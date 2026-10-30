@@ -1,6 +1,8 @@
 import base64
 import contextlib
 import csv
+import fnmatch
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -24,7 +26,6 @@ from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
-AWS_RUNNER = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
 import test_engine_build  # noqa: E402
@@ -38,9 +39,6 @@ RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
 # run-campaign.py puts the language tooling on the path; its campaign fixture runs attempts as workers do.
 import test_fleet  # noqa: E402
-UNIT_WORKER_WRAPPER = {"CAMPAIGN_MODE": "unit-worker", "CAMPAIGN_SHARD_ID": RUN_CAMPAIGN.UNIT_WORKER_SHARD,
-                       "TIMEOUT_SECONDS": str(RUN_CAMPAIGN.unit_worker_timeout(0)),
-                       "CAMPAIGN_HOST_STOP_BY": "1800000000", "CAMPAIGN_PROVENANCE": "qualification"}
 
 
 def shell_function(source, name):
@@ -86,10 +84,10 @@ class TestRunCampaign(unittest.TestCase):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
         job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
         other = SimpleNamespace(platform=SimpleNamespace(name='r8i'))
-        running = {index: (None, job, None) for index in range(3)}
+        running = [job] * 3
         self.assertFalse(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
-        del running[0]
+        running.pop()
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
 
     def test_reserve_is_frozen_on_resume_but_launch_regions_and_purchase_are_not(self):
@@ -268,12 +266,6 @@ class TestRunCampaign(unittest.TestCase):
                              {name: checksum for name, (_, _, checksum) in aws.objects.items()})
             self.assertEqual(2, sum(call[0] == "put" for call in aws.calls))
 
-    def test_spot_only_launcher_rejects_on_demand_before_aws(self):
-        environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
-        result = subprocess.run([str(AWS_RUNNER), "test"], env=environment, capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
-
     def admit(self, arguments, result_root, job, observed=None):
         """Place and admit one launch as the unit dispatcher does, by default in a loop of its own: the job as placed,
         and whether it was admitted."""
@@ -317,37 +309,14 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual({"instances": 2, "spot_requests": 2, "vcpu_quota": 1, "vcpus": 1},
                              {operation: [call[0] for call in aws.calls].count(operation)
                               for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
-            self.assertEqual("1", RUN_CAMPAIGN.job_environment(launched, arguments, root, root)["CAMPAIGN_SPOT_ONLY"])
             self.assertIn("queued-capacity\tfleet quota or pending-launch limit",
                           (root / "job-attempts.tsv").read_text())
-            # An On-Demand platform launches no Spot host.
+            # A Spot platform launches no On-Demand host, and an On-Demand platform no Spot host.
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only Spot"):
+                RUN_CAMPAIGN.check_purchase(arguments, replace(launched, market="on-demand"))
             arguments.purchases["r8i"] = "on-demand"
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only On-Demand"):
-                RUN_CAMPAIGN.job_environment(launched, arguments, root, root)
-
-    def write_cleanup_session(self, result_root, job):
-        """Leave the session a wrapper leaves after its launch ends."""
-        session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
-        session.mkdir(parents=True)
-        (session / "session.txt").write_text(
-            "session=session\n"
-            "bucket=re2-baseline-test-bucket\n"
-            "intel_instance_id=i-0123456789abcdef0\n"
-            "arm_instance_id=none\n")
-        (session / "cleanup-manifest.txt").write_text(
-            "instances_terminated=verified\n"
-            "iam_removed=verified\n"
-            "bucket_removed=verified\n"
-            "network_resources=default-vpc-reused\n"
-            "cleanup_status=verified\n"
-            "run_status=failed\n"
-            "failure_classification=controller-abort\n"
-            "failure_detail=test failure\n"
-            "aws_region=us-east-2\n"
-            "intel_availability_zone=us-east-2b\n"
-            "arm_availability_zone=none\n"
-            "placement_score=9\n")
-        return session
+                RUN_CAMPAIGN.check_purchase(arguments, launched)
 
     def test_capacity_evidence_requires_complete_successful_measurement(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -974,85 +943,120 @@ class TestRunCampaign(unittest.TestCase):
                 with self.subTest(label=label), self.assertRaisesRegex(SystemExit, label):
                     RUN_CAMPAIGN.validate_durable_paths(root, case_arguments, result_root)
 
-    def test_unit_worker_wrapper_rejects_a_timeout_short_of_its_lifetime(self):
-        result = subprocess.run(
-            [str(AWS_RUNNER)],
-            capture_output=True,
-            text=True,
-            env={**os.environ, **UNIT_WORKER_WRAPPER, "TIMEOUT_SECONDS": "5400"})
+    def worker(self, root, language, market="spot"):
+        """A worker's arguments, job, metadata and engine archives, for a baseline pool or, with language, a
+        language pool that runs one of the two shards with plan bundles."""
+        archives, manifest = self.engine_build(root)
+        arguments = self.arguments(root)
+        arguments.candidate_commit = "c" * 40
+        with gzip.open(arguments.candidate_archive, "wb") as candidate:
+            candidate.write(b"candidate")
+        arguments.engine_build_directories = {"r8i": root}
+        arguments.engine_build_policy = {"r8i": manifest}
+        platform = self.platform
+        if language:
+            platform = replace(self.platform, instance_type="r8i.large", vcpus=2)
+            (root / "provenance.tsv").write_text("provenance\n")
+            arguments.language_plans = {"language-lifecycle": root}
+            arguments.language_bundles = {"language-bulk": (root / "bulk.tar.zst", "1" * 64),
+                                          "language-lifecycle": (root / "lifecycle.tar.zst", "2" * 64)}
+            arguments.candidate_provenance = root / "provenance.tsv"
+            # The other pool's shard has a bundle too, which the language pool's worker leaves alone.
+            arguments.pool_shards = {("r8i", "r8i.2xlarge"): ["language-bulk"],
+                                     ("r8i", "r8i.large"): ["language-lifecycle"]}
+        arguments.shared_budget = SimpleNamespace(policy={"hourly_rates": {platform.instance_type: {"spot": 0.5}}})
+        with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": ""}):
+            RUN_CAMPAIGN.campaign_heap_size(arguments)
+        job = replace(RUN_CAMPAIGN.unit_worker_job(platform, 1, 10, market), region="us-west-2", stop_by=1800000045)
+        metadata = RUN_CAMPAIGN.worker_metadata(arguments, job, "baseline-e10-20261030T000000Z",
+                                                "campaign/baseline-e10-20261030T000000Z")
+        self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "campaign"}))
+        return arguments, job, metadata, archives
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TIMEOUT_SECONDS of at least its lifetime plus 5400", result.stderr)
+    def worker_user_data(self, root, language):
+        """A worker's user data, the settings it exports by name, and its engine archives."""
+        arguments, job, metadata, archives = self.worker(root, language)
+        # A worker runs the heap its phase captured when it started, whatever the controller's environment says now.
+        with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
+            user_data = RUN_CAMPAIGN.worker_user_data(arguments, job, metadata)
+        self.assertTrue(user_data.endswith(RUN_CAMPAIGN.WORKER_USER_DATA.read_text().split("\n", 1)[1]))
+        return user_data, user_data_settings(user_data), archives
 
-    def test_generated_user_data_is_valid_bash(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("create_user_data()\n{"):
-            source.index("\n}\n\nlaunch_instance()") + 2]
-        # A language campaign's worker also fetches the candidate provenance its plan bundles name.
-        provenance_check = f"'{'2' * 64}' /tmp/candidate-provenance.tsv | sha256sum --check -"
-        language = f"LANGUAGE_PLAN_BUNDLE_SHA256S={'1' * 64} LANGUAGE_CANDIDATE_PROVENANCE_SHA256={'2' * 64}"
-        # The host installs exactly the archives the wrapper staged for it, one per line.
-        archives = (f"jdk {'3' * 64} s3://transfer/jdks/{'3' * 64}.tar.gz\n"
-                    f"classes {'4' * 64} s3://transfer/classes.tar.zst\n")
-        for settings in ("", language):
-            with self.subTest(language=bool(settings)), tempfile.TemporaryDirectory() as temporary_directory:
-                user_data = Path(temporary_directory) / "user-data.sh"
-                script = (
-                    f"{function}\n"
-                    f"HOST_ARCHIVES={shlex.quote(archives)} CAMPAIGN_HOST_STOP_BY=1800000045 {settings} "
-                    f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
-                    f"bash -n {user_data}\n")
-
-                result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
-
-                self.assertEqual(result.returncode, 0, result.stderr)
-                text = user_data.read_text()
-                self.assertEqual(bool(settings), provenance_check in text)
-                self.assertIn(f"export HOST_ARCHIVES='{archives}'\n", text)
-                self.assertIn("printf 'step\\tstarted\\tfinished\\n' > \"${RESULT_DIR}/startup-timeline.tsv\"", text)
+    def test_user_data_installs_only_its_pools_archives_and_stops_at_its_stop_time(self):
+        for language, expected, bundles in (
+                # A baseline pool also runs the native runners its specialized-pattern comparators need.
+                (False, ("classes", "trino", "native"), []),
+                # A language pool runs the native runners and the plans of its own shards, and fetches the
+                # candidate provenance their units measure.
+                (True, ("classes", "native"), ["2" * 64])):
+            with self.subTest(language=language), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                user_data, settings, archives = self.worker_user_data(root, language)
+                bundle_lines = [f"language-plan {sha256} s3://bucket/campaign/language-plans/{sha256}.tar.zst"
+                                for sha256 in bundles]
+                self.assertEqual(
+                    [f"jdk {'0' * 64} s3://bucket/campaign/jdks/{'0' * 64}.tar.gz",
+                     *(f"{name} {archives[name]['sha256']} s3://bucket/campaign/engine-builds/"
+                       f"{archives[name]['sha256']}.tar.zst" for name in expected), *bundle_lines],
+                    settings["HOST_ARCHIVES"].splitlines())
+                provenance = hashlib.sha256(b"provenance\n").hexdigest() if language else ""
+                self.assertEqual(
+                    (f"s3://bucket/campaign/candidates/{provenance}.tsv" if language else "", provenance),
+                    (settings["LANGUAGE_CANDIDATE_PROVENANCE_URI"], settings["LANGUAGE_CANDIDATE_PROVENANCE_SHA256"]))
+                self.assertEqual((hashlib.sha256(b"candidate").hexdigest(), "smoke", "d" * 40, "8g"),
+                                 tuple(settings[name] for name in (
+                                     "REGULATOR_CONTENT_SHA256", "BASELINE_PROTOCOL", "BASELINE_EXPECTED_ENGINE_TREE",
+                                     "BENCHMARK_HEAP_SIZE")))
+                self.assertEqual("s3://bucket/campaign/baseline-e10-20261030T000000Z/results/host.tar.gz",
+                                 settings["HOST_ARCHIVE_URI"])
+                (root / "user-data.sh").write_text(user_data)
+                subprocess.run(["bash", "-n", str(root / "user-data.sh")], check=True)
                 # The host powers off at its stop time, which a lease moves from 1800000045 to 1800000060.
-                start = text.index("HOST_STOP_BY_FILE=")
-                loop = text[start:text.index(") &\n", start)].replace("/var/tmp/re2-stop-by", "stop-by")
-                result = subprocess.run(["bash", "-c", "clock=1800000000\n"
+                start = user_data.index("HOST_STOP_BY_FILE=")
+                loop = user_data[start:user_data.index(") &\n", start)].replace("/var/tmp/re2-stop-by", "stop-by")
+                result = subprocess.run(["bash", "-c", f"HOST_STOP_BY={settings['HOST_STOP_BY']}\n"
+                                         "clock=1800000000\n"
                                          "date() { echo \"${clock}\"; }\n"
                                          "sleep() { clock=$((clock + $1)); ((clock != 1800000030)) || "
                                          "echo 1800000060 > stop-by; }\n"
                                          "shutdown() { echo \"shutdown $* at ${clock}\"; }\n"
-                                         f"{loop})\n"], cwd=temporary_directory, text=True,
-                                        capture_output=True, check=False)
+                                         f"{loop})\n"], cwd=temporary, text=True, capture_output=True, check=False)
                 self.assertEqual((0, "shutdown -h now at 1800000060\n"), (result.returncode, result.stdout))
 
-    def test_a_unit_worker_lists_only_its_leases(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("create_instance_profile()\n{"):
-            source.index("\n}\n\nsubnet_rotation()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            script = (
-                "aws_cli() { :; }\nsleep() { :; }\n"
-                f"{function}\n"
-                f"SESSION_DIR={shlex.quote(temporary_directory)} LOWER_SESSION_ID=session\n"
-                "BUCKET=transfer INPUT_PREFIX=campaign/session/input RESULT_PREFIX=campaign/session/results\n"
-                "create_instance_profile\n")
+    def test_worker_profile_reaches_every_object_its_user_data_names_and_no_other(self):
+        policy = json.loads((SCRIPT.parents[1] / "aws" / "worker-policy.json").read_text())
 
-            result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
+        def allowed(action, bucket, key=None, prefix=None):
+            resource = f"arn:aws:s3:::{bucket}" + (f"/{key}" if key is not None else "")
+            return any(statement["Action"] == action and
+                       any(fnmatch.fnmatchcase(resource, pattern) for pattern in
+                           (statement["Resource"] if isinstance(statement["Resource"], list)
+                            else [statement["Resource"]])) and
+                       all(fnmatch.fnmatchcase(prefix or "", pattern) for pattern in
+                           statement.get("Condition", {}).get("StringLike", {}).values())
+                       for statement in policy["Statement"])
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            policy = json.loads((Path(temporary_directory) / "instance-transfer-policy.json").read_text())
-            self.assertEqual(
-                sorted([("s3:GetObject", "arn:aws:s3:::transfer/campaign/session/input/*"),
-                        ("s3:PutObject", "arn:aws:s3:::transfer/campaign/session/results/*"),
-                        ("s3:ListBucket", "arn:aws:s3:::transfer")]),
-                sorted((statement["Action"], statement["Resource"]) for statement in policy["Statement"]))
-            listing = next(statement for statement in policy["Statement"] if statement["Action"] == "s3:ListBucket")
-            self.assertEqual({"StringLike": {"s3:prefix": "campaign/session/input/leases/*"}}, listing["Condition"])
+        with tempfile.TemporaryDirectory() as temporary:
+            _, settings, _ = self.worker_user_data(Path(temporary), language=True)
+        bucket = "regulator-benchmark-938463256137-us-west-2"
+        reads = [line.split()[2] for line in settings["HOST_ARCHIVES"].splitlines()] + [
+            settings["CANDIDATE_URI"], settings["LANGUAGE_CANDIDATE_PROVENANCE_URI"]]
+        leases, results = settings["UNIT_WORKER_LEASE_PREFIX"], settings["UNIT_WORKER_RESULT_PREFIX"]
+        for uri in reads:
+            self.assertTrue(allowed("s3:GetObject", bucket, uri.removeprefix("s3://bucket/")), uri)
+            self.assertFalse(allowed("s3:PutObject", bucket, uri.removeprefix("s3://bucket/")), uri)
+        # The worker reads and claims its leases, lists them to tell one not yet written from one it cannot read,
+        # and writes its results and host archive.
+        self.assertTrue(allowed("s3:GetObject", bucket, f"{leases}/1.json"))
+        self.assertTrue(allowed("s3:PutObject", bucket, f"{leases}/2.json"))
+        self.assertTrue(allowed("s3:ListBucket", bucket, prefix=f"{leases}/"))
+        for key in (f"{results}/heartbeat/1.json", settings["HOST_ARCHIVE_URI"].removeprefix("s3://bucket/")):
+            self.assertTrue(allowed("s3:PutObject", bucket, key), key)
+        self.assertFalse(allowed("s3:ListBucket", bucket, prefix=f"{results}/"))
+        self.assertFalse(allowed("s3:GetObject", "another-bucket", f"{leases}/1.json"))
 
-    def test_host_installs_the_build_toolchain_exactly_when_the_controller_expects_it(self):
-        host = (AWS_RUNNER.parent / "run-host.sh").read_text()
-        controller = AWS_RUNNER.read_text()
-        expected = controller[controller.index("expected_native_compiler_package=${NATIVE_COMPILER_PACKAGE}"):
-                              controller.index("if [[ ! -f \"${environment_manifest}\" ]]")]
+    def test_host_installs_the_build_toolchain_only_without_prebuilt_engines(self):
+        host = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()
         pins = {"NATIVE_COMPILER_PACKAGE": "gcc-pin", "CMAKE_PACKAGE": "cmake-pin", "CARGO_PACKAGE": "cargo-pin",
                 "RUST_PACKAGE": "rust-pin"}
         # A build phase's worker, with no prebuilt engines, builds them; a measuring worker runs them prebuilt.
@@ -1060,22 +1064,18 @@ class TestRunCampaign(unittest.TestCase):
             script = ("sudo() { echo \"installed $*\"; }\n"
                       + "".join(f"{name}={pin}\n" for name, pin in pins.items())
                       + f"{shell_function(host, 'install_packages')}ENGINE_BUILD_MANIFEST_SHA256={manifest}\n"
-                      f"install_packages\n{expected}\n"
-                      "echo \"expected ${expected_native_compiler_package} ${expected_cmake_package}"
-                      " ${expected_cargo_package} ${expected_rust_package}\"\n")
+                      "install_packages\n")
             output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
             installed = " ".join(line for line in output.splitlines() if line.startswith("installed"))
-            expected_packages = output.splitlines()[-1].split()[1:]
             with self.subTest(manifest=manifest):
                 for pin in pins.values():
                     self.assertEqual(pin in installed, not manifest)
-                self.assertEqual(expected_packages, ["not-installed"] * 4 if manifest else list(pins.values()))
                 # No worker installs perf.
                 self.assertNotIn("perf", installed.split())
 
     def install_host_archives(self, root, archives, manifest="a" * 64):
         """Run run-host.sh's archive install for (name, SHA-256, path) archives, with S3 a local directory."""
-        host = (AWS_RUNNER.parent / "run-host.sh").read_text()
+        host = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()
         script = ('aws() { echo "$*" >> "${AWS_CALLS}"; cat "${3#s3://bucket}"; }\nsleep() { :; }\nset -euo pipefail\n'
                   + shell_functions(host, "timeline", "unpack", "install_archive", "install_archives")
                   + 'TRINO_ARCHIVE_SHA256=none\ninstall_archives\necho "trino=${TRINO_ARCHIVE_SHA256}"\n')
@@ -1152,64 +1152,6 @@ class TestRunCampaign(unittest.TestCase):
                     # A refused archive leaves nothing installed, staged, or written outside its destination.
                     self.assertEqual([], list((root / "shared").iterdir()))
                     self.assertFalse((root / "escaped.txt").exists())
-
-    def test_worker_installs_only_the_archives_its_pool_runs(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            archives, manifest = self.engine_build(root)
-            language_platform = replace(self.platform, instance_type="r8i.large", vcpus=2)
-            bundles = {"language-bulk": (root / "bulk.tar.zst", "1" * 64),
-                       "language-lifecycle": (root / "lifecycle.tar.zst", "2" * 64)}
-            (root / "provenance.tsv").write_text("provenance\n")
-            for kind, platform, language, expected, expected_bundles in (
-                    # A baseline pool also runs the native runners its specialized-pattern comparators need.
-                    ("baseline", self.platform, {}, ("classes", "trino", "native"), ""),
-                    # A language pool runs the native runners and the plans of its own shards.
-                    ("language", language_platform, {"language_plans": {"language-lifecycle": root},
-                                                     "language_bundles": bundles,
-                                                     "candidate_provenance": root / "provenance.tsv"},
-                     ("classes", "native"), "2" * 64)):
-                with self.subTest(kind=kind):
-                    arguments = self.arguments(root)
-                    arguments.engine_build_directories = {"r8i": root}
-                    arguments.engine_build_policy = {"r8i": manifest}
-                    # The other pool's shard has a bundle too, which the language pool's worker leaves alone.
-                    arguments.pool_shards = {("r8i", "r8i.2xlarge"): ["language-bulk"],
-                                             ("r8i", "r8i.large"): ["language-lifecycle"]}
-                    for name, value in language.items():
-                        setattr(arguments, name, value)
-                    job = RUN_CAMPAIGN.unit_worker_job(platform, 1, 10, "spot")
-                    environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
-                    self.assertEqual(" ".join(f"{name}={archives[name]['sha256']}" for name in expected),
-                                     environment["ENGINE_BUILD_ARCHIVES"])
-                    self.assertEqual(expected_bundles, environment.get("LANGUAGE_PLAN_BUNDLE_SHA256S", ""))
-
-    def test_shared_transfer_bucket_requires_prefix(self):
-        result = subprocess.run(
-            [str(AWS_RUNNER)],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                **UNIT_WORKER_WRAPPER,
-                "TRANSFER_BUCKET": "benchmark-transfer"})
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TRANSFER_BUCKET and TRANSFER_PREFIX are required", result.stderr)
-
-    def test_shared_transfer_prefix_must_be_safe(self):
-        result = subprocess.run(
-            [str(AWS_RUNNER)],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                **UNIT_WORKER_WRAPPER,
-                "TRANSFER_BUCKET": "benchmark-transfer",
-                "TRANSFER_PREFIX": "../another-campaign"})
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must be a safe relative S3 prefix", result.stderr)
 
     def test_prerequisite_rejects_different_engine_builds(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1310,7 +1252,7 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(arguments.ami_names, {"r8i": "al2023-pinned"})
         self.assertEqual(arguments.region_offerings, {"r8i.2xlarge": ["eu-west-1"]})
 
-        aws.networks["ap-south-1"] = cloud.Network("vpc-ap-south-1", ())
+        aws.networks["ap-south-1"] = cloud.Network("vpc-ap-south-1", "sg-ap-south-1", ())
         with self.assertRaisesRegex(SystemExit, "ap-south-1 has no public default-VPC subnet"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         del aws.networks["ap-south-1"]
@@ -1349,12 +1291,10 @@ class TestRunCampaign(unittest.TestCase):
                 aws.quotas[("eu-west-1", "spot")] = 8
                 aws.region_requests["eu-west-1"] = [cloud.SpotRequest("sir-other", "", "r8i.2xlarge", {})]
                 launched, _ = self.admit(arguments, result_root, job)
-                environment = RUN_CAMPAIGN.job_environment(launched, arguments, root, result_root)
+                metadata = RUN_CAMPAIGN.worker_metadata(arguments, launched, "session", "prefix")
                 self.assertEqual(expected_queries, [call[1] for call in aws.calls if call[0] == "instances"])
-                self.assertEqual(environment["AWS_REGION"], expected_region)
-                self.assertEqual(environment["CAMPAIGN_PLACEMENT_SCORE"], expected_score)
-                self.assertEqual(environment["BENCHMARK_INTEL_AMI_ID"], "ami-" + expected_region)
-                self.assertEqual(environment["TRANSFER_BUCKET"], "bucket-" + expected_region)
+                self.assertEqual((expected_region, expected_score, "bucket-" + expected_region),
+                                 (metadata["aws_region"], metadata["placement_score"], metadata["bucket"]))
 
     def test_spot_placement_leaves_out_regions_that_found_no_capacity(self):
         # With no region left, the pool has no Spot placement; with one left, no score is asked for.
@@ -1447,6 +1387,12 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-west-2'\]"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.transfer_buckets = {"us-west-2": "west"}
+        # The controller names every host's prefix under the transfer prefix.
+        for prefix, error in (("", "requires TRANSFER_PREFIX"), ("../another-campaign", "safe relative S3 prefix"),
+                              ("prefix/", "safe relative S3 prefix")):
+            with self.subTest(prefix=prefix), patch.dict(os.environ, {"TRANSFER_PREFIX": prefix}), \
+                    self.assertRaisesRegex(SystemExit, error):
+                RUN_CAMPAIGN.validate_configuration(arguments, items)
         self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 0
@@ -1468,8 +1414,8 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.regional_amis[("r8i", "eu-west-1")] = "ami"
         RUN_CAMPAIGN.validate_configuration(arguments, items)
-        # A worker's wrapper waits through its setup, lifetime and uploads, then a last unit as long as its pool's
-        # longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700.
+        # A worker's planned span runs through its setup, lifetime and uploads, then a last unit as long as its
+        # pool's longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700.
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(900), 27000)
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(75600), 101700)
         # A phase refuses a campaign ID the driver would, as the ID tags its hosts and names its S3 prefixes.
@@ -1536,34 +1482,13 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
 
     def test_campaign_phase_maps_to_execution_protocol(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            candidate_archive = root / "candidate.tar.gz"
-            arguments = SimpleNamespace(
-                campaign_id="baseline",
-                campaign_root=root,
-                candidate_archive=candidate_archive,
-                candidate_archive_sha256="0" * 64,
-                engine_tree="d" * 40,
-                result_root=root,
-                transfer_buckets={region: "bucket" for region in RUN_CAMPAIGN.default_regions()})
-            job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
-
-            arguments.phase = "smoke"
-            self.assertEqual(
-                RUN_CAMPAIGN.job_environment(job, arguments, root, root)["BASELINE_PROTOCOL"],
-                "smoke")
-
-            arguments.smoke_protocol = 'qualification'
-            self.assertEqual(RUN_CAMPAIGN.job_environment(job, arguments, root, root)["BASELINE_PROTOCOL"], "qualification")
-
-            for phase in ("primary", "confirmation"):
-                arguments.phase = phase
-                environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
-                self.assertEqual(environment["BASELINE_PROTOCOL"], "qualification")
-                self.assertEqual(
-                    environment["BASELINE_EXPECTED_ENGINE_TREE"],
-                    "d" * 40)
+        arguments = SimpleNamespace(phase="smoke")
+        self.assertEqual("smoke", RUN_CAMPAIGN.phase_protocol(arguments))
+        arguments.smoke_protocol = "qualification"
+        self.assertEqual("qualification", RUN_CAMPAIGN.phase_protocol(arguments))
+        for phase in ("primary", "confirmation"):
+            arguments.phase = phase
+            self.assertEqual("qualification", RUN_CAMPAIGN.phase_protocol(arguments))
 
     def test_language_plan_runs_its_units_at_qualification_on_its_allocations(self):
         fleet = RUN_CAMPAIGN.language_fleet
@@ -1696,7 +1621,8 @@ class TestRunCampaign(unittest.TestCase):
         arguments = SimpleNamespace(
             phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g", max_concurrent=2,
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
-            candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory})
+            candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory},
+            shared_budget=Mock(policy={}, policy_path="fleet.json", **{"reservations.return_value": []}))
 
         def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
             """The campaign's validation, installing each platform's engine build, whose classes archive has the
@@ -1773,498 +1699,47 @@ class TestRunCampaign(unittest.TestCase):
                 order.append(item.identity)
             self.assertEqual([f"r8i/{identity}" for identity in expected], order)
 
-    def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
-        source = AWS_RUNNER.read_text()
-        selector = source[source.index('subnet_rotation()'):source.index('\ncreate_user_data()')]
-        fixture = '''
-aws_cli() {
-    if [[ "$*" == *describe-instance-type-offerings* ]]; then
-        printf 'us-west-2a us-west-2b us-west-2c us-west-2d\\n'
-    else
-        printf 'subnet-%s\\tus-west-2%s\\n' a a b b c c d d
-    fi
-}
-VPC_ID=vpc-test
-CAMPAIGN_PLATFORM=r8i
-CAMPAIGN_SHARD_ID=trino-operations
-CAMPAIGN_REPLICA_ID=1
-for CAMPAIGN_ATTEMPT in 1 2 3 4; do
-    CAMPAIGN_HOST_EPOCH=$((CAMPAIGN_ATTEMPT * 4 + 1))
-    subnet_rotation r8i.large | head -n 1
-done
-'''
-        result = subprocess.run(['bash', '-c', selector + fixture], capture_output=True, text=True, check=True)
-        self.assertEqual(set(result.stdout.splitlines()), {
-            'subnet-a us-west-2a', 'subnet-b us-west-2b', 'subnet-c us-west-2c', 'subnet-d us-west-2d'})
-        self.assertEqual(len(result.stdout.splitlines()), 4)
+    def test_launch_tries_each_zone_with_capacity_and_classifies_what_aws_refused(self):
+        def full(*zones, kind="capacity", code="InsufficientInstanceCapacity"):
+            return lambda region, spec: (cloud.LaunchRejected(kind, code)
+                                         if spec.subnet[-1] in zones else None)
 
-    def test_spot_capacity_failure_tries_the_regions_other_zones_first(self):
-        source = AWS_RUNNER.read_text()
-        functions = shell_functions(source, "subnet_rotation", "record_launch_zone", "launch_instance",
-                                    "classify_launch_error", "launch_error_is_rejection")
-        fixture = '''
-aws_cli() {
-    case "$*" in
-        *describe-images*) printf '/dev/xvda\\n' ;;
-        *describe-instance-type-offerings*)
-            printf 'offerings\\n' >> "${SESSION_DIR}/described"
-            printf 'us-east-2a us-east-2b us-east-2c\\n' ;;
-        *describe-subnets*)
-            printf 'subnets\\n' >> "${SESSION_DIR}/described"
-            printf 'subnet-%s\\tus-east-2%s\\n' a a b b c c ;;
-        *run-instances*)
-            subnet=$*
-            subnet=${subnet#*SubnetId=}
-            printf '%s\\n' "${subnet%%,*}" >> "${SESSION_DIR}/tried"
-            if (($(wc -l < "${SESSION_DIR}/tried") <= FULL_ZONES)); then
-                printf 'An error occurred (%s) when calling the RunInstances operation\\n' "${CAPACITY_ERROR}" >&2
-                return 254
-            fi
-            printf 'i-launched\\n' ;;
-    esac
-}
-benchmark_ami_id() { printf 'ami-test\\n'; }
-benchmark_ami_name() { :; }
-jdk_archive_url() { :; }
-jdk_archive_sha256() { :; }
-create_user_data() { :; }
-record_failure_classification() { printf '%s|%s\\n' "$1" "${2%%:*}"; }
-sleep() { :; }
-CAMPAIGN_PLATFORM=r8i CAMPAIGN_SHARD_ID=unit-worker CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1
-INSTANCE_MARKET_TYPE=spot LOWER_SESSION_ID=session VPC_ID=vpc-test
-launch_instance intel x86_64 r8i.large parameter result.tar.gz || printf 'failed\\n'
-printf '%s %s\\n' "${LAUNCHED_INSTANCE_ID:-none}" "${INTEL_AVAILABILITY_ZONE}"
-'''
-        # One full zone moves the launch to the next; only all three full make it the region's failure.
-        for error, full_zones, expected in (
-                ("InsufficientInstanceCapacity", 1, ["i-launched"]),
-                ("UnfulfillableCapacity", 1, ["i-launched"]),
-                ("InsufficientInstanceCapacity", 3, ["retryable-spot|launch-capacity", "failed", "none"])):
-            with self.subTest(error=error, full_zones=full_zones), tempfile.TemporaryDirectory() as temporary:
-                result = subprocess.run(
-                    ["bash", "-c", functions + fixture], capture_output=True, text=True,
-                    env={**os.environ, "SESSION_DIR": temporary, "FULL_ZONES": str(full_zones),
-                         "CAPACITY_ERROR": error}, check=True)
-                tried = Path(temporary, "tried").read_text().split()
-                self.assertEqual(min(full_zones + 1, 3), len(set(tried)))
-                self.assertEqual(len(tried), len(set(tried)))
-                # The launch enumerates the region's zones and subnets once, however many it tries.
-                self.assertEqual(["offerings", "subnets"], Path(temporary, "described").read_text().split())
-                # The session records the zone it last tried.
-                self.assertEqual(expected + [f"us-east-2{tried[-1][-1]}"],
-                                 result.stdout.replace(" ", "\n").splitlines())
-
-    def test_launch_without_a_public_subnet_fails_retryably_before_submission(self):
-        source = AWS_RUNNER.read_text()
-        functions = shell_functions(source, "subnet_rotation", "record_launch_zone", "launch_instance")
-        fixture = '''
-aws_cli() {
-    case "$*" in
-        *describe-images*) printf '/dev/xvda\\n' ;;
-        *describe-instance-type-offerings*) printf 'us-east-2a\\n' ;;
-        *run-instances*) printf 'submitted\\n' ;;
-    esac
-}
-benchmark_ami_id() { printf 'ami-test\\n'; }
-jdk_archive_url() { :; }
-jdk_archive_sha256() { :; }
-record_failure_classification() { printf '%s|%s\\n' "$1" "${2%%:*}"; }
-LAUNCH_ATTEMPTED=0
-trap 'printf "attempted=%s\\n" "${LAUNCH_ATTEMPTED}"' EXIT
-launch_instance intel x86_64 r8i.large parameter result.tar.gz
-'''
-        result = subprocess.run(["bash", "-c", functions + fixture], capture_output=True, text=True)
-        # Cleanup then knows no instance can exist, and the controller retries the launch.
-        self.assertEqual((1, ["retryable-infrastructure|launch-preflight", "attempted=0"]),
-                         (result.returncode, result.stdout.splitlines()))
-
-    def test_aws_wrapper_omits_empty_profile(self):
-        source = AWS_RUNNER.read_text()
-        function_start = source.index("aws_cli()\n{")
-        function_end = source.index("\n}\n", function_start) + 3
-        function = source[function_start:function_end]
-        script = (
-            "AWS_PROFILE=\n"
-            "AWS_REGION=us-east-1\n"
-            "aws() { printf '%s\\n' \"$*\"; }\n"
-            f"{function}\n"
-            "aws_cli sts get-caller-identity\n"
-            "AWS_PROFILE=benchmark\n"
-            "aws_cli sts get-caller-identity\n")
-
-        result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(),
-            [
-                "--region us-east-1 sts get-caller-identity",
-                "--profile benchmark --region us-east-1 sts get-caller-identity",
-            ])
-
-    def test_job_environment_does_not_invent_an_aws_profile(self):
-        with tempfile.TemporaryDirectory() as temporary_directory, \
-                patch.dict(os.environ, {}, clear=True):
-            root = Path(temporary_directory)
-            arguments = self.arguments(root)
-            arguments.cloud = FakeCloud()
-            job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
-
-            environment = RUN_CAMPAIGN.job_environment(
-                RUN_CAMPAIGN.place(job, RUN_CAMPAIGN.launch_placements(arguments, job)[0]), arguments, root, root)
-
-            self.assertNotIn("AWS_PROFILE", environment)
-
-    def test_termination_signal_marks_campaign_failed(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn("FAILURE_CLASSIFICATION=controller-abort", source)
-        self.assertIn('FAILURE_DETAIL="received $1"', source)
-        self.assertIn("trap cleanup EXIT", source)
-        self.assertIn("trap 'abort_campaign TERM 143' TERM", source)
-
-        function = source[
-            source.index("abort_campaign()\n{"):
-            source.index("\n}\n\ntrap cleanup EXIT") + 2]
-        script = (
-            "FAILURE_CLASSIFICATION=none\n"
-            "FAILURE_DETAIL=none\n"
-            "cleanup() { result=$?; printf '%s|%s|%s\\n' \"$result\" "
-            "\"$FAILURE_CLASSIFICATION\" \"$FAILURE_DETAIL\"; exit \"$result\"; }\n"
-            f"{function}\n"
-            "trap cleanup EXIT\n"
-            "trap 'abort_campaign TERM 143' TERM\n"
-            "kill -TERM $$\n")
-
-        result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
-
-        self.assertEqual(143, result.returncode)
-        self.assertEqual("143|controller-abort|received TERM\n", result.stdout)
-
-    def test_cleanup_accepts_an_empty_remaining_instance_array(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("terminate_campaign_instances()\n{"):
-            source.index("\n}\n\nverify_campaign_instance_ownership()") + 2]
-        script = (
-            "set -u\n"
-            "INSTANCE_IDS=(i-test)\n"
-            "retry_cleanup_command() { return 0; }\n"
-            "instance_state() { printf 'terminated\\n'; }\n"
-            f"{function}\n"
-            "terminate_campaign_instances\n")
-
-        result = subprocess.run(
-            ["bash"],
-            input=script,
-            text=True,
-            capture_output=True,
-            check=False)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_instance_state_retries_launch_propagation_not_found(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("instance_state()\n{"):
-            source.index("\n}\n\nterminate_campaign_instances()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            counter = Path(temporary_directory) / "counter"
-            counter.write_text("0\n")
-            script = (
-                "set -u\n"
-                "sleep() { :; }\n"
-                "aws_cli() {\n"
-                f"  attempt=$(cat {counter})\n"
-                "  attempt=$((attempt + 1))\n"
-                f"  printf '%s\\n' \"$attempt\" > {counter}\n"
-                "  if ((attempt < 3)); then\n"
-                "    printf 'InvalidInstanceID.NotFound\\n' >&2\n"
-                "    return 1\n"
-                "  fi\n"
-                "  printf 'pending\\n'\n"
-                "}\n"
-                f"{function}\n"
-                "instance_state i-new\n"
-                f"cat {counter}\n")
-
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("pending\n3\n", result.stdout)
-
-    def test_instance_state_keeps_known_launch_pending_while_aws_propagates(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("instance_state()\n{"):
-            source.index("\n}\n\nterminate_campaign_instances()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            counter = Path(temporary_directory) / "counter"
-            counter.write_text("0\n")
-            script = (
-                "set -u\n"
-                "sleep() { :; }\n"
-                "aws_cli() {\n"
-                f"  attempt=$(cat {counter})\n"
-                "  attempt=$((attempt + 1))\n"
-                f"  printf '%s\\n' \"$attempt\" > {counter}\n"
-                "  printf 'InvalidInstanceID.NotFound\\n' >&2\n"
-                "  return 1\n"
-                "}\n"
-                f"{function}\n"
-                "instance_state i-new\n"
-                f"cat {counter}\n"
-                f"printf '0\\n' > {counter}\n"
-                "instance_state i-terminated true\n"
-                f"cat {counter}\n")
-
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual("pending\n5\nterminated\n5\n", result.stdout)
-
-    def test_absence_verification_retries_eventual_consistency(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("verify_aws_resource_absent()\n{"):
-            source.index("\n}\n\ninstance_state()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            counter = Path(temporary_directory) / "counter"
-            counter.write_text("0\n")
-            script = (
-            "set -u\n"
-            "sleep() { :; }\n"
-            "aws_cli() {\n"
-            f"  attempt=$(cat {counter})\n"
-            "  attempt=$((attempt + 1))\n"
-            f"  printf '%s\\n' \"$attempt\" > {counter}\n"
-            "  if ((attempt < 3)); then return 0; fi\n"
-            "  printf 'NoSuchBucket\\n' >&2\n"
-            "  return 1\n"
-            "}\n"
-            f"{function}\n"
-            "verify_aws_resource_absent bucket NoSuchBucket s3api head-bucket --bucket test\n"
-            f"cat {counter}\n")
-
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
-
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("3\n", result.stdout)
-
-    def test_launch_error_classification_distinguishes_spot_and_on_demand_capacity(self):
-        source = AWS_RUNNER.read_text()
-        function = source[
-            source.index("classify_launch_error()\n{"):
-            source.index("\n}\n\nretry_cleanup_command()") + 2]
-        script = (
-            "record_failure_classification() { printf '%s|%s\\n' \"$1\" \"$2\"; }\n"
-            f"{function}\n"
-            "classify_launch_error spot VcpuLimitExceeded\n"
-            "classify_launch_error on-demand VcpuLimitExceeded\n"
-            "classify_launch_error spot SpotMaxPriceTooLow\n"
-            "if classify_launch_error on-demand InternalError; then exit 9; fi\n")
-
-        result = subprocess.run(
-            ["bash"], input=script, text=True, capture_output=True, check=False)
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), [
-            "retryable-spot|launch-capacity:VcpuLimitExceeded",
-            "retryable-capacity|vcpu-limit:VcpuLimitExceeded",
-            # A Spot price above the ceiling rejects the request outright.
-            "retryable-spot|launch-capacity:SpotMaxPriceTooLow",
-        ])
-
-    def test_retryable_no_instance_launch_cleans_all_temporary_resources(self):
-        source = AWS_RUNNER.read_text()
-        functions = shell_functions(
-            source, "aws_cli", "record_failure_classification", "is_retryable_failure_classification",
-            "classify_launch_error", "launch_error_is_rejection", "discover_campaign_instances", "cleanup",
-            "subnet_rotation", "record_launch_zone", "launch_instance")
-        fixture = '''
-aws() {
-    case "$*" in
-        *describe-images*) printf '/dev/xvda\\n' ;;
-        *describe-instance-type-offerings*) printf 'us-east-2b\\n' ;;
-        *describe-subnets*) printf 'subnet-b\\tus-east-2b\\n' ;;
-        *run-instances*)
-            printf '%s\\n' "${AWS_MAX_ATTEMPTS:-unlimited}" >> "${SESSION_DIR}/submitted"
-            # Unless its attempts are limited, the CLI resubmits on its own and reports only the last error.
-            for ((request = 0; request < ${AWS_MAX_ATTEMPTS:-5}; request++)); do
-                printf 'x\\n' >> "${SESSION_DIR}/requests"
-                error='An error occurred (RequestLimitExceeded) when calling the RunInstances operation'
-                if [[ -n "${FIRST_ERROR}" && $(wc -l < "${SESSION_DIR}/requests") -eq 1 ]]; then
-                    error=${FIRST_ERROR}
-                fi
-            done
-            printf '%s\\n' "${error}" >&2
-            return 254 ;;
-        *describe-instances*) ;;
-    esac
-}
-benchmark_ami_id() { printf 'ami-test\\n'; }
-benchmark_ami_name() { :; }
-jdk_archive_url() { :; }
-jdk_archive_sha256() { :; }
-create_user_data() { :; }
-retry_cleanup_command() { printf 'removed %s\\n' "$2" >&2; }
-verify_aws_resource_absent() { printf 'verified %s\\n' "$1" >&2; }
-verify_bucket_prefix_absent() { printf 'verified prefix %s\\n' "${OBJECT_PREFIX}" >&2; }
-sleep() { :; }
-SESSION_ID=session LOWER_SESSION_ID=session VPC_ID=vpc-test INSTANCE_MARKET_TYPE=on-demand AWS_PROFILE=
-FAILURE_CLASSIFICATION=none FAILURE_DETAIL= LAUNCH_ATTEMPTED=0 LAUNCH_AMBIGUOUS=0 INSTANCE_IDS=()
-INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket
-AWS_REGION=us-east-2 INTEL_AVAILABILITY_ZONE=none ARM_AVAILABILITY_ZONE=none CAMPAIGN_PLACEMENT_SCORE=9
-OBJECT_PREFIX=campaign/session CAMPAIGN_MODE=unit-worker CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
-CAMPAIGN_SHARD_ID=unit-worker CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
-DOWNLOADED_RESULT_COUNT=0
-launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
-'''
-        # RequestLimitExceeded proves AWS launched nothing. A timed-out submission may have launched an
-        # instance that discovery does not see yet, even though every later submission was rejected, so each
-        # submission's outcome must reach the launch loop, which alone retries.
-        for first_error, expected in (
-                ("", "verified"),
-                ("Read timeout on endpoint URL: \"https://ec2.us-east-2.amazonaws.com/\"", "failed")):
-            with self.subTest(first_error=first_error), tempfile.TemporaryDirectory() as temporary_directory:
-                session = Path(temporary_directory) / "session"
-                session.mkdir()
-                result = subprocess.run(
-                    ["bash", "-c", f"SESSION_DIR={session}\n" + functions + fixture],
-                    env={**os.environ, "FIRST_ERROR": first_error}, text=True, capture_output=True, check=False)
-
-                self.assertEqual(result.returncode, 1, result.stderr)
-                cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
-                self.assertEqual(cleanup["failure_classification"], "retryable-infrastructure")
-                self.assertEqual(cleanup["cleanup_status"], expected)
-                self.assertEqual((session / "submitted").read_text().split(), ["1"] * 5)
-                self.assertEqual(cleanup["run_status"], "failed")
-                if expected == "verified":
-                    self.assertEqual(
-                        [cleanup[field] for field in (
-                            "instances_terminated", "iam_removed", "bucket_removed", "aws_region",
-                            "intel_availability_zone", "placement_score")],
-                        ["verified", "verified", "verified", "us-east-2", "us-east-2b", "9"])
-                    self.assertLessEqual(
-                        {"removed delete-instance-profile", "removed delete-role", "removed rm",
-                         "verified instance profile test-profile", "verified role test-role",
-                         "verified prefix campaign/session"},
-                        set(result.stderr.splitlines()))
-                else:
-                    self.assertIn("Cleanup refused", result.stderr)
-                    self.assertEqual(cleanup["instances_terminated"], "not-created")
-
-    def test_retryable_launch_does_not_hide_failed_instance_discovery(self):
-        source = AWS_RUNNER.read_text()
-        retryable_function = source[
-            source.index("is_retryable_failure_classification()\n{"):
-            source.index("\n}\n\nclassify_launch_error()") + 2]
-        cleanup_function = source[
-            source.index("cleanup()\n{"):
-            source.index("\n}\n\nabort_campaign()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            session = Path(temporary_directory) / "session"
-            session.mkdir()
-            script = (
-                f"SESSION_DIR={session}\n"
-                "SESSION_ID=session\n"
-                "FAILURE_CLASSIFICATION=retryable-capacity\n"
-                "FAILURE_DETAIL=vcpu-limit:VcpuLimitExceeded\n"
-                "LAUNCH_ATTEMPTED=1\n"
-                "INSTANCE_IDS=()\n"
-                "INSTANCE_PROFILE_NAME=test-profile\n"
-                "INSTANCE_ROLE_NAME=test-role\n"
-                "BUCKET=test-bucket\n"
-                "CAMPAIGN_MODE=unit-worker\n"
-                "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=r8i\n"
-                "CAMPAIGN_SHARD_ID=unit-worker\n"
-                "CAMPAIGN_REPLICA_ID=1\n"
-                "CAMPAIGN_HOST_EPOCH=10\n"
-                "DOWNLOADED_RESULT_COUNT=0\n"
-                "discover_campaign_instances() { return 1; }\n"
-                f"{retryable_function}\n"
-                f"{cleanup_function}\n"
-                "false\n"
-                "cleanup\n")
-
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
-
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("Cleanup refused", result.stderr)
-            cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
-            self.assertEqual(cleanup["instances_terminated"], "not-created")
-            self.assertEqual(cleanup["iam_removed"], "unverified")
-            self.assertEqual(cleanup["bucket_removed"], "unverified")
-            self.assertEqual(cleanup["cleanup_status"], "failed")
-
-    def test_preflight_failure_removes_what_setup_created_and_retries_unless_inputs_were_refused(self):
-        source = AWS_RUNNER.read_text()
-        cleanup_function = source[
-            source.index("cleanup()\n{"):
-            source.index("\n}\n\nabort_campaign()") + 2]
-        classification_function = source[
-            source.index("record_failure_classification()\n{"):
-            source.index("\n}\n\nspot_request_status()") + 2]
-        # Cleanup runs at two points. Before setup created anything, as after a failed default VPC or
-        # security group lookup, or a refused frozen input. After setup chose the session's prefix in the
-        # shared bucket and created its instance profile, as after a launch that failed before RunInstances.
-        for created, failure, classification in (
-                (False, "false", "retryable-infrastructure"),
-                (True, "false", "retryable-infrastructure"),
-                (False, "reject_input 'Frozen candidate archive SHA-256 mismatch'", "input-rejection")):
-            with self.subTest(created=created, failure=failure), \
-                    tempfile.TemporaryDirectory() as temporary_directory:
-                session = Path(temporary_directory) / "session"
-                session.mkdir()
-                resources = "test" if created else ""
-                script = (
-                    f"SESSION_DIR={session}\n"
-                    "FAILURE_CLASSIFICATION=none\n"
-                    "FAILURE_DETAIL=preflight\n"
-                    "LAUNCH_ATTEMPTED=0\n"
-                    "INSTANCE_IDS=()\n"
-                    f"INSTANCE_PROFILE_NAME={resources}\n"
-                    f"INSTANCE_ROLE_NAME={resources}\n"
-                    f"BUCKET={resources}\n"
-                    f"OBJECT_PREFIX={resources}\n"
-                    "CAMPAIGN_MODE=unit-worker\n"
-                    "CAMPAIGN_ID=baseline\n"
-                    "CAMPAIGN_PLATFORM=r8i\n"
-                    "CAMPAIGN_SHARD_ID=unit-worker\n"
-                    "CAMPAIGN_REPLICA_ID=1\n"
-                    "CAMPAIGN_HOST_EPOCH=10\n"
-                    "DOWNLOADED_RESULT_COUNT=0\n"
-                    "retry_cleanup_command() { printf 'removed %s\\n' \"$2\" >&2; }\n"
-                    "verify_aws_resource_absent() { printf 'verified %s\\n' \"$1\" >&2; }\n"
-                    "verify_bucket_prefix_absent() { printf 'verified prefix %s\\n' \"${OBJECT_PREFIX}\" >&2; }\n"
-                    f"{classification_function}\n"
-                    f"{cleanup_function}\n"
-                    "trap cleanup EXIT\n"
-                    f"{failure}\n"
-                    "exit 1\n")
-
-                result = subprocess.run(
-                    ["bash"], input=script, text=True, capture_output=True, check=False)
-
-                self.assertEqual(result.returncode, 1, result.stderr)
-                cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
-                self.assertEqual(cleanup["instances_terminated"], "verified")
-                self.assertEqual(cleanup["iam_removed"], "verified")
-                self.assertEqual(cleanup["bucket_removed"], "verified")
-                self.assertEqual(cleanup["cleanup_status"], "verified")
-                # No instance can exist, so the controller retries it as infrastructure, unless the
-                # wrapper refused an input that a retry would refuse again.
-                self.assertEqual(cleanup["failure_classification"], classification)
-                if created:
-                    self.assertLessEqual(
-                        {"removed delete-instance-profile", "removed delete-role", "removed rm",
-                         "verified instance profile test", "verified role test", "verified prefix test"},
-                        set(result.stderr.splitlines()))
+        for market, rejection, expected in (
+                # A full zone moves the launch to the next; only every zone full fails it.
+                ("spot", full("a"), "launched"),
+                ("spot", full("a", "b", "c"), ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity")),
+                # A refused Spot price or quota is the Spot market's, an On-Demand quota the pool's capacity.
+                ("spot", full("a", "b", "c", kind="price", code="SpotMaxPriceTooLow"),
+                 ("retryable-spot", "launch-capacity:SpotMaxPriceTooLow")),
+                ("on-demand", full("a", "b", "c", kind="quota", code="VcpuLimitExceeded"),
+                 ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded")),
+                ("on-demand", full("a", "b", "c", kind="ambiguous", code="InternalError"),
+                 ("retryable-infrastructure", "launch-infrastructure:InternalError")),
+                # A launch that offers the type in no public subnet fails before it asks.
+                ("spot", None, ("retryable-infrastructure",
+                                "launch-preflight:no public default-VPC subnet offers r8i.2xlarge"))):
+            with self.subTest(market=market, expected=expected), tempfile.TemporaryDirectory() as temporary:
+                arguments, job, metadata, _ = self.worker(Path(temporary), language=False, market=market)
+                aws = arguments.cloud = FakeCloud()
+                aws.networks["us-west-2"] = cloud.Network("vpc-1", "sg-1", tuple(
+                    (f"subnet-{zone}", f"us-west-2{zone}") for zone in "abc"))
+                aws.offerings["us-west-2", "r8i.2xlarge"] = set() if rejection is None else {
+                    f"us-west-2{zone}" for zone in "abc"}
+                aws.rejections = [] if rejection is None else [rejection]
+                try:
+                    instance_id, zone = RUN_CAMPAIGN.launch_worker(arguments, job, metadata)
+                except RUN_CAMPAIGN.LaunchFailed as failure:
+                    self.assertEqual(expected, (failure.classification, failure.detail))
+                    continue
+                self.assertEqual("launched", expected)
+                launches = [call[2] for call in aws.calls if call[0] == "run_instance"]
+                (instance,) = aws.region_instances["us-west-2"]
+                self.assertEqual((instance.id, f"us-west-2{launches[-1].subnet[-1]}"), (instance_id, zone))
+                self.assertEqual(len(launches), len({spec.subnet for spec in launches}))
+                # The host is found by its session, and buys Spot at no more than the budget's rate.
+                self.assertEqual(metadata["session"], instance.tags["Session"])
+                self.assertEqual(("spot", "0.5", "regulator-benchmark-worker"),
+                                 (launches[-1].market, launches[-1].max_price, launches[-1].profile))
 
     def semantic_verifier_script(self, source, directory):
         """The run-shard.sh semantic-verifier functions, set up for a native-access route under directory."""
@@ -2599,55 +2074,24 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "heap_size"):
                 RUN_CAMPAIGN.campaign_started_at(root / "campaign-state.tsv", self.arguments(root))
 
-    def test_job_environment_uses_captured_heap_not_later_environment(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            arguments = self.arguments(root)
-            job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 1, "spot")
-            with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": ""}):
-                self.assertEqual("8g", RUN_CAMPAIGN.campaign_heap_size(arguments))
-            with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
-                environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
-            self.assertEqual("8g", environment["BENCHMARK_HEAP_SIZE"])
-
-    def test_budget_recovery_requires_cleanup_after_launch(self):
+    def test_budget_recovery_releases_only_the_epochs_no_worker_holds(self):
         job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
-            RUN_CAMPAIGN.write_attempt(attempts, job, "starting")
-            RUN_CAMPAIGN.write_attempt(attempts, job, "started", "wrapper_pid=123")
-            RUN_CAMPAIGN.write_attempt(attempts, job, "retryable-infrastructure", "controller stopped")
+            RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
             budget = Mock()
-            budget.reservations.return_value = [{
-                "campaign_id": "baseline",
-                "logical_identity": job.logical_identity,
-                "host_epoch": job.host_epoch,
-                "attempt": job.attempt,
-            }]
-
-            with self.assertRaisesRegex(RuntimeError, "produced no result directory"):
-                RUN_CAMPAIGN.recover_budget_reservations(
-                    budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts)
-
-            budget.release.assert_not_called()
-
-    def test_recovery_finds_only_its_own_campaigns_wrapper_of_the_job(self):
-        job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 1, "spot")
-        runner = "/bin/bash /checkout/tools/re2-benchmark/aws/run-campaign.sh"
-        # Another candidate's wrapper of the same job, and this campaign's wrapper of a later host epoch.
-        processes = {101: f"{runner} tournament.b {job.identity}",
-                     102: f"{runner} tournament.a {replace(job, host_epoch=100001).identity}",
-                     103: f"{runner} tournament.a {job.identity}"}
-
-        def ps(command, **_):
-            if command[:2] == ["ps", "-p"]:
-                return processes[int(command[2])]
-            return "".join(f" {process_id} {line}\n" for process_id, line in processes.items())
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=ps):
-            self.assertEqual(103, RUN_CAMPAIGN.wrapper_process_id("tournament.a", job, "-"))
-            self.assertIsNone(RUN_CAMPAIGN.wrapper_process_id("tournament.a", job, "wrapper_pid=101"))
+            # Epoch 10's worker is live; the controller stopped after reserving epoch 11 but before its launch.
+            budget.reservations.return_value = [
+                {"campaign_id": "baseline", "logical_identity": job.logical_identity, "host_epoch": epoch,
+                 "attempt": job.attempt} for epoch in (10, 11)]
+            RUN_CAMPAIGN.recover_budget_reservations(
+                budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts, {10})
+            budget.release.assert_called_once_with("baseline", 11, cleanup_verified=True)
+            self.assertEqual([("10", "starting", "session=baseline-e10"),
+                              ("11", "retryable-infrastructure", "controller stopped before launch")],
+                             [(row["host_epoch"], row["outcome"], row["detail"])
+                              for row in RUN_CAMPAIGN.read_attempts(attempts)])
 
     def test_tooling_digest_covers_each_tracked_files_path_and_content(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2785,13 +2229,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
-            session = self.write_cleanup_session(result_root, job)
+            worker = RUN_CAMPAIGN.UnitWorker(job, {
+                "session": "session", "aws_region": "us-east-2", "placement_score": "9",
+                "instance_id": "i-0123456789abcdef0", "availability_zone": "us-east-2b"}, result_root / "session")
             events = result_root / "campaign-events.tsv"
             fields = ("event_type", "campaign_id", "platform", "shard_id", "replica_id", "instance_id",
                       "host_epoch", "reason", "artifact_uri", "artifact_sha256", "details")
             events.write_text("\t".join(fields) + "\n")
 
-            RUN_CAMPAIGN.write_event(events, "interruption", "baseline", job, session, "spot-interruption")
+            RUN_CAMPAIGN.write_event(events, "interruption", "baseline", job, worker, "spot-interruption")
 
             with events.open(newline="") as input_file:
                 rows = list(csv.DictReader(input_file, delimiter="\t"))
@@ -2823,33 +2269,40 @@ def measure_release(directory):
                          f"release_artifact_sha256={hashlib.sha256(attestation.encode()).hexdigest()}\n")
 
 
+def user_data_settings(user_data):
+    """The settings a worker's user data exports, by name."""
+    body = RUN_CAMPAIGN.WORKER_USER_DATA.read_text().split("\n", 1)[1]
+    exports = shlex.split(user_data[user_data.index("\n") + 1:len(user_data) - len(body)])
+    return dict(token.split("=", 1) for token in exports if token != "export")
+
+
 class FakeUnitHost:
-    """A unit worker host behind a stubbed wrapper, exchanging its leases and uploads through the fleet's S3: each lease
-    runs as fixture evidence.
+    """A unit worker host on the fleet's instance, as its user data runs it, exchanging its leases and uploads
+    through the fleet's S3: each lease runs as fixture evidence.
 
     A lease runs its groups in order, uploading each group's result and marker as it finishes, and a failed
     group ends the lease. A script names what a lease does instead of completing: "interrupt" uploads an
-    interruption bundle and fails as a Spot interruption, as the wrapper reports a worker's status 43,
-    "interrupt-progress" does so once the lease's first group finished, and "notice" does so before it fetches
-    the lease. A host scripted to "silent-interrupt" does so with none of its heartbeat uploads landing, and one
-    scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats also lost. "stall"
-    stops the heartbeat; once the controller stops its wrapper, the lease's completion lands late, after another
-    host completed the same replica, or never, once no other host runs, and with "stall-interrupt" the stopped
-    host reports an interruption of the lease instead. With "stall-semantic" the late completion is a semantic
-    failure, and with "stall-semantic-early" it lands as soon as another host leased the replica, before that
-    host completes it. A host the fleet finds no Spot capacity for, or whose boot the fleet fails, exits before
-    its first heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits before it
-    launches. A host whose boot the fleet slows stays booting until it is stopped, and one whose cleanup the
-    fleet slows keeps running once stopped until every other host has exited. Every host that launched uploads
-    its host archive as it exits, as the user data's exit trap does, even one that failed during bootstrap. A
-    host whose cleanup the fleet leaves unverified records its bucket's removal as failed. A lease completes
-    failed with "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1), or
-    "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a result that
+    interruption bundle and exits as a Spot interruption, with the worker's status 43, "interrupt-progress" does
+    so once the lease's first group finished, and "notice" does so before it fetches the lease. A host scripted
+    to "silent-interrupt" does so with none of its heartbeat uploads landing, and one scripted to "silent-crash"
+    runs the lease's first group and then fails, its heartbeats also lost. "stall" stops the heartbeat; once the
+    controller terminates its instance, the lease's completion lands late, after another host completed the same
+    replica, or never, once no other host runs, and with "stall-interrupt" the stopping host reports an
+    interruption of the lease instead. With "stall-semantic" the late completion is a semantic failure, and with
+    "stall-semantic-early" it lands as soon as another host leased the replica, before that host completes it. A
+    host whose boot the fleet fails exits before its first heartbeat. A host whose boot the fleet slows stays
+    pending until it is terminated, one the fleet leaves unlisted is launched without RunInstances's answer and is
+    missing from EC2's listing while it stays unlisted, and one whose cleanup the fleet slows keeps shutting down
+    once terminated
+    until every other host has exited. Every host that booted uploads its host archive as it exits, as the user
+    data's exit trap does, even one that failed during bootstrap, and its instance then terminates. A lease
+    completes failed with "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1),
+    or "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a result that
     differs from its marker's checksum, and "foreign-receipt" a receipt that names another attempt.
     "foreign-marker" completes with a marker naming another campaign, and "partial-marker" with one lacking its
-    result checksum. A host whose environment names a release measures RELEASE's JAR, except for a lease
-    scripted to "unreleased", which measures the candidate's own classes. The fleet's unit scripts give every
-    lease of a unit, on any host, a behavior.
+    result checksum. A host whose user data names a release measures RELEASE's JAR, except for a lease scripted
+    to "unreleased", which measures the candidate's own classes. The fleet's unit scripts give every lease of a
+    unit, on any host, a behavior.
     """
 
     # Each scripted failure's exit status, as run-unit.sh reports it.
@@ -2860,44 +2313,38 @@ class FakeUnitHost:
         "protocol-rejection": RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, "fail": 1, "capacity-rejected": 1,
     }
 
-    def __init__(self, fleet, number, arguments, environment):
+    def __init__(self, fleet, number, region, spec):
+        settings = user_data_settings(spec.user_data)
         self.fleet = fleet
         self.number = number
-        self.pid = 4_000_000 + number
-        # The wrapper's arguments, by which ps shows it.
-        self.arguments = arguments
-        self.platform = environment["CAMPAIGN_PLATFORM"]
-        self.instance_type = environment.get("INTEL_INSTANCE_TYPE") or environment["ARM_INSTANCE_TYPE"]
-        self.market = environment["INSTANCE_MARKET_TYPE"]
-        self.region = environment["AWS_REGION"]
+        self.region = region
+        self.instance_type = spec.instance_type
+        self.market = spec.market
+        self.platform = settings["RE2_CAMPAIGN_PLATFORM"]
+        self.epoch = settings["RE2_CAMPAIGN_HOST_EPOCH"]
+        self.stop_by = int(settings["HOST_STOP_BY"])
+        self.architecture = settings["RE2_ENGINEERING_ARCHITECTURE"]
+        self.session = settings["RE2_CAMPAIGN_HOST_SESSION"]
+        self.bucket = settings["UNIT_WORKER_BUCKET"]
+        self.lease_prefix = settings["UNIT_WORKER_LEASE_PREFIX"] + "/"
+        self.result_prefix = settings["UNIT_WORKER_RESULT_PREFIX"] + "/"
+        self.prefix = self.result_prefix.removesuffix("results/")
+        self.release_version = settings["REGULATOR_RELEASE_VERSION"]
+        self.zone = next(zone for subnet, zone in fleet.network(region).subnets if subnet == spec.subnet)
         self.launched_at = fleet.clock
-        self.epoch = environment["CAMPAIGN_HOST_EPOCH"]
-        self.stop_by = int(environment["CAMPAIGN_HOST_STOP_BY"])
-        self.archive_key = (f"{self.platform}/{environment['CAMPAIGN_SHARD_ID']}/"
-                            f"replica-{environment['CAMPAIGN_REPLICA_ID']}/epoch-{self.epoch}/"
-                            f"{environment['CAMPAIGN_ARCHITECTURES']}.tar.gz")
-        self.architecture = environment["CAMPAIGN_ARCHITECTURES"]
-        self.instance_type = environment["INTEL_INSTANCE_TYPE" if self.architecture == "intel" else "ARM_INSTANCE_TYPE"]
-        self.session_directory = Path(environment["RESULT_ROOT"]) / f"{self.platform}-session-{number}"
-        self.session = self.session_directory.name
-        self.instance_id = f"i-{self.platform}-{number}"
-        self.release_version = environment["REGULATOR_RELEASE_VERSION"]
+        self.instance_id = None
         self.script = fleet.scripts.get(number, {})
-        self.full = self.market == "spot" and fleet.full_spot.get(self.platform, 0) > 0
-        if self.full:
-            fleet.full_spot[self.platform] -= 1
-        self.refused = fleet.refused_inputs(self)
         self.sequence = 1
         self.booted = False
         self.stalled = False
         self.stopping = False
+        self.terminations = 0
         self.status = None
-        self.signals = []
 
     def tick(self):
         if self.stopping and self.status is None and not self.stalled:
             if all(host is self or host.status is not None for host in self.fleet.hosts):
-                self.exit(143, "controller-abort", "terminated")
+                self.exit(143)
             return
         if self.stopping and self.status is None:
             lease = self.leases[self.sequence]
@@ -2910,29 +2357,19 @@ class FakeUnitHost:
                     if sequence < host.sequence or behavior == "stall-semantic-early")
                    for host in self.fleet.hosts):
                 self.run(lease)
-                self.exit(143, "controller-abort", "terminated")
+                self.exit(143)
             elif all(host is self or host.status is not None for host in self.fleet.hosts):
-                self.exit(143, "controller-abort", "terminated")
+                self.exit(143)
             return
         if self.status is not None or self.stalled:
             return
         if not self.booted:
-            self.session_directory.mkdir(parents=True, exist_ok=True)
             if self.fleet.slow_boot(self):
                 return
             self.booted = True
-            # A launch that finds no capacity, or whose inputs are refused, never publishes its session.
-            if self.full:
-                return self.exit(1, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity")
-            if self.refused:
-                return self.exit(1, "input-rejection", "Frozen candidate archive SHA-256 mismatch")
-            other = "arm" if self.architecture == "intel" else "intel"
-            (self.session_directory / "session.txt").write_text(
-                f"session={self.session}\nbucket=bucket\ninput_prefix={self.session}/input\n"
-                f"result_prefix={self.session}/results\naws_region={self.region}\nplacement_score=9\n"
-                f"{self.architecture}_instance_id={self.instance_id}\n{other}_instance_id=none\n")
+            self.fleet.set_state(self, "running")
             if self.fleet.failed_boot(self):
-                return self.exit(1, "retryable-infrastructure", "bootstrap failed")
+                return self.exit(1)
         if self.script.get(self.sequence) == "notice":
             return self.interrupt(None)
         lease = self.leases.get(self.sequence)
@@ -2946,7 +2383,7 @@ class FakeUnitHost:
             return self.interrupt(lease["unit_id"])
         if behavior == "silent-crash":
             self.run_group(lease, lease["groups"][0], None)
-            return self.exit(1, "retryable-infrastructure", "host failed")
+            return self.exit(1)
         if behavior == "interrupt-progress":
             self.run_group(lease, lease["groups"][0], None)
             return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1])
@@ -2966,7 +2403,7 @@ class FakeUnitHost:
             member.size = len(notice)
             archive.addfile(member, io.BytesIO(notice))
         self.put(f"events/{self.sequence}-interrupted.tar.gz", bundle.getvalue())
-        self.exit(1, "retryable-spot", "spot-interruption-notice")
+        self.exit(RUN_CAMPAIGN.UNIT_WORKER_INTERRUPTED_STATUS)
 
     def heartbeat(self, unit_id):
         if {"silent-interrupt", "silent-crash"} & set(self.script.values()):
@@ -2975,21 +2412,20 @@ class FakeUnitHost:
 
     @property
     def leases(self):
-        """The leases the controller wrote for this host, by sequence."""
-        prefix = f"{self.session}/input/leases/"
-        return {int(key[len(prefix):-len(".json")]): json.loads(body)
-                for (bucket, key), (body, _, _) in self.fleet.objects.items()
-                if bucket == "bucket" and key.startswith(prefix)}
+        """The leases the controller wrote for this host, by sequence, whether or not its cleanup deleted them."""
+        return {int(key[len(self.lease_prefix):-len(".json")]): json.loads(body)
+                for (bucket, key), body in self.fleet.written_leases.items()
+                if bucket == self.bucket and key.startswith(self.lease_prefix)}
 
     @property
     def objects(self):
         """The host's uploads, by key below its result prefix, as (body, modification time)."""
-        prefix = f"{self.session}/results/"
-        return {key[len(prefix):]: (body, modified) for (bucket, key), (body, modified, _) in self.fleet.objects.items()
-                if bucket == "bucket" and key.startswith(prefix)}
+        return {key[len(self.result_prefix):]: (body, modified)
+                for (bucket, key), (body, modified, _) in self.fleet.objects.items()
+                if bucket == self.bucket and key.startswith(self.result_prefix)}
 
     def put(self, key, body, modified=None):
-        self.fleet.objects["bucket", f"{self.session}/results/{key}"] = (
+        self.fleet.objects[self.bucket, self.result_prefix + key] = (
             body, self.fleet.time() if modified is None else modified, None)
 
     def run(self, lease):
@@ -3005,13 +2441,12 @@ class FakeUnitHost:
         """Measure one group of the lease and upload its result and marker; returns its exit status."""
         sequence = self.sequence
         unit = self.fleet.units[lease["unit_id"]]
-        host = self.fleet.scratch / self.session
-        directory = host / f"lease-{sequence}" / f"group-{group}"
+        directory = self.fleet.scratch / self.session / f"lease-{sequence}" / f"group-{group}"
         directory.mkdir(parents=True)
         fixture = UnitFixture(directory, unit["shard_id"], unit["unit_index"], str(lease["replica_id"]), {
             "campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
             "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
-            "availability_zone": f"{self.region}b",
+            "availability_zone": self.zone,
         }, group=group, market=self.market)
         if self.release_version and behavior != "unreleased":
             measure_release(directory)
@@ -3040,65 +2475,52 @@ class FakeUnitHost:
         self.put(f"{prefix}/completion.json", json.dumps(marker).encode())
         return status
 
-    def exit(self, status, classification="none", detail="-"):
-        """Clean up as the wrapper does: recover the uploads, then record the cleanup."""
-        if self.booted and not self.full and not self.refused:
-            self.put(self.archive_key, b"host archive")
-        objects = self.session_directory / "recovered-uploads" / "objects"
-        for key, (body, _) in self.objects.items():
-            (objects / key).parent.mkdir(parents=True, exist_ok=True)
-            (objects / key).write_bytes(body)
-        cleanup = "failed" if self.fleet.unverified_cleanup(self) else "verified"
-        (self.session_directory / "cleanup-manifest.txt").write_text(
-            f"instances_terminated=verified\niam_removed=verified\nbucket_removed={cleanup}\n"
-            f"network_resources=default-vpc-reused\ncleanup_status={cleanup}\n"
-            f"run_status={'complete' if status == 0 else 'failed'}\nfailure_classification={classification}\n"
-            f"failure_detail={detail}\naws_region={self.region}\n")
-        if status == 0:
-            (self.session_directory / "campaign-success").touch()
-            if self.leases:
-                # The host archive the wrapper unpacks carries the startup timeline of a host that began a unit.
-                results = self.session_directory / self.architecture / "re2-results"
-                results.mkdir(parents=True, exist_ok=True)
-                (results / "startup-timeline.tsv").write_text(
+    def exit(self, status):
+        """Exit as the user data's trap does: upload the host archive, with the startup timeline of a host that
+        began a unit, then power off, which terminates the instance."""
+        if self.booted:
+            results = {"re2-results/exit-status": f"{status}\n"}
+            if status == 0 and self.leases:
+                results["re2-results/startup-timeline.tsv"] = (
                     "step\tstarted\tfinished\nboot\t1000.000\t1000.000\npackages\t1010.000\t1100.000\n"
                     "worker\t1200.000\t1250.500\n")
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode="w:gz") as host:
+                for name, content in results.items():
+                    member = tarfile.TarInfo(name)
+                    member.size = len(content)
+                    host.addfile(member, io.BytesIO(content.encode()))
+            self.put("host.tar.gz", archive.getvalue())
         self.status = status
+        self.fleet.set_state(self, "terminated", "Client.UserInitiatedShutdown" if self.terminations
+                             else "Client.InstanceInitiatedShutdown")
         self.fleet.log.append(("exit", self.session))
 
-    def poll(self):
-        return self.status
-
-    def send_signal(self, sent_signal):
-        self.signals.append(sent_signal)
-        self.fleet.log.append(("signal", self.session))
+    def terminate(self):
+        self.terminations += 1
+        self.fleet.log.append(("terminate", self.session))
         if self.status is None:
+            self.stopping = True
             if self.stalled or self.fleet.slow_cleanup(self):
-                self.stopping = True
+                self.fleet.set_state(self, "shutting-down")
             else:
-                self.exit(143, "controller-abort", "terminated")
-
-    def wait(self, timeout):
-        return self.status
-
-    def kill(self):
-        self.status = -9
+                self.exit(143)
 
 
 class FakeUnitFleet(FakeCloud):
-    """AWS with the unit worker hosts the stubbed wrapper launches, which exchange their leases and uploads with the
+    """AWS with the unit worker hosts the controller launches, which exchange their leases and uploads with the
     controller through its S3."""
 
-    def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None,
-                 failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None,
-                 unverified_cleanup=lambda host: False, slow_boot=lambda host: False, slow_cleanup=lambda host: False):
+    def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
+                 unit_scripts=None, stuck_prefix=lambda host: False, unlisted=lambda host: False,
+                 slow_boot=lambda host: False, slow_cleanup=lambda host: False):
         super().__init__()
         self.scratch = scratch
         self.failed_boot = failed_boot
         self.slow_boot = slow_boot
         self.slow_cleanup = slow_cleanup
-        self.refused_inputs = refused_inputs
-        self.unverified_cleanup = unverified_cleanup
+        self.stuck_prefix = stuck_prefix
+        self.unlisted = unlisted
         self.scripts = scripts or {}
         self.unit_scripts = unit_scripts or {}
         # The controller stops after this many polls, by raising this exception, as a crash does by default.
@@ -3106,8 +2528,12 @@ class FakeUnitFleet(FakeCloud):
         self.abort = SystemExit
         # Each platform's first Spot launches that find no capacity.
         self.full_spot = dict(full_spot or {})
-        # The shared fleet's reservations a restart recovers, or None to leave recovery stubbed.
-        self.reservations = None
+        # The shared fleet's reservations a restart recovers.
+        self.reservations = []
+        # Every lease the controller wrote, by bucket and key.
+        self.written_leases = {}
+        # Every launch the controller asked for, in order, and whether AWS refused it.
+        self.launches = []
         self.units = RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
         self.hosts = []
         self.log = []
@@ -3115,28 +2541,50 @@ class FakeUnitFleet(FakeCloud):
         # The digest of the tooling the controller runs.
         self.tooling = "c" * 64
 
-    def popen(self, command, **kwargs):
-        host = FakeUnitHost(self, len(self.hosts) + 1, command[1:], kwargs["env"])
-        self.hosts.append(host)
-        return host
+    def run_instance(self, region, spec):
+        if (region, spec.token) not in self.launched:
+            platform = spec.tags["Platform"]
+            refused = spec.market == "spot" and self.full_spot.get(platform, 0) > 0
+            self.launches.append(SimpleNamespace(platform=platform, market=spec.market, region=region,
+                                                 launched_at=self.clock, refused=refused))
+            if refused:
+                self.full_spot[platform] -= 1
+                self.call("run_instance", region, spec)
+                raise cloud.LaunchRejected("capacity", "InsufficientInstanceCapacity")
+        host = FakeUnitHost(self, len(self.hosts) + 1, region, spec)
+        host.instance_id = super().run_instance(region, spec)
+        if host.instance_id not in {other.instance_id for other in self.hosts}:
+            self.hosts.append(host)
+        if self.unlisted(host):
+            raise cloud.LaunchUnknown("RunInstances gave no answer")
+        return host.instance_id
+
+    def instances(self, region):
+        hidden = {host.instance_id for host in self.hosts if self.unlisted(host)}
+        return [instance for instance in super().instances(region) if instance.id not in hidden]
+
+    def set_state(self, host, state, reason=""):
+        self.region_instances[host.region] = [
+            replace(instance, state=state, state_reason=reason) if instance.id == host.instance_id else instance
+            for instance in self.region_instances[host.region]]
+
+    def terminate(self, region, ids):
+        self.call("terminate", region, *ids)
+        for host in self.hosts:
+            if host.instance_id in ids:
+                host.terminate()
+
+    def delete(self, region, bucket, keys):
+        stuck = {host.prefix for host in self.hosts if self.stuck_prefix(host)}
+        super().delete(region, bucket, [key for key in keys if not any(key.startswith(prefix) for prefix in stuck)])
 
     def put(self, region, bucket, key, body, *, if_none_match=False, sha256=None):
         written = super().put(region, bucket, key, body, if_none_match=if_none_match, sha256=sha256)
-        lease = re.fullmatch(r"(.+)/input/leases/([0-9]+)\.json", key)
+        lease = re.fullmatch(r"(?:.+/)?([^/]+)/input/leases/([0-9]+)\.json", key)
         if written and lease:
+            self.written_leases[bucket, key] = body
             self.log.append(("lease", lease[1], int(lease[2]), json.loads(body).get("unit_id")))
         return written
-
-    def check_output(self, command, **kwargs):
-        if command[:2] == ["ps", "-p"]:
-            host = next(host for host in self.hosts if host.pid == int(command[2]))
-            if host.status is not None:
-                raise subprocess.CalledProcessError(1, command)
-            return " ".join(["bash", "run-campaign.sh", *host.arguments])
-        raise AssertionError(command)
-
-    def kill(self, process_id, sent_signal):
-        next(host for host in self.hosts if host.pid == process_id).send_signal(sent_signal)
 
     def sleep(self, seconds):
         self.clock += seconds
@@ -3152,16 +2600,12 @@ class FakeUnitFleet(FakeCloud):
 
     def stubs(self):
         stack = contextlib.ExitStack()
-        stack.enter_context(patch.object(RUN_CAMPAIGN, "check_output", side_effect=self.check_output))
+        stack.enter_context(patch.dict(os.environ, {"TRANSFER_PREFIX": "campaign"}))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "frozen_input_fingerprint", return_value=None))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "tooling_digest", side_effect=lambda root: self.tooling))
-        if self.reservations is None:
-            stack.enter_context(patch.object(RUN_CAMPAIGN, "recover_budget_reservations"))
-        stack.enter_context(patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=self.popen))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "sleep", side_effect=self.sleep))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "monotonic", side_effect=self.monotonic))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "time", side_effect=self.time))
-        stack.enter_context(patch.object(RUN_CAMPAIGN.os, "kill", side_effect=self.kill))
         return stack
 
 
@@ -3201,6 +2645,8 @@ class TestUnitWorkers(unittest.TestCase):
             release_version=release_version,
             transfer_buckets={region: "bucket" for region in regions | set(RUN_CAMPAIGN.default_regions())})
         self.arguments = arguments
+        with gzip.open(arguments.candidate_archive, "wb") as candidate:
+            candidate.write(b"candidate")
         items = RUN_CAMPAIGN.build_work_items(phase, self.PLATFORMS, fleet.units, shards, confirmations)
         result_root = root / "results"
         result_root.mkdir(exist_ok=True)
@@ -3249,10 +2695,10 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_lease_writes_once_and_listing_strips_the_workers_prefix(self):
         worker = SimpleNamespace(host_session="r8i-session-1", metadata={
-            "aws_region": "eu-west-1", "bucket": "bucket", "input_prefix": "campaign/input/r8i-session-1",
-            "result_prefix": "campaign/results/r8i-session-1"})
+            "aws_region": "eu-west-1", "bucket": "bucket", "input_prefix": "campaign/r8i-session-1/input",
+            "result_prefix": "campaign/r8i-session-1/results"})
         body = json.dumps({"sequence": 1, "unit_id": "unit"}, sort_keys=True) + "\n"
-        lease = ("eu-west-1", "bucket", "campaign/input/r8i-session-1/leases/1.json")
+        lease = ("eu-west-1", "bucket", "campaign/r8i-session-1/input/leases/1.json")
         # A lease written before a restart or a lost response conflicts, and stands only if it is this one.
         for case, existing, operations, error in (
                 ("new key", None, ["put"], None),
@@ -3265,13 +2711,13 @@ class TestUnitWorkers(unittest.TestCase):
                 arguments = SimpleNamespace(cloud=aws)
                 if existing is not None:
                     aws.put(*lease, existing.encode())
-                aws.objects["bucket", "campaign/results/r8i-session-1/heartbeat/1.json"] = (b"{}", 1793030400.0, None)
-                aws.objects["bucket", "campaign/results/r8i-session-10/heartbeat/1.json"] = (b"{}", 1793030401.0, None)
+                aws.objects["bucket", "campaign/r8i-session-1/results/heartbeat/1.json"] = (b"{}", 1793030400.0, None)
+                aws.objects["bucket", "campaign/r8i-session-10/results/heartbeat/1.json"] = (b"{}", 1793030401.0, None)
                 aws.calls.clear()
                 if case == "listing":
                     self.assertEqual({"heartbeat/1.json": 1793030400.0},
                                      RUN_CAMPAIGN.list_unit_worker_results(arguments, worker))
-                    self.assertEqual([("list", "eu-west-1", "bucket", "campaign/results/r8i-session-1/")], aws.calls)
+                    self.assertEqual([("list", "eu-west-1", "bucket", "campaign/r8i-session-1/results/")], aws.calls)
                     continue
                 if error:
                     with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
@@ -3352,10 +2798,17 @@ class TestUnitWorkers(unittest.TestCase):
                     RUN_CAMPAIGN.validate_unit_phase_prerequisite(
                         self.arguments, self.validation, result_root, "smoke")
         with tempfile.TemporaryDirectory() as temporary:
-            # A worker whose cleanup cannot be proven stops the phase before it is marked complete.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", unverified_cleanup=lambda host: host.number == 1)
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cleanup could not be proven"):
+            # A worker whose prefix will not empty keeps its reservation, and its cleanup is retried, so the phase
+            # is never marked complete; a controller stopped then cannot prove it either.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", stuck_prefix=lambda host: host.number == 1,
+                                  abort_after=200)
+            fleet.abort = RuntimeError
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError,
+                                        "controller stopped; cleanup could not be proven for unit workers r8i/"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            stuck = fleet.hosts[0]
+            self.assertEqual(0, stuck.status)
+            self.assertNotIn(int(stuck.epoch), {call.args[1] for call in self.budget.release.call_args_list})
             self.assertFalse((Path(temporary) / "results" / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
 
     def test_confirmation_runs_on_a_new_instance_and_is_accepted_beside_the_primary_campaign(self):
@@ -3434,7 +2887,7 @@ class TestUnitWorkers(unittest.TestCase):
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 2})
             result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
                                          platform_regions={"r8i": ["us-east-2", "us-west-2"]})
-            first, second, third = [host for host in fleet.hosts if host.platform == "r8i"][:3]
+            first, second, third = [launch for launch in fleet.launches if launch.platform == "r8i"][:3]
             self.assertEqual([("spot", "us-east-2"), ("spot", "us-west-2"), ("spot", "us-east-2")],
                              [(host.market, host.region) for host in (first, second, third)])
             self.assertLess(third.launched_at - first.launched_at, RUN_CAMPAIGN.SPOT_SHORTAGE_WAIT_SECONDS)
@@ -3450,11 +2903,11 @@ class TestUnitWorkers(unittest.TestCase):
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1000})
             result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
                                          platform_regions={"r8i": ["us-east-2", "us-west-2"]})
-            hosts = [host for host in fleet.hosts if host.platform == "r8i"]
-            on_demand = next(host for host in hosts if host.market == "on-demand")
+            launches = [launch for launch in fleet.launches if launch.platform == "r8i"]
+            on_demand = next(launch for launch in launches if launch.market == "on-demand")
             self.assertEqual("us-east-2", on_demand.region)
-            self.assertTrue(all(host.market == "spot" for host in hosts[:hosts.index(on_demand)]))
-            self.assertGreaterEqual(on_demand.launched_at - hosts[0].launched_at,
+            self.assertTrue(all(launch.market == "spot" for launch in launches[:launches.index(on_demand)]))
+            self.assertGreaterEqual(on_demand.launched_at - launches[0].launched_at,
                                     RUN_CAMPAIGN.SPOT_SHORTAGE_WAIT_SECONDS)
             self.assertIn(("on-demand", "us-east-2"),
                           {(receipt["market"], receipt["region"])
@@ -3474,24 +2927,23 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_booting_worker_stops_once_the_queue_holds_nothing_for_it(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The second r8i worker is still booting when the first, done with one unit, leases the other, and
-            # its cleanup is slow. That lease then fails.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "fail"}},
-                                  slow_boot=lambda host: host.number == 2, slow_cleanup=lambda host: host.number == 2)
+            # The second r8i launch's answer is lost, and EC2 lists its instance only once the first worker has
+            # measured both units, while it still boots; its cleanup is slow.
+            fleet = FakeUnitFleet(
+                Path(temporary) / "hosts", slow_boot=lambda host: host.number == 2,
+                slow_cleanup=lambda host: host.number == 2,
+                unlisted=lambda host: host.number == 2 and ("complete", fleet.hosts[0].session, 2) not in fleet.log)
             self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 6, 3)
             first, booting = fleet.hosts[:2]
-            self.assertEqual(({}, [signal.SIGTERM]), (booting.leases, booting.signals))
-            # It stops while the first still measures that unit, not once the phase drains, and its stop lease
+            # Its session's tag finds it, and it is stopped at once, before the first worker exits; its stop lease
             # records it stopping for a restart.
-            self.assertLess(fleet.log.index(("signal", booting.session)),
-                            fleet.log.index(("complete", first.session, 2)))
+            self.assertEqual(([True], 1), ([lease.get("stop") for lease in booting.leases.values()],
+                                           booting.terminations))
+            self.assertLess(fleet.log.index(("terminate", booting.session)), fleet.log.index(("exit", first.session)))
             self.assertIn((booting.epoch, "stop"), {(row["host_epoch"], row["outcome"]) for row in self.ledger})
-            # The failed unit goes to a new host while the stopping worker still cleans up.
-            unit_id = first.leases[2]["unit_id"]
-            [replacement] = [host for host in fleet.hosts[2:] if host.platform == "r8i"]
-            self.assertEqual(unit_id, replacement.leases[1]["unit_id"])
-            self.assertLess(fleet.log.index(("lease", replacement.session, 1, unit_id)),
-                            fleet.log.index(("exit", booting.session)))
+            self.assertIn((booting.epoch, "started", f"instance_id={booting.instance_id};availability_zone=us-west-2a"),
+                          [(row["host_epoch"], row["outcome"], row["detail"]) for row in
+                           RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")])
 
     def test_late_completion_after_requeue_is_superseded(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3499,7 +2951,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 4, 2)
             stalled = fleet.hosts[0]
             replacement = next(host for host in fleet.hosts[2:] if host.platform == stalled.platform)
-            self.assertEqual([signal.SIGTERM], stalled.signals)
+            self.assertEqual(1, stalled.terminations)
             outcomes = {(row["host_session"], row["outcome"]) for row in self.ledger}
             self.assertLessEqual({(stalled.session, "lost"), (stalled.session, "superseded"),
                                   (replacement.session, "accepted")}, outcomes)
@@ -3564,8 +3016,6 @@ class TestUnitWorkers(unittest.TestCase):
                 other.budget, budget = (RUN_CAMPAIGN.FleetBudget(other.path) for _ in range(2))
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
                 fleet.abort = abort
-                # Recovery reads the shared fleet's reservations.
-                fleet.reservations = []
                 with self.assertRaisesRegex(stopped, message), \
                         RUN_CAMPAIGN.controller_lock(Path(temporary) / "results", RUN_CAMPAIGN.DRIVER_CHILD):
                     self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
@@ -3590,29 +3040,37 @@ class TestUnitWorkers(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.reserve(1)
-        RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="baseline"), fixture.root / "baseline",
-                                       fixture.budget, {}, KeyboardInterrupt())
+        RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "baseline", fixture.budget, lambda: None, KeyboardInterrupt())
         with self.assertRaisesRegex(RuntimeError,
                                     "halted: KeyboardInterrupt; hosts of .* await verified cleanup") as halted:
             fixture.budget.check()
         # Another controller that observes the halt and proves its cleanup stops without recording one of its own.
-        RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="language"), fixture.root / "language",
-                                       fixture.budget, {}, halted.exception)
+        RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "language", fixture.budget, lambda: None, halted.exception)
         self.assertEqual([str((fixture.root / "baseline").resolve())],
                          list(json.loads(fixture.budget.state_path.read_text())["halts"]))
-        # One that cannot prove its own cleanup, as when ps cannot start to follow a wrapper it adopted, records its
-        # own halt, which outlasts the first owner's restart.
-        job = RUN_CAMPAIGN.unit_worker_job(self.PLATFORMS[0], 1, 1, "spot")
-        wrapper = RUN_CAMPAIGN.DetachedWrapper(101, "confirmation", job, "wrapper_pid=101",
-                                               fixture.root / "confirmation")
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=OSError("cannot start ps")), \
-                self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cannot start ps"):
-            RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="confirmation"), fixture.root / "confirmation",
-                                           fixture.budget, {101: (wrapper, job, io.StringIO())}, halted.exception)
+        # One that cannot prove its own cleanup records its own halt, which outlasts the first owner's restart.
+        def unproven():
+            raise RuntimeError("cleanup could not be proven for unit workers r8i/unit-worker/replica-1")
+
+        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cleanup could not be proven"):
+            RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "confirmation", fixture.budget, unproven, halted.exception)
         fixture.budget.release("baseline", 1, cleanup_verified=True)
         fixture.budget.resume(fixture.root / "baseline")
-        with self.assertRaisesRegex(RuntimeError, "halted: .*cannot start ps"):
+        with self.assertRaisesRegex(RuntimeError, "halted: .*cleanup could not be proven"):
             fixture.budget.check()
+
+    def test_phase_launched_by_the_per_host_wrapper_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # The wrapper's starting record named no session, so no instance can be found by its tag.
+            (Path(temporary) / "results").mkdir()
+            RUN_CAMPAIGN.write_attempt(
+                Path(temporary) / "results" / "job-attempts.tsv",
+                RUN_CAMPAIGN.unit_worker_job(self.PLATFORMS[0], 1, 1, "spot"), "starting",
+                "region=us-west-2;placement_score=;slot=1;slot_failures=0;boot_by=1793001200;stop_by=1793004500")
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "per-host wrapper.*run the phase in a new root"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            self.assertEqual([], fleet.hosts)
 
     def test_phase_resumes_only_with_the_tooling_that_started_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3661,23 +3119,6 @@ class TestUnitWorkers(unittest.TestCase):
             unresolved = self.unresolved(Path(temporary) / "results")
             self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
             self.assertTrue(all("exhausted their replacements" in detail for detail in unresolved.values()))
-        with self.subTest(scenario="inputs refused"), tempfile.TemporaryDirectory() as temporary:
-            # A wrapper that refuses its frozen inputs would refuse them again, so its pool gives up at once.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", refused_inputs=lambda host: host.platform == "r8i")
-            with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/"):
-                self.run_phase(Path(temporary), fleet, "primary", shards, 12, 6)
-            self.assertEqual(6, sum(host.platform == "r8i" for host in fleet.hosts))
-            unresolved = self.unresolved(Path(temporary) / "results")
-            self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
-            self.assertTrue(all(re.search(r"unit worker r8i/.* was refused before launch: Frozen candidate archive "
-                                          "SHA-256 mismatch$", detail) for detail in unresolved.values()))
-        with self.subTest(scenario="inputs refused beside a free slot"), tempfile.TemporaryDirectory() as temporary:
-            # An interrupted worker frees its slot; a sibling's refusal gives up the pool, that free slot included.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "interrupt"}},
-                                  refused_inputs=lambda host: host.platform == "r8i" and host.number > 1)
-            with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/"):
-                self.run_phase(Path(temporary), fleet, "smoke", shards, 4, 2)
-            self.assertEqual(1, sum(host.refused for host in fleet.hosts))
         with self.subTest(scenario="restart at every poll"), tempfile.TemporaryDirectory() as temporary:
             # A restart at every poll, and one after the phase ends, keeps each slot's count and its giving up.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", failed_boot=lambda host: host.platform == "r8i")
@@ -3764,30 +3205,24 @@ class TestUnitWorkers(unittest.TestCase):
             identity = f"r8i/{stalled.leases[1]['unit_id']}/replica-1"
             self.assertEqual(1, dispatchers[0][0].failures[identity])
 
-    def test_worker_session_waits_for_a_whole_session_file(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            session = Path(temporary)
-            job = RUN_CAMPAIGN.Job(self.PLATFORMS[0], RUN_CAMPAIGN.UNIT_WORKER_SHARD, 1, 1, 1, "spot", "unit-worker")
-            worker = RUN_CAMPAIGN.UnitWorker(job, None, None, session=session)
-            # The worker already knows its session directory, so the dispatcher's result root goes unread.
-            dispatcher = SimpleNamespace(result_root=session)
-            for contents, ready in (("", False), ("session=s\nbucket=b\n", False),
-                                    ("session=s\nbucket=b\nresult_prefix=s/results\n", True)):
-                (session / "session.txt").write_text(contents)
-                self.assertEqual(ready, RUN_CAMPAIGN.UnitDispatcher.worker_session(dispatcher, worker))
-            self.assertEqual("s/results", worker.metadata["result_prefix"])
-
     def test_restart_settles_a_worker_that_exited_before_its_first_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The controller stops while a Spot launch that found no capacity exits.
+            # The controller stops before it settles a Spot launch that found no capacity.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1}, abort_after=1)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             fleet.abort_after = None
             self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            failed = fleet.hosts[0]
-            self.assertEqual(("r8i", "spot", 1), (failed.platform, failed.market, failed.status))
-            self.assertEqual({}, failed.leases)
+            # Its restart finds no instance under the session's tag by the boot deadline, so it settles the attempt
+            # as a launch that left no instance, without a lease.
+            refused, *_ = fleet.launches
+            self.assertEqual(("r8i", "spot", True), (refused.platform, refused.market, refused.refused))
+            self.assertEqual([("starting", None), ("retryable-infrastructure", RUN_CAMPAIGN.LAUNCH_NOT_FOUND)],
+                             [(row["outcome"], None if row["outcome"] == "starting" else row["detail"])
+                              for row in RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")
+                              if row["host_epoch"] == "1"])
+            self.assertEqual({"r9g", "r8i"}, {host.platform for host in fleet.hosts})
+            self.assertFalse(any(entry[0] == "lease" and entry[1].startswith("campaign-e1-") for entry in fleet.log))
 
     def test_restart_releases_a_reservation_made_while_its_worker_waited_for_capacity(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3798,7 +3233,7 @@ class TestUnitWorkers(unittest.TestCase):
                                purchases={"r8i": "on-demand"}, on_demand=False)
             waiting = self.budget.reserve.call_args_list[-1].args[1]
             self.assertEqual(("r8i", "on-demand"), (waiting.platform.name, waiting.market))
-            # The controller stopped after the reservation, before the wrapper started.
+            # The controller stopped after the reservation, before the launch.
             fleet.reservations = [{"campaign_id": "campaign", "logical_identity": waiting.logical_identity,
                                    "host_epoch": waiting.host_epoch, "attempt": waiting.attempt}]
             fleet.abort_after = None
@@ -3832,9 +3267,9 @@ class TestUnitWorkers(unittest.TestCase):
         # A marker that names another campaign, or lacks a field the controller reads, is not evidence of
         # this lease, so the controller stops every worker rather than judge the unit.
         for script, error in (
-                ("foreign-marker", r"unit completion marker r8i-session-1/1 group 1 does not match its lease: "
+                ("foreign-marker", r"unit completion marker campaign-e[0-9]+-[0-9TZ]+/1 group 1 does not match its lease: "
                                    r"\['campaign_id'\]"),
-                ("partial-marker", r"unit completion marker r8i-session-1/1 group 1 lacks \['result_sha256'\]")):
+                ("partial-marker", r"unit completion marker campaign-e[0-9]+-[0-9TZ]+/1 group 1 lacks \['result_sha256'\]")):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
                 with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
@@ -3902,7 +3337,7 @@ class TestUnitWorkers(unittest.TestCase):
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={
                 host: {1: "silent-crash" if host == attempts else "fail"} for host in range(1, attempts + 1)})
             with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/.* worker exited: classification="
-                                                    f"retryable-infrastructure; spent its {attempts} attempts"):
+                                                    f"benchmark-failure; spent its {attempts} attempts"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 1, 1)
             crashed = fleet.hosts[attempts - 1]
             self.assertEqual(attempts, self.lease_count(crashed.leases[1]))

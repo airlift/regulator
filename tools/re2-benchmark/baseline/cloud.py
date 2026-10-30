@@ -19,11 +19,35 @@ class CloudError(RuntimeError):
     """An AWS call failed, or AWS could not be reached."""
 
 
+class LaunchRejected(CloudError):
+    """AWS refused a launch, so no instance exists: kind is capacity, quota or price, and code is AWS's error code."""
+
+    def __init__(self, kind, code):
+        super().__init__(f"{kind}: {code}")
+        self.kind = kind
+        self.code = code
+
+
+class LaunchUnknown(CloudError):
+    """A launch failed every attempt without AWS refusing it, so an instance may exist; its tags find it."""
+
+
+# The RunInstances errors that prove AWS launched nothing, by the kind of shortage each reports. Any other failure, a
+# timeout among them, is retried with the same client token, which AWS answers with the instance it launched.
+LAUNCH_REJECTIONS = {
+    "InsufficientInstanceCapacity": "capacity", "UnfulfillableCapacity": "capacity",
+    "VcpuLimitExceeded": "quota", "InstanceLimitExceeded": "quota", "MaxSpotInstanceCountExceeded": "quota",
+    "SpotMaxPriceTooLow": "price",
+}
+LAUNCH_ATTEMPTS = 3
+
+
 @dataclass(frozen=True)
 class Network:
-    """A region's default VPC, or None without one, and its subnets that give instances public addresses, as
-    (subnet, availability zone)."""
+    """A region's default VPC, or None without one, its default security group, and its subnets that give instances
+    public addresses, as (subnet, availability zone)."""
     vpc: str
+    security_group: str
     subnets: tuple
 
 
@@ -33,6 +57,7 @@ class Image:
     state: str
     owner: str
     name: str
+    root_device: str
 
 
 @dataclass(frozen=True)
@@ -60,6 +85,23 @@ class SpotRequest:
     instance_id: str
     type: str
     tags: dict
+
+
+@dataclass(frozen=True)
+class LaunchSpec:
+    """One instance to launch: market is spot or on-demand, max_price the hourly Spot price ceiling, and token the
+    client token that makes a resubmitted request return the instance its first submission launched."""
+    image: str
+    instance_type: str
+    root_device: str
+    subnet: str
+    security_group: str
+    profile: str
+    market: str
+    max_price: str
+    user_data: str
+    tags: dict
+    token: str
 
 
 def tag_dictionary(tags):
@@ -102,12 +144,14 @@ class AwsCloud:
     def network(self, region):
         vpcs = self.call("ec2", region, "describe_vpcs", Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
         if not vpcs:
-            return Network(None, ())
+            return Network(None, None, ())
         vpc = vpcs[0]["VpcId"]
+        [group] = self.call("ec2", region, "describe_security_groups", Filters=[
+            {"Name": "vpc-id", "Values": [vpc]}, {"Name": "group-name", "Values": ["default"]}])["SecurityGroups"]
         subnets = self.pages("ec2", region, "describe_subnets", "Subnets", Filters=[
             {"Name": "vpc-id", "Values": [vpc]}, {"Name": "state", "Values": ["available"]}])
-        return Network(vpc, tuple(sorted((subnet["SubnetId"], subnet["AvailabilityZone"])
-                                         for subnet in subnets if subnet.get("MapPublicIpOnLaunch"))))
+        return Network(vpc, group["GroupId"], tuple(sorted((subnet["SubnetId"], subnet["AvailabilityZone"])
+                                                           for subnet in subnets if subnet.get("MapPublicIpOnLaunch"))))
 
     def zones_offering(self, region, instance_type):
         offerings = self.pages("ec2", region, "describe_instance_type_offerings", "InstanceTypeOfferings",
@@ -121,7 +165,8 @@ class AwsCloud:
         if not images:
             return None
         image = images[0]
-        return Image(image["Architecture"], image["State"], image["OwnerId"], image.get("Name", ""))
+        return Image(image["Architecture"], image["State"], image["OwnerId"], image.get("Name", ""),
+                     image.get("RootDeviceName", ""))
 
     def vcpu_quota(self, region, market):
         """The region's Standard instance vCPU quota for the market, spot or on-demand."""
@@ -163,6 +208,48 @@ class AwsCloud:
                          item["LaunchTime"].timestamp())
                 for reservation in reservations for item in reservation["Instances"]]
 
+    def run_instance(self, region, spec):
+        """Launch one instance, terminated when it shuts down, and return its ID. Raises LaunchRejected when AWS
+        refuses it, and LaunchUnknown when every attempt failed otherwise."""
+        parameters = {
+            "ImageId": spec.image, "InstanceType": spec.instance_type, "MinCount": 1, "MaxCount": 1,
+            "ClientToken": spec.token, "UserData": spec.user_data,
+            "BlockDeviceMappings": [{"DeviceName": spec.root_device, "Ebs": {
+                "VolumeSize": 40, "VolumeType": "gp3", "DeleteOnTermination": True, "Encrypted": True}}],
+            "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+            "IamInstanceProfile": {"Name": spec.profile},
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": spec.subnet, "Groups": [spec.security_group],
+                                   "AssociatePublicIpAddress": True}],
+            "TagSpecifications": [{"ResourceType": "instance", "Tags": [
+                {"Key": key, "Value": value} for key, value in spec.tags.items()]}]}
+        if spec.market == "spot":
+            parameters["InstanceMarketOptions"] = {"MarketType": "spot", "SpotOptions": {
+                "SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate",
+                "MaxPrice": spec.max_price}}
+        for attempt in range(1, LAUNCH_ATTEMPTS + 1):
+            try:
+                return self.call("ec2", region, "run_instances", **parameters)["Instances"][0]["InstanceId"]
+            except CloudError as error:
+                code = error_code(error.__cause__)
+                if code in LAUNCH_REJECTIONS:
+                    raise LaunchRejected(LAUNCH_REJECTIONS[code], code) from error
+                if attempt == LAUNCH_ATTEMPTS:
+                    raise LaunchUnknown(str(error)) from error
+
+    def terminate(self, region, ids):
+        self.call("ec2", region, "terminate_instances", InstanceIds=list(ids))
+
+    def instance_profile(self, region, name):
+        """The roles of the account's instance profile of that name, or None where it has none."""
+        try:
+            profile = self.call("iam", region, "get_instance_profile", InstanceProfileName=name)["InstanceProfile"]
+        except CloudError as error:
+            if error_code(error.__cause__) == "NoSuchEntity":
+                return None
+            raise
+        return tuple(role["RoleName"] for role in profile["Roles"])
+
     def spot_requests(self, region):
         requests = self.pages("ec2", region, "describe_spot_instance_requests", "SpotInstanceRequests",
                               Filters=[{"Name": "state", "Values": ["open", "active"]}])
@@ -202,6 +289,16 @@ class AwsCloud:
                 return False
             raise
         return True
+
+    def delete(self, region, bucket, keys):
+        """Delete the objects, a thousand to a request, as S3 allows."""
+        keys = sorted(keys)
+        for start in range(0, len(keys), 1000):
+            failed = self.call("s3", region, "delete_objects", Bucket=bucket, Delete={
+                "Objects": [{"Key": key} for key in keys[start:start + 1000]], "Quiet": True}).get("Errors")
+            if failed:
+                raise CloudError(f"could not delete {len(failed)} objects from s3://{bucket}, such as "
+                                 f"{failed[0]['Key']}: {failed[0].get('Code')}")
 
     def head_sha256(self, region, bucket, key):
         """The object's whole-object SHA-256, in hex, or None where there is no object or it has no checksum."""

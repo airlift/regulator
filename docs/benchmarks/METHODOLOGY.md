@@ -274,7 +274,7 @@ and which benchmarks serve as its edge controls.
 
 `tools/re2-benchmark/baseline/run-campaign.py` partitions the frozen manifest
 into work units of about 15 minutes and leases them to R8i and R9g worker hosts
-that `aws/run-campaign.sh` provisions. Each worker installs the frozen
+that it launches. Each worker installs the frozen
 candidate archive and its platform's prebuilt engines and compiled candidate
 classes, so it runs no Maven build, records environment metadata, pins
 benchmark processes to physical cores, and measures one unit at a time,

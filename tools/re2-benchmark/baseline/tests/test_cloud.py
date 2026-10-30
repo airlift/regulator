@@ -6,22 +6,27 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 import cloud  # noqa: E402
-from cloud import CloudError  # noqa: E402
+from cloud import CloudError, LaunchRejected  # noqa: E402
 
-AMAZON_LINUX = cloud.Image("x86_64", "available", "137112412989", "al2023-test")
+AMAZON_LINUX = cloud.Image("x86_64", "available", "137112412989", "al2023-test", "/dev/xvda")
 
 
 class FakeCloud:
     """AWS as AwsCloud reaches it, simulated: one account whose regions each have a default VPC with a public subnet
     in zone a that offers every instance type, the images, quotas, instances, Spot requests, placement scores and
-    buckets a test gives it, and S3 objects by bucket and key. Without scores, placement scores fail, as AWS does
-    for a configuration it cannot score.
+    buckets a test gives it, the worker instance profile, and S3 objects by bucket and key. Without scores, placement
+    scores fail, as AWS does for a configuration it cannot score. An image a test does not give is Amazon Linux.
+
+    A launch adds a pending instance, or returns the one its client token already launched, unless a test's
+    rejections refuse it: each is a function of the region and launch spec that returns a LaunchRejected to raise,
+    or None. A terminated instance stays listed as terminated.
 
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
     monotonic() read it, so a scenario takes the time its calls would.
@@ -29,8 +34,8 @@ class FakeCloud:
 
     # Seconds of a round trip: an S3 object call is short, an EC2 description longer, and a placement query longer
     # still.
-    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "head_sha256": 0.05, "instances": 0.5, "spot_requests": 0.5,
-             "placement_scores": 1.0}
+    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "delete": 0.05, "head_sha256": 0.05, "instances": 0.5,
+             "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
     DEFAULT_COST = 0.2
     # The simulated epoch's start, 2026-10-26 07:33:20 UTC.
     EPOCH = 1_793_000_000
@@ -56,6 +61,10 @@ class FakeCloud:
         self.region_requests = {}
         # By (bucket, key), as (body, modified, SHA-256 or None).
         self.objects = {}
+        self.profiles = {"regulator-benchmark-worker": ("regulator-benchmark-worker",)}
+        self.rejections = []
+        # Each launch's instance ID, by region and client token.
+        self.launched = {}
 
     def time(self):
         return self.EPOCH + self.clock
@@ -73,7 +82,8 @@ class FakeCloud:
 
     def network(self, region):
         self.call("network", region)
-        return self.networks.get(region, cloud.Network(f"vpc-{region}", ((f"subnet-{region}a", f"{region}a"),)))
+        return self.networks.get(region, cloud.Network(f"vpc-{region}", f"sg-{region}",
+                                                       ((f"subnet-{region}a", f"{region}a"),)))
 
     def zones_offering(self, region, instance_type):
         self.call("zones_offering", region, instance_type)
@@ -81,7 +91,7 @@ class FakeCloud:
 
     def image(self, region, ami):
         self.call("image", region, ami)
-        return self.images.get((region, ami))
+        return self.images.get((region, ami), AMAZON_LINUX)
 
     def vcpu_quota(self, region, market):
         self.call("vcpu_quota", region, market)
@@ -107,6 +117,28 @@ class FakeCloud:
         self.call("instances", region)
         return list(self.region_instances.get(region, ()))
 
+    def run_instance(self, region, spec):
+        self.call("run_instance", region, spec)
+        if (region, spec.token) not in self.launched:
+            for rejection in self.rejections:
+                if (error := rejection(region, spec)) is not None:
+                    raise error
+            instance = cloud.Instance(f"i-{len(self.launched) + 1}", spec.instance_type, spec.market, "pending", "",
+                                      dict(spec.tags), self.time())
+            self.region_instances.setdefault(region, []).append(instance)
+            self.launched[region, spec.token] = instance.id
+        return self.launched[region, spec.token]
+
+    def terminate(self, region, ids):
+        self.call("terminate", region, *ids)
+        self.region_instances[region] = [
+            replace(instance, state="terminated", state_reason="Client.UserInitiatedShutdown")
+            if instance.id in ids else instance for instance in self.region_instances.get(region, ())]
+
+    def instance_profile(self, region, name):
+        self.call("instance_profile", region, name)
+        return self.profiles.get(name)
+
     def spot_requests(self, region):
         self.call("spot_requests", region)
         return list(self.region_requests.get(region, ()))
@@ -131,6 +163,11 @@ class FakeCloud:
             return False
         self.objects[bucket, key] = (body, self.time(), sha256)
         return True
+
+    def delete(self, region, bucket, keys):
+        self.call("delete", region, bucket, len(keys))
+        for key in keys:
+            self.objects.pop((bucket, key), None)
 
     def head_sha256(self, region, bucket, key):
         self.call("head_sha256", region, bucket, key)
@@ -168,13 +205,16 @@ class TestAwsCloud(unittest.TestCase):
         self.stub("sts").add_response("get_caller_identity", {"Account": "123456789012"})
         ec2.add_response("describe_vpcs", {"Vpcs": [{"VpcId": "vpc-default"}]},
                          {"Filters": [{"Name": "is-default", "Values": ["true"]}]})
+        ec2.add_response("describe_security_groups", {"SecurityGroups": [{"GroupId": "sg-default"}]}, {"Filters": [
+            {"Name": "vpc-id", "Values": ["vpc-default"]}, {"Name": "group-name", "Values": ["default"]}]})
         ec2.add_response("describe_subnets", {"Subnets": [
             {"SubnetId": "subnet-b", "AvailabilityZone": "us-west-2b", "MapPublicIpOnLaunch": True},
             {"SubnetId": "subnet-private", "AvailabilityZone": "us-west-2c", "MapPublicIpOnLaunch": False}]},
             {"Filters": [{"Name": "vpc-id", "Values": ["vpc-default"]}, {"Name": "state", "Values": ["available"]}]})
         ec2.add_response("describe_vpcs", {"Vpcs": []}, {"Filters": [{"Name": "is-default", "Values": ["true"]}]})
         ec2.add_response("describe_images", {"Images": [
-            {"Architecture": "x86_64", "State": "available", "OwnerId": "137112412989", "Name": "al2023-test"}]},
+            {"Architecture": "x86_64", "State": "available", "OwnerId": "137112412989", "Name": "al2023-test",
+             "RootDeviceName": "/dev/xvda"}]},
             {"ImageIds": ["ami-test"]})
         ec2.add_response("describe_images", {"Images": []}, {"ImageIds": ["ami-gone"]})
         self.stub("service-quotas").add_response(
@@ -202,8 +242,9 @@ class TestAwsCloud(unittest.TestCase):
 
         aws = self.cloud
         self.assertEqual("123456789012", aws.account("us-west-2"))
-        self.assertEqual(cloud.Network("vpc-default", (("subnet-b", "us-west-2b"),)), aws.network("us-west-2"))
-        self.assertEqual(cloud.Network(None, ()), aws.network("us-west-2"))
+        self.assertEqual(cloud.Network("vpc-default", "sg-default", (("subnet-b", "us-west-2b"),)),
+                         aws.network("us-west-2"))
+        self.assertEqual(cloud.Network(None, None, ()), aws.network("us-west-2"))
         self.assertEqual(AMAZON_LINUX, aws.image("us-west-2", "ami-test"))
         self.assertIsNone(aws.image("us-west-2", "ami-gone"))
         self.assertEqual(640, aws.vcpu_quota("us-west-2", "spot"))
@@ -269,6 +310,70 @@ class TestAwsCloud(unittest.TestCase):
             self.assertTrue(aws.put("us-west-2", "bucket", "archive", path, sha256=archive_sha256))
             self.assertEqual(archive_sha256, aws.head_sha256("us-west-2", "bucket", "archive"))
             self.assertIsNone(aws.head_sha256("us-west-2", "bucket", "absent"))
+
+    def test_launch_classifies_refusals_and_resubmits_an_unanswered_request(self):
+        ec2 = self.stub("ec2")
+        spec = cloud.LaunchSpec("ami-test", "r8i.large", "/dev/xvda", "subnet-a", "sg-default",
+                                "regulator-benchmark-worker", "spot", "0.2", "#!/bin/bash\n",
+                                {"Session": "campaign-e1"}, "token")
+        request = {
+            "ImageId": "ami-test", "InstanceType": "r8i.large", "MinCount": 1, "MaxCount": 1, "ClientToken": "token",
+            "UserData": "#!/bin/bash\n",
+            "BlockDeviceMappings": [{"DeviceName": "/dev/xvda", "Ebs": {
+                "VolumeSize": 40, "VolumeType": "gp3", "DeleteOnTermination": True, "Encrypted": True}}],
+            "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+            "IamInstanceProfile": {"Name": "regulator-benchmark-worker"},
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-a", "Groups": ["sg-default"],
+                                   "AssociatePublicIpAddress": True}],
+            "TagSpecifications": [{"ResourceType": "instance", "Tags": [{"Key": "Session", "Value": "campaign-e1"}]}],
+            "InstanceMarketOptions": {"MarketType": "spot", "SpotOptions": {
+                "SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate", "MaxPrice": "0.2"}}}
+        # An unanswered request is resubmitted with its token until AWS names the instance.
+        ec2.add_client_error("run_instances", "InternalError", http_status_code=500, expected_params=request)
+        ec2.add_response("run_instances", {"Instances": [{"InstanceId": "i-launched"}]}, request)
+        on_demand = {key: value for key, value in request.items() if key != "InstanceMarketOptions"}
+        ec2.add_client_error("run_instances", "VcpuLimitExceeded", expected_params=on_demand)
+        ec2.add_client_error("run_instances", "InsufficientInstanceCapacity")
+        for _ in range(cloud.LAUNCH_ATTEMPTS):
+            ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
+        ec2.add_response("terminate_instances", {}, {"InstanceIds": ["i-launched"]})
+
+        aws = self.cloud
+        self.assertEqual("i-launched", aws.run_instance("us-west-2", spec))
+        with self.assertRaises(LaunchRejected) as rejected:
+            aws.run_instance("us-west-2", replace(spec, market="on-demand"))
+        self.assertEqual(("quota", "VcpuLimitExceeded"), (rejected.exception.kind, rejected.exception.code))
+        with self.assertRaises(LaunchRejected) as rejected:
+            aws.run_instance("us-west-2", spec)
+        self.assertEqual("capacity", rejected.exception.kind)
+        with self.assertRaises(cloud.LaunchUnknown):
+            aws.run_instance("us-west-2", spec)
+        aws.terminate("us-west-2", ["i-launched"])
+
+    def test_worker_profile_and_prefix_deletion(self):
+        iam = self.stub("iam")
+        iam.add_response("get_instance_profile", {"InstanceProfile": {
+            "Path": "/", "InstanceProfileName": "worker", "InstanceProfileId": "AIPAEXAMPLEEXAMPLE1",
+            "Arn": "arn:aws:iam::123456789012:instance-profile/worker", "CreateDate": datetime(2026, 10, 30),
+            "Roles": [{"Path": "/", "RoleName": "worker-role", "RoleId": "AROAEXAMPLEEXAMPLE1",
+                       "Arn": "arn:aws:iam::123456789012:role/worker-role", "CreateDate": datetime(2026, 10, 30)}]}},
+            {"InstanceProfileName": "worker"})
+        iam.add_client_error("get_instance_profile", "NoSuchEntity", http_status_code=404)
+        s3 = self.stub("s3")
+        keys = [f"session/results/{index:04d}" for index in range(1001)]
+        s3.add_response("delete_objects", {}, {"Bucket": "bucket", "Delete": {
+            "Objects": [{"Key": key} for key in keys[:1000]], "Quiet": True}})
+        s3.add_response("delete_objects", {}, {"Bucket": "bucket", "Delete": {
+            "Objects": [{"Key": keys[1000]}], "Quiet": True}})
+        s3.add_response("delete_objects", {"Errors": [{"Key": keys[0], "Code": "AccessDenied"}]})
+
+        aws = self.cloud
+        self.assertEqual(("worker-role",), aws.instance_profile("us-west-2", "worker"))
+        self.assertIsNone(aws.instance_profile("us-west-2", "absent"))
+        aws.delete("us-west-2", "bucket", reversed(keys))
+        with self.assertRaisesRegex(CloudError, "AccessDenied"):
+            aws.delete("us-west-2", "bucket", keys[:1])
 
     def test_commands_that_never_reach_aws_run_without_the_sdk(self):
         result = subprocess.run([sys.executable, "-c", "import sys; import cloud; cloud.AwsCloud(); "

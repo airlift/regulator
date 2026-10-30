@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import statistics
@@ -59,11 +60,15 @@ MAX_REPLACEMENTS_PER_JOB = 2
 # launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim,
 # unless the pool's platform buys only Spot.
 ON_DEMAND_TAIL_PERCENT = 10
-WRAPPER_NOT_CREATED = "wrapper process was not created"
+# A launch whose answer never came, and whose instance no tag query found by the end of its boot allowance, booted
+# nothing.
+LAUNCH_NOT_FOUND = "launched instance was not found"
 UNIT_WORKER_SHARD = "unit-worker"
+# run-unit-worker.sh exits with this status after a Spot interruption notice.
+UNIT_WORKER_INTERRUPTED_STATUS = 43
 UNIT_WORKER_LIFETIME_SECONDS = 6 * 60 * 60
-# The wrapper waits for a unit worker's host evidence through its lifetime, this allowance for its host
-# setup and final uploads, and its last unit: the pool's longest unit, and at least the unit budget.
+# A phase plans each unit worker to run through its lifetime, this allowance for its host setup and final uploads,
+# and its last unit: the pool's longest unit, and at least the unit budget.
 UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS = 75 * 60
 UNIT_WORKER_LAST_UNIT_SECONDS = work_units.UNIT_SECONDS
 # A worker whose heartbeat is this stale has lost its lease once EC2 no longer runs its instance,
@@ -189,6 +194,12 @@ CAMPAIGN_ID_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}"
 CAMPAIGN_OPTIONS = "campaign-options.json"
 BENCHMARK_TOOLING = "tools/re2-benchmark"
 BASELINE_TOOLING = "tools/re2-benchmark/baseline"
+# Every worker's instance profile, which exists in the account before any campaign, with the policy in
+# aws/worker-policy.json, and its user data, which the controller sends with the worker's settings.
+WORKER_PROFILE = "regulator-benchmark-worker"
+WORKER_USER_DATA = REPOSITORY / BENCHMARK_TOOLING / "aws" / "worker-user-data.sh"
+# The Trino commit every worker's harness pins.
+TRINO_REVISION = "c7503d170344c4e266f03fdb39e53c82aa7e3594"
 JOB_MANIFEST_FIELDS = (
     "platform", "shard_id", "replica", "host_epoch", "attempt", "market", "instance_type", "architecture")
 PHASE_TIMEOUT_SECONDS = {
@@ -631,7 +642,7 @@ def pool_platforms(platforms, items):
 
 
 def unit_worker_timeout(longest_unit_seconds):
-    """A worker's wrapper timeout: setup, lifetime, uploads, and a last unit as long as the pool's longest."""
+    """A worker's planned span: setup, lifetime, uploads, and a last unit as long as the pool's longest."""
     return (UNIT_WORKER_LIFETIME_SECONDS + UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS +
             max(UNIT_WORKER_LAST_UNIT_SECONDS, math.ceil(longest_unit_seconds)))
 
@@ -658,8 +669,9 @@ def pool_shards(items):
 
 
 def platform_has_capacity(candidate, running, arguments):
+    """Whether the candidate's platform has room beside the running jobs."""
     limit = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
-    return sum(job.platform.name == candidate.platform.name for _, job, _ in running.values()) < limit
+    return sum(job.platform.name == candidate.platform.name for job in running) < limit
 
 
 def validate_configuration(arguments, items):
@@ -681,8 +693,12 @@ def validate_configuration(arguments, items):
     if not set(buckets) <= set(regions):
         raise SystemExit(
             f"--transfer-bucket names regions the campaign does not allow: {sorted(set(buckets) - set(regions))}")
-    if buckets and not os.environ.get("TRANSFER_PREFIX"):
+    prefix = os.environ.get("TRANSFER_PREFIX", "")
+    if buckets and not prefix:
         raise SystemExit("--transfer-bucket requires TRANSFER_PREFIX")
+    if prefix and (prefix.startswith("/") or prefix.endswith("/") or ".." in prefix or
+                   not re.fullmatch(r"[A-Za-z0-9._/-]+", prefix)):
+        raise SystemExit(f"TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: {prefix}")
     budget = getattr(arguments, "shared_budget", None)
     unit_platforms = getattr(arguments, "unit_platforms", {})
     workers = [unit_platforms[pool] for pool in sorted({item.pool for item in items}) if pool in unit_platforms]
@@ -735,7 +751,7 @@ def validate_configuration(arguments, items):
 
 def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
     """The wall clock the phase's units need: worker lifetimes of work at the concurrency limits,
-    plus one retry wave, each wave the wrapper's full worker timeout."""
+    plus one retry wave, each wave a worker's full planned span."""
     platforms = getattr(arguments, "unit_platforms", {})
     work = {}
     vcpu_seconds = 0
@@ -1055,7 +1071,7 @@ def frozen_input_fingerprint(root, arguments, items_path):
         items_path))
     tracked_inputs.extend(directory / "plan.json" for _, directory in
                           sorted(getattr(arguments, "language_plans", {}).items()))
-    # The policy binds each manifest's SHA-256 and each wrapper checks the archives against
+    # The policy binds each manifest's SHA-256 and each host checks the archives against
     # it, so large archives are not rehashed at every launch.
     tracked_inputs.extend(directory / engine_build.MANIFEST for _, directory in
                           sorted(getattr(arguments, "engine_build_directories", {}).items()))
@@ -1274,11 +1290,17 @@ def validate_aws(arguments, platforms, jobs=None):
     budget = getattr(arguments, "shared_budget", None)
     if budget and (account != budget.policy["account"] or not set(regions) <= set(region_limits(budget.policy))):
         raise SystemExit("AWS account or region differs from the shared fleet policy")
+    # Every worker runs under the account's permanent worker profile, which the controller never creates.
+    if not aws.instance_profile(regions[0], WORKER_PROFILE):
+        raise SystemExit(f"the account has no {WORKER_PROFILE} instance profile; create it as aws/README.md "
+                         "\"Worker profile\" describes")
     spot_quotas, on_demand_quotas = {}, {}
-    # The wrapper launches into a public subnet of each region's default VPC.
+    # The controller launches into a public subnet of each region's default VPC. A check describes the account
+    # afresh, and launches reuse what it found.
+    arguments.networks, arguments.images, arguments.zone_offerings = {}, {}, {}
     public_zones = {}
     for region in regions:
-        public_zones[region] = {zone for _, zone in aws.network(region).subnets}
+        public_zones[region] = {zone for _, zone in region_network(arguments, region).subnets}
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
         spot_quota, on_demand_quota = vcpu_quota(arguments, region, "spot"), vcpu_quota(arguments, region, "on-demand")
@@ -1319,21 +1341,22 @@ def validate_aws(arguments, platforms, jobs=None):
     for platform in required_platforms:
         expected_architecture = "x86_64" if platform.architecture == "intel" else "arm64"
         if platform.name not in names:
-            image = aws.image(PINNED_AMI_REGION, platform.ami_id)
+            image = region_image(arguments, PINNED_AMI_REGION, platform.ami_id)
             if (image is None or (image.architecture, image.state, image.owner) !=
                     (expected_architecture, "available", AMAZON_AMI_OWNER) or not image.name):
                 raise SystemExit(f"unexpected AMI identity for {platform.name}: {image}")
             names[platform.name] = image.name
         offered = []
         for region in platform_regions(arguments, platform.name):
-            if not aws.zones_offering(region, platform.instance_type) & public_zones[region]:
+            if not zones_offering(arguments, region, platform.instance_type) & public_zones[region]:
                 continue
             ami_id = platform.ami_id if amis is None else amis.get((platform.name, region))
             if ami_id is None:
                 raise SystemExit(f"platform-regions.tsv has no {platform.name} AMI for {region}")
             if (platform.name, region) not in verified and (region, ami_id) != (PINNED_AMI_REGION, platform.ami_id):
-                image = aws.image(region, ami_id)
-                if image != cloud.Image(expected_architecture, "available", AMAZON_AMI_OWNER, names[platform.name]):
+                image = region_image(arguments, region, ami_id)
+                if image is None or (image.architecture, image.state, image.owner, image.name) != (
+                        expected_architecture, "available", AMAZON_AMI_OWNER, names[platform.name]):
                     raise SystemExit(f"{platform.name} AMI {ami_id} in {region} is not {names[platform.name]}: {image}")
             verified.add((platform.name, region))
             offered.append(region)
@@ -1385,13 +1408,23 @@ def upload_engine_builds(arguments, jobs):
 
 
 def upload_language_bundles(arguments, jobs):
-    """Put each language plan's bundle once in every region that may launch a worker of a pool that measures it."""
+    """Put each language plan's bundle once in every region that may launch a worker of a pool that measures it,
+    and the candidate provenance their units measure, beside the candidate archive."""
     bundles = arguments.language_bundles
-    upload_shared_archives(arguments, {
+    provenance = candidate_provenance_key(arguments)
+    uploads = {(region, provenance[0]): (arguments.candidate_provenance, provenance[1], "candidate provenance")
+               for job in jobs for region in launch_regions(arguments, job)}
+    upload_shared_archives(arguments, {**uploads, **{
         (region, f"{os.environ['TRANSFER_PREFIX']}/language-plans/{bundles[shard][1]}.tar.zst"): (
             bundles[shard][0], bundles[shard][1], f"{shard} language plan bundle")
         for job in jobs for shard in arguments.pool_shards[unit_worker_pool(job)]
-        for region in launch_regions(arguments, job)})
+        for region in launch_regions(arguments, job)}})
+
+
+def candidate_provenance_key(arguments):
+    """The shared key of the language candidate's provenance, and its SHA-256."""
+    sha256 = engine_build.sha256_file(arguments.candidate_provenance)
+    return f"{os.environ['TRANSFER_PREFIX']}/candidates/{sha256}.tsv", sha256
 
 
 def jdk_archive(campaign_root, platform):
@@ -1521,6 +1554,30 @@ def vcpu_quota(arguments, region, market):
     return quotas[region, market]
 
 
+def region_network(arguments, region):
+    """The region's default network, described once per controller."""
+    networks = vars(arguments).setdefault("networks", {})
+    if region not in networks:
+        networks[region] = arguments.cloud.network(region)
+    return networks[region]
+
+
+def region_image(arguments, region, ami):
+    """The region's image, described once per controller, or None where it has none."""
+    images = vars(arguments).setdefault("images", {})
+    if (region, ami) not in images:
+        images[region, ami] = arguments.cloud.image(region, ami)
+    return images[region, ami]
+
+
+def zones_offering(arguments, region, instance_type):
+    """The region's zones offering the instance type, described once per controller."""
+    offerings = vars(arguments).setdefault("zone_offerings", {})
+    if (region, instance_type) not in offerings:
+        offerings[region, instance_type] = arguments.cloud.zones_offering(region, instance_type)
+    return offerings[region, instance_type]
+
+
 def described(arguments, observed, region, kind):
     """The region's instances or its open and active Spot requests, as kind names them, described once into observed.
 
@@ -1603,144 +1660,196 @@ def phase_protocol(arguments):
     return getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
 
 
-def job_environment(job, arguments, root, result_root):
+def worker_session(campaign_id, job):
+    """A new worker's host session: its campaign, host epoch, and the second the controller chose it, so no two
+    hosts, of any result root, share a prefix or a client token."""
+    return f"{campaign_id}-e{job.host_epoch}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(time.time()))}"
+
+
+def worker_metadata(arguments, job, session, prefix):
+    """Where a worker's host exchanges leases and results: its session's prefix in its region's shared bucket."""
+    return {"session": session, "aws_region": job.region, "bucket": arguments.transfer_buckets[job.region],
+            "prefix": prefix, "input_prefix": f"{prefix}/input", "result_prefix": f"{prefix}/results",
+            "placement_score": job.placement_score, "instance_id": "", "availability_zone": ""}
+
+
+def candidate_content_sha256(arguments):
+    """The SHA-256 of the candidate archive's uncompressed content, computed once per controller."""
+    if "candidate_content_sha256" not in vars(arguments):
+        with gzip.open(arguments.candidate_archive, "rb") as content:
+            arguments.candidate_content_sha256 = hashlib.file_digest(content, "sha256").hexdigest()
+    return arguments.candidate_content_sha256
+
+
+def worker_user_data(arguments, job, metadata):
+    """The worker's EC2 user data: aws/worker-user-data.sh with every setting it and the host scripts read exported
+    after its first line."""
+    platform = job.platform
+    prefix = os.environ["TRANSFER_PREFIX"]
+    bucket = metadata["bucket"]
+    archives = [("jdk", platform.jdk_sha256, f"{prefix}/jdks/{platform.jdk_sha256}.tar.gz")]
+    # Only a measuring phase's workers install engine builds.
+    manifest = ""
+    if getattr(arguments, "engine_build_directories", None):
+        manifest = arguments.engine_build_policy[platform.name]
+        archives += [(name, archive["sha256"], f"{prefix}/engine-builds/{archive['sha256']}.tar.zst")
+                     for name, archive in engine_archives(arguments, platform.name).items()]
+    provenance = ("", "")
+    if bundles := getattr(arguments, "language_bundles", None):
+        # A language worker installs the bundles of its pool's plans and the candidate provenance their units measure.
+        archives += [("language-plan", bundles[shard][1], f"{prefix}/language-plans/{bundles[shard][1]}.tar.zst")
+                     for shard in arguments.pool_shards[unit_worker_pool(job)]]
+        key, sha256 = candidate_provenance_key(arguments)
+        provenance = (f"s3://{bucket}/{key}", sha256)
+    amis = getattr(arguments, "regional_amis", None)
+    settings = {
+        "HOST_STOP_BY": job.stop_by,
+        "HOST_ARCHIVE_URI": f"s3://{bucket}/{metadata['result_prefix']}/host.tar.gz",
+        "CANDIDATE_URI": f"s3://{bucket}/{prefix}/candidates/{arguments.candidate_archive_sha256}.tar.gz",
+        "LANGUAGE_CANDIDATE_PROVENANCE_URI": provenance[0],
+        "LANGUAGE_CANDIDATE_PROVENANCE_SHA256": provenance[1],
+        "ENGINE_BUILD_MANIFEST_SHA256": manifest,
+        # Each archive the host streams into place, one line each: its name, its SHA-256, and its S3 URI.
+        "HOST_ARCHIVES": "".join(f"{name} {digest} s3://{bucket}/{key}\n" for name, digest, key in archives),
+        "REGULATOR_SNAPSHOT_COMMIT": arguments.candidate_commit,
+        "REGULATOR_SNAPSHOT_SHA256": arguments.candidate_archive_sha256,
+        "REGULATOR_CONTENT_SHA256": candidate_content_sha256(arguments),
+        "TRINO_SNAPSHOT_COMMIT": TRINO_REVISION,
+        "CAMPAIGN_PROVENANCE": "qualification",
+        "RE2_CAMPAIGN_ID": arguments.campaign_id,
+        "RE2_CAMPAIGN_PLATFORM": platform.name,
+        "RE2_CAMPAIGN_SHARD_ID": job.shard,
+        "RE2_CAMPAIGN_REPLICA_ID": job.replica,
+        "RE2_CAMPAIGN_HOST_EPOCH": job.host_epoch,
+        "BASELINE_PROTOCOL": phase_protocol(arguments),
+        "BASELINE_PROTOCOL_QUALIFICATION": "true",
+        "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
+        "NATIVE_COMPILER_PACKAGE": platform.native_compiler_package,
+        "CMAKE_PACKAGE": platform.cmake_package,
+        "GLIBC_PACKAGE": platform.glibc_package,
+        "CARGO_PACKAGE": platform.cargo_package,
+        "RUST_PACKAGE": platform.rust_package,
+        "TIME_PACKAGE": platform.time_package,
+        "ZSTD_PACKAGE": platform.zstd_package,
+        "JONI_EVIDENCE_SCOPE": "unit-shard-comparison",
+        "EXPECTED_AMI_ID": platform.ami_id if amis is None else amis[platform.name, job.region],
+        "EXPECTED_AMI_NAME": getattr(arguments, "ami_names", {}).get(platform.name, ""),
+        "RE2_ENGINEERING_ARCHITECTURE": platform.architecture,
+        "RE2_BENCHMARK_MODE": job.workload,
+        "INSTANCE_MARKET_TYPE": job.market,
+        "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
+        "BENCHMARK_JAVA_ARCHIVE_URL": platform.jdk_url,
+        "BENCHMARK_JAVA_ARCHIVE_SHA256": platform.jdk_sha256,
+        "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
+        "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
+        "BENCHMARK_CPU_LIST": "0",
+        "BENCHMARK_EXPECTED_VCPUS": platform.vcpus,
+        "RE2_CAMPAIGN_HOST_SESSION": metadata["session"],
+        "BASELINE_REGION": metadata["aws_region"],
+        "UNIT_WORKER_BUCKET": bucket,
+        "UNIT_WORKER_LEASE_PREFIX": f"{metadata['input_prefix']}/leases",
+        "UNIT_WORKER_RESULT_PREFIX": metadata["result_prefix"],
+        "UNIT_WORKER_LIFETIME_SECONDS": UNIT_WORKER_LIFETIME_SECONDS,
+        "UNIT_WORKER_IDLE_SECONDS": UNIT_WORKER_IDLE_SECONDS,
+    }
+    shebang, body = WORKER_USER_DATA.read_text().split("\n", 1)
+    return "".join([shebang, "\n", *(f"export {name}={shlex.quote(str(value))}\n" for name, value in settings.items()),
+                    body])
+
+
+class LaunchFailed(Exception):
+    """AWS launched no instance for the worker: its attempt's classification and detail."""
+
+    def __init__(self, classification, detail):
+        super().__init__(detail)
+        self.classification = classification
+        self.detail = detail
+
+
+def launch_failure(market, rejection):
+    """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
+    and an On-Demand one ran out of its vCPU quota or of capacity."""
+    if market == "spot":
+        return "retryable-spot", f"launch-capacity:{rejection.code}"
+    if rejection.kind == "quota":
+        return "retryable-capacity", f"vcpu-limit:{rejection.code}"
+    return "retryable-infrastructure", f"launch-infrastructure:{rejection.code}"
+
+
+def check_purchase(arguments, job):
+    """Refuse a job in a market its platform does not buy."""
     purchase = purchase_policy(arguments, job.platform.name)
     if purchase == "spot" and job.market != "spot":
         raise UnsafeCampaignError(f"{job.platform.name} buys only Spot, so it may not launch an On-Demand job")
     if purchase == "on-demand" and job.market != "on-demand":
         raise UnsafeCampaignError(f"{job.platform.name} buys only On-Demand, so it may not launch a Spot job")
-    environment = os.environ.copy()
-    if getattr(arguments, "shared_budget", None):
-        environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
-    architecture = job.platform.architecture
-    benchmark_protocol = phase_protocol(arguments)
-    regions = platform_regions(arguments, job.platform.name)
-    region = job.region or regions[0]
+
+
+def launch_worker(arguments, job, metadata):
+    """Launch the worker's instance in its region's public subnets that offer its type, each zone in turn from the
+    one the worker's identity picks while AWS reports no capacity there. Returns the instance ID, or "" when AWS's
+    answer never came and only the session's tag can find the instance, and the zone; raises LaunchFailed when AWS
+    launched none."""
+    region, instance_type, session = job.region, job.platform.instance_type, metadata["session"]
+    network = region_network(arguments, region)
+    offered = zones_offering(arguments, region, instance_type)
+    subnets = sorted((zone, subnet) for subnet, zone in network.subnets if zone in offered)
+    if not subnets:
+        raise LaunchFailed("retryable-infrastructure",
+                           f"launch-preflight:no public default-VPC subnet offers {instance_type}")
     amis = getattr(arguments, "regional_amis", None)
-    ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
-    if ami_id is None:
-        raise UnsafeCampaignError(f"platform-regions.tsv has no {job.platform.name} AMI for {region}")
-    # Hosts read their inputs from the shared bucket in their own region.
-    environment["TRANSFER_BUCKET"] = arguments.transfer_buckets[region]
-    if len(regions) > 1:
-        # The controller chose the region, so it alone reports the score it chose by.
-        environment["CAMPAIGN_PLACEMENT_SCORE"] = job.placement_score
-    environment.update({
-        "AWS_REGION": region,
-        "CAMPAIGN_PROVENANCE": "qualification",
-        "CAMPAIGN_MODE": job.workload,
-        "BASELINE_PROTOCOL": benchmark_protocol,
-        "CAMPAIGN_ID": arguments.campaign_id,
-        "CAMPAIGN_PLATFORM": job.platform.name,
-        "CAMPAIGN_SHARD_ID": job.shard,
-        "CAMPAIGN_REPLICA_ID": str(job.replica),
-        "CAMPAIGN_HOST_EPOCH": str(job.host_epoch),
-        "CAMPAIGN_ATTEMPT": str(job.attempt),
-        "CAMPAIGN_ARCHITECTURES": architecture,
-        "INSTANCE_MARKET_TYPE": job.market,
-        "CAMPAIGN_SPOT_ONLY": "1" if purchase == "spot" else "0",
-        "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
-        "BENCHMARK_CPU_LIST": "0",
-        "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
-        "TIMEOUT_SECONDS": str(unit_worker_timeout(getattr(arguments, "longest_units", {}).get(
-            unit_worker_pool(job), 0))),
-        "CAMPAIGN_HOST_STOP_BY": str(job.stop_by),
-        "RESULT_ROOT": str(job_result_root(result_root, job)),
-        "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
-        "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
-        "NATIVE_COMPILER_PACKAGE": job.platform.native_compiler_package,
-        "CMAKE_PACKAGE": job.platform.cmake_package,
-        "GLIBC_PACKAGE": job.platform.glibc_package,
-        "CARGO_PACKAGE": job.platform.cargo_package,
-        "RUST_PACKAGE": job.platform.rust_package,
-        "TIME_PACKAGE": job.platform.time_package,
-        "ZSTD_PACKAGE": job.platform.zstd_package,
-        "BASELINE_CANDIDATE_ARCHIVE": str(arguments.candidate_archive.resolve()),
-        "BASELINE_CANDIDATE_ARCHIVE_SHA256": arguments.candidate_archive_sha256,
-        "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
-        "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
-    })
-    environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
-    environment["UNIT_WORKER_IDLE_SECONDS"] = str(UNIT_WORKER_IDLE_SECONDS)
-    # Only a measuring phase's workers install engine builds; never pass the controller's own environment through.
-    environment.pop("ENGINE_BUILD_ARCHIVES", None)
-    environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
-    if getattr(arguments, "engine_build_directories", None):
-        environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
-        environment["ENGINE_BUILD_ARCHIVES"] = " ".join(
-            f"{name}={archive['sha256']}" for name, archive in engine_archives(arguments, job.platform.name).items())
-    for name in ("LANGUAGE_PLAN_BUNDLE_SHA256S", "LANGUAGE_CANDIDATE_PROVENANCE", "LANGUAGE_CANDIDATE_PROVENANCE_SHA256"):
-        environment.pop(name, None)
-    bundles = getattr(arguments, "language_bundles", None)
-    if bundles:
-        # A language worker installs the bundles of its pool's plans and the candidate provenance their units measure.
-        environment.update({
-            "LANGUAGE_PLAN_BUNDLE_SHA256S": " ".join(
-                bundles[shard][1] for shard in arguments.pool_shards[unit_worker_pool(job)]),
-            "LANGUAGE_CANDIDATE_PROVENANCE": str(arguments.candidate_provenance.resolve()),
-            "LANGUAGE_CANDIDATE_PROVENANCE_SHA256": hashlib.sha256(arguments.candidate_provenance.read_bytes()).hexdigest(),
-        })
-    if architecture == "intel":
-        environment.update({
-            "INTEL_INSTANCE_TYPE": job.platform.instance_type,
-            "BENCHMARK_INTEL_AMI_ID": ami_id,
-            "BENCHMARK_INTEL_AMI_NAME": getattr(arguments, "ami_names", {}).get(job.platform.name, ""),
-            "BENCHMARK_INTEL_JAVA_ARCHIVE_URL": job.platform.jdk_url,
-            "BENCHMARK_INTEL_JAVA_ARCHIVE_SHA256": job.platform.jdk_sha256,
-        })
-    else:
-        environment.update({
-            "ARM_INSTANCE_TYPE": job.platform.instance_type,
-            "BENCHMARK_ARM_AMI_ID": ami_id,
-            "BENCHMARK_ARM_AMI_NAME": getattr(arguments, "ami_names", {}).get(job.platform.name, ""),
-            "BENCHMARK_ARM_JAVA_ARCHIVE_URL": job.platform.jdk_url,
-            "BENCHMARK_ARM_JAVA_ARCHIVE_SHA256": job.platform.jdk_sha256,
-        })
-    return environment
-
-
-def terminate_and_validate_cleanup(processes, result_root):
-    records = list(processes.values())
-    wait_failures = {}
-    for process, _, _ in records:
-        if process.poll() is None:
-            try:
-                process.send_signal(signal.SIGTERM)
-            except OSError:
-                # The wrapper may have exited between poll() and signal delivery.
-                pass
-    for process, job, log in records:
+    ami = job.platform.ami_id if amis is None else amis[job.platform.name, region]
+    user_data = worker_user_data(arguments, job, metadata)
+    tags = {"Name": f"re2-qualification-{job.platform.architecture}-{session}", "Project": "re2-port-benchmark",
+            "BaselineCampaign": arguments.campaign_id, "Phase": arguments.phase, "Platform": job.platform.name,
+            "Shard": job.shard, "Replica": str(job.replica), "HostEpoch": str(job.host_epoch), "Session": session}
+    max_price = (str(arguments.shared_budget.policy["hourly_rates"][instance_type]["spot"])
+                 if job.market == "spot" else "")
+    first = int(hashlib.sha256(job.logical_identity.encode()).hexdigest(), 16) % len(subnets)
+    for offset in range(len(subnets)):
+        zone, subnet = subnets[(first + offset) % len(subnets)]
+        # Each zone has its own token, since a token names one exact request.
+        spec = cloud.LaunchSpec(ami, instance_type, region_image(arguments, region, ami).root_device, subnet,
+                                network.security_group, WORKER_PROFILE, job.market, max_price, user_data, tags,
+                                hashlib.sha256(f"{session}/{zone}".encode()).hexdigest())
         try:
-            process.wait(timeout=15 * 60)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            try:
-                process.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                wait_failures[job] = f"wrapper pid {process.pid} did not exit after SIGKILL"
-            except OSError as error:
-                wait_failures[job] = f"wrapper pid {process.pid} could not be reaped after SIGKILL: {error}"
-        except OSError as error:
-            wait_failures[job] = f"wrapper pid {process.pid} could not be reaped after SIGTERM: {error}"
-        finally:
-            log.close()
+            return arguments.cloud.run_instance(region, spec), zone
+        except cloud.LaunchUnknown:
+            return "", zone
+        except cloud.LaunchRejected as rejection:
+            if rejection.kind != "capacity" or offset + 1 == len(subnets):
+                raise LaunchFailed(*launch_failure(job.market, rejection)) from rejection
 
-    cleanup_failures = []
-    for process, job, _ in records:
-        wait_failure = wait_failures.get(job)
-        try:
-            session, cleanup = validate_cleanup_manifest(result_root, job)
-        except (OSError, RuntimeError) as error:
-            detail = f"{wait_failure}; {error}" if wait_failure is not None else str(error)
-            cleanup_failures.append(f"wrapper_pid={process.pid}; {detail}")
-        else:
-            if wait_failure is not None:
-                cleanup_failures.append(
-                    f"wrapper_pid={process.pid}; {wait_failure}; "
-                    f"{cleanup_evidence(result_root, job, session, cleanup)}")
-    if cleanup_failures:
-        raise RuntimeError(
-            "cleanup could not be proven for terminated wrappers: " + "; ".join(cleanup_failures))
+
+def recover_uploads(aws, metadata, objects):
+    """The second half of a worker's cleanup proof, once its instance has terminated: download every object left in
+    its prefix, those of its result prefix into objects by their key below it, then delete the prefix and find it
+    empty. Returns whether that held; a failed AWS call or write leaves the rest for another try, and a file already
+    downloaded whole is kept."""
+    region, bucket, prefix = metadata["aws_region"], metadata["bucket"], metadata["prefix"] + "/"
+    results = metadata["result_prefix"] + "/"
+    try:
+        listed = aws.list(region, bucket, prefix)
+        for key, (size, _) in sorted(listed.items()):
+            if not key.startswith(results):
+                continue
+            relative = key[len(results):]
+            path = objects / relative
+            if not relative or any(part in ("", ".", "..") for part in relative.split("/")):
+                raise UnsafeCampaignError(f"worker {metadata['session']} uploaded an unsafe key: {key}")
+            if path.is_file() and path.stat().st_size == size:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            download = path.with_name(path.name + ".download")
+            aws.get(region, bucket, key, download)
+            if download.stat().st_size != size:
+                return False
+            os.replace(download, path)
+        if listed:
+            aws.delete(region, bucket, list(listed))
+        return not aws.list(region, bucket, prefix)
+    except (CloudError, OSError):
+        return False
 
 
 def read_properties(path):
@@ -1751,61 +1860,6 @@ def read_properties(path):
             raise RuntimeError(f"invalid property line in {path}: {line!r}")
         values[key] = value
     return values
-
-
-def cleanup_evidence(result_root, job, session=None, cleanup=None):
-    job_root = job_result_root(result_root, job)
-    details = [f"job={job.identity}", f"result_root={job_root}"]
-    if session is None:
-        details.append("session=unavailable")
-        details.append("resources=unavailable")
-    else:
-        details.append(f"session={session}")
-        metadata = {}
-        try:
-            metadata = read_properties(session / "session.txt")
-        except (OSError, RuntimeError):
-            pass
-        resources = [
-            f"{field}={metadata[field]}"
-            for field in ("bucket", "intel_instance_id", "arm_instance_id")
-            if metadata.get(field) not in (None, "", "none", "None")
-        ]
-        details.append("resources=" + (",".join(resources) if resources else "unavailable"))
-    if cleanup is not None:
-        fields = (
-            "instances_terminated",
-            "iam_removed",
-            "bucket_removed",
-            "network_resources",
-            "cleanup_status",
-        )
-        details.append("cleanup=" + ",".join(f"{field}={cleanup.get(field)!r}" for field in fields))
-    return "; ".join(details)
-
-
-def validate_cleanup_manifest(result_root, job):
-    try:
-        session = single_session(result_root, job)
-    except (OSError, RuntimeError) as error:
-        raise RuntimeError(f"{error}; {cleanup_evidence(result_root, job)}") from error
-    manifest = session / "cleanup-manifest.txt"
-    try:
-        cleanup = read_properties(manifest)
-    except (OSError, RuntimeError) as error:
-        raise RuntimeError(
-            f"{job.identity} cleanup manifest {manifest} is unavailable or invalid: {error}; "
-            f"{cleanup_evidence(result_root, job, session)}") from error
-    for field in ("instances_terminated", "iam_removed", "bucket_removed", "cleanup_status"):
-        if cleanup.get(field) != "verified":
-            raise RuntimeError(
-                f"{job.identity} cleanup {field} is {cleanup.get(field)!r}; "
-                f"{cleanup_evidence(result_root, job, session, cleanup)}")
-    if cleanup.get("network_resources") != "default-vpc-reused":
-        raise RuntimeError(
-            f"{job.identity} has unexpected network cleanup state; "
-            f"{cleanup_evidence(result_root, job, session, cleanup)}")
-    return session, cleanup
 
 
 def validate_capacity(path):
@@ -1879,20 +1933,10 @@ def validate_capacity(path):
     return values
 
 
-def single_session(result_root, job):
-    job_root = job_result_root(result_root, job)
-    if not job_root.is_dir():
-        raise RuntimeError(f"{job.identity} produced no result directory")
-    sessions = [path for path in job_root.iterdir() if path.is_dir()]
-    if len(sessions) != 1:
-        raise RuntimeError(f"{job.identity} produced {len(sessions)} session directories")
-    return sessions[0]
-
-
-def boot_to_first_unit(session, job):
+def boot_to_first_unit(directory, job):
     """Seconds from a worker's boot to the start of its first unit, by the startup timeline its host uploaded, or
     None when the host uploaded none or never began a unit."""
-    path = session / job.platform.architecture / "re2-results" / "startup-timeline.tsv"
+    path = directory / job.platform.architecture / "re2-results" / "startup-timeline.tsv"
     try:
         with path.open(newline="") as input_file:
             steps = {row["step"]: row for row in csv.DictReader(input_file, delimiter="\t")}
@@ -1914,17 +1958,11 @@ def write_attempt(path, job, outcome, detail="-"):
         os.fsync(output_file.fileno())
 
 
-def write_event(path, event_type, campaign_id, job, session, reason, details="", unit_id=None, unit_attempt_id=""):
-    """Append one campaign event; a unit campaign's events, given a unit_id, name the unit and attempt."""
-    # A launch that failed before the host started leaves only the cleanup manifest.
-    metadata = {}
-    for name in ("cleanup-manifest.txt", "session.txt"):
-        if (session / name).is_file():
-            metadata.update(read_properties(session / name))
-    label = job.platform.architecture
-    instance_id = metadata.get(f"{label}_instance_id", "")
-    availability_zone = metadata.get(f"{label}_availability_zone", "")
-    failure_classification = metadata.get("failure_classification", "")
+def write_event(path, event_type, campaign_id, job, worker, reason, details="", unit_id=None, unit_attempt_id="",
+                failure_classification=""):
+    """Append one campaign event about a worker; a unit campaign's events, given a unit_id, name the unit and
+    attempt."""
+    metadata = worker.metadata
     fields = (
         "event_type", "campaign_id", "platform", "shard_id", "replica_id", "instance_id",
         "host_epoch", "reason", "artifact_uri", "artifact_sha256", "region", "availability_zone",
@@ -1949,17 +1987,17 @@ def write_event(path, event_type, campaign_id, job, session, reason, details="",
             "platform": job.platform.name,
             "shard_id": job.shard,
             "replica_id": str(job.replica),
-            "instance_id": "" if instance_id in {"none", "None"} else instance_id,
+            "instance_id": metadata["instance_id"],
             "host_epoch": str(job.host_epoch),
             "unit_id": unit_id or "",
             "unit_attempt_id": unit_attempt_id,
             "reason": reason,
-            "artifact_uri": str(session),
+            "artifact_uri": str(worker.directory),
             "artifact_sha256": "",
-            "region": metadata.get("aws_region", ""),
-            "availability_zone": "" if availability_zone in {"none", "None"} else availability_zone,
-            "placement_score": metadata.get("placement_score", ""),
-            "failure_classification": "" if failure_classification == "none" else failure_classification,
+            "region": metadata["aws_region"],
+            "availability_zone": metadata["availability_zone"],
+            "placement_score": metadata["placement_score"],
+            "failure_classification": failure_classification,
             "details": details.replace("\t", " ").replace("\n", " "),
         })
         output_file.flush()
@@ -2036,73 +2074,22 @@ def read_attempts(path):
         return list(reader)
 
 
-def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path, live=frozenset()):
-    """Release the reservations of attempts proven to have stopped, keeping those of live host epochs."""
+def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path, live):
+    """Release the reservations of host epochs no live worker holds: each was settled once its cleanup was proven,
+    or never reached its launch, which its starting record precedes. A reservation with no attempt record at all
+    gets one."""
     by_identity = {job.logical_identity: job for job in jobs}
-    attempts = read_attempts(attempts_path)
-    latest_by_epoch = {}
-    started_epochs = set()
-    for row in attempts:
-        key = (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"]))
-        latest_by_epoch[key] = row
-        if row["outcome"] == "started":
-            started_epochs.add(key)
+    recorded = {(row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"]))
+                for row in read_attempts(attempts_path)}
     for item in budget.reservations(result_root):
         if item["campaign_id"] != arguments.campaign_id or item["logical_identity"] not in by_identity:
             raise UnsafeCampaignError("shared fleet reservation identifies a different controller")
         if item["host_epoch"] in live:
             continue
         job = replace(by_identity[item["logical_identity"]], host_epoch=item["host_epoch"], attempt=item["attempt"])
-        key = (job.platform.name, job.shard, job.replica, job.host_epoch)
-        latest = latest_by_epoch.get(key)
-        # A reservation whose attempt was still waiting for capacity was made just before a stop.
-        stopped_before_launch = latest is None or (
-            latest["outcome"] in ("retryable-infrastructure", "queued-capacity") and
-            key not in started_epochs)
-        if stopped_before_launch:
-            # No attempt record, or the settled pre-Popen outcome, proves this
-            # reservation could not have launched a wrapper.
-            if latest is None:
-                write_attempt(
-                    attempts_path,
-                    job,
-                    "retryable-infrastructure",
-                    "controller stopped before wrapper start")
-        else:
-            validate_cleanup_manifest(result_root, job)
+        if (job.platform.name, job.shard, job.replica, job.host_epoch) not in recorded:
+            write_attempt(attempts_path, job, "retryable-infrastructure", "controller stopped before launch")
         budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-
-
-def wrapper_command(command, campaign_id, job):
-    """Whether a process's command line is the job's wrapper in the campaign: run-campaign.sh with the campaign ID
-    and the job's identity as its arguments, which start_wrapper gives it."""
-    arguments = command.split()
-    return (len(arguments) >= 3 and Path(arguments[-3]).name == "run-campaign.sh" and
-            arguments[-2:] == [campaign_id, job.identity])
-
-
-def wrapper_process_id(campaign_id, job, detail):
-    marker = "wrapper_pid="
-    if marker in detail:
-        value = detail.split(marker, 1)[1].split(";", 1)[0].strip()
-        try:
-            process_id = int(value)
-        except ValueError:
-            return None
-        try:
-            command = check_output(["ps", "-p", str(process_id), "-o", "command="])
-        except subprocess.CalledProcessError:
-            return None
-        return process_id if wrapper_command(command, campaign_id, job) else None
-    processes = check_output(["ps", "ax", "-o", "pid=,command="])
-    matches = []
-    for line in processes.splitlines():
-        process_id, separator, command = line.strip().partition(" ")
-        if separator and wrapper_command(command, campaign_id, job):
-            matches.append(int(process_id))
-    if len(matches) > 1:
-        raise UnsafeCampaignError(f"multiple detached wrappers match {job.identity}: {matches}")
-    return matches[0] if matches else None
 
 
 CAMPAIGN_STATE_FIELDS = ("schema_version", "campaign_id", "phase", "started_at_epoch_seconds", "heap_size")
@@ -2188,54 +2175,15 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
     return candidate, ready_at, True, False, None
 
 
-class WrapperStartError(RuntimeError):
-    """The wrapper process did not start, so no host was launched and its job may be retried."""
-
-
-def start_wrapper(arguments, root, result_root, runner, attempts_path, job, slot=None, slot_failures=0):
-    """Record and start the wrapper for an admitted job; the caller records it as started.
-
-    A unit worker's starting record names its launch slot and the failures it inherited from the slot.
-    Only a failed process start raises WrapperStartError; any other failure stops the campaign.
-    """
-    environment = job_environment(job, arguments, root, result_root)
-    log_path = result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("w")
-    try:
-        write_attempt(
-            attempts_path, job, "starting",
-            f"region={environment['AWS_REGION']};"
-            f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
-            (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
-             if job.spot_capacity_failures else "") +
-            (f";slot={slot};slot_failures={slot_failures}" if slot is not None else "") +
-            f";boot_by={job.boot_by};stop_by={job.stop_by}")
-        try:
-            # The wrapper reads only its environment; its arguments name it, so recovery finds this campaign's.
-            process = subprocess.Popen(
-                [str(runner), arguments.campaign_id, job.identity],
-                cwd=root,
-                env=environment,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True)
-        except OSError as error:
-            raise WrapperStartError(error) from error
-    except BaseException:
-        log.close()
-        raise
-    return process, log
-
-
 def launch_record(row):
-    """The placement, and a unit worker's launch slot, that start_wrapper records in a starting row's detail."""
+    """The fields of an attempt row's detail: a starting row's placement, launch slot, session and prefix, and a
+    started row's instance."""
     return dict(item.split("=", 1) for item in row["detail"].split(";") if "=" in item)
 
 
-def halt_and_clean_up(arguments, result_root, budget, running, error):
-    """Stop a controller that failed with error: terminate the running hosts, as process ID to (process, job, log),
-    prove their cleanup, and release their reservations. A failure halts the fleet budget in the name of
+def halt_and_clean_up(result_root, budget, stop_hosts, error):
+    """Stop a controller that failed with error: stop_hosts terminates its hosts, proves their cleanup, and releases
+    their reservations, raising RuntimeError for any it cannot prove. A failure halts the fleet budget in the name of
     result_root, its owner, whose restart clears it once its cleanup is verified. A cancellation, Ctrl-C or SIGTERM,
     or FleetHalted, which another owner's halt raises, halts it only when cleanup cannot be proven for every host the
     owner holds a reservation for, so a halt stays its owner's alone to clear. The caller then re-raises error."""
@@ -2253,13 +2201,10 @@ def halt_and_clean_up(arguments, result_root, budget, running, error):
         # Stop the other collectors' admissions and ask them to drain too.
         halt(reason)
     try:
-        terminate_and_validate_cleanup(running, result_root)
-        if budget:
-            for _, job, _ in running.values():
-                budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-            # A host the controller had not adopted yet, such as one an earlier run left, still awaits cleanup.
-            if cancelled and budget.reservations(result_root):
-                halt(f"{reason}; hosts of {result_root} await verified cleanup")
+        stop_hosts()
+        # A host the controller had not adopted yet, such as one an earlier run left, still awaits cleanup.
+        if budget and cancelled and budget.reservations(result_root):
+            halt(f"{reason}; hosts of {result_root} await verified cleanup")
     except (OSError, RuntimeError) as cleanup_error:
         if budget and cancelled:
             halt(f"{reason}; {cleanup_error}")
@@ -2328,51 +2273,15 @@ def read_unit_workers(path, platforms):
     return jobs
 
 
-class DetachedWrapper:
-    """A worker wrapper an earlier controller started, followed through its process ID and session."""
-
-    def __init__(self, process_id, campaign_id, job, detail, result_root):
-        self.pid = process_id
-        self.campaign_id = campaign_id
-        self.job = job
-        self.detail = detail
-        self.result_root = result_root
-
-    def poll(self):
-        if wrapper_process_id(self.campaign_id, self.job, self.detail) is not None:
-            return None
-        try:
-            session = single_session(self.result_root, self.job)
-        except (OSError, RuntimeError):
-            return 1
-        return 0 if (session / "campaign-success").is_file() else 1
-
-    def send_signal(self, sent_signal):
-        try:
-            os.kill(self.pid, sent_signal)
-        except ProcessLookupError:
-            pass
-
-    def wait(self, timeout):
-        deadline = time.monotonic() + timeout
-        while (status := self.poll()) is None:
-            if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(f"wrapper {self.pid}", timeout)
-            time.sleep(5)
-        return status
-
-    def kill(self):
-        self.send_signal(signal.SIGKILL)
-
-
 @dataclass
 class UnitWorker:
-    """A unit worker host: its wrapper, its session, and the leases it was given."""
+    """A unit worker host: its session, its instance, and the leases it was given."""
     job: Job
-    process: object
-    log: object
-    session: Path = None
-    metadata: dict = None
+    # Where its host exchanges leases and results, and its instance and zone once its launch names them, as
+    # worker_metadata describes them.
+    metadata: dict
+    # The session's directory under the worker's job result root, which holds what its cleanup recovered.
+    directory: Path
     # Each lease's work item identity, or None for a stop lease, and each work lease's groups in run order.
     leases: dict = field(default_factory=dict)
     lease_groups: dict = field(default_factory=dict)
@@ -2400,6 +2309,11 @@ class UnitWorker:
     # seconds.
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
+    # A launch AWS refused, as its classification and detail; the instance as its cleanup last saw it; and whether
+    # the controller asked EC2 to terminate it.
+    launch_failure: tuple = None
+    instance: cloud.Instance = None
+    terminating: bool = False
 
     @property
     def pool(self):
@@ -2411,8 +2325,7 @@ class UnitWorker:
 
     @property
     def instance_id(self):
-        value = (self.metadata or {}).get(f"{self.job.platform.architecture}_instance_id", "")
-        return "" if value in ("none", "None") else value
+        return self.metadata["instance_id"]
 
     def outstanding(self):
         done = self.settled | self.abandoned
@@ -2437,10 +2350,11 @@ class UnitWorker:
 class UnitDispatcher:
     """One phase's unit queue: the work items that remain, each worker's leases, and what each became.
 
-    Workers are hosts the campaign wrapper launches and cleans up, each within the fleet budget.
-    unit-workers.tsv freezes each worker before its launch, and unit-attempts.tsv records
-    each lease before it is written and each outcome it reaches, so a restart rebuilds this state
-    from the ledgers, the live workers' uploads, and the uploads recovered while cleaning up exited workers.
+    Workers are hosts the controller launches and cleans up, each within the fleet budget.
+    unit-workers.tsv freezes each worker before its launch, job-attempts.tsv records its session before its launch,
+    and unit-attempts.tsv records each lease before it is written and each outcome it reaches, so a restart
+    rebuilds this state from the ledgers, the instances their sessions' tags find, the live workers' uploads, and
+    the uploads recovered while cleaning up exited workers.
     """
 
     def __init__(self, arguments, root, result_root, items, platforms, validation):
@@ -2462,7 +2376,6 @@ class UnitDispatcher:
         self.accepted_path = result_root / "accepted-units.tsv"
         self.rejections_path = result_root / unit_session.SEMANTIC_REJECTIONS
         self.items_path = result_root / "work-items.tsv"
-        self.runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
         # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
         self.fingerprint = None
         self.uploads_path = result_root / UNIT_UPLOADS
@@ -2490,8 +2403,6 @@ class UnitDispatcher:
         # Each pool's free launch slots, as (slot, consecutive failures), and the pools a slot gave up on.
         self.free_slots = {}
         self.exhausted = {}
-        # Pools whose wrapper refused its inputs, where every launch would be refused the same way.
-        self.refused = set()
         self.pool_ready = {}
         self.on_demand_ready = {}
         # Each pool's On-Demand workers admitted in its tail, and the Spot workers they retired.
@@ -2500,7 +2411,8 @@ class UnitDispatcher:
         # Each lease, as its worker's host epoch and sequence, that spent one of its item's attempts.
         self.counted = set()
         self.capacity_waits = set()
-        self.terminated = set()
+        # When the controller decided to stop each host it terminates, by host epoch.
+        self.terminated = {}
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
@@ -2533,99 +2445,62 @@ class UnitDispatcher:
         return [worker for worker in self.workers.values() if worker.pool == pool]
 
     def gave_up(self, pool):
-        """Whether the pool opens no new worker: its wrapper refused its inputs, or it gave up with no free slot."""
-        return pool in self.exhausted and (pool in self.refused or not self.free_slots.get(pool))
-
-    def worker_session(self, worker):
-        if worker.session is None:
-            try:
-                worker.session = single_session(self.result_root, worker.job)
-            except (OSError, RuntimeError):
-                return False
-        if worker.metadata is None:
-            try:
-                metadata = read_properties(worker.session / "session.txt")
-            except (OSError, RuntimeError):
-                return False
-            # The wrapper renames session.txt into place; a read that lacks the session or its result
-            # prefix waits for the next poll.
-            if not metadata.get("session") or not metadata.get("result_prefix"):
-                return False
-            worker.metadata = metadata
-        return True
+        """Whether the pool opens no new worker: it gave up with no free slot."""
+        return pool in self.exhausted and not self.free_slots.get(pool)
 
     def recover(self):
-        """Adopt the live workers an earlier controller started, and settle the ones that exited.
+        """Adopt the workers an earlier controller launched and did not settle; each loop then follows its instance,
+        by its ID or its session's tag, until its cleanup is proven.
 
-        Each launch slot is rebuilt from its latest worker's starting record: a live worker holds it, and
-        one that exited leaves it free with its count, or given up.
+        Each launch slot is rebuilt from its latest worker's starting record: a worker not yet settled holds it, and
+        one settled leaves it free with its count, or given up.
         """
         latest = {}
         placements = {}
+        instances = {}
         for row in read_attempts(self.attempts_path):
             if row["shard_id"] == UNIT_WORKER_SHARD:
                 latest[int(row["host_epoch"])] = row
                 if row["outcome"] == "starting":
                     placements[int(row["host_epoch"])] = launch_record(row)
+                elif row["outcome"] == "started":
+                    instances[int(row["host_epoch"])] = launch_record(row)
         slots = {}
         for epoch, placement in placements.items():
+            if "session" not in placement:
+                raise UnsafeCampaignError(f"unit worker epoch {epoch} of {self.result_root} was launched by the "
+                                          "per-host wrapper, which no longer exists; run the phase in a new root")
             placement["slot"] = int(placement["slot"])
             placement["slot_failures"] = int(placement["slot_failures"])
             slots[placement["slot"]] = max(slots.get(placement["slot"], epoch), epoch)
         workers = {}
-        exited = []
         for job in self.planned:
             row = latest.get(job.host_epoch)
             placement = placements.get(job.host_epoch)
             if row is None or placement is None:
                 continue
             slot, slot_failures = placement["slot"], placement["slot_failures"]
+            directory = job_result_root(self.result_root, job) / placement["session"]
             if row["outcome"] not in ("starting", "started"):
                 if slots[slot] == job.host_epoch:
                     # The earlier controller settled this worker; its slot is as that settlement left it.
-                    self.release_slot(job, slot, slot_failures, self.recovered_start(job),
+                    self.release_slot(job, slot, slot_failures, self.recovered_start(directory),
                                       0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"])
                 continue
             # The starting record names the region the worker was placed in.
-            job = replace(job, market=row["market"], region=placement.get("region", ""),
-                          placement_score=placement.get("placement_score", ""),
+            job = replace(job, market=row["market"], region=placement["region"],
+                          placement_score=placement["placement_score"],
                           boot_by=int(placement["boot_by"]), stop_by=int(placement["stop_by"]))
-            process_id = None
-            for probe in range(2):
-                try:
-                    session = single_session(self.result_root, job)
-                except (OSError, RuntimeError):
-                    session = None
-                if session is not None and (session / "cleanup-manifest.txt").is_file():
-                    break
-                process_id = wrapper_process_id(self.arguments.campaign_id, job, row["detail"])
-                if process_id is not None:
-                    break
-                if probe == 0:
-                    time.sleep(2)
-            if process_id is not None:
-                log = (self.result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")).open("a")
-                # A live worker is registered at once, so a recovery step that fails still stops it.
-                wrapper = DetachedWrapper(process_id, self.arguments.campaign_id, job, row["detail"], self.result_root)
-                workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
-                    job, wrapper, log, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
-                    stop_by=job.stop_by)
-            elif session is not None and (session / "cleanup-manifest.txt").is_file():
-                workers[job.host_epoch] = UnitWorker(job, None, None, session=session,
-                                                     slot=slot, slot_failures=slot_failures)
-                exited.append(workers[job.host_epoch])
-            elif session is None and row["outcome"] == "starting":
-                write_attempt(self.attempts_path, job, "retryable-infrastructure", WRAPPER_NOT_CREATED)
-                self.release_slot(job, slot, slot_failures, False, 1, "retryable-infrastructure",
-                                  WRAPPER_NOT_CREATED)
-            else:
-                raise UnsafeCampaignError(f"detached unit worker {job.identity} exited without cleanup evidence")
-        if self.budget:
-            live = {epoch for epoch, worker in workers.items() if worker.process is not None}
-            recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned,
-                                        self.attempts_path, live)
-            # A halt this controller's failure set clears once no host of its own awaits verified cleanup.
-            self.budget.resume(self.result_root)
+            metadata = worker_metadata(self.arguments, job, placement["session"], placement["prefix"])
+            metadata.update({field: instances.get(job.host_epoch, {}).get(field, "")
+                             for field in ("instance_id", "availability_zone")})
+            workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
+                job, metadata, directory, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
+                stop_by=job.stop_by)
+        recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
+                                    set(workers))
+        # A halt this controller's failure set clears once no host of its own awaits verified cleanup.
+        self.budget.resume(self.result_root)
         self.accepted = recover_accepted_units(self.validation, self.result_root, self.accepted_path)
         for row in read_semantic_rejections(self.rejections_path):
             identity = unit_logical_identity(row)
@@ -2646,7 +2521,6 @@ class UnitDispatcher:
             worker = workers.get(epoch)
             if worker is None:
                 continue
-            self.worker_session(worker)
             if row["outcome"] in ("leased", "stop"):
                 worker.leases[sequence] = identity
                 worker.unsent.add(sequence)
@@ -2673,16 +2547,12 @@ class UnitDispatcher:
             for sequence in worker.outstanding():
                 if worker.leases[sequence] is not None:
                     self.held[worker.leases[sequence]] = (epoch, sequence)
-        for worker in exited:
-            self.finish(worker, 0 if (worker.session / "campaign-success").is_file() else 1)
 
-    def recovered_start(self, job):
-        """Whether a settled worker's recovered uploads show it started, as its settlement judged."""
-        try:
-            objects = single_session(self.result_root, job) / "recovered-uploads" / "objects"
-        except (OSError, RuntimeError):
-            return False
-        return shows_worker_start(recovered_keys(objects))
+    @staticmethod
+    def recovered_start(directory):
+        """Whether a settled worker's recovered uploads, in its session's directory, show it started, as its
+        settlement judged."""
+        return shows_worker_start(recovered_keys(directory / "recovered-uploads" / "objects"))
 
     def count(self, item, detail, lease):
         """Spend one of the item's attempts, once per lease; an item that spent them all stays unresolved."""
@@ -2732,7 +2602,7 @@ class UnitDispatcher:
         if not self.done(item.identity):
             self.unresolved[item.identity] = detail
         write_event(self.events_path, "rejected-session", self.arguments.campaign_id, self.event_job(worker, item),
-                    worker.session, "unit-rejected", detail, **self.event_unit(worker, sequence))
+                    worker, "unit-rejected", detail, **self.event_unit(worker, sequence))
 
     def interrupt(self, worker, sequence):
         """Settle a lease a Spot interruption stopped. Once a group of the lease was accepted, the item keeps
@@ -2747,7 +2617,7 @@ class UnitDispatcher:
             self.interrupted.add(item.identity)
             self.count(item, "Spot interruption", (worker.job.host_epoch, sequence))
         write_event(self.events_path, "interruption", self.arguments.campaign_id, self.event_job(worker, item),
-                    worker.session, "spot-interruption-notice",
+                    worker, "spot-interruption-notice",
                     f"replacement_market={'on-demand' if self.on_demand_only(item) else 'any'}",
                     **self.event_unit(worker, sequence))
 
@@ -2913,8 +2783,6 @@ class UnitDispatcher:
 
     def poll(self, worker):
         """Process a live worker's uploads and decide whether its host was lost."""
-        if not self.worker_session(worker):
-            return
         try:
             objects = list_unit_worker_results(self.arguments, worker)
             keys = set(objects)
@@ -2949,32 +2817,108 @@ class UnitDispatcher:
             # S3 may be unavailable for a moment; the next poll, or cleanup's recovered uploads, retries.
             return
 
-    def finish(self, worker, status):
-        """Settle an exited worker from its verified cleanup and the uploads cleanup recovered."""
-        try:
-            session, cleanup = validate_cleanup_manifest(self.result_root, worker.job)
-        except (OSError, RuntimeError) as error:
-            raise UnsafeCampaignError(
-                f"cleanup could not be proven for unit worker {worker.job.identity}: {error}") from error
-        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
-        if worker.log is not None:
-            worker.log.close()
-        if self.budget:
-            self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
-        self.workers.pop(worker.job.host_epoch, None)
-        classification = cleanup.get("failure_classification", "none")
-        detail = cleanup.get("failure_detail", "unknown")
-        objects = session / "recovered-uploads" / "objects"
-        keys = recovered_keys(objects)
-        if self.worker_session(worker):
-            def fetch(key, path):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(objects / key, path)
+    def instance(self, worker):
+        """The worker's instance in this loop's description of its region, by its ID, or by its session's tag while
+        its launch's answer never came, or None while EC2 lists none; one found by its tag is recorded as started.
+        Raises CloudError."""
+        instances = described(self.arguments, self.observed, worker.metadata["aws_region"], "instances")
+        if worker.instance_id:
+            return next((instance for instance in instances if instance.id == worker.instance_id), None)
+        instance = next((instance for instance in instances
+                         if instance.tags.get("Session") == worker.host_session), None)
+        if instance is not None:
+            worker.metadata["instance_id"] = instance.id
+            write_attempt(self.attempts_path, worker.job, "started",
+                          f"instance_id={instance.id};availability_zone={worker.metadata['availability_zone']}")
+        return instance
 
-            self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
+    def ended(self, worker):
+        """Whether the worker's host is gone or going: AWS refused its launch, its instance is past running, or EC2
+        still lists none once its boot allowance is over."""
+        if worker.launch_failure:
+            return True
+        try:
+            instance = self.instance(worker)
+        except CloudError:
+            return False
+        if instance is None:
+            return time.time() >= worker.job.boot_by
+        return instance.state not in ("pending", "running")
+
+    def stop_host(self, worker):
+        """Ask EC2, once, to terminate the worker's instance while it may still run."""
+        try:
+            instance = None if worker.launch_failure else self.instance(worker)
+            if (instance is not None and not worker.terminating and
+                    instance.state in ("pending", "running", "stopping", "stopped")):
+                self.arguments.cloud.terminate(worker.metadata["aws_region"], [instance.id])
+                worker.terminating = True
+        except CloudError:
+            # The next loop asks again.
+            return
+
+    def clean_up(self, worker):
+        """Prove an ended worker's cleanup: its instance terminated, then its prefix recovered, deleted, and found
+        empty. Until both hold, its reservation stays and each loop tries again."""
+        if not worker.launch_failure:
+            try:
+                instance = self.instance(worker)
+            except CloudError:
+                return False
+            if instance is not None and instance.state != "terminated":
+                self.stop_host(worker)
+                return False
+            worker.instance = instance
+        return recover_uploads(self.arguments.cloud, worker.metadata,
+                               worker.directory / "recovered-uploads" / "objects")
+
+    def host_exit(self, worker):
+        """How the worker's host ended, as its status, classification, and detail: its launch's refusal; the
+        controller's termination; the exit status its host archive reports; a Spot reclaim; or no host found."""
+        if worker.launch_failure:
+            return 1, *worker.launch_failure
+        archive = worker.directory / "recovered-uploads" / "objects" / "host.tar.gz"
+        status = None
+        if archive.is_file():
+            try:
+                extract_unit_result(archive, worker.directory / worker.job.platform.architecture)
+                status = int((worker.directory / worker.job.platform.architecture / "re2-results" /
+                              "exit-status").read_text())
+            except (OSError, ValueError, tarfile.TarError):
+                status = None
+        if worker.job.host_epoch in self.terminated:
+            return status or 1, "controller-abort", "terminated by the controller"
+        if status == 0:
+            return 0, "none", "-"
+        if status == UNIT_WORKER_INTERRUPTED_STATUS:
+            # The worker saw a Spot interruption notice and uploaded what it had.
+            return status, "retryable-spot", "spot-interruption-notice"
+        if status is not None:
+            return status, "benchmark-failure", f"remote-exit-status:{status}"
+        if worker.instance is not None and worker.instance.state_reason == "Server.SpotInstanceTermination":
+            return 1, "retryable-spot", worker.instance.state_reason
+        if not worker.instance_id:
+            return 1, "retryable-infrastructure", LAUNCH_NOT_FOUND
+        reason = worker.instance.state_reason if worker.instance else "absent"
+        return 1, "retryable-infrastructure", f"instance-terminated-without-results:state_reason={reason}"
+
+    def finish(self, worker):
+        """Settle a worker whose cleanup was proven, from the uploads its cleanup recovered and its host's exit."""
+        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
+        self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
+        self.workers.pop(worker.job.host_epoch, None)
+        status, classification, detail = self.host_exit(worker)
+        objects = worker.directory / "recovered-uploads" / "objects"
+        keys = recovered_keys(objects)
+
+        def fetch(key, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(objects / key, path)
+
+        self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
         worker.started |= shows_worker_start(keys)
         # The attempt's record reports how long its host took from boot to its first unit.
-        startup = boot_to_first_unit(session, worker.job)
+        startup = boot_to_first_unit(worker.directory, worker.job)
         details = [] if status == 0 else [detail]
         if startup is not None:
             details.append(f"boot_to_first_unit_seconds={startup:.1f}")
@@ -2989,11 +2933,12 @@ class UnitDispatcher:
             # Each launch that failed before its worker started is recorded as a failed session.
             retryable = classification in ("retryable-spot", "retryable-capacity", "retryable-infrastructure")
             write_event(self.events_path, "interruption" if retryable else "rejected-session",
-                        self.arguments.campaign_id, worker.job, session, detail if retryable else "job-failure",
-                        f"status={status}; classification={classification}; detail={detail}", unit_id="")
+                        self.arguments.campaign_id, worker.job, worker, detail if retryable else "job-failure",
+                        f"status={status}; classification={classification}; detail={detail}", unit_id="",
+                        failure_classification=classification)
         if classification == "retryable-spot" and detail.startswith("launch-capacity:"):
             # Spot moves past a region whose launch found no capacity.
-            self.cool_down(pool, cleanup.get("aws_region") or worker.job.region)
+            self.cool_down(pool, worker.job.region)
         elif classification == "retryable-capacity":
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
@@ -3012,18 +2957,13 @@ class UnitDispatcher:
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
-        its pool opens no new slot. A wrapper that refused its inputs gives up its pool at once, every free slot
-        included, since any launch would be refused the same way. A launch that found no capacity, or a wrapper
-        never created, booted nothing.
+        its pool opens no new slot. A launch that found no capacity, or whose instance was never found, booted
+        nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
-        elif status != 0 and classification == "input-rejection":
-            self.exhausted[pool] = f"unit worker {job.identity} was refused before launch: {detail}"
-            self.refused.add(pool)
-            return
-        elif (status != 0 and not terminated and detail != WRAPPER_NOT_CREATED and
+        elif (status != 0 and not terminated and detail != LAUNCH_NOT_FOUND and
               classification != "retryable-capacity" and
               not (classification == "retryable-spot" and detail.startswith("launch-capacity:"))):
             failures += 1
@@ -3090,7 +3030,7 @@ class UnitDispatcher:
 
     def extend(self, worker, stop_by):
         """Whether the fleet budget covers the host until stop_by and its teardown, extending its reservation."""
-        if not self.budget or stop_by <= worker.stop_by:
+        if stop_by <= worker.stop_by:
             return True
         admitted, _ = self.budget.extend(self.arguments.campaign_id, worker.job.host_epoch,
                                          until=stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
@@ -3155,8 +3095,6 @@ class UnitDispatcher:
 
     def lease(self, worker):
         """Keep the worker's next lease written one ahead of its current one, or stop it."""
-        if worker.metadata is None:
-            return
         if (worker.open() and worker.job.market == "spot" and self.purchases[worker.pool] != "spot" and
                 worker.pool in self.tail and
                 self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
@@ -3293,16 +3231,14 @@ class UnitDispatcher:
 
     def instance_state(self, worker):
         """The worker's instance's state in this loop's description of its region, or unknown."""
-        if not worker.instance_id:
-            return "unknown"
         try:
-            instances = described(self.arguments, self.observed, worker.metadata["aws_region"], "instances")
+            instance = self.instance(worker)
         except CloudError:
             return "unknown"
-        return next((instance.state for instance in instances if instance.id == worker.instance_id), "unknown")
+        return instance.state if instance else "unknown"
 
     def launch(self, now):
-        running = {worker.job.host_epoch: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
+        running = [worker.job for worker in self.workers.values()]
         blocked_vcpus = None
         for pool in self.pools:
             while len(self.workers) < self.arguments.max_concurrent and self.pool_ready.get(pool, 0) <= now:
@@ -3336,35 +3272,64 @@ class UnitDispatcher:
                     if not scan:
                         return
                     break
-                worker = self.start(pool, candidate, now)
-                if worker is not None:
-                    running[candidate.host_epoch] = (worker.process, worker.job, worker.log)
+                running.append(self.start(pool, candidate, now).job)
 
     def start(self, pool, job, now):
+        """Record and launch an admitted worker. A launch AWS refused leaves a worker that has ended, settled once its
+        cleanup is proven."""
         del self.candidates[pool]
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
         slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
         validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
-        try:
-            process, log = start_wrapper(self.arguments, self.root, self.result_root, self.runner,
-                                         self.attempts_path, job, slot, slot_failures)
-        except WrapperStartError as error:
-            if self.budget:
-                self.budget.release(self.arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-            detail = f"controller could not start wrapper: {error}"
-            write_attempt(self.attempts_path, job, "retryable-infrastructure", detail)
-            self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
-            self.release_slot(job, slot, slot_failures, False, 1, "retryable-infrastructure", detail)
-            return None
+        check_purchase(self.arguments, job)
+        session = worker_session(self.arguments.campaign_id, job)
+        metadata = worker_metadata(self.arguments, job, session, f"{os.environ['TRANSFER_PREFIX']}/{session}")
+        # The starting record names the session before the launch, so a restart finds its instance by its tag.
+        write_attempt(
+            self.attempts_path, job, "starting",
+            f"region={job.region};placement_score={job.placement_score}" +
+            (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
+             if job.spot_capacity_failures else "") +
+            f";slot={slot};slot_failures={slot_failures};boot_by={job.boot_by};stop_by={job.stop_by}"
+            f";session={session};prefix={metadata['prefix']}")
         # The worker boots from the poll that launched it, so a projection in that poll counts it as booting
         # no later than a further launch would.
-        worker = self.workers[job.host_epoch] = UnitWorker(job, process, log, slot=slot, slot_failures=slot_failures,
-                                                           launched_at=now, stop_by=job.stop_by)
+        worker = self.workers[job.host_epoch] = UnitWorker(
+            job, metadata, job_result_root(self.result_root, job) / session, slot=slot, slot_failures=slot_failures,
+            launched_at=now, stop_by=job.stop_by)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
-        write_attempt(self.attempts_path, job, "started", f"wrapper_pid={process.pid}")
+        try:
+            metadata["instance_id"], metadata["availability_zone"] = launch_worker(self.arguments, job, metadata)
+        except LaunchFailed as failure:
+            worker.launch_failure = (failure.classification, failure.detail)
+            return worker
+        if worker.instance_id:
+            write_attempt(self.attempts_path, job, "started",
+                          f"instance_id={worker.instance_id};availability_zone={metadata['availability_zone']}")
         return worker
+
+    def stop_all(self):
+        """Terminate every worker's host and prove its cleanup, releasing its reservation, within the teardown;
+        raises RuntimeError naming the workers whose cleanup it could not prove. A restart settles them from their
+        ledger rows."""
+        deadline = time.monotonic() + UNIT_WORKER_TEARDOWN_SECONDS
+        for epoch in self.workers:
+            self.terminated.setdefault(epoch, time.time())
+        while True:
+            self.observed = {}
+            for epoch, worker in list(self.workers.items()):
+                self.stop_host(worker)
+                if self.ended(worker) and self.clean_up(worker):
+                    self.budget.release(self.arguments.campaign_id, epoch, cleanup_verified=True)
+                    del self.workers[epoch]
+            if not self.workers:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("cleanup could not be proven for unit workers " +
+                                   ", ".join(worker.job.identity for worker in self.workers.values()))
+            time.sleep(UNIT_POLL_SECONDS)
 
     def start_campaign(self):
         """The phase's start time. A first start records the tooling digest and an empty semantic-rejection
@@ -3404,17 +3369,15 @@ class UnitDispatcher:
         try:
             self.recover()
             while True:
-                if self.budget:
-                    self.budget.check()
+                self.budget.check()
                 self.observed = {}
                 now = time.monotonic()
                 deadline_reached = now >= deadline
                 for worker in list(self.workers.values()):
-                    status = worker.process.poll()
-                    if status is None:
+                    if not self.ended(worker):
                         self.poll(worker)
-                    else:
-                        self.finish(worker, status)
+                    elif self.clean_up(worker):
+                        self.finish(worker)
                 # Work handed back after the deadline, or to a pool that gave up, is not leased again.
                 self.resolve_unlaunchable(deadline_reached)
                 self.update_tail()
@@ -3430,15 +3393,15 @@ class UnitDispatcher:
                     if (worker.lost or self.unneeded(worker)) and epoch not in self.terminated:
                         if not (worker.lost or worker.stopping):
                             self.issue(worker, None)
-                        self.terminated.add(epoch)
-                        worker.process.send_signal(signal.SIGTERM)
+                        self.terminated[epoch] = time.time()
+                    if epoch in self.terminated:
+                        self.stop_host(worker)
                 self.write_status()
                 if not self.workers and not self.queued():
                     break
                 time.sleep(UNIT_POLL_SECONDS)
         except (Exception, KeyboardInterrupt) as error:
-            records = {worker.process.pid: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
-            halt_and_clean_up(arguments, self.result_root, self.budget, records, error)
+            halt_and_clean_up(self.result_root, self.budget, self.stop_all, error)
             raise
         unresolved = self.unresolved_items(ending=True)
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
