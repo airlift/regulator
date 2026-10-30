@@ -207,9 +207,9 @@ and their stop times bound them. Each owner's restart clears its own halt once
 its recovery has verified the cleanup of every host it held; the fleet stays
 halted while another owner's halt stands. See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
-policy and state together across restarts. More than 64 executing workers
-requires this shared policy. Ramp from canaries to the approved cap, using the
-configured pending-launch limit and frozen launch interval.
+policy and state together across restarts. Every execution requires this
+shared policy. Ramp from canaries to the approved cap, using the configured
+pending-launch limit and frozen launch interval.
 
 The controller defaults to 64 concurrent workers. Set `--max-concurrent` and
 `--max-concurrent-per-platform` for the planned campaign; the shared policy
@@ -219,10 +219,9 @@ reduce actual concurrency. Derived phase deadlines use the configured host,
 per-platform, and shared vCPU limits, plus one retry wave and a capacity
 allowance; the shared limit is the sum of the launch regions' `max_vcpus`.
 Every worker type, including each unit pool's host, must fit the largest
-`max_vcpus` among the regions of its platform's list. Without a shared policy,
-deadline planning uses host counts; live quota shortages can require a larger
-explicit deadline. An explicit `--phase-timeout-seconds` is frozen on first
-execution and cannot change on resume.
+`max_vcpus` among the regions of its platform's list. An explicit
+`--phase-timeout-seconds` is frozen on first execution and cannot change on
+resume.
 
 For a focused change, budget only the affected cases and protected controls.
 Preserve accepted work and resume with unchanged frozen inputs instead
@@ -481,7 +480,8 @@ type and AMI; see [engine builds](#engine-builds):
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   build <campaign> --execute --candidate <name>=<commit> \
   --campaign-root /durable/path/<campaign> \
-  --purchase r8i=spot --purchase r9g=spot --spot-vcpu-reserve 16
+  --purchase r8i=spot --purchase r9g=spot \
+  --spot-vcpu-reserve 16 --fleet-budget /durable/path/fleet-policy.json
 ```
 
 A measuring phase installs the candidate's build, or the accepted build
@@ -570,15 +570,15 @@ names, or the defaults, so a campaign whose Spot capacity ran dry can resume in
 other regions. Every result records its host's region and market.
 
 For each Spot launch, the controller asks AWS for the Spot placement score of
-the worker type in every region of its platform's list that offers it, caches
-the answer for five minutes, and launches in the best-scored region with quota
-headroom. Equal scores keep the list's order. When scores are unavailable, the
-first region of the list with headroom launches and the session records no
-score. On-Demand launches take the first region of the list with headroom.
-Headroom is the shared budget's when one is set. Without one, On-Demand launches
-query quota, and Spot launches query it only for a `spot` purchase or a
-`--max-concurrent` above 32; otherwise a Spot launch takes the first placement
-and learns of a full region from EC2. A list of one region asks for no score.
+the worker type in every region of its platform's list that offers it, for the
+campaign's concurrency but at most 50 instances, since AWS refused larger
+queries. It caches the answer for five minutes and launches in the best-scored
+region with headroom in the shared budget. Equal scores keep the list's order.
+When scores are unavailable, the first region of the list with headroom
+launches and the session records no score. On-Demand launches take the first
+region of the list with headroom. The budget's headroom counts the region's
+quota, read once per controller, and its instances and Spot requests, described
+at most once per dispatch loop. A list of one region asks for no score.
 Within the chosen region, each attempt starts in a different zone that offers
 the worker type, and a Spot launch that finds a zone without capacity moves on
 to the region's next zone. Each session runs and verifies its cleanup in its own
@@ -586,12 +586,10 @@ region, and its unit receipts record the region and the market the host read
 from instance metadata.
 
 A worker type's Spot shortage starts when one of its Spot launches finds no
-capacity in a region, or, without a shared budget, when no region of its list
-has Spot quota headroom. It ends when one of its Spot workers starts. A
+capacity in a region. It ends when one of its Spot workers starts. A
 `spot-then-on-demand` pool keeps buying Spot for 15 minutes of shortage, one
 region cool-down, so every region of its list is tried again; after that, while
-every region cools or none has Spot quota, its new workers launch On-Demand in
-the list's order. A `spot` pool waits for Spot however long the shortage lasts.
+every region cools, its new workers launch On-Demand in the list's order. A `spot` pool waits for Spot however long the shortage lasts.
 A restarted controller forgets the shortage.
 
 Quotas are regional and account-wide, so read them before choosing lists. On

@@ -42,7 +42,7 @@ from unit_dispatch import (
     list_unit_worker_results, persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease,
     read_accepted_units, read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads,
     recovered_keys, result_key, retain_unit_attempt, shows_worker_start, unit_attempt_directory,
-    unit_logical_identity, unit_worker_instance_state, unresolved_unit_rows, write_unit_attempt,
+    unit_logical_identity, unresolved_unit_rows, write_unit_attempt,
     write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
@@ -50,7 +50,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import fleet as language_fleet
 import released_artifact
 
-PROACTIVE_SPOT_CAPACITY_THRESHOLD = 32
 DEFAULT_MAX_CONCURRENT = 64
 STANDARD_INSTANCE_FAMILIES = frozenset("acdhimrtz")
 SPOT_VCPU_SAFETY_RESERVE = 32
@@ -150,6 +149,8 @@ PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
 # Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
 PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
+# AWS refused every placement query of the 2.0 run, whose target of 64 instances was above this.
+PLACEMENT_SCORE_MAXIMUM_TARGET = 50
 # A JDK download slower than this for a minute has stalled.
 JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
 # A shared archive upload that stalls for the SDK's read timeout is retried rather than left to hold every launch
@@ -714,8 +715,8 @@ def validate_configuration(arguments, items):
     if budget and refused:
         raise SystemExit(f"shared fleet allows no On-Demand in a region of {', '.join(refused)}; give the "
                          "policy an On-Demand allowance in one of its regions, or buy with --purchase PLATFORM=spot")
-    if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
-        raise SystemExit("more than 64 workers requires a shared fleet budget")
+    if getattr(arguments, "execute", False) and budget is None:
+        raise SystemExit("launching hosts requires a shared fleet budget; name its policy with --fleet-budget")
     validate_campaign_id(arguments.campaign_id)
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
         raise SystemExit("max concurrency must be a positive integer")
@@ -1294,7 +1295,7 @@ def validate_aws(arguments, platforms, jobs=None):
         public_zones[region] = {zone for _, zone in aws.network(region).subnets}
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
-        spot_quota, on_demand_quota = aws.vcpu_quota(region, "spot"), aws.vcpu_quota(region, "on-demand")
+        spot_quota, on_demand_quota = vcpu_quota(arguments, region, "spot"), vcpu_quota(arguments, region, "on-demand")
         if budget:
             limits = region_limits(budget.policy)[region]
             if limits["max_vcpus"] > spot_quota - limits["spot_vcpu_reserve"]:
@@ -1466,7 +1467,8 @@ def spot_placement_scores(arguments, instance_type, regions):
     if cached is not None and now - cached[0] < PLACEMENT_SCORE_CACHE_SECONDS:
         return cached[1]
     # A campaign-constant target keeps every query the same configuration.
-    target = min(arguments.max_concurrent, getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT))
+    target = min(PLACEMENT_SCORE_MAXIMUM_TARGET, arguments.max_concurrent,
+                 getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT))
     try:
         scores = {region: score for region, score in
                   arguments.cloud.placement_scores(instance_type, regions, target).items()
@@ -1513,198 +1515,55 @@ def place(job, placement):
     return replace(job, region=region, placement_score=score)
 
 
-def place_with_headroom(job, placements, query):
-    """Place the job in the first region with room, else return each region's capacity."""
-    capacities = []
-    failure = None
-    for placement in placements:
-        try:
-            capacity = query(placement[0])
-        except UnsafeCampaignError:
-            raise
-        except (OSError, RuntimeError) as error:
-            failure = error
-            continue
-        if capacity["available"] >= job.platform.vcpus:
-            return place(job, placement), capacities, None
-        capacities.append((placement[0], capacity))
-    return None, capacities, failure
-
-
-def capacity_detail(capacities):
-    details = [";".join(f"{key}={value}" for key, value in capacity.items()) for _, capacity in capacities]
-    if len(capacities) == 1:
-        return details[0]
-    return " ".join(f"{region}:{detail}" for (region, _), detail in zip(capacities, details))
-
-
 def is_standard_instance_type(instance_type):
     return bool(instance_type) and instance_type[0].lower() in STANDARD_INSTANCE_FAMILIES
 
 
-def shared_fleet_snapshot(arguments, region, market="spot"):
+def vcpu_quota(arguments, region, market):
+    """The region's Standard vCPU quota for the market, asked once per controller."""
+    quotas = vars(arguments).setdefault("vcpu_quotas", {})
+    if (region, market) not in quotas:
+        quotas[region, market] = arguments.cloud.vcpu_quota(region, market)
+    return quotas[region, market]
+
+
+def described(arguments, observed, region, kind):
+    """The region's instances or its open and active Spot requests, as kind names them, described once into observed.
+
+    The dispatcher observes the fleet once a loop. A host launched later in the loop is covered by its fleet
+    reservation until it appears, and one gone since is counted as still running, so a loop-old description only
+    ever overstates the fleet."""
+    if (region, kind) not in observed:
+        observed[region, kind] = getattr(arguments.cloud, kind)(region)
+    return observed[region, kind]
+
+
+def shared_fleet_snapshot(arguments, region, market, observed):
     """The region's Standard quota for the market and the pending and running Standard instances, and for Spot the
     open and active requests, that use it, each with its vCPUs and the campaign and host epoch its tags name."""
-    aws = arguments.cloud
     spot = market == "spot"
-    instances = [instance for instance in aws.instances(region)
+    instances = [instance for instance in described(arguments, observed, region, "instances")
                  if instance.state in ("pending", "running") and (instance.lifecycle == "spot") == spot]
-    requests = aws.spot_requests(region) if spot else []
+    requests = described(arguments, observed, region, "spot_requests") if spot else []
     if any(not item.type for item in instances + requests):
         raise BudgetError(f"cannot account for {'a Spot instance or request' if spot else 'an On-Demand instance'} "
                           "with no instance type")
     instances = [item for item in instances if is_standard_instance_type(item.type)]
     requests = [item for item in requests if is_standard_instance_type(item.type)]
-    vcpus = aws.vcpus(region, {item.type for item in instances + requests})
+    # An instance type's vCPUs are the same in every region and never change.
+    vcpus = vars(arguments).setdefault("instance_vcpus", {})
+    if missing := {item.type for item in instances + requests} - set(vcpus):
+        vcpus.update(arguments.cloud.vcpus(region, missing))
     if any(item.type not in vcpus for item in instances + requests):
         raise BudgetError("AWS omitted requested vCPU metadata")
 
     def resource(item, **fields):
-        return {**fields, "type": item.type, "vcpus": vcpus[item.type], "campaign_id": item.tags.get("BaselineCampaign"),
-                "host_epoch": item.tags.get("HostEpoch")}
+        return {**fields, "type": item.type, "vcpus": vcpus[item.type],
+                "campaign_id": item.tags.get("BaselineCampaign"), "host_epoch": item.tags.get("HostEpoch")}
 
-    return {"quota": aws.vcpu_quota(region, market),
+    return {"quota": vcpu_quota(arguments, region, market),
             "instances": [resource(item, id=item.id) for item in instances],
             "requests": [resource(item, id=item.id, instance_id=item.instance_id or None) for item in requests]}
-
-
-def region_jobs(arguments, running_jobs, region):
-    """Keep the running jobs placed in the region whose capacity is being counted."""
-    if region is None:
-        return running_jobs
-    return [job for job in running_jobs if (job.region or platform_regions(arguments, job.platform.name)[0]) == region]
-
-
-def current_on_demand_capacity(arguments, campaign_id, running_jobs, region):
-    aws = arguments.cloud
-    running_jobs = region_jobs(arguments, running_jobs, region)
-    quota = aws.vcpu_quota(region, "on-demand")
-    instances = [instance for instance in aws.instances(region) if instance.state in ("pending", "running")]
-    vcpus_by_type = aws.vcpus(region, {
-        instance.type
-        for instance in instances
-        if instance.lifecycle != "spot" and is_standard_instance_type(instance.type)
-    })
-
-    running_epochs = {
-        str(job.host_epoch)
-        for job in running_jobs
-        if job.market == "on-demand"
-    }
-    used_vcpus = 0
-    observed_running_epochs = set()
-    for instance in instances:
-        instance_type = instance.type
-        if instance.lifecycle == "spot" or not is_standard_instance_type(instance_type):
-            continue
-        tags = instance.tags
-        if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
-            # The local reservation below already covers this instance. This also
-            # covers the interval before a newly launched instance is visible.
-            host_epoch = tags["HostEpoch"]
-            if host_epoch in observed_running_epochs:
-                raise UnsafeCampaignError(
-                    f"multiple active campaign instances use host epoch {host_epoch}")
-            observed_running_epochs.add(host_epoch)
-            continue
-        try:
-            used_vcpus += vcpus_by_type[instance_type]
-        except KeyError as error:
-            raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
-
-    reserved_vcpus = sum(
-        job.platform.vcpus
-        for job in running_jobs
-        if job.market == "on-demand"
-    )
-    available_vcpus = max(
-        0,
-        quota - used_vcpus - reserved_vcpus - ON_DEMAND_VCPU_SAFETY_RESERVE)
-    return {
-        "quota": quota,
-        "used": used_vcpus,
-        "reserved": reserved_vcpus,
-        "safety_reserve": ON_DEMAND_VCPU_SAFETY_RESERVE,
-        "available": available_vcpus,
-    }
-
-
-def current_spot_capacity(arguments, campaign_id, running_jobs, region):
-    aws = arguments.cloud
-    running_jobs = region_jobs(arguments, running_jobs, region)
-    quota = aws.vcpu_quota(region, "spot")
-    instances = [instance for instance in aws.instances(region) if instance.state in ("pending", "running")]
-    requests = aws.spot_requests(region)
-    vcpus_by_type = aws.vcpus(
-        region,
-        {
-            instance.type
-            for instance in instances
-            if instance.lifecycle == "spot" and is_standard_instance_type(instance.type)
-        } |
-        {
-            request.type
-            for request in requests
-            if is_standard_instance_type(request.type)
-        })
-
-    running_epochs = {
-        str(job.host_epoch)
-        for job in running_jobs
-        if job.market == "spot"
-    }
-    used_vcpus = 0
-    observed_running_epochs = set()
-    visible_instance_ids = {instance.id for instance in instances}
-    for instance in instances:
-        instance_type = instance.type
-        if instance.lifecycle != "spot" or not is_standard_instance_type(instance_type):
-            continue
-        tags = instance.tags
-        if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
-            host_epoch = tags["HostEpoch"]
-            if host_epoch in observed_running_epochs:
-                raise UnsafeCampaignError(
-                    f"multiple active campaign instances use host epoch {host_epoch}")
-            observed_running_epochs.add(host_epoch)
-            continue
-        try:
-            used_vcpus += vcpus_by_type[instance_type]
-        except KeyError as error:
-            raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
-    for request in requests:
-        instance_type = request.type
-        if request.instance_id in visible_instance_ids or not is_standard_instance_type(instance_type):
-            continue
-        tags = request.tags
-        if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
-            host_epoch = tags["HostEpoch"]
-            if host_epoch in observed_running_epochs:
-                raise UnsafeCampaignError(
-                    f"multiple active campaign resources use host epoch {host_epoch}")
-            observed_running_epochs.add(host_epoch)
-            continue
-        try:
-            used_vcpus += vcpus_by_type[instance_type]
-        except KeyError as error:
-            raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
-
-    reserved_vcpus = sum(
-        job.platform.vcpus
-        for job in running_jobs
-        if job.market == "spot"
-    )
-    safety_reserve = getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE)
-    available_vcpus = max(
-        0,
-        quota - used_vcpus - reserved_vcpus - safety_reserve)
-    return {
-        "quota": quota,
-        "used": used_vcpus,
-        "reserved": reserved_vcpus,
-        "safety_reserve": safety_reserve,
-        "available": available_vcpus,
-    }
 
 
 def write_jobs(path, jobs, *, extend=False):
@@ -2303,93 +2162,40 @@ def campaign_started_at(path, arguments):
     return started_at
 
 
-def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs,
-                 spot_fallback=False):
-    """Place a launch candidate and reserve its capacity.
-
-    An unbudgeted Spot candidate that finds no Spot quota headroom launches On-Demand instead only with
-    spot_fallback, once its pool has waited out a Spot shortage; otherwise it waits for Spot.
+def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, observed):
+    """Place a launch candidate and reserve its capacity in the shared fleet, from the fleet observed this loop.
 
     Returns the candidate as placed, when it may next be tried, whether it was admitted, whether
     the launch scan may continue to later candidates, and the vCPU count a full fleet quota now
     blocks, if any.
     """
-    budget = getattr(arguments, "shared_budget", None)
-    purchase = purchase_policy(arguments, candidate.platform.name)
+    budget = arguments.shared_budget
     placements = launch_placements(arguments, candidate)
     candidate = place(candidate, placements[0])
-    # An unbudgeted Spot launch queries quota headroom only when its platform buys only Spot or above
-    # the proactive threshold; otherwise it takes the first placement and learns of a full region from EC2.
-    if candidate.market == "spot" and (
-            purchase == "spot" or arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
-        placed, spot_capacities, error = place_with_headroom(
-            candidate, placements,
-            lambda region: current_spot_capacity(arguments, arguments.campaign_id, running_jobs, region))
-        if placed is None and error is not None:
-            wait_key = (candidate.identity, "spot-capacity-query")
-            if wait_key not in capacity_waits:
-                capacity_waits.add(wait_key)
-                write_attempt(attempts_path, candidate, "queued-capacity", f"Spot capacity query failed: {error}")
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
-        if placed is not None:
-            candidate = placed
-        elif purchase == "spot" or not spot_fallback:
-            wait_key = (candidate.identity, "spot-capacity")
-            if wait_key not in capacity_waits:
-                capacity_waits.add(wait_key)
-                write_attempt(attempts_path, candidate, "queued-capacity",
-                              f"{purchase} purchase waiting for Spot quota; " + capacity_detail(spot_capacities))
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
-        else:
-            candidate = replace(candidate, market="on-demand")
-            wait_key = (candidate.identity, "spot-to-on-demand")
-            if wait_key not in capacity_waits:
-                capacity_waits.add(wait_key)
-                write_attempt(attempts_path, candidate, "queued-capacity",
-                              "Spot capacity exhausted; " + capacity_detail(spot_capacities))
-    if candidate.market == "on-demand" and budget is None:
-        placements = launch_placements(arguments, candidate)
-        placed, capacities, error = place_with_headroom(
-            candidate, placements,
-            lambda region: current_on_demand_capacity(arguments, arguments.campaign_id, running_jobs, region))
-        if placed is None and error is not None:
-            wait_key = (candidate.identity, "capacity-query")
-            if wait_key not in capacity_waits:
-                capacity_waits.add(wait_key)
-                write_attempt(attempts_path, candidate, "queued-capacity", f"capacity query failed: {error}")
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
-        if placed is None:
-            wait_key = (candidate.identity, "capacity")
-            if wait_key not in capacity_waits:
-                capacity_waits.add(wait_key)
-                write_attempt(attempts_path, candidate, "queued-capacity", capacity_detail(capacities))
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
-        candidate = placed
-    if budget:
-        for placement in placements:
-            try:
-                admitted, reason = budget.reserve(
-                    arguments.campaign_id, place(candidate, placement), result_root,
-                    lambda region=placement[0], market=candidate.market:
-                    shared_fleet_snapshot(arguments, region, market),
-                    until=candidate.stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
-            except BudgetError:
-                raise
-            except (OSError, RuntimeError) as error:
-                admitted, reason = False, f"shared capacity query failed: {error}"
-            if admitted:
-                candidate = place(candidate, placement)
-                break
-            # Fleet-wide host, spending and launch-rate limits hold in every region.
-            if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
-                break
-        if not admitted:
-            if (candidate.identity, reason) not in capacity_waits:
-                capacity_waits.add((candidate.identity, reason))
-                write_attempt(attempts_path, candidate, "queued-capacity", reason)
-            if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
-                return candidate, now + CAPACITY_RETRY_SECONDS, False, False, None
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, candidate.platform.vcpus
+    for placement in placements:
+        try:
+            admitted, reason = budget.reserve(
+                arguments.campaign_id, place(candidate, placement), result_root,
+                lambda region=placement[0], market=candidate.market:
+                shared_fleet_snapshot(arguments, region, market, observed),
+                until=candidate.stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
+        except BudgetError:
+            raise
+        except (OSError, RuntimeError) as error:
+            admitted, reason = False, f"shared capacity query failed: {error}"
+        if admitted:
+            candidate = place(candidate, placement)
+            break
+        # Fleet-wide host, spending and launch-rate limits hold in every region.
+        if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
+            break
+    if not admitted:
+        if (candidate.identity, reason) not in capacity_waits:
+            capacity_waits.add((candidate.identity, reason))
+            write_attempt(attempts_path, candidate, "queued-capacity", reason)
+        if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, False, None
+        return candidate, now + CAPACITY_RETRY_SECONDS, False, True, candidate.platform.vcpus
     return candidate, ready_at, True, False, None
 
 
@@ -2657,6 +2463,8 @@ class UnitDispatcher:
         self.pools = sorted({item.pool for item in items})
         self.platforms = pool_platforms(platforms, items)
         self.budget = getattr(arguments, "shared_budget", None)
+        # Each region's fleet as this loop described it, once, when the loop first needed it.
+        self.observed = {}
         self.purchases = {pool: purchase_policy(arguments, platform.name) for pool, platform in self.platforms.items()}
         self.attempts_path = result_root / "job-attempts.tsv"
         self.leases_path = result_root / "unit-attempts.tsv"
@@ -3140,7 +2948,7 @@ class UnitDispatcher:
             age = time.time() - beats[max(beats)]
             if age < UNIT_HEARTBEAT_STALE_SECONDS or (
                     age < UNIT_HEARTBEAT_LOST_SECONDS and
-                    unit_worker_instance_state(self.arguments, worker) in ("pending", "running", "unknown")):
+                    self.instance_state(worker) in ("pending", "running", "unknown")):
                 return
             worker.lost = True
             for sequence in worker.outstanding():
@@ -3494,6 +3302,16 @@ class UnitDispatcher:
                 candidate = replace(candidate, spot_capacity_failures=())
         return candidate
 
+    def instance_state(self, worker):
+        """The worker's instance's state in this loop's description of its region, or unknown."""
+        if not worker.instance_id:
+            return "unknown"
+        try:
+            instances = described(self.arguments, self.observed, worker.metadata["aws_region"], "instances")
+        except CloudError:
+            return "unknown"
+        return next((instance.state for instance in instances if instance.id == worker.instance_id), "unknown")
+
     def launch(self, now):
         running = {worker.job.host_epoch: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
         blocked_vcpus = None
@@ -3512,16 +3330,12 @@ class UnitDispatcher:
                 first_lease = lease_timeout(max(map(self.remaining_seconds, self.queued(pool)), default=0))
                 candidate = replace(candidate, boot_by=boot_by, stop_by=boot_by + first_lease +
                                     UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
-                if self.budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
+                if blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                     break
                 candidate, ready_at, admitted, scan, blocked = admit_launch(
                     self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
-                    [record[1] for record in running.values()], self.spot_waited(pool, now))
+                    self.observed)
                 self.candidates[pool] = candidate
-                if not admitted and candidate.market == "spot" and not self.budget:
-                    # Without a shared budget, a Spot launch is refused only when no region has Spot quota
-                    # headroom, or the query for it failed.
-                    self.spot_shortages.setdefault(pool, now)
                 if not admitted and candidate.market == "on-demand" and market == "on-demand":
                     # The pool's Spot-eligible items need not wait for On-Demand admission.
                     self.on_demand_ready[pool] = ready_at
@@ -3603,6 +3417,7 @@ class UnitDispatcher:
             while True:
                 if self.budget:
                     self.budget.check()
+                self.observed = {}
                 now = time.monotonic()
                 deadline_reached = now >= deadline
                 for worker in list(self.workers.values()):
@@ -4050,8 +3865,8 @@ def run_campaign(arguments, root):
     """Freeze every candidate, then run each candidate's phases as their own controllers, side by side."""
     if not arguments.candidates:
         raise SystemExit("a campaign requires at least one --candidate NAME=COMMITISH")
-    if len(arguments.candidates) > 1 and arguments.fleet_budget is None:
-        raise SystemExit("a campaign of several candidates shares one fleet; name its policy with --fleet-budget")
+    if arguments.execute and arguments.fleet_budget is None:
+        raise SystemExit("launching hosts requires a shared fleet budget; name its policy with --fleet-budget")
     given = [option for option, value in (("--smoke-results", arguments.smoke_results),
                                           ("--primary-results", arguments.primary_results),
                                           ("--confirmation-jobs", arguments.confirmation_jobs),

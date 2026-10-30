@@ -16,7 +16,6 @@ from pathlib import Path
 
 import unit_session
 from campaign_io import UnsafeCampaignError, fsync_directory, write_ledger
-from cloud import CloudError
 
 # A lease row's groups are those it leased, in run order; an outcome row's are those whose markers it processed.
 UNIT_ATTEMPT_FIELDS = (
@@ -269,16 +268,6 @@ def put_unit_lease(arguments, worker, sequence, document):
         arguments.cloud.get(region, bucket, key, existing)
         if existing.read_text() != body:
             raise UnsafeCampaignError(f"unit worker {worker.host_session} lease {sequence} differs from its ledger")
-
-
-def unit_worker_instance_state(arguments, worker):
-    if not worker.instance_id:
-        return "unknown"
-    try:
-        return next((instance.state for instance in arguments.cloud.instances(worker.metadata["aws_region"])
-                     if instance.id == worker.instance_id), "unknown")
-    except CloudError:
-        return "unknown"
 
 
 def extract_unit_result(archive, directory):

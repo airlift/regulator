@@ -259,29 +259,52 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
 
-    def admit(self, arguments, result_root, job, spot_fallback=False):
-        """Place and admit one launch as the unit dispatcher does: the job as placed, and whether it was admitted."""
+    def admit(self, arguments, result_root, job, observed=None):
+        """Place and admit one launch as the unit dispatcher does, by default in a loop of its own: the job as placed,
+        and whether it was admitted."""
         candidate, _, admitted, _, _ = RUN_CAMPAIGN.admit_launch(
-            arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0, [], spot_fallback)
+            arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0,
+            {} if observed is None else observed)
         return candidate, admitted
 
-    def test_spot_platform_waits_out_a_quota_shortage_and_an_on_demand_platform_refuses_spot(self):
+    def shared_fleet(self, regions=()):
+        """A shared fleet budget for Spot hosts in its home region, us-west-2, and in regions."""
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        if regions:
+            fixture.policy["regions"] = {region: {"max_vcpus": 64, "spot_vcpu_reserve": 0} for region in regions}
+            fixture.path.write_text(json.dumps(fixture.policy))
+        return RUN_CAMPAIGN.FleetBudget(fixture.path)
+
+    def test_spot_platform_waits_for_quota_and_an_on_demand_platform_refuses_spot(self):
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             arguments = self.arguments(root)
             arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
-            with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=[
-                        {"available": 0}, {"available": 8}]), \
-                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity") as on_demand:
-                # A Spot platform never falls back, however long its pool has been short.
-                waiting, admitted = self.admit(arguments, root, job, spot_fallback=True)
-                self.assertEqual(("spot", False), (waiting.market, admitted))
-                launched, admitted = self.admit(arguments, root, job, spot_fallback=True)
-                self.assertEqual(("spot", True), (launched.market, admitted))
-            on_demand.assert_not_called()
+            arguments.platform_regions = {"r8i": ["us-west-2"]}
+            aws = arguments.cloud = FakeCloud()
+            arguments.shared_budget = self.shared_fleet()
+            # Other work holds the region's Spot quota, then ends.
+            aws.quotas[("us-west-2", "spot")] = 8
+            aws.region_instances["us-west-2"] = [
+                cloud.Instance("i-other", "r8i.2xlarge", "spot", "running", "", {}, 0)]
+            loop = {}
+            waiting, admitted = self.admit(arguments, root, job, loop)
+            self.assertEqual(("spot", False), (waiting.market, admitted))
+            aws.region_instances["us-west-2"] = []
+            # Every admission of a loop reads the fleet as the loop described it; the next loop finds the quota free.
+            self.assertFalse(self.admit(arguments, root, job, loop)[1])
+            launched, admitted = self.admit(arguments, root, job)
+            self.assertEqual(("spot", True), (launched.market, admitted))
+            # The quota is asked for once.
+            self.assertEqual({"instances": 2, "spot_requests": 2, "vcpu_quota": 1, "vcpus": 1},
+                             {operation: [call[0] for call in aws.calls].count(operation)
+                              for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
             self.assertEqual("1", RUN_CAMPAIGN.job_environment(launched, arguments, root, root)["CAMPAIGN_SPOT_ONLY"])
-            self.assertIn("spot purchase waiting for Spot quota", (root / "job-attempts.tsv").read_text())
+            self.assertIn("queued-capacity\tfleet quota or pending-launch limit",
+                          (root / "job-attempts.tsv").read_text())
             # An On-Demand platform launches no Spot host.
             arguments.purchases["r8i"] = "on-demand"
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only On-Demand"):
@@ -664,9 +687,9 @@ class TestRunCampaign(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             campaign_root = Path(temporary_directory)
             arguments = SimpleNamespace(
-                campaign="tournament", campaign_root=campaign_root, candidates=[("a", "main")], fleet_budget=None,
-                smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None,
-                language_plan=[], execute=True, detach=True, max_concurrent=1, max_concurrent_per_platform=1,
+                campaign="tournament", campaign_root=campaign_root, candidates=[("a", "main")],
+                fleet_budget=campaign_root / "fleet-policy.json", smoke_results=None, primary_results=None,
+                confirmation_jobs=None, engine_builds=None, language_plan=[], execute=True, detach=True, max_concurrent=1, max_concurrent_per_platform=1,
                 selected_shards=None, smoke_protocol="smoke", release_version="")
             argv = ["run-campaign.py", "campaign", "tournament", "--execute", "--detach", "--candidate=a=main"]
             output = io.StringIO()
@@ -1306,19 +1329,16 @@ class TestRunCampaign(unittest.TestCase):
                 arguments.platform_regions = {"r8i": regions}
                 arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
                 arguments.transfer_buckets = {"ap-south-1": "bucket-mumbai"}
-                arguments.cloud = FakeCloud()
+                arguments.shared_budget = self.shared_fleet(["eu-west-1", "ap-south-1"])
+                aws = arguments.cloud = FakeCloud()
                 if scored:
-                    arguments.cloud.scores = {"us-west-2": 3, "eu-west-1": 9, "ap-south-1": 9}
-                queried = []
-
-                def spot_capacity(_, __, ___, region):
-                    queried.append(region)
-                    return {"available": 0 if region == "eu-west-1" else 8}
-
-                with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity):
-                    launched, _ = self.admit(arguments, result_root, job)
+                    aws.scores = {"us-west-2": 3, "eu-west-1": 9, "ap-south-1": 9}
+                # Another workload's open Spot request holds Ireland's quota.
+                aws.quotas[("eu-west-1", "spot")] = 8
+                aws.region_requests["eu-west-1"] = [cloud.SpotRequest("sir-other", "", "r8i.2xlarge", {})]
+                launched, _ = self.admit(arguments, result_root, job)
                 environment = RUN_CAMPAIGN.job_environment(launched, arguments, root, result_root)
-                self.assertEqual(queried, expected_queries)
+                self.assertEqual(expected_queries, [call[1] for call in aws.calls if call[0] == "instances"])
                 self.assertEqual(environment["AWS_REGION"], expected_region)
                 self.assertEqual(environment["CAMPAIGN_PLACEMENT_SCORE"], expected_score)
                 self.assertEqual(environment["BENCHMARK_INTEL_AMI_ID"], "ami-" + expected_region)
@@ -1350,6 +1370,8 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(platform=name, market=market):
                 job = RUN_CAMPAIGN.unit_worker_job(platforms[name], 1, 10, market)
                 self.assertEqual(expected, [region for region, _ in RUN_CAMPAIGN.launch_placements(arguments, job)])
+        # AWS refuses to score more than 50 instances, whatever the campaign's concurrency.
+        self.assertEqual({50}, {call[3] for call in arguments.cloud.calls if call[0] == "placement_scores"})
 
     def test_aws_preflight_uses_routed_worker_topologies(self):
         platform = replace(
@@ -1369,7 +1391,7 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "cannot admit one host"):
             RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
 
-        aws.quotas[("us-west-2", "spot")] = 12
+        arguments.spot_vcpu_reserve = 3
         with self.assertRaisesRegex(SystemExit, "r8i.2xlarge is not offered"):
             RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
 
@@ -1619,9 +1641,14 @@ class TestRunCampaign(unittest.TestCase):
             # A second controller of a phase stops at once, before its slow setup, while the first owns the root, with
             # the status that tells a campaign driver to adopt the first.
             errors = io.StringIO()
+            fleet_policy = test_fleet_budget.TestFleetBudget()
+            fleet_policy.setUp()
+            self.addCleanup(fleet_policy.doCleanups)
             with patch.object(sys, "argv", ["run-campaign.py", "smoke", "language", "--language-plan",
                                             str(root / "plan"), "--candidate", "lifecycle=HEAD",
-                                            "--campaign-root", str(root), "--execute"]), \
+                                            "--campaign-root", str(root), "--execute",
+                                            "--fleet-budget", str(fleet_policy.path), "--spot-vcpu-reserve", "0",
+                                            "--purchase", "r8i=spot", "--purchase", "r9g=spot"]), \
                     RUN_CAMPAIGN.controller_lock(root / "lifecycle/lang/smoke", RUN_CAMPAIGN.DRIVER_CHILD), \
                     patch.object(RUN_CAMPAIGN, "validate_source") as setup, contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as busy:
@@ -2702,94 +2729,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                                         "unit artifacts are not accepted .*did not complete"):
                 recover()
 
-    def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
-        running_job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "on-demand")
-        aws = FakeCloud()
-        aws.quotas[("us-west-2", "on-demand")] = 500
-        aws.instance_vcpus["m8gd.4xlarge"] = 16
-        aws.region_instances["us-west-2"] = [
-            cloud.Instance("i-external", "m8gd.4xlarge", "on-demand", "running", "", {}, 0),
-            cloud.Instance("i-local", "r8i.2xlarge", "on-demand", "running", "",
-                           {"BaselineCampaign": "baseline", "HostEpoch": "10"}, 0),
-            cloud.Instance("i-spot", "r8i.2xlarge", "spot", "running", "", {}, 0)]
-        arguments = self.arguments(Path("."))
-        arguments.cloud, arguments.platform_regions = aws, {"r8i": ["us-west-2"]}
-        capacity = RUN_CAMPAIGN.current_on_demand_capacity(arguments, "baseline", [running_job], "us-west-2")
-
-        self.assertEqual(capacity, {
-            "quota": 500,
-            "used": 16,
-            "reserved": 8,
-            "safety_reserve": 32,
-            "available": 444,
-        })
-
-    def test_spot_capacity_accounts_for_unrelated_work_and_local_reservations(self):
-        running_job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
-        aws = FakeCloud()
-        aws.quotas[("us-west-2", "spot")] = 352
-        aws.instance_vcpus.update({"m8gd.4xlarge": 16, "r8g.large": 2})
-        aws.region_instances["us-west-2"] = [
-            cloud.Instance("i-external", "m8gd.4xlarge", "spot", "running", "", {}, 0),
-            cloud.Instance("i-local", "r8i.2xlarge", "spot", "running", "",
-                           {"BaselineCampaign": "baseline", "HostEpoch": "10"}, 0),
-            cloud.Instance("i-on-demand", "r8i.2xlarge", "on-demand", "running", "", {}, 0)]
-        aws.region_requests["us-west-2"] = [cloud.SpotRequest("sir-local", "i-local", "r8i.2xlarge", {}),
-                                            cloud.SpotRequest("sir-open", "", "r8g.large", {})]
-        arguments = self.arguments(Path("."))
-        arguments.cloud, arguments.platform_regions = aws, {"r8i": ["us-west-2"]}
-        capacity = RUN_CAMPAIGN.current_spot_capacity(arguments, "baseline", [running_job], "us-west-2")
-
-        self.assertEqual(capacity, {
-            "quota": 352,
-            "used": 18,
-            "reserved": 8,
-            "safety_reserve": 32,
-            "available": 294,
-        })
-
-    def test_quota_short_spot_launch_turns_on_demand_only_once_its_pool_may_fall_back(self):
-        spot_job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            with patch.object(RUN_CAMPAIGN, "current_spot_capacity", return_value={
-                        "quota": 352,
-                        "used": 320,
-                        "reserved": 0,
-                        "safety_reserve": 32,
-                        "available": 0,
-                    }), \
-                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={
-                        "quota": 532,
-                        "used": 103,
-                        "reserved": 0,
-                        "safety_reserve": 32,
-                        "available": 397,
-                    }):
-                arguments = self.arguments(root, maximum_concurrent=64)
-                waiting, admitted = self.admit(arguments, root, spot_job)
-                self.assertEqual(("spot", False), (waiting.market, admitted))
-                launched, admitted = self.admit(arguments, root, spot_job, spot_fallback=True)
-            self.assertEqual(("on-demand", True), (launched.market, admitted))
-
-    def test_on_demand_capacity_wait_queues_instead_of_aborting(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            no_capacity = {
-                "quota": 500,
-                "used": 468,
-                "reserved": 0,
-                "safety_reserve": 32,
-                "available": 0,
-            }
-            capacity = {**no_capacity, "used": 460, "available": 8}
-
-            with patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", side_effect=[no_capacity, capacity]):
-                self.assertFalse(self.admit(self.arguments(root), root, job)[1])
-                self.assertTrue(self.admit(self.arguments(root), root, job)[1])
-            self.assertIn("queued-capacity", (root / "job-attempts.tsv").read_text())
-
     def test_shared_fleet_launches_on_demand_where_its_allowance_has_headroom(self):
         fixture = test_fleet_budget.TestFleetBudget()
         fixture.setUp()
@@ -2816,7 +2755,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         reserved = json.loads(arguments.shared_budget.state_path.read_text())["reservations"]
         self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in reserved.values()],
                          [("eu-west-1", "on-demand", 0.60)])
-        snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand")
+        snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand", {})
         self.assertEqual(snapshot["instances"],
                          [{"id": "i-other", "type": "r8i.2xlarge", "vcpus": 8, "campaign_id": None, "host_epoch": None}])
 
