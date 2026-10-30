@@ -908,18 +908,21 @@ its cool-down ends. A restarted controller forgets the cool-downs.
 
 Once a worker's session exists, the controller writes its first lease and
 keeps one lease written ahead while no idle worker of the pool could take the
-item. It leases On-Demand work first, then the eligible item with the most
-estimated work remaining, never a unit the host already leased, and never to an
-instance a confirmation excludes or that measured any group of the unit's
-replicas. A lease runs the item's remaining groups. An item requeued for
-On-Demand only goes to an On-Demand host, and On-Demand hosts also take every
-other item. When the pool can give a worker nothing more, the worker gets a
-stop lease. Each lease, and each outcome it reaches, is a row of
+item. Eligible items lease by On-Demand priority, then replica, then remaining
+work: On-Demand work first, then the item of the lowest replica, and of those
+the one with the most estimated work remaining, so the phase has a first
+reading of every unit as early as it can. A lease never goes to a unit the host
+already leased, nor to an instance a confirmation excludes or that measured any
+group of the unit's replicas. A lease runs the item's remaining groups. An item
+requeued for On-Demand only goes to an On-Demand host, and On-Demand hosts also
+take every other item. When the pool can give a worker nothing more, the worker
+gets a stop lease. Each lease, and each outcome it reaches, is a row of
 `unit-attempts.tsv`, written before the lease is; its `groups` are the groups
 a lease runs, or those whose markers an outcome processed. A unit whose
 longest remaining group is estimated past the 15-minute unit budget, such as a
 slow language comparison isolated in its own unit, is On-Demand work unless its
-platform buys only Spot.
+platform buys only Spot; it leases first because only the On-Demand hosts
+launched for it may take it.
 
 The controller polls each worker's uploads and processes a lease's markers in
 its groups' order, each as it lands. A completion marker's result must match

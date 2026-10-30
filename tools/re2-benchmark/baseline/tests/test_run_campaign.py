@@ -1663,6 +1663,26 @@ class TestRunCampaign(unittest.TestCase):
                                                      RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
             self.assertEqual([item.identity for item in items if dispatcher.on_demand(item)], expected)
 
+    def test_items_lease_by_on_demand_work_then_replica_then_work_left(self):
+        items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, replica, seconds,
+                                       (("1", seconds),))
+                 for unit_id, seconds in (("short", 100.0), ("long", 600.0), ("slow", 950.0)) for replica in (1, 2)]
+        dispatcher = RUN_CAMPAIGN.UnitDispatcher(
+            SimpleNamespace(phase="primary", purchases={"r8i": "spot-then-on-demand"}), SCRIPT.parents[3],
+            Path("/nonexistent"), items, RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
+        # On-Demand work goes first, then the lowest replica, then the longest: an On-Demand host takes both
+        # replicas of the slow unit, which only it may run, before any other unit's replica 1, and a Spot host never
+        # takes it.
+        for market, expected in (("spot", ["long/replica-1", "short/replica-1", "long/replica-2", "short/replica-2"]),
+                                 ("on-demand", ["slow/replica-1", "slow/replica-2", "long/replica-1",
+                                                "short/replica-1", "long/replica-2", "short/replica-2"])):
+            worker = SimpleNamespace(job=SimpleNamespace(market=market), pool=("r8i", "r8i.large"), instance_id="")
+            queued, order = dispatcher.queued(worker.pool), []
+            while (item := dispatcher.next_item(worker, queued, set())) is not None:
+                queued.remove(item)
+                order.append(item.identity)
+            self.assertEqual([f"r8i/{identity}" for identity in expected], order)
+
     def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
         source = AWS_RUNNER.read_text()
         selector = source[source.index('subnet_rotation()'):source.index('\ncreate_user_data()')]
