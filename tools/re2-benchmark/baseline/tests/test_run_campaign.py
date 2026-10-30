@@ -30,6 +30,7 @@ from unittest.mock import Mock, patch
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
+import fleet_budget  # noqa: E402
 import test_engine_build  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
@@ -1624,7 +1625,8 @@ class TestRunCampaign(unittest.TestCase):
             phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g", max_concurrent=2,
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
             candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory},
-            shared_budget=Mock(policy={}, policy_path="fleet.json", **{"reservations.return_value": []}))
+            shared_budget=Mock(policy={}, policy_path="fleet.json", **{
+                "reservations.return_value": [], "report_boots.return_value": fleet_budget.BOOT_WINDOW_MAX}))
 
         def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
             """The campaign's validation, installing each platform's engine build, whose classes archive has the
@@ -2768,7 +2770,7 @@ class TestUnitWorkers(unittest.TestCase):
                    release_version="", extend=True, budget=None):
         """The controller of the phase's work items, with the fleet's stubs in place, its result directory in root.
         Unless given a shared fleet budget, the stub budget admits every extension of a host's reservation if extend,
-        logging each, and refuses every one otherwise."""
+        logging each, and refuses every one otherwise, and keeps its boot window at its largest."""
         if budget is None:
             budget = Mock(policy={"hourly_rates": {
                 instance_type: {"spot": 0.2} for platform in self.PLATFORMS
@@ -2783,6 +2785,7 @@ class TestUnitWorkers(unittest.TestCase):
 
             budget.extend.side_effect = extend_reservation
             budget.reservations.return_value = fleet.reservations or []
+            budget.report_boots.return_value = fleet_budget.BOOT_WINDOW_MAX
         self.budget = budget
         regions = {region for listed in (platform_regions or {}).values() for region in listed}
         arguments = SimpleNamespace(
@@ -2806,6 +2809,36 @@ class TestUnitWorkers(unittest.TestCase):
 
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]
+
+    def shared_budget(self):
+        """A shared fleet budget for Spot hosts of both platforms, which sees EC2 hold none of its hosts, so only its
+        pending-launch limit, here its host limit, and its boot window pace launches."""
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
+        fixture.policy["max_pending_launches"] = fixture.policy["max_hosts"]
+        fixture.path.write_text(json.dumps(fixture.policy))
+        snapshot = patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
+                                return_value={"quota": 736, "instances": [], "requests": []})
+        snapshot.start()
+        self.addCleanup(snapshot.stop)
+        return RUN_CAMPAIGN.FleetBudget(fixture.path)
+
+    def boot_windows(self, budget):
+        """The boot window's sizes in turn, as the loops read it."""
+        sizes = []
+        report_boots = budget.report_boots
+
+        def reporting(*arguments):
+            room = report_boots(*arguments)
+            size = json.loads(budget.state_path.read_text())["boot_window"]["size"]
+            if sizes[-1:] != [size]:
+                sizes.append(size)
+            return room
+
+        budget.report_boots = reporting
+        return sizes
 
     def lease_count(self, lease, platform="r8i"):
         """How many leases the platform's hosts were given for the replica a lease names."""
@@ -3095,8 +3128,14 @@ class TestUnitWorkers(unittest.TestCase):
                      for index in range(1, 301)}
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: setups[host.number - 1])
-            self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100)
+            budget = self.shared_budget()
+            windows = self.boot_windows(budget)
+            self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100,
+                           purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
             self.assertEqual(200, len(fleet.hosts))
+            # The hosts launch in waves, each as large as the boot window, which doubles as each wave reports in
+            # time, up to its largest.
+            self.assertEqual([10, 20, 40, 50], windows)
             # Every host finds its first lease waiting as it boots, and its next as each lease ends, until the queue
             # is empty.
             sessions = {host.session: host for host in fleet.hosts}
@@ -3156,20 +3195,34 @@ class TestUnitWorkers(unittest.TestCase):
             leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
             self.assertEqual((80, 80), (len(leased), len(set(leased))))
 
+    def test_late_boot_wave_halves_the_boot_window_and_a_healthy_one_doubles_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # 20 hosts measure two 10-minute units each. The first ten take six minutes to boot, a minute past the
+            # five they have to report in; the rest boot in about one.
+            units = {f"boot-{index}": {"unit_id": f"boot-{index}", "shard_id": "boot", "unit_index": str(index),
+                                       "estimated_seconds": "600",
+                                       "groups": [{"group_id": "1", "estimated_seconds": 600}]}
+                     for index in range(1, 21)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+                                  setup_seconds=lambda host: 360 if host.number <= 10 else 67)
+            budget = self.shared_budget()
+            windows = self.boot_windows(budget)
+            self.run_phase(Path(temporary), fleet, "smoke", ["boot"], 20, 10,
+                           purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+            # The late wave halved the window, and no host launched until the late hosts reported; the next wave of
+            # five reported in time and doubled it.
+            self.assertEqual([10, 5, 10], windows)
+            launched = sorted(host.launched_at for host in fleet.hosts)
+            self.assertEqual(20, len(launched))
+            self.assertGreaterEqual(launched[10], launched[0] + 360)
+
     def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
         units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
                                       "estimated_seconds": "900",
                                       "groups": [{"group_id": "1", "estimated_seconds": 900}]}
                  for shard, count in (("short", 1), ("long", 4)) for index in range(1, count + 1)}
-        fixture = test_fleet_budget.TestFleetBudget()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        fixture.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
-        fixture.path.write_text(json.dumps(fixture.policy))
-        budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
-        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log, \
-                patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
-                             return_value={"quota": 736, "instances": [], "requests": []}):
+        budget = self.shared_budget()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             # Two phases share the fleet. The smoke phase's two hosts measure a unit each and stop: the r8i host's
             # prefix will not empty, and the r9g host's instance never terminates. The primary phase's four hosts
             # measure 15-minute units meanwhile.

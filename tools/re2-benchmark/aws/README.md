@@ -211,6 +211,15 @@ policy and state together across restarts. Every execution requires this
 shared policy. Ramp from canaries to the approved cap, using the configured
 pending-launch limit and frozen launch interval.
 
+The shared state's boot window also paces launches: it caps the fleet's hosts
+launched but not yet reporting, across every collector, so a bad image,
+region, or user-data change costs at most one window of hosts before it
+shows. The window starts at 10. Its wave is the hosts admitted since it last
+changed; once as many of them as it holds report within 5 minutes of launch,
+it doubles, up to 50, and once any is late, or ends before it reported for a
+reason other than a Spot reclaim, it halves, down to 5. A launch it refuses
+waits with reason `boot window`.
+
 The controller defaults to 64 concurrent workers. Set `--max-concurrent` and
 `--max-concurrent-per-platform` for the planned campaign; the shared policy
 and live quota checks enforce aggregate capacity across collectors. Multicore

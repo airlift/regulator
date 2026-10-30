@@ -22,6 +22,12 @@ REGION_PATTERN = r"[a-z]+(?:-[a-z]+)+-[0-9]+"
 # Every On-Demand launch leaves this much of its region's On-Demand quota free.
 ON_DEMAND_VCPU_SAFETY_RESERVE = 32
 STATE_FILE = "fleet-state.json"
+# The boot window's first, smallest and largest number of hosts launched but not yet reporting, and how soon after its
+# launch a host must report.
+BOOT_WINDOW_FIRST = 10
+BOOT_WINDOW_MIN = 5
+BOOT_WINDOW_MAX = 50
+BOOT_REPORT_SECONDS = 5 * 60
 
 
 class BudgetError(RuntimeError):
@@ -180,6 +186,46 @@ def capacity(snapshot, reservations, policy, *, region=None, market="spot", reme
             "pending_launches": pending}
 
 
+class BootWindow:
+    """How many of the fleet's hosts may be launched but not yet reporting, which bounds what a bad image, region or
+    user data costs before it shows.
+
+    The window starts at BOOT_WINDOW_FIRST. Its wave is the hosts admitted since it last changed: once as many of
+    them as it holds have reported within BOOT_REPORT_SECONDS of their launch, it doubles, up to BOOT_WINDOW_MAX; once
+    any is late, or ends before reporting for a reason other than a Spot reclaim, it halves, down to BOOT_WINDOW_MIN.
+    It lives in the fleet state, so it holds across every campaign the fleet runs, and counts the reservations whose
+    hosts have not reported."""
+
+    def __init__(self, state, now):
+        self.reservations = state["reservations"]
+        self.window = state.setdefault("boot_window", {"size": BOOT_WINDOW_FIRST, "changed_at": 0, "healthy": 0})
+        if any(self.member(item) and now - item["started_at"] > BOOT_REPORT_SECONDS for item in self.booting()):
+            self.change(self.window["size"] // 2, now)
+
+    def booting(self):
+        return [item for item in self.reservations.values() if "reported_at" not in item]
+
+    def member(self, item):
+        return "reported_at" not in item and item["started_at"] >= self.window["changed_at"]
+
+    def room(self):
+        return max(0, self.window["size"] - len(self.booting()))
+
+    def report(self, item, now):
+        if self.member(item):
+            self.window["healthy"] += 1
+            if self.window["healthy"] >= self.window["size"]:
+                self.change(self.window["size"] * 2, now)
+        item["reported_at"] = now
+
+    def fail(self, item, now):
+        if self.member(item):
+            self.change(self.window["size"] // 2, now)
+
+    def change(self, size, now):
+        self.window.update(size=min(BOOT_WINDOW_MAX, max(BOOT_WINDOW_MIN, size)), changed_at=now, healthy=0)
+
+
 def refuse_halted(state):
     """Refuse to go on while any owner's halt stands."""
     if state.get("halts"):
@@ -236,6 +282,8 @@ class FleetBudget:
                 raise BudgetError("host epoch already used by the shared fleet")
             if "spending_stop" in state:
                 return False, "spending_stop"
+            if not BootWindow(state, now).room():
+                return False, "boot window"
             active = state["reservations"]
             policy = self.policy
             if len(active) >= policy["max_hosts"] or now - state["last_launch_at"] < policy["minimum_launch_interval_seconds"]:
@@ -292,6 +340,26 @@ class FleetBudget:
             state["machine_hours"] += hours
             state["cost_usd"] += hours * item["hourly_rate"]
             state["completed"][key] = {**item, "finished_at": now, "machine_hours": hours}
+
+    def report_boots(self, campaign_id, host_epochs, now=None):
+        """Record that the campaign's hosts of host_epochs reported; returns how many more hosts the boot window
+        admits."""
+        now = time.time() if now is None else now
+        with self.locked() as state:
+            window = BootWindow(state, now)
+            for host_epoch in host_epochs:
+                item = state["reservations"].get(reservation_key(campaign_id, host_epoch))
+                if item is not None and "reported_at" not in item:
+                    window.report(item, now)
+            return window.room()
+
+    def boot_failed(self, campaign_id, host_epoch, now=None):
+        """Record that the campaign's host ended before it reported, for a reason other than a Spot reclaim."""
+        now = time.time() if now is None else now
+        with self.locked() as state:
+            item = state["reservations"].get(reservation_key(campaign_id, host_epoch))
+            if item is not None:
+                BootWindow(state, now).fail(item, now)
 
     def reservations(self, owner):
         with self.locked() as state:
