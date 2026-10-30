@@ -79,7 +79,8 @@ class TestRunCampaign(unittest.TestCase):
             max_concurrent=maximum_concurrent,
             candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="0" * 64,
-            engine_tree="d" * 40)
+            engine_tree="d" * 40,
+            transfer_buckets={region: "bucket" for region in RUN_CAMPAIGN.default_regions()})
 
     def test_platform_limit_applies_independently_of_global_capacity(self):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
@@ -122,11 +123,6 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
         arguments = SimpleNamespace(phase="build", engine_builds=Path("builds"))
         with self.assertRaisesRegex(SystemExit, "apply only to measuring phases"):
-            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
-        arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"),
-                                    platform_regions={"r8i": ["us-west-2", "us-east-2"]},
-                                    transfer_buckets={"us-west-2": "bucket"})
-        with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
 
     def test_measuring_campaign_installs_builds_of_its_candidate_and_build_inputs(self):
@@ -190,7 +186,6 @@ class TestRunCampaign(unittest.TestCase):
                     change(builds)
                 arguments = SimpleNamespace(
                     phase="smoke", campaign_id="language", heap_size="16g", engine_builds=builds,
-                    platform_regions={"r8i": ["us-west-2"]}, transfer_buckets={"us-west-2": "bucket"},
                     candidate_commit=candidate, candidate_archive_sha256="5" * 64)
                 if error is None:
                     RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
@@ -252,6 +247,26 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual({(bucket, key): sha256 for (bucket, key), (_, _, sha256) in aws.objects.items()
                                       if bucket == "west"},
                                      {(bucket, key): key.split("/")[-1].split(".")[0] for bucket, key in puts})
+
+    def test_candidate_archive_is_shared_by_content_once_per_region(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "candidate.tar.gz"
+            archive.write_bytes(b"candidate")
+            sha256 = hashlib.sha256(b"candidate").hexdigest()
+            aws = FakeCloud()
+            arguments = SimpleNamespace(
+                platform_regions={"r8i": ["us-west-2", "us-east-2"]},
+                transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
+                candidate_archive=archive, candidate_archive_sha256=sha256, cloud=aws)
+            jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
+            with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), contextlib.redirect_stdout(io.StringIO()):
+                RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
+                # A later phase of the campaign finds each copy in place.
+                RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
+            key = f"prefix/candidates/{sha256}.tar.gz"
+            self.assertEqual({("west", key): sha256, ("east", key): sha256},
+                             {name: checksum for name, (_, _, checksum) in aws.objects.items()})
+            self.assertEqual(2, sum(call[0] == "put" for call in aws.calls))
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
         environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
@@ -1168,9 +1183,6 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual(" ".join(f"{name}={archives[name]['sha256']}" for name in expected),
                                      environment["ENGINE_BUILD_ARCHIVES"])
                     self.assertEqual(expected_bundles, environment.get("LANGUAGE_PLAN_BUNDLE_SHA256S", ""))
-                    # Every phase's workers carry the one copy of the JDK staged under the campaign root.
-                    self.assertEqual(str(root.resolve() / "campaign" / "jdks" / f"{self.platform.jdk_sha256}.tar.gz"),
-                                     environment["BENCHMARK_JAVA_ARCHIVE"])
 
     def test_shared_transfer_bucket_requires_prefix(self):
         result = subprocess.run(
@@ -1183,7 +1195,7 @@ class TestRunCampaign(unittest.TestCase):
                 "TRANSFER_BUCKET": "benchmark-transfer"})
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("TRANSFER_PREFIX is required", result.stderr)
+        self.assertIn("TRANSFER_BUCKET and TRANSFER_PREFIX are required", result.stderr)
 
     def test_shared_transfer_prefix_must_be_safe(self):
         result = subprocess.run(
@@ -1328,7 +1340,7 @@ class TestRunCampaign(unittest.TestCase):
                 arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
                 arguments.platform_regions = {"r8i": regions}
                 arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
-                arguments.transfer_buckets = {"ap-south-1": "bucket-mumbai"}
+                arguments.transfer_buckets = {region: "bucket-" + region for region in regions}
                 arguments.shared_budget = self.shared_fleet(["eu-west-1", "ap-south-1"])
                 aws = arguments.cloud = FakeCloud()
                 if scored:
@@ -1342,7 +1354,7 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(environment["AWS_REGION"], expected_region)
                 self.assertEqual(environment["CAMPAIGN_PLACEMENT_SCORE"], expected_score)
                 self.assertEqual(environment["BENCHMARK_INTEL_AMI_ID"], "ami-" + expected_region)
-                self.assertEqual(environment.get("TRANSFER_BUCKET"), "bucket-mumbai" if scored else None)
+                self.assertEqual(environment["TRANSFER_BUCKET"], "bucket-" + expected_region)
 
     def test_spot_placement_leaves_out_regions_that_found_no_capacity(self):
         # With no region left, the pool has no Spot placement; with one left, no score is asked for.
@@ -1431,6 +1443,11 @@ class TestRunCampaign(unittest.TestCase):
         arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
                                                           "spot_vcpu_reserve": 16})
         arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 16
+        # Hosts read their inputs from a shared bucket in their own region.
+        with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-west-2'\]"):
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
+        arguments.transfer_buckets = {"us-west-2": "west"}
+        self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 0
         with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
@@ -1443,6 +1460,7 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "allows no On-Demand in a region of r8i"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.platform_regions["r8i"].append("eu-west-1")
+        arguments.transfer_buckets["eu-west-1"] = "ireland"
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A platform launches only in regions holding its image.
         arguments.regional_amis = {("r8i", "us-west-2"): "ami", ("r9g", "eu-west-1"): "ami"}
@@ -1527,7 +1545,8 @@ class TestRunCampaign(unittest.TestCase):
                 candidate_archive=candidate_archive,
                 candidate_archive_sha256="0" * 64,
                 engine_tree="d" * 40,
-                result_root=root)
+                result_root=root,
+                transfer_buckets={region: "bucket" for region in RUN_CAMPAIGN.default_regions()})
             job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
 
             arguments.phase = "smoke"
@@ -1648,7 +1667,9 @@ class TestRunCampaign(unittest.TestCase):
                                             str(root / "plan"), "--candidate", "lifecycle=HEAD",
                                             "--campaign-root", str(root), "--execute",
                                             "--fleet-budget", str(fleet_policy.path), "--spot-vcpu-reserve", "0",
-                                            "--purchase", "r8i=spot", "--purchase", "r9g=spot"]), \
+                                            "--purchase", "r8i=spot", "--purchase", "r9g=spot",
+                                            "--transfer-bucket", f"{RUN_CAMPAIGN.default_regions()[0]}=bucket"]), \
+                    patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
                     RUN_CAMPAIGN.controller_lock(root / "lifecycle/lang/smoke", RUN_CAMPAIGN.DRIVER_CHILD), \
                     patch.object(RUN_CAMPAIGN, "validate_source") as setup, contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as busy:
@@ -2091,12 +2112,13 @@ jdk_archive_sha256() { :; }
 create_user_data() { :; }
 retry_cleanup_command() { printf 'removed %s\\n' "$2" >&2; }
 verify_aws_resource_absent() { printf 'verified %s\\n' "$1" >&2; }
+verify_bucket_prefix_absent() { printf 'verified prefix %s\\n' "${OBJECT_PREFIX}" >&2; }
 sleep() { :; }
 SESSION_ID=session LOWER_SESSION_ID=session VPC_ID=vpc-test INSTANCE_MARKET_TYPE=on-demand AWS_PROFILE=
 FAILURE_CLASSIFICATION=none FAILURE_DETAIL= LAUNCH_ATTEMPTED=0 LAUNCH_AMBIGUOUS=0 INSTANCE_IDS=()
-INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket BUCKET_OWNED=1
+INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket
 AWS_REGION=us-east-2 INTEL_AVAILABILITY_ZONE=none ARM_AVAILABILITY_ZONE=none CAMPAIGN_PLACEMENT_SCORE=9
-OBJECT_PREFIX= CAMPAIGN_MODE=unit-worker CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
+OBJECT_PREFIX=campaign/session CAMPAIGN_MODE=unit-worker CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
 CAMPAIGN_SHARD_ID=unit-worker CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
 DOWNLOADED_RESULT_COUNT=0
 launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
@@ -2127,9 +2149,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                             "intel_availability_zone", "placement_score")],
                         ["verified", "verified", "verified", "us-east-2", "us-east-2b", "9"])
                     self.assertLessEqual(
-                        {"removed delete-instance-profile", "removed delete-role", "removed delete-bucket",
+                        {"removed delete-instance-profile", "removed delete-role", "removed rm",
                          "verified instance profile test-profile", "verified role test-role",
-                         "verified bucket test-bucket"},
+                         "verified prefix campaign/session"},
                         set(result.stderr.splitlines()))
                 else:
                     self.assertIn("Cleanup refused", result.stderr)
@@ -2189,8 +2211,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             source.index("record_failure_classification()\n{"):
             source.index("\n}\n\nspot_request_status()") + 2]
         # Cleanup runs at two points. Before setup created anything, as after a failed default VPC or
-        # security group lookup, or a refused frozen input. After setup created the bucket and instance
-        # profile, as after a launch that failed before its RunInstances request.
+        # security group lookup, or a refused frozen input. After setup chose the session's prefix in the
+        # shared bucket and created its instance profile, as after a launch that failed before RunInstances.
         for created, failure, classification in (
                 (False, "false", "retryable-infrastructure"),
                 (True, "false", "retryable-infrastructure"),
@@ -2209,8 +2231,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     f"INSTANCE_PROFILE_NAME={resources}\n"
                     f"INSTANCE_ROLE_NAME={resources}\n"
                     f"BUCKET={resources}\n"
-                    f"BUCKET_OWNED={int(created)}\n"
-                    "OBJECT_PREFIX=\n"
+                    f"OBJECT_PREFIX={resources}\n"
                     "CAMPAIGN_MODE=unit-worker\n"
                     "CAMPAIGN_ID=baseline\n"
                     "CAMPAIGN_PLATFORM=r8i\n"
@@ -2220,6 +2241,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     "DOWNLOADED_RESULT_COUNT=0\n"
                     "retry_cleanup_command() { printf 'removed %s\\n' \"$2\" >&2; }\n"
                     "verify_aws_resource_absent() { printf 'verified %s\\n' \"$1\" >&2; }\n"
+                    "verify_bucket_prefix_absent() { printf 'verified prefix %s\\n' \"${OBJECT_PREFIX}\" >&2; }\n"
                     f"{classification_function}\n"
                     f"{cleanup_function}\n"
                     "trap cleanup EXIT\n"
@@ -2240,8 +2262,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 self.assertEqual(cleanup["failure_classification"], classification)
                 if created:
                     self.assertLessEqual(
-                        {"removed delete-instance-profile", "removed delete-role", "removed delete-bucket",
-                         "verified instance profile test", "verified role test", "verified bucket test"},
+                        {"removed delete-instance-profile", "removed delete-role", "removed rm",
+                         "verified instance profile test", "verified role test", "verified prefix test"},
                         set(result.stderr.splitlines()))
 
     def semantic_verifier_script(self, source, directory):
@@ -3169,13 +3191,15 @@ class TestUnitWorkers(unittest.TestCase):
             budget.extend.side_effect = extend_reservation
             budget.reservations.return_value = fleet.reservations or []
         self.budget = budget
+        regions = {region for listed in (platform_regions or {}).values() for region in listed}
         arguments = SimpleNamespace(
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
             candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             cloud=fleet, shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
             purchases=purchases or {}, topology_deadline_seconds=deadline, primary_results=primary_results,
-            release_version=release_version)
+            release_version=release_version,
+            transfer_buckets={region: "bucket" for region in regions | set(RUN_CAMPAIGN.default_regions())})
         self.arguments = arguments
         items = RUN_CAMPAIGN.build_work_items(phase, self.PLATFORMS, fleet.units, shards, confirmations)
         result_root = root / "results"

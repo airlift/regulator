@@ -472,23 +472,26 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --campaign-root /durable/path/<campaign>
 ```
 
+Every execution requires a shared transfer bucket in every launch region and
+`TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The
+examples below run in one region with one shared bucket.
+
 Build each platform's engines once before the smoke. The build phase leases
 one `engine-build` unit per platform to a unit worker of its pinned instance
 type and AMI; see [engine builds](#engine-builds):
 
 ```bash
+TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   build <campaign> --execute --candidate <name>=<commit> \
   --campaign-root /durable/path/<campaign> \
+  --transfer-bucket us-west-2=<bucket> \
   --purchase r8i=spot --purchase r9g=spot \
   --spot-vcpu-reserve 16 --fleet-budget /durable/path/fleet-policy.json
 ```
 
 A measuring phase installs the candidate's build, or the accepted build
-`--engine-builds` names. Installing builds requires a shared transfer bucket
-in every launch region and `TRANSFER_PREFIX`; see
-[launch regions](#launch-regions-and-purchase). The examples below run in one
-region with one shared bucket.
+`--engine-builds` names.
 
 Execute the smoke after inspecting the smoke plan above:
 
@@ -614,8 +617,8 @@ then Mumbai, since equal scores keep the list's order. r9g launches Spot in
 its best-scored region, Ohio before Frankfurt at equal scores, and after a
 15-minute shortage turns to On-Demand, which the policy allows only in Oregon.
 Each region needs the platform's AMI in `platform-regions.tsv`, a shared
-transfer bucket for the engine build, and a shared policy entry, and the
-policy's `on_demand_max_vcpus` bounds r9g's On-Demand hosts in Oregon.
+transfer bucket, and a shared policy entry, and the policy's
+`on_demand_max_vcpus` bounds r9g's On-Demand hosts in Oregon.
 
 `platforms.tsv` pins each AMI by its ID in `us-west-2`. Preflight resolves that
 image's name and requires each launch region's AMI in `platform-regions.tsv`
@@ -632,17 +635,15 @@ aws ec2 describe-images --region <region> --owners 137112412989 --include-deprec
   --query 'Images[0].ImageId' --output text
 ```
 
-Hosts read campaign inputs from a bucket in their launch region. Without a
-shared bucket, each session creates and removes its own bucket there. To reuse
-shared buckets, give each region's bucket with `--transfer-bucket REGION=BUCKET`
-and set `TRANSFER_PREFIX`; regions without one use per-session buckets, but
-installing an engine build requires one in every launch region. Each shared
-bucket must carry the `Project=regulator-benchmark` tag, and preflight checks
-the tag and the bucket's region. A single-region campaign may still set
-`TRANSFER_BUCKET`; a multi-region campaign must use `--transfer-bucket` instead.
-Every session uploads its own inputs to its bucket, except the engine build
-archives described below. To create a shared bucket, omitting
-`--create-bucket-configuration` in `us-east-1`:
+Hosts read campaign inputs from a shared bucket in their launch region. Give
+each launch region's bucket with `--transfer-bucket REGION=BUCKET` and set
+`TRANSFER_PREFIX`; the controller refuses to launch in a region without one.
+Each shared bucket must carry the `Project=regulator-benchmark` tag, and
+preflight checks the tag and the bucket's region. Each session keeps its
+leases and results under its own prefix, `TRANSFER_PREFIX/<session>`, and
+cleanup removes that prefix; the shared archives described below stay. To
+create a shared bucket, omitting `--create-bucket-configuration` in
+`us-east-1`:
 
 ```bash
 aws s3api create-bucket --bucket <bucket> --region <region> \
@@ -723,11 +724,12 @@ and the runners in `language-native/` under the shared work directory, and
 records the manifest and installed archives beside the host evidence and in
 each route.
 
-Preflight names each launch region that lacks the shared transfer bucket an
-engine build requires. Before it launches any host, the controller puts each
-archive once in every region that may launch a host installing it, under
+Before it launches any host, the controller puts each archive once in every
+region that may launch a host installing it, under
 `TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips an object with that
-key and checksum. A language plan's bundle, which a language unit worker
+key and checksum. The frozen candidate archive, which every host unpacks first,
+travels the same way under `TRANSFER_PREFIX/candidates/<sha256>.tar.gz`. A
+language plan's bundle, which a language unit worker
 installs, travels the same way under
 `TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; the wrapper takes the bundles
 of a session's own pool shards in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the
@@ -735,7 +737,7 @@ candidate provenance their units measure. The platform's pinned JDK travels the
 same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
 it once per campaign from its pinned URL into the campaign root's `jdks/`,
 checks it against the pinned SHA-256, and puts it in each region, so hosts never
-fetch it from its publisher. A session without a shared bucket uploads it with its own inputs.
+fetch it from its publisher.
 Each upload is one request, which fails once a read waits 60 seconds, and is
 retried; the campaign stops after three failed attempts. A
 session whose archive is missing from its bucket fails as
@@ -745,6 +747,7 @@ archives are campaign inputs rather than session resources, so session cleanup
 leaves them in place. Remove them once the campaign is done:
 
 ```bash
+aws s3 rm "s3://<bucket>/<transfer-prefix>/candidates/" --recursive --region <region>
 aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
 aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region <region>
 aws s3 rm "s3://<bucket>/<transfer-prefix>/jdks/" --recursive --region <region>
@@ -758,8 +761,8 @@ wrapper reads only its environment; the controller names it with the campaign
 ID and the job's identity as its arguments, so a restarted controller adopts
 only its own campaign's wrappers. The
 wrapper verifies the archive, provisions an isolated
-instance, uploads inputs through a private temporary S3 location, downloads the
-result, and verifies instance, IAM, and S3 cleanup.
+instance that reads its inputs from the region's shared bucket, downloads the
+result, and verifies instance, IAM, and session prefix cleanup.
 
 The fleet controller should normally invoke this wrapper. Direct invocation is
 appropriate only while diagnosing one qualification job and still requires all

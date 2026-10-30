@@ -1,9 +1,9 @@
 # Permanent baseline artifact archive
 
 `archive_results.py` preserves a complete accepted campaign outside the local
-checkout. This permanent archive is separate from the temporary S3 buckets
-used to transfer host results. Those buckets must still be deleted and pass
-the cleanup checks.
+checkout. This permanent archive is separate from the temporary session
+prefixes in the shared transfer buckets that carry host results. Those
+prefixes must still be deleted and pass the cleanup checks.
 
 ## Archive format
 
