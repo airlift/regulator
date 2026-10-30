@@ -21,6 +21,21 @@ def fsync_directory(path):
         os.close(descriptor)
 
 
+def append_ledger(path, fields, row):
+    """Append one row to a TSV ledger durably, writing its header first when the ledger is new."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = not path.exists()
+    with path.open("a", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        if created:
+            writer.writeheader()
+        writer.writerow(row)
+        output_file.flush()
+        os.fsync(output_file.fileno())
+    if created:
+        fsync_directory(path.parent)
+
+
 def write_ledger(path, rows, fields,
                  key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"]))):
     """Replace a TSV ledger with its rows, durably, in key order."""

@@ -15,7 +15,8 @@ import tempfile
 from pathlib import Path
 
 import unit_session
-from campaign_io import UnsafeCampaignError, fsync_directory, write_ledger
+from cloud import CloudError
+from campaign_io import UnsafeCampaignError, append_ledger, fsync_directory, write_ledger
 
 # A lease row's groups are those it leased, in run order; an outcome row's are those whose markers it processed.
 UNIT_ATTEMPT_FIELDS = (
@@ -34,20 +35,6 @@ UNIT_UPLOADS = "unit-uploads.tsv"
 UPLOAD_TIMING_FIELDS = ("result_bytes", "pack_seconds", "upload_seconds", "upload_attempts")
 UNIT_UPLOAD_FIELDS = ("platform", "unit_id", "replica", "group_id", "host_session", "sequence", *UPLOAD_TIMING_FIELDS)
 UNRESOLVED_UNIT_FIELDS = ("platform", "unit_id", "replica", "detail")
-
-
-def accepted_row(rows, receipt, identity, attempt_field, attempts):
-    """The ledger row already accepted for the receipt's logical identity, or None; it must be the receipt.
-
-    attempt_field names the field, and attempts the plural, that tell two attempts of one identity apart.
-    """
-    logical_identity = identity(receipt)
-    existing = next((row for row in rows if identity(row) == logical_identity), None)
-    if existing is not None and existing != receipt:
-        raise UnsafeCampaignError(
-            f"conflicting accepted receipts for {logical_identity}: "
-            f"{attempts} {existing[attempt_field]} and {receipt[attempt_field]}")
-    return existing
 
 
 def unit_logical_identity(receipt):
@@ -97,17 +84,10 @@ def read_accepted_units(path):
     return rows
 
 
-def persist_accepted_unit(path, receipt_path):
-    """Append one accepted group's receipt to accepted-units.tsv atomically."""
-    receipt = read_unit_receipt(receipt_path)
-    rows = read_accepted_units(path)
-    if accepted_row(rows, receipt, group_identity, "unit_attempt_id", "attempts") is not None:
-        return receipt
-    if any(group_attempt(row) == group_attempt(receipt) for row in rows):
-        raise UnsafeCampaignError(f"unit attempt {group_attempt(receipt)} is accepted for another unit")
-    write_ledger(path, [*rows, receipt], unit_session.UNIT_RECEIPT_FIELDS, lambda row: (
-        row["platform"], row["shard_id"], row["unit_id"], int(row["replica_id"]), int(row["group_id"])))
-    return receipt
+def persist_accepted_unit(path, receipt):
+    """Append one accepted group's receipt to accepted-units.tsv durably. The controller accepts each group once,
+    so the ledger grows by a row per acceptance rather than being rewritten."""
+    append_ledger(path, unit_session.UNIT_RECEIPT_FIELDS, receipt)
 
 
 def read_unit_uploads(path):
@@ -120,17 +100,16 @@ def read_unit_uploads(path):
         return list(reader)
 
 
-def persist_unit_upload(path, item, host_session, sequence, marker):
-    """Record a group's upload timings from its completion marker, once per marker."""
-    rows = read_unit_uploads(path)
-    row = {"platform": item.platform, "unit_id": item.unit_id, "replica": str(item.replica),
-           "group_id": marker["group_id"], "host_session": host_session, "sequence": str(sequence),
-           **{field: str(marker[field]) for field in UPLOAD_TIMING_FIELDS}}
-    if any((existing["host_session"], existing["sequence"], existing["group_id"]) ==
-           (host_session, str(sequence), marker["group_id"]) for existing in rows):
-        return
-    write_ledger(path, [*rows, row], UNIT_UPLOAD_FIELDS,
-                 lambda row: (row["host_session"], int(row["sequence"]), int(row["group_id"])))
+def unit_upload_row(item, host_session, sequence, marker):
+    """A group's upload timings from its completion marker, as a row of unit-uploads.tsv."""
+    return {"platform": item.platform, "unit_id": item.unit_id, "replica": str(item.replica),
+            "group_id": marker["group_id"], "host_session": host_session, "sequence": str(sequence),
+            **{field: str(marker[field]) for field in UPLOAD_TIMING_FIELDS}}
+
+
+def persist_unit_upload(path, row):
+    """Append a group's upload timings to unit-uploads.tsv durably; the controller records each marker once."""
+    append_ledger(path, UNIT_UPLOAD_FIELDS, row)
 
 
 def read_unit_attempts(path):
@@ -236,6 +215,11 @@ def result_key(sequence, group):
     return f"units/{sequence}/groups/{group}/result.tar.gz"
 
 
+def lease_key(metadata, sequence):
+    """A worker's lease's full key in its bucket."""
+    return f"{metadata['input_prefix']}/leases/{sequence}.json"
+
+
 def recovered_keys(objects):
     """The keys of a worker's uploads that its cleanup recovered into objects."""
     return {path.relative_to(objects).as_posix() for path in objects.rglob("*") if path.is_file()}
@@ -259,7 +243,7 @@ def put_unit_lease(arguments, worker, sequence, document):
     the sequence as its own stop. Any other lease already written, before a restart or a lost response, must hold
     this same document."""
     region, bucket = worker.metadata["aws_region"], worker.metadata["bucket"]
-    key = f"{worker.metadata['input_prefix']}/leases/{sequence}.json"
+    key = lease_key(worker.metadata, sequence)
     body = json.dumps(document, sort_keys=True) + "\n"
     if arguments.cloud.put(region, bucket, key, body.encode(), if_none_match=True):
         return True
@@ -276,6 +260,21 @@ def put_unit_lease(arguments, worker, sequence, document):
     if isinstance(claim, dict) and claim.get("by") == "worker" and claim.get("stop") is True:
         return False
     raise UnsafeCampaignError(f"unit worker {worker.host_session} lease {sequence} differs from its ledger")
+
+
+def write_leases(arguments, worker, documents):
+    """Write a worker's leases, each a (sequence, document), in order with put_unit_lease, until one cannot be written
+    or the host holds no more; returns each written sequence with whether the host holds it."""
+    written = []
+    for sequence, document in documents:
+        try:
+            held = put_unit_lease(arguments, worker, sequence, document)
+        except (CloudError, OSError):
+            break
+        written.append((sequence, held))
+        if not held:
+            break
+    return written
 
 
 def extract_unit_result(archive, directory):
