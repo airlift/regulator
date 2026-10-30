@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import copy
+import io
 import json
 from operator import itemgetter
 from pathlib import Path
@@ -228,10 +230,9 @@ class TestFleetBudget(unittest.TestCase):
         with self.assertRaisesRegex(fleet_budget.BudgetError, "do not cover region ap-south-1"):
             reserve(4, "ap-south-1")
 
-    def test_reservation_past_its_end_halts_nothing_and_counts_as_spent_until_released(self):
+    def test_reservation_past_its_end_counts_as_spent_until_released(self):
         # A controller that slept, or died, leaves its host's reservation past its end; the host stopped by then.
         self.reserve(1)
-        self.budget.check()
         # Charged to now, the 1,500 machine-hour ceiling holds no more.
         self.assertEqual((False, "fleet spending or machine-hour ceiling"),
                          self.reserve(2, campaign="language", now=1000 + 1500 * 3600))
@@ -244,18 +245,24 @@ class TestFleetBudget(unittest.TestCase):
 
     def test_spending_stop_refuses_launches_and_extensions_until_cleared(self):
         self.reserve(1)
-        self.budget.stop_spending("instance i-1 did not terminate")
-        # The first reason stands, and the stop halts no controller.
+        # While the settings file does not validate, the stop is not recorded, and the controller logs why and goes
+        # on to try again.
+        settings = self.budget.settings.path.read_text()
+        self.budget.settings.path.write_text("{}\n")
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            self.assertFalse(self.budget.stop_spending("instance i-1 did not terminate"))
+        self.assertIn("cannot record spending stop: instance i-1 did not terminate in the campaign settings: ",
+                      log.getvalue())
+        self.budget.settings.path.write_text(settings)
+        self.assertTrue(self.budget.stop_spending("instance i-1 did not terminate"))
+        # The first reason stands.
         self.budget.stop_spending("instance i-2 did not terminate")
-        self.budget.check()
         other = fleet_budget.FleetBudget(self.root, CampaignSettings(self.root), 0)
         self.assertEqual((False, "spending_stop"), self.reserve(2, campaign="language", now=1001))
         self.assertEqual((False, "spending_stop"), other.extend("baseline", 1, now=1002, until=9000))
-        # A host keeps what it holds, and verified cleanup still returns it; no owner's resume clears the stop, which
-        # the settings record as the controller's.
+        # A host keeps what it holds, and verified cleanup still returns it; the stop stands, as the controller's.
         self.assertEqual((True, "reserved"), other.extend("baseline", 1, now=1002, until=8200))
         other.release("baseline", 1, cleanup_verified=True, now=1003)
-        other.resume(self.root / "baseline")
         self.assertEqual(("controller", "instance i-1 did not terminate"),
                          itemgetter("by", "reason")(CampaignSettings(self.root).current["spending_stop"]))
         self.assertEqual((False, "spending_stop"), self.reserve(3, campaign="language", now=1004))
@@ -287,33 +294,6 @@ class TestFleetBudget(unittest.TestCase):
         self.assertTrue(launch(12, 1300)[0])
         self.budget.boot_failed("baseline", 12, now=1350)
         self.assertEqual(5, window())
-
-    def test_failure_stops_admission_until_its_owner_cleans_up_and_resumes(self):
-        self.reserve(1)
-        self.assertTrue(self.reserve(2, campaign="language", now=1001)[0])
-        self.budget.halt("semantic disagreement", self.root / "baseline")
-        # The owner's first reason stands.
-        self.budget.halt("cleanup failure", self.root / "baseline")
-        other = fleet_budget.FleetBudget(self.root, CampaignSettings(self.root), 0)
-        # Neither another owner nor the failed one, while its host awaits verified cleanup, clears the halt.
-        for owner in ("language", "baseline"):
-            other.resume(self.root / owner)
-            with self.assertRaisesRegex(RuntimeError, "halted: semantic disagreement$"):
-                other.check()
-        with self.assertRaisesRegex(RuntimeError, "semantic disagreement"):
-            other.reserve("third", self.job(3), self.root / "third", lambda: self.snapshot, 1002, until=8200)
-        # The stop marker must not prevent verified cleanup from returning capacity.
-        other.release("baseline", 1, cleanup_verified=True, now=1003)
-        self.assertEqual(other.reservations(self.root / "baseline"), [])
-        # Another owner's failure stands once the first owner cleaned up and resumed, until it does the same.
-        other.halt("secondary controller failure", self.root / "language")
-        self.budget.resume(self.root / "baseline")
-        with self.assertRaisesRegex(RuntimeError, "halted: secondary controller failure$"):
-            other.check()
-        other.release("language", 2, cleanup_verified=True, now=1004)
-        other.resume(self.root / "language")
-        other.check()
-        self.assertTrue(self.reserve(3, campaign="third", now=1005)[0])
 
 
 if __name__ == "__main__":

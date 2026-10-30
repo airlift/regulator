@@ -2794,9 +2794,10 @@ class TestUnitWorkers(unittest.TestCase):
         phase's dispatcher built as dispatcher builds it with options, its key naming its results, and the campaign's
         budget; loop runs before each of the controller's polls. Returns the steps that failed and each phase's
         dispatcher by key."""
-        settings = self.campaign_settings(root, max_hosts, per_platform, options.get("platform_regions"),
-                                          options.get("purchases"))
-        arguments = SimpleNamespace(settings=settings, shared_budget=self.shared_budget(root, settings))
+        budget = self.shared_budget(root, self.campaign_settings(root, max_hosts, per_platform,
+                                                                 options.get("platform_regions"),
+                                                                 options.get("purchases")))
+        arguments = SimpleNamespace(settings=budget.settings, shared_budget=budget)
         dispatchers = {}
 
         def prepare(phase, _):
@@ -3370,9 +3371,8 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(4, len(primary.workers))
                 launches = len(fleet.launches)
                 run(lambda: not primary.workers)
-                # The stop halted no controller, and the primary phase's hosts finished every lease they held: each
-                # unit leased was accepted. With no extension or launch admitted, its remaining work waits.
-                budget.check()
+                # The primary phase's hosts finished every lease they held: each unit leased was accepted. With no
+                # extension or launch admitted, its remaining work waits.
                 ledger = self.unit_attempts(primary.result_root)
                 self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
                                           if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
@@ -3475,65 +3475,63 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual({epoch: stop_by for epoch, (_, stop_by) in dispatchers[0][1].items()},
                              {epoch: stopped[epoch] for epoch in dispatchers[0][1]})
 
-    def test_cancelled_controller_leaves_the_fleet_running_and_a_failed_one_halts_it_until_its_restart(self):
-        # Two controllers share a fleet; one stops partway, from Ctrl-C, SIGTERM, or a failure, its cleanup verified.
-        def terminated(message):
-            # The signal handler the controller installed, as SIGTERM would run it.
-            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+    def test_resource_the_fleet_cannot_account_for_stops_spending_and_pauses_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
+            # The first look at the fleet finds a Spot request with no instance type. Once the stop stands, Dain
+            # clears it.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts")
+            empty = {"quota": 736, "instances": [], "requests": []}
+            looks = iter([RUN_CAMPAIGN.AccountMismatch("cannot account for a Spot instance or request with no "
+                                                       "instance type")])
 
-        for name, abort, stopped, message in (("Ctrl-C", KeyboardInterrupt, KeyboardInterrupt, "controller stopped"),
-                                              ("SIGTERM", terminated, KeyboardInterrupt, ""),
-                                              ("failure", RuntimeError, RuntimeError, "controller stopped")):
-            with self.subTest(abort=name), tempfile.TemporaryDirectory() as temporary:
-                settings = campaign_settings(Path(temporary), dict.fromkeys(("r8i", "r9g"), ["us-west-2"]),
-                                             {"r8i": "spot", "r9g": "spot"}, max_hosts=3, max_hosts_per_platform=2)
-                other = test_fleet_budget.TestFleetBudget()
-                other.setUp()
-                self.addCleanup(other.doCleanups)
-                other.budget = RUN_CAMPAIGN.FleetBudget(Path(temporary), settings, 0)
-                fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
-                fleet.abort = abort
-                with self.assertRaisesRegex(stopped, message), \
-                        RUN_CAMPAIGN.controller_lock(Path(temporary)):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1, shared=True)
-                budget = self.budget
-                self.assertEqual([], budget.reservations(Path(temporary) / "results"))
-                if stopped is RuntimeError:
-                    # A failure halts the fleet, and only its own controller's restart clears that halt.
-                    other.budget.resume(other.root / "other")
-                    with self.assertRaisesRegex(RuntimeError, "shared fleet is halted: controller stopped"):
-                        other.reserve(1, campaign="other", now=fleet.time())
-                else:
-                    self.assertTrue(other.reserve(1, campaign="other", now=fleet.time())[0])
-                fleet.abort_after = None
-                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1, shared=True)
-                self.assertTrue(other.reserve(2, campaign="other", now=fleet.time())[0])
+            def snapshot(*_):
+                look = next(looks, empty)
+                if isinstance(look, Exception):
+                    raise look
+                return look
 
-    def test_cancelled_controller_with_a_host_awaiting_cleanup_halts_the_fleet_until_its_own_restart(self):
-        # A controller cancelled before its recovery adopted a host that an earlier run left halts the fleet, since
-        # that host still awaits cleanup.
-        fixture = test_fleet_budget.TestFleetBudget()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        fixture.reserve(1)
-        RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "baseline", fixture.budget, lambda: None, KeyboardInterrupt())
-        with self.assertRaisesRegex(RuntimeError,
-                                    "halted: KeyboardInterrupt; hosts of .* await verified cleanup") as halted:
-            fixture.budget.check()
-        # Another controller that observes the halt and proves its cleanup stops without recording one of its own.
-        RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "language", fixture.budget, lambda: None, halted.exception)
-        self.assertEqual([str((fixture.root / "baseline").resolve())],
-                         list(json.loads(fixture.budget.state_path.read_text())["halts"]))
-        # One that cannot prove its own cleanup records its own halt, which outlasts the first owner's restart.
-        def unproven():
-            raise RuntimeError("cleanup could not be proven for unit workers r8i/unit-worker/replica-1")
+            stops = []
 
-        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cleanup could not be proven"):
-            RUN_CAMPAIGN.halt_and_clean_up(fixture.root / "confirmation", fixture.budget, unproven, halted.exception)
-        fixture.budget.release("baseline", 1, cleanup_verified=True)
-        fixture.budget.resume(fixture.root / "baseline")
-        with self.assertRaisesRegex(RuntimeError, "halted: .*cleanup could not be proven"):
-            fixture.budget.check()
+            def loop():
+                if CampaignSettings(root).current["spending_stop"]:
+                    stops.append(CampaignSettings(root).current["spending_stop"]["reason"])
+                    self.control(root, "clear-spending-stop")
+
+            self.shared_budget(root, self.campaign_settings(root, 2, 1))
+            with patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot", side_effect=snapshot):
+                failed, dispatchers = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"],
+                                                                       ())], 2, 1, loop)
+            self.assertEqual(["cannot account for a Spot instance or request with no instance type"], stops)
+            self.assertNotIn("paused", log.getvalue())
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["smoke"])
+
+    def test_sigterm_stops_only_the_controller_and_the_next_one_adopts_its_hosts(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
+            # SIGTERM reaches the controller two polls in, while its hosts measure their first leases.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts")
+            phases = [("smoke", "smoke", ["trino-like-specialized"], ())]
+
+            def loop():
+                if fleet.sleeps == 2:
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+            # It ends cleanly with one line, its hosts still running with their reservations held.
+            self.assertEqual([], self.run_campaign(root, fleet, phases, 2, 1, loop)[0])
+            self.assertEqual(1, log.getvalue().count("controller stopped by SIGTERM"))
+            sessions = {host.session for host in fleet.hosts}
+            self.assertEqual((2, sessions), (len(self.budget.reservations(root / "smoke")),
+                                             {host.session for host in fleet.hosts if host.status is None}))
+            # The next controller adopts them, leasing nothing twice, and finishes the phase.
+            failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1)
+            self.ledger = self.unit_attempts(dispatchers["smoke"].result_root)
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["smoke"])
+            self.assertLessEqual(sessions, {row["host_session"] for row in self.leases("accepted")})
+            leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
+            self.assertEqual(len(leased), len(set(leased)))
 
     def test_phase_launched_by_the_per_host_wrapper_is_refused(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3743,21 +3741,46 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(1, self.lease_count(rejected.leases[1]))
                 self.assertEqual(0, rejected.status)
 
-    def test_completion_marker_unlike_its_lease_stops_the_campaign(self):
-        # A marker that names another campaign, or lacks a field the controller reads, is not evidence of
-        # this lease, so the controller stops every worker rather than judge the unit.
+    def test_completion_marker_unlike_its_lease_pauses_only_its_phase(self):
+        # A marker that names another campaign, or lacks a field the controller reads, is not evidence of this lease,
+        # so the controller pauses the smoke phase rather than judge the unit, while the primary phase finishes. Once
+        # the primary is complete and the paused phase's hosts' cleanup is proven, Dain resumes it, and it pauses
+        # again as its dispatch restarts from its ledgers, since the marker still stands, so he stops the campaign.
         for script, error in (
-                ("foreign-marker", r"unit completion marker campaign-e[0-9]+-[0-9TZ]+/1 group 1 does not match its lease: "
-                                   r"\['campaign_id'\]"),
-                ("partial-marker", r"unit completion marker campaign-e[0-9]+-[0-9TZ]+/1 group 1 lacks \['result_sha256'\]")):
-            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
-                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
-                with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-                self.budget.halt.assert_called_once()
+                ("foreign-marker", r"unit completion marker campaign-e1-[0-9TZ]+/1 group 1 does not match its "
+                                   r"lease: \['campaign_id'\]"),
+                ("partial-marker", r"unit completion marker campaign-e1-[0-9TZ]+/1 group 1 lacks "
+                                   r"\['result_sha256'\]")):
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                root = Path(temporary)
+                fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: script}})
+                resumed = []
+
+                def loop():
+                    if not resumed and (root / "primary" / RUN_CAMPAIGN.PHASE_COMPLETE).exists() and \
+                            not self.budget.reservations(root / "smoke"):
+                        self.control(root, "resume", "smoke")
+                        resumed.append(log.getvalue().count("smoke: paused: "))
+                    elif resumed and log.getvalue().count("smoke: paused: ") > resumed[0]:
+                        self.control(root, "stop")
+
+                failed, dispatchers = self.run_campaign(
+                    root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ()),
+                                  ("primary", "primary", ["like-dfa-single-use"], ())], 4, 2, loop)
+                self.assertEqual([], failed)
+                paused = CampaignSettings(root).current["phases"]["smoke"]
+                self.assertEqual("paused", paused["state"])
+                self.assertRegex(paused["reason"], error)
+                self.assertEqual(([1], 2), (resumed, log.getvalue().count("smoke: paused: ")))
+                # Its hosts finished their leases and stopped, each one's cleanup proven, and the unit was not
+                # accepted.
+                smoke = dispatchers["smoke"]
+                self.assertEqual([], self.budget.reservations(smoke.result_root))
                 self.assertEqual([], [host.session for host in fleet.hosts if host.status is None])
-                self.assertEqual([], self.leases("accepted"))
-                self.assertEqual([], RUN_CAMPAIGN.read_accepted_units(Path(temporary) / "results/accepted-units.tsv"))
+                self.assertNotIn(fleet.hosts[0].leases[1]["unit_id"], {
+                    receipt["unit_id"] for receipt in RUN_CAMPAIGN.read_accepted_units(smoke.accepted_path)})
+                self.assert_accepted(dispatchers["primary"])
 
     def test_semantic_failure_or_protocol_rejection_is_final(self):
         for script, detail in (("semantic-failure", "semantic failure: status 44"),

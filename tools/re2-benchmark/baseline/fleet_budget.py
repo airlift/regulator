@@ -29,9 +29,8 @@ class BudgetError(RuntimeError):
     pass
 
 
-class FleetHalted(BudgetError):
-    """An owner's halt stands, so the fleet admits nothing. A controller that observes it stops and cleans up as a
-    cancelled one does, without recording a halt of its own."""
+class AccountMismatch(BudgetError):
+    """AWS lists a resource the fleet cannot account for, so no region's quota can be trusted for a launch."""
 
 
 def on_demand_regions(settings):
@@ -140,16 +139,11 @@ class BootWindow:
             self.change(self.size() // 2, now)
 
     def change(self, size, now):
+        # A change the settings refuse leaves the wave as it is, so the next look tries it again.
         size = min(self.settings.current["boot_window"]["max"], max(BOOT_WINDOW_MIN, size))
-        self.settings.change("controller", f"boot window {self.size()} to {size}",
-                             lambda settings: settings["boot_window"].update(size=size))
-        self.wave.update(changed_at=now, healthy=0)
-
-
-def refuse_halted(state):
-    """Refuse to go on while any owner's halt stands."""
-    if state.get("halts"):
-        raise FleetHalted("shared fleet is halted: " + "; ".join(state["halts"].values()))
+        if self.settings.controller_change(f"boot window {self.size()} to {size}",
+                                           lambda settings: settings["boot_window"].update(size=size)):
+            self.wave.update(changed_at=now, healthy=0)
 
 
 class FleetBudget:
@@ -193,7 +187,6 @@ class FleetBudget:
         if region not in settings["regions"]:
             raise BudgetError("the campaign settings do not cover region " + region)
         with self.locked() as state:
-            refuse_halted(state)
             if key in state["reservations"] or key in state["completed"]:
                 raise BudgetError("host epoch already used by the shared fleet")
             if settings["spending_stop"]:
@@ -228,7 +221,6 @@ class FleetBudget:
         now = time.time() if now is None else now
         key = reservation_key(campaign_id, host_epoch)
         with self.locked() as state:
-            refuse_halted(state)
             item = state["reservations"].get(key)
             if item is None:
                 raise BudgetError("host epoch holds no shared fleet reservation")
@@ -280,33 +272,13 @@ class FleetBudget:
         with self.locked() as state:
             return [item.copy() for item in state["reservations"].values() if item["owner"] == str(Path(owner).resolve())]
 
-    def halt(self, reason, owner):
-        """Halt every controller's admissions for the owner's failure; each owner's first reason stands."""
-        with self.locked() as state:
-            state.setdefault("halts", {}).setdefault(str(Path(owner).resolve()), reason)
-
-    def resume(self, owner):
-        """Clear the owner's halt, once verified cleanup has released every reservation it holds. The fleet stays
-        halted while another owner's halt stands."""
-        owner = str(Path(owner).resolve())
-        with self.locked() as state:
-            if owner in state.get("halts", {}) and not any(
-                    item["owner"] == owner for item in state["reservations"].values()):
-                del state["halts"][owner]
-
     def stop_spending(self, reason):
         """Stop the fleet's spending, as the controller's settings change: no launch or extension is admitted until
         the stop is cleared, while every host keeps the reservation it holds, so running leases finish. The first
-        reason stands. Unlike a halt, it stops no controller."""
+        reason stands. Returns whether the stop was recorded."""
         stop = {"by": "controller", "at": round(time.time()), "reason": reason}
-        self.settings.change("controller", f"spending stop: {reason}",
-                             lambda settings: settings.update(spending_stop=settings["spending_stop"] or stop))
-
-    def check(self):
-        """Raise FleetHalted while the fleet is halted. A host past its reservation's end is no halt: it stops at its
-        stop time, and its reservation counts as spent until its owner releases it."""
-        with self.locked() as state:
-            refuse_halted(state)
+        return self.settings.controller_change(f"spending stop: {reason}", lambda settings: settings.update(
+            spending_stop=settings["spending_stop"] or stop))
 
 
 def spend_by_owner(state_path, now):
