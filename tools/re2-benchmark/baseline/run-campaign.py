@@ -4526,7 +4526,8 @@ def results_lines(phases, tsv=False):
             writer.writerow(fields)
             lines.append(f"  {fields['ratio']:>6}  {fields['replicas']}  {fields['host_ratios']:<26}  "
                          f"{fields['ratio_1_0']:>6}  {item['platform']:<8} {item['row']}  {fields['flags']}".rstrip())
-    return table.getvalue().splitlines() if tsv else lines
+    # A field may hold a Unicode line separator, which only a newline ends a record at.
+    return table.getvalue().split("\n")[:-1] if tsv else lines
 
 
 def main():
