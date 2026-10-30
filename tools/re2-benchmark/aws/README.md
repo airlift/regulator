@@ -1002,8 +1002,12 @@ its [bounded wait](#launch-regions-and-purchase); a `spot-then-on-demand`
 pool's new workers then launch On-Demand, and Spot resumes in each region once
 its cool-down ends. A restarted controller forgets the cool-downs.
 
-Once a worker's instance is known, the controller writes its first lease and
-keeps one lease written ahead while no idle worker of the pool could take the
+The controller writes a worker's first lease before it launches the host, so
+the host finds its work waiting when its setup ends. It also writes the second
+lease then, unless the pool's idle workers and the workers it may still launch
+could take every queued item, so a burst spreads its first leases across its
+hosts. Once the worker reports, the controller keeps one lease written ahead
+while no idle worker of the pool could take the
 item. Eligible items lease by On-Demand priority, then replica, then remaining
 work: On-Demand work first, then the item of the lowest replica, and of those
 the one with the most estimated work remaining, so the phase has a first
@@ -1045,6 +1049,9 @@ accepted first elsewhere. Other outcomes:
 - A failed group requeues the item's remaining groups. A unit replica gets 3
   attempts across failures, interruptions without progress, and lost hosts,
   then stays unresolved.
+- A worker that has not reported by its boot deadline, 20 minutes after its
+  launch, is stopped, and the leases it was launched with are released
+  without spending an attempt.
 - A worker that fails before its first lease passes its launch slot to a
   replacement. A worker whose uploads include a heartbeat, a completion or an
   interruption bundle has started, even if no heartbeat landed. The host

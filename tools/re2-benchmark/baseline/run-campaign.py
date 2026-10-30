@@ -63,6 +63,7 @@ ON_DEMAND_TAIL_PERCENT = 10
 # A launch whose answer never came, and whose instance no tag query found by the end of its boot allowance, booted
 # nothing.
 LAUNCH_NOT_FOUND = "launched instance was not found"
+BOOT_DEADLINE_MISSED = "worker did not report by its boot deadline"
 UNIT_WORKER_SHARD = "unit-worker"
 # run-unit-worker.sh exits with this status after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS = 43
@@ -96,7 +97,8 @@ UNIT_WORKER_BOOT_SECONDS = 5 * 60
 # time and the host's teardown in the fleet budget before it issues the lease. So a host whose controller died stops
 # within its reservation, and a reservation holds only the work its host was issued: the leases it holds, each run
 # for its timeout, after its boot allowance before its first lease, then its idle stop and wind-down.
-# The boot allowance runs from admission to the latest start of the worker's first lease.
+# The boot allowance runs from admission to the latest start of the worker's first lease; a worker that has not
+# reported by then is stopped, and the leases it was launched with are released.
 UNIT_WORKER_BOOT_ALLOWANCE_SECONDS = 20 * 60
 # The worker stops once its next lease has been absent this long.
 UNIT_WORKER_IDLE_SECONDS = 10 * 60
@@ -2309,9 +2311,10 @@ class UnitWorker:
     # seconds.
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
-    # A launch AWS refused, as its classification and detail; the instance as its cleanup last saw it; and whether
-    # the controller asked EC2 to terminate it.
+    # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
+    # the instance as its cleanup last saw it; and whether the controller asked EC2 to terminate it.
     launch_failure: tuple = None
+    missed_boot: bool = False
     instance: cloud.Instance = None
     terminating: bool = False
 
@@ -2798,6 +2801,14 @@ class UnitDispatcher:
                 get_unit_worker_result(self.arguments, worker, key, path)
 
             self.reconcile(worker, keys, fetch)
+            if not worker.started and time.time() >= worker.job.boot_by:
+                # A host silent past its boot deadline is stopped, and the leases it was launched with go to other
+                # workers without spending an attempt.
+                worker.missed_boot = True
+                for sequence in worker.outstanding():
+                    if worker.leases[sequence] is not None:
+                        self.abandon(worker, sequence, "released", BOOT_DEADLINE_MISSED)
+                return
             beats = {beat: modified for key, modified in objects.items()
                      if (beat := heartbeat_sequence(key)) is not None}
             if worker.lost or not beats or not worker.outstanding():
@@ -2833,9 +2844,9 @@ class UnitDispatcher:
         return instance
 
     def ended(self, worker):
-        """Whether the worker's host is gone or going: AWS refused its launch, its instance is past running, or EC2
-        still lists none once its boot allowance is over."""
-        if worker.launch_failure:
+        """Whether the worker's host is gone or going: AWS refused its launch, it never reported by its boot deadline,
+        its instance is past running, or EC2 still lists none once its boot allowance is over."""
+        if worker.launch_failure or worker.missed_boot:
             return True
         try:
             instance = self.instance(worker)
@@ -2897,6 +2908,8 @@ class UnitDispatcher:
             return status, "benchmark-failure", f"remote-exit-status:{status}"
         if worker.instance is not None and worker.instance.state_reason == "Server.SpotInstanceTermination":
             return 1, "retryable-spot", worker.instance.state_reason
+        if worker.missed_boot:
+            return 1, "retryable-infrastructure", BOOT_DEADLINE_MISSED
         if not worker.instance_id:
             return 1, "retryable-infrastructure", LAUNCH_NOT_FOUND
         reason = worker.instance.state_reason if worker.instance else "absent"
@@ -3093,20 +3106,26 @@ class UnitDispatcher:
         return min(candidates, key=lambda item: (not self.on_demand(item), item.replica,
                                                  -self.remaining_seconds(item), item.identity), default=None)
 
-    def lease(self, worker):
-        """Keep the worker's next lease written one ahead of its current one, or stop it."""
+    def lease(self, worker, launching=False):
+        """Keep the worker's next lease written one ahead of its current one, or stop it. A worker is leased as it
+        launches, before its instance exists, and again once it reports; until then it keeps the leases it was
+        launched with."""
         if (worker.open() and worker.job.market == "spot" and self.purchases[worker.pool] != "spot" and
                 worker.pool in self.tail and
                 self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
             # A tail Spot worker retires once an On-Demand worker admitted in the tail replaces it.
             self.retired[worker.pool] = self.retired.get(worker.pool, 0) + 1
             self.issue(worker, None)
-        if worker.open() and worker.instance_id:
+        if worker.open() and (launching or worker.started):
             outstanding = worker.outstanding()
             while len(outstanding) < 2:
-                # A worker leases ahead only while no waiting worker of its pool could take the item now.
+                # A worker leases ahead only while no waiting worker of its pool could take the item now. At a
+                # launch, the workers the pool may still launch are waiting too, so a burst spreads its first
+                # leases across its hosts and gives slack only to work beyond one lease each.
                 waiting = sum(1 for other in self.pool_workers(worker.pool)
                               if other is not worker and other.open() and not other.outstanding())
+                if launching:
+                    waiting += self.launch_room(worker.pool)
                 if outstanding and len(self.queued(worker.pool)) <= waiting:
                     break
                 item = self.next_item(worker)
@@ -3124,9 +3143,18 @@ class UnitDispatcher:
                 outstanding = worker.outstanding()
         self.send(worker)
 
+    def launch_room(self, pool):
+        """How many more workers the pool may run beside those it has, within the phase's and its platform's
+        limits."""
+        platform = self.platforms[pool].name
+        per_platform = getattr(self.arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT)
+        return max(0, min(self.arguments.max_concurrent - len(self.workers), per_platform - sum(
+            other.job.platform.name == platform for other in self.workers.values())))
+
     def unneeded(self, worker):
-        """Whether a worker that has not started holds no lease of an open item and could take no queued one."""
-        return not worker.started and self.next_item(worker) is None and all(
+        """Whether a worker that has not started, nor missed its boot deadline, holds no lease of an open item and
+        could take no queued one."""
+        return not (worker.started or worker.missed_boot) and self.next_item(worker) is None and all(
             identity is None or self.done(identity) or identity in self.unresolved
             for identity in map(worker.leases.get, worker.outstanding()))
 
@@ -3275,8 +3303,8 @@ class UnitDispatcher:
                 running.append(self.start(pool, candidate, now).job)
 
     def start(self, pool, job, now):
-        """Record and launch an admitted worker. A launch AWS refused leaves a worker that has ended, settled once its
-        cleanup is proven."""
+        """Record an admitted worker, write its first leases, and launch it. A launch AWS refused leaves a worker that
+        has ended, settled once its cleanup is proven."""
         del self.candidates[pool]
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
@@ -3300,6 +3328,9 @@ class UnitDispatcher:
             launched_at=now, stop_by=job.stop_by)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
+        # The host finds its work waiting when its setup ends; a lease that could not be written is retried each
+        # loop.
+        self.lease(worker, launching=True)
         try:
             metadata["instance_id"], metadata["availability_zone"] = launch_worker(self.arguments, job, metadata)
         except LaunchFailed as failure:

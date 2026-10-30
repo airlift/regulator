@@ -1,4 +1,5 @@
 import base64
+import collections
 import contextlib
 import csv
 import fnmatch
@@ -9,6 +10,7 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shlex
 import shutil
@@ -2280,29 +2282,31 @@ class FakeUnitHost:
     """A unit worker host on the fleet's instance, as its user data runs it, exchanging its leases and uploads
     through the fleet's S3: each lease runs as fixture evidence.
 
-    A lease runs its groups in order, uploading each group's result and marker as it finishes, and a failed
-    group ends the lease. A script names what a lease does instead of completing: "interrupt" uploads an
-    interruption bundle and exits as a Spot interruption, with the worker's status 43, "interrupt-progress" does
-    so once the lease's first group finished, and "notice" does so before it fetches the lease. A host scripted
-    to "silent-interrupt" does so with none of its heartbeat uploads landing, and one scripted to "silent-crash"
-    runs the lease's first group and then fails, its heartbeats also lost. "stall" stops the heartbeat; once the
-    controller terminates its instance, the lease's completion lands late, after another host completed the same
-    replica, or never, once no other host runs, and with "stall-interrupt" the stopping host reports an
-    interruption of the lease instead. With "stall-semantic" the late completion is a semantic failure, and with
-    "stall-semantic-early" it lands as soon as another host leased the replica, before that host completes it. A
-    host whose boot the fleet fails exits before its first heartbeat. A host whose boot the fleet slows stays
-    pending until it is terminated, one the fleet leaves unlisted is launched without RunInstances's answer and is
-    missing from EC2's listing while it stays unlisted, and one whose cleanup the fleet slows keeps shutting down
-    once terminated
-    until every other host has exited. Every host that booted uploads its host archive as it exits, as the user
-    data's exit trap does, even one that failed during bootstrap, and its instance then terminates. A lease
-    completes failed with "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1),
-    or "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a result that
-    differs from its marker's checksum, and "foreign-receipt" a receipt that names another attempt.
-    "foreign-marker" completes with a marker naming another campaign, and "partial-marker" with one lacking its
-    result checksum. A host whose user data names a release measures RELEASE's JAR, except for a lease scripted
-    to "unreleased", which measures the candidate's own classes. The fleet's unit scripts give every lease of a
-    unit, on any host, a behavior.
+    The host acts each time the controller sleeps between polls. It boots once its setup, drawn by the fleet, has
+    passed since its launch, then reads its next lease from S3, and stops idle, as the worker does, once that lease
+    has been absent for the idle time its user data names. A lease runs its groups in order, each for the time the
+    fleet gives it, uploading each group's result and marker as it finishes, and a failed group ends the lease; a
+    host ends at most one lease each time it acts, and takes its next lease the time after. A script names what a
+    lease does instead of completing: "interrupt" uploads an interruption bundle and exits as a Spot interruption,
+    with the worker's status 43, "interrupt-progress" does so once the lease's first group finished, and "notice"
+    does so before it fetches the lease. A host scripted to "silent-interrupt" does so with none of its heartbeat
+    uploads landing, and one scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats
+    also lost. "stall" stops the heartbeat; once the controller terminates its instance, the lease's completion
+    lands late, after another host completed the same replica, or never, once no other host runs, and with
+    "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic" the late
+    completion is a semantic failure, and with "stall-semantic-early" it lands as soon as another host leased the
+    replica, before that host completes it. A host whose boot the fleet fails exits before its first heartbeat. A
+    host whose boot the fleet slows stays pending until it is terminated, one the fleet leaves unlisted is launched
+    without RunInstances's answer and is missing from EC2's listing while it stays unlisted, and one whose cleanup
+    the fleet slows keeps shutting down once terminated until every other host has exited. Every host that booted
+    uploads its host archive as it exits, as the user data's exit trap does, even one that failed during bootstrap,
+    and its instance then terminates. A lease completes failed with "semantic-failure" (status 44),
+    "protocol-rejection" (status 42), "fail" (status 1), or "capacity-rejected", whose capacity gate failed it with
+    status 1. "corrupt-archive" uploads a result that differs from its marker's checksum, and "foreign-receipt" a
+    receipt that names another attempt. "foreign-marker" completes with a marker naming another campaign, and
+    "partial-marker" with one lacking its result checksum. A host whose user data names a release measures RELEASE's
+    JAR, except for a lease scripted to "unreleased", which measures the candidate's own classes. The fleet's unit
+    scripts give every lease of a unit, on any host, a behavior.
     """
 
     # Each scripted failure's exit status, as run-unit.sh reports it.
@@ -2330,11 +2334,19 @@ class FakeUnitHost:
         self.result_prefix = settings["UNIT_WORKER_RESULT_PREFIX"] + "/"
         self.prefix = self.result_prefix.removesuffix("results/")
         self.release_version = settings["REGULATOR_RELEASE_VERSION"]
+        self.idle_seconds = int(settings["UNIT_WORKER_IDLE_SECONDS"])
         self.zone = next(zone for subnet, zone in fleet.network(region).subnets if subnet == spec.subnet)
         self.launched_at = fleet.clock
+        self.setup_seconds = fleet.setup_seconds(self)
         self.instance_id = None
         self.script = fleet.scripts.get(number, {})
         self.sequence = 1
+        # Since when the host has waited for its next lease, and the lease it runs, with its groups yet to finish
+        # and when the first of them does.
+        self.idle_since = None
+        self.running = None
+        # The sequence it last found no lease for.
+        self.absent = None
         self.booted = False
         self.stalled = False
         self.stopping = False
@@ -2364,19 +2376,27 @@ class FakeUnitHost:
         if self.status is not None or self.stalled:
             return
         if not self.booted:
-            if self.fleet.slow_boot(self):
+            if self.fleet.slow_boot(self) or self.fleet.clock < self.launched_at + self.setup_seconds:
                 return
             self.booted = True
+            self.idle_since = self.fleet.clock
             self.fleet.set_state(self, "running")
             if self.fleet.failed_boot(self):
                 return self.exit(1)
+        if self.running is not None:
+            return self.advance()
         if self.script.get(self.sequence) == "notice":
             return self.interrupt(None)
-        lease = self.leases.get(self.sequence)
+        lease = self.next_lease()
         if lease is None:
+            if self.fleet.clock - self.idle_since >= self.idle_seconds:
+                return self.stop()
+            if self.absent != self.sequence:
+                self.absent = self.sequence
+                self.fleet.log.append(("absent", self.session, self.sequence))
             return self.heartbeat(None)
         if lease.get("stop"):
-            return self.exit(0)
+            return self.stop()
         behavior = self.script.get(self.sequence)
         self.heartbeat(lease["unit_id"])
         if behavior in ("interrupt", "silent-interrupt"):
@@ -2410,6 +2430,16 @@ class FakeUnitHost:
             return
         self.put(f"heartbeat/{self.sequence}.json", json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode())
 
+    def next_lease(self):
+        """The host's next lease as S3 holds it, or None."""
+        lease = self.fleet.objects.get((self.bucket, f"{self.lease_prefix}{self.sequence}.json"))
+        return None if lease is None else json.loads(lease[0])
+
+    def stop(self):
+        """Stop as the worker does, at a stop lease or once idle: a final heartbeat, then exit."""
+        self.heartbeat(None)
+        self.exit(0)
+
     @property
     def leases(self):
         """The leases the controller wrote for this host, by sequence, whether or not its cleanup deleted them."""
@@ -2430,11 +2460,26 @@ class FakeUnitHost:
 
     def run(self, lease):
         behavior = self.script.get(self.sequence, self.fleet.unit_scripts.get(lease["unit_id"]))
-        for group in lease["groups"]:
-            if self.run_group(lease, group, behavior):
+        groups = list(lease["groups"])
+        self.running = (lease, behavior, groups, self.fleet.clock + self.fleet.group_seconds(self, lease, groups[0]))
+        self.advance()
+
+    def advance(self):
+        """Finish each group of the running lease whose time has come; a failed or last group ends the lease."""
+        lease, behavior, groups, finishes = self.running
+        while finishes <= self.fleet.clock:
+            group = groups.pop(0)
+            if self.run_group(lease, group, behavior) or not groups:
                 break
+            finishes += self.fleet.group_seconds(self, lease, groups[0])
+        else:
+            self.running = (lease, behavior, groups, finishes)
+            # The worker heartbeats while it measures.
+            return self.heartbeat(lease["unit_id"])
+        self.running = None
         self.fleet.log.append(("complete", self.session, self.sequence))
         self.sequence += 1
+        self.idle_since = self.fleet.clock
         self.heartbeat(None)
 
     def run_group(self, lease, group, behavior):
@@ -2443,14 +2488,22 @@ class FakeUnitHost:
         unit = self.fleet.units[lease["unit_id"]]
         directory = self.fleet.scratch / self.session / f"lease-{sequence}" / f"group-{group}"
         directory.mkdir(parents=True)
-        fixture = UnitFixture(directory, unit["shard_id"], unit["unit_index"], str(lease["replica_id"]), {
-            "campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
-            "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
-            "availability_zone": self.zone,
-        }, group=group, market=self.market)
-        if self.release_version and behavior != "unreleased":
-            measure_release(directory)
-        fixture.accept(f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}")
+        host = {"campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
+                "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
+                "availability_zone": self.zone}
+        attempt = f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}"
+        if self.fleet.synthetic:
+            RUN_CAMPAIGN.unit_session.write_unit_receipt(directory / "unit-receipt.tsv", {
+                field: "-" for field in RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS} | host | {
+                "schema_version": RUN_CAMPAIGN.unit_session.UNIT_SCHEMA_VERSION, "unit_id": lease["unit_id"],
+                "replica_id": str(lease["replica_id"]), "group_id": group, "unit_attempt_id": attempt,
+                "region": self.region, "market": self.market, "shard_id": unit["shard_id"]})
+        else:
+            fixture = UnitFixture(directory, unit["shard_id"], unit["unit_index"], str(lease["replica_id"]), host,
+                                  group=group, market=self.market)
+            if self.release_version and behavior != "unreleased":
+                measure_release(directory)
+            fixture.accept(attempt)
         status = self.STATUSES.get(behavior, 0)
         if behavior == "capacity-rejected":
             capacity = directory / "unit-capacity.txt"
@@ -2509,13 +2562,25 @@ class FakeUnitHost:
 
 class FakeUnitFleet(FakeCloud):
     """AWS with the unit worker hosts the controller launches, which exchange their leases and uploads with the
-    controller through its S3."""
+    controller through its S3.
+
+    A host's setup takes the seconds setup_seconds gives it, none by default, so it boots the first time it acts. A
+    timed fleet's hosts measure each group for its estimate; otherwise a lease takes no time. Given synthetic units,
+    which own no rows to measure, a host uploads only each group's receipt, and the campaign accepts the receipt
+    alone. The fleet records each controller loop's seconds and calls by operation, from one sleep between polls to the
+    next.
+    """
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
                  unit_scripts=None, stuck_prefix=lambda host: False, unlisted=lambda host: False,
-                 slow_boot=lambda host: False, slow_cleanup=lambda host: False):
+                 slow_boot=lambda host: False, slow_cleanup=lambda host: False, setup_seconds=lambda host: 0,
+                 timed=False, units=None):
         super().__init__()
         self.scratch = scratch
+        self.setup_seconds = setup_seconds
+        self.timed = timed
+        self.loops = []
+        self.loop_started = (self.clock, 0)
         self.failed_boot = failed_boot
         self.slow_boot = slow_boot
         self.slow_cleanup = slow_cleanup
@@ -2534,7 +2599,8 @@ class FakeUnitFleet(FakeCloud):
         self.written_leases = {}
         # Every launch the controller asked for, in order, and whether AWS refused it.
         self.launches = []
-        self.units = RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
+        self.synthetic = units is not None
+        self.units = units or RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
         self.hosts = []
         self.log = []
         self.sleeps = 0
@@ -2586,7 +2652,17 @@ class FakeUnitFleet(FakeCloud):
             self.log.append(("lease", lease[1], int(lease[2]), json.loads(body).get("unit_id")))
         return written
 
+    def group_seconds(self, host, lease, group):
+        if not self.timed:
+            return 0
+        return RUN_CAMPAIGN.work_units.unit_group(self.units[lease["unit_id"]], group)["estimated_seconds"]
+
     def sleep(self, seconds):
+        if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS:
+            started, calls = self.loop_started
+            self.loops.append(SimpleNamespace(seconds=self.clock - started, calls=collections.Counter(
+                call[0] for call in self.calls[calls:])))
+            self.loop_started = (self.clock + seconds, len(self.calls))
         self.clock += seconds
         if seconds != RUN_CAMPAIGN.UNIT_POLL_SECONDS:
             return
@@ -2606,6 +2682,11 @@ class FakeUnitFleet(FakeCloud):
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "sleep", side_effect=self.sleep))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "monotonic", side_effect=self.monotonic))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "time", side_effect=self.time))
+        if self.synthetic:
+            validation = RUN_CAMPAIGN.unit_validation
+            stack.enter_context(patch.object(RUN_CAMPAIGN, "validate_unit_artifacts"))
+            stack.enter_context(patch.object(RUN_CAMPAIGN, "unit_validation", side_effect=lambda *args: replace(
+                validation(*args), validate_ledger=lambda *_: None)))
         return stack
 
 
@@ -2925,25 +3006,59 @@ class TestUnitWorkers(unittest.TestCase):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like"], 4, 2)
                 self.assertEqual(workers, sum(host.platform == "r8i" for host in fleet.hosts))
 
-    def test_booting_worker_stops_once_the_queue_holds_nothing_for_it(self):
+    def test_worker_silent_past_its_boot_deadline_hands_back_its_leases(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The second r8i launch's answer is lost, and EC2 lists its instance only once the first worker has
-            # measured both units, while it still boots; its cleanup is slow.
+            # The second r8i worker never boots, its launch's answer is lost, and EC2 lists its instance only once the
+            # first worker has finished its lease, whose unit fails. Its cleanup is slow.
             fleet = FakeUnitFleet(
-                Path(temporary) / "hosts", slow_boot=lambda host: host.number == 2,
+                Path(temporary) / "hosts", scripts={1: {1: "fail"}}, slow_boot=lambda host: host.number == 2,
                 slow_cleanup=lambda host: host.number == 2,
-                unlisted=lambda host: host.number == 2 and ("complete", fleet.hosts[0].session, 2) not in fleet.log)
-            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 6, 3)
-            first, booting = fleet.hosts[:2]
-            # Its session's tag finds it, and it is stopped at once, before the first worker exits; its stop lease
-            # records it stopping for a restart.
-            self.assertEqual(([True], 1), ([lease.get("stop") for lease in booting.leases.values()],
-                                           booting.terminations))
-            self.assertLess(fleet.log.index(("terminate", booting.session)), fleet.log.index(("exit", first.session)))
-            self.assertIn((booting.epoch, "stop"), {(row["host_epoch"], row["outcome"]) for row in self.ledger})
-            self.assertIn((booting.epoch, "started", f"instance_id={booting.instance_id};availability_zone=us-west-2a"),
+                unlisted=lambda host: host.number == 2 and ("complete", fleet.hosts[0].session, 1) not in fleet.log)
+            with self.dispatchers() as dispatchers:
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 6, 3)
+            first, silent = fleet.hosts[:2]
+            failed, held = first.leases[1]["unit_id"], silent.leases[1]["unit_id"]
+            # Its session's tag finds it. At its boot deadline the lease it was launched with is released without
+            # spending an attempt, its host is stopped, and another host completes that unit.
+            self.assertIn((silent.epoch, "started", f"instance_id={silent.instance_id};availability_zone=us-west-2a"),
                           [(row["host_epoch"], row["outcome"], row["detail"]) for row in
                            RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")])
+            self.assertEqual([("leased", "-"), ("released", RUN_CAMPAIGN.BOOT_DEADLINE_MISSED)],
+                             [(row["outcome"], row["detail"] if row["outcome"] != "leased" else "-")
+                              for row in self.ledger if row["host_session"] == silent.session])
+            self.assertEqual({f"r8i/{failed}/replica-1": 1}, dispatchers[0][0].failures)
+            [(replacement, sequence)] = [(host, sequence) for host in fleet.hosts[2:] for sequence, lease in
+                                         host.leases.items() if (host.platform, lease.get("unit_id")) == ("r8i", held)]
+            self.assertIn(("complete", replacement.session, sequence), fleet.log)
+            self.assertEqual(1, silent.terminations)
+            # The failed unit goes to a new host while the silent worker still cleans up.
+            [retry] = [host for host in fleet.hosts[2:]
+                       if (host.platform, host.leases[1].get("unit_id")) == ("r8i", failed)]
+            self.assertLess(fleet.log.index(("lease", retry.session, 1, failed)),
+                            fleet.log.index(("exit", silent.session)))
+
+    def test_burst_finds_each_host_its_lease_at_boot_and_keeps_its_slack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # 200 hosts of two platforms, most of which boot in about 67 s and a few in up to four minutes, measure
+            # three 10-minute units each.
+            boots = random.Random(5)
+            setups = [boots.uniform(60, 75) if boots.random() < 0.95 else boots.uniform(120, 240) for _ in range(200)]
+            units = {f"burst-{index}": {"unit_id": f"burst-{index}", "shard_id": "burst", "unit_index": str(index),
+                                        "estimated_seconds": "600",
+                                        "groups": [{"group_id": "1", "estimated_seconds": 600}]}
+                     for index in range(1, 301)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+                                  setup_seconds=lambda host: setups[host.number - 1])
+            self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100)
+            self.assertEqual(200, len(fleet.hosts))
+            # Every host finds its first lease waiting as it boots, and its next as each lease ends, until the queue
+            # is empty.
+            sessions = {host.session: host for host in fleet.hosts}
+            self.assertEqual([], [entry for entry in fleet.log if entry[0] == "absent" and
+                                  "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
+            # A loop that only polls, launching nothing and downloading nothing, covers all 200 workers in under 30 s.
+            self.assertLess(max(loop.seconds for loop in fleet.loops if not {"run_instance", "get"} & set(loop.calls)),
+                            30)
 
     def test_late_completion_after_requeue_is_superseded(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3222,7 +3337,11 @@ class TestUnitWorkers(unittest.TestCase):
                               for row in RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")
                               if row["host_epoch"] == "1"])
             self.assertEqual({"r9g", "r8i"}, {host.platform for host in fleet.hosts})
-            self.assertFalse(any(entry[0] == "lease" and entry[1].startswith("campaign-e1-") for entry in fleet.log))
+            # The leases written before its launch are released without spending an attempt.
+            self.assertEqual({"1": ["leased", "released"], "2": ["leased", "released"]},
+                             {sequence: [row["outcome"] for row in self.ledger
+                                         if (row["host_epoch"], row["sequence"]) == ("1", sequence)]
+                              for sequence in ("1", "2")})
 
     def test_restart_releases_a_reservation_made_while_its_worker_waited_for_capacity(self):
         with tempfile.TemporaryDirectory() as temporary:
