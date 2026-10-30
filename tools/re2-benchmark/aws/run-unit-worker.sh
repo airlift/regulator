@@ -402,23 +402,42 @@ fetch_lease()
     lease_state=found
 }
 
+claim_stop()
+{
+    # Claims the host's next lease as its own stop before an idle stop, with the
+    # conditional write every lease has, so the controller's lease and the claim
+    # cannot both land; the next read finds whichever won. Fails only when the
+    # put neither landed nor lost to the controller's lease.
+    local file="${UNIT_ROOT}/claim-${sequence}.json"
+    jq -n \
+        --arg campaign_id "${CAMPAIGN_ID}" \
+        --arg platform "${PLATFORM}" \
+        --arg host_session "${HOST_SESSION}" \
+        --argjson sequence "${sequence}" \
+        '{schema_version: 2, campaign_id: $campaign_id, platform: $platform, host_session: $host_session,
+          sequence: $sequence, stop: true, by: "worker"}' \
+        > "${file}"
+    put_once "${file}" "${LEASE_PREFIX}/${sequence}.json" || [[ "$(<"${S3_ERRORS}")" == *PreconditionFailed* ]]
+}
+
 read_lease()
 {
-    # Prints stop, or the unit, replica, phase, comma-separated groups, and host
-    # stop time of a work lease; rejects any lease that is not this host's next one.
+    # Prints stop, claimed for this host's own claim, or the unit, replica,
+    # phase, comma-separated groups, and host stop time of a work lease; rejects
+    # any lease that is not this host's next one.
     local file="${HOST_DIR}/leases/${sequence}.json"
     local fields
-    local lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop
+    local lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop lease_by
     local lease_phase lease_unit lease_replica lease_protocol lease_groups lease_stop_by
     if ! fields=$(jq -r '[.schema_version, .sequence, .host_session, .campaign_id, .platform,
-            (.stop // false), .phase, .unit_id, .replica_id, .protocol,
+            (.stop // false), .by, .phase, .unit_id, .replica_id, .protocol,
             (if (.groups | type) == "array" and (.groups | all(type == "string" and test("^[1-9][0-9]*$")))
              then .groups | join(",") else "-" end), .stop_by]
             | map(tostring | if . == "" or . == "null" then "-" else . end) | @tsv' "${file}"); then
         echo "Lease ${sequence} is not JSON" >&2
         return 1
     fi
-    IFS=$'\t' read -r lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop \
+    IFS=$'\t' read -r lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop lease_by \
         lease_phase lease_unit lease_replica lease_protocol lease_groups lease_stop_by <<<"${fields}"
     if [[ "${lease_schema}" != 2 || "${lease_sequence}" != "${sequence}" || "${lease_host}" != "${HOST_SESSION}" ||
             "${lease_campaign}" != "${CAMPAIGN_ID}" || "${lease_platform}" != "${PLATFORM}" ]]; then
@@ -426,6 +445,10 @@ read_lease()
             "sequence ${lease_sequence}, host ${lease_host}, campaign ${lease_campaign}," \
             "platform ${lease_platform}" >&2
         return 1
+    fi
+    if [[ "${lease_stop}" == true && "${lease_by}" == worker ]]; then
+        printf 'claimed\n'
+        return 0
     fi
     if [[ "${lease_stop}" == true ]]; then
         printf 'stop\n'
@@ -602,8 +625,10 @@ while true; do
     fi
     lease_failures=0
     if [[ "${lease_state}" == absent ]]; then
-        if (($(now) - idle_since >= IDLE_SECONDS)); then
-            stop idle
+        # An idle host claims its next lease as its own stop, then reads it again:
+        # its claim stops it, and a lease the controller wrote first runs.
+        if (($(now) - idle_since >= IDLE_SECONDS)) && claim_stop; then
+            continue
         fi
         pause
         continue
@@ -613,6 +638,9 @@ while true; do
     fi
     if [[ "${lease}" == stop ]]; then
         stop stop-lease
+    fi
+    if [[ "${lease}" == claimed ]]; then
+        stop idle
     fi
     # The lease read's S3 calls may have outlasted the lifetime.
     stop_if_winding_down

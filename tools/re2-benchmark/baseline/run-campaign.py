@@ -107,6 +107,9 @@ UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
 UNIT_LEASE_TIMEOUT_FACTOR = 2
 # A running host whose lease outran its lease timeout from its latest heartbeat has stalled, and loses that lease.
 STALLED = "stalled"
+# An idle host claims its next lease as its own stop before it stops; a lease the controller writes after the claim
+# never runs, so its item is requeued without spending an attempt.
+SELF_STOP_CLAIMED = "host claimed the lease as its idle stop"
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
@@ -2534,10 +2537,14 @@ class UnitDispatcher:
                 worker.stopping = True
             if row["outcome"] in SETTLED_UNIT_OUTCOMES:
                 worker.settled.add(sequence)
-            elif row["outcome"] in ("lost", "released"):
-                # A live worker's lease is abandoned only when its host was judged lost.
+            elif row["outcome"] in ("lost", "released", "claimed"):
                 worker.abandoned.add(sequence)
-                worker.lost = True
+                # Only a lost lease shows its host was judged lost. A host that claimed its idle stop gets nothing
+                # more, nor any lease of the sequence it claimed or after it.
+                worker.lost = worker.lost or row["outcome"] == "lost"
+                if row["outcome"] == "claimed":
+                    worker.stopping = True
+                    worker.unsent = {unsent for unsent in worker.unsent if unsent < sequence}
         for lease, (identity, seen) in outcomes.items():
             if identity is not None and seen & COUNTED_UNIT_OUTCOMES:
                 self.count(self.items[identity], "earlier attempts", lease)
@@ -3074,12 +3081,23 @@ class UnitDispatcher:
             self.held[item.identity] = (worker.job.host_epoch, sequence)
 
     def send(self, worker):
-        for sequence in sorted(worker.unsent):
+        """Write the worker's unsent leases in order, but none that was abandoned, whose item may already run
+        elsewhere. A lease the host claimed first as its idle stop is `claimed`, and those behind it are released,
+        all without spending an attempt; the host gets nothing more."""
+        for sequence in sorted(worker.unsent - worker.abandoned):
             try:
-                put_unit_lease(self.arguments, worker, sequence, self.lease_document(worker, sequence))
+                held = put_unit_lease(self.arguments, worker, sequence, self.lease_document(worker, sequence))
             except (CloudError, OSError):
                 return
             worker.unsent.discard(sequence)
+            if not held:
+                worker.stopping = True
+                worker.unsent.clear()
+                for later in worker.outstanding():
+                    if later >= sequence and worker.leases[later] is not None:
+                        self.abandon(worker, later, "claimed" if later == sequence else "released",
+                                     SELF_STOP_CLAIMED)
+                return
 
     def next_item(self, worker, queued=None, units=None):
         """The eligible queued item to lease next: On-Demand work first, then the lowest replica, then the longest

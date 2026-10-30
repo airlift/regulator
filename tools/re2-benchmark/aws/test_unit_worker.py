@@ -32,7 +32,9 @@ FAR_STOP_BY = 4102444800
 # key, start, and end. A Spot notice arrives as the first such call starts whose
 # operation FAKE_NOTICE_DURING_STALLED_CALL names, or whose key or body it is a
 # fragment of, logged as a notice at that start. Every PUT but a heartbeat's must
-# carry the conditional-write and checksum options.
+# carry the conditional-write and checksum options. FAKE_RACING_LEASES holds
+# leases, by key, that the controller writes just before the worker's own put of
+# that key.
 FAKE_AWS = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, sys
 from pathlib import Path
@@ -94,6 +96,10 @@ elif operation == 'get-object':
     Path(positional[2]).write_bytes(path.read_bytes())
 elif operation == 'put-object':
     body = Path(options['--body']).read_bytes()
+    racing = json.loads(os.environ.get('FAKE_RACING_LEASES', '{}')).get(options['--key'])
+    if racing is not None and not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(racing)
     if '/heartbeat/' not in options['--key'] and (
             options.get('--if-none-match') != '*' or options.get('--checksum-algorithm') != 'SHA256' or
             '--checksum-sha256' not in options):
@@ -382,6 +388,25 @@ class TestUnitWorker(unittest.TestCase):
                                      (completion['exit_status'], completion['unit_status']))
                 heartbeat = worker.json(f'heartbeat/{len(completed) + 1}.json')
                 self.assertEqual(('stopped', reason), (heartbeat['state'], heartbeat['stop_reason']))
+                if reason == 'idle':
+                    # Before it stops idle, the worker claims its next lease as its own stop.
+                    claim = worker.bucket / 'input' / 'leases' / f'{len(units) + 1}.json'
+                    self.assertEqual(lease(len(units) + 1, stop=True, by='worker'), json.loads(claim.read_text()))
+
+    def test_idle_claim_that_loses_to_the_controllers_lease_runs_that_lease(self):
+        # The controller writes lease 1 just as the idle worker claims it, so the claim loses, and the worker runs
+        # the lease; its claim of lease 2 then wins.
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = Worker(Path(temporary), clock=True)
+            worker.environment['FAKE_RACING_LEASES'] = json.dumps(
+                {'input/leases/1.json': json.dumps(lease(1, 'first'))})
+            status, output = worker.run(idle_seconds=1)
+
+            self.assertEqual(0, status, output)
+            self.assertEqual(('idle', [(1, UNIT['first'])]),
+                             (worker.stop_reason(), [(run['sequence'], run['unit_id']) for run in worker.runs()]))
+            self.assertEqual(lease(2, stop=True, by='worker'),
+                             json.loads((worker.bucket / 'input' / 'leases' / '2.json').read_text()))
 
     def test_leases_move_the_hosts_stop_time_only_later(self):
         # The host powers off at its stop time, so a lease that names an earlier stop time leaves it unchanged.
