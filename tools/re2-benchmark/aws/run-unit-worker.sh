@@ -6,8 +6,10 @@ set -euo pipefail
 # A lease names the unit's measured groups to run, in order; the worker uploads
 # each group's result as soon as the group finishes, so a Spot notice loses only
 # the group it interrupts. Each work lease names the host's new stop time, which
-# the worker records for the host's power-off. aws/README.md "Unit workers"
-# specifies the S3 keys, schemas, and stop rules.
+# the worker records for the host's power-off. The worker heartbeats only as a
+# lease starts, as each of its groups completes, and as it stops or is
+# interrupted; the controller judges a silent host by its instance's state.
+# aws/README.md "Unit workers" specifies the S3 keys, schemas, and stop rules.
 
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 <host-evidence-directory> <unit-directory>" >&2
@@ -34,7 +36,6 @@ STOP_BY_FILE=${UNIT_WORKER_STOP_BY_FILE:?UNIT_WORKER_STOP_BY_FILE is required}
 LIFETIME_SECONDS=${UNIT_WORKER_LIFETIME_SECONDS:-21600}
 IDLE_SECONDS=${UNIT_WORKER_IDLE_SECONDS:-600}
 POLL_SECONDS=${UNIT_WORKER_POLL_SECONDS:-5}
-HEARTBEAT_SECONDS=30
 # The CLI gives up on a socket after its connect and read timeouts, but a
 # request whose socket stays alive can outlive them, so coreutils timeout ends
 # each S3 call after the two together.
@@ -90,7 +91,6 @@ finished_groups=()
 group_status=0
 unit_pid=
 unit_directory=
-next_heartbeat=0
 lease_failures=0
 imds_token=
 imds_token_time=0
@@ -236,14 +236,6 @@ heartbeat()
             --key "${RESULT_PREFIX}/heartbeat/${sequence}.json" --body "${file}"; then
         echo "Heartbeat upload failed for lease ${sequence}: $(<"${S3_ERRORS}")" >&2
     fi
-    next_heartbeat=$(($(now) + HEARTBEAT_SECONDS))
-}
-
-heartbeat_if_due()
-{
-    if (($(now) >= next_heartbeat)); then
-        heartbeat
-    fi
 }
 
 imds_get()
@@ -368,9 +360,8 @@ stop()
 
 pause()
 {
-    # Sleep one poll interval, watching for Spot notices and keeping the heartbeat.
+    # Sleep one poll interval, watching for Spot notices.
     check_notices
-    heartbeat_if_due
     sleep "${POLL_SECONDS}"
 }
 
@@ -501,8 +492,6 @@ run_group()
     python3 "${UNIT_TOOL}" copy-environment --source "${HOST_DIR}" --target "${unit_directory}"
     environment=$(python3 "${UNIT_TOOL}" environment-sha256 --directory "${unit_directory}")
 
-    state=running
-    heartbeat
     unit_started=$(timestamp)
     # The unit leads its own process group, so an interruption stops all of it.
     (
@@ -528,8 +517,6 @@ run_group()
     echo "Lease ${sequence} unit ${unit_id} replica ${replica_id} group ${group_id} ${outcome}" \
         "with status ${unit_status}"
 
-    state=uploading
-    heartbeat
     archive="${UNIT_ROOT}/lease-${sequence}-group-${group_id}.tar.gz"
     pack_started=${EPOCHREALTIME}
     tar -czf "${archive}" -C "${unit_directory}" .
@@ -573,6 +560,7 @@ run_group()
     check_notices
     put_once "${completion}" "${prefix}/completion.json" || stop upload-failure 1
     finished_groups+=("${group_id}")
+    heartbeat
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" "${group_id}" \
         "${outcome}" "${unit_status}" "${unit_attempt}" "${environment}" >> "${LEDGER}"
     rm -rf "${unit_directory}" "${archive}" "${completion}"
@@ -587,6 +575,8 @@ run_lease()
     local phase=$1
     local groups=()
     IFS=, read -r -a groups <<<"${lease_groups}"
+    state=running
+    heartbeat
     for group_id in "${groups[@]}"; do
         run_group "${phase}"
         if ((group_status != 0)); then
@@ -598,7 +588,6 @@ run_lease()
 }
 
 idle_since=$(now)
-heartbeat
 while true; do
     check_notices
     stop_if_winding_down
@@ -641,5 +630,4 @@ while true; do
     state=waiting
     sequence=$((sequence + 1))
     idle_since=$(now)
-    heartbeat
 done

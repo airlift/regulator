@@ -298,7 +298,8 @@ class Worker:
 class TestUnitWorker(unittest.TestCase):
     def test_worker_runs_leases_and_their_groups_in_order(self):
         def write_stop_lease_once_awaited(worker):
-            if worker.object('heartbeat/4.json').exists() and not (worker.bucket / 'input/leases/4.json').exists():
+            if (worker.object('units/3/groups/1/completion.json').exists() and
+                    not (worker.bucket / 'input/leases/4.json').exists()):
                 worker.write_lease(lease(4, stop=True))
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -336,11 +337,16 @@ class TestUnitWorker(unittest.TestCase):
             self.assertEqual([(f'host-1/{sequence}', group) for sequence, group in groups],
                              [(row['unit_attempt_id'], row['group_id']) for row in leases])
             self.assertEqual(['complete'] * 4, [row['outcome'] for row in leases])
-            # Each group's result and marker land as soon as the group finishes.
-            puts = [key for key in worker.puts() if not key.startswith('results/heartbeat/')]
-            self.assertEqual([
-                f'results/units/{sequence}/groups/{group}/{name}'
-                for sequence, group in groups for name in ('result.tar.gz', 'completion.json')], puts)
+            # Each group's result and marker land as soon as the group finishes. The worker heartbeats only as each
+            # lease starts, as each group completes, and as it stops.
+            expected = []
+            for sequence in (1, 2, 3):
+                expected.append(f'results/heartbeat/{sequence}.json')
+                for group in (group for leased, group in groups if leased == sequence):
+                    expected += [f'results/units/{sequence}/groups/{group}/result.tar.gz',
+                                 f'results/units/{sequence}/groups/{group}/completion.json',
+                                 f'results/heartbeat/{sequence}.json']
+            self.assertEqual([*expected, 'results/heartbeat/4.json'], worker.puts())
             self.assertEqual(('stopped', 'stop-lease'),
                              (worker.json('heartbeat/4.json')['state'], worker.json('heartbeat/4.json')['stop_reason']))
             self.assertEqual('stop-lease', worker.stop_reason())
@@ -501,13 +507,12 @@ class TestUnitWorker(unittest.TestCase):
 
     def test_spot_notice_during_lease_acquisition_or_upload_is_bundled_within_two_minutes(self):
         # Every S3 call stalls until just before its timeout. A notice during the lease's listing or download
-        # interrupts the host before its unit starts; one during the heartbeat that starts the unit's upload, or
-        # during its completion upload, interrupts it with that unit; and one during a stop's heartbeat makes
-        # the stop an interruption.
+        # interrupts the host before its unit starts; one during the unit's result or completion upload
+        # interrupts it with that unit; and one during a stop's heartbeat makes the stop an interruption.
         for trigger, unit, environment in (
                 ('list-objects-v2', None, {}),
                 ('get-object', None, {}),
-                ('"state": "uploading"', UNIT['first'], {}),
+                ('result.tar.gz', UNIT['first'], {}),
                 ('completion.json', UNIT['first'], {}),
                 ('"state": "stopped"', None, {'lifetime_seconds': 1})):
             with self.subTest(trigger=trigger), tempfile.TemporaryDirectory() as temporary:
