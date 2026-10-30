@@ -31,7 +31,7 @@ from unittest.mock import Mock, patch
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
-import fleet_budget  # noqa: E402
+from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENTS, CampaignSettings  # noqa: E402
 import test_engine_build  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
@@ -43,6 +43,19 @@ RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
 # run-campaign.py puts the language tooling on the path; its campaign fixture runs attempts as workers do.
 import test_fleet  # noqa: E402
+
+
+def campaign_settings(root, platform_regions=None, purchase=None, buckets=None, **values):
+    """Seed the campaign root's settings as its first execution does, with values over test_fleet_budget's: each
+    platform's launch regions, by default the default region for both platforms, how it buys hosts, and each of those
+    regions with its bucket, which buckets names or is "bucket", and a limit of 736 vCPUs."""
+    platform_regions = platform_regions or dict.fromkeys(("r8i", "r9g"), RUN_CAMPAIGN.default_regions())
+    regions = dict.fromkeys(region for listed in platform_regions.values() for region in listed)
+    root.mkdir(parents=True, exist_ok=True)
+    return test_fleet_budget.seed_settings(root, **{
+        "platform_regions": platform_regions, "purchase": purchase or {},
+        "regions": {region: {"bucket": (buckets or {}).get(region, "bucket"), "max_vcpus": 736} for region in regions},
+        **values})
 
 
 def shell_function(source, name):
@@ -73,16 +86,24 @@ class TestRunCampaign(unittest.TestCase):
             "time",
             "zstd")
 
-    def arguments(self, root, maximum_concurrent=1):
+    def arguments(self, root, **settings):
+        """A phase's arguments, under settings seeded in its campaign root, with the given settings of
+        campaign_settings."""
         return SimpleNamespace(
             phase="smoke",
             campaign_id="baseline",
             campaign_root=root / "campaign",
-            max_concurrent=maximum_concurrent,
             candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40,
-            transfer_buckets={region: "bucket" for region in RUN_CAMPAIGN.default_regions()})
+            spot_vcpu_reserve=0,
+            settings=campaign_settings(root / "campaign", **settings))
+
+    def settings(self, **options):
+        """Settings of campaign_settings seeded in a campaign root of their own."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return campaign_settings(Path(temporary.name), **options)
 
     def test_hosts_are_shared_by_the_seconds_left_within_the_limits_and_each_phases_items(self):
         # The platforms split 20 hosts by their seconds left, and each platform's phases split its hosts the same
@@ -102,26 +123,8 @@ class TestRunCampaign(unittest.TestCase):
             demand=lambda seconds=seconds: {"r8i": (seconds, 50)}, holding=lambda held=held: Counter(r8i=held)))
             for key, seconds, held in (("a", 100, 8), ("b", 900, 0))]
         RUN_CAMPAIGN.Campaign.assign_shares(SimpleNamespace(arguments=SimpleNamespace(
-            max_concurrent=10, max_concurrent_per_platform=10)), running)
+            settings=self.settings(max_hosts=10, max_hosts_per_platform=10))), running)
         self.assertEqual([{"r8i": 8}, {"r8i": 2}], [phase.dispatcher.share for phase in running])
-
-    def test_reserve_is_frozen_on_resume_but_launch_regions_and_purchase_are_not(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            arguments = SimpleNamespace(platform_regions={"r8i": ["eu-west-1", "ap-south-1"]},
-                                        purchases={"r8i": "spot"}, spot_vcpu_reserve=0)
-            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            # A restart may move to other regions or buy differently; each result records its region and market.
-            # Nor do the hosts it may hold freeze: its share follows the work every phase has left.
-            for change in ({"purchases": {}}, {"platform_regions": {"r8i": ["ap-south-1", "eu-west-1"]}},
-                          {"max_concurrent": 5, "max_concurrent_per_platform": 2}):
-                RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), **change}), root)
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
-                RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), "spot_vcpu_reserve": 32}),
-                                                       root)
-            arguments.smoke_protocol = 'qualification'
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
-                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
 
     def test_engine_builds_are_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -226,8 +229,8 @@ class TestRunCampaign(unittest.TestCase):
             archives, manifest = self.engine_build(build)
             trino, classes, native = (archives[name]["sha256"] for name in ("trino", "classes", "native"))
             arguments = SimpleNamespace(
-                platform_regions={"r8i": ["us-west-2", "us-east-2"]},
-                transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
+                settings=self.settings(platform_regions={"r8i": ["us-west-2", "us-east-2"]},
+                                       buckets={"us-west-2": "west", "us-east-2": "east"}),
                 engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest})
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
@@ -270,8 +273,8 @@ class TestRunCampaign(unittest.TestCase):
             sha256 = hashlib.sha256(b"candidate").hexdigest()
             aws = FakeCloud()
             arguments = SimpleNamespace(
-                platform_regions={"r8i": ["us-west-2", "us-east-2"]},
-                transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
+                settings=self.settings(platform_regions={"r8i": ["us-west-2", "us-east-2"]},
+                                       buckets={"us-west-2": "west", "us-east-2": "east"}),
                 candidate_archive=archive, candidate_archive_sha256=sha256, cloud=aws)
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), contextlib.redirect_stdout(io.StringIO()):
@@ -291,25 +294,18 @@ class TestRunCampaign(unittest.TestCase):
             {} if observed is None else observed)
         return candidate, admitted
 
-    def shared_fleet(self, regions=()):
-        """A shared fleet budget for Spot hosts in its home region, us-west-2, and in regions."""
-        fixture = test_fleet_budget.TestFleetBudget()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        if regions:
-            fixture.policy["regions"] = {region: {"max_vcpus": 64, "spot_vcpu_reserve": 0} for region in regions}
-            fixture.path.write_text(json.dumps(fixture.policy))
-        return RUN_CAMPAIGN.FleetBudget(fixture.path)
+    @staticmethod
+    def shared_fleet(arguments):
+        """The campaign's fleet budget, as its controller keeps it, under the phase's settings."""
+        return RUN_CAMPAIGN.FleetBudget(arguments.campaign_root, arguments.settings, arguments.spot_vcpu_reserve)
 
     def test_spot_platform_waits_for_quota_and_an_on_demand_platform_refuses_spot(self):
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            arguments = self.arguments(root)
-            arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
-            arguments.platform_regions = {"r8i": ["us-west-2"]}
+            arguments = self.arguments(root, platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"})
             aws = arguments.cloud = FakeCloud()
-            arguments.shared_budget = self.shared_fleet()
+            arguments.shared_budget = self.shared_fleet(arguments)
             # Other work holds the region's Spot quota, then ends.
             aws.quotas[("us-west-2", "spot")] = 8
             aws.region_instances["us-west-2"] = [
@@ -326,12 +322,13 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual({"instances": 2, "spot_requests": 2, "vcpu_quota": 1, "vcpus": 1},
                              {operation: [call[0] for call in aws.calls].count(operation)
                               for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
-            self.assertIn("queued-capacity\tfleet quota or pending-launch limit",
+            self.assertIn("queued-capacity\tfleet quota",
                           (root / "job-attempts.tsv").read_text())
             # A Spot platform launches no On-Demand host, and an On-Demand platform no Spot host.
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only Spot"):
                 RUN_CAMPAIGN.check_purchase(arguments, replace(launched, market="on-demand"))
-            arguments.purchases["r8i"] = "on-demand"
+            arguments.settings.change("dain", "r8i buys On-Demand",
+                                      lambda settings: settings["purchase"].update(r8i="on-demand"))
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only On-Demand"):
                 RUN_CAMPAIGN.check_purchase(arguments, launched)
 
@@ -450,11 +447,13 @@ class TestRunCampaign(unittest.TestCase):
     def test_campaign_runs_every_candidates_phases_in_one_controller_as_their_steps_complete(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             campaign_root = Path(temporary_directory)
+            given = Path(temporary_directory) / "settings.json"
+            given.write_text(json.dumps({**test_fleet_budget.SETTINGS, "max_hosts": 16, "max_hosts_per_platform": 64}))
             arguments = SimpleNamespace(
                 campaign="tournament", campaign_root=campaign_root, language_plan=[], selected_shards=["trino-like"],
-                max_concurrent=16, max_concurrent_per_platform=64, release_version="", smoke_protocol="smoke",
-                smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True,
-                fleet_budget=campaign_root / "fleet-policy.json", shared_budget=Mock())
+                release_version="", smoke_protocol="smoke", smoke_results=None, primary_results=None,
+                confirmation_jobs=None, engine_builds=None, execute=True, spot_vcpu_reserve=32,
+                phase_timeout_seconds=None, cloud=FakeCloud())
             candidates = [RUN_CAMPAIGN.FrozenCandidate(name, commit * 40, f"refs/benchmarks/tournament/{name}",
                                                        campaign_root / name / "candidate", "0" * 64, "e" * 40)
                           for name, commit in (("a", "a"), ("b", "b"))]
@@ -510,6 +509,8 @@ class TestRunCampaign(unittest.TestCase):
             def run(names=("a", "b")):
                 events.clear()
                 arguments.candidates = [(name, frozen[name].commit) for name in names]
+                # Each restart repeats the command that started the campaign.
+                arguments.settings = given
                 controller_loops = iter(range(100))
 
                 def sleep(_):
@@ -543,9 +544,18 @@ class TestRunCampaign(unittest.TestCase):
             self.assertNotIn(("start", "a/primary"), order)
             self.assertNotIn(("start", "b/confirmation"), order)
             self.assertNotIn("b/", str(failed.exception))
-            # The controller records itself in the campaign root.
+            # The controller records itself in the campaign root, and each phase's state in the settings it seeded,
+            # as its own changes.
             self.assertEqual(str(os.getpid()), RUN_CAMPAIGN.read_properties(
                 campaign_root / RUN_CAMPAIGN.CONTROLLER_RECORD)["pid"])
+            settings = CampaignSettings(campaign_root).current
+            self.assertEqual({"a/build": "complete", "a/smoke": "failed", "a/primary": "pending",
+                              "a/confirmation": "pending", "b/build": "complete", "b/smoke": "complete",
+                              "b/primary": "complete", "b/confirmation": "complete"},
+                             {key: steering["state"] for key, steering in settings["phases"].items()})
+            self.assertEqual((16, {"controller"}), (settings["max_hosts"], {
+                row["actor"] for row in csv.DictReader((campaign_root / EVENTS).read_text().splitlines(),
+                                                       delimiter="\t") if row["change"] != "seed"}))
 
             # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
             # listed on the shards it measured.
@@ -557,22 +567,24 @@ class TestRunCampaign(unittest.TestCase):
             confirmation = events[-2][2]
             self.assertEqual((campaign_root / "a" / "reduction" / "confirmation-jobs.tsv", ["trino-like"]),
                              (confirmation.confirmation_jobs, confirmation.selected_shards))
-            # A restart measures what the campaign started measuring, of the candidates it started with.
+            # A restart measures what the campaign started measuring, of the candidates it started with, with the
+            # Spot vCPU reserve it started with, in the AWS account it started in.
             with self.assertRaisesRegex(SystemExit, "candidates differ"):
                 run(names=("a",))
-            arguments.selected_shards = None
-            with self.assertRaisesRegex(SystemExit, "options differ"):
-                run()
-            self.assertEqual([], events)
+            for option, value in (("selected_shards", None), ("spot_vcpu_reserve", 16), ("account_id", "1" * 12)):
+                options = arguments.cloud if option == "account_id" else arguments
+                with self.subTest(option=option), patch.object(options, option, value), \
+                        self.assertRaisesRegex(SystemExit, "options differ"):
+                    run()
+                self.assertEqual([], events)
 
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
         # tournament.a.lang, so they would reserve the fleet and number their hosts as one campaign.
         arguments = SimpleNamespace(
             campaign="tournament", campaign_root=Path("unused"), candidates=[("a", "main"), ("a.lang", "main")],
-            fleet_budget=Path("fleet-policy.json"), smoke_results=None, primary_results=None, confirmation_jobs=None,
-            engine_builds=None, language_plan=[Path("plan")], execute=True, max_concurrent=1,
-            max_concurrent_per_platform=1)
+            smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None,
+            language_plan=[Path("plan")], execute=True)
         with patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                 self.assertRaisesRegex(SystemExit, "a and a.lang would both run as campaign tournament.a.lang"):
             RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
@@ -625,11 +637,14 @@ class TestRunCampaign(unittest.TestCase):
             write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"),
                       [{"platform": "r8i", "unit_id": unit, "replica": "1", "detail": "not accepted"}
                        for unit in ("u2", "u3")])
+            # The language smoke reserved its hosts as an earlier controller did, in the fleet its policy names.
             policy = Path(temporary_directory) / "fleet" / "fleet-policy.json"
-            (primary / "execution-policy.json").write_text(json.dumps({"fleet_budget": str(policy)}))
+            (language_smoke / "execution-policy.json").write_text(json.dumps({"fleet_budget": str(policy)}))
             policy.parent.mkdir()
+            (policy.parent / "fleet-state.json").write_text(json.dumps({"reservations": {}, "completed": {
+                "y/1": {"owner": str(language_smoke.resolve()), "machine_hours": 2, "hourly_rate": 0.1}}}))
             owner = str(primary.resolve())
-            (policy.parent / "fleet-state.json").write_text(json.dumps({
+            (campaign_root / "fleet-state.json").write_text(json.dumps({
                 "completed": {"other/1": {"owner": "other", "machine_hours": 9, "hourly_rate": 1},
                               "x/5": {"owner": owner, "machine_hours": 1, "hourly_rate": 0.1}},
                 "reservations": {"x/1": {"owner": owner, "started_at": now - 1800, "reserved_until": now + 3600,
@@ -684,6 +699,7 @@ class TestRunCampaign(unittest.TestCase):
             f"  lang smoke        running as process {os.getpid()}",
             "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued",
             "    workers   none, as of 20s ago",
+            "    spend     $0.20 so far, $0.00 reserved",
             "    finish    unknown; no worker runs",
             "    medians   upload 7s"], lines)
 
@@ -837,7 +853,6 @@ class TestRunCampaign(unittest.TestCase):
             # The other pool's shard has a bundle too, which the language pool's worker leaves alone.
             arguments.pool_shards = {("r8i", "r8i.2xlarge"): ["language-bulk"],
                                      ("r8i", "r8i.large"): ["language-lifecycle"]}
-        arguments.shared_budget = SimpleNamespace(policy={"hourly_rates": {platform.instance_type: {"spot": 0.5}}})
         with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": ""}):
             RUN_CAMPAIGN.campaign_heap_size(arguments)
         job = replace(RUN_CAMPAIGN.unit_worker_job(platform, 1, 10, market), region="us-west-2", stop_by=1800000045)
@@ -1093,33 +1108,25 @@ class TestRunCampaign(unittest.TestCase):
                          [(item.platform, item.instance_type, item.unit_id, item.replica) for item in items])
         self.assertTrue(all(item.estimated_seconds <= RUN_CAMPAIGN.work_units.UNIT_SECONDS for item in items))
 
-    def test_shared_policy_checks_the_actual_aws_account_and_region(self):
-        policy = {"account": "123456789012", "region": "us-east-2",
-                  "regions": {"us-east-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0}}}
-        arguments = SimpleNamespace(shared_budget=SimpleNamespace(policy=policy), cloud=FakeCloud())
-        for account, region, regions in (("234567890123", "us-east-2", None),
-                                         ("123456789012", "us-west-2", None),
-                                         ("123456789012", "us-east-2", ["us-east-2", "eu-west-1"])):
-            arguments.platform_regions = {"r8i": regions} if regions else {}
-            arguments.cloud.account_id = account
-            with self.subTest(account=account, region=region, regions=regions), \
-                    patch.dict(os.environ, {"AWS_REGION": region}), \
-                    self.assertRaisesRegex(SystemExit, "differs from the shared fleet policy"):
-                RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
-
     def test_aws_preflight_requires_each_region_to_run_the_pinned_image(self):
         aws = FakeCloud()
         arguments = SimpleNamespace(
-            shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=0, cloud=aws,
-            platform_regions={"r8i": ["eu-west-1", "us-west-2", "ap-south-1"]},
-            regional_amis={("r8i", "us-west-2"): "ami-test", ("r8i", "eu-west-1"): "ami-ireland"},
-            transfer_buckets={"eu-west-1": "bucket-ireland"})
+            spot_vcpu_reserve=0, cloud=aws,
+            settings=self.settings(platform_regions={"r8i": ["eu-west-1", "us-west-2", "ap-south-1"]},
+                                   purchase={"r8i": "spot"}, buckets={"eu-west-1": "bucket-ireland",
+                                                                      "us-west-2": "bucket-oregon",
+                                                                      "ap-south-1": "bucket-mumbai"}),
+            regional_amis={("r8i", "us-west-2"): "ami-test", ("r8i", "eu-west-1"): "ami-ireland"})
+        arguments.settings.change("dain", "fit the quota", lambda settings: [
+            limits.update(max_vcpus=64) for limits in settings["regions"].values()])
         aws.default_quota = 64
         # The Oregon pin names the image even when Oregon does not offer the type.
         aws.images[("us-west-2", "ami-test")] = aws.images[("eu-west-1", "ami-ireland")] = replace(
             AMAZON_LINUX, name="al2023-pinned")
         aws.offerings[("us-west-2", "r8i.2xlarge")] = aws.offerings[("ap-south-1", "r8i.2xlarge")] = set()
-        aws.buckets["bucket-ireland"] = cloud.BucketInfo("eu-west-1", {"Project": "regulator-benchmark"})
+        for region, bucket in (("eu-west-1", "bucket-ireland"), ("us-west-2", "bucket-oregon"),
+                               ("ap-south-1", "bucket-mumbai")):
+            aws.buckets[bucket] = cloud.BucketInfo(region, {"Project": "regulator-benchmark"})
 
         RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         self.assertEqual(arguments.ami_names, {"r8i": "al2023-pinned"})
@@ -1157,12 +1164,10 @@ class TestRunCampaign(unittest.TestCase):
                 root = Path(temporary)
                 result_root = root / "results"
                 result_root.mkdir()
-                arguments = self.arguments(root)
-                arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
-                arguments.platform_regions = {"r8i": regions}
+                arguments = self.arguments(root, platform_regions={"r8i": regions}, purchase={"r8i": "spot"},
+                                           buckets={region: "bucket-" + region for region in regions})
                 arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
-                arguments.transfer_buckets = {region: "bucket-" + region for region in regions}
-                arguments.shared_budget = self.shared_fleet(["eu-west-1", "ap-south-1"])
+                arguments.shared_budget = self.shared_fleet(arguments)
                 aws = arguments.cloud = FakeCloud()
                 if scored:
                     aws.scores = {"us-west-2": 3, "eu-west-1": 9, "ap-south-1": 9}
@@ -1181,7 +1186,7 @@ class TestRunCampaign(unittest.TestCase):
                                             (["us-west-2", "eu-west-1", "ap-south-1"], ("us-west-2", "ap-south-1"),
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
-                arguments = SimpleNamespace(platform_regions={"r8i": regions}, cloud=FakeCloud())
+                arguments = SimpleNamespace(settings=self.settings(platform_regions={"r8i": regions}), cloud=FakeCloud())
                 job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", spot_capacity_failures=failures)
                 self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
                 self.assertEqual([], arguments.cloud.calls)
@@ -1190,9 +1195,9 @@ class TestRunCampaign(unittest.TestCase):
         # The October 28, 2026 scores: r8i's three regions tie, so its list order stands, while r9g's best-scored
         # regions come first. On-Demand takes each list as given.
         platforms = {platform.name: platform for platform in RUN_CAMPAIGN.read_platforms(SCRIPT.parent)}
-        arguments = SimpleNamespace(max_concurrent=64, cloud=FakeCloud(),
-                                    platform_regions={"r8i": ["eu-west-1", "eu-central-1", "ap-south-1"],
-                                                      "r9g": ["us-west-2", "us-east-2", "eu-central-1"]})
+        arguments = SimpleNamespace(cloud=FakeCloud(), settings=self.settings(
+            platform_regions={"r8i": ["eu-west-1", "eu-central-1", "ap-south-1"],
+                              "r9g": ["us-west-2", "us-east-2", "eu-central-1"]}))
         arguments.cloud.scores = {"eu-west-1": 3, "eu-central-1": 3, "ap-south-1": 3, "us-west-2": 1, "us-east-2": 3}
         for name, market, expected in (
                 ("r8i", "spot", ["eu-west-1", "eu-central-1", "ap-south-1"]),
@@ -1214,8 +1219,10 @@ class TestRunCampaign(unittest.TestCase):
         # A unit worker runs on the instance its plan allocates, here the platform's multicore worker.
         jobs = [RUN_CAMPAIGN.unit_worker_job(replace(platform, instance_type="r8i.2xlarge", vcpus=8), 1, 1, "spot")]
         aws = FakeCloud()
-        arguments = SimpleNamespace(shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=4, cloud=aws,
-                                    platform_regions={"r8i": ["us-west-2"]})
+        arguments = SimpleNamespace(spot_vcpu_reserve=4, cloud=aws, settings=self.settings(
+            platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"}))
+        arguments.settings.change("dain", "fit the quota",
+                                  lambda settings: settings["regions"]["us-west-2"].update(max_vcpus=7))
         aws.quotas[("us-west-2", "spot")] = 11
         aws.images[("us-west-2", platform.ami_id)] = AMAZON_LINUX
         aws.offerings[("us-west-2", "r8i.2xlarge")] = set()
@@ -1227,19 +1234,23 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
 
     def test_aws_preflight_rejects_deadline_capacity_above_effective_spot_quota(self):
-        policy = {"account": "123456789012", "region": "us-west-2",
-                  "max_vcpus": 64, "spot_vcpu_reserve": 16}
         aws = FakeCloud()
-        arguments = SimpleNamespace(
-            shared_budget=SimpleNamespace(policy=policy), purchases={"r8i": "spot"}, spot_vcpu_reserve=16, cloud=aws,
-            platform_regions={"r8i": ["us-west-2"]})
+        arguments = SimpleNamespace(spot_vcpu_reserve=16, cloud=aws, settings=self.settings(
+            platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"}))
+
+        def limit(vcpus):
+            arguments.settings.change("dain", f"Oregon's limit {vcpus} vCPUs",
+                                      lambda settings: settings["regions"]["us-west-2"].update(max_vcpus=vcpus))
+
+        limit(64)
         aws.quotas[("us-west-2", "spot")] = 64
         # Below the On-Demand safety reserve, which binds only a region with an allowance.
         aws.quotas[("us-west-2", "on-demand")] = 16
         aws.images[("us-west-2", self.platform.ami_id)] = AMAZON_LINUX
+        aws.buckets["bucket"] = cloud.BucketInfo("us-west-2", {"Project": "regulator-benchmark"})
         with self.assertRaisesRegex(SystemExit, "max_vcpus exceeds"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
-        policy["max_vcpus"] = 48
+        limit(48)
         RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     @staticmethod
@@ -1251,21 +1262,16 @@ class TestRunCampaign(unittest.TestCase):
         arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
         return items
 
-    def test_campaign_concurrency_uses_configuration(self):
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
-                                    platform_regions={"r8i": ["us-west-2"]})
+    def test_campaign_checks_its_phases_against_its_settings(self):
+        arguments = SimpleNamespace(campaign_id="baseline", phase="primary")
         items = self.replica_items(arguments, [self.platform], ["unit-0001"], 900)
+        # A phase planned alone, before its campaign has settings, plans for the default region.
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.execute = True
-        with self.assertRaisesRegex(SystemExit, "requires a shared fleet budget"):
+        with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
+                self.assertRaisesRegex(SystemExit, "requires the campaign's settings"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
-                                                          "spot_vcpu_reserve": 16})
-        arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 16
-        # Hosts read their inputs from a shared bucket in their own region.
-        with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-west-2'\]"):
-            RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.transfer_buckets = {"us-west-2": "west"}
+        arguments.settings = self.settings(platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"})
         # The controller names every host's prefix under the transfer prefix.
         for prefix, error in (("", "requires TRANSFER_PREFIX"), ("../another-campaign", "safe relative S3 prefix"),
                               ("prefix/", "safe relative S3 prefix")):
@@ -1274,18 +1280,18 @@ class TestRunCampaign(unittest.TestCase):
                 RUN_CAMPAIGN.validate_configuration(arguments, items)
         self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.spot_vcpu_reserve = 0
-        with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
+        # A campaign runs On-Demand only where its settings allow it.
+        arguments.settings.change("dain", "r8i may buy On-Demand", lambda settings: settings["purchase"].clear())
+        with self.assertRaisesRegex(SystemExit, "allow no On-Demand in a region of r8i"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.spot_vcpu_reserve = 16
-        # A shared fleet runs On-Demand only where its policy allows it.
-        arguments.purchases = {}
-        arguments.shared_budget.policy.update(regions={
-            "eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}})
-        with self.assertRaisesRegex(SystemExit, "allows no On-Demand in a region of r8i"):
-            RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.platform_regions["r8i"].append("eu-west-1")
-        arguments.transfer_buckets["eu-west-1"] = "ireland"
+
+        def allow_on_demand(settings):
+            settings["regions"]["eu-west-1"] = {"bucket": "ireland", "max_vcpus": 64, "on_demand_max_vcpus": 64}
+            settings["platform_regions"]["r8i"].append("eu-west-1")
+            for rates in settings["hourly_rates"].values():
+                rates["on_demand_total"] = 2 * rates["total"]
+
+        arguments.settings.change("dain", "Ireland allows On-Demand", allow_on_demand)
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A platform launches only in regions holding its image.
         arguments.regional_amis = {("r8i", "us-west-2"): "ami", ("r9g", "eu-west-1"): "ami"}
@@ -1301,42 +1307,44 @@ class TestRunCampaign(unittest.TestCase):
         arguments.campaign_id = "tournament.a/b"
         with self.assertRaisesRegex(SystemExit, "campaign ID must be"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.campaign_id = "baseline"
-        arguments.max_concurrent = 0
-        with self.assertRaisesRegex(SystemExit, "positive integer"):
-            RUN_CAMPAIGN.validate_configuration(arguments, items)
 
-    def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
-                                    purchases={"r8i": "spot"}, spot_vcpu_reserve=0,
-                                    platform_regions={"r8i": ["us-west-2"]},
-                                    shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
-                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0}),
-                                    phase_timeout_seconds=54000)
+    def test_deadline_uses_the_settings_host_and_vcpu_limits(self):
+        arguments = SimpleNamespace(campaign_id="baseline", phase="primary", spot_vcpu_reserve=0,
+                                    phase_timeout_seconds=54000, settings=self.settings(
+                                        platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"},
+                                        max_hosts=512))
+
+        def change(update):
+            arguments.settings.change("dain", "limits", update)
+
+        def oregon(vcpus):
+            return lambda settings: settings["regions"]["us-west-2"].update(max_vcpus=vcpus)
+
+        change(oregon(8))
         # 18 worker hours of units: one worker lifetime and a retry wave on three workers, but not on one.
         items = self.replica_items(arguments, [self.platform], [f"unit-{index}" for index in range(24)], 900)
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.shared_budget.policy.update(max_vcpus=1024, max_hosts=1)
+        change(lambda settings: oregon(1024)(settings) or settings.update(max_hosts=1))
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.shared_budget.policy["max_hosts"] = 512
+        change(lambda settings: settings.update(max_hosts=512))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.shared_budget.policy["max_vcpus"] = 1
+        change(oregon(1))
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         # Another allowed region's limit admits the workers, and a wave fills every region's limit at once:
         # the three 8-vCPU workers need Oregon's one vCPU beside Ireland's 23.
-        arguments.platform_regions["r8i"].append("eu-west-1")
-        arguments.shared_budget.policy["regions"] = {"eu-west-1": {"max_vcpus": 23, "spot_vcpu_reserve": 0}}
+        change(lambda settings: settings["regions"].update({"eu-west-1": {"bucket": "ireland", "max_vcpus": 23}}) or
+               settings["platform_regions"]["r8i"].append("eu-west-1"))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A unit campaign's limits apply to its pools' worker hosts.
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        arguments.shared_budget.policy["regions"] = {}
+        change(lambda settings: settings.update(platform_regions={"r8i": ["us-west-2"], "r9g": ["us-west-2"]},
+                                                purchase={"r8i": "spot", "r9g": "spot"}))
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
                                               ["trino-operations"])
         arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
-        arguments.purchases = {platform.name: "spot" for platform in platforms}
         arguments.phase_timeout_seconds = None
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
@@ -1345,18 +1353,17 @@ class TestRunCampaign(unittest.TestCase):
         platforms = [
             self.platform,
             RUN_CAMPAIGN.Platform(
-                "r8g", "arm", "r8g.2xlarge", 8, "ami", "jdk", "0" * 64,
-                "gcc", "cmake", "glibc", "cargo", "rust", "time", "zstd"),
-            RUN_CAMPAIGN.Platform(
                 "r9g", "arm", "r9g.2xlarge", 8, "ami", "jdk", "0" * 64,
                 "gcc", "cmake", "glibc", "cargo", "rust", "time", "zstd"),
         ]
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary")
+        arguments = SimpleNamespace(campaign_id="baseline", phase="primary", settings=self.settings(
+            purchase={"r8i": "spot", "r9g": "spot"}, max_hosts=64, max_hosts_per_platform=64))
         items = self.replica_items(arguments, platforms, [f"unit-{index}" for index in range(33)], 2700)
 
         RUN_CAMPAIGN.validate_configuration(arguments, items)
 
-        arguments.max_concurrent, arguments.phase_timeout_seconds = 32, 57600
+        arguments.phase_timeout_seconds = 57600
+        arguments.settings.change("dain", "max_hosts 64 to 16", lambda settings: settings.update(max_hosts=16))
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
 
@@ -1412,11 +1419,8 @@ class TestRunCampaign(unittest.TestCase):
                     (["tournament", "--candidate", "a"], "--candidate takes one NAME=COMMITISH"),
                     (["tournament", "--candidate", "a/b=HEAD"], "--candidate takes one NAME=COMMITISH"),
                     (["tour/nament", "--candidate", "a=HEAD"], "candidate a's campaign ID must be"),
-                    (["tournament", "--candidate", "a=HEAD", "--platform-regions", "r8i"],
-                     "--platform-regions takes one PLATFORM=VALUE"),
-                    (["tournament", "--candidate", "a=HEAD", "--purchase", "r8i=cheap"], "--purchase policies are"),
-                    (["tournament", "--candidate", "a=HEAD", "--max-concurrent", "0"],
-                     "--max-concurrent must be a positive number of hosts"),
+                    # A campaign's first execution seeds its settings from the file it names.
+                    (["tournament", "--candidate", "a=HEAD", "--execute"], "name them with --settings FILE"),
                     # The driver plans its language phases' units, so it refuses plans they would refuse.
                     (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "source")],
                      f"invalid language plan {(root / 'source').resolve()}"),
@@ -1433,12 +1437,10 @@ class TestRunCampaign(unittest.TestCase):
             self.assertFalse((root / "refused").exists())
             # A phase runs only inside its campaign's controller, and a second controller of a campaign stops at
             # once, before it freezes anything, while the first owns the campaign root.
-            fleet_policy = test_fleet_budget.TestFleetBudget()
-            fleet_policy.setUp()
-            self.addCleanup(fleet_policy.doCleanups)
+            given = root / "settings.json"
+            given.write_text(json.dumps(test_fleet_budget.SETTINGS))
             execute = ["--candidate", "lifecycle=HEAD", "--campaign-root", str(root), "--execute",
-                       "--fleet-budget", str(fleet_policy.path), "--purchase", "r8i=spot", "--purchase", "r9g=spot",
-                       "--transfer-bucket", f"{RUN_CAMPAIGN.default_regions()[0]}=bucket"]
+                       "--settings", str(given)]
             for command, refusal in ((["smoke", "language", *execute], "a phase runs only inside its campaign's"),
                                      (["campaign", "language", *execute], f"owns campaign root {root}")):
                 with self.subTest(refusal=refusal), patch.object(sys, "argv", ["run-campaign.py", *command]), \
@@ -1461,9 +1463,8 @@ class TestRunCampaign(unittest.TestCase):
                     path.write_text(content)
                     arguments = SimpleNamespace(
                         campaign="tournament", campaign_root=Path(old) / "old", candidates=[("a", "main")],
-                        fleet_budget=fleet_policy.path, smoke_results=None, primary_results=None,
-                        confirmation_jobs=None, engine_builds=None, language_plan=[], execute=True, max_concurrent=1,
-                        max_concurrent_per_platform=1)
+                        smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None,
+                        language_plan=[], execute=True, settings=given)
                     with self.assertRaisesRegex(SystemExit, f"as {re.escape(str(path))} shows"):
                         RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
                     self.assertFalse((Path(old) / "old" / RUN_CAMPAIGN.CONTROLLER_LOCK).exists())
@@ -1484,11 +1485,11 @@ class TestRunCampaign(unittest.TestCase):
             (directory / "status.txt").write_text("status=complete\n")
         plan = RUN_CAMPAIGN.language_fleet.validate(fixture.directory)
         arguments = SimpleNamespace(
-            phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g", max_concurrent=2,
+            phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g",
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
             candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory},
-            shared_budget=Mock(policy={}, policy_path="fleet.json", **{
-                "reservations.return_value": [], "report_boots.return_value": fleet_budget.BOOT_WINDOW_MAX}))
+            settings=self.settings(max_hosts=2), shared_budget=Mock(**{
+                "reservations.return_value": [], "report_boots.return_value": BOOT_WINDOW_MAX}))
 
         def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
             """The campaign's validation, installing each platform's engine build, whose classes archive has the
@@ -1540,7 +1541,8 @@ class TestRunCampaign(unittest.TestCase):
                  for unit_id, seconds in (("lone", 950.0), ("packed", 900.0))]
         for purchase, expected in (("spot-then-on-demand", ["r8i/lone/replica-1"]), ("spot", []),
                                    ("on-demand", ["r8i/lone/replica-1", "r8i/packed/replica-1"])):
-            dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", purchases={"r8i": purchase}),
+            dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", settings=self.settings(
+                purchase={"r8i": purchase})),
                                                      SCRIPT.parents[3], Path("/nonexistent"), items,
                                                      RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
             self.assertEqual([item.identity for item in items if dispatcher.on_demand(item)], expected)
@@ -1550,7 +1552,8 @@ class TestRunCampaign(unittest.TestCase):
                                        (("1", seconds),))
                  for unit_id, seconds in (("short", 100.0), ("long", 600.0), ("slow", 950.0)) for replica in (1, 2)]
         dispatcher = RUN_CAMPAIGN.UnitDispatcher(
-            SimpleNamespace(phase="primary", purchases={"r8i": "spot-then-on-demand"}), SCRIPT.parents[3],
+            SimpleNamespace(phase="primary", settings=self.settings(purchase={"r8i": "spot-then-on-demand"})),
+            SCRIPT.parents[3],
             Path("/nonexistent"), items, RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
         # On-Demand work goes first, then the lowest replica, then the longest: an On-Demand host takes both
         # replicas of the slow unit, which only it may run, before any other unit's replica 1, and a Spot host never
@@ -1605,7 +1608,7 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(len(launches), len({spec.subnet for spec in launches}))
                 # The host is found by its session, and buys Spot at no more than the budget's rate.
                 self.assertEqual(metadata["session"], instance.tags["Session"])
-                self.assertEqual(("spot", "0.5", "regulator-benchmark-worker"),
+                self.assertEqual(("spot", "0.28", "regulator-benchmark-worker"),
                                  (launches[-1].market, launches[-1].max_price, launches[-1].profile))
 
     def semantic_verifier_script(self, source, directory):
@@ -2063,14 +2066,6 @@ class TestRunCampaign(unittest.TestCase):
                 recover()
 
     def test_shared_fleet_launches_on_demand_where_its_allowance_has_headroom(self):
-        fixture = test_fleet_budget.TestFleetBudget()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        policy = fixture.policy
-        policy["regions"] = {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}}
-        for rates in policy["hourly_rates"].values():
-            rates["on_demand_total"] = 2 * rates["total"]
-        fixture.path.write_text(json.dumps(policy))
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
         aws = FakeCloud()
         aws.quotas[("eu-west-1", "on-demand")] = 64
@@ -2078,14 +2073,20 @@ class TestRunCampaign(unittest.TestCase):
                                              cloud.Instance("i-other", "r8i.2xlarge", "on-demand", "running", "", {}, 0)]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            arguments = self.arguments(root)
-            arguments.shared_budget, arguments.cloud = RUN_CAMPAIGN.FleetBudget(fixture.path), aws
-            arguments.spot_vcpu_reserve, arguments.platform_regions = 0, {"r8i": ["us-west-2", "eu-west-1"]}
+            arguments = self.arguments(root, platform_regions={"r8i": ["us-west-2", "eu-west-1"]})
+
+            def allow_on_demand(settings):
+                settings["regions"]["eu-west-1"].update(max_vcpus=64, on_demand_max_vcpus=64)
+                for rates in settings["hourly_rates"].values():
+                    rates["on_demand_total"] = 2 * rates["total"]
+
+            arguments.settings.change("dain", "Ireland allows On-Demand", allow_on_demand)
+            arguments.shared_budget, arguments.cloud = self.shared_fleet(arguments), aws
             launched, admitted = self.admit(arguments, root, job)
+            reserved = json.loads(arguments.shared_budget.state_path.read_text())["reservations"]
         # Oregon has no allowance; Ireland's quota, less its reserve and other work, fits the host.
         self.assertEqual({"eu-west-1"}, {call[1] for call in aws.calls})
         self.assertEqual(("eu-west-1", "on-demand", True), (launched.region, launched.market, admitted))
-        reserved = json.loads(arguments.shared_budget.state_path.read_text())["reservations"]
         self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in reserved.values()],
                          [("eu-west-1", "on-demand", 0.60)])
         snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand", {})
@@ -2647,17 +2648,36 @@ class TestUnitWorkers(unittest.TestCase):
 
     def dispatcher(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None,
                    purchases=None, on_demand=True, deadline=None, confirmations=(), primary_results=None,
-                   release_version="", extend=True, budget=None):
-        """The controller of the phase's work items, with the fleet's stubs in place, its result directory in root.
-        Unless given a shared fleet budget, the stub budget admits every extension of a host's reservation if extend,
-        logging each, and refuses every one otherwise, and keeps its boot window at its largest."""
-        if budget is None:
-            budget = Mock(policy={"hourly_rates": {
-                instance_type: {"spot": 0.2} for platform in self.PLATFORMS
-                for instance_type in (platform.instance_type, platform.concurrency_instance_type)}},
-                policy_path="fleet.json")
+                   release_version="", extend=True, shared=False, budget=None, results="results"):
+        """The controller of the phase's work items, with the fleet's stubs in place, its result directory in root,
+        under the settings its campaign root, root, holds, or else settings it seeds there: its limits, each platform's
+        regions, the default region unless platform_regions names others, and its purchases, its results in the
+        directory results names. With shared, its budget is the campaign's own, as its controller keeps it for every
+        phase, which sees EC2 hold none of its hosts, so only its host limit and its boot window pace launches. Unless
+        given one, the stub budget admits every extension of a host's reservation if extend, logging each, and
+        refuses every one otherwise, and keeps its boot window at its largest."""
+        shared_budgets = vars(self).setdefault("shared_budgets", {})
+        if shared and root in shared_budgets:
+            settings = shared_budgets[root].settings
+        elif (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).is_file():
+            settings = CampaignSettings(root)
+        else:
+            settings = campaign_settings(
+                root, {**{platform.name: RUN_CAMPAIGN.default_regions() for platform in self.PLATFORMS},
+                       **(platform_regions or {})}, purchases, max_hosts=max_concurrent,
+                max_hosts_per_platform=per_platform)
+        if shared and root not in shared_budgets:
+            snapshot = patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
+                                    return_value={"quota": 736, "instances": [], "requests": []})
+            snapshot.start()
+            self.addCleanup(snapshot.stop)
+            shared_budgets[root] = RUN_CAMPAIGN.FleetBudget(root, settings, 0)
+        if shared:
+            budget = shared_budgets[root]
+        elif budget is None:
+            budget = Mock()
             budget.reserve.side_effect = lambda campaign, job, *_, **__: (
-                on_demand or job.market == "spot", "fleet quota or pending-launch limit")
+                on_demand or job.market == "spot", "fleet quota")
 
             def extend_reservation(campaign, epoch, *, until):
                 fleet.log.append(("extend", epoch, until, extend))
@@ -2665,22 +2685,18 @@ class TestUnitWorkers(unittest.TestCase):
 
             budget.extend.side_effect = extend_reservation
             budget.reservations.return_value = fleet.reservations or []
-            budget.report_boots.return_value = fleet_budget.BOOT_WINDOW_MAX
+            budget.report_boots.return_value = BOOT_WINDOW_MAX
         self.budget = budget
-        regions = {region for listed in (platform_regions or {}).values() for region in listed}
         arguments = SimpleNamespace(
-            phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
-            max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
+            phase=phase, campaign_id="campaign", campaign_root=root, candidate_archive=root / "candidate.tar.gz",
             candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
-            cloud=fleet, shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
-            purchases=purchases or {}, topology_deadline_seconds=deadline, primary_results=primary_results,
-            release_version=release_version,
-            transfer_buckets={region: "bucket" for region in regions | set(RUN_CAMPAIGN.default_regions())})
+            cloud=fleet, settings=settings, spot_vcpu_reserve=0, shared_budget=budget, selected_shards=shards,
+            topology_deadline_seconds=deadline, primary_results=primary_results, release_version=release_version)
         self.arguments = arguments
         with gzip.open(arguments.candidate_archive, "wb") as candidate:
             candidate.write(b"candidate")
         items = RUN_CAMPAIGN.build_work_items(phase, self.PLATFORMS, fleet.units, shards, confirmations)
-        result_root = root / "results"
+        result_root = root / results
         result_root.mkdir(exist_ok=True)
         RUN_CAMPAIGN.write_work_items(result_root / "work-items.tsv", items)
         self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
@@ -2690,35 +2706,13 @@ class TestUnitWorkers(unittest.TestCase):
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]
 
-    def shared_budget(self):
-        """A shared fleet budget for Spot hosts of both platforms, which sees EC2 hold none of its hosts, so only its
-        pending-launch limit, here its host limit, and its boot window pace launches."""
-        fixture = test_fleet_budget.TestFleetBudget()
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        fixture.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
-        fixture.policy["max_pending_launches"] = fixture.policy["max_hosts"]
-        fixture.path.write_text(json.dumps(fixture.policy))
-        snapshot = patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
-                                return_value={"quota": 736, "instances": [], "requests": []})
-        snapshot.start()
-        self.addCleanup(snapshot.stop)
-        return RUN_CAMPAIGN.FleetBudget(fixture.path)
-
-    def boot_windows(self, budget):
-        """The boot window's sizes in turn, as the loops read it."""
-        sizes = []
-        report_boots = budget.report_boots
-
-        def reporting(*arguments):
-            room = report_boots(*arguments)
-            size = json.loads(budget.state_path.read_text())["boot_window"]["size"]
-            if sizes[-1:] != [size]:
-                sizes.append(size)
-            return room
-
-        budget.report_boots = reporting
-        return sizes
+    @staticmethod
+    def boot_windows(root):
+        """The boot window's sizes in turn, as the controller changed them in the campaign's settings."""
+        with (root / EVENTS).open(newline="") as events:
+            return [BOOT_WINDOW_FIRST] + [int(row["change"].split(" to ")[1])
+                                          for row in csv.DictReader(events, delimiter="\t")
+                                          if row["change"].startswith("boot window")]
 
     def lease_count(self, lease, platform="r8i"):
         """How many leases the platform's hosts were given for the replica a lease names."""
@@ -3008,14 +3002,12 @@ class TestUnitWorkers(unittest.TestCase):
                      for index in range(1, 301)}
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: setups[host.number - 1])
-            budget = self.shared_budget()
-            windows = self.boot_windows(budget)
             self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100,
-                           purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                           purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
             self.assertEqual(200, len(fleet.hosts))
             # The hosts launch in waves, each as large as the boot window, which doubles as each wave reports in
             # time, up to its largest.
-            self.assertEqual([10, 20, 40, 50], windows)
+            self.assertEqual([10, 20, 40, 50], self.boot_windows(Path(temporary)))
             # Every host finds its first lease waiting as it boots, and its next as each lease ends, until the queue
             # is empty.
             sessions = {host.session: host for host in fleet.hosts}
@@ -3141,13 +3133,11 @@ class TestUnitWorkers(unittest.TestCase):
                      for index in range(1, 21)}
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: 360 if host.number <= 10 else 67)
-            budget = self.shared_budget()
-            windows = self.boot_windows(budget)
             self.run_phase(Path(temporary), fleet, "smoke", ["boot"], 20, 10,
-                           purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                           purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
             # The late wave halved the window, and no host launched until the late hosts reported; the next wave of
             # five reported in time and doubled it.
-            self.assertEqual([10, 5, 10], windows)
+            self.assertEqual([10, 5, 10], self.boot_windows(Path(temporary)))
             launched = sorted(host.launched_at for host in fleet.hosts)
             self.assertEqual(20, len(launched))
             self.assertGreaterEqual(launched[10], launched[0] + 360)
@@ -3157,7 +3147,6 @@ class TestUnitWorkers(unittest.TestCase):
                                       "estimated_seconds": "900",
                                       "groups": [{"group_id": "1", "estimated_seconds": 900}]}
                  for shard, count in (("short", 1), ("long", 4)) for index in range(1, count + 1)}
-        budget = self.shared_budget()
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             # Two phases share the fleet. The smoke phase's two hosts measure a unit each and stop: the r8i host's
             # prefix will not empty, and the r9g host's instance never terminates. The primary phase's four hosts
@@ -3166,13 +3155,15 @@ class TestUnitWorkers(unittest.TestCase):
                                   stuck_prefix=lambda host: host.epoch == "1", leaked=lambda host: host.epoch == "2")
             with fleet.stubs():
                 running = {}
-                for phase, shard, limits in (("smoke", "short", (2, 1)), ("primary", "long", (4, 2))):
-                    (Path(temporary) / phase).mkdir()
-                    dispatcher = self.dispatcher(Path(temporary) / phase, fleet, phase, [shard], *limits,
-                                                 purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                # The campaign's controller gives each phase its share of each platform's hosts.
+                for phase, shard, share in (("smoke", "short", 1), ("primary", "long", 2)):
+                    dispatcher = self.dispatcher(Path(temporary), fleet, phase, [shard], 6, 3,
+                                                 purchases={"r8i": "spot", "r9g": "spot"}, shared=True, results=phase)
+                    dispatcher.share = dict.fromkeys(("r8i", "r9g"), share)
                     running[dispatcher] = dispatcher.begin()
                     dispatcher.recover()
                 smoke, primary = phases = list(running)
+                budget = self.budget
 
                 def run(until):
                     # Each loop runs each phase not yet over, as one controller would.
@@ -3183,7 +3174,8 @@ class TestUnitWorkers(unittest.TestCase):
                         fleet.sleep(RUN_CAMPAIGN.UNIT_POLL_SECONDS)
 
                 def spending_stop():
-                    return json.loads(budget.state_path.read_text()).get("spending_stop")
+                    stop = CampaignSettings(Path(temporary)).current["spending_stop"]
+                    return stop and stop["reason"]
 
                 run(spending_stop)
                 stuck, leaked = (next(host for host in fleet.hosts if host.epoch == epoch) for epoch in "12")
@@ -3210,7 +3202,8 @@ class TestUnitWorkers(unittest.TestCase):
                                         if entry[1] not in (stuck.session, leaked.session)])
                 # Once the prefix empties, the instance terminates and the stop is cleared, both phases finish.
                 fleet.stuck_prefix = fleet.leaked = lambda host: False
-                budget.clear_spending_stop()
+                budget.settings.change("dain", "clear the spending stop",
+                                       lambda settings: settings.update(spending_stop=None))
                 run(lambda: False)
                 for dispatcher in phases:
                     dispatcher.end()
@@ -3308,21 +3301,19 @@ class TestUnitWorkers(unittest.TestCase):
         for name, abort, stopped, message in (("Ctrl-C", KeyboardInterrupt, KeyboardInterrupt, "controller stopped"),
                                               ("SIGTERM", terminated, KeyboardInterrupt, ""),
                                               ("failure", RuntimeError, RuntimeError, "controller stopped")):
-            snapshot = {"quota": 736, "instances": [], "requests": []}
-            with self.subTest(abort=name), tempfile.TemporaryDirectory() as temporary, \
-                    patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot", return_value=snapshot):
+            with self.subTest(abort=name), tempfile.TemporaryDirectory() as temporary:
+                settings = campaign_settings(Path(temporary), dict.fromkeys(("r8i", "r9g"), ["us-west-2"]),
+                                             {"r8i": "spot", "r9g": "spot"}, max_hosts=3, max_hosts_per_platform=2)
                 other = test_fleet_budget.TestFleetBudget()
                 other.setUp()
                 self.addCleanup(other.doCleanups)
-                other.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
-                other.path.write_text(json.dumps(other.policy))
-                other.budget, budget = (RUN_CAMPAIGN.FleetBudget(other.path) for _ in range(2))
+                other.budget = RUN_CAMPAIGN.FleetBudget(Path(temporary), settings, 0)
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
                 fleet.abort = abort
                 with self.assertRaisesRegex(stopped, message), \
                         RUN_CAMPAIGN.controller_lock(Path(temporary)):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
-                                   purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1, shared=True)
+                budget = self.budget
                 self.assertEqual([], budget.reservations(Path(temporary) / "results"))
                 if stopped is RuntimeError:
                     # A failure halts the fleet, and only its own controller's restart clears that halt.
@@ -3332,8 +3323,7 @@ class TestUnitWorkers(unittest.TestCase):
                 else:
                     self.assertTrue(other.reserve(1, campaign="other", now=fleet.time())[0])
                 fleet.abort_after = None
-                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
-                               purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1, shared=True)
                 self.assertTrue(other.reserve(2, campaign="other", now=fleet.time())[0])
 
     def test_cancelled_controller_with_a_host_awaiting_cleanup_halts_the_fleet_until_its_own_restart(self):

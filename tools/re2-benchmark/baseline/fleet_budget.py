@@ -1,4 +1,4 @@
-"""Durable admission reservations shared by controllers on one coordinator.
+"""A campaign's durable admission reservations, in fleet-state.json at its root, within its live settings' limits.
 
 A reservation holds a host's hours and cost until the stop time its controller
 reserved for it. That time covers only the work the host was issued: the
@@ -11,22 +11,17 @@ must prove resource cleanup before releasing it, including during recovery.
 from contextlib import contextmanager
 import fcntl
 import json
-import math
 import os
 from pathlib import Path
-import re
 import time
 
+from campaign_settings import BOOT_WINDOW_MIN
 
-REGION_PATTERN = r"[a-z]+(?:-[a-z]+)+-[0-9]+"
+
 # Every On-Demand launch leaves this much of its region's On-Demand quota free.
 ON_DEMAND_VCPU_SAFETY_RESERVE = 32
 STATE_FILE = "fleet-state.json"
-# The boot window's first, smallest and largest number of hosts launched but not yet reporting, and how soon after its
-# launch a host must report.
-BOOT_WINDOW_FIRST = 10
-BOOT_WINDOW_MIN = 5
-BOOT_WINDOW_MAX = 50
+# How soon after its launch a host must report.
 BOOT_REPORT_SECONDS = 5 * 60
 
 
@@ -39,104 +34,33 @@ class FleetHalted(BudgetError):
     cancelled one does, without recording a halt of its own."""
 
 
-def validate_region_limits(limits):
-    if (not isinstance(limits, dict) or {"max_vcpus", "spot_vcpu_reserve"} - set(limits) or
-            set(limits) - {"max_vcpus", "spot_vcpu_reserve", "on_demand_max_vcpus"}):
-        raise BudgetError("fleet region limits require max_vcpus and spot_vcpu_reserve and allow on_demand_max_vcpus")
-    if type(limits["max_vcpus"]) is not int or limits["max_vcpus"] <= 0:
-        raise BudgetError("invalid fleet budget: max_vcpus")
-    if type(limits["spot_vcpu_reserve"]) is not int or limits["spot_vcpu_reserve"] < 0:
-        raise BudgetError("invalid fleet Spot vCPU reserve")
-    if "on_demand_max_vcpus" in limits and (
-            type(limits["on_demand_max_vcpus"]) is not int or limits["on_demand_max_vcpus"] <= 0):
-        raise BudgetError("invalid fleet On-Demand vCPU allowance")
-
-
-def validate_policy(policy):
-    if policy.get("schema_version") != 1 or policy.get("market") != "spot":
-        raise BudgetError("shared fleet requires a schema-1 Spot policy")
-    for name, pattern in (("account", r"[0-9]{12}"), ("region", REGION_PATTERN)):
-        value = policy.get(name)
-        if not isinstance(value, str) or not re.fullmatch(pattern, value):
-            raise BudgetError("invalid fleet " + name)
-    for name in ("max_hosts", "max_pending_launches"):
-        value = policy.get(name)
-        if type(value) is not int or value <= 0:
-            raise BudgetError("invalid fleet budget: " + name)
-    validate_region_limits(home_limits(policy))
-    # The top-level limits cover the home region; each other region a campaign may
-    # launch in names its own, since quotas are regional.
-    regions = policy.get("regions", {})
-    if not isinstance(regions, dict) or ("regions" in policy and not regions):
-        raise BudgetError("invalid fleet regions")
-    for region, limits in regions.items():
-        if not isinstance(region, str) or not re.fullmatch(REGION_PATTERN, region) or region == policy["region"]:
-            raise BudgetError("invalid fleet region")
-        validate_region_limits(limits)
-    for name in ("max_machine_hours", "max_usd", "ancillary_reserve_usd", "minimum_launch_interval_seconds"):
-        value = policy.get(name)
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
-            raise BudgetError("invalid fleet budget: " + name)
-        if name in ("max_machine_hours", "max_usd") and value == 0:
-            raise BudgetError("invalid fleet budget: " + name)
-    if policy["ancillary_reserve_usd"] >= policy["max_usd"]:
-        raise BudgetError("ancillary reserve exhausts the fleet budget")
-    if not isinstance(policy.get("hourly_rates"), dict) or not policy["hourly_rates"]:
-        raise BudgetError("fleet budget requires per-type hourly ceilings")
-    # A policy allowing On-Demand anywhere prices every worker type's On-Demand hour.
-    on_demand = bool(on_demand_regions(policy))
-    price_fields = {"spot", "total", "on_demand_total"} if on_demand else {"spot", "total"}
-    for instance_type, rates in policy["hourly_rates"].items():
-        if instance_type not in {family + size for family in ("r8i", "r9g") for size in (".large", ".2xlarge")}:
-            raise BudgetError("unapproved instance type in fleet budget")
-        if (set(rates) != price_fields or
-                any(type(value) not in (int, float) or not math.isfinite(value) for value in rates.values()) or
-                not 0 < rates["spot"] < rates["total"] or (on_demand and rates["on_demand_total"] <= 0)):
-            raise BudgetError("invalid hourly price ceiling")
-
-
-def home_limits(policy):
-    limits = {name: policy.get(name) for name in ("max_vcpus", "spot_vcpu_reserve")}
-    if "on_demand_max_vcpus" in policy:
-        limits["on_demand_max_vcpus"] = policy["on_demand_max_vcpus"]
-    return limits
-
-
-def region_limits(policy):
-    return {policy["region"]: home_limits(policy), **policy.get("regions", {})}
-
-
-def on_demand_regions(policy):
+def on_demand_regions(settings):
     """Name the regions whose On-Demand allowance lets the fleet launch On-Demand there."""
-    return [region for region, limits in region_limits(policy).items() if "on_demand_max_vcpus" in limits]
+    return [region for region, limits in settings["regions"].items() if "on_demand_max_vcpus" in limits]
 
 
 def reservation_key(campaign_id, host_epoch):
     return f"{campaign_id}/{host_epoch}"
 
 
-def affordable(policy, state, reservations, now):
+def affordable(settings, state, reservations, now):
     """Whether completed usage plus active reservations fits both of the fleet's ceilings, machine hours and
     spending: each completed attempt at its actual hours, and each reservation's hours to its reserved end, or to
     now once it ran past it."""
     hours = [(max(item["reserved_until"], now) - item["started_at"]) / 3600 for item in reservations.values()]
-    cost = state["cost_usd"] + policy["ancillary_reserve_usd"] + sum(
-        duration * item["hourly_rate"] for duration, item in zip(hours, reservations.values()))
-    return state["machine_hours"] + sum(hours) <= policy["max_machine_hours"] and cost <= policy["max_usd"]
+    cost = state["cost_usd"] + sum(duration * item["hourly_rate"] for duration, item in zip(hours, reservations.values()))
+    return state["machine_hours"] + sum(hours) <= settings["max_machine_hours"] and cost <= settings["max_usd"]
 
 
-def capacity(snapshot, reservations, policy, *, region=None, market="spot", remember=False):
-    """Count one region's and market's instance/request unions and reserved hosts not yet visible in EC2."""
-    region = region or policy["region"]
-    limits = region_limits(policy)[region]
-    # Reservations made before regions and markets were recorded all launched on Spot in the home region.
+def capacity(snapshot, reservations, region, limits, spot_vcpu_reserve, *, market="spot"):
+    """Count one region's and market's instance/request unions, given the region's limits, and the vCPUs left for
+    the fleet's next host there."""
     reservations = {key: item for key, item in reservations.items()
-                    if item.get("region", policy["region"]) == region and item.get("market", "spot") == market}
+                    if item["region"] == region and item["market"] == market}
     instances = {instance["id"]: instance for instance in snapshot["instances"]}
     if len(instances) != len(snapshot["instances"]):
         raise BudgetError("duplicate EC2 instances in capacity snapshot")
     observed = set()
-    launched = set()
     external_vcpus = 0
     for instance in instances.values():
         key = reservation_key(instance.get("campaign_id"), instance.get("host_epoch"))
@@ -144,10 +68,8 @@ def capacity(snapshot, reservations, policy, *, region=None, market="spot", reme
             if key in observed or instance["vcpus"] != reservations[key]["vcpus"]:
                 raise BudgetError("EC2 instance disagrees with its reserved topology")
             observed.add(key)
-            launched.add(key)
         else:
             external_vcpus += instance["vcpus"]
-    resource_claims = set(observed)
     for request in snapshot["requests"]:
         if request.get("instance_id") in instances:
             continue
@@ -155,75 +77,73 @@ def capacity(snapshot, reservations, policy, *, region=None, market="spot", reme
         # instance. Unidentified requests are counted conservatively as extra.
         key = reservation_key(request.get("campaign_id"), request.get("host_epoch"))
         if key in reservations:
-            if key in resource_claims:
+            if key in observed:
                 raise BudgetError("multiple Spot resources use one fleet reservation")
-            resource_claims.add(key)
+            observed.add(key)
             if request["vcpus"] != reservations[key]["vcpus"]:
                 raise BudgetError("Spot request disagrees with reserved topology")
-            if request.get("instance_id") and key not in observed:
-                observed.add(key)
-                launched.add(key)
         else:
             external_vcpus += request["vcpus"]
-    # A terminated worker can still be returning results or awaiting verified
-    # cleanup. Retain its full reservation without calling it a new launch.
-    # Persist proof only under the caller's ledger lock, after topology checks.
-    if remember:
-        for key in launched:
-            reservations[key]["launch_observed"] = True
-    pending = sum(key not in observed and not item.get("launch_observed", False)
-                  for key, item in reservations.items())
+    # A terminated worker can still be returning results or awaiting verified cleanup, so it keeps its full
+    # reservation.
     reserved = sum(item["vcpus"] for item in reservations.values())
     if market == "spot":
         # max_vcpus bounds all Standard Spot use in the region, the fleet's and others'.
-        ceiling = min(snapshot["quota"] - limits["spot_vcpu_reserve"], limits["max_vcpus"]) - external_vcpus
+        ceiling = min(snapshot["quota"] - spot_vcpu_reserve, limits["max_vcpus"]) - external_vcpus
     else:
         # The allowance bounds only the fleet's own On-Demand use; other workloads take quota headroom.
         ceiling = min(snapshot["quota"] - ON_DEMAND_VCPU_SAFETY_RESERVE - external_vcpus,
                       limits.get("on_demand_max_vcpus", 0))
     available = max(0, ceiling - reserved)
-    return {"available": available, "reserved": reserved, "external": external_vcpus,
-            "pending_launches": pending}
+    return {"available": available, "reserved": reserved, "external": external_vcpus}
 
 
 class BootWindow:
     """How many of the fleet's hosts may be launched but not yet reporting, which bounds what a bad image, region or
     user data costs before it shows.
 
-    The window starts at BOOT_WINDOW_FIRST. Its wave is the hosts admitted since it last changed: once as many of
-    them as it holds have reported within BOOT_REPORT_SECONDS of their launch, it doubles, up to BOOT_WINDOW_MAX; once
-    any is late, or ends before reporting for a reason other than a Spot reclaim, it halves, down to BOOT_WINDOW_MIN.
-    It lives in the fleet state, so it holds across every campaign the fleet runs, and counts the reservations whose
-    hosts have not reported."""
+    The window's size is a setting, which starts at its initial size. Its wave is the hosts admitted since the size
+    last changed: once as many of them as the window holds have reported within BOOT_REPORT_SECONDS of their launch,
+    it doubles, up to the settings' maximum; once any is late, or ends before reporting for a reason other than a
+    Spot reclaim, it halves, down to BOOT_WINDOW_MIN. The controller changes the size as its own settings change. The
+    wave lives in the fleet state, and the window counts the reservations whose hosts have not reported."""
 
-    def __init__(self, state, now):
+    def __init__(self, state, settings, now):
         self.reservations = state["reservations"]
-        self.window = state.setdefault("boot_window", {"size": BOOT_WINDOW_FIRST, "changed_at": 0, "healthy": 0})
+        self.settings = settings
+        self.wave = state.setdefault("boot_wave", {"changed_at": 0, "healthy": 0})
         if any(self.member(item) and now - item["started_at"] > BOOT_REPORT_SECONDS for item in self.booting()):
-            self.change(self.window["size"] // 2, now)
+            self.change(self.size() // 2, now)
+
+    def size(self):
+        window = self.settings.current["boot_window"]
+        return min(window["size"], window["max"])
 
     def booting(self):
         return [item for item in self.reservations.values() if "reported_at" not in item]
 
     def member(self, item):
-        return "reported_at" not in item and item["started_at"] >= self.window["changed_at"]
+        return "reported_at" not in item and item["started_at"] >= self.wave["changed_at"]
 
     def room(self):
-        return max(0, self.window["size"] - len(self.booting()))
+        return max(0, self.size() - len(self.booting()))
 
     def report(self, item, now):
         if self.member(item):
-            self.window["healthy"] += 1
-            if self.window["healthy"] >= self.window["size"]:
-                self.change(self.window["size"] * 2, now)
+            self.wave["healthy"] += 1
+            if self.wave["healthy"] >= self.size():
+                self.change(self.size() * 2, now)
         item["reported_at"] = now
 
     def fail(self, item, now):
         if self.member(item):
-            self.change(self.window["size"] // 2, now)
+            self.change(self.size() // 2, now)
 
     def change(self, size, now):
-        self.window.update(size=min(BOOT_WINDOW_MAX, max(BOOT_WINDOW_MIN, size)), changed_at=now, healthy=0)
+        size = min(self.settings.current["boot_window"]["max"], max(BOOT_WINDOW_MIN, size))
+        self.settings.change("controller", f"boot window {self.size()} to {size}",
+                             lambda settings: settings["boot_window"].update(size=size))
+        self.wave.update(changed_at=now, healthy=0)
 
 
 def refuse_halted(state):
@@ -233,26 +153,23 @@ def refuse_halted(state):
 
 
 class FleetBudget:
-    def __init__(self, policy_path):
-        self.policy_path = Path(policy_path).resolve()
-        self.policy = json.loads(self.policy_path.read_text())
-        validate_policy(self.policy)
-        self.state_path = self.policy_path.with_name(STATE_FILE)
-        self.lock_path = self.policy_path.with_name("fleet-budget.lock")
+    """The campaign's reservations, admitted within the limits of its settings as they stand, with the Spot vCPU
+    reserve the campaign froze left in each region's quota."""
+
+    def __init__(self, campaign_root, settings, spot_vcpu_reserve):
+        self.settings = settings
+        self.spot_vcpu_reserve = spot_vcpu_reserve
+        self.state_path = Path(campaign_root) / STATE_FILE
+        self.lock_path = Path(campaign_root) / "fleet-budget.lock"
 
     @contextmanager
     def locked(self):
         with self.lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            if json.loads(self.policy_path.read_text()) != self.policy:
-                raise BudgetError("fleet policy changed during execution")
             if self.state_path.exists():
                 state = json.loads(self.state_path.read_text())
-                if state["policy"] != self.policy:
-                    raise BudgetError("fleet policy changed on restart")
             else:
-                state = {"schema_version": 1, "policy": self.policy, "reservations": {},
-                         "completed": {}, "machine_hours": 0, "cost_usd": 0, "last_launch_at": 0}
+                state = {"schema_version": 2, "reservations": {}, "completed": {}, "machine_hours": 0, "cost_usd": 0}
             yield state
             temporary = self.state_path.with_suffix(".new")
             with temporary.open("w") as output:
@@ -269,43 +186,41 @@ class FleetBudget:
 
     def reserve(self, campaign_id, job, owner, snapshot_reader, now=None, *, until):
         """Admit a launch whose host stops by until, in epoch seconds, unless a later extension covers more."""
-        if job.market != "spot" and not on_demand_regions(self.policy):
-            raise BudgetError("shared fleet forbids On-Demand")
         now = time.time() if now is None else now
         key = reservation_key(campaign_id, job.host_epoch)
-        region = getattr(job, "region", "") or self.policy["region"]
-        if region not in region_limits(self.policy):
-            raise BudgetError("shared fleet policy does not cover region " + region)
+        settings = self.settings.current
+        region = job.region
+        if region not in settings["regions"]:
+            raise BudgetError("the campaign settings do not cover region " + region)
         with self.locked() as state:
             refuse_halted(state)
             if key in state["reservations"] or key in state["completed"]:
                 raise BudgetError("host epoch already used by the shared fleet")
-            if "spending_stop" in state:
+            if settings["spending_stop"]:
                 return False, "spending_stop"
-            if not BootWindow(state, now).room():
+            if not BootWindow(state, self.settings, now).room():
                 return False, "boot window"
             active = state["reservations"]
-            policy = self.policy
-            if len(active) >= policy["max_hosts"] or now - state["last_launch_at"] < policy["minimum_launch_interval_seconds"]:
+            if len(active) >= settings["max_hosts"]:
                 return False, "fleet launch limit"
-            rate = policy["hourly_rates"].get(job.platform.instance_type)
+            rate = settings["hourly_rates"].get(job.platform.instance_type)
             if rate is None:
-                raise BudgetError("instance type has no frozen price ceiling")
+                raise BudgetError(f"the campaign settings price no {job.platform.instance_type} hour")
+            if job.market != "spot" and region not in on_demand_regions(settings):
+                return False, "fleet quota"
             hourly_rate = rate["total"] if job.market == "spot" else rate["on_demand_total"]
             item = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": str(Path(owner).resolve()),
                     "attempt": getattr(job, "attempt", 1),
                     "logical_identity": job.logical_identity, "region": region, "market": job.market,
                     "instance_type": job.platform.instance_type,
                     "vcpus": job.platform.vcpus, "started_at": now, "reserved_until": until, "hourly_rate": hourly_rate}
-            if not affordable(policy, state, {**active, key: item}, now):
+            if not affordable(settings, state, {**active, key: item}, now):
                 return False, "fleet spending or machine-hour ceiling"
-            if job.market != "spot" and region not in on_demand_regions(policy):
-                return False, "fleet quota or pending-launch limit"
-            available = capacity(snapshot_reader(), active, policy, region=region, market=job.market, remember=True)
-            if available["available"] < job.platform.vcpus or available["pending_launches"] >= policy["max_pending_launches"]:
-                return False, "fleet quota or pending-launch limit"
+            available = capacity(snapshot_reader(), active, region, settings["regions"][region],
+                                 self.spot_vcpu_reserve, market=job.market)
+            if available["available"] < job.platform.vcpus:
+                return False, "fleet quota"
             active[key] = item
-            state["last_launch_at"] = now
             return True, "reserved"
 
     def extend(self, campaign_id, host_epoch, now=None, *, until):
@@ -319,10 +234,10 @@ class FleetBudget:
                 raise BudgetError("host epoch holds no shared fleet reservation")
             if until <= item["reserved_until"]:
                 return True, "reserved"
-            if "spending_stop" in state:
+            if self.settings.current["spending_stop"]:
                 return False, "spending_stop"
-            if not affordable(self.policy, state, {**state["reservations"], key: {**item, "reserved_until": until}},
-                              now):
+            extended = {**state["reservations"], key: {**item, "reserved_until": until}}
+            if not affordable(self.settings.current, state, extended, now):
                 return False, "fleet spending or machine-hour ceiling"
             item["reserved_until"] = until
             return True, "reserved"
@@ -346,7 +261,7 @@ class FleetBudget:
         admits."""
         now = time.time() if now is None else now
         with self.locked() as state:
-            window = BootWindow(state, now)
+            window = BootWindow(state, self.settings, now)
             for host_epoch in host_epochs:
                 item = state["reservations"].get(reservation_key(campaign_id, host_epoch))
                 if item is not None and "reported_at" not in item:
@@ -359,7 +274,7 @@ class FleetBudget:
         with self.locked() as state:
             item = state["reservations"].get(reservation_key(campaign_id, host_epoch))
             if item is not None:
-                BootWindow(state, now).fail(item, now)
+                BootWindow(state, self.settings, now).fail(item, now)
 
     def reservations(self, owner):
         with self.locked() as state:
@@ -380,15 +295,12 @@ class FleetBudget:
                 del state["halts"][owner]
 
     def stop_spending(self, reason):
-        """Stop the fleet's spending: no owner's launch or extension is admitted until clear_spending_stop, while
-        every host keeps the reservation it holds, so running leases finish. The first reason stands. Unlike a halt,
-        it stops no controller."""
-        with self.locked() as state:
-            state.setdefault("spending_stop", reason)
-
-    def clear_spending_stop(self):
-        with self.locked() as state:
-            state.pop("spending_stop", None)
+        """Stop the fleet's spending, as the controller's settings change: no launch or extension is admitted until
+        the stop is cleared, while every host keeps the reservation it holds, so running leases finish. The first
+        reason stands. Unlike a halt, it stops no controller."""
+        stop = {"by": "controller", "at": round(time.time()), "reason": reason}
+        self.settings.change("controller", f"spending stop: {reason}",
+                             lambda settings: settings.update(spending_stop=settings["spending_stop"] or stop))
 
     def check(self):
         """Raise FleetHalted while the fleet is halted. A host past its reservation's end is no halt: it stops at its
@@ -397,12 +309,11 @@ class FleetBudget:
             refuse_halted(state)
 
 
-def spend_by_owner(policy_path, now):
-    """Each owner's spend in the fleet of policy_path, in USD, as (spent so far, reserved beyond now): its completed
-    attempts' actual hours and its reservations' hours since they started, and their hours left to their reserved
-    ends. Reads the state without the budget's lock, as each change replaces the whole file; None before the
-    fleet's first reservation."""
-    state_path = Path(policy_path).with_name(STATE_FILE)
+def spend_by_owner(state_path, now):
+    """Each owner's spend in the fleet whose state is at state_path, in USD, as (spent so far, reserved beyond now):
+    its completed attempts' actual hours and its reservations' hours since they started, and their hours left to
+    their reserved ends. Reads the state without the budget's lock, as each change replaces the whole file; None
+    before the fleet's first reservation."""
     if not state_path.is_file():
         return None
     state = json.loads(state_path.read_text())

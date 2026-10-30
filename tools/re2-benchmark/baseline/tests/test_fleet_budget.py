@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
+from operator import itemgetter
 from pathlib import Path
 import tempfile
 import sys
@@ -8,7 +9,20 @@ from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+from campaign_settings import CampaignSettings
 import fleet_budget
+
+# The settings a campaign's first execution names, which the tests change as Dain would.
+SETTINGS = {"max_hosts": 368, "max_hosts_per_platform": 368, "max_usd": 150, "max_machine_hours": 1500,
+            "regions": {"us-west-2": {"bucket": "west", "max_vcpus": 736}},
+            "platform_regions": {"r8i": ["us-west-2"]}, "purchase": {"r8i": "spot"},
+            "hourly_rates": {"r8i.large": {"spot": 0.065, "total": 0.075}, "r8i.2xlarge": {"spot": 0.28, "total": 0.30},
+                             "r9g.large": {"spot": 0.065, "total": 0.075}, "r9g.2xlarge": {"spot": 0.28, "total": 0.30}}}
+
+
+def seed_settings(root, **values):
+    """Seed the campaign root's settings as its first execution does, from SETTINGS with values replacing its."""
+    return CampaignSettings.seed(root, {**copy.deepcopy(SETTINGS), **values})
 
 
 class TestFleetBudget(unittest.TestCase):
@@ -16,20 +30,15 @@ class TestFleetBudget(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.policy = {"schema_version": 1, "account": "123456789012", "region": "us-west-2",
-                       "market": "spot", "spot_vcpu_reserve": 0, "max_vcpus": 736, "max_hosts": 368,
-                       "max_pending_launches": 32, "max_machine_hours": 1500, "max_usd": 150,
-                       "ancillary_reserve_usd": 15,
-                       "minimum_launch_interval_seconds": 0,
-                       "hourly_rates": {"r8i.large": {"spot": 0.065, "total": 0.075},
-                                        "r8i.2xlarge": {"spot": 0.28, "total": 0.30}}}
-        self.path = self.root / "policy.json"
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
+        self.settings = seed_settings(self.root)
+        self.budget = fleet_budget.FleetBudget(self.root, self.settings, 0)
         self.snapshot = {"quota": 736, "instances": [], "requests": []}
 
+    def change(self, update):
+        self.settings.change("dain", "test", update)
+
     def job(self, epoch, large=False):
-        return SimpleNamespace(market="spot", host_epoch=epoch, logical_identity="r8i/test/replica-1",
+        return SimpleNamespace(market="spot", region="us-west-2", host_epoch=epoch, logical_identity="r8i/test/replica-1",
                                platform=SimpleNamespace(instance_type="r8i.2xlarge" if large else "r8i.large",
                                                         vcpus=8 if large else 2))
 
@@ -43,7 +52,7 @@ class TestFleetBudget(unittest.TestCase):
     def test_two_controllers_cannot_reserve_the_same_remaining_vcpus(self):
         self.snapshot["quota"] = 2
         def reserve(campaign):
-            independent = fleet_budget.FleetBudget(self.path)
+            independent = fleet_budget.FleetBudget(self.root, CampaignSettings(self.root), 0)
             return independent.reserve(campaign, self.job(1), self.root / campaign, lambda: self.snapshot, 1000,
                                        until=8200)[0]
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -61,57 +70,14 @@ class TestFleetBudget(unittest.TestCase):
         self.snapshot["requests"] = [{"instance_id": "i-own", "vcpus": 2},
                                      {"instance_id": "i-other", "vcpus": 8},
                                      {"instance_id": None, "vcpus": 16}]
-        current = fleet_budget.capacity(self.snapshot, reservations, self.policy)
-        self.assertEqual(current, {"available": 710, "reserved": 2, "external": 24, "pending_launches": 0})
+        current = fleet_budget.capacity(self.snapshot, reservations, "us-west-2", SETTINGS["regions"]["us-west-2"], 0)
+        self.assertEqual(current, {"available": 710, "reserved": 2, "external": 24})
 
     def test_larger_workers_consume_actual_vcpus(self):
         self.snapshot["quota"] = 10
         self.assertTrue(self.reserve(1, large=True)[0])
         self.assertTrue(self.reserve(2)[0])
         self.assertFalse(self.reserve(3)[0])
-
-    def test_finished_instances_do_not_consume_pending_launch_slots(self):
-        self.policy['max_pending_launches'] = 1
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
-        self.snapshot['quota'] = 6
-        self.assertTrue(self.reserve(1)[0])
-        self.assertFalse(self.reserve(2)[0])
-        self.snapshot['instances'] = [
-            {'id': 'i-first', 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 1}]
-        self.assertTrue(self.reserve(2)[0])
-        # First host has terminated but still owns its reservation until cleanup.
-        # Restarting a controller must retain proof that it was already launched.
-        self.budget = fleet_budget.FleetBudget(self.path)
-        self.snapshot['instances'] = [
-            {'id': 'i-second', 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 2}]
-        self.assertTrue(self.reserve(3)[0])
-        state = json.loads(self.budget.state_path.read_text())
-        self.assertEqual(len(state['reservations']), 3)
-        self.assertEqual(state['machine_hours'], 0)
-        self.assertTrue(state['reservations']['baseline/1']['launch_observed'])
-        self.assertFalse(self.reserve(4)[0])
-        with self.assertRaisesRegex(RuntimeError, 'verified cleanup'):
-            self.budget.release('baseline', 1, cleanup_verified=False)
-
-    def test_unfulfilled_request_is_not_proof_of_a_launched_instance(self):
-        self.reserve(1)
-        self.snapshot['requests'] = [
-            {'instance_id': None, 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 1}]
-        self.assertTrue(self.reserve(2)[0])
-        self.snapshot['requests'] = []
-        reservations = json.loads(self.budget.state_path.read_text())['reservations']
-        self.assertEqual(fleet_budget.capacity(self.snapshot, reservations, self.policy)['pending_launches'], 2)
-
-    def test_unfulfilled_request_consumes_pending_launch_slot(self):
-        self.policy['max_pending_launches'] = 1
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
-        self.assertTrue(self.reserve(1)[0])
-        self.snapshot['requests'] = [
-            {'instance_id': None, 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 1}]
-
-        self.assertFalse(self.reserve(2)[0])
 
     def test_duplicate_unfulfilled_requests_cannot_share_a_reservation(self):
         self.reserve(1)
@@ -123,7 +89,7 @@ class TestFleetBudget(unittest.TestCase):
                 {**request, 'instance_id': instance_id} for instance_id in instance_ids]
             with self.subTest(instance_ids=instance_ids), \
                     self.assertRaisesRegex(fleet_budget.BudgetError, 'multiple Spot resources'):
-                fleet_budget.capacity(self.snapshot, reservations, self.policy)
+                fleet_budget.capacity(self.snapshot, reservations, 'us-west-2', SETTINGS['regions']['us-west-2'], 0)
 
     def test_request_for_a_visible_instance_is_deduplicated_before_reservation_check(self):
         self.reserve(1)
@@ -132,30 +98,19 @@ class TestFleetBudget(unittest.TestCase):
         self.snapshot['requests'] = [
             {'instance_id': 'i-first', 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 1}]
         reservations = json.loads(self.budget.state_path.read_text())['reservations']
-        self.assertEqual(fleet_budget.capacity(self.snapshot, reservations, self.policy),
-                         {'available': 734, 'reserved': 2, 'external': 0, 'pending_launches': 0})
 
+        def capacity():
+            return fleet_budget.capacity(self.snapshot, reservations, 'us-west-2', SETTINGS['regions']['us-west-2'], 0)
+
+        self.assertEqual(capacity(), {'available': 734, 'reserved': 2, 'external': 0})
         self.snapshot['requests'].append(
             {'instance_id': None, 'vcpus': 2, 'campaign_id': 'baseline', 'host_epoch': 1})
         with self.assertRaisesRegex(fleet_budget.BudgetError, 'multiple Spot resources'):
-            fleet_budget.capacity(self.snapshot, reservations, self.policy)
-
-    def test_fulfilled_request_proof_preserves_reservation_and_read_only_capacity(self):
-        self.reserve(1)
-        reservations = json.loads(self.budget.state_path.read_text())["reservations"]
-        self.snapshot["requests"] = [
-            {"instance_id": "i-first", "vcpus": 2, "campaign_id": "baseline", "host_epoch": 1}]
-        before = copy.deepcopy(reservations)
-        fleet_budget.capacity(self.snapshot, reservations, self.policy)
-        self.assertEqual(reservations, before)
-        fleet_budget.capacity(self.snapshot, reservations, self.policy, remember=True)
-        self.snapshot["requests"] = []
-        self.assertEqual(fleet_budget.capacity(self.snapshot, reservations, self.policy),
-                         {"available": 734, "reserved": 2, "external": 0, "pending_launches": 0})
-        self.snapshot["instances"] = [
-            {"id": "i-first", "vcpus": 8, "campaign_id": "baseline", "host_epoch": 1}]
-        with self.assertRaisesRegex(RuntimeError, "reserved topology"):
-            fleet_budget.capacity(self.snapshot, reservations, self.policy, remember=True)
+            capacity()
+        self.snapshot['requests'].pop()
+        self.snapshot['instances'][0]['vcpus'] = 8
+        with self.assertRaisesRegex(fleet_budget.BudgetError, 'reserved topology'):
+            capacity()
 
     def test_stale_reservations_never_expire_without_cleanup(self):
         self.snapshot["quota"] = 2
@@ -172,26 +127,21 @@ class TestFleetBudget(unittest.TestCase):
         self.assertEqual(json.loads(self.budget.state_path.read_text())["machine_hours"], 1)
 
     def test_hour_and_cost_ceilings_include_inflight_attempts(self):
-        for field, value in (("max_machine_hours", 3), ("max_usd", 15.2)):
+        for field, value in (("max_machine_hours", 3), ("max_usd", 0.2)):
             with self.subTest(field=field):
                 self.budget.state_path.unlink(missing_ok=True)
-                policy = copy.deepcopy(self.policy)
-                policy[field] = value
-                self.path.write_text(json.dumps(policy))
-                self.budget = fleet_budget.FleetBudget(self.path)
+                self.change(lambda settings: settings.update({**SETTINGS, field: value}))
                 self.assertTrue(self.reserve(1)[0])
                 self.assertEqual(self.reserve(2), (False, "fleet spending or machine-hour ceiling"))
 
     def test_reservations_hold_issued_work_and_extend_within_the_ceilings(self):
-        # A $10 fleet with a $2 ancillary reserve, at $0.10 an r8i.large hour.
-        self.policy.update(max_usd=10, ancillary_reserve_usd=2, max_pending_launches=368)
-        self.policy["hourly_rates"]["r8i.large"] = {"spot": 0.08, "total": 0.10}
-        self.path.write_text(json.dumps(self.policy))
+        # An $8 fleet, at $0.10 an r8i.large hour.
+        self.change(lambda settings: settings.update(max_usd=8) or
+                    settings["hourly_rates"].update({"r8i.large": {"spot": 0.08, "total": 0.10}}))
 
         def admitted(seconds):
             self.budget.state_path.unlink(missing_ok=True)
-            self.budget = fleet_budget.FleetBudget(self.path)
-            for count in range(self.policy["max_hosts"] + 1):
+            for count in range(SETTINGS["max_hosts"] + 1):
                 if not self.reserve(count + 1, seconds=seconds)[0]:
                     return count
             self.fail("the fleet admitted more hosts than its limit")
@@ -213,36 +163,23 @@ class TestFleetBudget(unittest.TestCase):
         self.budget.release("baseline", 3, cleanup_verified=True, now=1000 + 1800)
         self.assertEqual((True, "reserved"), self.budget.extend("baseline", 1, now=1000 + 1800, until=7300 + 3600))
 
-    def test_policy_and_used_host_epochs_are_immutable_on_resume(self):
+    def test_used_host_epochs_are_never_reserved_again(self):
         self.reserve(1)
         with self.assertRaisesRegex(RuntimeError, "already used"):
             self.reserve(1)
         self.budget.release("baseline", 1, cleanup_verified=True, now=1001)
         with self.assertRaisesRegex(RuntimeError, "already used"):
             self.reserve(1)
-        self.policy["max_hosts"] = 300
-        self.path.write_text(json.dumps(self.policy))
-        restarted = fleet_budget.FleetBudget(self.path)
-        with self.assertRaisesRegex(RuntimeError, "changed on restart"):
-            restarted.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
-
-    def test_forbids_on_demand(self):
-        job = self.job(1)
-        job.market = "on-demand"
-        with self.assertRaisesRegex(RuntimeError, "On-Demand"):
-            self.budget.reserve("baseline", job, self.root, lambda: self.snapshot, until=8200)
-        self.policy["market"] = "on-demand"
-        with self.assertRaises(fleet_budget.BudgetError):
-            fleet_budget.validate_policy(self.policy)
 
     def test_on_demand_allowance_admits_against_each_regions_quota_headroom(self):
-        self.policy["on_demand_max_vcpus"] = 400
-        self.policy["regions"] = {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 8},
-                                  "ap-south-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0}}
-        for rates in self.policy["hourly_rates"].values():
-            rates["on_demand_total"] = 2 * rates["total"]
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
+        def allow_on_demand(settings):
+            settings["regions"] = {"us-west-2": {"bucket": "west", "max_vcpus": 736, "on_demand_max_vcpus": 400},
+                                   "eu-west-1": {"bucket": "ireland", "max_vcpus": 64, "on_demand_max_vcpus": 8},
+                                   "ap-south-1": {"bucket": "mumbai", "max_vcpus": 64}}
+            for rates in settings["hourly_rates"].values():
+                rates["on_demand_total"] = 2 * rates["total"]
+
+        self.change(allow_on_demand)
         # Other workloads leave Oregon 16 vCPUs of On-Demand headroom after the safety reserve.
         snapshots = {("us-west-2", "on-demand"): {"quota": 1000, "instances": [{"id": "i-other", "vcpus": 952}],
                                                   "requests": []},
@@ -260,7 +197,7 @@ class TestFleetBudget(unittest.TestCase):
         self.assertTrue(reserve(2, "us-west-2"))
         self.assertTrue(reserve(3, "us-west-2"))
         self.assertFalse(reserve(4, "us-west-2"))
-        # Ireland's own allowance binds before its quota, and Mumbai has none.
+        # Ireland's own allowance binds before its quota, and Mumbai has none, so it launches no On-Demand.
         self.assertTrue(reserve(4, "eu-west-1"))
         self.assertFalse(reserve(5, "eu-west-1"))
         self.assertFalse(reserve(5, "ap-south-1"))
@@ -269,33 +206,10 @@ class TestFleetBudget(unittest.TestCase):
                          {"baseline/1": ("spot", 0.30), "baseline/2": ("on-demand", 0.60),
                           "baseline/3": ("on-demand", 0.60), "baseline/4": ("on-demand", 0.60)})
 
-    def test_on_demand_allowance_is_positive_and_prices_every_worker_types_on_demand_hour(self):
-        policy = copy.deepcopy(self.policy)
-        policy["on_demand_max_vcpus"] = 8
-        for rates in policy["hourly_rates"].values():
-            rates["on_demand_total"] = 2 * rates["total"]
-        fleet_budget.validate_policy(policy)
-        for value in (0, -1, True, 1.5):
-            with self.subTest(on_demand_max_vcpus=value):
-                with self.assertRaisesRegex(fleet_budget.BudgetError, "On-Demand vCPU allowance"):
-                    fleet_budget.validate_policy({**policy, "on_demand_max_vcpus": value})
-        del policy["hourly_rates"]["r8i.large"]["on_demand_total"]
-        with self.assertRaisesRegex(fleet_budget.BudgetError, "hourly price"):
-            fleet_budget.validate_policy(policy)
-
-    def test_configured_account_region_and_limits_allow_another_campaign(self):
-        self.policy.update(account="234567890123", region="us-east-2",
-                           max_vcpus=1024, max_hosts=512, max_pending_launches=40,
-                           max_machine_hours=2000, max_usd=200)
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
-        self.assertTrue(self.reserve(1)[0])
-
     def test_each_region_admits_against_its_own_quota_and_limits(self):
-        # Ireland's quota less its reserve leaves five vCPUs, under its own limit and Oregon's.
-        self.policy["regions"] = {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 2}}
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
+        # Ireland's quota less the campaign's Spot vCPU reserve leaves five vCPUs, under its own limit and Oregon's.
+        self.change(lambda settings: settings["regions"].update({"eu-west-1": {"bucket": "ireland", "max_vcpus": 8}}))
+        self.budget = fleet_budget.FleetBudget(self.root, self.settings, 2)
         snapshots = {"us-west-2": self.snapshot, "eu-west-1": {"quota": 7, "instances": [], "requests": []}}
 
         def reserve(epoch, region):
@@ -311,39 +225,8 @@ class TestFleetBudget(unittest.TestCase):
         state = json.loads(self.budget.state_path.read_text())
         self.assertEqual({key: item["region"] for key, item in state["reservations"].items()},
                          {"baseline/1": "eu-west-1", "baseline/2": "eu-west-1", "baseline/3": "us-west-2"})
-        with self.assertRaisesRegex(fleet_budget.BudgetError, "does not cover region ap-south-1"):
+        with self.assertRaisesRegex(fleet_budget.BudgetError, "do not cover region ap-south-1"):
             reserve(4, "ap-south-1")
-
-    def test_reserved_headroom_is_unavailable_to_both_controllers(self):
-        self.policy["spot_vcpu_reserve"] = 4
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
-        self.snapshot["quota"] = 8
-        self.snapshot["instances"] = [{"id": "i-other", "vcpus": 2}]
-        self.assertTrue(self.reserve(1)[0])
-        self.assertFalse(self.reserve(2, campaign="language")[0])
-
-    def test_invalid_policy_values_are_rejected(self):
-        invalid = {"account": [None, "", "123", 123456789012],
-                   "region": [None, "", "bad region"],
-                   "spot_vcpu_reserve": [-1, True, 1.5],
-                   "max_vcpus": [0, -1, True, 1.5],
-                   "max_hosts": [0, True, 1.5],
-                   "max_pending_launches": [0, True, 1.5],
-                   "max_machine_hours": [0, -1, True, float("inf"), float("nan")],
-                   "max_usd": [0, -1, True, float("inf"), float("nan")],
-                   "regions": [[], {}, {"us-west-2": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
-                               {"bad region": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
-                               {"eu-west-1": {"max_vcpus": 0, "spot_vcpu_reserve": 0}},
-                               {"eu-west-1": {"max_vcpus": 8}},
-                               {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 0}},
-                               {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0, "vcpus": 8}}]}
-        for name, values in invalid.items():
-            for value in values:
-                with self.subTest(name=name, value=value):
-                    policy = {**self.policy, name: value}
-                    with self.assertRaises(fleet_budget.BudgetError):
-                        fleet_budget.validate_policy(policy)
 
     def test_reservation_past_its_end_halts_nothing_and_counts_as_spent_until_released(self):
         # A controller that slept, or died, leaves its host's reservation past its end; the host stopped by then.
@@ -365,30 +248,27 @@ class TestFleetBudget(unittest.TestCase):
         # The first reason stands, and the stop halts no controller.
         self.budget.stop_spending("instance i-2 did not terminate")
         self.budget.check()
-        other = fleet_budget.FleetBudget(self.path)
+        other = fleet_budget.FleetBudget(self.root, CampaignSettings(self.root), 0)
         self.assertEqual((False, "spending_stop"), self.reserve(2, campaign="language", now=1001))
         self.assertEqual((False, "spending_stop"), other.extend("baseline", 1, now=1002, until=9000))
-        # A host keeps what it holds, and verified cleanup still returns it; no owner's resume clears the stop.
+        # A host keeps what it holds, and verified cleanup still returns it; no owner's resume clears the stop, which
+        # the settings record as the controller's.
         self.assertEqual((True, "reserved"), other.extend("baseline", 1, now=1002, until=8200))
         other.release("baseline", 1, cleanup_verified=True, now=1003)
         other.resume(self.root / "baseline")
-        self.assertEqual("instance i-1 did not terminate",
-                         json.loads(self.budget.state_path.read_text())["spending_stop"])
+        self.assertEqual(("controller", "instance i-1 did not terminate"),
+                         itemgetter("by", "reason")(CampaignSettings(self.root).current["spending_stop"]))
         self.assertEqual((False, "spending_stop"), self.reserve(3, campaign="language", now=1004))
-        other.clear_spending_stop()
+        self.change(lambda settings: settings.update(spending_stop=None))
         self.assertTrue(self.reserve(3, campaign="language", now=1005)[0])
 
     def test_boot_window_holds_hosts_not_yet_reporting_and_halves_on_a_boot_failure(self):
-        self.policy["max_pending_launches"] = self.policy["max_hosts"]
-        self.path.write_text(json.dumps(self.policy))
-        self.budget = fleet_budget.FleetBudget(self.path)
-
         def launch(epoch, now):
             return self.budget.reserve("baseline", self.job(epoch), self.root / "baseline", lambda: self.snapshot,
                                        now, until=now + 7200)
 
         def window():
-            return json.loads(self.budget.state_path.read_text())["boot_window"]["size"]
+            return CampaignSettings(self.root).current["boot_window"]["size"]
 
         # Ten hosts may boot at once. One gone before it reported, as a Spot reclaim is, frees its place without
         # judging the window.
@@ -414,7 +294,7 @@ class TestFleetBudget(unittest.TestCase):
         self.budget.halt("semantic disagreement", self.root / "baseline")
         # The owner's first reason stands.
         self.budget.halt("cleanup failure", self.root / "baseline")
-        other = fleet_budget.FleetBudget(self.path)
+        other = fleet_budget.FleetBudget(self.root, CampaignSettings(self.root), 0)
         # Neither another owner nor the failed one, while its host awaits verified cleanup, clears the halt.
         for owner in ("language", "baseline"):
             other.resume(self.root / owner)

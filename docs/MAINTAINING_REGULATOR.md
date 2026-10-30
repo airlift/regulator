@@ -285,14 +285,14 @@ launching machines. Choose shards based on the changed path, not this example:
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
   --candidate change=<commit> --shard trino-operations --shard trino-like \
-  --campaign-root /durable/path/focused-change --max-concurrent 4
+  --campaign-root /durable/path/focused-change
 ```
 
 Execution additionally requires `--execute` and the candidate's accepted build
 phase, as the AWS guide describes. Primary collection requires the accepted
 smoke and the same selection. Resume an interrupted campaign
-with its original inputs; do not change source, heap, selection, or
-concurrency inside a resumed run.
+with its original inputs; do not change source, heap, or selection inside a
+resumed run.
 A new code change starts a new candidate and invalidates its affected results.
 
 ## Final qualification

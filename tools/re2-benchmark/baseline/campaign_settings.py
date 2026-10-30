@@ -1,0 +1,188 @@
+"""A campaign's live settings: what may change while it runs, in campaign-settings.json at the campaign root.
+
+The controller reloads the settings every loop. Every change is made under campaign-settings.lock, held only while
+the file is rewritten: it bumps the version and appends an event naming its actor to campaign-settings-events.tsv,
+so no change is anonymous. What decides a measurement's validity is frozen elsewhere and never lives here.
+"""
+
+import copy
+import fcntl
+import json
+import math
+import os
+import re
+import time
+
+from campaign_io import append_ledger, fsync_directory
+
+SETTINGS = "campaign-settings.json"
+LOCK = "campaign-settings.lock"
+EVENTS = "campaign-settings-events.tsv"
+EVENT_FIELDS = ("version", "at", "actor", "change")
+# Dain and the monitor steer a campaign; the controller changes only phase states, the boot window, and the spending
+# stop.
+ACTORS = ("dain", "monitor", "controller")
+REGION_PATTERN = r"[a-z]+(?:-[a-z]+)+-[0-9]+"
+PURCHASE_POLICIES = ("spot", "spot-then-on-demand", "on-demand")
+PHASE_STATES = ("pending", "running", "paused", "draining", "complete", "failed")
+INSTANCE_TYPES = frozenset(family + size for family in ("r8i", "r9g") for size in (".large", ".2xlarge"))
+# The boot window's first and largest number of hosts launched but not yet reporting, unless the settings name
+# others, and the smallest it ever halves to.
+BOOT_WINDOW_FIRST = 10
+BOOT_WINDOW_MAX = 50
+BOOT_WINDOW_MIN = 5
+FIELDS = ("version", "max_hosts", "max_hosts_per_platform", "max_usd", "max_machine_hours", "regions",
+          "platform_regions", "purchase", "hourly_rates", "phases", "boot_window", "authorized", "spending_stop",
+          "stop")
+
+
+class SettingsError(RuntimeError):
+    pass
+
+
+def positive_integer(value):
+    return type(value) is int and value > 0
+
+
+def positive_number(value):
+    return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def validate(settings):
+    """Refuse settings the controller could not run under."""
+    def check(condition, field):
+        if not condition:
+            raise SettingsError(f"invalid campaign settings: {field}")
+
+    check(isinstance(settings, dict) and set(settings) == set(FIELDS), f"the fields are {', '.join(FIELDS)}")
+    for name in ("version", "max_hosts", "max_hosts_per_platform"):
+        check(positive_integer(settings[name]), name)
+    for name in ("max_usd", "max_machine_hours"):
+        check(positive_number(settings[name]), name)
+    regions = settings["regions"]
+    check(isinstance(regions, dict) and regions, "regions")
+    for region, limits in regions.items():
+        check(isinstance(region, str) and re.fullmatch(REGION_PATTERN, region), "region name")
+        check(isinstance(limits, dict) and {"bucket", "max_vcpus"} <= set(limits) <=
+              {"bucket", "max_vcpus", "on_demand_max_vcpus"}, f"{region} takes bucket, max_vcpus and "
+                                                              "on_demand_max_vcpus")
+        check(isinstance(limits["bucket"], str) and limits["bucket"], f"{region} bucket")
+        check(positive_integer(limits["max_vcpus"]), f"{region} max_vcpus")
+        check(positive_integer(limits.get("on_demand_max_vcpus", 1)), f"{region} on_demand_max_vcpus")
+    check(isinstance(settings["platform_regions"], dict), "platform_regions")
+    for platform, listed in settings["platform_regions"].items():
+        check(isinstance(listed, list) and listed and len(listed) == len(set(listed)) and
+              all(region in regions for region in listed), f"{platform} platform_regions")
+    check(isinstance(settings["purchase"], dict) and set(settings["purchase"].values()) <= set(PURCHASE_POLICIES),
+          f"purchase is one of {', '.join(PURCHASE_POLICIES)} per platform")
+    # Settings allowing On-Demand anywhere price every worker type's On-Demand hour.
+    on_demand = any("on_demand_max_vcpus" in limits for limits in regions.values())
+    prices = {"spot", "total", "on_demand_total"} if on_demand else {"spot", "total"}
+    rates = settings["hourly_rates"]
+    check(isinstance(rates, dict) and rates and set(rates) <= INSTANCE_TYPES, "hourly_rates")
+    for instance_type, rate in rates.items():
+        check(isinstance(rate, dict) and set(rate) == prices and all(map(positive_number, rate.values())) and
+              rate["spot"] < rate["total"], f"{instance_type} hourly price ceiling")
+    check(isinstance(settings["phases"], dict), "phases")
+    for phase, steering in settings["phases"].items():
+        check(isinstance(steering, dict) and set(steering) == {"state", "share"} and
+              steering["state"] in PHASE_STATES and (steering["share"] == "auto" or positive_integer(
+                  steering["share"])), f"{phase} phase")
+    window = settings["boot_window"]
+    check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
+          all(map(positive_integer, window.values())) and
+          BOOT_WINDOW_MIN <= window["initial"] <= window["max"] and window["size"] >= BOOT_WINDOW_MIN, "boot_window")
+    authorized = settings["authorized"]
+    check(isinstance(authorized, dict) and set(authorized) == {"max_hosts", "max_usd", "regions"} and
+          positive_integer(authorized["max_hosts"]) and positive_number(authorized["max_usd"]) and
+          isinstance(authorized["regions"], list) and
+          all(isinstance(region, str) and re.fullmatch(REGION_PATTERN, region) for region in authorized["regions"]),
+          "authorized")
+    for name in ("spending_stop", "stop"):
+        value = settings[name]
+        check(value is None or isinstance(value, dict) and set(value) == {"by", "at", "reason"} and
+              value["by"] in ACTORS and positive_number(value["at"]) and isinstance(value["reason"], str) and
+              value["reason"], name)
+
+
+def read(path):
+    try:
+        settings = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise SettingsError(f"cannot read the campaign settings {path}: {error}") from error
+    validate(settings)
+    return settings
+
+
+def write(path, settings):
+    temporary = path.with_name(path.name + ".new")
+    with temporary.open("w") as output:
+        json.dump(settings, output, indent=2, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fsync_directory(path.parent)
+
+
+def seeded(given):
+    """A campaign's first settings, version 1, from those given: no phase steered yet, no stop, the boot window at
+    its first size, and unless given, the default boot window and an authorized envelope of the given limits."""
+    if not isinstance(given, dict):
+        raise SettingsError("campaign settings are a JSON object")
+    settings = {"phases": {}, "spending_stop": None, "stop": None,
+                "boot_window": {"initial": BOOT_WINDOW_FIRST, "max": BOOT_WINDOW_MAX},
+                "authorized": {"max_hosts": given.get("max_hosts"), "max_usd": given.get("max_usd"),
+                               "regions": sorted(given.get("regions") or ())},
+                **copy.deepcopy(given), "version": 1}
+    if isinstance(settings["boot_window"], dict):
+        settings["boot_window"].setdefault("size", settings["boot_window"].get("initial"))
+    validate(settings)
+    return settings
+
+
+class CampaignSettings:
+    """A campaign's live settings, as the controller last loaded them, and their changes."""
+
+    def __init__(self, root):
+        self.path = root / SETTINGS
+        self.lock_path = root / LOCK
+        self.events_path = root / EVENTS
+        self.current = read(self.path)
+
+    @classmethod
+    def seed(cls, root, given, actor="dain"):
+        """Write the campaign's first settings, unless it has some, and load them."""
+        path = root / SETTINGS
+        if not path.exists():
+            settings = seeded(given)
+            write(path, settings)
+            append_ledger(root / EVENTS, EVENT_FIELDS, {"version": 1, "at": round(time.time()), "actor": actor,
+                                                         "change": "seed"})
+        return cls(root)
+
+    def reload(self):
+        """Read the settings as they stand now."""
+        self.current = read(self.path)
+        return self.current
+
+    def change(self, actor, change, update):
+        """Apply update to the settings as they stand, as the actor's change, described by change: once the result
+        validates, it takes the next version and its event is recorded. An update that changes nothing records
+        nothing. Returns the settings."""
+        if actor not in ACTORS:
+            raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
+        with self.lock_path.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            before = read(self.path)
+            settings = copy.deepcopy(before)
+            update(settings)
+            if settings != before:
+                settings["version"] = before["version"] + 1
+                validate(settings)
+                write(self.path, settings)
+                append_ledger(self.events_path, EVENT_FIELDS, {"version": settings["version"],
+                                                               "at": round(time.time()), "actor": actor,
+                                                               "change": change})
+        self.current = settings
+        return settings
