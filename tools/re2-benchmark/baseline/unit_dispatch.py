@@ -12,6 +12,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import unit_session
@@ -29,11 +30,13 @@ WORKER_EVIDENCE_PATTERN = (r"heartbeat/[0-9]+\.json|events/[0-9]+-interrupted\.t
 UNIT_COMPLETION_FIELDS = (
     "schema_version", "host_session", "sequence", "campaign_id", "phase", "platform", "unit_id", "replica_id",
     "group_id", "unit_attempt_id", "exit_status", "unit_status", "result_sha256", "result_bytes", "pack_seconds",
-    "upload_seconds", "upload_attempts")
-# How long each group's result took to pack and upload, as its completion marker reports it, one row per marker.
+    "upload_seconds", "upload_attempts", "started_at", "finished_at")
+# How long each group took to measure, and its result to pack and upload, as its completion marker reports it, one
+# row per marker. A ledger an earlier controller wrote lacks the measured seconds.
 UNIT_UPLOADS = "unit-uploads.tsv"
 UPLOAD_TIMING_FIELDS = ("result_bytes", "pack_seconds", "upload_seconds", "upload_attempts")
-UNIT_UPLOAD_FIELDS = ("platform", "unit_id", "replica", "group_id", "host_session", "sequence", *UPLOAD_TIMING_FIELDS)
+UNIT_UPLOAD_FIELDS = ("platform", "unit_id", "replica", "group_id", "host_session", "sequence", *UPLOAD_TIMING_FIELDS,
+                      "group_seconds")
 UNRESOLVED_UNIT_FIELDS = ("platform", "unit_id", "replica", "detail")
 
 
@@ -95,16 +98,32 @@ def read_unit_uploads(path):
         return []
     with path.open(newline="") as input_file:
         reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != UNIT_UPLOAD_FIELDS:
+        if tuple(reader.fieldnames or ()) not in (UNIT_UPLOAD_FIELDS, UNIT_UPLOAD_FIELDS[:-1]):
             raise UnsafeCampaignError(f"unexpected unit upload schema in {path}")
         return list(reader)
 
 
+def measured_group_seconds(path):
+    """The seconds each group took to measure, by its unit attempt and group, as unit-uploads.tsv records them; None
+    for a group an earlier controller recorded."""
+    return {(unit_session.format_unit_attempt(row["host_session"], row["sequence"]), row["group_id"]):
+            None if row.get("group_seconds") is None else float(row["group_seconds"])
+            for row in read_unit_uploads(path)}
+
+
+def marker_seconds(marker):
+    """The seconds a group took to measure, from its completion marker's start and finish, each a UTC time to the
+    second."""
+    start, finish = (datetime.strptime(marker[field], "%Y-%m-%dT%H:%M:%SZ") for field in ("started_at", "finished_at"))
+    return (finish - start).total_seconds()
+
+
 def unit_upload_row(item, host_session, sequence, marker):
-    """A group's upload timings from its completion marker, as a row of unit-uploads.tsv."""
+    """A group's measured seconds and upload timings from its completion marker, as a row of unit-uploads.tsv."""
     return {"platform": item.platform, "unit_id": item.unit_id, "replica": str(item.replica),
             "group_id": marker["group_id"], "host_session": host_session, "sequence": str(sequence),
-            **{field: str(marker[field]) for field in UPLOAD_TIMING_FIELDS}}
+            **{field: str(marker[field]) for field in UPLOAD_TIMING_FIELDS},
+            "group_seconds": f"{marker_seconds(marker):g}"}
 
 
 def persist_unit_upload(path, row):

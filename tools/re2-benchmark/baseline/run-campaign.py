@@ -42,11 +42,11 @@ from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
     get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key, lease_key,
-    list_unit_worker_results, persist_accepted_unit, persist_semantic_rejection, persist_unit_upload,
-    read_accepted_units, read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads,
-    recovered_keys, result_key, retain_unit_attempt, shows_worker_start, unit_attempt_directory,
-    unit_logical_identity, unit_upload_row, unresolved_unit_rows, write_leases, write_unit_attempt,
-    write_unresolved_units)
+    list_unit_worker_results, marker_seconds, measured_group_seconds, persist_accepted_unit,
+    persist_semantic_rejection, persist_unit_upload, read_accepted_units, read_semantic_rejections, read_unit_attempts,
+    read_unit_receipt, read_unit_uploads, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
+    unit_attempt_directory, unit_logical_identity, unit_upload_row, unresolved_unit_rows, write_leases,
+    write_unit_attempt, write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
@@ -557,6 +557,58 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=(), all
     return [WorkItem(platform, allocations[units[unit_id]["shard_id"]][platform], units[unit_id]["shard_id"], unit_id,
                      replica, float(units[unit_id]["estimated_seconds"]), groups(unit_id, replica), instances)
             for platform, unit_id, replica, instances in selected]
+
+
+def read_work_items(path):
+    with path.open(newline="") as input_file:
+        return [WorkItem(row["platform"], row["instance_type"], row["shard_id"], row["unit_id"], int(row["replica"]),
+                         float(row["estimated_seconds"]),
+                         tuple((group, float(seconds)) for group, seconds in
+                               (entry.split(":") for entry in row["groups"].split(","))),
+                         frozenset() if row["excluded_instances"] == "-" else frozenset(
+                             row["excluded_instances"].split(",")))
+                for row in csv.DictReader(input_file, delimiter="\t")]
+
+
+@dataclass(frozen=True)
+class Progress:
+    """A pool's work left: the estimated seconds of its groups not yet accepted, the items they belong to, and the
+    ratio of measured to estimated seconds over its accepted groups, 1.0 before the first."""
+    seconds: float
+    items: int
+    correction: float
+
+    @property
+    def corrected(self):
+        return self.seconds * self.correction
+
+
+def progress(items, accepted, measured, unresolved=()):
+    """Each pool's work left, given its work items, their accepted receipts by identity and group, and the measured
+    seconds of each group by its unit attempt and group. An item left unresolved has no work left, and a group whose
+    measured seconds are unknown, or whose estimate is none, corrects nothing."""
+    pools = {}
+    for item in items:
+        seconds, count, estimated, actual = pools.get(item.pool, (0.0, 0, 0.0, 0.0))
+        receipts = accepted.get(item.identity, {})
+        left = [estimate for group, estimate in item.groups if group not in receipts]
+        if left and item.identity not in unresolved:
+            seconds, count = seconds + sum(left), count + 1
+        for group, estimate in item.groups:
+            receipt = receipts.get(group)
+            took = None if receipt is None else measured.get((receipt["unit_attempt_id"], group))
+            if took is not None and estimate:
+                estimated, actual = estimated + estimate, actual + took
+        pools[item.pool] = seconds, count, estimated, actual
+    return {pool: Progress(seconds, count, actual / estimated if estimated else 1.0)
+            for pool, (seconds, count, estimated, actual) in pools.items()}
+
+
+def finish_seconds(pools, hosts):
+    """The seconds until the work left finishes, its latest pool's corrected seconds over the pool's live hosts, or
+    None while a pool with work left has no host."""
+    finishes = [left.corrected / hosts[pool] if hosts.get(pool) else None for pool, left in pools.items() if left.items]
+    return None if None in finishes else max(finishes, default=0.0)
 
 
 def language_plans(arguments):
@@ -2477,8 +2529,8 @@ class UnitDispatcher:
         # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
         self.fingerprint = None
         self.uploads_path = result_root / UNIT_UPLOADS
-        # The groups whose upload timings unit-uploads.tsv records, as (host session, sequence, group).
-        self.uploads = set()
+        # The seconds each group unit-uploads.tsv records took to measure, by its unit attempt and group.
+        self.uploads = {}
         # Each work item's accepted receipts, by group, and the instances that measured each unit, by platform and
         # unit.
         self.accepted = {}
@@ -2626,8 +2678,7 @@ class UnitDispatcher:
         for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
             for receipt in groups.values():
                 self.accept(receipt)
-        self.uploads = {(row["host_session"], row["sequence"], row["group_id"])
-                        for row in read_unit_uploads(self.uploads_path)}
+        self.uploads = measured_group_seconds(self.uploads_path)
         for row in read_semantic_rejections(self.rejections_path):
             identity = unit_logical_identity(row)
             if identity not in self.items:
@@ -2828,9 +2879,9 @@ class UnitDispatcher:
         item = self.items[worker.leases[sequence]]
         attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
         marker = evidence.marker
-        if (worker.host_session, str(sequence), group) not in self.uploads:
+        if (attempt, group) not in self.uploads:
             persist_unit_upload(self.uploads_path, unit_upload_row(item, worker.host_session, sequence, marker))
-            self.uploads.add((worker.host_session, str(sequence), group))
+            self.uploads[attempt, group] = marker_seconds(marker)
         finished = worker.finished[sequence]
         if marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
             # A verdict that the semantics are wrong rejects the unit for good, before or after another attempt.
@@ -3390,15 +3441,13 @@ class UnitDispatcher:
         return Counter(worker.job.platform.name for worker in self.workers.values())
 
     def demand(self):
-        """The phase's work left on each platform, as the estimated seconds and the number of its open items not
-        left unresolved."""
+        """The phase's work left on each platform, as its pools' corrected seconds and the number of its open items
+        not left unresolved."""
         demand = {}
-        for pool, items in self.open.items():
-            platform = self.platforms[pool].name
-            left = [item for identity, item in items.items() if identity not in self.unresolved]
-            if left:
-                seconds, count = demand.get(platform, (0, 0))
-                demand[platform] = (seconds + sum(map(self.remaining_seconds, left)), count + len(left))
+        for pool, left in progress(self.items.values(), self.accepted, self.uploads, self.unresolved).items():
+            if left.items:
+                seconds, count = demand.get(self.platforms[pool].name, (0, 0))
+                demand[self.platforms[pool].name] = (seconds + left.corrected, count + left.items)
         return demand
 
     def launch_room(self, pool):
@@ -4168,6 +4217,23 @@ def phase_unresolved(root, snapshot, live):
     return snapshot["unresolved"] if snapshot else []
 
 
+def phase_progress(root, snapshot, live):
+    """A unit phase's progress, from its ledgers and its controller's latest snapshot: its work items, their accepted
+    receipts by identity and group, its unresolved units, each pool's work left, and the seconds until it finishes
+    at the snapshot's live workers, or None while some pool with work left has none, or no controller runs."""
+    items = read_work_items(root / "work-items.tsv")
+    accepted = {}
+    for row in read_accepted_units(root / "accepted-units.tsv"):
+        accepted.setdefault(unit_logical_identity(row), {})[row["group_id"]] = row
+    unresolved = phase_unresolved(root, snapshot, live)
+    pools = progress(items, accepted, measured_group_seconds(root / UNIT_UPLOADS),
+                     {f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}" for row in unresolved})
+    hosts = Counter((worker["platform"], worker["instance_type"]) for worker in (snapshot or {}).get("workers", ())
+                    if worker["state"] != "stopping")
+    return SimpleNamespace(items=items, accepted=accepted, unresolved=unresolved, pools=pools,
+                           finish=finish_seconds(pools, hosts) if live and snapshot else None)
+
+
 def phase_status(label, root, now, fleets, controller, zone=None):
     """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot, given
     the process ID of its campaign's live controller, or None. fleets holds each fleet policy's spend_by_owner, so
@@ -4187,29 +4253,14 @@ def phase_status(label, root, now, fleets, controller, zone=None):
     def line(name, text):
         lines.append(f"    {name:<10}{text}")
 
-    with (root / "work-items.tsv").open(newline="") as input_file:
-        items = list(csv.DictReader(input_file, delimiter="\t"))
-    accepted = {(row["platform"], row["unit_id"], row["replica_id"], row["group_id"])
-                for row in read_accepted_units(root / "accepted-units.tsv")}
-    groups = units_accepted = groups_accepted = 0
-    remaining = 0.0
-    for item in items:
-        done = True
-        for group in item["groups"].split(","):
-            group_id, seconds = group.split(":")
-            groups += 1
-            if (item["platform"], item["unit_id"], item["replica"], group_id) in accepted:
-                groups_accepted += 1
-            else:
-                done = False
-                remaining += float(seconds)
-        units_accepted += done
     snapshot = dispatch_snapshot(root)
-    unresolved = len(phase_unresolved(root, snapshot, live))
+    phase = phase_progress(root, snapshot, live)
+    groups = sum(len(item.groups) for item in phase.items)
+    groups_accepted = sum(map(len, phase.accepted.values()))
+    units_accepted = sum(len(phase.accepted.get(item.identity, ())) == len(item.groups) for item in phase.items)
     queued = f", {snapshot['queued']} queued" if snapshot and state != "complete" else ""
-    line("units", f"{units_accepted}/{len(items)} accepted ({groups_accepted}/{groups} groups), {unresolved} unresolved"
-                  f"{queued}")
-    running = 0
+    line("units", f"{units_accepted}/{len(phase.items)} accepted ({groups_accepted}/{groups} groups), "
+                  f"{len(phase.unresolved)} unresolved{queued}")
     # Without a live controller, the snapshot's workers may since have stopped.
     if snapshot and live:
         workers = snapshot["workers"]
@@ -4225,7 +4276,6 @@ def phase_status(label, root, now, fleets, controller, zone=None):
             members = [worker for worker in workers
                        if (worker["platform"], worker["instance_type"], worker["region"], worker["market"]) == key]
             line("", f"{' '.join(key)}: {counts(members)}")
-        running = sum(worker["state"] == "running" for worker in workers)
     policy_path = root / "execution-policy.json"
     budget = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
     if budget and budget not in fleets:
@@ -4235,8 +4285,8 @@ def phase_status(label, root, now, fleets, controller, zone=None):
         line("spend", f"${spent:.2f} so far, ${reserved:.2f} reserved")
     elif budget is None and policy_path.is_file():
         line("spend", "no fleet budget")
-    if live and remaining:
-        line("finish", clock_time(now + remaining / running, now, zone) if running else "unknown; no worker runs")
+    if live and any(left.items for left in phase.pools.values()):
+        line("finish", "unknown; no worker runs" if phase.finish is None else clock_time(now + phase.finish, now, zone))
     boot = [float(match.group(1)) for row in read_attempts(root / "job-attempts.tsv")
             if (match := re.search(r"boot_to_first_unit_seconds=([0-9.]+)", row["detail"]))]
     uploads = [float(row["upload_seconds"]) for row in read_unit_uploads(root / UNIT_UPLOADS)]
