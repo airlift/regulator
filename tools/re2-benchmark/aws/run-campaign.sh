@@ -66,8 +66,6 @@ CARGO_PACKAGE=${CARGO_PACKAGE:-}
 RUST_PACKAGE=${RUST_PACKAGE:-}
 TIME_PACKAGE=${TIME_PACKAGE:-}
 ZSTD_PACKAGE=${ZSTD_PACKAGE:-}
-# The controller's verified copy of this platform's JDK, which a session without a shared bucket carries.
-BENCHMARK_JAVA_ARCHIVE=${BENCHMARK_JAVA_ARCHIVE:-}
 BENCHMARK_JAVA_ARCHIVE_URL=${BENCHMARK_JAVA_ARCHIVE_URL:-}
 BENCHMARK_JAVA_ARCHIVE_SHA256=${BENCHMARK_JAVA_ARCHIVE_SHA256:-}
 BENCHMARK_AMI_ID=${BENCHMARK_AMI_ID:-}
@@ -155,14 +153,12 @@ if [[ "${CAMPAIGN_PROVENANCE}" != qualification ]]; then
 fi
 CAMPAIGN_LABEL=Qualification
 SOURCE_SNAPSHOT_KIND=exact-commit
-if [[ -n "${TRANSFER_BUCKET}" && -z "${TRANSFER_PREFIX}" ]]; then
-    echo "TRANSFER_PREFIX is required when TRANSFER_BUCKET is set" >&2
+if [[ -z "${TRANSFER_BUCKET}" || -z "${TRANSFER_PREFIX}" ]]; then
+    echo "TRANSFER_BUCKET and TRANSFER_PREFIX are required: hosts read inputs from their region's shared bucket" >&2
     exit 1
 fi
-if [[ -n "${TRANSFER_PREFIX}" ]] &&
-        { [[ "${TRANSFER_PREFIX}" == /* ]] || [[ "${TRANSFER_PREFIX}" == */ ]] ||
-          [[ "${TRANSFER_PREFIX}" == *..* ]] ||
-          [[ ! "${TRANSFER_PREFIX}" =~ ^[A-Za-z0-9._/-]+$ ]]; }; then
+if [[ "${TRANSFER_PREFIX}" == /* || "${TRANSFER_PREFIX}" == */ || "${TRANSFER_PREFIX}" == *..* ||
+        ! "${TRANSFER_PREFIX}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
     echo "TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: ${TRANSFER_PREFIX}" >&2
     exit 1
 fi
@@ -208,14 +204,6 @@ done
 if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" && ( ! -f "${LANGUAGE_CANDIDATE_PROVENANCE}" ||
         ! "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" =~ ^[0-9a-f]{64}$ ) ]]; then
     echo "Language plans require checksummed candidate provenance" >&2
-    exit 1
-fi
-if [[ -n "${ENGINE_BUILD_ARCHIVES}${LANGUAGE_PLAN_BUNDLE_SHA256S}" && -z "${TRANSFER_BUCKET}" ]]; then
-    echo "Prebuilt engines and language plans require TRANSFER_BUCKET, the shared bucket that holds their archives" >&2
-    exit 1
-fi
-if [[ -z "${TRANSFER_BUCKET}" && ! -f "${BENCHMARK_JAVA_ARCHIVE}" ]]; then
-    echo "A session without a shared transfer bucket requires BENCHMARK_JAVA_ARCHIVE, the verified JDK it carries" >&2
     exit 1
 fi
 if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^[1-9][0-9]*$ ||
@@ -317,10 +305,9 @@ DOWNLOADED_RESULT_COUNT=0
 FAILURE_CLASSIFICATION=none
 FAILURE_DETAIL=none
 BUCKET=
-BUCKET_OWNED=0
 OBJECT_PREFIX=
-INPUT_PREFIX=input
-RESULT_PREFIX=results
+INPUT_PREFIX=
+RESULT_PREFIX=
 INSTANCE_ROLE_NAME=
 INSTANCE_PROFILE_NAME=
 
@@ -769,17 +756,8 @@ cleanup()
         fi
     fi
     if [[ ${preserve_resources} -eq 0 && -n "${BUCKET}" && "${result_recovery_status}" != failed ]]; then
-        if [[ ${BUCKET_OWNED} -ne 0 ]]; then
-            retry_cleanup_command s3 rm "s3://${BUCKET}" --recursive || true
-            retry_cleanup_command s3api delete-bucket --bucket "${BUCKET}" || true
-            verify_aws_resource_absent \
-                "bucket ${BUCKET}" \
-                '404|NoSuchBucket|Not Found' \
-                s3api head-bucket --bucket "${BUCKET}" || cleanup_failed=1
-        else
-            retry_cleanup_command s3 rm "s3://${BUCKET}/${OBJECT_PREFIX}/" --recursive || true
-            verify_bucket_prefix_absent || cleanup_failed=1
-        fi
+        retry_cleanup_command s3 rm "s3://${BUCKET}/${OBJECT_PREFIX}/" --recursive || true
+        verify_bucket_prefix_absent || cleanup_failed=1
         if [[ ${cleanup_failed} -eq 0 ]]; then
             bucket_cleanup_status=verified
         else
@@ -813,7 +791,6 @@ cleanup()
             printf 'iam_removed=%s\n' "${iam_cleanup_status}"
             printf 'bucket_removed=%s\n' "${bucket_cleanup_status}"
             printf 'uploaded_result_recovery=%s\n' "${result_recovery_status}"
-            printf 'bucket_owned=%s\n' "${BUCKET_OWNED}"
             printf 'object_prefix=%s\n' "${OBJECT_PREFIX}"
             printf 'network_resources=default-vpc-reused\n'
             printf 'cleanup_status=%s\n' "$([[ ${cleanup_failed} -eq 0 && ${preserve_resources} -eq 0 ]] && echo verified || echo failed)"
@@ -887,8 +864,10 @@ archive_content_sha256()
     gzip -dc "$1" | shasum -a 256 | awk '{print $1}'
 }
 
-verify_shared_archive()
+shared_input()
 {
+    # Every session in the bucket's region shares one copy of each content-addressed
+    # input; it is a campaign input, not a session resource, so cleanup keeps it.
     local checksum=$1
     local key=$2
     local encoded
@@ -903,17 +882,15 @@ verify_shared_archive()
         record_failure_classification retryable-infrastructure "shared-archive-unavailable:s3://${BUCKET}/${key}"
         return 1
     fi
+    SHARED_ARCHIVE_RESOURCES+="${SHARED_ARCHIVE_RESOURCES:+,}\"arn:aws:s3:::${BUCKET}/${key}\""
 }
 
 shared_archive()
 {
-    # Every session in the bucket's region shares one copy of each content-addressed
-    # archive; it is a campaign input, not a session resource, so cleanup keeps it.
     local name=$1
     local checksum=$2
     local key=$3
-    verify_shared_archive "${checksum}" "${key}"
-    SHARED_ARCHIVE_RESOURCES+="${SHARED_ARCHIVE_RESOURCES:+,}\"arn:aws:s3:::${BUCKET}/${key}\""
+    shared_input "${checksum}" "${key}"
     HOST_ARCHIVES+="${name} ${checksum} s3://${BUCKET}/${key}"$'\n'
 }
 
@@ -1099,7 +1076,7 @@ timeline credentials "\${step_started}"
 
 step_started=\${EPOCHREALTIME}
 mkdir -p /opt/re2-work/regulator
-download_input 's3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz' /tmp/regulator.tar.gz
+download_input 's3://${BUCKET}/${CANDIDATE_KEY}' /tmp/regulator.tar.gz
 printf '%s  %s\n' '${REGULATOR_SHA256}' /tmp/regulator.tar.gz | sha256sum --check -
 tar -xzf /tmp/regulator.tar.gz -C /opt/re2-work/regulator
 export PYTHONDONTWRITEBYTECODE=1
@@ -1312,60 +1289,29 @@ if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
 fi
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
 REGULATOR_CONTENT_SHA256=$(archive_content_sha256 "${SESSION_DIR}/regulator.tar.gz")
-ACCOUNT_ID=$(aws_cli sts get-caller-identity --query Account --output text)
 LOWER_SESSION_ID=$(printf '%s' "${SESSION_ID}" | tr '[:upper:]' '[:lower:]')
-if [[ -n "${TRANSFER_BUCKET}" ]]; then
-    BUCKET=${TRANSFER_BUCKET}
-    OBJECT_PREFIX="${TRANSFER_PREFIX}/${LOWER_SESSION_ID}"
-    INPUT_PREFIX="${OBJECT_PREFIX}/input"
-    RESULT_PREFIX="${OBJECT_PREFIX}/results"
-    aws_cli s3api head-bucket --bucket "${BUCKET}" >/dev/null
-    if [[ $(aws_cli s3api get-bucket-tagging \
-            --bucket "${BUCKET}" \
-            --query 'length(TagSet[?Key==`Project` && Value==`regulator-benchmark`])' \
-            --output text) != 1 ]]; then
-        echo "Shared transfer bucket is missing Project=regulator-benchmark ownership tag: ${BUCKET}" >&2
-        exit 1
-    fi
-else
-    BUCKET="re2-${CAMPAIGN_PROVENANCE}-${ACCOUNT_ID}-${LOWER_SESSION_ID}-$RANDOM"
-    BUCKET_OWNED=1
-    # us-east-1 is S3's default location, which S3 rejects as an explicit constraint.
-    if [[ "${AWS_REGION}" == us-east-1 ]]; then
-        aws_cli s3api create-bucket --bucket "${BUCKET}" >/dev/null
-    else
-        aws_cli s3api create-bucket \
-            --bucket "${BUCKET}" \
-            --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
-    fi
-    aws_cli s3api put-public-access-block \
+BUCKET=${TRANSFER_BUCKET}
+OBJECT_PREFIX="${TRANSFER_PREFIX}/${LOWER_SESSION_ID}"
+INPUT_PREFIX="${OBJECT_PREFIX}/input"
+RESULT_PREFIX="${OBJECT_PREFIX}/results"
+aws_cli s3api head-bucket --bucket "${BUCKET}" >/dev/null
+if [[ $(aws_cli s3api get-bucket-tagging \
         --bucket "${BUCKET}" \
-        --public-access-block-configuration \
-            BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-    aws_cli s3api put-bucket-encryption \
-        --bucket "${BUCKET}" \
-        --server-side-encryption-configuration \
-            'Rules=[{ApplyServerSideEncryptionByDefault={SSEAlgorithm=AES256},BucketKeyEnabled=true}]'
-    aws_cli s3api put-bucket-lifecycle-configuration \
-        --bucket "${BUCKET}" \
-        --lifecycle-configuration \
-            '{"Rules":[{"ID":"ExpireCampaignArtifacts","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":1}}]}'
+        --query 'length(TagSet[?Key==`Project` && Value==`regulator-benchmark`])' \
+        --output text) != 1 ]]; then
+    echo "Shared transfer bucket is missing Project=regulator-benchmark ownership tag: ${BUCKET}" >&2
+    exit 1
 fi
 
-aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz" --only-show-errors
 if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
 fi
 # Each archive the host streams into place, one line each: its name, its SHA-256, and its S3 URI.
 HOST_ARCHIVES=
 SHARED_ARCHIVE_RESOURCES=
-if [[ -n "${TRANSFER_BUCKET}" ]]; then
-    shared_archive jdk "${java_sha256}" "${TRANSFER_PREFIX}/jdks/${java_sha256}.tar.gz"
-else
-    # A session without a shared bucket carries its own copy of the controller's verified JDK.
-    aws_cli s3 cp "${BENCHMARK_JAVA_ARCHIVE}" "s3://${BUCKET}/${INPUT_PREFIX}/jdk.tar.gz" --only-show-errors
-    HOST_ARCHIVES+="jdk ${java_sha256} s3://${BUCKET}/${INPUT_PREFIX}/jdk.tar.gz"$'\n'
-fi
+CANDIDATE_KEY="${TRANSFER_PREFIX}/candidates/${REGULATOR_SHA256}.tar.gz"
+shared_input "${REGULATOR_SHA256}" "${CANDIDATE_KEY}"
+shared_archive jdk "${java_sha256}" "${TRANSFER_PREFIX}/jdks/${java_sha256}.tar.gz"
 for engine_archive in ${ENGINE_BUILD_ARCHIVES}; do
     shared_archive "${engine_archive%%=*}" "${engine_archive#*=}" \
         "${TRANSFER_PREFIX}/engine-builds/${engine_archive#*=}.tar.zst"
@@ -1425,7 +1371,6 @@ aws_profile=${AWS_PROFILE:-default-credential-chain}
 aws_region=${AWS_REGION}
 placement_score=${CAMPAIGN_PLACEMENT_SCORE}
 bucket=${BUCKET}
-bucket_owned=${BUCKET_OWNED}
 object_prefix=${OBJECT_PREFIX}
 input_prefix=${INPUT_PREFIX}
 result_prefix=${RESULT_PREFIX}

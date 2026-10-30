@@ -339,8 +339,8 @@ def parse_args():
                              "measuring unit worker installs, verified against their pinned SHA-256 (default: the "
                              "candidate's build)")
     parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
-                        help="shared transfer bucket for hosts launched in REGION; regions without one "
-                             "use a per-session bucket")
+                        help="shared transfer bucket for hosts launched in REGION, required in every region "
+                             "the campaign launches in")
     return parser.parse_args()
 
 
@@ -401,15 +401,6 @@ def campaign_regions(arguments):
     """Every region a platform of the campaign may launch in."""
     return list(dict.fromkeys(region for platform in campaign_platforms(arguments)
                               for region in platform_regions(arguments, platform))) or default_regions()
-
-
-def shared_transfer_buckets(arguments):
-    """Return each allowed region's shared transfer bucket; a single-region campaign may name its own."""
-    buckets = getattr(arguments, "transfer_buckets", None)
-    if buckets:
-        return buckets
-    bucket = os.environ.get("TRANSFER_BUCKET")
-    return {campaign_regions(arguments)[0]: bucket} if bucket else {}
 
 
 def execution_policy(arguments):
@@ -690,12 +681,8 @@ def validate_configuration(arguments, items):
     if not set(buckets) <= set(regions):
         raise SystemExit(
             f"--transfer-bucket names regions the campaign does not allow: {sorted(set(buckets) - set(regions))}")
-    if os.environ.get("TRANSFER_BUCKET") and (buckets or len(regions) > 1):
-        # A shared bucket serves hosts in its own region, so name each one with its region.
-        raise SystemExit("TRANSFER_BUCKET serves only a single-region campaign without --transfer-bucket; "
-                         "name each region's shared bucket with --transfer-bucket")
-    if shared_transfer_buckets(arguments) and not os.environ.get("TRANSFER_PREFIX"):
-        raise SystemExit("--transfer-bucket and TRANSFER_BUCKET require TRANSFER_PREFIX")
+    if buckets and not os.environ.get("TRANSFER_PREFIX"):
+        raise SystemExit("--transfer-bucket requires TRANSFER_PREFIX")
     budget = getattr(arguments, "shared_budget", None)
     unit_platforms = getattr(arguments, "unit_platforms", {})
     workers = [unit_platforms[pool] for pool in sorted({item.pool for item in items}) if pool in unit_platforms]
@@ -717,6 +704,12 @@ def validate_configuration(arguments, items):
                          "policy an On-Demand allowance in one of its regions, or buy with --purchase PLATFORM=spot")
     if getattr(arguments, "execute", False) and budget is None:
         raise SystemExit("launching hosts requires a shared fleet budget; name its policy with --fleet-budget")
+    missing = [region for region in regions if region not in buckets]
+    if getattr(arguments, "execute", False) and missing:
+        # Hosts read every input from a bucket in their own region, uploaded once before launch.
+        raise SystemExit(f"launching hosts requires a shared transfer bucket in every allowed region; name one for "
+                         f"{missing} with --transfer-bucket REGION=BUCKET, created as aws/README.md \"Launch "
+                         "regions\" describes")
     validate_campaign_id(arguments.campaign_id)
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
         raise SystemExit("max concurrency must be a positive integer")
@@ -1229,13 +1222,6 @@ def resolve_engine_builds(root, arguments):
         return
     if builds is None:
         raise SystemExit(f"{arguments.phase} execution requires --engine-builds from an accepted build phase")
-    buckets = shared_transfer_buckets(arguments)
-    missing = [region for region in campaign_regions(arguments) if region not in buckets]
-    if missing:
-        # Hosts install the archives from a bucket in their own region, uploaded once before launch.
-        raise SystemExit(f"--engine-builds requires a shared transfer bucket in every allowed region; "
-                         f"name one for {missing} with --transfer-bucket REGION=BUCKET, created as "
-                         "aws/README.md \"Launch regions\" describes")
     # The build phase's accepted units, one build per platform, each revalidated from its retained attempt.
     # Any measuring campaign may install them, so they are checked under the build phase's own campaign ID, and
     # against this checkout only for what the engines are made from: the candidate, the build scripts, the
@@ -1354,7 +1340,7 @@ def validate_aws(arguments, platforms, jobs=None):
         if not offered:
             raise SystemExit(f"{platform.instance_type} is not offered in any region of {platform.name}'s list")
         offerings[platform.instance_type] = offered
-    for region, bucket in shared_transfer_buckets(arguments).items():
+    for region, bucket in getattr(arguments, "transfer_buckets", {}).items():
         info = aws.bucket(region, bucket)
         if info.region != region or info.tags.get("Project") != "regulator-benchmark":
             raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
@@ -1371,6 +1357,16 @@ def engine_archives(arguments, platform):
                                           arguments.engine_build_policy[platform])
     kind = "language" if getattr(arguments, "language_plans", None) else "baseline"
     return {name: manifest["archives"][name] for name in engine_build.UNIT_ARCHIVES[kind]}
+
+
+def upload_candidate_archive(arguments, jobs):
+    """Put the frozen candidate archive, which every worker unpacks first, once in every region that may launch
+    one, under its SHA-256."""
+    sha256 = arguments.candidate_archive_sha256
+    upload_shared_archives(arguments, {
+        (region, f"{os.environ['TRANSFER_PREFIX']}/candidates/{sha256}.tar.gz"): (
+            arguments.candidate_archive, sha256, "candidate archive")
+        for job in jobs for region in launch_regions(arguments, job)})
 
 
 def upload_engine_builds(arguments, jobs):
@@ -1405,8 +1401,7 @@ def jdk_archive(campaign_root, platform):
 def stage_jdks(arguments, jobs):
     """Download each pinned JDK once for the campaign, verified against its pin, into the campaign root, where
     every phase's workers take it from, and put it in the shared transfer bucket of every region that may launch a
-    worker installing it. A worker launched elsewhere carries the verified copy in its own session's bucket."""
-    buckets = shared_transfer_buckets(arguments)
+    worker installing it."""
     uploads = {}
     directory = arguments.campaign_root / "jdks"
     directory.mkdir(parents=True, exist_ok=True)
@@ -1430,15 +1425,14 @@ def stage_jdks(arguments, jobs):
     for job in jobs:
         path = jdk_archive(arguments.campaign_root, job.platform)
         for region in launch_regions(arguments, job):
-            if region in buckets:
-                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/jdks/{job.platform.jdk_sha256}.tar.gz"] = (
-                    path, job.platform.jdk_sha256, f"{job.platform.name} JDK")
+            uploads[region, f"{os.environ['TRANSFER_PREFIX']}/jdks/{job.platform.jdk_sha256}.tar.gz"] = (
+                path, job.platform.jdk_sha256, f"{job.platform.name} JDK")
     upload_shared_archives(arguments, uploads)
 
 
 def upload_shared_archives(arguments, uploads):
     """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket."""
-    buckets = shared_transfer_buckets(arguments)
+    buckets = arguments.transfer_buckets
     for (region, key), (path, sha256, label) in sorted(uploads.items()):
         for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
             try:
@@ -1626,12 +1620,8 @@ def job_environment(job, arguments, root, result_root):
     ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
     if ami_id is None:
         raise UnsafeCampaignError(f"platform-regions.tsv has no {job.platform.name} AMI for {region}")
-    buckets = getattr(arguments, "transfer_buckets", None)
-    if buckets:
-        # Hosts read inputs from a bucket in their own region; others get a per-session bucket.
-        environment.pop("TRANSFER_BUCKET", None)
-        if region in buckets:
-            environment["TRANSFER_BUCKET"] = buckets[region]
+    # Hosts read their inputs from the shared bucket in their own region.
+    environment["TRANSFER_BUCKET"] = arguments.transfer_buckets[region]
     if len(regions) > 1:
         # The controller chose the region, so it alone reports the score it chose by.
         environment["CAMPAIGN_PLACEMENT_SCORE"] = job.placement_score
@@ -1665,7 +1655,6 @@ def job_environment(job, arguments, root, result_root):
         "RUST_PACKAGE": job.platform.rust_package,
         "TIME_PACKAGE": job.platform.time_package,
         "ZSTD_PACKAGE": job.platform.zstd_package,
-        "BENCHMARK_JAVA_ARCHIVE": str(jdk_archive(arguments.campaign_root, job.platform).resolve()),
         "BASELINE_CANDIDATE_ARCHIVE": str(arguments.candidate_archive.resolve()),
         "BASELINE_CANDIDATE_ARCHIVE_SHA256": arguments.candidate_archive_sha256,
         "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
@@ -4349,6 +4338,7 @@ def main():
                        for pool in sorted({item.pool for item in items})]
             validate_aws(arguments, platforms, workers)
             stage_jdks(arguments, workers)
+            upload_candidate_archive(arguments, workers)
             upload_engine_builds(arguments, workers)
             if arguments.language_plan:
                 write_language_bundles(arguments, result_root)
