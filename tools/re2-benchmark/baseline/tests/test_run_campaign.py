@@ -2302,7 +2302,10 @@ class FakeUnitHost:
     and with "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic"
     the late completion is a semantic failure, and with "stall-semantic-early" it lands as soon as another host
     leased the replica, before that host completes it. A host whose boot the fleet fails exits before its first
-    heartbeat. A host whose boot the fleet slows stays pending until it is terminated, one the fleet leaves unlisted
+    heartbeat. As the user data's watcher does, a host powers off at its stop time, the latest of the one it was
+    launched with and those of the work leases it read, whatever it is doing, and as the worker does, it takes no
+    lease once the lifetime its user data names has passed since it booted, stopping instead. A host whose boot the
+    fleet slows stays pending until it is terminated, one the fleet leaves unlisted
     is launched without RunInstances's answer and is missing from EC2's listing while it stays unlisted, and one
     whose cleanup the fleet slows keeps shutting down once terminated until every other host has exited. Every host
     that booted uploads its host archive as it exits, as the user data's exit trap does, even one that failed during
@@ -2341,6 +2344,8 @@ class FakeUnitHost:
         self.prefix = self.result_prefix.removesuffix("results/")
         self.release_version = settings["REGULATOR_RELEASE_VERSION"]
         self.idle_seconds = int(settings["UNIT_WORKER_IDLE_SECONDS"])
+        self.lifetime_seconds = int(settings["UNIT_WORKER_LIFETIME_SECONDS"])
+        self.power_off_at = self.stop_by
         self.zone = next(zone for subnet, zone in fleet.region_network(region).subnets if subnet == spec.subnet)
         self.launched_at = fleet.clock
         self.setup_seconds = fleet.setup_seconds(self)
@@ -2350,6 +2355,7 @@ class FakeUnitHost:
         # Since when the host has waited for its next lease, and the lease it runs, with its groups yet to finish
         # and when the first of them does.
         self.idle_since = None
+        self.booted_at = None
         self.running = None
         # The sequence it last found no lease for.
         self.absent = None
@@ -2358,12 +2364,16 @@ class FakeUnitHost:
         self.stopping = False
         self.terminations = 0
         self.status = None
+        self.ended_at = None
         self.leaking = False
 
     def tick(self):
         if self.leaking and not self.fleet.leaked(self):
             self.leaking = False
             self.fleet.set_state(self, "terminated", self.shutdown_reason)
+        if self.status is None and not self.stopping and self.fleet.time() >= self.power_off_at:
+            self.fleet.log.append(("power-off", self.session))
+            return self.exit(143)
         if self.stopping and self.status is None and not self.stalled:
             if all(host is self or host.status is not None for host in self.fleet.hosts):
                 self.exit(143)
@@ -2389,7 +2399,7 @@ class FakeUnitHost:
             if self.fleet.slow_boot(self) or self.fleet.clock < self.launched_at + self.setup_seconds:
                 return
             self.booted = True
-            self.idle_since = self.fleet.clock
+            self.booted_at = self.idle_since = self.fleet.clock
             self.fleet.set_state(self, "running")
             if self.fleet.failed_boot(self):
                 return self.exit(1)
@@ -2397,6 +2407,9 @@ class FakeUnitHost:
             return self.advance()
         if self.script.get(self.sequence) == "notice":
             return self.interrupt(None)
+        if self.fleet.clock - self.booted_at >= self.lifetime_seconds:
+            self.fleet.log.append(("lifetime", self.session))
+            return self.stop()
         lease = self.next_lease()
         if lease is None and self.fleet.clock - self.idle_since >= self.idle_seconds:
             lease = self.claim()
@@ -2407,6 +2420,7 @@ class FakeUnitHost:
             return
         if lease.get("stop"):
             return self.stop()
+        self.power_off_at = max(self.power_off_at, lease["stop_by"])
         behavior = self.script.get(self.sequence)
         self.heartbeat(lease["unit_id"])
         if behavior in ("interrupt", "silent-interrupt"):
@@ -2564,7 +2578,7 @@ class FakeUnitHost:
                     member.size = len(content)
                     host.addfile(member, io.BytesIO(content.encode()))
             self.put("host.tar.gz", archive.getvalue())
-        self.status = status
+        self.status, self.ended_at = status, self.fleet.time()
         self.leaking = self.fleet.leaked(self)
         self.fleet.set_state(self, "shutting-down" if self.leaking else "terminated", self.shutdown_reason)
         self.fleet.log.append(("exit", self.session))
@@ -3194,6 +3208,43 @@ class TestUnitWorkers(unittest.TestCase):
                                   "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
             leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
             self.assertEqual((80, 80), (len(leased), len(set(leased))))
+
+    def test_hosts_end_on_their_own_within_their_reservations_once_the_controller_is_gone(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(RUN_CAMPAIGN, "UNIT_WORKER_LIFETIME_SECONDS", 35 * 60):
+            # 20 hosts of two platforms, whose user data gives them a 35-minute lifetime, each measure a 15-minute
+            # unit and hold a 15- or 5-minute one of slack when the controller stops, seven minutes in, and never
+            # returns. The second lease of the first two hosts hangs.
+            units = {f"gone-{index}": {"unit_id": f"gone-{index}", "shard_id": "gone", "unit_index": str(index),
+                                       "estimated_seconds": str(seconds),
+                                       "groups": [{"group_id": "1", "estimated_seconds": seconds}]}
+                     for index, seconds in enumerate([900] * 15 + [300] * 25, 1)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                  abort_after=28, scripts={1: {2: "stall"}, 2: {2: "stall"}})
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["gone"], 20, 10)
+            gone = fleet.time()
+            fleet.outage(3 * 3600)
+            # A hung host powers off at its stop time. A host whose two leases took 20 minutes waits out its idle
+            # stop and stops itself; one whose leases took 30 minutes reaches its lifetime first, as it waits.
+            self.assertEqual(20, len(fleet.hosts))
+            ends = {entry[1]: {"power-off": "stop time", "lifetime": "lifetime", "claim": "idle stop"}[entry[0]]
+                    for entry in fleet.log if entry[0] in ("power-off", "lifetime", "claim")}
+            self.assertEqual({host.session: "stop time" if host.number <= 2 else "lifetime" if sum(
+                                  int(fleet.units[lease["unit_id"]]["estimated_seconds"])
+                                  for lease in host.leases.values() if "unit_id" in lease) == 1800 else "idle stop"
+                              for host in fleet.hosts}, ends)
+            self.assertEqual({"stop time", "lifetime", "idle stop"}, set(ends.values()))
+            # Every instance terminated, each by the stop time its reservation covers, as the watcher's 15-second
+            # poll finds it, and the fleet spent no more after the controller's end than each host running two
+            # leases at twice their estimate and an idle stop.
+            self.assertEqual({"terminated"}, {instance.state for instances in fleet.region_instances.values()
+                                              for instance in instances})
+            for host in fleet.hosts:
+                self.assertLessEqual(host.ended_at, max(lease.get("stop_by", host.stop_by)
+                                                        for lease in host.leases.values()) + 15)
+            self.assertLessEqual(sum(host.ended_at - gone for host in fleet.hosts),
+                                 len(fleet.hosts) * (2 * 2 * 900 + RUN_CAMPAIGN.UNIT_WORKER_IDLE_SECONDS))
 
     def test_late_boot_wave_halves_the_boot_window_and_a_healthy_one_doubles_it(self):
         with tempfile.TemporaryDirectory() as temporary:
