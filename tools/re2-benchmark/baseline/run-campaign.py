@@ -35,11 +35,12 @@ import unit_session
 import work_units
 from acceptance import normalize_heap_size
 from campaign_settings import (
-    PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError)
+    PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
+    changed as changed_settings)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
     spend_by_owner)
-from campaign_io import UnsafeCampaignError, check_output, fsync_directory, write_ledger
+from campaign_io import UnsafeCampaignError, append_ledger, check_output, fsync_directory, write_ledger
 from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
@@ -170,6 +171,10 @@ JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
 # A shared archive upload that stalls for the SDK's read timeout is retried rather than left to hold every launch
 # behind it.
 SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
+# Every archive the campaign has put in its regions' shared buckets, by key, in the campaign root, so a region added
+# later gets each one before any phase may launch there.
+SHARED_ARCHIVES = "shared-archives.tsv"
+SHARED_ARCHIVE_FIELDS = ("key", "sha256", "path", "label")
 CANDIDATE_PROVENANCE_FIELDS = (
     "candidate_ref",
     "candidate_commit",
@@ -207,6 +212,10 @@ BASELINE_TOOLING = "tools/re2-benchmark/baseline"
 # aws/worker-policy.json, and its user data, which the controller sends with the worker's settings.
 WORKER_PROFILE = "regulator-benchmark-worker"
 WORKER_USER_DATA = REPOSITORY / BENCHMARK_TOOLING / "aws" / "worker-user-data.sh"
+# Every shared bucket, in the region its name ends with, carries this tag and expires objects as this lifecycle
+# configuration says.
+SHARED_BUCKET_TAGS = {"Project": "regulator-benchmark"}
+SHARED_BUCKET_LIFECYCLE = REPOSITORY / BENCHMARK_TOOLING / "aws" / "bucket-lifecycle.json"
 # The Trino commit every worker's harness pins.
 TRINO_REVISION = "c7503d170344c4e266f03fdb39e53c82aa7e3594"
 JOB_MANIFEST_FIELDS = (
@@ -1371,13 +1380,30 @@ def validate_aws(arguments, platforms, jobs=None):
             raise SystemExit(f"{platform.instance_type} is not offered in any region of {platform.name}'s list")
         offerings[platform.instance_type] = offered
     for region in regions:
-        bucket = region_bucket(arguments, region)
-        info = aws.bucket(region, bucket)
-        if info.region != region or info.tags.get("Project") != "regulator-benchmark":
-            raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
-                             f"bucket in {region}: location={info.region}")
+        check_bucket(aws, region, region_bucket(arguments, region))
     arguments.ami_names = names
     arguments.region_offerings = offerings
+
+
+def check_bucket(aws, region, bucket):
+    info = aws.bucket(region, bucket)
+    if info.region != region or any(info.tags.get(key) != value for key, value in SHARED_BUCKET_TAGS.items()):
+        raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
+                         f"bucket in {region}: location={info.region}")
+
+
+def check_regions(arguments, platforms):
+    """Check AWS for the phase's workers in every region its settings list, and put what they read in each region
+    that may launch one, as its region_offerings then name them. A phase launches in a region only once this passed
+    for it: the controller checks again for a running phase whenever the settings' regions change, on a copy of its
+    namespace, and adopts the regions only once the check passes."""
+    workers = [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(arguments.unit_platforms.items())]
+    validate_aws(arguments, platforms, workers)
+    stage_jdks(arguments, workers)
+    upload_candidate_archive(arguments, workers)
+    upload_engine_builds(arguments, workers)
+    if arguments.language_plan:
+        upload_language_bundles(arguments, workers)
 
 
 def engine_archives(arguments, platform):
@@ -1472,24 +1498,41 @@ def stage_jdks(arguments, jobs):
 
 
 def upload_shared_archives(arguments, uploads):
-    """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket."""
-    for (region, key), (path, sha256, label) in sorted(uploads.items()):
-        bucket = region_bucket(arguments, region)
-        for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
-            try:
-                existing = arguments.cloud.head_sha256(region, bucket, key)
-            except CloudError:
-                existing = None
-            if existing == sha256:
-                break
-            print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
-            try:
-                # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
-                arguments.cloud.put(region, bucket, key, path, sha256=sha256)
-                break
-            except CloudError as error:
-                if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:
-                    raise SystemExit(f"could not upload the {label} to s3://{bucket}/{key}: {error}") from error
+    """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket,
+    and record it among the campaign's shared archives."""
+    path = arguments.campaign_root / SHARED_ARCHIVES
+    recorded = {row["key"] for row in read_shared_archives(path)}
+    for (region, key), (archive, sha256, label) in sorted(uploads.items()):
+        put_shared_archive(arguments.cloud, region, region_bucket(arguments, region), key, archive, sha256, label)
+        if key not in recorded:
+            append_ledger(path, SHARED_ARCHIVE_FIELDS, {"key": key, "sha256": sha256, "path": archive, "label": label})
+            recorded.add(key)
+
+
+def read_shared_archives(path):
+    if not path.is_file():
+        return []
+    with path.open(newline="") as ledger:
+        return list(csv.DictReader(ledger, delimiter="\t"))
+
+
+def put_shared_archive(aws, region, bucket, key, path, sha256, label):
+    """Put the archive in the bucket unless it holds it already, as its SHA-256 says."""
+    for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
+        try:
+            existing = aws.head_sha256(region, bucket, key)
+        except CloudError:
+            existing = None
+        if existing == sha256:
+            return
+        print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
+        try:
+            # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
+            aws.put(region, bucket, key, path, sha256=sha256)
+            return
+        except CloudError as error:
+            if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:
+                raise SystemExit(f"could not upload the {label} to s3://{bucket}/{key}: {error}") from error
 
 
 def spot_placement_scores(arguments, instance_type, regions):
@@ -3743,6 +3786,10 @@ class Phase:
     deadline: float = None
     # Why the phase is paused for a fault in its dispatch, until it is resumed and its dispatch restarts.
     fault: str = ""
+    # The settings' regions as they stood when the phase's regions were last checked, and a check of a running
+    # phase's regions on the setup thread, with the copy of its namespace it checks.
+    regions: str = None
+    checking: tuple = None
 
     @property
     def reduction(self):
@@ -3874,15 +3921,9 @@ def prepare_phase(arguments, root):
     resolve_engine_builds(root, arguments)
     validation = unit_validation(root, arguments, kind, plans)
     validate_prerequisites(arguments, validation)
-    workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
-               for pool in sorted({item.pool for item in items})]
-    validate_aws(arguments, platforms, workers)
-    stage_jdks(arguments, workers)
-    upload_candidate_archive(arguments, workers)
-    upload_engine_builds(arguments, workers)
     if arguments.language_plan:
         write_language_bundles(arguments, result_root)
-        upload_language_bundles(arguments, workers)
+    check_regions(arguments, platforms)
     dispatcher = UnitDispatcher(arguments, root, result_root, items, platforms, validation)
     return dispatcher, dispatcher.begin()
 
@@ -3929,6 +3970,7 @@ class Campaign:
                     print(f"campaign stopped by {stop['by']}: {stop['reason']}; every worker's cleanup is proven",
                           flush=True)
                     break
+                self.follow_regions(running)
                 self.steer(running)
                 self.assign_shares(running)
                 observed = {}
@@ -4023,11 +4065,38 @@ class Campaign:
     def start(self, phase):
         print(f"{phase.key}: starting", flush=True)
         phase.state = "starting"
+        phase.regions = self.regions()
         if phase.reduction:
             phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
         else:
             arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
             phase.future = self.setup.submit(prepare_phase, arguments, self.root)
+
+    def regions(self):
+        settings = live_settings(self.arguments)
+        return json.dumps([settings["regions"], settings["platform_regions"]], sort_keys=True)
+
+    def follow_regions(self, running):
+        """Check each running phase's regions again once the settings' regions or a platform's list of them
+        changed, as its setup did, on the setup thread; a phase launches in the regions that check finds only once it
+        passes, and until then where it did. A check that fails is logged and runs again at the next change."""
+        regions = self.regions()
+        for phase in running:
+            if phase.checking is not None and phase.checking[0].done():
+                future, checked, namespace = phase.checking
+                phase.checking = None
+                try:
+                    future.result()
+                except (Exception, SystemExit) as error:
+                    print(f"{phase.key}: launches stay in the regions checked before: {error}", flush=True)
+                else:
+                    namespace.ami_names, namespace.region_offerings = checked.ami_names, checked.region_offerings
+            if phase.checking is None and phase.regions != regions and not phase.fault:
+                phase.regions = regions
+                namespace = phase.dispatcher.arguments
+                checked = SimpleNamespace(**vars(namespace))
+                phase.checking = (self.setup.submit(check_regions, checked, list(phase.dispatcher.platforms.values())),
+                                  checked, namespace)
 
     def steer(self, running):
         """Steer each running phase as the settings say: stopping once the campaign is stopped, else as its state
@@ -4576,6 +4645,14 @@ def control_parser():
     parser.add_argument("--actor", required=True, choices=("dain", "monitor"),
                         help="who makes the change, which the settings' events record")
     commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("add-region", help="create a region's shared bucket unless it has one, put every "
+                                                     "archive the campaign shares in it, then add the region")
+    command.add_argument("region")
+    command.add_argument("--max-vcpus", type=int, required=True, help="the fleet's Spot vCPUs in the region")
+    command.add_argument("--on-demand-max-vcpus", type=int, help="the fleet's On-Demand vCPUs in the region; "
+                                                                 "without it, the region launches no On-Demand")
+    command.add_argument("--platforms", nargs="+", help="the platforms whose lists gain the region; every platform's "
+                                                        "by default")
     command = commands.add_parser("set-limit", help="set max-hosts, max-hosts-per-platform, max-usd, or "
                                                     "max-machine-hours N, or region REGION max-vcpus N")
     command.add_argument("limit", nargs="+")
@@ -4681,11 +4758,44 @@ def control_change(arguments, now):
     return f"authorized {name} to {value:g}", lambda settings: settings["authorized"].update({name: value})
 
 
-def control(arguments):
-    """Change the campaign's live settings as the actor's control command."""
+def add_region(arguments, store, aws):
+    """Add a region to the campaign: create its shared bucket unless it has one, put every archive the campaign has
+    shared in it, each verified by its SHA-256, and only then add the region to the settings, listed for the platforms
+    --platforms names, or for every platform. A change the settings or the actor's bounds would refuse is refused
+    before anything is created."""
+    region = arguments.region
+    bucket = f"regulator-benchmark-{aws.account(region)}-{region}"
+    limits = {"bucket": bucket, "max_vcpus": arguments.max_vcpus, **(
+        {} if arguments.on_demand_max_vcpus is None else {"on_demand_max_vcpus": arguments.on_demand_max_vcpus})}
+
+    def update(settings):
+        if region in settings["regions"]:
+            raise SettingsError(f"the campaign has region {region} already; change its limit with set-limit")
+        settings["regions"][region] = limits
+        for platform in arguments.platforms or settings["platform_regions"]:
+            if platform not in settings["platform_regions"]:
+                raise SettingsError(f"the campaign has no platform {platform}")
+            settings["platform_regions"][platform].append(region)
+
+    changed_settings(store.current, arguments.actor, update)
+    try:
+        check_bucket(aws, region, bucket)
+    except CloudError:
+        print(f"creating the shared bucket {bucket} in {region}", flush=True)
+        aws.create_bucket(region, bucket, SHARED_BUCKET_TAGS, json.loads(SHARED_BUCKET_LIFECYCLE.read_text()))
+        check_bucket(aws, region, bucket)
+    for row in read_shared_archives(arguments.root / SHARED_ARCHIVES):
+        put_shared_archive(aws, region, bucket, row["key"], Path(row["path"]), row["sha256"], row["label"])
+    platforms = ", ".join(arguments.platforms or store.current["platform_regions"])
+    return f"add region {region} ({bucket}) for {platforms}", update
+
+
+def control(arguments, aws):
+    """Change the campaign's live settings as the actor's control command; add-region reaches AWS through aws."""
     try:
         store = CampaignSettings(arguments.root)
-        description, update = control_change(arguments, time.time())
+        description, update = (add_region(arguments, store, aws) if arguments.command == "add-region" else
+                               control_change(arguments, time.time()))
         before = store.current["version"]
         settings = store.change(arguments.actor, description, update)
     except SettingsError as error:
@@ -4698,7 +4808,7 @@ def control(arguments):
 
 def main():
     if sys.argv[1:2] == ["control"]:
-        control(control_parser().parse_args(sys.argv[2:]))
+        control(control_parser().parse_args(sys.argv[2:]), cloud.AwsCloud())
         return
     if sys.argv[1:2] == ["status"]:
         parser = argparse.ArgumentParser(

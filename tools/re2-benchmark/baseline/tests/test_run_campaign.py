@@ -253,7 +253,7 @@ class TestRunCampaign(unittest.TestCase):
             arguments = SimpleNamespace(
                 settings=self.settings(platform_regions={"r8i": ["us-west-2", "us-east-2"]},
                                        buckets={"us-west-2": "west", "us-east-2": "east"}),
-                engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest})
+                engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest}, campaign_root=build)
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
                 with self.subTest(stalls=stalls):
@@ -297,7 +297,7 @@ class TestRunCampaign(unittest.TestCase):
             arguments = SimpleNamespace(
                 settings=self.settings(platform_regions={"r8i": ["us-west-2", "us-east-2"]},
                                        buckets={"us-west-2": "west", "us-east-2": "east"}),
-                candidate_archive=archive, candidate_archive_sha256=sha256, cloud=aws)
+                candidate_archive=archive, candidate_archive_sha256=sha256, cloud=aws, campaign_root=Path(temporary))
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), contextlib.redirect_stdout(io.StringIO()):
                 RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
@@ -307,6 +307,10 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual({("west", key): sha256, ("east", key): sha256},
                              {name: checksum for name, (_, _, checksum) in aws.objects.items()})
             self.assertEqual(2, sum(call[0] == "put" for call in aws.calls))
+            # The campaign records it once among its shared archives, for a region added later.
+            self.assertEqual([(key, sha256, str(archive))], [
+                (row["key"], row["sha256"], row["path"]) for row in RUN_CAMPAIGN.read_shared_archives(
+                    Path(temporary) / RUN_CAMPAIGN.SHARED_ARCHIVES)])
 
     def admit(self, arguments, result_root, job, observed=None):
         """Place and admit one launch as the unit dispatcher does, by default in a loop of its own: the job as placed,
@@ -611,10 +615,12 @@ class TestRunCampaign(unittest.TestCase):
             settings.change("controller", "spending stop", lambda current: current.update(
                 spending_stop={"by": "controller", "at": 1, "reason": "leak"}))
 
+            aws = FakeCloud()
+
             def control(*command, actor="dain"):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
-                        [str(root), "--actor", actor, *command]))
+                        [str(root), "--actor", actor, *command]), aws)
                 return settings.reload()
 
             region = RUN_CAMPAIGN.default_regions()[0]
@@ -640,6 +646,25 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual(value, current.get("a/primary", current) if field == "phases" else
                                      {key: current[key] for key in value} if field in ("regions", "purchase") else
                                      current)
+            # A new region gets its shared bucket, private, tagged, and expiring objects as the checked-in rule
+            # says, and every archive the campaign shared, before the platforms --platforms names list it.
+            archive = root / "candidate.tar.gz"
+            archive.write_bytes(b"candidate")
+            sha256 = hashlib.sha256(b"candidate").hexdigest()
+            key = f"campaign/candidates/{sha256}.tar.gz"
+            with contextlib.redirect_stdout(io.StringIO()):
+                RUN_CAMPAIGN.upload_shared_archives(SimpleNamespace(cloud=aws, campaign_root=root, settings=settings),
+                                                    {(region, key): (archive, sha256, "candidate archive")})
+            bucket = "regulator-benchmark-123456789012-eu-central-1"
+            current = control("add-region", "eu-central-1", "--max-vcpus", "256", "--platforms", "r9g")
+            self.assertEqual(({"bucket": bucket, "max_vcpus": 256}, ["eu-central-1"]),
+                             (current["regions"]["eu-central-1"], [
+                                 region for platform, regions in current["platform_regions"].items()
+                                 for region in regions if region == "eu-central-1" and platform == "r9g"]))
+            self.assertNotIn("eu-central-1", current["platform_regions"]["r8i"])
+            self.assertEqual((cloud.BucketInfo("eu-central-1", {"Project": "regulator-benchmark"}),
+                              json.loads((SCRIPT.parents[1] / "aws" / "bucket-lifecycle.json").read_text()), sha256),
+                             (aws.buckets[bucket], aws.lifecycles[bucket], aws.objects[bucket, key][2]))
             with open(root / EVENTS, newline="") as events:
                 rows = list(csv.DictReader(events, delimiter="\t"))
             self.assertIn(("monitor", "a/primary paused: bad AMI"), [(row["actor"], row["change"]) for row in rows])
@@ -650,10 +675,14 @@ class TestRunCampaign(unittest.TestCase):
                     (["set-limit", "hosts", "5"], "dain", "set-limit takes"),
                     (["pause", "a/confirmation"], "dain", "a/confirmation is pending"),
                     (["resume", "a/primary"], "dain", "a/primary is running"),
-                    (["drain", "b/primary"], "dain", "no phase b/primary")):
+                    (["drain", "b/primary"], "dain", "no phase b/primary"),
+                    (["add-region", "eu-central-1", "--max-vcpus", "256"], "dain", "has region eu-central-1"),
+                    (["add-region", "ap-south-1", "--max-vcpus", "256"], "monitor", "only the authorized regions")):
                 with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
                     control(*command, actor=actor)
             self.assertEqual(len(rows), len((root / EVENTS).read_text().splitlines()) - 1)
+            # A refused region gets no bucket.
+            self.assertEqual([bucket], list(aws.buckets))
 
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
@@ -2823,10 +2852,11 @@ class TestUnitWorkers(unittest.TestCase):
             fleet.sleep = poll
         return failed, dispatchers
 
-    def control(self, root, *command, actor="dain"):
-        """Run a control command on the campaign root, as the actor."""
+    def control(self, root, *command, actor="dain", aws=None):
+        """Run a control command on the campaign root, as the actor, reaching AWS through aws."""
         with contextlib.redirect_stdout(io.StringIO()):
-            RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args([str(root), "--actor", actor, *command]))
+            RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args([str(root), "--actor", actor, *command]),
+                                 aws)
 
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]
