@@ -6,6 +6,7 @@ use, so the commands that never reach AWS, such as status, run without it.
 """
 
 import contextlib
+import email.utils
 import shutil
 import threading
 from dataclasses import dataclass
@@ -63,6 +64,14 @@ class Image:
 class BucketInfo:
     region: str
     tags: dict
+
+
+@dataclass(frozen=True)
+class ObjectHead:
+    """An S3 object's SHA-256, in hex, as upload kept it in the object's metadata, or None, and its age in seconds by
+    S3's own clock."""
+    sha256: str
+    age: float
 
 
 @dataclass(frozen=True)
@@ -313,16 +322,16 @@ class AwsCloud:
                 raise CloudError(f"could not delete {len(failed)} objects from s3://{bucket}, such as "
                                  f"{failed[0]['Key']}: {failed[0].get('Code')}")
 
-    def head_sha256(self, region, bucket, key):
-        """The whole-object SHA-256 that upload kept in the object's metadata, or None where there is no object or it
-        has none."""
+    def head(self, region, bucket, key):
+        """The object's head, or None where there is no object."""
         try:
             head = self.call("s3", region, "head_object", Bucket=bucket, Key=key)
         except CloudError as error:
             if error_code(error.__cause__) in ("404", "NoSuchKey", "NotFound"):
                 return None
             raise
-        return head.get("Metadata", {}).get("sha256")
+        now = email.utils.parsedate_to_datetime(head["ResponseMetadata"]["HTTPHeaders"]["date"])
+        return ObjectHead(head.get("Metadata", {}).get("sha256"), (now - head["LastModified"]).total_seconds())
 
 
 def error_code(error):

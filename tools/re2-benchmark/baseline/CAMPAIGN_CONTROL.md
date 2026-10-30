@@ -70,9 +70,9 @@ host creates four IAM resources and deletes three):
 
 - the **worker role** and its instance profile, which every worker instance
   runs under. Its policy allows, in every `regulator-benchmark-938463256137-*`
-  bucket, reads under `*/input/*` and the shared archives, writes under
-  `*/results/*`, and writes and listing under `*/input/leases/*` for the
-  self-stop claim. A host of one campaign could write another session's
+  bucket, reads under `campaigns/*/input/*` and `shared/*`, writes under
+  `campaigns/*/results/*`, and writes and listing under
+  `campaigns/*/input/leases/*` for the self-stop claim. A host of one campaign could write another session's
   prefix; every result is checked against its marker's SHA-256 and lease
   identity, and the hosts are ours, so this is accepted.
 - the **control host role**: run, describe, tag and terminate instances and
@@ -80,6 +80,18 @@ host creates four IAM resources and deletes three):
   read and write the campaign buckets; read the network parameter and write
   the Grafana password parameter; update the control host's DNS record;
   Session Manager (`AmazonSSMManagedInstanceCore`); pass the worker role.
+
+Every campaign bucket keeps two trees with their own lifecycle rules, from
+`../aws/bucket-lifecycle.json`. The content-addressed archives every campaign
+reuses (candidates, engine builds, plan bundles, JDKs) live under `shared/`
+and expire seven days after upload; a phase, or a region `add-region` adds,
+puts an archive again once it is five days old, so no phase outlives its
+archives. Each campaign's worker sessions live under
+`campaigns/<campaign>/<session>/` and expire after one day, which sweeps what
+a lost controller leaves. One rule over the whole bucket could not serve both:
+a one-day expiry would delete archives that a later phase skips uploading
+because it finds them in place. Old campaign roots stay readable, because
+their ledgers record keys rather than derive them.
 
 The control host is reached through the company's existing Tailscale subnet
 router, which carries the dev VPC's private subnets onto the tailnet: nothing
@@ -170,8 +182,8 @@ rate and setup time is host time.
   about 70 minutes; at the 29th's mix (91 r8i.large and 16 r9g.large at
   $0.10, 76 r9g.2xlarge at $0.28, about $32 an hour) that is about $37, and
   about $21 at the 40 minutes a typical lease and slack take. What remains
-  is S3 objects only, swept by the buckets' `ExpireCampaignArtifacts`
-  lifecycle rule within days or by the next controller.
+  is S3 objects only, swept by the buckets' session lifecycle rule after a
+  day or by the next controller.
 
 ### The scheduler loop
 
