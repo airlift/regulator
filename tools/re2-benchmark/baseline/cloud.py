@@ -195,6 +195,19 @@ class AwsCloud:
         return BucketInfo({None: "us-east-1", "": "us-east-1", "EU": "eu-west-1"}.get(location, location),
                           tag_dictionary(tags))
 
+    def create_bucket(self, region, name, tags, lifecycle):
+        """Create the bucket in the region: private, encrypted with S3's own keys, tagged, and expiring objects as
+        the lifecycle configuration says."""
+        location = {} if region == "us-east-1" else {"CreateBucketConfiguration": {"LocationConstraint": region}}
+        self.call("s3", region, "create_bucket", Bucket=name, **location)
+        self.call("s3", region, "put_public_access_block", Bucket=name, PublicAccessBlockConfiguration=dict.fromkeys(
+            ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets"), True))
+        self.call("s3", region, "put_bucket_encryption", Bucket=name, ServerSideEncryptionConfiguration={"Rules": [
+            {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}, "BucketKeyEnabled": True}]})
+        self.call("s3", region, "put_bucket_tagging", Bucket=name,
+                  Tagging={"TagSet": [{"Key": key, "Value": value} for key, value in sorted(tags.items())]})
+        self.call("s3", region, "put_bucket_lifecycle_configuration", Bucket=name, LifecycleConfiguration=lifecycle)
+
     def placement_scores(self, instance_type, regions, target):
         """Each region's 1-10 Spot placement score for target instances of the type, asked from the first."""
         scores = self.pages("ec2", regions[0], "get_spot_placement_scores", "SpotPlacementScores",

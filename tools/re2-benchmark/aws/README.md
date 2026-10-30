@@ -374,6 +374,14 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   set-limit max-hosts 300
 ```
 
+- `add-region <region> --max-vcpus N [--on-demand-max-vcpus N]
+  [--platforms <platform>...]` creates the region's shared bucket,
+  `regulator-benchmark-<account>-<region>`, unless it has one, as
+  [the setup](#launch-regions-and-purchase) below does, puts every archive the
+  campaign has shared, which `shared-archives.tsv` in the campaign root
+  records, in it, each verified by its SHA-256, and then adds the region,
+  listed for the platforms named, or for every platform. The running phases
+  launch there once their [check](#launch-regions-and-purchase) passes.
 - `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`
   and `set-limit region <region> max-vcpus N` change a limit.
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand` changes how a
@@ -586,10 +594,15 @@ not depend on the region.
   wait. `spot` buys only Spot and never falls back. `on-demand` buys only
   On-Demand.
 
-Neither is frozen. The controller reads both every loop, and each phase checks
-its platforms' regions when it starts, so a campaign whose Spot capacity ran
-dry can restart in other regions. Every result records its host's region and
-market.
+Neither is frozen. The controller reads both every loop. Each phase checks its
+platforms' regions when it starts, and a running phase checks them again
+whenever the settings' regions or a platform's list of them change, as
+[`add-region`](#steer-a-campaign) does, so a campaign whose Spot capacity ran
+dry moves to other regions without a restart. A phase launches in a region
+only once its check there passed: the bucket's tag and region, the AMI, the
+worker type's offerings, the quota, and every archive its hosts read. A check
+that fails is logged, and the phase keeps launching where it did until the
+next change. Every result records its host's region and market.
 
 For each Spot launch, the controller asks AWS for the Spot placement score of
 the worker type in every region of its platform's list that offers it, for the
@@ -670,8 +683,10 @@ Each shared bucket must carry the `Project=regulator-benchmark` tag, and
 preflight checks the tag and the bucket's region. Each worker keeps its
 leases and results under its own prefix, `TRANSFER_PREFIX/<session>`, and
 cleanup removes that prefix; the shared archives described below stay. To
-create a shared bucket, omitting `--create-bucket-configuration` in
-`us-east-1`:
+create a shared bucket by hand as `add-region` does, omitting
+`--create-bucket-configuration` in `us-east-1`; its lifecycle rule,
+`ExpireCampaignArtifacts` in `bucket-lifecycle.json`, sweeps what a lost
+controller leaves:
 
 ```bash
 aws s3api create-bucket --bucket <bucket> --region <region> \
@@ -679,8 +694,13 @@ aws s3api create-bucket --bucket <bucket> --region <region> \
 aws s3api put-public-access-block --bucket <bucket> --region <region> \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-encryption --bucket <bucket> --region <region> \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
 aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
   --tagging 'TagSet=[{Key=Project,Value=regulator-benchmark}]'
+aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --region <region> \
+  --lifecycle-configuration file://tools/re2-benchmark/aws/bucket-lifecycle.json
 ```
 
 ### Engine builds

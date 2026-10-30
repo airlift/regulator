@@ -106,7 +106,8 @@ class FakeExecutor:
 class FakeCloud:
     """AWS as AwsCloud reaches it, simulated: one account whose regions each have a default VPC with a public subnet
     in zone a that offers every instance type, the images, quotas, instances, Spot requests, placement scores and
-    buckets a test gives it, the worker instance profile, and S3 objects by bucket and key. Without scores, placement
+    buckets a test gives it or the controller creates, each created one's lifecycle configuration, the worker instance
+    profile, and S3 objects by bucket and key. Without scores, placement
     scores fail, as AWS does for a configuration it cannot score. An image a test does not give is Amazon Linux.
 
     A launch adds a pending instance, or returns the one its client token already launched, unless a test's
@@ -142,6 +143,7 @@ class FakeCloud:
         self.default_quota = 1000
         self.instance_vcpus = {"r8i.large": 2, "r8i.2xlarge": 8, "r9g.large": 2, "r9g.2xlarge": 8}
         self.buckets = {}
+        self.lifecycles = {}
         self.scores = None
         self.region_instances = {}
         self.region_requests = {}
@@ -198,6 +200,11 @@ class FakeCloud:
         if name not in self.buckets:
             raise CloudError(f"NoSuchBucket: {name}")
         return self.buckets[name]
+
+    def create_bucket(self, region, name, tags, lifecycle):
+        self.call("create_bucket", region, name)
+        self.buckets[name] = cloud.BucketInfo(region, dict(tags))
+        self.lifecycles[name] = lifecycle
 
     def placement_scores(self, instance_type, regions, target):
         self.call("placement_scores", instance_type, tuple(regions), target)
@@ -352,7 +359,25 @@ class TestAwsCloud(unittest.TestCase):
                          aws.placement_scores("r8i.large", ["us-west-2", "us-east-2"], 50))
         self.assertEqual({"us-west-2a", "us-west-2b"}, aws.zones_offering("us-west-2", "r8i.large"))
 
-    def test_bucket_names_its_region_and_tags(self):
+    def test_bucket_is_created_private_and_names_its_region_and_tags(self):
+        lifecycle = {"Rules": [{"ID": "ExpireCampaignArtifacts", "Status": "Enabled", "Filter": {"Prefix": ""},
+                                "Expiration": {"Days": 1}}]}
+        # A bucket outside us-east-1 names its region.
+        for region, location in (("us-east-1", {}), ("eu-west-1", {"CreateBucketConfiguration": {
+                "LocationConstraint": "eu-west-1"}})):
+            s3 = self.stub("s3", region)
+            s3.add_response("create_bucket", {}, {"Bucket": "new", **location})
+            s3.add_response("put_public_access_block", {}, {"Bucket": "new", "PublicAccessBlockConfiguration": {
+                "BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True}})
+            s3.add_response("put_bucket_encryption", {}, {"Bucket": "new", "ServerSideEncryptionConfiguration": {
+                "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
+                           "BucketKeyEnabled": True}]}})
+            s3.add_response("put_bucket_tagging", {}, {"Bucket": "new", "Tagging": {"TagSet": [
+                {"Key": "Project", "Value": "regulator-benchmark"}]}})
+            s3.add_response("put_bucket_lifecycle_configuration", {},
+                            {"Bucket": "new", "LifecycleConfiguration": lifecycle})
+            self.cloud.create_bucket(region, "new", {"Project": "regulator-benchmark"}, lifecycle)
         s3 = self.stub("s3", "eu-west-1")
         # S3 keeps the legacy EU name for eu-west-1, and a bucket without tags has no tag set.
         s3.add_response("get_bucket_location", {"LocationConstraint": "EU"}, {"Bucket": "ireland"})

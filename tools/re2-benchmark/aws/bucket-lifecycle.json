@@ -1,0 +1,14 @@
+{
+  "Rules": [
+    {
+      "ID": "ExpireCampaignArtifacts",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 1
+      }
+    }
+  ]
+}
