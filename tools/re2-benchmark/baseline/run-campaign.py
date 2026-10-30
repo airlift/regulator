@@ -72,10 +72,6 @@ UNIT_WORKER_LIFETIME_SECONDS = 6 * 60 * 60
 # and its last unit: the pool's longest unit, and at least the unit budget.
 UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS = 75 * 60
 UNIT_WORKER_LAST_UNIT_SECONDS = work_units.UNIT_SECONDS
-# A worker whose heartbeat is this stale has lost its lease once EC2 no longer runs its instance,
-# and after the longer bound whatever EC2 reports.
-UNIT_HEARTBEAT_STALE_SECONDS = 10 * 60
-UNIT_HEARTBEAT_LOST_SECONDS = 30 * 60
 UNIT_POLL_SECONDS = 15
 # A unit pool's new Spot workers skip a region this long after it found no Spot capacity.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
@@ -109,6 +105,8 @@ UNIT_WORKER_WIND_DOWN_SECONDS = 15 * 60
 UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
 # A lease's timeout is this multiple of its groups' estimate, or of the unit budget when that is longer.
 UNIT_LEASE_TIMEOUT_FACTOR = 2
+# A running host whose lease outran its lease timeout from its latest heartbeat has stalled, and loses that lease.
+STALLED = "stalled"
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
@@ -2809,21 +2807,24 @@ class UnitDispatcher:
                     if worker.leases[sequence] is not None:
                         self.abandon(worker, sequence, "released", BOOT_DEADLINE_MISSED)
                 return
-            beats = {beat: modified for key, modified in objects.items()
-                     if (beat := heartbeat_sequence(key)) is not None}
-            if worker.lost or not beats or not worker.outstanding():
+            current = next((sequence for sequence in worker.outstanding() if worker.leases[sequence] is not None),
+                           None)
+            if worker.lost or current is None or heartbeat_key(current) not in objects:
                 return
-            age = time.time() - beats[max(beats)]
-            if age < UNIT_HEARTBEAT_STALE_SECONDS or (
-                    age < UNIT_HEARTBEAT_LOST_SECONDS and
-                    self.instance_state(worker) in ("pending", "running", "unknown")):
+            # The worker heartbeats as a lease starts and as each of its groups completes, so its running instance
+            # has stalled once the lease's unfinished groups outrun their lease timeout from its latest heartbeat.
+            # It is told to stop and terminated, and its cleanup still recovers a completion that lands.
+            seconds = dict(self.items[worker.leases[current]].groups)
+            finished = worker.finished.get(current, {})
+            unfinished = [group for group in worker.lease_groups[current] if group not in finished]
+            if time.time() - objects[heartbeat_key(current)] <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
+            if not worker.stopping:
+                self.issue(worker, None)
             worker.lost = True
             for sequence in worker.outstanding():
-                if worker.leases[sequence] is None:
-                    continue
-                started = self.lease_started(worker, sequence, keys, fetch)
-                self.abandon(worker, sequence, "lost" if started else "released", f"heartbeat {age:.0f}s old")
+                if worker.leases[sequence] is not None:
+                    self.abandon(worker, sequence, "lost" if sequence == current else "released", STALLED)
         except (CloudError, OSError, ValueError):
             # S3 may be unavailable for a moment; the next poll, or cleanup's recovered uploads, retries.
             return
@@ -3256,14 +3257,6 @@ class UnitDispatcher:
                 self.pool_regions.pop(pool, None)
                 candidate = replace(candidate, spot_capacity_failures=())
         return candidate
-
-    def instance_state(self, worker):
-        """The worker's instance's state in this loop's description of its region, or unknown."""
-        try:
-            instance = self.instance(worker)
-        except CloudError:
-            return "unknown"
-        return instance.state if instance else "unknown"
 
     def launch(self, now):
         running = [worker.job for worker in self.workers.values()]

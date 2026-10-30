@@ -855,7 +855,7 @@ is under one of those.
 | Key | Writer | Holds |
 |---|---|---|
 | `<input_prefix>/leases/<seq>.json` | controller | the host's lease `seq`, numbered from 1 |
-| `<result_prefix>/heartbeat/<seq>.json` | host | its state while it waits for, runs, or uploads lease `seq` |
+| `<result_prefix>/heartbeat/<seq>.json` | host | its state as lease `seq` starts, as each of its groups completes, or as the host stops while it holds or awaits it |
 | `<result_prefix>/units/<seq>/groups/<g>/result.tar.gz` | host | the directory of group `g` of lease `seq` |
 | `<result_prefix>/units/<seq>/groups/<g>/completion.json` | host | the group's completion marker, written after its result |
 | `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the running group's log |
@@ -906,9 +906,10 @@ any other lease stops it. Each lease read is kept in the host evidence under
 
 A heartbeat is `{"schema_version": 1, "host_session", "instance_id",
 "sequence", "state", "unit_id", "replica_id", "timestamp", "stop_reason"}`,
-written every 30 seconds and at each state change once bootstrap ends. `state`
-is `waiting`, `running`, `uploading`, `stopped`, or `interrupted`; the unit,
-replica, and stop reason are `null` when they do not apply.
+written only as a lease starts, as each of its groups completes, and as the
+worker stops or is interrupted, so a measuring host makes no S3 calls between
+groups. `state` is `running`, `stopped`, or `interrupted`; the unit, replica,
+and stop reason are `null` when they do not apply.
 
 The host runs each group of a lease into its own directory and uploads the
 group's `result.tar.gz`, then its completion marker, before it starts the next
@@ -1040,12 +1041,17 @@ accepted first elsewhere. Other outcomes:
   item for On-Demand only, unless its platform buys only Spot. A record that
   names no unit, from a notice while the host waited for its next lease,
   releases that lease without spending an attempt.
-- A heartbeat 30 minutes old, or 10 minutes old on an instance no longer
-  running, marks the host lost, and the controller terminates its instance. A lease has
-  started if one of its groups finished or a heartbeat shows it began; the
-  lost host's started lease is requeued, and an unstarted one is released.
-  Cleanup still recovers a completion that lands, which is accepted if it is
-  first and superseded otherwise.
+- A host whose instance is no longer pending or running, or that EC2 still
+  lists none of by its boot deadline, is lost. A lease has started if one of
+  its groups finished or a heartbeat shows it began; the lost host's started
+  lease is requeued, and an unstarted one is released.
+- A running host has stalled once its latest heartbeat is older than the
+  budget of its lease's unfinished groups: twice their estimate, or twice the
+  15-minute unit budget when that is longer. It gets a stop lease and is
+  terminated, its lease is `lost` with detail `stalled`, and the leases behind
+  it are released. Cleanup still recovers a completion that lands from
+  a lost or stalled host, which is accepted if it is first and superseded
+  otherwise.
 - A failed group requeues the item's remaining groups. A unit replica gets 3
   attempts across failures, interruptions without progress, and lost hosts,
   then stays unresolved.
