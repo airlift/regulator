@@ -35,6 +35,7 @@ UNIT_COMPLETION_FIELDS = (
 UNIT_UPLOADS = "unit-uploads.tsv"
 UPLOAD_TIMING_FIELDS = ("result_bytes", "pack_seconds", "upload_seconds", "upload_attempts")
 UNIT_UPLOAD_FIELDS = ("platform", "unit_id", "replica", "group_id", "host_session", "sequence", *UPLOAD_TIMING_FIELDS)
+UNRESOLVED_UNIT_FIELDS = ("platform", "unit_id", "replica", "detail")
 
 
 def accepted_row(rows, receipt, identity, attempt_field, attempts):
@@ -178,9 +179,13 @@ def write_unresolved(path, fields, rows):
     fsync_directory(path.parent)
 
 
+def unresolved_unit_rows(unresolved):
+    """Each unresolved item and its detail as a row of unresolved-units.tsv."""
+    return [(item.platform, item.unit_id, item.replica, detail) for item, detail in unresolved]
+
+
 def write_unresolved_units(path, unresolved):
-    write_unresolved(path, ("platform", "unit_id", "replica", "detail"),
-                     [(item.platform, item.unit_id, item.replica, detail) for item, detail in unresolved])
+    write_unresolved(path, UNRESOLVED_UNIT_FIELDS, unresolved_unit_rows(unresolved))
 
 
 def read_semantic_rejections(path):

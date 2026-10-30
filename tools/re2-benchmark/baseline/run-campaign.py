@@ -6,6 +6,7 @@ import contextlib
 import csv
 import fcntl
 import functools
+import gzip
 import hashlib
 import io
 import json
@@ -20,11 +21,12 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
+import aggregate_results
 import engine_build
 import unit_session
 import work_units
@@ -35,12 +37,13 @@ from fleet_budget import (
 from campaign_io import (
     UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
-    UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result, get_unit_worker_result,
-    group_identity, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
-    persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease, read_accepted_units,
-    read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads, recovered_keys, result_key,
-    retain_unit_attempt, shows_worker_start, unit_attempt_directory, unit_logical_identity,
-    unit_worker_instance_state, write_unit_attempt, write_unresolved_units)
+    UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
+    get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key,
+    list_unit_worker_results, persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease,
+    read_accepted_units, read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads,
+    recovered_keys, result_key, retain_unit_attempt, shows_worker_start, unit_attempt_directory,
+    unit_logical_identity, unit_worker_instance_state, unresolved_unit_rows, write_unit_attempt,
+    write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
@@ -127,8 +130,15 @@ TOOLING_DIGEST = "tooling-digest.txt"
 # a later phase consumes the result root only once it exists.
 PHASE_COMPLETE = "phase-complete.txt"
 # What only a running unit phase's controller knows, rewritten each poll for the status command: its live workers'
-# states and the items queued and unresolved.
+# states, the number of items queued, and the units unresolved so far; unresolved-units.tsv, written when the
+# controller ends, lists every item not accepted.
 DISPATCH_STATUS = "dispatch-status.json"
+# The checkout this tooling runs from.
+REPOSITORY = Path(__file__).resolve().parents[3]
+# The status command's results compare each row with the 1.0 release's, from these repository files.
+RELEASE_1_0_BASELINE_TABLES = "docs/benchmarks/results-1.0/baseline-tables.tar.gz"
+RELEASE_1_0_REPORT = "benchmark-report/data/regulator-68e42b7d2a104798524189aac7e2a008b49c3d4a-f045d62d4340a0fd.json.gz"
+RESULT_FIELDS = ("candidate", "phase", "platform", "row", "ratio", "replicas", "host_ratios", "ratio_1_0", "flags")
 WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds", "groups",
                     "excluded_instances")
 # Lease outcomes that spend one of the item's attempts. An interruption after the lease's first accepted group,
@@ -275,7 +285,8 @@ def parse_args():
     # No abbreviations: a detached controller drops only the exact --detach from the command it runs again.
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
-        epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers")
+        epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers, "
+               "and with --results each primary phase's, or the given phase's, ratios so far")
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -3333,10 +3344,21 @@ class UnitDispatcher:
         else:
             self.free_slots.setdefault(pool, []).append((slot, failures))
 
+    def unresolved_items(self, ending=False):
+        """The items left unresolved, each with its reason: a semantic failure, even where another attempt was
+        accepted, or spent attempts, a rejection, the phase's launch limit, or no worker left to take it; once the
+        phase ends, also every other item not accepted, as "not accepted"."""
+        return [(item, SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
+                 self.unresolved.get(identity, "not accepted"))
+                for identity, item in sorted(self.items.items())
+                if identity in self.semantic or ((ending or identity in self.unresolved) and not self.done(identity))]
+
     def write_status(self):
-        """Record the live workers' states and the items queued and unresolved for the status command."""
+        """Record the live workers' states, the number of items queued, and the items unresolved so far, in
+        unresolved-units.tsv's columns, for the status command."""
         status = {"updated_at": round(time.time()), "queued": len(self.queued()),
-                  "unresolved": len(set(self.unresolved) | set(self.semantic)),
+                  "unresolved": [dict(zip(UNRESOLVED_UNIT_FIELDS, row))
+                                 for row in unresolved_unit_rows(self.unresolved_items())],
                   "workers": [{"host_epoch": epoch, "platform": worker.job.platform.name,
                                "instance_type": worker.job.platform.instance_type, "region": worker.job.region,
                                "market": worker.job.market, "state": worker.state(epoch in self.terminated)}
@@ -3722,11 +3744,7 @@ class UnitDispatcher:
             records = {worker.process.pid: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
             halt_and_clean_up(arguments, self.result_root, self.budget, records, error)
             raise
-        # A semantic failure fails the campaign, even where another attempt was accepted.
-        unresolved = [(item, SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
-                       self.unresolved.get(identity, "not accepted"))
-                      for identity, item in sorted(self.items.items())
-                      if not self.done(identity) or identity in self.semantic]
+        unresolved = self.unresolved_items(ending=True)
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
         if unresolved:
             details = ", ".join(f"{item.identity} {detail}" for item, detail in unresolved)
@@ -4220,6 +4238,23 @@ def clock_time(epoch, now, zone=None):
     return text if moment.date() == today.date() else f"{text} on {moment:%a %b} {moment.day}"
 
 
+def dispatch_snapshot(root):
+    """The latest snapshot a unit phase's controller wrote of what only it knows, or None before its first."""
+    path = root / DISPATCH_STATUS
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def phase_unresolved(root, snapshot, live):
+    """A unit phase's unresolved units, each with its platform, unit_id, replica, and detail: a live controller's
+    latest snapshot's, else those unresolved-units.tsv lists, else the latest snapshot's, else none."""
+    path = root / "unresolved-units.tsv"
+    # A controller writes its unresolved units when it ends, so a live one's snapshot is newer than them.
+    if path.is_file() and not (live and snapshot):
+        with path.open(newline="") as input_file:
+            return list(csv.DictReader(input_file, delimiter="\t"))
+    return snapshot["unresolved"] if snapshot else []
+
+
 def phase_status(label, root, now, fleets, zone=None):
     """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot.
     fleets holds each fleet policy's spend_by_owner, so the phases sharing a fleet read its state once."""
@@ -4255,14 +4290,8 @@ def phase_status(label, root, now, fleets, zone=None):
                 done = False
                 remaining += float(seconds)
         units_accepted += done
-    snapshot = json.loads((root / DISPATCH_STATUS).read_text()) if (root / DISPATCH_STATUS).is_file() else None
-    unresolved_path = root / "unresolved-units.tsv"
-    # A controller writes its unresolved units when it ends, so a live one's snapshot is newer than them.
-    if unresolved_path.is_file() and not (live and snapshot):
-        with unresolved_path.open(newline="") as input_file:
-            unresolved = sum(1 for _ in csv.DictReader(input_file, delimiter="\t"))
-    else:
-        unresolved = snapshot["unresolved"] if snapshot else 0
+    snapshot = dispatch_snapshot(root)
+    unresolved = len(phase_unresolved(root, snapshot, live))
     queued = f", {snapshot['queued']} queued" if snapshot and state != "complete" else ""
     line("units", f"{units_accepted}/{len(items)} accepted ({groups_accepted}/{groups} groups), {unresolved} unresolved"
                   f"{queued}")
@@ -4304,38 +4333,228 @@ def phase_status(label, root, now, fleets, zone=None):
     return lines
 
 
+def phase_root(root):
+    """The candidate and label of a phase's root, which holds the phase's work items, or only its controller's process
+    file while that controller starts, or None for any other root. A phase root inside a campaign takes its candidate
+    and the campaign status's label; any other takes "-" and its directory's name."""
+    if not ((root / "work-items.tsv").is_file() or (root / DRIVER_CHILD).is_file()):
+        return None
+    for prefix, candidate in (("lang ", root.parent.parent), ("", root.parent)):
+        if (not prefix or root.parent.name == "lang") and candidate.name in {
+                row["name"] for row in read_candidates(candidate.parent)}:
+            return candidate.name, prefix + root.name
+    return "-", root.name
+
+
+def campaign_phases(root):
+    """Each phase root a campaign's candidates have, as (candidate, label, directory), in the status command's order."""
+    if not (root / "candidates.tsv").is_file():
+        raise SystemExit(f"{root} holds neither a campaign's candidates.tsv nor a phase's work-items.tsv")
+    return [(candidate["name"], prefix.replace("/", " ") + phase, root / candidate["name"] / prefix / phase)
+            for candidate in read_candidates(root) for prefix in ("", "lang/")
+            for phase in ("build", "smoke", "primary", "confirmation")
+            if (prefix == "" or phase != "build") and (root / candidate["name"] / prefix / phase).is_dir()]
+
+
 def campaign_status(root, now=None, zone=None):
     """The status command's lines for a campaign root, or for one phase's root."""
     now = time.time() if now is None else now
-    if (root / "work-items.tsv").is_file() or (root / DRIVER_CHILD).is_file():
-        return [f"phase {root}", *phase_status(root.name, root, now, {}, zone)]
-    if not (root / "candidates.tsv").is_file():
-        raise SystemExit(f"{root} holds neither a campaign's candidates.tsv nor a phase's work-items.tsv")
+    if (phase := phase_root(root)) is not None:
+        return [f"phase {root}", *phase_status(phase[1], root, now, {}, zone)]
+    phases = campaign_phases(root)
     driver = controller_process(root, CAMPAIGN_DRIVER)
     lines = [f"campaign {root}: " + (f"driver running as process {driver}" if driver else "no live driver")]
     fleets = {}
     for candidate in read_candidates(root):
         lines.append(f"candidate {candidate['name']} at {candidate['commit'][:12]}")
-        for prefix in ("", "lang/"):
-            for phase in ("build", "smoke", "primary", "confirmation"):
-                directory = root / candidate["name"] / prefix / phase
-                if directory.is_dir() and (prefix == "" or phase != "build"):
-                    lines.extend(phase_status(prefix.replace("/", " ") + phase, directory, now, fleets, zone))
+        for name, label, directory in phases:
+            if name == candidate["name"]:
+                lines.extend(phase_status(label, directory, now, fleets, zone))
     return lines
+
+
+@functools.cache
+def release_1_0_ratios():
+    """The 1.0 release's Regulator-to-comparator ratios by platform and row: each baseline comparison's median
+    over its primary hosts from the release's baseline tables, and each compared language row's published
+    ratio."""
+    with tarfile.open(REPOSITORY / RELEASE_1_0_BASELINE_TABLES) as archive:
+        with io.TextIOWrapper(archive.extractfile("reduction/comparison-aggregates.tsv"), encoding="utf-8") as table:
+            ratios = {(row["platform"], row["comparison_id"]): float(row["primary_median_ratio"])
+                      for row in csv.DictReader(table, delimiter="\t")}
+    with gzip.open(REPOSITORY / RELEASE_1_0_REPORT, "rt", encoding="utf-8") as report:
+        for row in json.load(report)["rows"]:
+            if row["source"] == "language" and "ratio" in row["result"]:
+                ratios[row["platform"], f"{row['language']}/{row['memoryMode']}/{row['id']}"] = row["result"]["ratio"]
+    return ratios
+
+
+def phase_results(root):
+    """A unit phase's results so far: each row's Regulator-to-comparator ratio on every host whose group the phase
+    has accepted, above 1 when Regulator is slower, each unit it left unresolved, and how many accepted groups have
+    no retained results. Baseline rows are paired by comparison and estimated by the median of their host ratios, as
+    the baseline reduction estimates them; language rows are paired by language, memory mode, suite, case, and
+    operation and estimated by the average Regulator host time divided by the average comparator host time, as the
+    report estimates them. A row is slower past the baseline reduction's material limit, and a 1.0 win now a loss
+    when 1.0 was also faster past it."""
+    # The report's reduction lives outside the tooling a phase's digest freezes, so only this command loads it.
+    scripts = str(REPOSITORY / "benchmark-report" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import language_data
+    observed, measured, missing = [], defaultdict(list), 0
+    for receipt in read_accepted_units(root / "accepted-units.tsv"):
+        directory = unit_attempt_directory(root, receipt)
+        if not directory.is_dir():
+            missing += 1
+            continue
+        if (directory / "observed-rows.tsv").is_file():
+            observed.extend({**receipt, **row, "confirmation": "false"}
+                            for row in aggregate_results.read_observed_rows(directory / "observed-rows.tsv"))
+        for path in sorted(directory.glob("partitions/*/language-results.json")):
+            data = json.loads(path.read_text())
+            for comparison in data["comparisons"]:
+                row = "/".join((comparison["language"], comparison["mode"], data["manifest"]["suite"],
+                                comparison["logical_case"], comparison["operation"]))
+                measured[receipt["platform"], row].append({
+                    "replica": int(receipt["replica_id"]), "instanceId": receipt["instance_id"],
+                    **{side: data["observations"][comparison[side]] for side in ("candidate", "comparator")}})
+    results = []
+    limit = aggregate_results.MATERIAL_LIMIT
+
+    # A result's rank orders its phase's table: unresolved units and missing results, then rows that cannot be
+    # reduced, then timed rows, slowest first, then rows the comparison does not time. Its kind is what the
+    # summary counts it as: a row, a slower row, a 1.0 win lost, an unresolved unit, or missing results. replicas
+    # counts the hosts that landed, timed or not; a unit has none.
+    def result(platform, row, replicas, host_ratios=(), ratio=None, flags=(), rank=1, kind="row"):
+        ratio_1_0 = release_1_0_ratios().get((platform, row))
+        if ratio is not None:
+            rank = 2
+            if ratio > 1 + limit:
+                kind = "lost" if ratio_1_0 is not None and ratio_1_0 < 1 - limit else "slower"
+                flags = ["slower", *(["1.0 win now a loss"] if kind == "lost" else []), *flags]
+        results.append({"platform": platform, "row": row, "ratio": ratio, "replicas": replicas,
+                        "host_ratios": sorted(host_ratios), "ratio_1_0": ratio_1_0, "flags": list(flags),
+                        "rank": rank, "kind": kind})
+
+    if missing:
+        result("-", "-", None, flags=[f"accepted groups without retained results: {missing}"], rank=0,
+               kind="missing")
+    if observed:
+        manifest = {row["row_id"]: row for row in aggregate_results.load_manifest(
+            Path(__file__).resolve().parent / "rows.tsv", None)}
+        # A row this checkout's rows.tsv does not list has no comparison to pair it in.
+        unlisted = Counter((row["platform"], row["row_id"]) for row in observed if row["row_id"] not in manifest)
+        for (platform, row), replicas in unlisted.items():
+            result(platform, row, replicas, flags=["not in this checkout's rows.tsv"])
+        observed = [row for row in observed if row["row_id"] in manifest]
+        for row in observed:
+            row["suite"] = manifest[row["row_id"]]["suite"]
+        _, comparisons = aggregate_results.build_comparisons(observed, manifest.values())
+        paired = defaultdict(list)
+        for comparison in comparisons:
+            paired[comparison["platform"], comparison["comparison_id"]].append(comparison)
+        for (platform, row), pairs in paired.items():
+            ratios = [(int(pair["replica_id"]), float(pair["ratio"])) for pair in pairs]
+            result(platform, row, len(pairs), ratios, aggregate_results.median([ratio for _, ratio in ratios]),
+                   ["precision rejected"] if any(pair["outcome"] != "accepted" for pair in pairs) else [])
+    for (platform, row), hosts in measured.items():
+        try:
+            hosts = [{**host, **{side: language_data.outcome(host[side]) for side in ("candidate", "comparator")}}
+                     for host in hosts]
+            reduced = language_data.reduce_hosts(hosts)
+        except ValueError as error:
+            result(platform, row, len(hosts), flags=[str(error)])
+            continue
+        if reduced["state"] == "compared":
+            ratios = [(host["replica"], host["candidate"]["meanNs"] / host["comparator"]["meanNs"]) for host in hosts]
+            candidate, comparator = (statistics.mean(host[side]["meanNs"] for host in hosts)
+                                     for side in ("candidate", "comparator"))
+            result(platform, row, len(hosts), ratios, candidate / comparator)
+        else:
+            result(platform, row, len(hosts), flags=[reduced["state"], reduced["reason"]], rank=3)
+    # The snapshot lists the units unresolved so far; unresolved-units.tsv, written when the controller ends, lists
+    # every item not accepted.
+    for unit in phase_unresolved(root, dispatch_snapshot(root), controller_process(root, DRIVER_CHILD) is not None):
+        result(unit["platform"], f"{unit['unit_id']} replica {unit['replica']}", None,
+               flags=[f"unresolved: {unit['detail']}"], rank=0, kind="unit")
+    return sorted(results, key=lambda item: (item["rank"], -item["ratio"] if item["ratio"] is not None else 0,
+                                             item["platform"], item["row"]))
+
+
+def campaign_results(root):
+    """Each primary phase's, or the given phase's, results, as (candidate, phase, results, error), for a campaign
+    root or for one phase's root. A phase whose results cannot be read has none, and the error that stopped them, so
+    one phase's error does not hide the others' results."""
+    phase = phase_root(root)
+    phases = ([(*phase, root)] if phase else
+              [entry for entry in campaign_phases(root) if entry[1] in ("primary", "lang primary")])
+    results = []
+    for candidate, label, directory in phases:
+        try:
+            results.append((candidate, label, phase_results(directory), None))
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError, tarfile.TarError) as error:
+            results.append((candidate, label, [], f"{type(error).__name__}: {error}"))
+    return results
+
+
+def results_lines(phases, tsv=False):
+    """The status command's results, worst first: a table per phase, or one tab-separated table."""
+    def ratio(value):
+        return "-" if value is None else f"{value:.3f}"
+
+    table = io.StringIO()
+    writer = csv.DictWriter(table, RESULT_FIELDS, restval="-", extrasaction="ignore", delimiter="\t",
+                            lineterminator="\n")
+    writer.writeheader()
+    lines = []
+    for candidate, phase, results, error in phases:
+        if error is not None:
+            writer.writerow({"candidate": candidate, "phase": phase, "flags": f"unreadable: {error}"})
+            lines.append(f"candidate {candidate} {phase}: unreadable: {error}")
+            continue
+        kinds = Counter(item["kind"] for item in results)
+        slower = kinds["slower"] + kinds["lost"]
+        lines += [f"candidate {candidate} {phase}: rows {kinds['row'] + slower}, slower {slower}, "
+                  f"1.0 wins lost {kinds['lost']}, unresolved {kinds['unit']}",
+                  f"  {'ratio':>6}  n  {'host ratios':<26}  {'1.0':>6}  platform row  flags"]
+        for item in results:
+            fields = {**item, "candidate": candidate, "phase": phase, "ratio": ratio(item["ratio"]),
+                      "replicas": "-" if item["replicas"] is None else item["replicas"],
+                      "host_ratios": " ".join(f"r{replica}={ratio(value)}" for replica, value in item["host_ratios"]),
+                      "ratio_1_0": ratio(item["ratio_1_0"]), "flags": ", ".join(item["flags"])}
+            writer.writerow(fields)
+            lines.append(f"  {fields['ratio']:>6}  {fields['replicas']}  {fields['host_ratios']:<26}  "
+                         f"{fields['ratio_1_0']:>6}  {item['platform']:<8} {item['row']}  {fields['flags']}".rstrip())
+    return table.getvalue().splitlines() if tsv else lines
 
 
 def main():
     if sys.argv[1:2] == ["status"]:
-        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} status",
-                                         description="report a campaign's or phase's progress from its ledgers")
+        parser = argparse.ArgumentParser(
+            prog=f"{Path(sys.argv[0]).name} status",
+            description="report a campaign's or phase's progress from its ledgers, or with --results each primary "
+                        "phase's, or the given phase's, ratios so far")
         parser.add_argument("root", type=Path, help="the campaign root, or one phase's root")
-        print("\n".join(campaign_status(parser.parse_args(sys.argv[2:]).root.absolute())))
+        parser.add_argument("--results", action="store_true",
+                            help="report each primary phase's, or the given phase's, Regulator-to-comparator ratios "
+                                 "so far, worst first")
+        parser.add_argument("--tsv", action="store_true", help="report the results as one tab-separated table")
+        arguments = parser.parse_args(sys.argv[2:])
+        if arguments.tsv and not arguments.results:
+            parser.error("--tsv formats the results; it requires --results")
+        root = arguments.root.absolute()
+        if arguments.results:
+            lines = results_lines(campaign_results(root), arguments.tsv)
+        else:
+            lines = campaign_status(root)
+        print("\n".join(lines))
         return
     arguments = parse_args()
     if arguments.fleet_budget:
         arguments.shared_budget = FleetBudget(arguments.fleet_budget)
     directory = Path(__file__).resolve().parent
-    root = directory.parents[2]
+    root = REPOSITORY
     arguments.candidates = parse_candidates(arguments.candidate_values)
     arguments.campaign_root = (arguments.campaign_root or
                                root / "benchmark-results" / "pre-review-baseline" / arguments.campaign).absolute()

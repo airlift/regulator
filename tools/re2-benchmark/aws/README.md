@@ -407,11 +407,57 @@ spend, and medians come from the phase's ledgers: `work-items.tsv`,
 state of the policy its `execution-policy.json` names, `job-attempts.tsv`, and
 `unit-uploads.tsv`. Spend is the phase's completed hosts' cost plus the cost of
 its live hosts' hours so far; reserved is what their reservations hold beyond
-now. The workers, and the queued and unresolved counts while the phase runs,
-come from `dispatch-status.json`, which the phase's controller rewrites every
-poll; its age shows how current they are. The finish is the estimated seconds of
-groups not yet accepted, divided among the running workers, as a local clock
-time. Given a phase's root, the command reports that phase alone.
+now. The workers, and the queued count and unresolved units while the phase
+runs, come from `dispatch-status.json`, which the phase's controller rewrites
+every poll; its age shows how current they are. The finish is the estimated
+seconds of groups not yet accepted, divided among the running workers, as a
+local clock time. Given a phase's root, the command reports that phase alone.
+
+With `--results`, the command reads each primary phase's accepted groups so
+far instead, or the given phase's, from the phase's retained group
+directories, and reports every row's Regulator time divided by its
+comparator's, so a ratio above 1 means Regulator is slower:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campaign> --results
+```
+
+```text
+candidate after lang primary: rows 1180, slower 41, 1.0 wins lost 3, unresolved 1
+   ratio  n  host ratios                    1.0  platform row  flags
+       -  -                                   -  r8i      5f3a9c0e...d41b replica 2  unresolved: semantic failure: status 44
+   1.200  2  r1=1.180 r2=1.220            0.082  r9g      java/native/language-bulk/grep/every-line/execute  slower, 1.0 win now a loss
+```
+
+The unit ID, a 64-digit hex digest, is shortened here. In table order, the
+columns are the row's ratio; `n`, how many replicas' hosts have landed the
+row, timed or not; the ratio on each replica's host; the row's 1.0 ratio; and
+the platform, row, and flags. Baseline rows are each comparison's same-host
+ratios, as the baseline reduction pairs them, and the row's ratio is their
+median; language rows are reduced per language, memory mode, suite, case, and
+operation, as the report reduces them, and the row's ratio is the average
+Regulator host time divided by the average comparator host time, the report's
+mean estimator. The 1.0 ratio is each baseline comparison's median over its
+primary hosts in `docs/benchmarks/results-1.0/baseline-tables.tar.gz`, or each
+language row's published ratio in the 1.0 report.
+
+Flags mark a row slower past the baseline reduction's material limit, a 1.0
+win, faster past that limit, that is now slower, a precision rejection, a row
+whose hosts cannot be reduced, a row this checkout's `rows.tsv` does not list,
+and a row the comparison does not time, `not-compatible` or `did-not-finish`,
+with its reason. Units the phase left unresolved come first, each with its
+reason: a semantic verification failure, even where another attempt was
+accepted, or attempts spent, a rejection, the phase's launch limit, or no
+worker left to take it; once the phase ends, every other unit not accepted, as
+`not accepted`. A failed lease whose retry was accepted is not listed. While
+the phase runs they come from `dispatch-status.json`, and once it ends from
+`unresolved-units.tsv`, as the unresolved count does. A row counting the
+accepted groups whose retained directories are missing also comes first. Rows
+that cannot be reduced or are not listed come next, then rows by ratio, slowest
+first, and rows the comparison does not time last. A phase whose results
+cannot be read reports why, and the other phases still report. Add `--tsv` for
+one tab-separated table with the columns `candidate`, `phase`, `platform`,
+`row`, `ratio`, `replicas`, `host_ratios`, `ratio_1_0`, and `flags`.
 
 ## Run a phase
 
