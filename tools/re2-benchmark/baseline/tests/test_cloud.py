@@ -1,4 +1,3 @@
-import base64
 import bisect
 import hashlib
 import io
@@ -121,8 +120,8 @@ class FakeCloud:
 
     # Seconds of a round trip: an S3 object call is short, an EC2 description longer, and a placement query longer
     # still.
-    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "delete": 0.05, "head_sha256": 0.05, "instances": 0.5,
-             "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
+    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "upload": 0.05, "delete": 0.05, "head_sha256": 0.05,
+             "instances": 0.5, "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
     DEFAULT_COST = 0.2
     # The simulated epoch's start, 2026-10-26 07:33:20 UTC.
     EPOCH = 1_793_000_000
@@ -147,7 +146,7 @@ class FakeCloud:
         self.scores = None
         self.region_instances = {}
         self.region_requests = {}
-        # By (bucket, key), as (body, modified, SHA-256 or None).
+        # By (bucket, key), as (body, modified, the SHA-256 an upload kept in its metadata or None).
         self.objects = Objects()
         self.profiles = {"regulator-benchmark-worker": ("regulator-benchmark-worker",)}
         self.rejections = []
@@ -253,15 +252,16 @@ class FakeCloud:
             raise CloudError(f"NoSuchKey: s3://{bucket}/{key}")
         path.write_bytes(self.objects[bucket, key][0])
 
-    def put(self, region, bucket, key, body, *, if_none_match=False, sha256=None):
+    def put(self, region, bucket, key, body, *, if_none_match=False):
         self.call("put", region, bucket, key)
-        body = body if isinstance(body, bytes) else body.read_bytes()
-        if sha256 is not None and hashlib.sha256(body).hexdigest() != sha256:
-            raise CloudError(f"BadDigest: s3://{bucket}/{key}")
         if if_none_match and (bucket, key) in self.objects:
             return False
-        self.objects[bucket, key] = (body, self.time(), sha256)
+        self.objects[bucket, key] = (body, self.time(), None)
         return True
+
+    def upload(self, region, bucket, key, path, sha256):
+        self.call("upload", region, bucket, key)
+        self.objects[bucket, key] = (path.read_bytes(), self.time(), sha256)
 
     def delete(self, region, bucket, keys):
         self.call("delete", region, bucket, len(keys))
@@ -404,12 +404,12 @@ class TestAwsCloud(unittest.TestCase):
         # A conditional write that finds the key reports it, and any other failure is a CloudError.
         s3.add_client_error("put_object", "PreconditionFailed", http_status_code=412)
         s3.add_client_error("put_object", "SlowDown", http_status_code=503)
+        # A managed upload keeps the whole file's SHA-256 in the object's metadata, which head reads back.
         archive_sha256 = hashlib.sha256(b"archive").hexdigest()
-        checksum = base64.b64encode(bytes.fromhex(archive_sha256)).decode()
         s3.add_response("put_object", {}, {"Bucket": "bucket", "Key": "archive", "Body": ANY,
-                                           "ChecksumAlgorithm": "SHA256", "ChecksumSHA256": checksum})
-        s3.add_response("head_object", {"ChecksumSHA256": checksum},
-                        {"Bucket": "bucket", "Key": "archive", "ChecksumMode": "ENABLED"})
+                                           "Metadata": {"sha256": archive_sha256}, "ChecksumAlgorithm": "SHA256"})
+        s3.add_client_error("put_object", "SlowDown", http_status_code=503)
+        s3.add_response("head_object", {"Metadata": {"sha256": archive_sha256}}, {"Bucket": "bucket", "Key": "archive"})
         s3.add_client_error("head_object", "404", http_status_code=404)
 
         aws = self.cloud
@@ -424,7 +424,9 @@ class TestAwsCloud(unittest.TestCase):
             with self.assertRaisesRegex(CloudError, "SlowDown"):
                 aws.put("us-west-2", "bucket", "lease", b"{}", if_none_match=True)
             path.write_bytes(b"archive")
-            self.assertTrue(aws.put("us-west-2", "bucket", "archive", path, sha256=archive_sha256))
+            aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
+            with self.assertRaisesRegex(CloudError, "SlowDown"):
+                aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
             self.assertEqual(archive_sha256, aws.head_sha256("us-west-2", "bucket", "archive"))
             self.assertIsNone(aws.head_sha256("us-west-2", "bucket", "absent"))
 

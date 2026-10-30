@@ -260,18 +260,18 @@ class TestRunCampaign(unittest.TestCase):
                     # Ohio already holds every archive.
                     aws = arguments.cloud = FakeCloud()
                     for name in RUN_CAMPAIGN.engine_build.ARCHIVES:
-                        aws.put("us-east-2", "east", f"prefix/engine-builds/{archives[name]['sha256']}.tar.zst",
-                                name.encode(), sha256=archives[name]["sha256"])
+                        aws.upload("us-east-2", "east", f"prefix/engine-builds/{archives[name]['sha256']}.tar.zst",
+                                   build / archives[name]["file"], archives[name]["sha256"])
                     puts = []
 
-                    def put(region, bucket, key, body, **kwargs):
+                    def upload(region, bucket, key, path, sha256):
                         puts.append((bucket, key))
                         if len(puts) <= stalls:
                             raise RUN_CAMPAIGN.CloudError("RequestTimeout")
-                        return FakeCloud.put(aws, region, bucket, key, body, **kwargs)
+                        return FakeCloud.upload(aws, region, bucket, key, path, sha256)
 
                     with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
-                            patch.object(aws, "put", side_effect=put), contextlib.redirect_stdout(io.StringIO()):
+                            patch.object(aws, "upload", side_effect=upload), contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
                             with self.assertRaisesRegex(SystemExit, "could not upload the r8i (classes|trino|native) "
                                                                     "archive to s3://west/"):
@@ -306,7 +306,7 @@ class TestRunCampaign(unittest.TestCase):
             key = f"prefix/candidates/{sha256}.tar.gz"
             self.assertEqual({("west", key): sha256, ("east", key): sha256},
                              {name: checksum for name, (_, _, checksum) in aws.objects.items()})
-            self.assertEqual(2, sum(call[0] == "put" for call in aws.calls))
+            self.assertEqual(2, sum(call[0] == "upload" for call in aws.calls))
             # The campaign records it once among its shared archives, for a region added later.
             self.assertEqual([(key, sha256, str(archive))], [
                 (row["key"], row["sha256"], row["path"]) for row in RUN_CAMPAIGN.read_shared_archives(
@@ -2666,8 +2666,8 @@ class FakeUnitFleet(FakeCloud):
         stuck = {host.prefix for host in self.hosts if self.stuck_prefix(host)}
         super().delete(region, bucket, [key for key in keys if not any(key.startswith(prefix) for prefix in stuck)])
 
-    def put(self, region, bucket, key, body, *, if_none_match=False, sha256=None):
-        written = super().put(region, bucket, key, body, if_none_match=if_none_match, sha256=sha256)
+    def put(self, region, bucket, key, body, *, if_none_match=False):
+        written = super().put(region, bucket, key, body, if_none_match=if_none_match)
         lease = re.fullmatch(r"(?:.+/)?([^/]+)/input/leases/([0-9]+)\.json", key)
         if written and lease:
             self.written_leases[bucket, key] = body
