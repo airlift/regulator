@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from campaign_io import fsync_directory
 from cloud import CloudError
 
 REGION = "us-west-2"
@@ -266,10 +267,14 @@ def root_files(root):
 
 def write_manifest(root):
     """Write the campaign root's manifest, each file's SHA-256 and path as sha256sum lists them, as its controller
-    ends."""
+    ends, durably, as it marks the campaign ended."""
     temporary = root / f"{MANIFEST}.new"
-    temporary.write_text("".join(f"{sha256_file(root / name)}  {name}\n" for name in root_files(root)))
+    with temporary.open("w") as output:
+        output.write("".join(f"{sha256_file(root / name)}  {name}\n" for name in root_files(root)))
+        output.flush()
+        os.fsync(output.fileno())
     os.replace(temporary, root / MANIFEST)
+    fsync_directory(root)
 
 
 def manifest_problems(root):

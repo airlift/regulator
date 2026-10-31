@@ -47,10 +47,12 @@ class TestCampaignSettings(unittest.TestCase):
     def test_a_change_takes_effect_only_with_its_event(self):
         settings = seed_settings(self.root)
         change = ("monitor", "max_hosts 368 to 200", lambda current: current.update(max_hosts=200))
-        # A change whose event could not be recorded never took effect, and its retry records it.
+        # A change whose event could not be recorded never took effect, and its retry records it. Its staged file's
+        # name was durable before its event was recorded.
         with patch.object(campaign_settings, "append_ledger", side_effect=OSError("disk full")), \
-                self.assertRaises(OSError):
+                patch.object(campaign_settings, "fsync_directory") as synced, self.assertRaises(OSError):
             settings.change(*change)
+        synced.assert_called_once_with(self.root)
         self.assertEqual(368, settings.reload()["max_hosts"])
         settings.change(*change)
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))

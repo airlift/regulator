@@ -167,12 +167,14 @@ def staged(path):
 
 def record(path, events_path, settings, actor, change):
     """Make settings the campaign's, as the actor's change: staged beside the file first, then its event recorded,
-    and only then put in place, so no version takes effect without its event."""
+    and only then put in place, so no version takes effect without its event. The staged file and its name are
+    durable before the event is, so a crash never leaves an event whose change recovery cannot find."""
     with staged(path).open("w") as output:
         json.dump(settings, output, indent=2, sort_keys=True)
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
+    fsync_directory(path.parent)
     append_ledger(events_path, EVENT_FIELDS, {"version": settings["version"], "at": round(time.time()),
                                               "actor": actor, "change": change})
     os.replace(staged(path), path)

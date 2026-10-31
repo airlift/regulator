@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import shutil
@@ -231,7 +232,12 @@ class TestControlHost(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "controller has not ended"):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
                 self.assertFalse(local.exists())
-                control_host.write_manifest(host)
+                # The manifest marks the campaign ended, so it and its name are durable once written.
+                with patch.object(control_host.os, "fsync", wraps=os.fsync) as synced, \
+                        patch.object(control_host, "fsync_directory") as directory_synced:
+                    control_host.write_manifest(host)
+                synced.assert_called_once()
+                directory_synced.assert_called_once_with(host)
                 control_host.finish(aws, "c", local, Path("/keys/control-host"))
                 self.assertEqual("unit\n", (local / "a" / "primary" / "accepted-units.tsv").read_text())
                 # A file that differs from the manifest is named, and a finish again replaces the copy.
