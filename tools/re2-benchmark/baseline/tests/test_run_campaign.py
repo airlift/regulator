@@ -4744,6 +4744,44 @@ class TestUnitWorkers(unittest.TestCase):
                     receipt["unit_id"] for receipt in RUN_CAMPAIGN.read_accepted_units(smoke.accepted_path)})
                 self.assert_accepted(dispatchers["primary"])
 
+    def test_resumed_phase_gathers_no_completion_its_paused_dispatch_still_gathers(self):
+        # Host 2's first completion takes ten minutes to gather, and host 1's marker names another campaign before
+        # that is done, so the smoke pauses. Dain resumes it at once; its next dispatch gathers host 2's completion
+        # only once the paused dispatch's gathering of it has finished, since both write the same staging.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack, \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: "foreign-marker"}},
+                                  setup_seconds=lambda host: 60 if host.number == 1 else 0)
+            gather = RUN_CAMPAIGN.gather_group
+            gathers = []
+
+            def slow(validation, result_root, staging, item, expected, *arguments):
+                started = fleet.clock
+                if expected["host_session"] == fleet.hosts[1].session:
+                    fleet.clock += 600
+                try:
+                    return gather(validation, result_root, staging, item, expected, *arguments)
+                finally:
+                    gathers.append(((expected["host_session"], expected["sequence"], expected["group_id"]),
+                                    started, fleet.clock))
+
+            def loop():
+                pauses = log.getvalue().count("smoke: paused: ")
+                if pauses == 1 and CampaignSettings(root).current["phases"]["smoke"]["state"] == "paused":
+                    self.control(root, "resume", "smoke")
+                elif pauses == 2 and not CampaignSettings(root).current["stop"]:
+                    self.control(root, "stop")
+
+            stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1,
+                                          loop)
+            self.assertEqual([], failed)
+            self.assertEqual(2, log.getvalue().count("smoke: paused: "))
+            for key, started, ended in gathers:
+                self.assertEqual([], [(key, started, ended, other) for other, before, after in gathers
+                                      if other == key and before < started < after])
+
     def test_setup_that_fails_pauses_its_phase_until_it_is_resumed(self):
         # The controller stops with the smoke's hosts live, and the region's Spot quota then drops below its limit,
         # so the restarted controller's setup of the smoke refuses it. The smoke pauses with the reason, rather than
