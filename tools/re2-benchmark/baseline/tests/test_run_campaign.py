@@ -777,6 +777,11 @@ class TestRunCampaign(unittest.TestCase):
                      "no r9g image in ap-northeast-2")):
                 with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
                     control(*command, actor=actor)
+            # One whose check AWS does not answer is refused too.
+            with patch.object(aws, "vcpu_quota", side_effect=cloud.CloudError("ThrottlingException: Rate exceeded")), \
+                    self.assertRaisesRegex(SystemExit, "^set-limit cannot reach AWS, so the settings are unchanged: "
+                                                       "ThrottlingException"):
+                control("set-limit", "region", region, "max-vcpus", "700")
             # A command for another campaign never steers this one.
             with self.assertRaisesRegex(SystemExit, "is campaign campaign's root, not campaign other's"):
                 control("set-limit", "max-hosts", "80", campaign="other")
