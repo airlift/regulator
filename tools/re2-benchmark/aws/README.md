@@ -574,7 +574,8 @@ it holds, so no lease is interrupted. Hosts move only while a phase waits for
 them, so the shares' changes as the work left is corrected move none on their
 own. A phase's share is never frozen, and the controller records each phase's
 state, `pending`, `running`, `paused` with its fault, `complete`, or `failed`,
-in the settings' `phases`.
+in the settings' `phases`, where `since` records when each phase took its
+state, at the time the change's event records.
 
 ### Control host
 
