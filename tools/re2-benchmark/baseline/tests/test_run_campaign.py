@@ -2432,7 +2432,8 @@ class FakeUnitHost:
     failure. A host whose lease is scripted to "claim" claims it the moment its previous lease
     ends, as if its idle time ran out then. A host scripted to "silent-interrupt" does so with none of its heartbeat
     uploads landing, and one scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats
-    also lost; with "silent-groups" the lease completes with only the heartbeat that started it landing. "stall"
+    also lost; with "silent-groups" the lease completes with only the heartbeat that started it landing, and with
+    "silent-stall" it runs its first group and stalls, none of its heartbeats landing. "stall"
     stops the host once its lease starts; once the controller terminates its instance, the lease's completion lands
     late, after another host completed the same replica, or never, once no other host runs,
     and with "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic"
@@ -2569,6 +2570,10 @@ class FakeUnitHost:
         if behavior == "silent-crash":
             self.run_group(lease, lease["groups"][0], None)
             return self.exit(1)
+        if behavior == "silent-stall":
+            self.run_group(lease, lease["groups"][0], None)
+            self.stalled = True
+            return
         if behavior in ("interrupt-progress", "interrupt-semantic"):
             self.run_group(lease, lease["groups"][0], behavior)
             return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1], running_on=True)
@@ -2591,7 +2596,7 @@ class FakeUnitHost:
             self.exit(RUN_CAMPAIGN.UNIT_WORKER_INTERRUPTED_STATUS)
 
     def heartbeat(self, unit_id):
-        if {"silent-interrupt", "silent-crash"} & set(self.script.values()):
+        if {"silent-interrupt", "silent-crash", "silent-stall"} & set(self.script.values()):
             return
         self.put(f"heartbeat/{self.sequence}.json", json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode())
 
@@ -3978,15 +3983,33 @@ class TestUnitWorkers(unittest.TestCase):
     def test_host_whose_group_heartbeats_are_lost_is_judged_by_its_completions(self):
         units = {"long": {"unit_id": "long", "shard_id": "long", "unit_index": "1", "estimated_seconds": "2700",
                           "groups": [{"group_id": str(group), "estimated_seconds": 900} for group in (1, 2, 3)]}}
-        with tempfile.TemporaryDirectory() as temporary:
-            # The first host's lease runs three 15-minute groups, and only the heartbeat that started it lands. Its
-            # third group runs past twice its estimate from that heartbeat, but not from its second group's
-            # completion, so the host is never judged stalled.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
-                                  scripts={1: {1: "silent-groups"}})
-            self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
-            self.assertEqual([], [row for row in self.ledger if row["outcome"] == "lost"])
-            self.assertEqual(0, fleet.hosts[0].terminations)
+        # The first host's lease runs three 15-minute groups, and only the heartbeat that started it lands. Its
+        # third group runs past twice its estimate from that heartbeat, but not from its second group's completion,
+        # so the host is never judged stalled: nor while the acceptance threads are slow to gather its completions,
+        # nor once a restart during its third group finds the groups before it accepted and gone from S3. With none
+        # of its heartbeats landing, its first group's completion still shows its progress, so once it stalls in its
+        # second group it is judged stalled.
+        for script, case, lost in (("silent-groups", "", []), ("silent-groups", "slow acceptance", []),
+                                   ("silent-groups", "restart", []), ("silent-stall", "", ["stalled"])):
+            with self.subTest(script=script, case=case), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.ExitStack() as stack:
+                fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, pace=1.9,
+                                      scripts={1: {1: script}}, abort_after=240 if case == "restart" else None)
+                if case == "slow acceptance":
+                    gather = RUN_CAMPAIGN.gather_group
+
+                    def slow(*arguments):
+                        fleet.clock += 4000
+                        return gather(*arguments)
+
+                    stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
+                if case == "restart":
+                    with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                        self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
+                    fleet.abort_after = None
+                self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
+                self.assertEqual(lost, [row["detail"] for row in self.ledger if row["outcome"] == "lost"])
+                self.assertEqual(len(lost), fleet.hosts[0].terminations)
 
     def test_termination_that_keeps_failing_leaks_from_its_first_request(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):

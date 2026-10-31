@@ -2426,6 +2426,8 @@ class UnitWorker:
     # leased, the lease before it settled, or the worker started, whichever came last.
     launched_at: float = 0.0
     running_since: float = 0.0
+    # When, in epoch seconds, this controller adopted the worker from an earlier one's ledgers, if it did.
+    adopted_at: float = 0.0
     # The host's stop time, the latest of its admission's and its work leases', and each work lease's, in epoch
     # seconds.
     stop_by: int = 0
@@ -2690,7 +2692,8 @@ class UnitDispatcher:
                              for field in ("instance_id", "availability_zone")})
             workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
                 job, metadata, directory, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
-                stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0))
+                stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0),
+                adopted_at=time.time())
             if job.host_epoch in aborted:
                 self.terminated[job.host_epoch] = terminating[job.host_epoch]
         recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
@@ -3111,20 +3114,26 @@ class UnitDispatcher:
                 return
             current = next((sequence for sequence in worker.outstanding() if worker.leases[sequence] is not None),
                            None)
-            if worker.lost or current is None or heartbeat_key(current) not in objects:
+            if worker.lost or current is None:
                 return
             # The worker heartbeats as a lease starts and as each of its groups completes, so its running instance
             # has stalled once the lease's unfinished groups outrun their lease timeout from its latest progress: its
-            # latest heartbeat, or the upload of the latest group this controller saw finish, whose heartbeat may
-            # have been lost. It is told to stop and terminated, and its cleanup still recovers a completion that
-            # lands.
+            # latest heartbeat, the upload of a group S3 lists complete or this controller saw finish, any of whose
+            # heartbeats may have been lost, or once the lease shows progress, when this controller adopted it, as
+            # an accepted group's uploads are gone. A lease with no progress, or none left to run, is not judged. A
+            # stalled worker is told to stop and terminated, and its cleanup still recovers a completion that lands.
             seconds = dict(self.items[worker.leases[current]].groups)
             finished = worker.finished.get(current, {})
-            unfinished = [group for group in worker.lease_groups[current] if group not in finished]
-            progress = max(objects[heartbeat_key(current)], worker.steps.get(current, {}).get("uploaded", 0))
-            if unfinished:
-                # Its latest progress began the group it runs.
-                worker.group = (current, unfinished[0], progress)
+            groups = worker.lease_groups[current]
+            listed = [objects[key] for key in (heartbeat_key(current), *(completion_key(current, group)
+                                                                       for group in groups)) if key in objects]
+            unfinished = [group for group in groups
+                          if group not in finished and completion_key(current, group) not in objects]
+            if not (listed or finished) or not unfinished:
+                return
+            progress = max(*listed, worker.steps.get(current, {}).get("uploaded", 0), worker.adopted_at)
+            # Its latest progress began the group it runs.
+            worker.group = (current, unfinished[0], progress)
             if time.time() - progress <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
             if not worker.stopping:

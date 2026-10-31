@@ -1461,10 +1461,13 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
   lists none of by its boot deadline, is lost. A lease has started if one of
   its groups finished or a heartbeat shows it began; the lost host's started
   lease is requeued, and an unstarted one is released.
-- A running host has stalled once its latest heartbeat, or the upload of the
-  latest of its lease's groups the controller saw finish if that is later, is
-  older than the budget of its lease's unfinished groups: twice their estimate,
-  or twice the 15-minute unit budget when that is longer. It gets a stop lease
+- A running host has stalled once its lease's latest progress is older than
+  the budget of the groups S3 does not yet list complete: twice their
+  estimate, or twice the 15-minute unit budget when that is longer. Its
+  progress is the latest of its heartbeat, the upload of each group S3 lists
+  complete or the controller saw finish, and, for a lease that shows progress
+  when a restarted controller adopts it, that adoption; a lease with none, or
+  with every group listed complete, is not judged. It gets a stop lease
   and is terminated, its lease is `lost` with detail `stalled`, and the leases
   behind it are released. Cleanup still recovers a completion that lands from
   a lost or stalled host, which is accepted if it is first and superseded

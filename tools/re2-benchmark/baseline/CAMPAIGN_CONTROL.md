@@ -257,7 +257,9 @@ running is lost at once: its started lease is requeued and its unstarted one
 released, as today. A running host whose lease has passed its timeout
 (twice its unfinished groups' estimate) since its latest heartbeat or group
 completion, whichever is later, is stalled: it gets a stop lease and is
-terminated, and its lease is requeued. The heartbeat ages of 10 and 30
+terminated, and its lease is requeued. A completion S3 lists counts before
+it is accepted, and a restarted controller gives a lease that shows progress
+one timeout from its adoption. The heartbeat ages of 10 and 30
 minutes go.
 
 **Boot window.** Hosts launched but not yet reporting are capped
