@@ -68,7 +68,8 @@ class TestControlHost(unittest.TestCase):
                              {name: value for name, value in launched.items() if name != "user_data"})
             self.assertEqual({"CAMPAIGN": "c", "CAMPAIGN_VOLUME": volume.id, "SSH_PUBLIC_KEY": SSH_PUBLIC_KEY,
                               "LAUNCH_INPUTS_URI": uri, "LAUNCH_INPUTS_SHA256": sha256,
-                              "CONTROL_HOST_REGION": "us-west-2"}, user_data_settings(launched["user_data"]))
+                              "CONTROL_HOST_REGION": "us-west-2", "GRAFANA_URL": "http://control.test:3000"},
+                             user_data_settings(launched["user_data"]))
             self.assertEqual({volume.id: first}, aws.attachments)
             self.assertEqual({("Z-test", "control.test"): "10.0.0.1"}, aws.records)
             self.assertIn("Grafana: http://control.test:3000", printed.getvalue())
@@ -179,7 +180,8 @@ class TestControlHost(unittest.TestCase):
     def test_user_data_and_units_agree_on_the_host_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "user-data.sh"
-            path.write_text(control_host.user_data("c", "vol-1", SSH_PUBLIC_KEY, "s3://bucket/inputs", "0" * 64))
+            path.write_text(control_host.user_data("c", "vol-1", SSH_PUBLIC_KEY, "s3://bucket/inputs", "0" * 64,
+                                                   "http://control.test:3000"))
             subprocess.run(["bash", "-n", str(path)], check=True)
         user_data = control_host.USER_DATA.read_text()
         campaign = (CONTROL_HOST / "regulator-campaign@.service").read_text()
@@ -193,6 +195,8 @@ class TestControlHost(unittest.TestCase):
         self.assertIn(f"\nWorkingDirectory={control_host.INPUTS}/checkout\n", campaign)
         self.assertIn(f"\nRestartPreventExitStatus={control_host.FAILED_PHASES_EXIT}\n", campaign)
         self.assertIn('systemctl enable --now "regulator-campaign@${CAMPAIGN}.service"', user_data)
+        # The campaign root records Grafana's URL for the status command.
+        self.assertIn(f'> "${{MOUNT}}/campaign/{control_host.GRAFANA_URL_FILE}"', user_data)
         # Grafana answers the router on port 3000 with anonymous access off, OTLP answers only the host itself, the
         # image is pinned, and the dashboards' provider reads where the unit mounts them.
         self.assertEqual(["-p 3000:3000", "-p 127.0.0.1:4317:4317", "-p 127.0.0.1:4318:4318"],

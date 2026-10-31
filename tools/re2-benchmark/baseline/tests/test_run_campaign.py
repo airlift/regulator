@@ -715,58 +715,71 @@ class TestRunCampaign(unittest.TestCase):
             write_tsv(campaign_root / "candidates.tsv", RUN_CAMPAIGN.CANDIDATE_FIELDS,
                       [{"name": name, "commit": name * 40, "ref": f"refs/benchmarks/tournament/{name}",
                         "archive_sha256": "0" * 64} for name in ("a", "b")])
+            # The control host records where its Grafana serves, and the settings steer each phase and hold a
+            # spending stop and a stop.
+            (campaign_root / "grafana-url.txt").write_text("http://control.test:3000\n")
+            campaign_settings(campaign_root).change("dain", "steer", lambda settings: settings.update(
+                phases={"a/primary": {"state": "paused", "share": "auto", "reason": "bad AMI"},
+                        "b/lang/smoke": {"state": "draining", "share": "auto"}},
+                spending_stop={"by": "controller", "at": round(now), "reason": "instance i-1 did not terminate"},
+                stop={"by": "dain", "at": round(now), "reason": "smoke over"}))
             build.mkdir(parents=True)
             (build / RUN_CAMPAIGN.PHASE_COMPLETE).write_text("complete\n")
             primary.mkdir(parents=True)
-            # Three units: one accepted, one half accepted with 900 seconds left, and one of 1800 seconds untouched.
+            # Four units: one accepted, one half accepted with 900 seconds left, one of 1800 seconds untouched, and
+            # one a rejection left unresolved.
             write_tsv(primary / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": unit, "replica": "1",
                  "estimated_seconds": seconds, "groups": groups, "excluded_instances": "-"}
                 for unit, seconds, groups in (("u1", "900", "1:600,2:300"), ("u2", "1800", "1:900,2:900"),
-                                              ("u3", "1800", "1:1800"))])
+                                              ("u3", "1800", "1:1800"), ("u4", "600", "1:600"))])
             write_tsv(primary / "accepted-units.tsv", RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, [
                 {**dict.fromkeys(RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, "-"), "platform": "r8i",
                  "unit_id": unit, "replica_id": "1", "group_id": group, "unit_attempt_id": f"session/{unit}"}
                 for unit, group in (("u1", "1"), ("u1", "2"), ("u2", "1"))])
-            jobs = [replace(RUN_CAMPAIGN.unit_worker_job(self.platform, epoch, epoch, market), region=region)
-                    for epoch, market, region in ((1, "spot", "us-east-2"), (2, "spot", "us-east-2"),
-                                                  (3, "on-demand", "us-west-2"), (4, "spot", "us-east-2"),
-                                                  (5, "on-demand", "us-west-2"))]
-            # Worker 3 runs its last work lease behind the stop lease it was given; worker 4 holds only its stop lease.
-            workers = {1: RUN_CAMPAIGN.UnitWorker(jobs[0], None, None, started=True, leases={1: "u2"}),
-                       2: RUN_CAMPAIGN.UnitWorker(jobs[1], None, None),
-                       3: RUN_CAMPAIGN.UnitWorker(jobs[2], None, None, started=True, leases={1: "u3", 2: None},
-                                                  settled={2}, stopping=True),
-                       4: RUN_CAMPAIGN.UnitWorker(jobs[3], None, None, started=True, leases={1: None}, stopping=True),
-                       5: RUN_CAMPAIGN.UnitWorker(jobs[4], None, None, started=True, leases={1: "u1"}, settled={1})}
-            # Candidate b's language smoke has no worker yet.
+            # Worker 1 holds u2's lease and worker 2's lease of u4 was rejected, so only u3 is queued.
+            worker = RUN_CAMPAIGN.UnitWorker(RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 1, "spot"),
+                                             {"session": "session-1"}, None)
+            items = {item.identity: item for item in RUN_CAMPAIGN.read_work_items(primary / "work-items.tsv")}
+            for epoch, unit, outcomes in ((1, "u2", ("leased",)), (2, "u4", ("leased", "rejected"))):
+                worker.job = replace(worker.job, host_epoch=epoch)
+                for outcome in outcomes:
+                    unit_dispatch.write_unit_attempt(primary / "unit-attempts.tsv", worker, 1,
+                                                     items[f"r8i/{unit}/replica-1"], outcome,
+                                                     "artifact gate: bad" if outcome == "rejected" else "-")
+            # A restarted controller reads the units unresolved so far from the ledgers, not those its predecessor
+            # left when it ended.
+            write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"),
+                      [{"platform": "r8i", "unit_id": unit, "replica": "1", "detail": "not accepted"}
+                       for unit in ("u2", "u3")])
+            # Candidate b's language smoke has no host yet.
             language_smoke.mkdir(parents=True)
             write_tsv(language_smoke / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": "u1", "replica": "1",
                  "estimated_seconds": "600", "groups": "1:600", "excluded_instances": "-"}])
-            for result_root, members in ((primary, workers), (language_smoke, {})):
-                with patch.object(RUN_CAMPAIGN.time, "time", return_value=now - 20):
-                    RUN_CAMPAIGN.UnitDispatcher.write_status(SimpleNamespace(
-                        result_root=result_root, queued=lambda: [], workers=members, terminated=set(),
-                        unresolved_items=lambda: [(SimpleNamespace(platform="r8i", unit_id="u4", replica=1), "spent")]))
-            # A restarted controller's snapshot supersedes the unresolved units its predecessor left.
-            write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"),
-                      [{"platform": "r8i", "unit_id": unit, "replica": "1", "detail": "not accepted"}
-                       for unit in ("u2", "u3")])
             # The language smoke reserved its hosts as an earlier controller did, in the fleet its policy names.
             policy = Path(temporary_directory) / "fleet" / "fleet-policy.json"
             (language_smoke / "execution-policy.json").write_text(json.dumps({"fleet_budget": str(policy)}))
             policy.parent.mkdir()
             (policy.parent / "fleet-state.json").write_text(json.dumps({"reservations": {}, "completed": {
                 "y/1": {"owner": str(language_smoke.resolve()), "machine_hours": 2, "hourly_rate": 0.1}}}))
+            # The primary's three live hosts, one not yet reporting, each took a minute or so to report, as did the
+            # host it completed.
             owner = str(primary.resolve())
+
+            def host(started, until, rate, region, market, ready=None):
+                return {"owner": owner, "instance_type": "r8i.2xlarge", "region": region, "market": market,
+                        "started_at": now - started, "reserved_until": now + until, "hourly_rate": rate,
+                        **({} if ready is None else {"reported_at": now - started + ready})}
+
             (campaign_root / "fleet-state.json").write_text(json.dumps({
                 "completed": {"other/1": {"owner": "other", "machine_hours": 9, "hourly_rate": 1},
-                              "x/5": {"owner": owner, "machine_hours": 1, "hourly_rate": 0.1}},
-                "reservations": {"x/1": {"owner": owner, "started_at": now - 1800, "reserved_until": now + 3600,
-                                         "hourly_rate": 0.1}}}))
+                              "x/5": {**host(7200, 0, 0.1, "us-east-2", "spot", 70), "machine_hours": 1}},
+                "reservations": {"x/1": host(1800, 3600, 0.1, "us-east-2", "spot", 60),
+                                 "x/2": host(600, 3000, 0.12, "us-east-2", "spot"),
+                                 "x/3": host(1200, 2400, 0.3, "us-west-2", "on-demand", 80)}}))
             for seconds in ("170.0", "180.0"):
-                RUN_CAMPAIGN.write_attempt(primary / "job-attempts.tsv", jobs[0], "stopped",
+                RUN_CAMPAIGN.write_attempt(primary / "job-attempts.tsv", worker.job, "stopped",
                                            f"boot_to_first_unit_seconds={seconds}")
             # Each accepted group took twice its estimate.
             write_tsv(primary / unit_dispatch.UNIT_UPLOADS, unit_dispatch.UNIT_UPLOAD_FIELDS, [
@@ -784,7 +797,8 @@ class TestRunCampaign(unittest.TestCase):
                     patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the campaign's lock")):
                 lines = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
                 # The command reports a campaign root or one phase's root.
-                for status_root, expected in ((campaign_root, lines[:4]), (primary, [f"phase {primary}", lines[3]])):
+                for status_root, expected in ((campaign_root, lines[:7]),
+                                              (primary, [f"phase {primary}", *lines[1:4], lines[6]])):
                     output = io.StringIO()
                     with patch.object(sys, "argv", ["run-campaign.py", "status", str(status_root)]), \
                             contextlib.redirect_stdout(output):
@@ -796,27 +810,34 @@ class TestRunCampaign(unittest.TestCase):
                 f"pid={os.getpid()}\nstarted=Thu Jan  1 00:00:00 1970\n")
             stopped = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
             self.assertEqual(f"campaign {campaign_root}: no live controller", stopped[0])
-            self.assertIn("  primary           no live controller", stopped)
+            self.assertIn("  primary           no live controller, paused: bad AMI", stopped)
+            # A controller that ended its stopped campaign listed the root's files as it ended.
+            self.assertIn("stopping by dain: smoke over", stopped)
+            RUN_CAMPAIGN.control_host.write_manifest(campaign_root)
+            self.assertIn("stopped by dain: smoke over", RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc))
 
-        # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the four live workers.
+        # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the three live hosts.
         self.assertEqual([
             f"campaign {campaign_root}: controller running as process {os.getpid()}",
+            "Grafana   http://control.test:3000",
+            "spending stop by controller: instance i-1 did not terminate",
+            "stopping by dain: smoke over",
             "candidate a at aaaaaaaaaaaa",
             "  build             complete",
-            f"  primary           running as process {os.getpid()}",
-            "    units     1/3 accepted (3/5 groups), 1 unresolved, 0 queued",
-            "    workers   1 booting, 2 running, 1 idle, 1 stopping, as of 20s ago",
-            "              r8i r8i.2xlarge us-east-2 spot: 1 booting, 1 running, 1 stopping",
-            "              r8i r8i.2xlarge us-west-2 on-demand: 1 running, 1 idle",
-            "    spend     $0.15 so far, $0.10 reserved",
-            "    finish    about 12:02 a.m. UTC on Thu Oct 29",
-            "    medians   boot to first unit 175s, upload 4s",
+            f"  primary           paused as process {os.getpid()}: bad AMI",
+            "    units     1/4 accepted (3/6 groups), 1 unresolved, 1 queued",
+            "    hosts     3 live, 1 not yet reporting",
+            "              r8i.2xlarge us-east-2 spot: 2 live, 1 not yet reporting",
+            "              r8i.2xlarge us-west-2 on-demand: 1 live",
+            "    spend     $0.27 so far, $0.40 reserved",
+            "    finish    about 12:10 a.m. UTC on Thu Oct 29",
+            "    medians   boot to ready 70s, boot to first unit 175s, upload 4s",
             "candidate b at bbbbbbbbbbbb",
-            f"  lang smoke        running as process {os.getpid()}",
-            "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued",
-            "    workers   none, as of 20s ago",
+            f"  lang smoke        draining as process {os.getpid()}",
+            "    units     0/1 accepted (0/1 groups), 0 unresolved, 1 queued",
+            "    hosts     0 live",
             "    spend     $0.20 so far, $0.00 reserved",
-            "    finish    unknown; no worker runs",
+            "    finish    unknown; no host runs",
             "    medians   upload 7s"], lines)
 
     def test_status_results_rank_rows_by_ratio_worst_first(self):
@@ -2862,13 +2883,13 @@ class TestUnitWorkers(unittest.TestCase):
     def run_campaign(self, root, fleet, phases, max_hosts, per_platform, loop=lambda: None, **options):
         """Run phases, each (key, phase, shards, after), as the campaign's controller runs them over the fleet, each
         phase's dispatcher built as dispatcher builds it with options, its key naming its results, and the campaign's
-        budget; loop runs before each of the controller's polls. Returns the steps that failed and each phase's
-        dispatcher by key."""
+        budget; loop runs before each of the controller's polls, with each phase's dispatcher so far in self.running.
+        Returns the steps that failed and each phase's dispatcher by key."""
         budget = self.shared_budget(root, self.campaign_settings(root, max_hosts, per_platform,
                                                                  options.get("platform_regions"),
                                                                  options.get("purchases")))
         arguments = SimpleNamespace(settings=budget.settings, shared_budget=budget)
-        dispatchers = {}
+        dispatchers = self.running = {}
 
         def prepare(phase, _):
             dispatcher = dispatchers[phase.key] = self.dispatcher(
@@ -3234,16 +3255,21 @@ class TestUnitWorkers(unittest.TestCase):
             poll = fleet.sleep
 
             def sleep(seconds):
-                # Every 20 polls, status estimates the finish from the phase's ledgers and its controller's snapshot.
-                snapshot = RUN_CAMPAIGN.dispatch_snapshot(results)
-                if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS and snapshot and fleet.sleeps % 20 == 0:
-                    progress = RUN_CAMPAIGN.phase_progress(results, snapshot, True)
+                # Every 20 polls, status estimates the finish from the phase's ledgers and its fleet's reservations.
+                state = RUN_CAMPAIGN.read_fleet_state(Path(temporary) / RUN_CAMPAIGN.STATE_FILE)
+                if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS and state and fleet.sleeps % 20 == 0:
+                    progress = RUN_CAMPAIGN.phase_progress(
+                        results, RUN_CAMPAIGN.owner_fleet(state, results, fleet.time()), True)
                     if progress.finish is not None:
                         finishes.append((bool(progress.accepted), fleet.time() + progress.finish))
                 poll(seconds)
 
             fleet.sleep = sleep
-            self.run_phase(Path(temporary), fleet, "smoke", ["steady"], 200, 100)
+            # The campaign's own budget reserves each host, as status reads them, and its boot window admits the
+            # whole fleet at once, so the steady state begins as the hosts boot.
+            campaign_settings(Path(temporary), max_hosts=200, max_hosts_per_platform=100,
+                              boot_window={"initial": 200, "max": 200})
+            self.run_phase(Path(temporary), fleet, "smoke", ["steady"], 200, 100, shared=True)
             self.assertEqual(200, len(fleet.hosts))
             # The estimate from the units' estimates alone is late by more than a unit, and once the first groups
             # are accepted their measured seconds correct it to within one unit's 15 minutes of the actual finish.
@@ -3420,12 +3446,16 @@ class TestUnitWorkers(unittest.TestCase):
             marks = {}
 
             def workers(state):
-                """The primary's workers in the state, as its latest snapshot records them, by host epoch."""
-                return {worker["host_epoch"]: worker["platform"]
-                        for worker in RUN_CAMPAIGN.dispatch_snapshot(primary)["workers"] if worker["state"] == state}
+                """The primary's workers in the state, by host epoch, as its controller holds them."""
+                dispatcher = self.running.get("primary")
+                return {} if dispatcher is None else {
+                    epoch: worker.job.platform.name for epoch, worker in dispatcher.workers.items()
+                    if worker.state(epoch in dispatcher.terminated) == state}
 
             def finish():
-                return RUN_CAMPAIGN.phase_progress(primary, RUN_CAMPAIGN.dispatch_snapshot(primary), True).finish
+                state = RUN_CAMPAIGN.read_fleet_state(root / RUN_CAMPAIGN.STATE_FILE)
+                return RUN_CAMPAIGN.phase_progress(primary, RUN_CAMPAIGN.owner_fleet(state, primary, fleet.time()),
+                                                   True).finish
 
             def loop():
                 if "added" not in marks and len(fleet.hosts) == 4 and all(host.booted for host in fleet.hosts):

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 from campaign_settings import BOOT_WINDOW_MIN
 
@@ -281,20 +282,22 @@ class FleetBudget:
             spending_stop=settings["spending_stop"] or stop))
 
 
-def spend_by_owner(state_path, now):
-    """Each owner's spend in the fleet whose state is at state_path, in USD, as (spent so far, reserved beyond now):
-    its completed attempts' actual hours and its reservations' hours since they started, and their hours left to
-    their reserved ends. Reads the state without the budget's lock, as each change replaces the whole file; None
+def read_state(state_path):
+    """The fleet's state at state_path, read without the budget's lock, as each change replaces the whole file; None
     before the fleet's first reservation."""
-    if not state_path.is_file():
-        return None
-    state = json.loads(state_path.read_text())
-    spend = {}
-    for item in state["completed"].values():
-        spent, reserved = spend.get(item["owner"], (0.0, 0.0))
-        spend[item["owner"]] = (spent + item["machine_hours"] * item["hourly_rate"], reserved)
-    for item in state["reservations"].values():
-        spent, reserved = spend.get(item["owner"], (0.0, 0.0))
-        spend[item["owner"]] = (spent + max(0, now - item["started_at"]) / 3600 * item["hourly_rate"],
-                                reserved + max(0, item["reserved_until"] - now) / 3600 * item["hourly_rate"])
-    return spend
+    return json.loads(state_path.read_text()) if state_path.is_file() else None
+
+
+def owner_fleet(state, owner, now):
+    """What one owner, a phase's root, holds of the fleet whose state is state: its spend in USD so far, its completed
+    hosts' actual hours and its reservations' hours since they started; what its reservations hold beyond now; its
+    reservations, one per live host; and the seconds from each of its hosts' launch to its first report."""
+    owner = str(Path(owner).resolve())
+    completed = [item for item in state["completed"].values() if item["owner"] == owner]
+    live = [item for item in state["reservations"].values() if item["owner"] == owner]
+    return SimpleNamespace(
+        spent=sum(item["machine_hours"] * item["hourly_rate"] for item in completed) +
+        sum(max(0, now - item["started_at"]) / 3600 * item["hourly_rate"] for item in live),
+        reserved=sum(max(0, item["reserved_until"] - now) / 3600 * item["hourly_rate"] for item in live),
+        hosts=live, ready=[item["reported_at"] - item["started_at"] for item in completed + live
+                           if "reported_at" in item])
