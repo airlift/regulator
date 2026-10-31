@@ -181,7 +181,7 @@ there means the controller's telemetry is not arriving, which you report.
 | Idle stops with work queued | a host stopped idle while its pool had work | Report. |
 | Boot window change | the boot window shrank: hosts reported late or ended before reporting | Report; the window regrows itself. |
 | Longest launch refusal | a reason has refused launches for 10 minutes | By the series' `reason`: `fleet launch limit`, raise `max-hosts` or `max-hosts-per-platform`; `fleet quota`, raise a region's `max-vcpus` or `add-region` from `authorized.regions`; `fleet spending or machine-hour ceiling`, raise `max-usd`; each within `authorized`. `spending_stop` follows the Spending stop row; `boot window` needs nothing. |
-| Finish past deadline | a phase finishes after its launches end | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
+| Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
 | Projected spend over max | the campaign will reach `max_usd` | Raise `max-usd` within `authorized` only while a refusal or a late finish also stands; otherwise report. |
 | Spending stop | no launch or extension is admitted | Ask Dain, with the stop's reason from `status`. |
 | Phases paused | a phase is paused | Read its reason from `status`. Resume it once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause Dain made is his. |

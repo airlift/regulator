@@ -78,6 +78,9 @@ FIRST_LEASES_UNWRITTEN = "launch-infrastructure:first leases not written"
 # A worker admitted in a loop whose launch the controller never asked for, as when an error ended the loop first,
 # booted nothing either, and spends none of its slot's replacements.
 LAUNCH_NOT_ATTEMPTED = "launch-infrastructure:launch not attempted"
+# When a pool with work left and no open host finishes. OpenTelemetry drops a gauge's non-finite values, so it is the
+# largest finite one, past every deadline.
+NEVER = sys.float_info.max
 # A request one region refused while its pool had another region to try spends none of its slot's replacements.
 REGION_REFUSAL = "launch-region-refused:"
 UNIT_WORKER_SHARD = "unit-worker"
@@ -3640,8 +3643,8 @@ class UnitDispatcher:
             "regulator_unresolved_units": [(phase, len(self.unresolved_items()))],
             "regulator_work_left_seconds": [(pool(name), left.seconds) for name, left in pools.items()],
             "regulator_correction": [(pool(name), left.correction) for name, left in pools.items()],
-            "regulator_finish_time": [(pool(name), now + left.corrected / hosts[name]) for name, left in pools.items()
-                                      if left.items and hosts[name]],
+            "regulator_finish_time": [(pool(name), now + left.corrected / hosts[name] if hosts[name] else NEVER)
+                                      for name, left in pools.items() if left.items],
             "regulator_slack_min": [(pool(name), min(values)) for name, values in slack.items()],
             "regulator_slack_zero_workers": [(pool(name), sum(value <= 0 for value in values) if queued[name] else 0)
                                              for name, values in slack.items()],

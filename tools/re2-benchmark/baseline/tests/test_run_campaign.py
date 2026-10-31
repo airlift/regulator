@@ -3752,8 +3752,8 @@ class TestUnitWorkers(unittest.TestCase):
                  for index in range(1, 9)}
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # Two hosts of each platform measure eight 15-minute units, each in its estimate. Two and a half minutes in, with every host
-            # running its first lease and holding its next, Dain pauses the phase, and resumes it once its hosts have
-            # stopped.
+            # running its first lease and holding its next, Dain pauses the phase, and resumes it once it holds no
+            # host.
             root = Path(temporary)
             fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
             reader, spans, logs = InMemoryMetricReader(), InMemorySpanExporter(), InMemoryLogRecordExporter()
@@ -3770,9 +3770,9 @@ class TestUnitWorkers(unittest.TestCase):
                 if fleet.sleeps == 10:
                     self.control(root, "pause", "smoke", "--reason", "checking the image")
                     steered.append("paused")
-                elif steered == ["paused"] and all(host.status is not None for host in fleet.hosts):
+                elif steered == ["paused"] and not sum(snapshots[-1]["regulator_workers"].values()):
                     self.control(root, "resume", "smoke")
-                    steered.append("resumed")
+                    steered.append(snapshots[-1])
 
             failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 4, 2, loop,
                                           exported, purchases={"r8i": "spot", "r9g": "spot"})
@@ -3807,6 +3807,8 @@ class TestUnitWorkers(unittest.TestCase):
                 (("phase", "smoke"), ("state", "paused"))) for snapshot in snapshots))
             self.assertEqual(0, snapshots[-1]["regulator_phase_state"][(("phase", "smoke"), ("state", "paused"))])
             self.assertEqual({(("phase", "smoke"), ("queued", "true")): 4}, snapshots[-1]["regulator_idle_stops"])
+            # Once the pause has stopped every host, each pool, its work left and no host, never finishes.
+            self.assertEqual([RUN_CAMPAIGN.NEVER] * 2, list(steered[1]["regulator_finish_time"].values()))
             # Each unit attempt is traced from its lease to its acceptance, its steps one after another.
             attempts = [span for span in spans.get_finished_spans() if span.name == "unit attempt"]
             self.assertEqual(16, len(attempts))
