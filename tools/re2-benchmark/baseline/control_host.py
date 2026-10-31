@@ -26,6 +26,8 @@ NETWORK_PARAMETER = "/regulator-benchmark/control-host-network"
 NETWORK_KEYS = ("vpc", "subnets", "ingress_cidr", "zone", "record")
 # ssh and Grafana, the only ports the security group admits.
 PORTS = (22, 3000)
+# The status ssh exits with when it cannot reach or log in to the host, rather than the remote command's.
+SSH_FAILED = 255
 VOLUME_GIB = 200
 VOLUME_DEVICE = "/dev/sdf"
 # On the campaign volume: the campaign root, and the launch inputs with the controller's checkout.
@@ -201,3 +203,64 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
           f"Grafana: http://{network['record']}:3000 (admin password in SSM {grafana_parameters(campaign)[0]})\n"
           f"ssh: ssh ec2-user@{network['record']}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
+
+
+
+def root_files(root):
+    """Every regular file under the campaign root but its manifest, by its path relative to the root."""
+    return sorted(name for name in (path.relative_to(root).as_posix() for path in root.rglob("*")
+                                    if path.is_file() and not path.is_symlink())
+                  if name not in (MANIFEST, f"{MANIFEST}.new"))
+
+
+def write_manifest(root):
+    """Write the campaign root's manifest, each file's SHA-256 and path as sha256sum lists them, as its controller
+    ends."""
+    temporary = root / f"{MANIFEST}.new"
+    temporary.write_text("".join(f"{sha256_file(root / name)}  {name}\n" for name in root_files(root)))
+    os.replace(temporary, root / MANIFEST)
+
+
+def manifest_problems(root):
+    """How the campaign root differs from its manifest: files missing, files it does not list, and files whose
+    SHA-256 differs."""
+    listed = {name: digest for digest, name in
+              (line.split("  ", 1) for line in (root / MANIFEST).read_text().splitlines())}
+    found = root_files(root)
+    return ([f"missing {name}" for name in sorted(set(listed) - set(found))] +
+            [f"unlisted {name}" for name in found if name not in listed] +
+            [f"changed {name}" for name in found if name in listed and sha256_file(root / name) != listed[name]])
+
+
+def finish(aws, campaign, local_root, identity=None):
+    """Pull the campaign root from its control host into local_root over ssh, with only the private key identity
+    when one is given, once its controller has ended, and check it against the controller's manifest. A local root
+    that holds files is replaced only where an earlier finish pulled it."""
+    hosts = [host for host in live_hosts(aws, campaign) if host.state == "running"]
+    if len(hosts) != 1:
+        raise SystemExit(f"campaign {campaign} has {len(hosts)} running control hosts; expected one")
+    if local_root.is_dir() and any(local_root.iterdir()) and not (local_root / MANIFEST).is_file():
+        raise SystemExit(f"{local_root} holds files but no {MANIFEST}, so no finish pulled it; name another "
+                         "--campaign-root")
+    remote = f"ec2-user@{hosts[0].address}"
+    # An agent holding many keys would spend the host's authentication attempts before it offered the right one.
+    ssh = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+           *(["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else [])]
+    try:
+        status = subprocess.run([*ssh, remote, "test", "-f", f"{CAMPAIGN_ROOT}/{MANIFEST}"]).returncode
+        if status == SSH_FAILED:
+            raise SystemExit(f"cannot reach campaign {campaign}'s control host at {remote} over ssh; see ssh's error "
+                             "above")
+        if status != 0:
+            raise SystemExit(f"campaign {campaign}'s controller has not ended: its root has no {MANIFEST}")
+        local_root.mkdir(parents=True, exist_ok=True)
+        # macOS's openrsync speaks only rsync's older protocol, which these options keep to.
+        subprocess.run(["rsync", "-a", "--delete", "-e", shlex.join(ssh), f"{remote}:{CAMPAIGN_ROOT}/",
+                        f"{local_root}/"], check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"cannot pull campaign {campaign}'s root from {remote}: {error}") from error
+    if problems := manifest_problems(local_root):
+        raise SystemExit(f"{local_root} differs from its controller's {MANIFEST}: {', '.join(problems[:10])}"
+                         f"{f' and {len(problems) - 10} more' if len(problems) > 10 else ''}")
+    print(f"pulled campaign {campaign}'s root into {local_root}: {len(root_files(local_root))} files match its "
+          f"controller's {MANIFEST}", flush=True)
