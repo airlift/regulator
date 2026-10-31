@@ -280,7 +280,8 @@ public final class RegexpMatcher
             return true;
         }
 
-        if (candidateStartCursor != null && candidateStartCursor.enabled()) {
+        boolean searchesInnerLiteral = pattern.searchesInnerLiteral(regionLength - nextFindStart);
+        if (!searchesInnerLiteral && candidateStartCursor != null && candidateStartCursor.enabled()) {
             long candidateBoundary = Dfa.searchCandidateBoundary(
                     candidateStartCursor,
                     input,
@@ -298,7 +299,7 @@ public final class RegexpMatcher
             }
         }
 
-        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursor();
+        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = searchesInnerLiteral ? null : groupZeroForwardCursor();
         if (groupZeroForwardCursor != null) {
             long matchBoundary = pattern.findGroupZeroBoundary(
                     groupZeroForwardCursor,
