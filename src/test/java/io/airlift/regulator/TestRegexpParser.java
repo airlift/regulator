@@ -188,17 +188,23 @@ public class TestRegexpParser
             throws InterruptedException
     {
         // Alternations nested in concatenations past the depth where simplification walks
-        // iteratively. Each is compiled once first, which loads and initializes the classes
-        // compilation uses, so that only the compile itself runs on the small stack.
-        Slice pattern = Slices.utf8Slice("(?:x|y(?:".repeat(300) + "z" + "))".repeat(300));
-        List<Supplier<Object>> compilers = List.of(
-                () -> Re2.compile(pattern),
-                () -> TrinoRegexp.compile(pattern),
-                () -> JavaRegexp.compile(pattern),
-                () -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setNestLimit(10_000)));
-        for (Supplier<Object> compiler : compilers) {
-            assertThat(compiler.get()).isNotNull();
-            assertThat(onSmallStack(compiler)).isNotNull();
+        // iteratively. The second pattern nests them in the prefix before a literal, which the
+        // inner literal search walks to prove safe. Each is compiled once first, which loads and
+        // initializes the classes compilation uses, so that only the compile itself runs on the
+        // small stack.
+        for (String nested : List.of(
+                "(?:x|y(?:".repeat(300) + "z" + "))".repeat(300),
+                "(?:x|y(?:".repeat(300) + "[a-z]+" + "))".repeat(300) + "-[0-9]+")) {
+            Slice pattern = Slices.utf8Slice(nested);
+            List<Supplier<Object>> compilers = List.of(
+                    () -> Re2.compile(pattern),
+                    () -> TrinoRegexp.compile(pattern),
+                    () -> JavaRegexp.compile(pattern),
+                    () -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setNestLimit(10_000)));
+            for (Supplier<Object> compiler : compilers) {
+                assertThat(compiler.get()).isNotNull();
+                assertThat(onSmallStack(compiler)).isNotNull();
+            }
         }
     }
 

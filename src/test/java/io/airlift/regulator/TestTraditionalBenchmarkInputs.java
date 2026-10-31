@@ -88,7 +88,8 @@ public class TestTraditionalBenchmarkInputs
     @Test
     public void testOnePassCapturesDoNotUseDirectBitState()
     {
-        Re2 pattern = Re2.compile(Slices.utf8Slice("([a-z]+)-([0-9]+)"));
+        // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("([a-z]+)[-+]([0-9]+)"));
         Slice input = Slices.utf8Slice(".".repeat(8 * 1024) + "abc-123");
 
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isTrue();

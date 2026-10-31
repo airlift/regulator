@@ -90,6 +90,24 @@ public class TestDfaStartStateFailure
     }
 
     @Test
+    public void testSecondStartStateFailureUsesInnerLiteralCountFallback()
+    {
+        // The count searches for the first hyphen, which lies far from the start. The hyphen after
+        // abc would make the reverse search read back past it, so the search falls back before its
+        // forward DFA runs, and both start-state failures reach the ordinary count. The inner
+        // literal route leaves bail recording to that count, which does not record a start-state
+        // failure, so the next count succeeds.
+        Re2 pattern = Re2.compile(utf8Slice("[a-z]+-[0-9]+"));
+        Slice input = utf8Slice(".".repeat(70) + "-abc-12" + ".".repeat(100));
+        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        dfa.failStateAllocationsForTesting(2);
+
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+        assertThat(pattern.countMatches(input)).isEqualTo(1);
+    }
+
+    @Test
     public void testSecondStartStateFailureUsesGroupZeroFallback()
     {
         Re2 pattern = Re2.compile(utf8Slice("[a-z]+"));

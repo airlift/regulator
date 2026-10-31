@@ -15,6 +15,10 @@ For an ordinary unanchored search, `Re2.matchInternal` performs:
 3. A capture engine only when the caller requested captures not already known
    from the two boundaries.
 
+A pattern with an inner literal search first scans for the literal, runs a
+reverse DFA of the prefix anchored at each hit, and confirms forward; it falls
+back to steps 1–3.
+
 End-anchored programs can start with an anchored reverse search. This quickly
 rejects text whose suffix cannot match and avoids scanning every possible start
 position from the left.
@@ -76,7 +80,8 @@ the current match falls back to another linear-time engine.
 ## Correct use
 
 - Run reverse matching only after a forward end boundary is known, unless using
-  the explicit end-anchored shortcut.
+  the explicit end-anchored shortcut or an inner literal search, whose reverse
+  prefix search is anchored at a literal hit.
 - Search the exact prefix ending at the forward boundary, not the complete input.
 - Preserve the complete context slice when the search window is a subrange.
 - Treat `Dfa.SEARCH_FAILED` separately from no match.

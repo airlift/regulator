@@ -28,7 +28,8 @@ public class TestDfaGroupZeroForwardCursor
     @Test
     public void testNegativeProductivityDecisionIsReusedAndRevalidated()
     {
-        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+-[0-9]+"));
+        // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+[-+][0-9]+"));
         Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
         byte[] bytes = new byte[3 * PRODUCTIVITY_EPOCH_BYTES];
         Arrays.fill(bytes, (byte) '.');
@@ -60,7 +61,8 @@ public class TestDfaGroupZeroForwardCursor
     @Test
     public void testNegativeProductivityDecisionExpiresForShortTail()
     {
-        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+-[0-9]+"));
+        // A class rather than a literal hyphen keeps the inner literal search from taking the pattern.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+[-+][0-9]+"));
         Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
         byte[] bytes = new byte[PRODUCTIVITY_EPOCH_BYTES + 10];
         Arrays.fill(bytes, (byte) '.');
