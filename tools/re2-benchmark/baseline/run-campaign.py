@@ -1427,6 +1427,33 @@ def check_regions(arguments, platforms):
     namespace, and adopts the regions only once the check passes."""
     workers = [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(arguments.unit_platforms.items())]
     validate_aws(arguments, platforms, workers)
+    put_archives(arguments, workers)
+
+
+def recheck_regions(checked, platforms, offerings):
+    """Check a running phase's regions again on checked, a copy of its namespace, as check_regions does. A check
+    that fails still puts the archives again in each region the phase launches in, as offerings name them, one
+    region at a time, so one region's failure leaves the others' archives fresh before they expire; each region's
+    failure is a note on the check's."""
+    try:
+        check_regions(checked, platforms)
+    except (Exception, SystemExit) as error:
+        workers = [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(checked.unit_platforms.items())]
+        for region in sorted({region for regions in offerings.values() for region in regions}):
+            alone = SimpleNamespace(**vars(checked))
+            alone.region_offerings = {instance_type: [region] for instance_type, regions in offerings.items()
+                                      if region in regions}
+            try:
+                put_archives(alone, [worker for worker in workers
+                                     if worker.platform.instance_type in alone.region_offerings and
+                                     region in platform_regions(alone, worker.platform.name)])
+            except (Exception, SystemExit) as failure:
+                error.add_note(f"archives not refreshed in {region}: {failure}")
+        raise
+
+
+def put_archives(arguments, workers):
+    """Put every archive the workers install in each region that may launch one of them."""
     stage_jdks(arguments, workers)
     upload_candidate_archive(arguments, workers)
     upload_engine_builds(arguments, workers)
@@ -4553,7 +4580,8 @@ class Campaign:
         """Check each running phase's regions again once the settings' regions or a platform's list of them
         changed, and every REGION_RECHECK_SECONDS, which puts its archives again before they expire, as its setup
         did, on the setup thread; a phase launches in the regions that check finds only once it passes, and until
-        then where it did. A check that fails is logged and runs again at the next change or the next day."""
+        then where it did. A check that fails still puts the archives again in each region the phase launches in,
+        each region on its own, and is logged, and runs again at the next change or the next day."""
         regions = self.regions()
         now = time.monotonic()
         for phase in running:
@@ -4563,7 +4591,8 @@ class Campaign:
                 try:
                     future.result()
                 except (Exception, SystemExit) as error:
-                    print(f"{phase.key}: launches stay in the regions checked before: {error}", flush=True)
+                    print(f"{phase.key}: launches stay in the regions checked before: "
+                          f"{'; '.join([str(error), *getattr(error, '__notes__', ())])}", flush=True)
                 else:
                     namespace.ami_names, namespace.region_offerings = checked.ami_names, checked.region_offerings
             if (phase.checking is None and not phase.fault and
@@ -4571,8 +4600,8 @@ class Campaign:
                 phase.regions, phase.checked_at = regions, now
                 namespace = phase.dispatcher.arguments
                 checked = SimpleNamespace(**vars(namespace))
-                phase.checking = (self.setup.submit(check_regions, checked, list(phase.dispatcher.platforms.values())),
-                                  checked, namespace)
+                phase.checking = (self.setup.submit(recheck_regions, checked, list(phase.dispatcher.platforms.values()),
+                                                    namespace.region_offerings), checked, namespace)
 
     def steer(self, running):
         """Steer each running phase as the settings say: stopping once the campaign is stopped, else as its state
