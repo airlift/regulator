@@ -1145,7 +1145,8 @@ in the worker's region with:
 
 A launch AWS refuses for capacity moves on to the region's next zone. A
 refused Spot launch, for capacity, quota, or price, is `retryable-spot`; an
-On-Demand quota is `retryable-capacity`; anything else is
+On-Demand one, for capacity or quota, is `retryable-capacity`; either has
+detail `launch-capacity:<code>`. Anything else is
 `retryable-infrastructure`. A request whose answer never comes is sent again
 with the same client token, so AWS launches at most one instance, and the
 controller then finds the instance by its session's tag.
@@ -1351,15 +1352,16 @@ lease of open work and no queued item is one it could take; work requeued later
 launches a worker by the same rule. Its stop lease records it as stopping, so it
 keeps its reservation and takes no work until its cleanup is verified.
 
-A worker whose Spot launch found no capacity in any zone of its region cools
-that region for its pool for 15 minutes, and the pool's new Spot workers launch
-in the list's other regions meanwhile. While every region of the list cools,
-the pool tries every region again at once until its Spot shortage has lasted
-its [bounded wait](#launch-regions-and-purchase); a `spot-then-on-demand`
-pool's new workers then launch On-Demand, and Spot resumes in each region once
-its cool-down ends. Through its shortage the pool tries one Spot launch a loop,
-so a pool AWS keeps refusing leaves the boot window to the others. A restarted
-controller forgets the cool-downs.
+A worker whose launch found no capacity in any zone of its region, or no
+quota, cools that region for its pool's launches in that market for 15
+minutes, and the pool's new workers in that market launch in the list's other
+regions meanwhile. Such a refusal spends none of its slot's replacements. While
+every region of the list cools, the pool tries every region again at once; a
+`spot-then-on-demand` pool whose Spot shortage has lasted its
+[bounded wait](#launch-regions-and-purchase) launches On-Demand instead, and
+Spot resumes in each region once its cool-down ends. Through its shortage the
+pool tries one Spot launch a loop, so a pool AWS keeps refusing leaves the boot
+window to the others. A restarted controller forgets the cool-downs.
 
 The controller writes a worker's first lease before it launches the host, so
 the host finds its work waiting when its setup ends. It also writes the second
