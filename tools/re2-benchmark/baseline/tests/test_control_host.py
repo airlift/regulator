@@ -118,6 +118,15 @@ class TestControlHost(unittest.TestCase):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
         self.assertEqual(["terminated"] * 4, [host.state for host in aws.region_instances["us-west-2"]])
         self.assertEqual(["available"], [volume.state for volume in aws.region_volumes["us-west-2"]])
+        # One AWS then refuses to terminate is named with both errors and left running for the next replace.
+        with patch.object(aws, "attach_volume", side_effect=CloudError("IncorrectState: busy")), \
+                patch.object(aws, "terminate", side_effect=CloudError("RequestLimitExceeded: slow down")), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(SystemExit, "control host i-control-5: IncorrectState: busy; that host still "
+                                                   "runs, .*: RequestLimitExceeded: slow down; the next control-host "
+                                                   "replace c terminates it"):
+            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+        self.assertEqual(["terminated"] * 4 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
         # Another campaign's launch passes its check of the target group while the replace has deregistered the host
         # it replaces, and registers its own host as the replacement registers. The replacement finds it there and
         # backs out.
@@ -132,12 +141,12 @@ class TestControlHost(unittest.TestCase):
 
         with patch.object(aws, "register_target", side_effect=register_both), \
                 contextlib.redirect_stdout(io.StringIO()) as printed, \
-                self.assertRaisesRegex(SystemExit, "also forwards Grafana to i-control-6 of campaign d, .* so that "
+                self.assertRaisesRegex(SystemExit, "also forwards Grafana to i-control-7 of campaign d, .* so that "
                                                    "host is deregistered and terminated"):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
         self.assertEqual("", printed.getvalue())
-        self.assertEqual(["terminated"] * 5 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
-        self.assertEqual({"arn:target-group": {("i-control-6", 3000)}}, aws.targets)
+        self.assertEqual(["terminated"] * 6 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual({"arn:target-group": {("i-control-7", 3000)}}, aws.targets)
 
     def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
         aws = control_host_cloud()
