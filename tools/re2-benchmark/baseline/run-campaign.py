@@ -3890,6 +3890,8 @@ class UnitDispatcher:
         tries one launch a loop in it until one of its workers in the market starts. Each pool's late items are
         projected once, and each admitted worker's first leases take theirs off them; a first lease of an item not
         late projects them again."""
+        if not self.pools:
+            return
         blocked_vcpus = None
         late = {}
 
