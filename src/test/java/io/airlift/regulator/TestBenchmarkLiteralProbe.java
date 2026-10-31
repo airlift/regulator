@@ -52,6 +52,19 @@ public class TestBenchmarkLiteralProbe
     }
 
     @Test
+    public void testShortSourceLength()
+    {
+        // An input under 1 KiB keeps the repeated first-byte scan even with the Vector API.
+        BenchmarkLiteralProbe benchmark = new BenchmarkLiteralProbe();
+        benchmark.workload = Workload.USER;
+        benchmark.inputShape = InputShape.EVERY_LINE;
+        benchmark.sourceLength = 128;
+        benchmark.setup();
+        assertThat(benchmark.program().prefixAccelStrategy(128)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(benchmark.re2Count()).isEqualTo(benchmark.expectedCount());
+    }
+
+    @Test
     public void testTrinoLeadingLiteralProbe()
     {
         for (Workload workload : Workload.values()) {

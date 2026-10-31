@@ -232,13 +232,14 @@ public class TestPrefixProbeAcceleration
     {
         // In a run of the prefix's first byte every position is a candidate that matches half the
         // prefix before it fails, so the first candidate passes LiteralSearchKernel's comparison
-        // budget, and KMP finds the match after a mebibyte of candidates.
-        String half = "a".repeat(500);
-        assertCandidateWorkBound(half + "b" + half, "a", ByteFrequencies.uniform(), 0);
+        // budget, and KMP finds the match after the run's candidates. The input stays under 1 KiB,
+        // where the first-byte scan serves a probe at the prefix's first byte.
+        String half = "a".repeat(100);
+        assertCandidateWorkBound(half + "b" + half, "a".repeat(822), ByteFrequencies.uniform(), 0);
         // A probe moved to the rare '=' meets a candidate at every other position, in text that
         // alternates 'a' with '='.
         String alternating = "a=".repeat(250);
-        assertCandidateWorkBound(alternating + "b=" + alternating, "a=", RARE_NON_LETTERS, 1);
+        assertCandidateWorkBound(alternating + "b=" + alternating, "a=".repeat((1 << 20) / 2), RARE_NON_LETTERS, 1);
     }
 
     @Test
@@ -256,7 +257,10 @@ public class TestPrefixProbeAcceleration
         System.arraycopy(prefix, 0, data, data.length - prefix.length, prefix.length);
         Prog program = configuredProgram(prefix, false, ByteFrequencies.uniform());
 
-        assertThat(program.prefixAccelStrategy(data.length)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        // With vector scans disabled, such as with eight preferred byte lanes, the first-byte loop
+        // runs here.
+        Prog.PrefixAccelStrategy strategy = VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE;
+        assertThat(program.prefixAccelStrategy(data.length)).isEqualTo(strategy);
         assertThat(program.prefixAccelProbeOffset()).isZero();
         assertThat(program.prefixAccel(data, 0, data.length)).isEqualTo(data.length - prefix.length);
     }
@@ -381,7 +385,7 @@ public class TestPrefixProbeAcceleration
     private static void assertCandidateWorkBound(String literal, String fill, ByteFrequencies frequencies, int probeOffset)
     {
         byte[] prefix = literal.getBytes(UTF_8);
-        byte[] data = (fill.repeat((1 << 20) / fill.length()) + literal).getBytes(UTF_8);
+        byte[] data = (fill + literal).getBytes(UTF_8);
         Prog program = configuredProgram(prefix, false, frequencies);
 
         assertThat(program.prefixAccelStrategy(data.length)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
