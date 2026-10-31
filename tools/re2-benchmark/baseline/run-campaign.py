@@ -4090,7 +4090,7 @@ class Campaign:
     the reduction thread, so a loop never waits for either. Each loop steps every running phase's dispatch, the
     phases sharing the request and acceptance threads, the caches of what AWS offers, and one look at each region's
     fleet, after setting each phase's share of the hosts from the work every phase has left. A failed step stops
-    only the steps after it, and a fault in a phase's dispatch pauses only that phase."""
+    only the steps after it, and a fault in a phase's setup or dispatch pauses only that phase."""
 
     def __init__(self, arguments, root, phases):
         self.arguments = arguments
@@ -4126,10 +4126,12 @@ class Campaign:
                 if not running and not starting:
                     break
                 stop = live_settings(self.arguments)["stop"]
-                if stop and not starting and not any(phase.dispatcher.workers for phase in running):
+                if stop and not starting and not any(self.holds_hosts(phase) for phase in running):
                     self.telemetry.event("campaign-stopped", f"campaign stopped by {stop['by']}: {stop['reason']}; "
                                          "every worker's cleanup is proven", actor=stop["by"])
                     break
+                # A phase paused because its setup failed has no dispatch until it is resumed.
+                running = [phase for phase in running if phase.dispatcher]
                 self.follow_regions(running)
                 self.steer(running)
                 self.assign_shares(running)
@@ -4150,6 +4152,13 @@ class Campaign:
 
     def terminate(self, signal_number, frame):
         self.terminated = True
+
+    def holds_hosts(self, phase):
+        """Whether the running phase has workers whose cleanup is not proven: those its dispatch follows, or with no
+        dispatch, those the fleet still reserves for it."""
+        if phase.dispatcher:
+            return bool(phase.dispatcher.workers)
+        return bool(self.arguments.shared_budget.reservations(phase.root))
 
     def reload(self):
         """Read the settings as they stand now, or keep the last good ones while the file does not validate."""
@@ -4205,7 +4214,7 @@ class Campaign:
             if phase.reduction:
                 continue
             finish = None
-            if phase.state == "running":
+            if phase.state == "running" and phase.dispatcher:
                 for name, values in phase.dispatcher.points(now).items():
                     points.setdefault(name, []).extend(values)
                 point("regulator_deadline_time", labels, now + phase.deadline - time.monotonic())
@@ -4250,15 +4259,20 @@ class Campaign:
     def advance(self):
         """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
         reduction, and start each step whose predecessors completed, unless it is complete already or has nothing
-        to do. A phase paused for a fault starts again once it is resumed, as it would under a restarted controller,
-        which rebuilds its dispatch from its ledgers."""
+        to do. A setup that fails, as one whose region's quota no longer holds its limit, pauses its phase for that
+        fault, with no dispatch, so its hosts wait for it. A phase paused for a fault starts again once it is
+        resumed, as it would under a restarted controller, which rebuilds its dispatch from its ledgers."""
         settings = live_settings(self.arguments)
         for phase in self.phases.values():
             if phase.state == "starting" and phase.future.done():
                 try:
                     result = phase.future.result()
                 except (Exception, SystemExit) as error:
-                    self.fail(phase, error)
+                    if phase.reduction:
+                        self.fail(phase, error)
+                    else:
+                        phase.state = "running"
+                        self.fault(phase, error)
                     continue
                 if phase.reduction:
                     self.finish(phase)

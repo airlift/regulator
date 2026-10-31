@@ -286,7 +286,7 @@ reservation is released at verified cleanup as today.
 | Failure | Scope | Action |
 |---|---|---|
 | Leftover | none | retried, alert while it stands |
-| Phase fault: bad marker, changed frozen inputs, conflicting receipts, ledger error, exception in a phase's dispatch | phase | paused with reason; others continue; alert |
+| Phase fault: bad marker, changed frozen inputs, conflicting receipts, ledger error, exception in a phase's setup or dispatch | phase | paused with reason; others continue; alert; `resume` sets it up again |
 | Leak, account mismatch | campaign | spending stop; alert naming the resource; running leases finish |
 | Budget ceiling | campaign | spending stop for launches; alert |
 | Controller crash | process | systemd restarts it (`Restart=on-failure`, 30 s, five in 10 minutes then stop); recovery adopts live instances by tag from the ledgers; alert |

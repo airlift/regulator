@@ -4096,6 +4096,38 @@ class TestUnitWorkers(unittest.TestCase):
                     receipt["unit_id"] for receipt in RUN_CAMPAIGN.read_accepted_units(smoke.accepted_path)})
                 self.assert_accepted(dispatchers["primary"])
 
+    def test_setup_that_fails_pauses_its_phase_until_it_is_resumed(self):
+        # The controller stops with the smoke's hosts live, and the region's Spot quota then drops below its limit,
+        # so the restarted controller's setup of the smoke refuses it. The smoke pauses with the reason, rather than
+        # failing; Dain lowers the limit and resumes it, and its setup runs again and adopts its hosts.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            phases = [("smoke", "smoke", ["trino-like-specialized"], ())]
+            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_campaign(root, fleet, phases, 2, 1)
+            fleet.abort_after = None
+            region = RUN_CAMPAIGN.default_regions()[0]
+            fleet.quotas[region, "spot"] = 512
+            reasons = []
+
+            def loop():
+                steering = CampaignSettings(root).current["phases"]["smoke"]
+                if not reasons and steering["state"] == "paused":
+                    reasons.append(steering["reason"])
+                    self.control(root, "set-limit", "region", region, "max-vcpus", "512")
+                    self.control(root, "resume", "smoke")
+
+            failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1, loop)
+            self.assertEqual([], failed)
+            self.assertEqual([f"the campaign settings' max_vcpus exceeds the Standard Spot quota after its reserve "
+                              f"in {region}"], reasons)
+            self.assert_accepted(dispatchers["smoke"])
+            self.assertEqual(2, len(fleet.hosts))
+            leased = [(row["platform"], row["unit_id"], row["replica"])
+                      for row in self.unit_attempts(dispatchers["smoke"].result_root) if row["outcome"] == "leased"]
+            self.assertEqual(len(leased), len(set(leased)))
+
     def test_semantic_failure_or_protocol_rejection_is_final(self):
         # A semantic failure stands though the host's interruption notice lands with it.
         for script, detail in (("semantic-failure", "semantic failure: status 44"),
