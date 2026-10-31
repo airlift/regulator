@@ -86,8 +86,8 @@ UNIT_POLL_SECONDS = 15
 REQUEST_THREADS = 16
 # Group completions are downloaded, checked and extracted on this many threads, beside the loop.
 ACCEPTANCE_THREADS = 4
-# A unit pool's new Spot workers skip a region this long after it found no Spot capacity.
-SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
+# A unit pool's new workers in a market skip a region this long after it found no capacity in that market.
+REGION_COOL_DOWN_SECONDS = 15 * 60
 # How a platform's workers buy capacity, unless the settings name a purchase policy for it: Spot only, waiting for it
 # however long; Spot, turning to On-Demand once Spot has fallen short for SPOT_SHORTAGE_WAIT_SECONDS; or On-Demand
 # only.
@@ -300,8 +300,8 @@ class Job:
     # Chosen at launch; empty until the controller places the attempt.
     region: str = ""
     placement_score: str = ""
-    # Regions where the pool's Spot launches found no capacity within the cool-down.
-    spot_capacity_failures: tuple = ()
+    # Regions where the pool's launches in the job's market found no capacity within the cool-down.
+    capacity_failures: tuple = ()
     # Chosen at admission, in epoch seconds: the end of the worker's boot allowance, and its host's first stop time.
     boot_by: int = 0
     stop_by: int = 0
@@ -661,10 +661,10 @@ def aggregate_language_plans(arguments, result_root):
     fsync_directory(result_root)
 
 
-def unit_worker_job(platform, ordinal, host_epoch, market, spot_capacity_failures=()):
+def unit_worker_job(platform, ordinal, host_epoch, market, capacity_failures=()):
     """A unit worker host of a platform's pool; its replica is the worker's ordinal within the phase."""
     return Job(platform, UNIT_WORKER_SHARD, ordinal, host_epoch, 1, market, "unit-worker",
-               spot_capacity_failures=tuple(spot_capacity_failures))
+               capacity_failures=tuple(capacity_failures))
 
 
 def unit_worker_pool(job):
@@ -1581,11 +1581,9 @@ def launch_regions(arguments, job):
 def launch_placements(arguments, job):
     """Order the regions of the job's platform's list that can launch it, best Spot placement score first."""
     regions = launch_regions(arguments, job)
-    if job.market != "spot":
-        return [(region, "") for region in regions]
-    # A Spot launch skips the regions where its pool's Spot launches found no capacity within the cool-down.
-    eligible = [region for region in regions if region not in job.spot_capacity_failures]
-    if len(eligible) <= 1:
+    # A launch skips the regions where its pool's launches in its market found no capacity within the cool-down.
+    eligible = [region for region in regions if region not in job.capacity_failures]
+    if job.market != "spot" or len(eligible) <= 1:
         return [(region, "") for region in eligible]
     scores = spot_placement_scores(arguments, job.platform.instance_type, regions)
     if scores is None:
@@ -1828,11 +1826,11 @@ class LaunchFailed(Exception):
 
 def launch_failure(market, rejection):
     """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
-    and an On-Demand one ran out of its vCPU quota or of capacity."""
+    and an On-Demand one no capacity or vCPU quota."""
     if market == "spot":
         return "retryable-spot", f"launch-capacity:{rejection.code}"
-    if rejection.kind == "quota":
-        return "retryable-capacity", f"vcpu-limit:{rejection.code}"
+    if rejection.kind in ("capacity", "quota"):
+        return "retryable-capacity", f"launch-capacity:{rejection.code}"
     return "retryable-infrastructure", f"launch-infrastructure:{rejection.code}"
 
 
@@ -3324,16 +3322,17 @@ class UnitDispatcher:
                         self.arguments.campaign_id, worker.job, worker, detail if retryable else "job-failure",
                         f"status={status}; classification={classification}; detail={detail}", unit_id="",
                         failure_classification=classification)
-        if classification == "retryable-spot" and detail.startswith("launch-capacity:"):
-            # Spot moves past a region whose launch found no capacity.
-            self.cool_down(pool, worker.job.region)
-        elif classification == "retryable-capacity":
+        if detail.startswith("launch-capacity:"):
+            # The pool's launches in the market move past a region that found no capacity.
+            self.cool_down(pool, worker.job.market, worker.job.region)
+        if classification == "retryable-capacity":
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
-    def cool_down(self, pool, region):
-        """Keep the pool's new Spot workers out of the region for its cool-down."""
-        self.pool_regions.setdefault(pool, {})[region] = time.monotonic()
-        self.spot_shortages.setdefault(pool, time.monotonic())
+    def cool_down(self, pool, market, region):
+        """Keep the pool's new workers in the market out of the region for its cool-down."""
+        self.pool_regions.setdefault((pool, market), {})[region] = time.monotonic()
+        if market == "spot":
+            self.spot_shortages.setdefault(pool, time.monotonic())
 
     def spot_waited(self, pool, now):
         """Whether a spot-then-on-demand pool has been short of Spot capacity for its whole bounded wait."""
@@ -3352,8 +3351,7 @@ class UnitDispatcher:
         if started:
             failures = 0
         elif (status != 0 and not terminated and detail != LAUNCH_NOT_FOUND and
-              classification != "retryable-capacity" and
-              not (classification == "retryable-spot" and detail.startswith("launch-capacity:"))):
+              not detail.startswith("launch-capacity:")):
             failures += 1
         if failures > MAX_REPLACEMENTS_PER_JOB:
             self.exhausted[pool] = (f"unit worker {job.identity} failed before it started: {detail}; "
@@ -3719,18 +3717,23 @@ class UnitDispatcher:
             # A launch the budget defers keeps this worker for the pool's next launch.
             self.candidates[pool] = candidate
         now = time.monotonic()
-        cooling = self.pool_regions[pool] = {
-            region: failed_at for region, failed_at in self.pool_regions.get(pool, {}).items()
-            if now - failed_at < SPOT_REGION_COOL_DOWN_SECONDS}
-        candidate = replace(candidate, market=market, spot_capacity_failures=tuple(cooling))
-        if market == "spot" and not launch_placements(self.arguments, candidate):
-            # Each region of the platform's list has found no Spot capacity for this pool within its cool-down.
-            # Once the pool's bounded wait is over it launches On-Demand; until then it tries every region again.
-            if self.spot_waited(pool, now):
-                candidate = replace(candidate, market="on-demand")
-            else:
-                self.pool_regions.pop(pool, None)
-                candidate = replace(candidate, spot_capacity_failures=())
+
+        def cooled(market):
+            cooling = self.pool_regions[pool, market] = {
+                region: failed_at for region, failed_at in self.pool_regions.get((pool, market), {}).items()
+                if now - failed_at < REGION_COOL_DOWN_SECONDS}
+            return replace(candidate, market=market, capacity_failures=tuple(cooling))
+
+        candidate = cooled(market)
+        if not launch_placements(self.arguments, candidate):
+            # Each region of the platform's list has found no capacity in the market for this pool within its
+            # cool-down. A pool short of Spot for its bounded wait launches On-Demand; otherwise it tries every
+            # region again.
+            if market == "spot" and self.spot_waited(pool, now):
+                candidate = cooled("on-demand")
+            if not launch_placements(self.arguments, candidate):
+                self.pool_regions.pop((pool, candidate.market), None)
+                candidate = replace(candidate, capacity_failures=())
         return candidate
 
     def launch(self, now):
@@ -3852,8 +3855,7 @@ class UnitDispatcher:
         write_attempt(
             self.attempts_path, job, "starting",
             f"region={job.region};placement_score={job.placement_score}" +
-            (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
-             if job.spot_capacity_failures else "") +
+            (f";capacity_failures={','.join(job.capacity_failures)}" if job.capacity_failures else "") +
             f";slot={slot};slot_failures={slot_failures};boot_by={job.boot_by};stop_by={job.stop_by}"
             f";session={session};prefix={metadata['prefix']}")
         # The worker boots from the poll that launched it, so a projection in that poll counts it as booting

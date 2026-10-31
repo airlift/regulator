@@ -1342,7 +1342,7 @@ class TestRunCampaign(unittest.TestCase):
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
                 arguments = SimpleNamespace(settings=self.settings(platform_regions={"r8i": regions}), cloud=FakeCloud())
-                job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", spot_capacity_failures=failures)
+                job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", capacity_failures=failures)
                 self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
                 self.assertEqual([], arguments.cloud.calls)
 
@@ -1757,11 +1757,14 @@ class TestRunCampaign(unittest.TestCase):
                 # A full zone moves the launch to the next; only every zone full fails it.
                 ("spot", full("a"), "launched"),
                 ("spot", full("a", "b", "c"), ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity")),
-                # A refused Spot price or quota is the Spot market's, an On-Demand quota the pool's capacity.
+                # A refused Spot price or quota is the Spot market's, an On-Demand capacity or quota the pool's
+                # capacity.
                 ("spot", full("a", "b", "c", kind="price", code="SpotMaxPriceTooLow"),
                  ("retryable-spot", "launch-capacity:SpotMaxPriceTooLow")),
+                ("on-demand", full("a", "b", "c"),
+                 ("retryable-capacity", "launch-capacity:InsufficientInstanceCapacity")),
                 ("on-demand", full("a", "b", "c", kind="quota", code="VcpuLimitExceeded"),
-                 ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded")),
+                 ("retryable-capacity", "launch-capacity:VcpuLimitExceeded")),
                 ("on-demand", full("a", "b", "c", kind="ambiguous", code="InternalError"),
                  ("retryable-infrastructure", "launch-infrastructure:InternalError")),
                 # A launch that offers the type in no public subnet fails before it asks.
@@ -3202,6 +3205,32 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn(("on-demand", "us-east-2"),
                           {(receipt["market"], receipt["region"])
                            for receipt in RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")})
+
+    def test_on_demand_pool_moves_past_regions_with_no_capacity_without_spending_replacements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # The r8i pool buys only On-Demand. Its first region never has capacity, and its second refuses its first
+            # three workers, more than a slot's replacements. Each refusal cools its region for the pool and spends
+            # none of the slot's replacements, so the pool's next worker tries the other region and its work is all
+            # accepted.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            run_instance = fleet.run_instance
+            refused = {}
+
+            def refuse(region, spec):
+                # Every zone refuses a worker the region refuses.
+                session = spec.tags["Session"]
+                if spec.tags["Platform"] == "r8i" and (
+                        region == "us-east-2" or refused.get(session) == region or
+                        session not in refused and list(refused.values()).count("us-west-2") < 3):
+                    refused[session] = region
+                    raise cloud.LaunchRejected("capacity", "InsufficientInstanceCapacity")
+                return run_instance(region, spec)
+
+            fleet.run_instance = refuse
+            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
+                           purchases={"r8i": "on-demand"}, platform_regions={"r8i": ["us-east-2", "us-west-2"]})
+            self.assertEqual(["us-east-2", "us-west-2"], list(refused.values())[:2])
+            self.assertLess(RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1, len(refused))
 
     def test_pool_short_of_spot_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
         with tempfile.TemporaryDirectory() as temporary:
