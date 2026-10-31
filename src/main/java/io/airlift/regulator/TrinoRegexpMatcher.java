@@ -25,7 +25,7 @@ import static java.util.Objects.requireNonNull;
 /// may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
 /// mutations to their original input storage. Do not mutate input while matching it.
 public sealed class TrinoRegexpMatcher
-        permits TrinoRegexpMatcher.CompiledScanMatcher
+        permits TrinoRegexpMatcher.CompiledScanMatcher, TrinoRegexpMatcher.LiteralSetMatcher
 {
     private final RegexpMatcher matcher;
     private final LiteralAlternationSpanMatcher literalAlternation;
@@ -43,7 +43,7 @@ public sealed class TrinoRegexpMatcher
         fixedWidth = null;
     }
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
     TrinoRegexpMatcher(RegexpMatcher matcher)
     {
         this.matcher = requireNonNull(matcher, "matcher is null");
@@ -51,7 +51,7 @@ public sealed class TrinoRegexpMatcher
         fixedWidth = null;
     }
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
     TrinoRegexpMatcher(LiteralAlternationSpanMatcher literalAlternation, Slice input)
     {
         matcher = null;
@@ -60,7 +60,7 @@ public sealed class TrinoRegexpMatcher
         reset(input);
     }
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
     TrinoRegexpMatcher(FixedWidthByteSpanMatcher fixedWidth, Slice input)
     {
         matcher = null;
@@ -185,6 +185,12 @@ public sealed class TrinoRegexpMatcher
         return CompiledScanMatcher.create(scan, input, retainedCapturingGroupCount);
     }
 
+    /// Returns a group-zero matcher whose finds search a large literal alternation's automaton.
+    static TrinoRegexpMatcher literalSet(LiteralSetSpanMatcher literalSet, Slice input)
+    {
+        return LiteralSetMatcher.create(literalSet, input);
+    }
+
     private void checkSpanGroup(int group)
     {
         if (span < 0) {
@@ -290,6 +296,104 @@ public sealed class TrinoRegexpMatcher
                 throw new IllegalStateException("no successful match");
             }
             if (group < 0 || group > groupCount()) {
+                throw new IllegalArgumentException("group index out of range: " + group);
+            }
+        }
+    }
+
+    /// A group-zero matcher whose finds search a [LiteralSetSpanMatcher], with the results and
+    /// exceptions of the base class's span matchers. The literals never match empty, so each find
+    /// resumes at the previous match end. It repeats the base class's span state, so a fix to one
+    /// belongs in both, and is a separate class so the base class's find dispatch stays unchanged.
+    private static final class LiteralSetMatcher
+            extends TrinoRegexpMatcher
+    {
+        private final LiteralSetSpanMatcher literalSet;
+        private Slice input;
+        private long span = -1;
+        private int nextStart;
+        private boolean exhausted;
+
+        private LiteralSetMatcher(LiteralSetSpanMatcher literalSet, Slice input)
+        {
+            this.literalSet = requireNonNull(literalSet, "literalSet is null");
+            reset(input);
+        }
+
+        /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this
+        /// class.
+        static TrinoRegexpMatcher create(LiteralSetSpanMatcher literalSet, Slice input)
+        {
+            return new LiteralSetMatcher(literalSet, input);
+        }
+
+        @Override
+        public TrinoRegexpMatcher reset(Slice input)
+        {
+            this.input = requireNonNull(input, "input is null");
+            span = -1;
+            nextStart = 0;
+            exhausted = false;
+            return this;
+        }
+
+        @Override
+        public boolean find()
+        {
+            if (exhausted) {
+                return false;
+            }
+            span = literalSet.findSpan(input, nextStart, input.length());
+            if (span < 0) {
+                // The search position is unchanged, so a retry from the last match end would
+                // repeat this failed search.
+                exhausted = true;
+                return false;
+            }
+            nextStart = (int) span;
+            return true;
+        }
+
+        @Override
+        public int groupCount()
+        {
+            return 0;
+        }
+
+        @Override
+        public boolean matched(int group)
+        {
+            checkGroup(group);
+            return true;
+        }
+
+        @Override
+        public int start(int group)
+        {
+            checkGroup(group);
+            return (int) (span >>> 32);
+        }
+
+        @Override
+        public int end(int group)
+        {
+            checkGroup(group);
+            return (int) span;
+        }
+
+        @Override
+        public Slice group(int group)
+        {
+            int start = start(group);
+            return input.slice(start, end(group) - start);
+        }
+
+        private void checkGroup(int group)
+        {
+            if (span < 0) {
+                throw new IllegalStateException("no successful match");
+            }
+            if (group != 0) {
                 throw new IllegalArgumentException("group index out of range: " + group);
             }
         }

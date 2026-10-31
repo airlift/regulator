@@ -1386,6 +1386,41 @@ uses the same reader and exclusive-cache mutation protocol as other DFA
 searches. It adds no public API and does not change capturing or longest-match
 execution.
 
+## Large Literal Alternations
+
+A capture-free alternation of more than 64 case-sensitive, non-empty literals,
+such as a dictionary of words, searches a leftmost-first Aho-Corasick automaton
+ported from the `aho-corasick` crate's noncontiguous NFA, the route the `regex`
+crate takes for such patterns. The DFA routes did not scale to them: rebar's
+`dictionary/search/english-10`, 43,029 words, failed the reverse DFA's
+admission check, so finds past the candidate-start cursor's budget fell to the
+NFA, which re-added a root alternation of about 4,000 branches at every byte.
+
+Trino compiles no program for such a pattern; every operation runs the
+automaton, as every operation of an eligible alternation of 64 or fewer runs the
+trie. RE2, Java, and Rust route only `RegexpMatcher.find()`; count, boolean,
+anchored, and capture operations keep the program. Smaller alternations keep the
+Trino trie where it is eligible; the other languages run them on the program.
+Trino checks the automaton against the forward-DFA budget, while RE2, Java, and
+Rust charge it to that budget.
+
+The literal set is what the parsers' factoring leaves of a dictionary: literal
+strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at
+most 16 code points merged from single-character alternatives, in the
+alternation's priority order. A choice of several literals must end its
+concatenation, as the factoring always places it, so every literal extends a
+prefix written once in the pattern and the automaton stays bounded by the
+pattern's size. A choice before more text, such as `(?:a|b)c` or `[ab][cd]`,
+would expand to every combination, so it keeps the program. Extraction also
+stops past a fixed amount of work, which a long run of separately flagged
+literals or deeply nested choices would otherwise make quadratic in the pattern.
+The trie's extraction has the same bound, so such a pattern of 64 or fewer
+alternatives keeps the program too. Deliberate limits: RE2's longest-match mode
+keeps the program, because the automaton reports leftmost-first matches, and
+literals or classes carrying a case-folding flag keep the program. A class the
+parser has already case-folded, such as Rust's `[Kk\u{212A}]` for `(?i)k`, is an
+ordinary class.
+
 ## Extended OnePass Captures
 
 Pinned native RE2 stores OnePass capture actions in spare bits of a 32-bit

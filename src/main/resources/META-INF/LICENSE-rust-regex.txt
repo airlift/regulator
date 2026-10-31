@@ -7,11 +7,15 @@ Unicode property naming rules of the crate and its regex-syntax 0.8.11 crate,
 whose property names come from the crate's table generator, ucd-generate
 (https://github.com/BurntSushi/ucd-generate), by the crate's author, and its
 ucd-parse and ucd-util crates. All of these are dual-licensed under the MIT
-license and the Apache License 2.0. Regulator uses them under the MIT license,
-reproduced below: the first notice covers the regex crates and ucd-generate,
-the second ucd-parse and ucd-util. The third notice covers the AT&T testregex
-data that the fowler/* fixture records derive from. The Unicode data license
-for the property names is in LICENSE-unicode.txt.
+license and the Apache License 2.0. Regulator's search of large literal
+alternations ports the automaton of the same author's aho-corasick crate
+(https://github.com/BurntSushi/aho-corasick), version 1.1.5, which is
+dual-licensed under the Unlicense and the MIT license. Regulator uses them
+under the MIT license, reproduced below: the first notice covers the regex
+crates and ucd-generate, the second ucd-parse, ucd-util, and aho-corasick. The
+third notice covers the AT&T testregex data that the fowler/* fixture records
+derive from. The Unicode data license for the property names is in
+LICENSE-unicode.txt.
 
 Copyright (c) 2014 The Rust Project Developers
 
@@ -40,7 +44,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 
-ucd-parse and ucd-util
+ucd-parse, ucd-util, and aho-corasick
 
 Copyright (c) 2015 Andrew Gallant
 

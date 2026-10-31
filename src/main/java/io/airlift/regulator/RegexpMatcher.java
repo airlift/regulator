@@ -38,6 +38,9 @@ public final class RegexpMatcher
     private final Map<String, Integer> namedCapturingGroups;
     private final boolean latin1;
     private final SingleByteMatcher singleByteMatcher;
+    // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
+    // of the program. See Re2.literalSetSpanMatcher.
+    private final LiteralSetSpanMatcher literalSet;
     private final Dfa.CandidateStartCursor candidateStartCursor;
     private final boolean enableGroupZeroForwardCursor;
     private final boolean hasLoweredCandidateSearch;
@@ -87,7 +90,9 @@ public final class RegexpMatcher
         this(pattern, input, singleByteMatcher, capturingGroupCount, true);
     }
 
-    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableGroupZeroForwardCursor)
+    /// `enableSpecializedGroupZeroRoutes` false turns off the group-zero forward cursor and the
+    /// literal set search of [#find()], for comparisons.
+    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
@@ -97,12 +102,9 @@ public final class RegexpMatcher
         this.namedCapturingGroups = retainedNamedCapturingGroups(pattern, capturingGroupCount);
         this.latin1 = (pattern.flags() & Regexp.LATIN1) != 0;
         this.singleByteMatcher = groups.length == 2 ? singleByteMatcher : null;
-        this.candidateStartCursor = groups.length == 2 && this.singleByteMatcher == null
-                ? pattern.createCandidateStartCursor()
-                : null;
-        this.enableGroupZeroForwardCursor = enableGroupZeroForwardCursor &&
-                this.singleByteMatcher == null &&
-                pattern.canUseGroupZeroForwardCursor(groups.length);
+        this.literalSet = enableSpecializedGroupZeroRoutes && this.singleByteMatcher == null ? pattern.literalSetSpanMatcher() : null;
+        this.candidateStartCursor = groups.length == 2 && this.singleByteMatcher == null && this.literalSet == null ? pattern.createCandidateStartCursor() : null;
+        this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes && this.singleByteMatcher == null && pattern.canUseGroupZeroForwardCursor(groups.length);
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
         this.hasDirectLoweredGroupZeroSearch =
                 groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
@@ -183,10 +185,28 @@ public final class RegexpMatcher
         if (startAnchoredScanPlan != null) {
             return findWithStartAnchoredScanPlan();
         }
+        if (literalSet != null) {
+            return findLiteralSet();
+        }
         if (rustSearch) {
             return findRust();
         }
         return findGeneral();
+    }
+
+    /// The literals match no empty string and read no context outside the region, so every
+    /// language's search, a Rust one over a partial region included, is the automaton's search
+    /// of the rest of the region.
+    private boolean findLiteralSet()
+    {
+        long span = literalSet.findSpan(input, regionStart + nextFindStart, regionEnd);
+        if (span < 0) {
+            return failFind();
+        }
+        groups[0] = (int) (span >>> 32) - regionStart;
+        groups[1] = (int) span - regionStart;
+        setMatchAndAdvance(groups[0], groups[1]);
+        return true;
     }
 
     /// The start-anchored plan can match only when the search starts at the region start. The
@@ -668,6 +688,11 @@ public final class RegexpMatcher
     boolean startAnchoredScanPlanEnabledForDiagnostics()
     {
         return startAnchoredScanPlan != null;
+    }
+
+    boolean literalSetEnabledForDiagnostics()
+    {
+        return literalSet != null;
     }
 
     int groupZeroForwardProductivityCheckCountForDiagnostics()
