@@ -344,11 +344,14 @@ original pattern, including when quoting rewrites it before parsing.
   `RustRegexp.Options` rather than a separate compiled type, following the
   encoding option on `Re2.Options`. It is named after the crate's bytes API
   rather than Latin-1, because only constructs without Unicode mode match
-  single bytes; Unicode-mode constructs still match UTF-8. The parser marks
-  each byte construct as a Latin-1 node, and the compiler and expression
-  analyses read the encoding from each node. Separately, byte mode sets the
-  pattern-level Latin-1 flag, so empty matches advance one byte, as in Latin-1
-  mode, and the matcher lets an empty match split a character.
+  single bytes; Unicode-mode constructs still match UTF-8. The parser marks the
+  byte classes and literals that can match a byte above 0x7F as Latin-1 nodes,
+  and the compiler and expression analyses read the encoding from each node; an
+  ASCII byte construct reads alike in both encodings, and the any-byte dot
+  (`ANY_BYTE`) carries no such flag and is recognized by its kind. Separately,
+  byte mode sets the pattern-level Latin-1 flag, so empty matches advance one
+  byte, as in Latin-1 mode, and the matcher lets an empty match split a
+  character.
 - Outside byte mode, inputs are not validated. The crate's `Regex` only
   accepts valid UTF-8, so results on malformed input are unspecified rather
   than an error, and valid input pays no validation scan. A pattern that runs
@@ -1952,15 +1955,18 @@ measurements specific to each language.
 - Rust patterns select the same plans, with the same routing and memory charge.
   The Rust frontend compiles to the same byte ranges as RE2, so a Rust plan
   reads input by the RE2 rule and reports what the ordinary engine reports on
-  every input, which on valid UTF-8 is the pinned crate's result. Without
-  multi-line mode Rust's `$` is the strict end, and Rust's dot and `(?i)` match
-  as RE2's do, so those reach a plan unchanged. Byte mode compiles as Latin-1
-  and builds no plan, as RE2's Latin-1 patterns do. The frontend declines it
-  explicitly, because only byte constructs carry the Latin-1 node flag that the
-  analysis rejects. Multiline anchors, CRLF ones included, word boundaries,
-  including Rust's start, end, and half word boundaries, and reluctant runs keep
-  the ordinary engine. Unicode Perl classes and folds with a non-ASCII member,
-  such as `\w` and `(?i)k`, reach a plan as sets of some non-ASCII characters.
+  every input, which on valid UTF-8 is the pinned crate's result, as it is on
+  any input in byte mode. Without multi-line mode Rust's `$` is the strict end,
+  and Rust's dot and `(?i)` match as RE2's do, so those reach a plan unchanged.
+  Byte mode keeps its plans, unlike RE2's Latin-1 patterns: a plan never matches
+  empty, so byte mode's one-byte advance past an empty match never applies, and
+  the analysis rejects every byte construct that can match a byte above 0x7F,
+  byte classes and literals by their Latin-1 node flag and the any-byte dot by
+  its kind, so a plan reads only constructs that byte mode reads as UTF-8 does.
+  Multiline anchors, CRLF ones included, word boundaries, including Rust's
+  start, end, and half word boundaries, and reluctant runs keep the ordinary
+  engine. Unicode Perl classes and folds with a non-ASCII member, such as `\w`
+  and `(?i)k`, reach a plan as sets of some non-ASCII characters.
 - A Rust range or matcher region keeps the whole input as assertion context, as
   the crate's `Input::range` does, while a matcher's start-anchored plan reads
   its region as the whole input. A Rust matcher therefore runs that plan
@@ -2194,8 +2200,8 @@ plans; the last bullets record the rules and measurements specific to each.
 - `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same executor
   classes under the same rules. A Rust plan is an RE2 plan, so the emitter,
   eligibility, and routes are RE2's, and `RustRegexp` holds the generated `Re2`
-  subclass. Byte-mode patterns build no plan, so the option leaves them
-  unchanged. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
+  subclass. Byte-mode patterns build plans and generated classes under the
+  same rules. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
   with `generateBytecode=true`, on the `URL`, `ANCHORED_HOST`,
   `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
   `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED` workloads, take
