@@ -90,15 +90,19 @@ Each check runs on one **path**: the subnet router, through `host` and
    down, read `host systemctl status regulator-campaign@<campaign>` and keep
    the last lines of its journal for the report,
    `host journalctl -u regulator-campaign@<campaign> -n 50 --no-pager`:
-   - a unit still restarting is systemd's to finish, so check again next
-     time;
+   - a unit still restarting is systemd's to finish, and one systemd cannot
+     find while `host cloud-init status` says `running` is the host's user
+     data's, so check again next time;
    - a unit whose controller exited with status 3 and no
      `campaign-files.sha256` refused to start, and starts no other way on a
      new host, so ask Dain, with the journal's lines, and replace nothing;
    - a unit systemd has given up on otherwise (`failed`, or its start limit
-     hit) means replacing the host once (see [Commands](#commands)). If the
-     new host's unit gives up too, ask Dain with both journals' lines; never
-     replace a host twice for one campaign without his answer.
+     hit), or one it cannot find once cloud-init no longer says `running`,
+     since the host's boot then ended before its user data installed it,
+     means replacing the host once (see [Commands](#commands)); a reboot runs
+     no user data again. If the new host's unit gives up too, or is missing
+     too, ask Dain with both journals' lines; never replace a host twice for
+     one campaign without his answer.
 
    When `host` fails, go to [Access failures](#access-failures) and run the
    check from here on the Systems Manager path.
@@ -197,7 +201,7 @@ on the host; read it with `host cat` before each raise.
 
 | The monitor may, unattended | The monitor must ask |
 |---|---|
-| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
+| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes, or never got its unit | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |

@@ -493,7 +493,7 @@ the spending stop.
 
 | The monitor may, unattended | The monitor must ask |
 |---|---|
-| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
+| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes, or never got its unit | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |

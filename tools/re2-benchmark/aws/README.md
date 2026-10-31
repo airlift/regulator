@@ -617,7 +617,7 @@ registration or the look with an error. The host's user data,
 - unpacks the launch inputs onto the volume the first time: the controller's
   command, the candidate commits, the settings, and the language plans,
   beside their place and then moved into it whole, so a first boot
-  interrupted while unpacking leaves them for the next boot;
+  interrupted while unpacking leaves them for the next host to unpack;
 - fetches the candidate commits from GitHub and checks out the first, whose
   benchmark tooling every candidate shares, over whatever a boot that ended
   while git ran left: its stale locks go, and a checkout git cannot read is
@@ -636,6 +636,10 @@ registration or the look with an error. The host's user data,
   `/regulator-benchmark/campaigns/<campaign>/grafana-admin-password` and
   `.../grafana-monitor-token`, generating them the first time; anonymous
   access is off.
+
+cloud-init runs user data once per instance, so rebooting a host whose first
+boot was interrupted runs none of it again; its repairs are for the next host
+`control-host replace` starts on the volume.
 
 The controller is the campaign's only telemetry exporter, and its unit is what
 turns it on: it sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`, so
