@@ -4128,6 +4128,30 @@ class TestUnitWorkers(unittest.TestCase):
                       for row in self.unit_attempts(dispatchers["smoke"].result_root) if row["outcome"] == "leased"]
             self.assertEqual(len(leased), len(set(leased)))
 
+    def test_phase_paused_for_a_fault_reports_its_boots_and_takes_a_stop(self):
+        # Host 1's marker names another campaign, so the smoke pauses while host 2 still boots, and Dain then stops the
+        # campaign. Host 2's boot still reaches the boot window, and it takes its stop lease behind the leases it was
+        # launched with, rather than idling until it stops itself.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: "foreign-marker"}},
+                                  setup_seconds=lambda host: 0 if host.number == 1 else 120)
+
+            def loop():
+                if "smoke: paused: " in log.getvalue() and not CampaignSettings(root).current["stop"]:
+                    self.assertFalse(fleet.hosts[1].booted)
+                    self.control(root, "stop")
+
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1,
+                                          loop)
+            self.assertEqual([], failed)
+            booting = fleet.hosts[1]
+            [reservation] = [item for item in json.loads((root / RUN_CAMPAIGN.STATE_FILE).read_text())[
+                "completed"].values() if str(item["host_epoch"]) == booting.epoch]
+            self.assertIn("reported_at", reservation)
+            self.assertTrue(booting.leases[max(booting.leases)].get("stop"))
+            self.assertNotIn("claim", [entry[0] for entry in fleet.log if entry[1:2] == (booting.session,)])
+
     def test_semantic_failure_or_protocol_rejection_is_final(self):
         # A semantic failure stands though the host's interruption notice lands with it.
         for script, detail in (("semantic-failure", "semantic failure: status 44"),

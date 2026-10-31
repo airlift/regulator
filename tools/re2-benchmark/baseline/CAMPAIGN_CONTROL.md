@@ -51,7 +51,8 @@ report never reached the coordinator, so nothing acted until morning.
 - **Settings**: what may change during a run. **Frozen inputs**: what decides
   measurement validity and cannot.
 - **Pause** (phase): no new launches or leases; running leases finish and the
-  workers idle-stop. **Drain**: no new launches; queued work goes to live
+  workers idle-stop. A phase paused for a fault still reports its hosts' boots
+  to the boot window and still stop-leases them at a stop. **Drain**: no new launches; queued work goes to live
   workers until they stop. **Stop** (campaign): stop-lease every worker, prove
   cleanup, exit. **Spending stop**: no launch anywhere until cleared.
 - **Leak**: an instance or Spot request that outlives its cleanup. **Leftover**:
