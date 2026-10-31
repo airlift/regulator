@@ -240,7 +240,7 @@ def replace(aws, campaign, ssh_public_key):
     group = security_group(aws, found)
     check_target_group(aws, found, campaign)
     volume = campaign_volume(aws, campaign)
-    if refusal := teardown_begun(aws, campaign, volume.id):
+    if refusal := teardown_refusal(aws, campaign, volume.id):
         raise SystemExit(refusal)
     deregister_hosts(aws, found, campaign)
     hosts = live_hosts(aws, campaign)
@@ -281,7 +281,7 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     # controller starts, and so does one whose look fails. Only a replace that stalls between the attach and this look
     # can start its controller after the snapshot.
     try:
-        refusal = teardown_begun(aws, campaign, volume.id)
+        refusal = teardown_refusal(aws, campaign, volume.id)
     except CloudError as error:
         fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"cannot check that no teardown has begun on campaign {campaign}'s volume {volume.id}: "
@@ -315,12 +315,12 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
 
-def teardown_begun(aws, campaign, volume):
+def teardown_refusal(aws, campaign, volume_id):
     """Why no host goes on the campaign volume once a teardown has marked it, or deleted it, or "" before."""
-    if any(item.id == volume and not TEARDOWN_TAG.items() <= item.tags.items()
+    if any(item.id == volume_id and not TEARDOWN_TAG.items() <= item.tags.items()
            for item in aws.volumes(REGION, tags(campaign))):
         return ""
-    return (f"campaign {campaign}'s teardown has begun on its volume {volume}, whose snapshot is its root's last "
+    return (f"campaign {campaign}'s teardown has begun on its volume {volume_id}, whose snapshot is its root's last "
             f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown {campaign} "
             "--confirm")
 
@@ -389,8 +389,8 @@ def known_host(aws, campaign):
     if len(hosts) != 1:
         raise SystemExit(f"campaign {campaign} has {len(hosts)} running control hosts; expected one")
     host = hosts[0]
-    listed = {fingerprint for block in FINGERPRINTS.findall(aws.console_output(REGION, host.id))
-              for fingerprint in re.findall(r"SHA256:[A-Za-z0-9+/]+", block)}
+    listed = {listing for block in FINGERPRINTS.findall(aws.console_output(REGION, host.id))
+              for listing in re.findall(r"SHA256:[A-Za-z0-9+/]+", block)}
     if not listed:
         raise SystemExit(f"campaign {campaign}'s control host {host.id} has not yet listed its ssh host keys on its "
                          "console; try again in a few minutes")
@@ -499,12 +499,17 @@ def teardown(aws, campaign, confirm):
         aws.wait_deregistered(REGION, found["target_group"], deregistered, GRAFANA_PORT)
     for volume in volumes:
         aws.wait(REGION, "volume_available", volume.id)
-        snapshot = next((snapshot.id for snapshot in aws.snapshots(REGION, tags(campaign))
-                         if snapshot.volume == volume.id), None) or aws.create_snapshot(REGION, volume.id,
+        snapshot = next((existing.id for existing in aws.snapshots(REGION, tags(campaign))
+                         if existing.volume == volume.id), None) or aws.create_snapshot(REGION, volume.id,
                                                                                          tags(campaign))
         aws.wait(REGION, "snapshot_completed", snapshot)
         aws.delete_volume(REGION, volume.id)
     aws.delete_parameters(REGION, grafana_parameters(campaign))
     snapshots = sorted(snapshot.id for snapshot in aws.snapshots(REGION, tags(campaign)))
-    print(f"tore down campaign {campaign}'s control host; its root's last copy is snapshot "
-          f"{', '.join(snapshots) or 'none'}", flush=True)
+    if not snapshots:
+        copies = "no snapshot holds its root"
+    elif len(snapshots) == 1:
+        copies = f"its root's last copy is snapshot {snapshots[0]}"
+    else:
+        copies = f"its root's last copies are snapshots {', '.join(snapshots)}"
+    print(f"tore down campaign {campaign}'s control host; {copies}", flush=True)

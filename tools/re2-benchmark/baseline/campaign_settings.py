@@ -77,8 +77,8 @@ def validate(settings):
         check(isinstance(listed, list) and listed and all(isinstance(region, str) for region in listed) and
               len(listed) == len(set(listed)) and all(region in regions for region in listed),
               f"{platform} platform_regions")
-    check(isinstance(settings["purchase"], dict) and all(policy in PURCHASE_POLICIES
-                                                         for policy in settings["purchase"].values()),
+    check(isinstance(settings["purchase"], dict) and
+          all(policy in PURCHASE_POLICIES for policy in settings["purchase"].values()),
           f"purchase is one of {', '.join(PURCHASE_POLICIES)} per platform")
     # Settings allowing On-Demand anywhere price every worker type's On-Demand hour.
     on_demand = any("on_demand_max_vcpus" in limits for limits in regions.values())

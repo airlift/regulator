@@ -408,10 +408,9 @@ class AwsCloud:
                 code = error_code(error.__cause__)
                 response = getattr(error.__cause__, "response", None) or {}
                 metadata = response.get("ResponseMetadata", {})
-                status = metadata.get("HTTPStatusCode", 0)
                 if code in LAUNCH_REJECTIONS:
                     raise LaunchRejected(LAUNCH_REJECTIONS[code], code) from error
-                if 400 <= status < 500 and code not in THROTTLES:
+                if 400 <= metadata.get("HTTPStatusCode", 0) < 500 and code not in THROTTLES:
                     # An outright refusal proves nothing launched only when it answered the launch's first request; a
                     # request sent before it, by this loop or by botocore's own retries, may have launched the
                     # instance.

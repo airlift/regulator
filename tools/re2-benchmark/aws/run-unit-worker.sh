@@ -96,7 +96,7 @@ imds_token=
 imds_token_time=0
 # When the current upload budget ends, while one runs.
 upload_deadline=
-# The attempts the last put_once made.
+# The attempts the last put_verified made.
 put_attempts=0
 # The last S3 call's output and errors.
 S3_OUTPUT="${UNIT_ROOT}/s3-output"
@@ -152,7 +152,7 @@ sha256_of()
     sha256sum "$1" | awk '{print $1}'
 }
 
-put_once()
+put_verified()
 {
     # One PUT with a whole-object SHA-256 that S3 verifies; a key is never
     # overwritten unless replace is given, as a heartbeat replaces its lease's
@@ -216,7 +216,7 @@ put_result()
     # The same PUT, with each attempt stretched by the archive's size at the
     # minimum rate. A Spot notice during a long attempt is acted on when it
     # ends, and the interruption bundle's upload then has its own attempts.
-    put_once "$1" "$2" "$(($(wc -c < "$1") / UPLOAD_MINIMUM_RATE))"
+    put_verified "$1" "$2" "$(($(wc -c < "$1") / UPLOAD_MINIMUM_RATE))"
 }
 
 heartbeat()
@@ -239,7 +239,7 @@ heartbeat()
         > "${file}"
     # A failed heartbeat is retried as an upload is, since the controller
     # judges a running lease stalled from its latest one.
-    if ! put_once "${file}" "${RESULT_PREFIX}/heartbeat/${sequence}.json" 0 replace; then
+    if ! put_verified "${file}" "${RESULT_PREFIX}/heartbeat/${sequence}.json" 0 replace; then
         echo "Heartbeat upload failed for lease ${sequence}" >&2
     fi
 }
@@ -344,7 +344,7 @@ interrupt()
     # The bundle and the final heartbeat share one upload budget.
     local upload_deadline=$(($(now) + UPLOAD_SECONDS))
     if tar -czf "${archive}" "${contents[@]}"; then
-        put_once "${archive}" "${RESULT_PREFIX}/events/${sequence}-interrupted.tar.gz" || true
+        put_verified "${archive}" "${RESULT_PREFIX}/events/${sequence}-interrupted.tar.gz" || true
     fi
     heartbeat interrupted
     write_session interrupted
@@ -423,7 +423,7 @@ claim_stop()
         '{schema_version: 2, campaign_id: $campaign_id, platform: $platform, host_session: $host_session,
           sequence: $sequence, stop: true, by: "worker"}' \
         > "${file}"
-    put_once "${file}" "${LEASE_PREFIX}/${sequence}.json" || [[ "$(<"${S3_ERRORS}")" == *PreconditionFailed* ]]
+    put_verified "${file}" "${LEASE_PREFIX}/${sequence}.json" || [[ "$(<"${S3_ERRORS}")" == *PreconditionFailed* ]]
 }
 
 read_lease()
@@ -587,7 +587,7 @@ run_group()
         > "${completion}"
     # A notice before the marker lands leaves the group unfinished.
     check_notices
-    put_once "${completion}" "${prefix}/completion.json" || stop upload-failure 1
+    put_verified "${completion}" "${prefix}/completion.json" || stop upload-failure 1
     finished_groups+=("${group_id}")
     heartbeat
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" "${group_id}" \
