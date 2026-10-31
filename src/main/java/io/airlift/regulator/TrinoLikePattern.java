@@ -151,7 +151,13 @@ public sealed class TrinoLikePattern
     private final Slice suffix;
     private final Matcher matcher;
     private final byte strategy;
-    private final LiteralMatchKernel.ShortLiteral shortLiteral;
+    // For a literal strategy's literal of at most 16 bytes, shortLiteralWidth is its word width,
+    // and 0 otherwise, shortLiteralLastOffset is where its last word starts, and shortLiteralFirst
+    // and shortLiteralLast are its first and last words; see LiteralMatchKernel.matchesShortLiteralAt.
+    private final int shortLiteralWidth;
+    private final int shortLiteralLastOffset;
+    private final long shortLiteralFirst;
+    private final long shortLiteralLast;
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     private TrinoLikePattern(
@@ -171,7 +177,11 @@ public sealed class TrinoLikePattern
         this.matcher = matcher;
         Slice literal = strategy == ENDS_WITH ? suffix : prefix;
         if ((strategy == EQUALS || strategy == STARTS_WITH || strategy == ENDS_WITH) && literal.length() > 0 && literal.length() <= 16) {
-            shortLiteral = new LiteralMatchKernel.ShortLiteral(literal);
+            int width = LiteralMatchKernel.shortLiteralWidth(literal.length());
+            shortLiteralWidth = width;
+            shortLiteralLastOffset = literal.length() - width;
+            shortLiteralFirst = LiteralMatchKernel.readShortLiteralWord(literal, 0, width);
+            shortLiteralLast = LiteralMatchKernel.readShortLiteralWord(literal, shortLiteralLastOffset, width);
             this.strategy = switch (strategy) {
                 case EQUALS -> SHORT_EQUALS;
                 case STARTS_WITH -> SHORT_STARTS_WITH;
@@ -180,7 +190,10 @@ public sealed class TrinoLikePattern
             };
         }
         else {
-            shortLiteral = null;
+            shortLiteralWidth = 0;
+            shortLiteralLastOffset = 0;
+            shortLiteralFirst = 0;
+            shortLiteralLast = 0;
             this.strategy = strategy;
         }
     }
@@ -341,8 +354,14 @@ public sealed class TrinoLikePattern
         if (length < minimumSize || (maximumSize >= 0 && length > maximumSize)) {
             return false;
         }
-        if (shortLiteral != null) {
-            return shortLiteral.matchesAt(input, strategy == SHORT_ENDS_WITH ? length - suffix.length() : 0);
+        if (shortLiteralWidth != 0) {
+            return LiteralMatchKernel.matchesShortLiteralAt(
+                    input,
+                    strategy == SHORT_ENDS_WITH ? length - suffix.length() : 0,
+                    shortLiteralWidth,
+                    shortLiteralLastOffset,
+                    shortLiteralFirst,
+                    shortLiteralLast);
         }
         return switch (strategy) {
             case EMPTY -> true;
@@ -392,7 +411,10 @@ public sealed class TrinoLikePattern
         this.suffix = pattern.suffix;
         this.matcher = pattern.matcher;
         this.strategy = pattern.strategy;
-        this.shortLiteral = pattern.shortLiteral;
+        this.shortLiteralWidth = pattern.shortLiteralWidth;
+        this.shortLiteralLastOffset = pattern.shortLiteralLastOffset;
+        this.shortLiteralFirst = pattern.shortLiteralFirst;
+        this.shortLiteralLast = pattern.shortLiteralLast;
     }
 
     /// Returns a copy of the compiled pattern bytes.
@@ -449,7 +471,7 @@ public sealed class TrinoLikePattern
 
     boolean usesShortLiteralForDiagnostics()
     {
-        return shortLiteral != null;
+        return shortLiteralWidth != 0;
     }
 
     boolean usesSharedOrderedLiteralSearchForDiagnostics()
