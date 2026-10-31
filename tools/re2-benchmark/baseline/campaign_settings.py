@@ -12,7 +12,6 @@ import copy
 import csv
 import fcntl
 import json
-import math
 import os
 import re
 import time
@@ -44,12 +43,13 @@ class SettingsError(RuntimeError):
     pass
 
 
+# OpenTelemetry exports an integer in 64 bits, and a number setting may be one, so every number stays below 2**63.
 def positive_integer(value):
-    return type(value) is int and value > 0
+    return type(value) is int and 0 < value < 2 ** 63
 
 
 def positive_number(value):
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
+    return type(value) in (int, float) and 0 < value < 2 ** 63
 
 
 def validate(settings):

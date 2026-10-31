@@ -98,10 +98,11 @@ class TestCampaignSettings(unittest.TestCase):
             rates["on_demand_total"] = 2 * rates["total"]
         campaign_settings.seeded(on_demand)
         region = SETTINGS["regions"]["us-west-2"]
-        invalid = {"max_hosts": [0, True, 1.5, None],
+        # A number exports in 64 bits.
+        invalid = {"max_hosts": [0, True, 1.5, None, 2 ** 63],
                    "max_hosts_per_platform": [0, -1],
                    "max_machine_hours": [0, -1, True, float("inf"), float("nan")],
-                   "max_usd": [0, -1, True, float("inf"), float("nan")],
+                   "max_usd": [0, -1, True, float("inf"), float("nan"), 10 ** 19, 10 ** 400],
                    "regions": [[], {}, {"bad region": region}, {"us-west-2": {**region, "max_vcpus": 0}},
                                {"us-west-2": {"max_vcpus": 8}}, {"us-west-2": {**region, "on_demand_max_vcpus": 0}},
                                {"us-west-2": {**region, "vcpus": 8}}],

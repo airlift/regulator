@@ -743,7 +743,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   listed for the platforms named, or for every platform. The running phases
   launch there once their [check](#launch-regions-and-purchase) passes.
 - `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`
-  and `set-limit region <region> max-vcpus N` change a limit.
+  and `set-limit region <region> max-vcpus N` change a limit, which must be
+  positive and below 2^63 so its gauge exports.
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand` changes how a
   platform buys hosts.
 - `set-share <phase> N|auto` pins a phase, named by its key in the settings'
