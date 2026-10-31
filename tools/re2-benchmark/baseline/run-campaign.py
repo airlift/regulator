@@ -2518,8 +2518,10 @@ class UnitDispatcher:
         self.accepted_path = result_root / "accepted-units.tsv"
         self.rejections_path = result_root / unit_session.SEMANTIC_REJECTIONS
         self.items_path = result_root / "work-items.tsv"
-        # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
+        # The frozen inputs' fingerprint, taken when the phase runs; each loop that starts or settles a worker checks
+        # it once.
         self.fingerprint = None
+        self.inputs_checked = False
         self.uploads_path = result_root / UNIT_UPLOADS
         # The seconds each group unit-uploads.tsv records took to measure, by its unit attempt and group.
         self.uploads = {}
@@ -3276,9 +3278,15 @@ class UnitDispatcher:
         reason = worker.instance.state_reason if worker.instance else "absent"
         return 1, "retryable-infrastructure", f"instance-terminated-without-results:state_reason={reason}"
 
+    def check_frozen_inputs(self):
+        """Refuse to start or settle a worker once the frozen inputs changed, hashing them at most once a loop."""
+        if not self.inputs_checked:
+            validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
+            self.inputs_checked = True
+
     def finish(self, worker):
         """Settle a worker whose cleanup was proven, from the uploads its cleanup recovered and its host's exit."""
-        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
+        self.check_frozen_inputs()
         status, classification, detail = self.host_exit(worker)
         objects = worker.directory / "recovered-uploads" / "objects"
         keys = recovered_keys(objects)
@@ -3692,11 +3700,10 @@ class UnitDispatcher:
             free[epoch] += self.remaining_seconds(item)
         return []
 
-    def pool_demand(self, pool, now):
-        """The market of the pool's next worker, if a new one would start some queued item sooner."""
+    def pool_demand(self, pool, now, late):
+        """The market of the pool's next worker, if a new one would start some of its late items sooner."""
         if self.gave_up(pool):
             return None
-        late = self.late_items(pool, now)
         if self.on_demand_ready.get(pool, 0) <= now:
             if any(self.on_demand(item) for item in late):
                 return "on-demand"
@@ -3783,15 +3790,26 @@ class UnitDispatcher:
         """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
         starting. Each pool in turn first takes up to its even part of the boot window, and the pools that need more
         then share what is left, so every pool that needs hosts gets its part; a pool short of Spot capacity tries
-        one Spot launch a loop until one of its Spot workers starts."""
+        one Spot launch a loop until one of its Spot workers starts. Each pool's late items are projected once, and
+        each admitted worker takes as many off them as its first leases hold."""
         blocked_vcpus = None
+        late = {}
+
+        def take_late(pool, worker):
+            # A first lease of a late item takes it off the list; one of an item not late frees the worker that
+            # would have taken it for the earliest late item.
+            leased = {worker.leases[sequence] for sequence in worker.outstanding()} - {None}
+            items = [item for item in late[pool] if item.identity not in leased]
+            late[pool] = items[len(leased) - (len(late[pool]) - len(items)):]
 
         def admit_pool(pool, limit):
             # Whether the pool admitted its limit and may take more; None once a refusal holds for every pool.
             nonlocal blocked_vcpus
+            if pool not in late:
+                late[pool] = self.late_items(pool, now)
             # A worker is planned only once its platform has room for it.
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
-                market = self.pool_demand(pool, now)
+                market = self.pool_demand(pool, now, late[pool])
                 if market is None:
                     self.refused.pop(pool, None)
                     return False
@@ -3816,13 +3834,14 @@ class UnitDispatcher:
                 if refusal and candidate.market == "on-demand" and market == "on-demand":
                     # The pool's Spot-eligible items need not wait for On-Demand admission.
                     self.on_demand_ready[pool] = ready_at
-                    if self.pool_demand(pool, now) == "spot":
+                    if self.pool_demand(pool, now, late[pool]) == "spot":
                         continue
                 if refusal:
                     self.pool_ready[pool] = ready_at
                     blocked_vcpus = blocked or blocked_vcpus
                     return False if scan else None
                 self.start(pool, candidate, now, starting)
+                take_late(pool, starting[-1])
                 if candidate.market == "spot" and pool in self.spot_shortages:
                     return False
                 limit -= 1
@@ -3847,7 +3866,7 @@ class UnitDispatcher:
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
         slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
-        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
+        self.check_frozen_inputs()
         check_purchase(self.arguments, job)
         session = worker_session(self.arguments.campaign_id, job)
         metadata = worker_metadata(self.arguments, job, session, f"campaigns/{self.arguments.campaign}/{session}")
@@ -3952,6 +3971,7 @@ class UnitDispatcher:
         """One loop of the phase, sharing what observed holds of each region's fleet with the campaign's other
         phases; returns whether it is over, with every worker settled and nothing queued."""
         self.observed = {} if observed is None else observed
+        self.inputs_checked = False
         now = time.monotonic()
         deadline_reached = now >= deadline
         self.poll()
