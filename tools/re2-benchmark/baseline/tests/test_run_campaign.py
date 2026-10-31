@@ -3308,6 +3308,27 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual({"1": f"{interrupted.session}/1", "2": f"{replacement.session}/{lease['sequence']}"},
                              accepted)
 
+    def test_hosts_are_judged_as_of_their_listing_while_an_interruption_waits_for_its_completions(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+            # Host 1 is interrupted after its first group, whose gathering outlasts host 2's boot deadline. Host 2
+            # boots a minute after its launch, after the listing that found host 1's interruption, so it is not
+            # judged to have missed its deadline while the controller waits for host 1's completion.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "interrupt-progress"}},
+                                  setup_seconds=lambda host: 60 if host.number == 2 else 0)
+            gather = RUN_CAMPAIGN.gather_group
+
+            def slow(validation, result_root, staging, item, expected, *arguments):
+                if (expected["host_session"], expected["sequence"]) == (fleet.hosts[0].session, 1):
+                    fleet.clock += RUN_CAMPAIGN.UNIT_WORKER_BOOT_ALLOWANCE_SECONDS + 300
+                return gather(validation, result_root, staging, item, expected, *arguments)
+
+            stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            booting = fleet.hosts[1]
+            self.assertEqual([], [row["detail"] for row in self.ledger
+                                  if row["host_session"] == booting.session and row["outcome"] == "released"])
+            self.assertEqual(0, booting.terminations)
+
     def test_pool_short_of_spot_capacity_retries_its_regions_and_turns_on_demand_only_after_its_wait(self):
         with tempfile.TemporaryDirectory() as temporary:
             # Both regions refuse the pool's first Spot launches, so each cools; before the wait is over the pool

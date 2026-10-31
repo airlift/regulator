@@ -3103,11 +3103,13 @@ class UnitDispatcher:
     def poll(self):
         """Follow every worker: list each live one's uploads and process them, and clean up each ended one, which
         takes no lease from then on, the workers' round trips on the request threads; then delete from S3 what
-        accepted groups and settled leases no longer need."""
+        accepted groups and settled leases no longer need. Every live worker is judged as of when its uploads were
+        listed, since following one may wait for its completions to be gathered."""
         live, ended = self.partition()
+        listed_at = time.time()
         for worker, objects in zip(live, self.concurrently(self.listing, live)):
             if objects is not None:
-                self.follow(worker, objects)
+                self.follow(worker, objects, listed_at)
         for worker in self.clean_up(ended):
             self.finish(worker)
         deleting = [(worker, sorted(worker.deletions)) for worker in self.workers.values() if worker.deletions]
@@ -3143,8 +3145,8 @@ class UnitDispatcher:
             return False
         return True
 
-    def follow(self, worker, objects):
-        """Process a live worker's uploads and decide whether its host was lost."""
+    def follow(self, worker, objects, listed_at):
+        """Process a live worker's uploads, listed at listed_at, and decide whether its host was lost as of then."""
         try:
             keys = set(objects)
             self.note_start(worker, keys)
@@ -3153,7 +3155,7 @@ class UnitDispatcher:
                 get_unit_worker_result(self.arguments, worker, key, path)
 
             self.reconcile(worker, keys, fetch)
-            if not worker.started and time.time() >= worker.job.boot_by:
+            if not worker.started and listed_at >= worker.job.boot_by:
                 # A host silent past its boot deadline is stopped, and the leases it was launched with go to other
                 # workers without spending an attempt.
                 worker.missed_boot = True
@@ -3183,7 +3185,7 @@ class UnitDispatcher:
             progress = max(*listed, worker.steps.get(current, {}).get("uploaded", 0), worker.adopted_at)
             # Its latest progress began the group it runs.
             worker.group = (current, unfinished[0], progress)
-            if time.time() - progress <= lease_timeout(sum(map(seconds.get, unfinished))):
+            if listed_at - progress <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
             if not worker.stopping:
                 self.issue(worker, None)
