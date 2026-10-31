@@ -40,8 +40,8 @@ from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
     changed as changed_settings, read as read_settings, seeded as seeded_settings)
 from fleet_budget import (
-    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
-    owner_fleet, read_state as read_fleet_state)
+    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, earlier_owner,
+    on_demand_regions, owner_fleet, read_state as read_fleet_state)
 from campaign_io import (UnsafeCampaignError, append_ledger, check_output, fsync_directory, ledger_rows, locked,
                          write_ledger)
 from cloud import CloudError
@@ -1322,6 +1322,27 @@ def validate_dependencies(root, arguments):
         subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
 
 
+# Each region vCPU limit and the market whose Standard quota holds it.
+REGION_VCPU_LIMITS = (("max_vcpus", "spot"), ("on_demand_max_vcpus", "on-demand"))
+# Each market's name in a refusal.
+MARKET_NAMES = {"spot": "Spot", "on-demand": "On-Demand"}
+
+
+def region_limit_over_quota(limits, quota, spot_reserve, earlier=None):
+    """The first of a region's vCPU limits that its market's Standard quota, as quota(market) reads it, cannot hold
+    after the market's reserve, as (name, market, quota, reserve); None when each fits. With earlier, the region's
+    limits before a change, only a raised or new limit is checked, since a lowered one needs no quota. A region
+    without an On-Demand allowance never launches On-Demand, whatever its quota."""
+    for name, market in REGION_VCPU_LIMITS:
+        if name not in limits or earlier is not None and limits[name] <= earlier.get(name, 0):
+            continue
+        reserve = spot_reserve if market == "spot" else ON_DEMAND_VCPU_SAFETY_RESERVE
+        available = quota(market)
+        if limits[name] > available - reserve:
+            return name, market, available, reserve
+    return None
+
+
 def validate_aws(arguments, platforms, jobs=None):
     required_platforms = list({
         (platform.name, platform.instance_type): platform
@@ -1347,18 +1368,13 @@ def validate_aws(arguments, platforms, jobs=None):
         public_zones[region] = {zone for _, zone in region_network(arguments, region).subnets}
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
-        spot_quota, on_demand_quota = (vcpu_quota(arguments, region, market, fresh=True)
-                                       for market in ("spot", "on-demand"))
-        limits = settings["regions"][region]
-        if limits["max_vcpus"] > spot_quota - arguments.spot_vcpu_reserve:
-            raise SystemExit(f"the campaign settings' max_vcpus exceeds the Standard Spot quota after its reserve in "
-                             f"{region}")
-        # A region without an On-Demand allowance never launches On-Demand, whatever its quota.
-        if ("on_demand_max_vcpus" in limits and
-                limits["on_demand_max_vcpus"] > on_demand_quota - ON_DEMAND_VCPU_SAFETY_RESERVE):
-            raise SystemExit(f"the campaign settings' on_demand_max_vcpus exceeds the Standard On-Demand quota after "
+        quotas = {market: vcpu_quota(arguments, region, market, fresh=True) for _, market in REGION_VCPU_LIMITS}
+        over = region_limit_over_quota(settings["regions"][region], quotas.get, arguments.spot_vcpu_reserve)
+        if over:
+            name, market = over[:2]
+            raise SystemExit(f"the campaign settings' {name} exceeds the Standard {MARKET_NAMES[market]} quota after "
                              f"its reserve in {region}")
-        spot_quotas[region], on_demand_quotas[region] = spot_quota, on_demand_quota
+        spot_quotas[region], on_demand_quotas[region] = quotas["spot"], quotas["on-demand"]
     # Each platform needs room for one host, after the safety reserves, in a region of its list in a market it buys.
     for platform in required_platforms:
         listed = platform_regions(arguments, platform.name)
@@ -2634,7 +2650,7 @@ class UnitDispatcher:
     @property
     def key(self):
         """The phase's name in its telemetry: its root relative to the campaign root."""
-        return self.result_root.relative_to(self.arguments.campaign_root).as_posix()
+        return phase_key(self.result_root, self.arguments.campaign_root)
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
@@ -4760,7 +4776,8 @@ def refuse_old_root(campaign_root):
         raise SystemExit(f"{campaign_root} was started by the earlier per-phase controllers, as {found} shows; this "
                          "controller cannot resume it, so start a new campaign root")
     fleet = read_fleet_state(campaign_root / STATE_FILE) or {"reservations": {}, "completed": {}}
-    if any(item["owner"].startswith("/") for item in [*fleet["reservations"].values(), *fleet["completed"].values()]):
+    if any(earlier_owner(item["owner"]) for items in (fleet["reservations"], fleet["completed"])
+           for item in items.values()):
         raise SystemExit(f"{campaign_root} was started by a controller that named its phases by their roots on the "
                          f"control host, as {campaign_root / STATE_FILE} shows; this controller cannot resume it, so "
                          "start a new campaign root")
@@ -5027,26 +5044,33 @@ def phase_progress(root, fleet, live):
         pools, {pool: hosts[pool[1]] for pool in pools}) if live else None)
 
 
-def phase_steering(root, settings, campaign_root):
-    """What a unit phase's campaign settings, or None, record of it, by its key in its campaign root, if any."""
-    return (settings or {}).get("phases", {}).get(root.relative_to(campaign_root).as_posix()
-                                                  if campaign_root else None, {})
+def phase_key(root, campaign_root):
+    """A unit phase's key, its root relative to its campaign root, or None without a campaign root."""
+    return root.relative_to(campaign_root).as_posix() if campaign_root else None
 
 
-def phase_live(root, controller, steering):
+def phase_steering(key, settings):
+    """The steering a unit phase's campaign settings record by its key, or an empty mapping when there are no
+    settings or they hold no such phase."""
+    return (settings or {}).get("phases", {}).get(key, {})
+
+
+def phase_live(complete, controller, steering):
     """Whether a unit phase is still running: its campaign's controller, by its process ID or None, is live, and the
-    phase is neither complete nor, as its steering records, failed."""
-    return controller is not None and not (root / PHASE_COMPLETE).is_file() and steering.get("state") != "failed"
+    phase is neither complete, as its completion marker shows, nor failed, as its steering records."""
+    return controller is not None and not complete and steering.get("state") != "failed"
 
 
 def phase_status(label, root, now, fleets, controller, settings, zone=None, campaign_root=None):
     """A unit phase's lines for the status command, read from its ledgers alone, given the process ID of its
     campaign's live controller, or None, its campaign's settings, or None, and its campaign root, if any. fleets holds
     each fleet state, so the phases sharing a fleet read it once."""
-    steering = phase_steering(root, settings, campaign_root)
+    key = phase_key(root, campaign_root)
+    steering = phase_steering(key, settings)
     state = steering.get("state", "running")
-    live = phase_live(root, controller, steering)
-    if (root / PHASE_COMPLETE).is_file():
+    complete = (root / PHASE_COMPLETE).is_file()
+    live = phase_live(complete, controller, steering)
+    if complete:
         state = "complete"
     elif live:
         state = f"{state} as process {controller}" + (f": {steering['reason']}" if steering.get("reason") else "")
@@ -5059,12 +5083,12 @@ def phase_status(label, root, now, fleets, controller, settings, zone=None, camp
     def line(name, text):
         lines.append(f"    {name:<10}{text}")
 
-    # The fleet's state is at the campaign root, and names the phase by its key.
+    # The fleet's state is at the campaign root. It names the phase by its key, or by its root on the control host
+    # in an earlier controller's root, which owner_fleet reads as the key.
     state_path = campaign_root / STATE_FILE if campaign_root else None
     if state_path and state_path not in fleets:
         fleets[state_path] = read_fleet_state(state_path)
-    fleet = (owner_fleet(fleets[state_path], root.relative_to(campaign_root).as_posix(), now)
-             if state_path and fleets[state_path] else None)
+    fleet = owner_fleet(fleets[state_path], key, now) if state_path and fleets[state_path] else None
     phase = phase_progress(root, fleet, live)
     groups = sum(len(item.groups) for item in phase.items)
     groups_accepted = sum(map(len, phase.accepted.values()))
@@ -5288,7 +5312,8 @@ def campaign_results(root):
     results = []
     for candidate, label, directory in phases:
         try:
-            live = phase_live(directory, controller, phase_steering(directory, settings, campaign_root))
+            live = phase_live((directory / PHASE_COMPLETE).is_file(), controller,
+                              phase_steering(phase_key(directory, campaign_root), settings))
             results.append((candidate, label, phase_results(directory, live), None))
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError, tarfile.TarError) as error:
             results.append((candidate, label, [], f"{type(error).__name__}: {error}"))
@@ -5463,17 +5488,16 @@ def control_change(arguments, now):
 
 def check_region_limits(root, aws, before, after):
     """Refuse settings whose raised or new region vCPU limits exceed the region's Standard quota after its reserve, the
-    check each phase's setup makes, so a limit a phase could not run under never reaches the controller. A lowered
-    limit needs no quota."""
+    check each phase's setup makes, so no raised limit reaches the controller that a phase could not run under. A
+    lowered limit needs no quota."""
     spot_reserve = json.loads((root / CAMPAIGN_OPTIONS).read_text())["spot_vcpu_reserve"]
     for region, limits in after["regions"].items():
-        for name, market, reserve in (("max_vcpus", "spot", spot_reserve),
-                                      ("on_demand_max_vcpus", "on-demand", ON_DEMAND_VCPU_SAFETY_RESERVE)):
-            if limits.get(name, 0) > before["regions"].get(region, {}).get(name, 0):
-                quota = aws.vcpu_quota(region, market)
-                if limits[name] > quota - reserve:
-                    raise SettingsError(f"{region} {name} {limits[name]:g} exceeds the Standard {market} quota of "
-                                        f"{quota:g} vCPUs after its reserve of {reserve:g}")
+        over = region_limit_over_quota(limits, lambda market: aws.vcpu_quota(region, market), spot_reserve,
+                                       before["regions"].get(region, {}))
+        if over:
+            name, market, quota, reserve = over
+            raise SettingsError(f"{region} {name} {limits[name]:g} exceeds the Standard {MARKET_NAMES[market]} "
+                                f"quota of {quota:g} vCPUs after its reserve of {reserve:g}")
 
 
 def add_region(arguments, store, aws):
