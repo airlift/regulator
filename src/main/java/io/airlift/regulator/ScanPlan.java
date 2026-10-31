@@ -50,8 +50,16 @@ final class ScanPlan
     private static final int MAX_OPERATIONS = 32;
     private static final int MAX_OPTIONALS = 4;
     private static final int MAX_LITERAL_BYTES = 256;
-    static final int SEARCH_MATCHED = -1;
-    static final int NO_MATCH = -2;
+    // An unanchored search returns a nonnegative value for a match, NO_MATCH, or the complement
+    // of the Slice-relative offset where it hands off to the ordinary engine. The value for a
+    // match is the Slice-relative match end when the caller passes groups or END_ONLY_GROUPS; a
+    // boolean search without groups may return any nonnegative value. The handoff offset
+    // precedes the context end, so its complement is never NO_MATCH.
+    static final int NO_MATCH = Integer.MIN_VALUE;
+    // The groups of a search that reports its match end without positions. Without groups, the
+    // attempt of a boolean caller may stop before the match end once the rest of the plan cannot
+    // fail; with these it reaches the end. Having no elements, it records nothing and is shared.
+    static final int[] END_ONLY_GROUPS = new int[0];
     // A boolean search hands off to the ordinary engine when, after each group of this many
     // failed attempts, the attempts average fewer than HANDOFF_BYTES bytes apart and at least
     // HANDOFF_REMAINING_BYTES remain to repay the ordinary engine's setup.
@@ -1415,11 +1423,13 @@ final class ScanPlan
     }
 
     /// Searches for a match that starts in `[start, contextEnd)`, or only at `start`
-    /// when `anchored`. Returns [#SEARCH_MATCHED], [#NO_MATCH], or the
-    /// Slice-relative offset where the search must continue on the ordinary engine, with the same
-    /// context, because its failed attempts exceeded the work budget. No match starts between
-    /// `start` and that offset. Groups are relative to `contextStart` and are cleared
-    /// unless the search matched. The budget belongs to this call, so every search starts afresh.
+    /// when `anchored`. Returns the Slice-relative end of the match, [#NO_MATCH], or the
+    /// complement of the Slice-relative offset where the search must continue on the ordinary
+    /// engine, with the same context, because its failed attempts exceeded the work budget. No
+    /// match starts between `start` and that offset. Groups are relative to `contextStart`
+    /// and are cleared unless the search matched. A search without groups serves a boolean
+    /// caller, and its result for a match may precede the match end; [#END_ONLY_GROUPS] reports
+    /// the end without positions. The budget belongs to this call, so every search starts afresh.
     int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
         if (wholeLiteralCandidates && !anchored) {
@@ -1448,7 +1458,7 @@ final class ScanPlan
             }
             long result = matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
             if (result >= 0) {
-                return SEARCH_MATCHED;
+                return (int) result - offset;
             }
             if (anchored) {
                 break;
@@ -1503,7 +1513,7 @@ final class ScanPlan
             }
             long result = matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
             if (result >= 0) {
-                return SEARCH_MATCHED;
+                return (int) result - offset;
             }
             if (anchored) {
                 break;
@@ -1554,7 +1564,7 @@ final class ScanPlan
                     ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups)
                     : matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
             if (result >= 0) {
-                return SEARCH_MATCHED;
+                return (int) result - offset;
             }
             long failure = ~result;
             failedWork += (int) (failure >>> 32) - candidate;
@@ -1567,19 +1577,20 @@ final class ScanPlan
     }
 
     /// Ends a search that continues on the ordinary engine at `resume`, leaving the groups
-    /// as a search without a match does.
+    /// as a search without a match does, and returns the search result that names `resume`.
     private static int handOff(int[] groups, int resume)
     {
         if (groups != null) {
             Arrays.fill(groups, -1);
         }
-        return resume;
+        return ~resume;
     }
 
     /// Unanchored boolean search that also stops once its failed attempts are dense, for a caller
-    /// that continues on an engine which does not visit each candidate. Returns
-    /// [#SEARCH_MATCHED], [#NO_MATCH], or the Slice-relative offset where the search
-    /// must continue. No match starts between `start` and that offset.
+    /// that continues on an engine which does not visit each candidate. Returns what a [#search]
+    /// without groups returns: a nonnegative value for a match, [#NO_MATCH], or the complement of
+    /// the Slice-relative offset where the search must continue. No match starts between `start`
+    /// and that offset.
     int searchBeforeHandoff(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded)
     {
         byte[] bytes = input.byteArray();
@@ -1596,7 +1607,7 @@ final class ScanPlan
                     (failures != 0 && failures % HANDOFF_ATTEMPTS == 0 &&
                             candidate - searchStart < (long) failures * HANDOFF_BYTES &&
                             end - candidate >= HANDOFF_REMAINING_BYTES)) {
-                return candidate - offset;
+                return ~(candidate - offset);
             }
             candidate = asciiFolded
                     ? nextAsciiFoldedCandidate(bytes, candidate, end, leading)
@@ -1608,7 +1619,7 @@ final class ScanPlan
                     ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
                     : matchUnanchoredAt(bytes, base, end, candidate, false, null);
             if (result >= 0) {
-                return SEARCH_MATCHED;
+                return (int) result - offset;
             }
             long failure = ~result;
             failedWork += (int) (failure >>> 32) - candidate;
@@ -2161,7 +2172,8 @@ final class ScanPlan
 
     private static void success(int[] groups, int start, int end)
     {
-        if (groups != null) {
+        // END_ONLY_GROUPS records nothing.
+        if (groups != null && groups.length != 0) {
             groups[0] = start;
             groups[1] = end;
         }

@@ -1602,12 +1602,12 @@ public sealed class Re2
         return finishScanSearch(input, 0, input.length(), result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
     }
 
-    /// Returns whether a scan-plan search that returned `result` matched. A
-    /// [ScanPlan#SEARCH_MATCHED] or [ScanPlan#NO_MATCH] result is final. Any
-    /// other result is the offset where the search handed off; the search then finishes on the
-    /// ordinary engine with the context, anchor, and context-relative capture offsets the plan
-    /// received. No match starts between the plan's search start and that offset. This route
-    /// skips the plan, so the search cannot hand off again.
+    /// Returns whether a scan-plan search that returned `result` matched. A nonnegative result
+    /// or [ScanPlan#NO_MATCH] is final. Any other result is the complement of the offset where
+    /// the search handed off; the search then finishes on the ordinary engine with the context,
+    /// anchor, and context-relative capture offsets the plan received. No match starts between
+    /// the plan's search start and that offset. This route skips the plan, so the search cannot
+    /// hand off again.
     private boolean finishScanSearch(
             Slice text,
             int contextStart,
@@ -1617,10 +1617,13 @@ public sealed class Re2
             int[] groupOffsets,
             MatchWorkspaces workspaces)
     {
-        if (result < 0) {
-            return result == ScanPlan.SEARCH_MATCHED;
+        if (result >= 0) {
+            return true;
         }
-        return matchInternal(partialProg, text, contextStart, contextEnd, result, contextEnd, anchor, groupOffsets, workspaces, false);
+        if (result == ScanPlan.NO_MATCH) {
+            return false;
+        }
+        return matchInternal(partialProg, text, contextStart, contextEnd, ~result, contextEnd, anchor, groupOffsets, workspaces, false);
     }
 
     /// Returns whether the pattern has a match in `[start, end)`, retaining the complete Slice as assertion context.
@@ -1864,10 +1867,10 @@ public sealed class Re2
     }
 
     /// Continues on the ordinary engine an unanchored search of all of `text` that a
-    /// scan-plan search handed off at `resume`, as [#finishScanSearch] does.
-    boolean continueScanSearch(Slice text, int resume, int[] groups)
+    /// scan-plan search handed off when it returned `result`, as [#finishScanSearch] does.
+    boolean continueScanSearch(Slice text, int result, int[] groups)
     {
-        return matchInternal(partialProg, text, 0, text.length(), resume, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
+        return matchInternal(partialProg, text, 0, text.length(), ~result, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
     }
 
     Dfa.CandidateStartCursor createCandidateStartCursor()
@@ -2156,21 +2159,32 @@ public sealed class Re2
     /// match on the ordinary engine.
     long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
     {
-        // CompiledScanRe2 copies this loop; keep in step.
+        // CompiledScanRe2 and ScanKernelGenerator.defineCount copy this loop; keep in step.
         ScanPlan plan = booleanPlans.scanPlan();
-        int[] groups = new int[2];
         int length = text.length();
         long count = 0;
         int start = 0;
+        // A search that hands off finishes on the ordinary engine, which reports the end in group
+        // storage. The first handoff allocates it, and later ones in this call reuse it.
+        int[] handoffGroups = null;
         while (start < length) {
-            int result = asciiFolded
-                    ? plan.searchAsciiFolded(text, 0, length, start, false, false, groups)
-                    : plan.search(text, 0, length, start, false, false, groups);
-            if (!finishScanSearch(text, 0, length, result, Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES)) {
-                break;
+            int matchEnd = asciiFolded
+                    ? plan.searchAsciiFolded(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS)
+                    : plan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
+            if (matchEnd < 0) {
+                if (matchEnd == ScanPlan.NO_MATCH) {
+                    break;
+                }
+                if (handoffGroups == null) {
+                    handoffGroups = new int[2];
+                }
+                if (!continueScanSearch(text, matchEnd, handoffGroups)) {
+                    break;
+                }
+                matchEnd = handoffGroups[1];
             }
             count++;
-            start = groups[1];
+            start = matchEnd;
         }
         return count;
     }
@@ -3683,17 +3697,26 @@ public sealed class Re2
         @Override
         long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
         {
-            int[] groups = new int[2];
             int length = text.length();
             long count = 0;
             int start = 0;
+            int[] handoffGroups = null;
             while (start < length) {
-                int result = scan.search(text, 0, length, start, false, false, groups);
-                if (!super.finishScanSearch(text, 0, length, result, Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES)) {
-                    break;
+                int matchEnd = scan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
+                if (matchEnd < 0) {
+                    if (matchEnd == ScanPlan.NO_MATCH) {
+                        break;
+                    }
+                    if (handoffGroups == null) {
+                        handoffGroups = new int[2];
+                    }
+                    if (!super.continueScanSearch(text, matchEnd, handoffGroups)) {
+                        break;
+                    }
+                    matchEnd = handoffGroups[1];
                 }
                 count++;
-                start = groups[1];
+                start = matchEnd;
             }
             return count;
         }
