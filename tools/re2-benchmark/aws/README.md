@@ -547,6 +547,16 @@ uploaded, and accepted steps. Export runs on the SDK's own threads, so a
 collector that is down drops what it misses and the loop goes on; the
 controller's journal still has every event's line.
 
+Grafana's Regulator folder holds three dashboards, provisioned from
+`control-host/grafana/`: Regulator fleet (phase states, units accepted, finish,
+workers, queued and corrected work left, each worker's group, hosts not yet
+reporting, events, and unit attempts), Regulator health (one panel per health
+check, red at its threshold: loop seconds over 30, a worker at zero slack, an
+idle stop with work queued, the boot window shrinking, a launch refusal over
+10 minutes, a finish past the deadline, projected spend at `max_usd`, a
+spending stop, a paused phase, and a leftover), and Regulator spend. There is
+no Grafana alerting; the monitor reads the panels by their titles.
+
 Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
 across replacements, through the subnet router; Session Manager is the shell
 when the router is down. ssh logs in with the private key of the launch's
