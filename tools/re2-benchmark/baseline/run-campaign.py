@@ -4408,9 +4408,10 @@ class Campaign:
     def track_pauses(self, running):
         """Record in each running phase's pauses ledger when it is paused, for a fault or by its settings, and when it
         runs again; the phase's deadline moves out by each pause the ledger records, so a pause spends none of the
-        phase's time. A change of its settings is recorded as of when the settings took it, so a pause or resume made
-        while no controller ran counts from when it was made, and a fault as of when it is found. A phase whose
-        setup never made its root records none: its time has not begun."""
+        phase's time. A change of its settings is recorded as of when the settings took it, so a pause still open
+        when the controller starts counts from when it was made, and a fault as of when it is found; a pause and its
+        resume both made while no controller ran are never seen, so not recorded. A phase whose setup never made its
+        root records none: its time has not begun."""
         settings = live_settings(self.arguments)
         now = time.time()
         for phase in running:
