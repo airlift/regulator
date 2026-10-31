@@ -4354,6 +4354,11 @@ def prepare_phase(arguments, root):
         return dispatcher, error
 
 
+def error_text(error):
+    """An error's message, or its type's name when it has none, with the notes added to it as it was raised."""
+    return "; ".join([str(error) or type(error).__name__, *getattr(error, "__notes__", ())])
+
+
 class Campaign:
     """The campaign's controller: every candidate's phases in this one process, sharing the fleet's hosts.
 
@@ -4614,8 +4619,7 @@ class Campaign:
                 try:
                     future.result()
                 except (Exception, SystemExit) as error:
-                    print(f"{phase.key}: launches stay in the regions checked before: "
-                          f"{'; '.join([str(error), *getattr(error, '__notes__', ())])}", flush=True)
+                    print(f"{phase.key}: launches stay in the regions checked before: {error_text(error)}", flush=True)
                 else:
                     namespace.ami_names, namespace.region_offerings = checked.ami_names, checked.region_offerings
             if (phase.checking is None and not phase.fault and
@@ -4645,7 +4649,7 @@ class Campaign:
             try:
                 phase.dispatcher.sweep(observed)
             except (Exception, SystemExit) as error:
-                print(f"{phase.key}: cleanup failed: {error}; retrying", flush=True)
+                print(f"{phase.key}: sweep failed: {error_text(error)}; retrying", flush=True)
             return
         try:
             finished = phase.dispatcher.step(phase.deadline, observed)
@@ -4734,11 +4738,11 @@ class Campaign:
         self.telemetry.event("phase-complete", f"{phase.key}: complete", phase=phase.key)
 
     def fail(self, phase, error):
-        phase.state, phase.failure = "failed", str(error) or type(error).__name__
+        phase.state, phase.failure = "failed", error_text(error)
         self.telemetry.event("phase-failed", f"{phase.key}: failed: {phase.failure}", phase=phase.key)
 
     def fault(self, phase, error):
-        phase.fault = "; ".join([str(error) or type(error).__name__, *getattr(error, "__notes__", ())])
+        phase.fault = error_text(error)
         self.telemetry.event("phase-paused", f"{phase.key}: paused: {phase.fault}", phase=phase.key)
 
 

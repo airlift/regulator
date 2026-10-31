@@ -573,7 +573,9 @@ class TestRunCampaign(unittest.TestCase):
                 def end(self):
                     events.append(("end", self.key))
                     if self.key in failing:
-                        raise SystemExit("campaign completed with unresolved units")
+                        error = SystemExit("campaign completed with unresolved units")
+                        error.add_note("a note the error carries")
+                        raise error
                     root = campaign_root / self.key
                     root.mkdir(parents=True, exist_ok=True)
                     (root / "campaign-events.tsv").touch()
@@ -628,7 +630,8 @@ class TestRunCampaign(unittest.TestCase):
                     patch.object(os, "replace", side_effect=interrupt):
                 run()
             self.assertEqual(RUN_CAMPAIGN.control_host.ENDED_EXIT, failed.exception.code)
-            self.assertIn("failed phases:\na/smoke: campaign completed with unresolved", errors.getvalue())
+            self.assertIn("failed phases:\na/smoke: campaign completed with unresolved units; a note the error carries",
+                          errors.getvalue())
             # Having ended, the controller finishes that change and lists every file of the root for finish to check
             # its copy against.
             self.assertEqual(1, len(interrupted))
