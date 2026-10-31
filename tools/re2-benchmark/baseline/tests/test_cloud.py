@@ -169,8 +169,8 @@ class FakeCloud:
         # Each volume's instance, by volume ID.
         self.attachments = {}
         self.region_snapshots = {}
-        # Each target group's registered (instance, port) targets, and those deregistered and still draining, which
-        # it lists until a wait for their deregistration, by ARN.
+        # Each target group's registered (instance, port) targets, by ARN, and those deregistered but still
+        # draining, which the group lists until a wait for their deregistration.
         self.targets = {}
         self.draining = {}
         # Each control host launch's parameters, by instance ID.
@@ -600,13 +600,13 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_client_error("run_instances", "UnauthorizedOperation", "not authorized", http_status_code=403)
         for _ in range(cloud.LAUNCH_ATTEMPTS):
             ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
-        # A shortage proves nothing launched under the token whichever request it answers, after an unanswered
-        # request or after botocore's own retries of the server error EC2 sends it as.
+        # A shortage proves nothing launched under the token, whichever request it answers: the one after an
+        # unanswered request, or the last of botocore's own retries, since EC2 sends a shortage as a server error.
         ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
         ec2.add_client_error("run_instances", "InsufficientInstanceCapacity", http_status_code=500)
         ec2.add_client_error("run_instances", "InsufficientInstanceCapacity", http_status_code=500,
                              response_meta={"RetryAttempts": 2})
-        # An outright refusal after either proves nothing about the instance the request before it may have launched.
+        # An outright refusal after either says nothing about whether the request before it launched an instance.
         ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
         ec2.add_client_error("run_instances", "UnauthorizedOperation", http_status_code=403)
         ec2.add_client_error("run_instances", "UnauthorizedOperation", http_status_code=403,

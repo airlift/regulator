@@ -112,8 +112,8 @@ class Telemetry:
         self.context = trace.set_span_in_context
 
     def observe(self, points):
-        """Set every gauge to points, each gauge's values by its name as (attributes, value); a gauge points names no
-        value of reads none, but each series of CLEARED_GAUGES observed before reads 0."""
+        """Set every gauge to points, each gauge's values by its name as (attributes, value). A gauge that points
+        does not name reads no value, except that each series of CLEARED_GAUGES observed before reads 0."""
         unknown = set(points) - GAUGES.keys()
         if unknown:
             raise ValueError(f"no such gauge: {', '.join(sorted(unknown))}")

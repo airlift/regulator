@@ -115,8 +115,8 @@ def unit_columns(fields, *extra):
 
 
 def read_tsv(path: Path, required=(), exact=None, ledger=False):
-    """A TSV file's rows, each with its source and line; a ledger's are read as ledger_lines reads them, without a
-    row a crash tore."""
+    """A TSV file's rows, each with its source and line. With ledger, the file is read as ledger_lines reads it,
+    without a row a crash tore."""
     try:
         input_file = ledger_lines(path) if ledger else path.open(newline="", encoding="utf-8")
     except OSError as error:

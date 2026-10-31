@@ -4,8 +4,8 @@
 # key, has sshd listen on 443, mounts the campaign volume, unpacks the launch inputs onto it the first time, checks
 # out the candidate commits, starts the campaign's controller, and then starts Grafana with credentials it keeps in
 # SSM. Nothing here stops the host: it outlives the campaign until teardown. cloud-init runs it once per instance, so
-# a reboot runs none of it again; what it repairs on the volume, an interrupted first boot left for the next host
-# control-host replace starts there.
+# a reboot runs none of it again. A first boot may be interrupted. The next host that control-host replace starts on
+# the volume then repairs what that boot left there.
 set -Eeuo pipefail
 exec > >(tee -a /var/log/regulator-control-host.log) 2>&1
 
@@ -74,7 +74,7 @@ install -d -m 777 "${MOUNT}/lgtm"
 
 # The launch inputs: the controller's command, the candidate commits, the campaign's settings, and its language
 # plans. A replaced host finds them on the volume already. They are unpacked beside their place and moved into it
-# whole, so a first boot interrupted while unpacking leaves them for the next host to unpack again.
+# whole, so when a first boot is interrupted while unpacking, the next host finds none and unpacks them again.
 if [[ ! -f ${INPUTS}/controller.env ]]; then
     aws s3 cp --region "${CONTROL_HOST_REGION}" --no-progress "${LAUNCH_INPUTS_URI}" /var/tmp/launch-inputs.tar.gz
     printf '%s  %s\n' "${LAUNCH_INPUTS_SHA256}" /var/tmp/launch-inputs.tar.gz | sha256sum --check --strict

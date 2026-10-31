@@ -183,7 +183,7 @@ PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
 # Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
 PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
-# Admission reuses a region's vCPU quota this long, so one AWS raises or lowers soon holds.
+# Admission reuses a region's vCPU quota reading this long, so a quota AWS raises or lowers takes effect within it.
 VCPU_QUOTA_CACHE_SECONDS = 5 * 60
 # AWS refused every placement query of the 2.0 run, whose target of 64 instances was above this.
 PLACEMENT_SCORE_MAXIMUM_TARGET = 50
@@ -1457,10 +1457,10 @@ def region_check_workers(arguments):
 
 
 def recheck_regions(checked, platforms, offerings):
-    """Check a running phase's regions again on checked, a copy of its namespace, as check_regions does. A check
-    that fails still puts the archives again in each region the phase launches in, as offerings name them, one
-    region at a time, so one region's failure leaves the others' archives fresh before they expire; each region's
-    failure is a note on the check's."""
+    """Check a running phase's regions again on checked, a copy of its namespace, as check_regions does. When the
+    check fails, upload the archives again to each region the phase launches in, as offerings name them, one region
+    at a time, so one region's failure leaves the others' archives fresh before they expire. Each region's failure
+    is added as a note to the check's error."""
     try:
         check_regions(checked, platforms)
     except (Exception, SystemExit) as error:
@@ -2401,9 +2401,9 @@ def process_start(process_id):
 @contextlib.contextmanager
 def controller_lock(campaign_root, campaign):
     """Own campaign_root as its only controller, and once it does, record this process's ID and start time in its
-    controller record. While another controller owns it, refuse, and refuse a campaign that has ended, as its manifest
-    shows, before the record its manifest lists changes, so a reboot or a replaced host neither runs an ended campaign
-    again nor changes its root; Dain reopens one with control's reopen."""
+    controller record. Refuse while another controller owns it. Refuse a campaign whose manifest shows it ended
+    before changing the controller record the manifest lists, so a reboot or a replaced host neither runs an ended
+    campaign again nor changes its root. Dain reopens one with control's reopen."""
     campaign_root.mkdir(parents=True, exist_ok=True)
     lock_path = campaign_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
@@ -3437,8 +3437,9 @@ class UnitDispatcher:
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
     def cool_down(self, pool, market, region, shortage):
-        """Keep the pool's new workers in the market out of the region for its cool-down, as a shortage of its
-        capacity there if shortage."""
+        """Keep the pool's new workers in the market out of the region for its cool-down. When shortage is true, AWS
+        refused the launch for the market's capacity or quota, or for the Spot price, so also record when the pool's
+        shortage in the market began."""
         self.pool_regions.setdefault((pool, market), {})[region] = time.monotonic()
         if shortage:
             self.shortages.setdefault((pool, market), time.monotonic())
@@ -3855,8 +3856,8 @@ class UnitDispatcher:
         request threads. A worker whose first leases S3 did not all take launches nothing, as a launch AWS refused
         does: it has ended, and is settled in the same loop once its cleanup is proven, so its reservation leaves the
         boot window before the campaign's next phase launches. An exception during admission still launches the
-        workers admitted before it, so none stays recorded as starting with no launch, and an error launching them
-        is noted on the admission's."""
+        workers admitted before it, so none stays recorded as starting with no launch. An error launching them is
+        added as a note to the admission's error."""
         starting = []
         try:
             self.admit(now, starting)
@@ -3914,7 +3915,8 @@ class UnitDispatcher:
                     write_attempt(self.attempts_path, worker.job, "started",
                                   f"instance_id={worker.instance_id};availability_zone={launched[1]}")
         finally:
-            # A launch asked for whose answer was lost is found by its session's tag.
+            # A worker whose launch was never asked for has failed to launch. One whose launch was asked for, but
+            # whose answer was lost, is found later by its session's tag.
             for worker in starting:
                 if worker.job.host_epoch not in asked and not worker.launch_failure:
                     worker.launch_failure = ("retryable-infrastructure", LAUNCH_NOT_ATTEMPTED)
@@ -3924,17 +3926,17 @@ class UnitDispatcher:
         starting. Each pool in turn first takes up to its even part of the boot window, and the pools that need more
         then share what is left, so every pool that needs hosts gets its part; a pool short of capacity in a market
         tries one launch a loop in it until one of its workers in the market starts. Each pool's late items are
-        projected once, and each admitted worker's first leases take theirs off them; a first lease of an item not
-        late projects them again."""
+        projected once. Each admitted worker's first leases remove their items from that projection, and a first
+        lease of an item that is not late projects them again."""
         if not self.pools:
             return
         blocked_vcpus = None
         late = {}
 
         def take_late(pool, worker):
-            # No worker reached a late item before a new worker's boot, so leasing one changes no earlier start. A
-            # lease of an item not late frees the worker that would have taken it for as many later items as their
-            # estimates fit before then, which only the projection counts.
+            # No running worker reaches a late item before a new worker boots, so leasing a late item changes no
+            # other item's start. Leasing an item that is not late frees the worker that would have run it, which
+            # may then reach later items before the new worker boots; only projecting again counts those.
             leased = {worker.leases[sequence] for sequence in worker.outstanding()} - {None}
             if leased <= {item.identity for item in late[pool]}:
                 late[pool] = [item for item in late[pool] if item.identity not in leased]
@@ -3969,7 +3971,7 @@ class UnitDispatcher:
                                     UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
                 if blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                     return False
-                # Checked before the reservation, which a worker owns only once it starts.
+                # Checked before reserving, since no worker owns a reservation until its starting record is written.
                 self.check_frozen_inputs()
                 check_purchase(self.arguments, candidate)
                 candidate, ready_at, refusal, scan, blocked = admit_launch(
@@ -4242,8 +4244,9 @@ class Phase:
     fault: str = ""
     # When, on the monotonic clock, the begun dispatch's launches end, as this loop found it.
     deadline: float = None
-    # The settings' regions as they stood when the phase's regions were last checked, and when, on the monotonic
-    # clock, and a check of a running phase's regions on the setup thread, with the copy of its namespace it checks.
+    # The settings' regions as they stood when the phase's regions were last checked, and when that was, on the
+    # monotonic clock. The check of a running phase's regions under way on the setup thread: its future, the copy of
+    # the phase's namespace it checks, and the namespace that adopts what it finds.
     regions: str = None
     checked_at: float = None
     checking: tuple = None
@@ -4369,11 +4372,10 @@ def reduce_primary(arguments, phase):
 
 
 def prepare_phase(arguments, root):
-    """Plan one of the campaign's phases, check that it may run, stage what its hosts read, and begin its dispatch;
-    returns its dispatcher and no fault. A check its launches need that fails once its dispatcher is built, as when
-    its region's quota no longer holds its limit, comes back as the fault, with the dispatch not begun, so the phase
-    still stops the hosts its ledgers name. This runs on the campaign's setup thread, so the controller's loop never
-    waits for it."""
+    """Plan one of the campaign's phases, check that it may run, stage what its hosts read, and begin its dispatch.
+    Returns (dispatcher, None) once the dispatch begins, or (dispatcher, error) when a step after the dispatcher is
+    built fails, as when its region's quota no longer holds its limit, so the phase still stops the hosts its ledgers
+    name. This runs on the campaign's setup thread, so the controller's loop never waits for it."""
     items, kind, plans, platforms, result_root = plan_phase(arguments, root)
     validate_source(root, arguments)
     validate_dependencies(root, arguments)
@@ -4583,10 +4585,10 @@ class Campaign:
         """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
         reduction, and start each step whose predecessors completed, unless it is complete already or has nothing
         to do. A setup that fails, as one whose region's quota no longer holds its limit, pauses its phase for that
-        fault; once it built the phase's dispatch, the phase still sweeps the hosts it holds, which count against
-        the limits, and with none, its hosts wait for it. A phase paused for a fault starts again once it is
-        resumed, as it would under a restarted controller, which rebuilds its dispatch from its ledgers, once
-        the acceptance threads finish what its dispatch gave them."""
+        fault. If the setup built the phase's dispatch, the paused phase still sweeps the hosts it holds, which
+        count against the limits; if not, its hosts wait until it is set up again. A phase paused for a fault
+        starts again once it is resumed and the acceptance threads finish what its dispatch gave them. Its new
+        dispatch is rebuilt from its ledgers, as under a restarted controller."""
         settings = live_settings(self.arguments)
         for phase in self.phases.values():
             if phase.state == "starting" and phase.future.done():
@@ -4611,8 +4613,8 @@ class Campaign:
                 if fault is not None:
                     self.fault(phase, fault)
             elif phase.fault:
-                # Resumed once its pause was recorded, and once its dispatch gathers nothing more into the staging
-                # its next dispatch gathers into.
+                # Start again once the settings resume the pause this controller recorded, and once the old dispatch
+                # has stopped gathering into the staging that the next dispatch gathers into.
                 if (self.recorded.get(phase.key) == "paused" and settings["phases"][phase.key]["state"] != "paused"
                         and not (phase.dispatcher and phase.dispatcher.gathering())):
                     phase.fault, phase.dispatcher, phase.deadline = "", None, None
@@ -4642,11 +4644,12 @@ class Campaign:
         return json.dumps([settings["regions"], settings["platform_regions"]], sort_keys=True)
 
     def follow_regions(self, running):
-        """Check each running phase's regions again once the settings' regions or a platform's list of them
-        changed, and every REGION_RECHECK_SECONDS, which puts its archives again before they expire, as its setup
-        did, on the setup thread; a phase launches in the regions that check finds only once it passes, and until
-        then where it did. A check that fails still puts the archives again in each region the phase launches in,
-        each region on its own, and is logged, and runs again at the next change or the next day."""
+        """Check each running phase's regions again on the setup thread once the settings' regions or a platform's
+        list of them changed, and every REGION_RECHECK_SECONDS. Each check uploads the phase's archives again, as
+        its setup did, before they expire. A phase launches in the regions a check finds only once it passes, and
+        until then where it did. A check that fails still uploads the archives to each region the phase launches
+        in, one region at a time. Its failure is logged, and the check runs again at the next change or the next
+        day."""
         regions = self.regions()
         now = time.monotonic()
         for phase in running:
@@ -4705,13 +4708,14 @@ class Campaign:
         the limits leave free toward the target its work left, or its pinned share, gives it. The hosts a paused or
         draining phase holds count against the limits until they stop.
 
-        A phase above its target gives up the hosts past it, and launches none past it, while its share is pinned,
-        or while another phase is below its target on that platform, or anywhere once the fleet's limit leaves no
-        host free, or while the hosts held pass the fleet's or the platform's limit, as once a limit is lowered; so a
-        host it gives up goes to the phase waiting, rather than back to it as its stopping hosts end. A draining
-        phase's hosts go on taking its leases, so it gives up as many of its open hosts as the open hosts still pass
-        a limit by once the launching phases have given up theirs. Otherwise hosts move between phases only when a
-        phase is waiting for them, so the shares' changes as the work left is corrected move none on their own."""
+        A phase above its target gives up the hosts past it, and launches none past it, in three cases: while its
+        share is pinned; while another phase is below its target on that platform, or on any platform once the
+        fleet's limit leaves no host free; and while the hosts held pass the fleet's or the platform's limit, as once
+        a limit is lowered. Because it launches none past its target, a host it gives up goes to the waiting phase
+        rather than back to it as its stopping hosts end. A draining phase's hosts go on taking its leases. Once the
+        launching phases have given up theirs, a draining phase stop-leases enough of its open hosts to bring the
+        open hosts within the limits. Otherwise hosts move between phases only when a phase is waiting for them, so
+        the shares' changes as the work left is corrected move none on their own."""
         settings = live_settings(self.arguments)
         limits = settings["max_hosts"], settings["max_hosts_per_platform"]
         launching = [phase for phase in running if phase.dispatcher.steering == "running"]
@@ -5561,7 +5565,8 @@ def add_region(arguments, store, aws, spot_reserve):
 
 
 def control(arguments, aws):
-    """Change the campaign's live settings as the actor's control command; add-region reaches AWS through aws."""
+    """Change the campaign's live settings as the actor's control command. Add-region, and any raised or new region
+    limit, reach AWS through aws."""
     if arguments.actor == "monitor" and arguments.command not in MONITOR_COMMANDS:
         raise SystemExit(f"only dain runs {arguments.command}; the monitor runs {', '.join(MONITOR_COMMANDS)}")
     # The controller records its campaign as it starts, so a command for one campaign never steers another's root.
@@ -5581,8 +5586,8 @@ def control(arguments, aws):
     manifest = arguments.root / control_host.MANIFEST
 
     def check_ended():
-        """Refuse a command but reopen on an ended campaign, whose manifest lists its settings and their events, and
-        reopen on one that has not ended."""
+        """Refuse every command but reopen on an ended campaign, whose manifest lists its settings and their
+        events. Refuse reopen on a campaign that has not ended."""
         if manifest.is_file() != (arguments.command == "reopen"):
             if arguments.command == "reopen":
                 message = f"campaign {arguments.campaign} has not ended: {arguments.root} has no {manifest.name}"
@@ -5591,14 +5596,15 @@ def control(arguments, aws):
             raise SettingsError(message)
 
     def checked(settings):
-        # The change checks again under the settings lock, which the controller holds as it writes the manifest.
+        # The change checks again under the settings lock. The controller holds that lock as it writes the manifest,
+        # so no change lands in a root once it is listed.
         check_ended()
         update(settings)
 
     def reopened():
-        # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
-        # A second reopen then finds the campaign not ended, and one interrupted before this leaves the
-        # manifest for its retry.
+        # Without the manifest the controller starts again, and finish refuses until the next controller writes a
+        # new list. A second reopen is refused, since the campaign has not ended. A reopen interrupted before this
+        # leaves the manifest, so it can be run again.
         manifest.unlink()
         fsync_directory(arguments.root)
 

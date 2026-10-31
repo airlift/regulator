@@ -54,10 +54,10 @@ import test_fleet  # noqa: E402
 
 
 def campaign_settings(root, platform_regions=None, purchase=None, buckets=None, **values):
-    """Seed the campaign root's settings, and record its options as campaign "campaign" with the default Spot vCPU
-    reserve, as its first execution does, with values over test_fleet_budget's: each platform's launch regions, by
-    default the default region for both platforms, how it buys hosts, and each of those regions with its bucket, which
-    buckets names or is "bucket", and a limit of 736 vCPUs."""
+    """Seed the campaign root's settings, with values over test_fleet_budget's, and record its options as campaign
+    "campaign" with the default Spot vCPU reserve, as its first execution does. The settings give each platform's
+    launch regions, by default the default region for both platforms, and how it buys hosts. Each of those regions
+    gets its bucket, which buckets names or is "bucket", and a limit of 736 vCPUs."""
     platform_regions = platform_regions or dict.fromkeys(("r8i", "r9g"), RUN_CAMPAIGN.default_regions())
     regions = dict.fromkeys(region for listed in platform_regions.values() for region in listed)
     root.mkdir(parents=True, exist_ok=True)
@@ -2408,7 +2408,7 @@ class TestRunCampaign(unittest.TestCase):
                 "campaign-events.tsv": (
                     lambda path, value: RUN_CAMPAIGN.write_event(path, "interruption", "baseline", job, worker, value),
                     lambda path: [row["reason"] for row in RUN_CAMPAIGN.aggregate_results.load_events([path])])}
-            # Each crash keeps the first bytes of the row's value it names.
+            # Each crash keeps the given number of bytes of the second row's value.
             for case, (ledger, value, kept) in enumerate((
                     ("job-attempts.tsv", "lease written", 8), ("job-attempts.tsv", "bail é", 6),
                     (EVENTS, "a paused: fault\nsee the log", 16), ("campaign-events.tsv", "spot-interruption", 4))):

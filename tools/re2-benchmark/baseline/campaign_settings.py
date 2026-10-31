@@ -1,10 +1,11 @@
 """A campaign's live settings: what may change while it runs, in campaign-settings.json at the campaign root.
 
-The controller reloads the settings every loop. Every change is made under campaign-settings.lock, held only while
-the file is rewritten: it bumps the version and appends an event naming its actor to campaign-settings-events.tsv,
-so no change is anonymous. A change is staged beside the file and takes effect only once its event is recorded, and
-the next change or reload finishes or discards one a failure interrupted, so no version takes effect without its
-event. What decides a measurement's validity is frozen elsewhere and never lives here.
+The controller reloads the settings every loop. Every change, reload and recovery takes campaign-settings.lock. A
+change holds it while the change is staged, recorded and put in place, and through any step that must follow its
+event. Each change bumps the version and appends an event naming its actor to campaign-settings-events.tsv, so no
+change is anonymous. A change is staged beside the file and takes effect only once its event is recorded. The next
+change or reload finishes or discards one a failure interrupted, so no version takes effect without its event. What
+decides a measurement's validity is frozen elsewhere and never lives here.
 """
 
 from contextlib import contextmanager
@@ -200,9 +201,10 @@ def staged(path):
 
 
 def record(path, events_path, settings, actor, change, at):
-    """Make settings the campaign's, as the actor's change at epoch time at: staged beside the file first, then its
-    event recorded, and only then put in place, so no version takes effect without its event. The staged file and
-    its name are durable before the event is, so a crash never leaves an event whose change recovery cannot find."""
+    """Make settings the campaign's, as the actor's change at epoch time at. The settings are staged beside the file,
+    then their event is recorded, and only then are they put in place, so no version takes effect without its event.
+    The staged file and its name are durable before the event is, so recovery finds the change of every event a
+    crash leaves."""
     with staged(path).open("w") as output:
         json.dump(settings, output, indent=2, sort_keys=True)
         output.write("\n")
@@ -216,10 +218,10 @@ def record(path, events_path, settings, actor, change, at):
 
 
 def recover(path, events_path):
-    """Finish the change a failure interrupted, under the lock: staged settings whose event was recorded take effect,
-    and any others are discarded, since their change was never recorded, as a staged file torn before its event was
-    recorded never was. While the staged file or the events cannot be read, the change stays staged and no other is
-    made, since its event may be recorded."""
+    """Finish the change a failure interrupted, under the lock. Staged settings whose event was recorded take effect.
+    Any others are discarded, since their change was never recorded; a staged file torn before its event was
+    recorded is discarded the same way. While the staged file or the events cannot be read, the change stays staged
+    and no other is made, since its event may be recorded."""
     if not staged(path).exists():
         return
     try:
@@ -298,12 +300,12 @@ class CampaignSettings:
         return self.current
 
     def change(self, actor, change, update, then=None):
-        """Apply update to the settings as they stand, as the actor's change, described by change: once the result
-        validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded,
-        the time its event records being when each phase it steers took its state. An update that changes nothing
-        records nothing, unless then is given: the change then takes its version and event whatever it changes, and
-        then runs under the lock once its event is durable, as the step of the campaign the event records. Returns
-        the settings."""
+        """Apply update to the settings as they stand, as the actor's change, described by change. Once the result
+        validates and check_actor finds the actor may make it, it takes the next version and its event is recorded.
+        Each phase whose state it sets takes the event's time as its since. An update that changes nothing records
+        nothing, unless then is given. A change given then takes its version and event whatever it changes, and the
+        then callable runs under the lock once the event is durable, as the step of the campaign the event records.
+        Returns the settings."""
         with self.locked():
             before = read(self.path)
             at = round(time.time())
