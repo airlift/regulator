@@ -1,3 +1,4 @@
+import base64
 import bisect
 import hashlib
 import io
@@ -171,6 +172,8 @@ class FakeCloud:
         self.targets = {}
         # Each control host launch's parameters, by instance ID.
         self.control_hosts = {}
+        # Each instance's serial console output, by instance ID.
+        self.consoles = {}
 
     def executor(self, max_workers):
         return FakeExecutor(self, max_workers)
@@ -371,6 +374,10 @@ class FakeCloud:
         self.call("snapshots", region)
         return [snapshot for snapshot in self.region_snapshots.get(region, ())
                 if all(snapshot.tags.get(key) == value for key, value in tags.items())]
+
+    def console_output(self, region, instance):
+        self.call("console_output", instance)
+        return self.consoles.get(instance, "")
 
     def register_target(self, region, target_group, instance, port):
         self.call("register_target", target_group, instance, port)
@@ -627,6 +634,8 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_response("describe_instances", {"Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]},
                          {"InstanceIds": ["i-host"]})
         ec2.add_response("attach_volume", {}, {"VolumeId": "vol-new", "InstanceId": "i-host", "Device": "/dev/sdf"})
+        ec2.add_response("get_console_output", {"Output": base64.b64encode(b"host keys\n").decode()},
+                         {"InstanceId": "i-host", "Latest": True})
         ec2.add_response("create_snapshot", {"SnapshotId": "snap-a"}, {
             "VolumeId": "vol-new", "TagSpecifications": [{"ResourceType": "snapshot", "Tags": tags}]})
         ec2.add_response("describe_snapshots", {"Snapshots": [
@@ -656,6 +665,7 @@ class TestAwsCloud(unittest.TestCase):
             {"Campaign": "c"}))
         aws.wait("us-west-2", "instance_running", "i-host")
         aws.attach_volume("us-west-2", "vol-new", "i-host", "/dev/sdf")
+        self.assertEqual("host keys\n", aws.console_output("us-west-2", "i-host"))
         self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
         self.assertEqual([cloud.Snapshot("snap-a", "vol-new", "pending", {"Campaign": "c"})],
                          aws.snapshots("us-west-2", {"Campaign": "c"}))

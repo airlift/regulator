@@ -36,16 +36,18 @@ Run every command from the repository root with Dain's AWS credentials,
 
 3. Reach the host through the subnet router with `host`: ssh on port 443,
    the only port the router forwards, to the host's private address, which
-   a replacement changes, so read it again after one. `host` offers only your
-   key, so an agent holding many keys does not use up the host's login
-   attempts:
+   a replacement changes, so run this again after one. `control-host
+   known-host` records the host's ssh keys whose fingerprints its console
+   lists in `~/.ssh/regulator-control-hosts` and prints the address; `host`
+   trusts only the keys recorded there, so a key the console never listed
+   stops it. It refuses a host whose console lists no keys yet; try again in
+   a few minutes. `host` offers only your key, so an agent holding many keys
+   does not use up the host's login attempts:
 
    ```bash
-   address=$(aws ec2 describe-instances --profile dev --region us-west-2 \
-     --filters Name=tag:Role,Values=control-host Name=tag:Campaign,Values=<campaign> \
-       Name=instance-state-name,Values=running \
-     --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
-   host() { ssh -p 443 -i <identity> -o IdentitiesOnly=yes -o ConnectTimeout=15 ec2-user@"$address" "$@"; }
+   address=$(AWS_PROFILE=dev python3 tools/re2-benchmark/baseline/run-campaign.py control-host known-host <campaign>)
+   host() { ssh -p 443 -i <identity> -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
+     -o UserKnownHostsFile=~/.ssh/regulator-control-hosts ec2-user@"$address" "$@"; }
    ```
 
 4. Read the Grafana token once for the thread, and keep it in the thread's
@@ -234,8 +236,9 @@ AWS_PROFILE=dev python3 tools/re2-benchmark/baseline/run-campaign.py \
   control-host replace <campaign> --ssh-public-key ~/.ssh/id_ed25519.pub
 ```
 
-Then read the new host's `address` again as [Start](#start) step 3 does, and
-report every replacement in the push notification.
+Then record the new host's keys and read its `address` again as
+[Start](#start) step 3 does, and report every replacement in the push
+notification.
 
 ## Access failures
 

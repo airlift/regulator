@@ -9,9 +9,11 @@ host's sshd listens on 443 too. The campaign root lives on the campaign's own EB
 on with it. The Mac-side steps run under Dain's credentials, which alone may register hosts in the target group.
 """
 
+import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import tarfile
@@ -34,6 +36,12 @@ SSH_PORT = 443
 GRAFANA_PORT = 3000
 # The status ssh exits with when it cannot reach or log in to the host, rather than the remote command's.
 SSH_FAILED = 255
+# The known-hosts file of the control hosts' ssh keys, each checked against its host's console before it is added, so
+# ssh to a control host trusts no key it has not seen there.
+KNOWN_HOSTS = Path.home() / ".ssh" / "regulator-control-hosts"
+# The block the host's console lists its ssh host keys' fingerprints in, as cloud-init and the user data print it.
+FINGERPRINTS = re.compile(r"-----BEGIN SSH HOST KEY FINGERPRINTS-----(.*?)-----END SSH HOST KEY FINGERPRINTS-----",
+                          re.DOTALL)
 VOLUME_GIB = 200
 VOLUME_DEVICE = "/dev/sdf"
 # On the campaign volume: the campaign root, and the launch inputs with the controller's checkout.
@@ -243,7 +251,8 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
-          f"ssh: ssh -p {SSH_PORT} ec2-user@{address}\n"
+          f"ssh, once control-host known-host {campaign} records its keys: ssh -p {SSH_PORT} "
+          f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={KNOWN_HOSTS} ec2-user@{address}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
 
@@ -274,20 +283,57 @@ def manifest_problems(root):
             [f"changed {name}" for name in found if name in listed and sha256_file(root / name) != listed[name]])
 
 
+def known_host(aws, campaign):
+    """Record in KNOWN_HOSTS the ssh keys the campaign's running control host serves on SSH_PORT whose fingerprints
+    its console lists, in place of any recorded for its address before, and return the address. A key the console
+    does not list is never recorded, so ssh checking strictly against the file reaches only the host itself."""
+    hosts = [host for host in live_hosts(aws, campaign) if host.state == "running"]
+    if len(hosts) != 1:
+        raise SystemExit(f"campaign {campaign} has {len(hosts)} running control hosts; expected one")
+    host = hosts[0]
+    listed = {fingerprint for block in FINGERPRINTS.findall(aws.console_output(REGION, host.id))
+              for fingerprint in re.findall(r"SHA256:[A-Za-z0-9+/]+", block)}
+    if not listed:
+        raise SystemExit(f"campaign {campaign}'s control host {host.id} has not yet listed its ssh host keys on its "
+                         "console; try again in a few minutes")
+    name = f"[{host.address}]:{SSH_PORT}"
+    try:
+        served = subprocess.run(["ssh-keyscan", "-p", str(SSH_PORT), "-T", "15", host.address], capture_output=True,
+                                text=True).stdout.splitlines()
+    except OSError as error:
+        raise SystemExit(f"cannot run ssh-keyscan: {error}") from error
+    keys = [line for line in served if line.split()[:1] == [name]]
+    if not keys:
+        raise SystemExit(f"cannot read the ssh host keys of campaign {campaign}'s control host at {host.address}")
+    trusted = [line for line in keys if fingerprint(line.split()[2]) in listed]
+    if not trusted:
+        raise SystemExit(f"no ssh host key campaign {campaign}'s control host at {host.address} serves matches a "
+                         f"fingerprint its console {host.id} lists, so ssh to it is refused")
+    kept = [line for line in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.is_file() else [])
+            if line.split()[:1] != [name]]
+    KNOWN_HOSTS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = KNOWN_HOSTS.with_name(f"{KNOWN_HOSTS.name}.new")
+    temporary.write_text("".join(f"{line}\n" for line in [*kept, *trusted]))
+    os.replace(temporary, KNOWN_HOSTS)
+    return host.address
+
+
+def fingerprint(key):
+    """The SHA-256 fingerprint ssh-keygen -l prints for a public key, given as its base64 blob."""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(key)).digest()).decode().rstrip("=")
+
+
 def finish(aws, campaign, local_root, identity=None):
     """Pull the campaign root from its control host into local_root over ssh on SSH_PORT to the host's private
     address, with only the private key identity when one is given, once its controller has ended, and check it
     against the controller's manifest. A local root that holds files is replaced only where an earlier finish pulled
     it."""
-    hosts = [host for host in live_hosts(aws, campaign) if host.state == "running"]
-    if len(hosts) != 1:
-        raise SystemExit(f"campaign {campaign} has {len(hosts)} running control hosts; expected one")
     if local_root.is_dir() and any(local_root.iterdir()) and not (local_root / MANIFEST).is_file():
         raise SystemExit(f"{local_root} holds files but no {MANIFEST}, so no finish pulled it; name another "
                          "--campaign-root")
-    remote = f"ec2-user@{hosts[0].address}"
+    remote = f"ec2-user@{known_host(aws, campaign)}"
     # An agent holding many keys would spend the host's authentication attempts before it offered the right one.
-    ssh = ["ssh", "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=accept-new",
+    ssh = ["ssh", "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
            *(["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else [])]
     try:
         status = subprocess.run([*ssh, remote, "test", "-f", f"{CAMPAIGN_ROOT}/{MANIFEST}"]).returncode

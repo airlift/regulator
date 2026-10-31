@@ -25,6 +25,11 @@ NETWORK = {"vpc": "vpc-router", "subnets": ["subnet-b", "subnet-a"], "ingress_ci
            "load_balancer_security_group": "sg-balancer", "target_group": "arn:target-group",
            "load_balancer": "arn:balancer", "listener": "arn:listener", "certificate": "arn:certificate"}
 SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest dain@mac"
+# Two ssh host keys, as ssh-keyscan prints them, and the fingerprint ssh-keygen -l prints for each.
+HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDFBF9zl104NO16Oi8hhaurUGHGUSidcNN7l8xRWsjQq"
+HOST_KEY_FINGERPRINT = "SHA256:8Ry9HHJV3IjVlw/07MBlyfNNpAULlvCo3jytFqWhB+w"
+OTHER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBqG8Ok8C3tNff9ph7g2xiVIS9qh1c0UCbB3xqPOwXlf"
+OTHER_KEY_FINGERPRINT = "SHA256:OaSJXQgSzkGqJaLM1DCBBlHrbYlP1Q0ipS8tJ1gSYWg"
 CONTROL_HOST = Path(control_host.__file__).parents[1] / "aws" / "control-host"
 
 
@@ -77,7 +82,8 @@ class TestControlHost(unittest.TestCase):
             self.assertEqual({volume.id: first}, aws.attachments)
             self.assertEqual({"arn:target-group": {(first, 3000)}}, aws.targets)
             self.assertIn("Grafana: https://control.test", printed.getvalue())
-            self.assertIn("ssh: ssh -p 443 ec2-user@10.0.0.1", printed.getvalue())
+            self.assertIn("ssh, once control-host known-host c records its keys: ssh -p 443 "
+                          "-o StrictHostKeyChecking=yes", printed.getvalue())
             # The volume holds the campaign root, so the campaign launches once.
             with self.assertRaisesRegex(SystemExit, "already has a control host volume"):
                 control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
@@ -171,21 +177,27 @@ class TestControlHost(unittest.TestCase):
                                                             control_host.tags("c"), 0, "10.0.0.1")]
         with tempfile.TemporaryDirectory() as temporary:
             host, local = Path(temporary) / "host", Path(temporary) / "local"
+            known_hosts = Path(temporary) / "ssh" / "regulator-control-hosts"
             (host / "a" / "primary").mkdir(parents=True)
             (host / "candidates.tsv").write_text("a\n")
             (host / "a" / "primary" / "accepted-units.tsv").write_text("unit\n")
             damaged = []
             reachable = [False]
 
-            def run(command, check=False):
-                """ssh to the host, which fails as ssh does until it is reachable, and rsync, which copies the root
-                over the local one and damages any file damaged names."""
+            def run(command, check=False, **options):
+                """ssh-keyscan of the host, which serves HOST_KEY, ssh to the host, which fails as ssh does until it
+                is reachable, and rsync, which copies the root over the local one and damages any file damaged
+                names."""
+                if command[0] == "ssh-keyscan":
+                    self.assertEqual(["ssh-keyscan", "-p", "443", "-T", "15", "10.0.0.1"], command)
+                    return subprocess.CompletedProcess(command, 0, f"# 10.0.0.1:443 SSH-2.0-OpenSSH_9.8\n"
+                                                                   f"[10.0.0.1]:443 {HOST_KEY}\n", "")
                 if command[0] == "ssh":
                     return subprocess.CompletedProcess(command, 255 if not reachable[0] else
                                                        0 if (host / control_host.MANIFEST).is_file() else 1)
-                # ssh offers only the key the host was launched with.
-                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -p 443 -o StrictHostKeyChecking=accept-new "
-                                  "-i /keys/control-host -o IdentitiesOnly=yes",
+                # ssh trusts only the host keys its console lists, and offers only the key it was launched with.
+                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -p 443 -o StrictHostKeyChecking=yes "
+                                  f"-o UserKnownHostsFile={known_hosts} -i /keys/control-host -o IdentitiesOnly=yes",
                                   "ec2-user@10.0.0.1:/regulator/campaign/", f"{local}/"], command)
                 shutil.rmtree(local)
                 shutil.copytree(host, local)
@@ -194,11 +206,26 @@ class TestControlHost(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(control_host.subprocess, "run", side_effect=run), \
-                    contextlib.redirect_stdout(io.StringIO()):
+                    patch.object(control_host, "KNOWN_HOSTS", known_hosts), contextlib.redirect_stdout(io.StringIO()):
+                # A host that has not yet listed its keys on its console, or serves a key other than the ones listed,
+                # is not trusted.
+                with self.assertRaisesRegex(SystemExit, "has not yet listed its ssh host keys"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                aws.consoles["i-host"] = ("ec2: -----BEGIN SSH HOST KEY FINGERPRINTS-----\n"
+                                          f"ec2: 256 {OTHER_KEY_FINGERPRINT} no comment (ED25519)\n"
+                                          "ec2: -----END SSH HOST KEY FINGERPRINTS-----\n")
+                with self.assertRaisesRegex(SystemExit, "no ssh host key .* matches a fingerprint its console"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertFalse(known_hosts.exists())
+                # A key the console lists replaces any an earlier host at the address had.
+                aws.consoles["i-host"] = aws.consoles["i-host"].replace(OTHER_KEY_FINGERPRINT, HOST_KEY_FINGERPRINT)
+                known_hosts.parent.mkdir()
+                known_hosts.write_text(f"[10.0.0.1]:443 {OTHER_KEY}\n[10.0.0.2]:443 {OTHER_KEY}\n")
                 # A host ssh cannot reach is named as such, not as a controller still running.
                 with self.assertRaisesRegex(SystemExit, "cannot reach campaign c's control host at "
                                                         "ec2-user@10.0.0.1 over ssh"):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual(f"[10.0.0.2]:443 {OTHER_KEY}\n[10.0.0.1]:443 {HOST_KEY}\n", known_hosts.read_text())
                 reachable[0] = True
                 # A root whose controller has not ended has no manifest, and nothing is pulled.
                 with self.assertRaisesRegex(SystemExit, "controller has not ended"):
@@ -241,8 +268,10 @@ class TestControlHost(unittest.TestCase):
         # The controller exports to the collector's OTLP/HTTP port, which answers only the host itself.
         self.assertIn("\nEnvironment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318\n", campaign)
         self.assertIn('systemctl enable --now "regulator-campaign@${CAMPAIGN}.service"', user_data)
-        # sshd listens on the one port the subnet router forwards, before the slow installs.
+        # sshd listens on the one port the subnet router forwards, and the console lists its keys' fingerprints for
+        # the Mac to trust them by, before the slow installs.
         self.assertLess(user_data.index("Port 443"), user_data.index("dnf install -y docker"))
+        self.assertLess(user_data.index("END SSH HOST KEY FINGERPRINTS"), user_data.index("dnf install -y docker"))
         # The host keeps Dain's local time, which the controller's events and status over ssh print.
         self.assertIn("\ntimedatectl set-timezone America/Los_Angeles\n", user_data)
         # The campaign root records Grafana's URL for the status command.

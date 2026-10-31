@@ -255,6 +255,10 @@ class AwsCloud:
                          item["LaunchTime"].timestamp(), item.get("PrivateIpAddress", ""))
                 for reservation in reservations for item in reservation["Instances"]]
 
+    def console_output(self, region, instance):
+        """The instance's latest serial console output, or nothing before it prints any."""
+        return self.call("ec2", region, "get_console_output", InstanceId=instance, Latest=True).get("Output", "")
+
     def run_control_host(self, region, image, instance_type, root_device, subnet, security_group, profile, user_data,
                          tags):
         """Launch a campaign's control host and return its ID and private address: On-Demand, with no public address,
