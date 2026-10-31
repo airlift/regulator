@@ -100,17 +100,17 @@ class TestRunCampaign(unittest.TestCase):
             "zstd")
 
     def arguments(self, root, **settings):
-        """A phase's arguments, under settings seeded in its campaign root, with the given settings of
+        """A phase's arguments, under settings seeded in its campaign root, root, with the given settings of
         campaign_settings."""
         return SimpleNamespace(
             phase="smoke",
             campaign_id="baseline",
-            campaign_root=root / "campaign",
+            campaign_root=root,
             candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40,
             spot_vcpu_reserve=0,
-            settings=campaign_settings(root / "campaign", **settings))
+            settings=campaign_settings(root, **settings))
 
     def settings(self, **options):
         """Settings of campaign_settings seeded in a campaign root of their own."""
@@ -800,23 +800,16 @@ class TestRunCampaign(unittest.TestCase):
             write_tsv(language_smoke / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": "u1", "replica": "1",
                  "estimated_seconds": "600", "groups": "1:600", "excluded_instances": "-"}])
-            # The language smoke reserved its hosts as an earlier controller did, in the fleet its policy names.
-            policy = Path(temporary_directory) / "fleet" / "fleet-policy.json"
-            (language_smoke / "execution-policy.json").write_text(json.dumps({"fleet_budget": str(policy)}))
-            policy.parent.mkdir()
-            (policy.parent / "fleet-state.json").write_text(json.dumps({"reservations": {}, "completed": {
-                "y/1": {"owner": str(language_smoke.resolve()), "machine_hours": 2, "hourly_rate": 0.1}}}))
             # The primary's three live hosts, one not yet reporting, each took a minute or so to report, as did the
-            # host it completed.
-            owner = str(primary.resolve())
-
+            # host it completed, and the language smoke completed one host. The fleet names each phase by its key.
             def host(started, until, rate, region, market, ready=None):
-                return {"owner": owner, "instance_type": "r8i.2xlarge", "region": region, "market": market,
+                return {"owner": "a/primary", "instance_type": "r8i.2xlarge", "region": region, "market": market,
                         "started_at": now - started, "reserved_until": now + until, "hourly_rate": rate,
                         **({} if ready is None else {"reported_at": now - started + ready})}
 
             (campaign_root / "fleet-state.json").write_text(json.dumps({
                 "completed": {"other/1": {"owner": "other", "machine_hours": 9, "hourly_rate": 1},
+                              "y/1": {"owner": "b/lang/smoke", "machine_hours": 2, "hourly_rate": 0.1},
                               "x/5": {**host(7200, 0, 0.1, "us-east-2", "spot", 70), "machine_hours": 1}},
                 "reservations": {"x/1": host(1800, 3600, 0.1, "us-east-2", "spot", 60),
                                  "x/2": host(600, 3000, 0.12, "us-east-2", "spot"),
@@ -857,7 +850,12 @@ class TestRunCampaign(unittest.TestCase):
             # A controller that ended its stopped campaign listed the root's files as it ended.
             self.assertIn("stopping by dain: smoke over", stopped)
             RUN_CAMPAIGN.control_host.write_manifest(campaign_root)
-            self.assertIn("stopped by dain: smoke over", RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc))
+            ended = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
+            self.assertIn("stopped by dain: smoke over", ended)
+            # Its root, pulled to the Mac, reports the same spend and medians there.
+            pulled = Path(temporary_directory) / "pulled"
+            shutil.copytree(campaign_root, pulled)
+            self.assertEqual(ended[1:], RUN_CAMPAIGN.campaign_status(pulled, now, timezone.utc)[1:])
 
         # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the three live hosts.
         self.assertEqual([
@@ -3414,7 +3412,7 @@ class TestUnitWorkers(unittest.TestCase):
                 state = RUN_CAMPAIGN.read_fleet_state(Path(temporary) / RUN_CAMPAIGN.STATE_FILE)
                 if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS and state and fleet.sleeps % 20 == 0:
                     progress = RUN_CAMPAIGN.phase_progress(
-                        results, RUN_CAMPAIGN.owner_fleet(state, results, fleet.time()), True)
+                        results, RUN_CAMPAIGN.owner_fleet(state, "results", fleet.time()), True)
                     if progress.finish is not None:
                         finishes.append((bool(progress.accepted), fleet.time() + progress.finish))
                 poll(seconds)
@@ -3690,7 +3688,7 @@ class TestUnitWorkers(unittest.TestCase):
 
             def finish():
                 state = RUN_CAMPAIGN.read_fleet_state(root / RUN_CAMPAIGN.STATE_FILE)
-                return RUN_CAMPAIGN.phase_progress(primary, RUN_CAMPAIGN.owner_fleet(state, primary, fleet.time()),
+                return RUN_CAMPAIGN.phase_progress(primary, RUN_CAMPAIGN.owner_fleet(state, "primary", fleet.time()),
                                                    True).finish
 
             def loop():

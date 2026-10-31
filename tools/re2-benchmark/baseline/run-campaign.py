@@ -4346,7 +4346,7 @@ class Campaign:
                     points.setdefault(name, []).extend(values)
                 point("regulator_deadline_time", labels, now + self.deadline(phase) - time.monotonic())
                 finish = phase.dispatcher.finish_estimate()
-            held = owner_fleet(fleet, phase.root, now)
+            held = owner_fleet(fleet, phase.key, now)
             rate = sum(item["hourly_rate"] for item in held.hosts)
             if held.ready:
                 point("regulator_boot_to_ready_seconds", labels, statistics.median(held.ready))
@@ -4870,14 +4870,12 @@ def phase_status(label, root, now, fleets, controller, settings, zone=None, camp
     def line(name, text):
         lines.append(f"    {name:<10}{text}")
 
-    # The fleet's state is at the campaign root, or for an old root's phase, beside the fleet policy it names.
-    policy_path = root / "execution-policy.json"
-    policy = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
-    state_path = (Path(policy).with_name(STATE_FILE) if policy else
-                  campaign_root / STATE_FILE if campaign_root else None)
+    # The fleet's state is at the campaign root, and names the phase by its key.
+    state_path = campaign_root / STATE_FILE if campaign_root else None
     if state_path and state_path not in fleets:
         fleets[state_path] = read_fleet_state(state_path)
-    fleet = owner_fleet(fleets[state_path], root, now) if state_path and fleets[state_path] else None
+    fleet = (owner_fleet(fleets[state_path], root.relative_to(campaign_root).as_posix(), now)
+             if state_path and fleets[state_path] else None)
     phase = phase_progress(root, fleet, live)
     groups = sum(len(item.groups) for item in phase.items)
     groups_accepted = sum(map(len, phase.accepted.values()))

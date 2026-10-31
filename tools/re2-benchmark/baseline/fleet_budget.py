@@ -154,6 +154,7 @@ class FleetBudget:
     def __init__(self, campaign_root, settings, spot_vcpu_reserve):
         self.settings = settings
         self.spot_vcpu_reserve = spot_vcpu_reserve
+        self.campaign_root = Path(campaign_root).resolve()
         self.state_path = Path(campaign_root) / STATE_FILE
         self.lock_path = Path(campaign_root) / "fleet-budget.lock"
 
@@ -208,7 +209,7 @@ class FleetBudget:
             if job.market != "spot" and region not in on_demand_regions(settings):
                 return False, "fleet quota"
             hourly_rate = rate["total"] if job.market == "spot" else rate["on_demand_total"]
-            item = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": str(Path(owner).resolve()),
+            item = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": self.owner(owner),
                     "attempt": getattr(job, "attempt", 1),
                     "logical_identity": job.logical_identity, "region": region, "market": job.market,
                     "instance_type": job.platform.instance_type,
@@ -274,9 +275,14 @@ class FleetBudget:
             if item is not None:
                 BootWindow(state, self.settings, now).fail(item, now)
 
+    def owner(self, root):
+        """The owner a phase's root names in the fleet's state: its key, its root relative to the campaign root, so
+        the state reads the same wherever the root is copied."""
+        return Path(root).resolve().relative_to(self.campaign_root).as_posix()
+
     def reservations(self, owner):
         with self.locked() as state:
-            return [item.copy() for item in state["reservations"].values() if item["owner"] == str(Path(owner).resolve())]
+            return [item.copy() for item in state["reservations"].values() if item["owner"] == self.owner(owner)]
 
     def stop_spending(self, reason):
         """Stop the fleet's spending, as the controller's settings change: no launch or extension is admitted until
@@ -294,10 +300,9 @@ def read_state(state_path):
 
 
 def owner_fleet(state, owner, now):
-    """What one owner, a phase's root, holds of the fleet whose state is state: its spend in USD so far, its completed
+    """What one owner, a phase's key, holds of the fleet whose state is state: its spend in USD so far, its completed
     hosts' actual hours and its reservations' hours since they started; what its reservations hold beyond now; its
     reservations, one per live host; and the seconds from each of its hosts' launch to its first report."""
-    owner = str(Path(owner).resolve())
     completed = [item for item in state["completed"].values() if item["owner"] == owner]
     live = [item for item in state["reservations"].values() if item["owner"] == owner]
     return SimpleNamespace(

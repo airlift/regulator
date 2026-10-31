@@ -831,8 +831,8 @@ follows it, with who made it and why. Units and groups accepted, the estimate
 left, spend, and medians come from the phase's ledgers: `work-items.tsv`,
 `accepted-units.tsv`, `unit-attempts.tsv`, `semantic-rejections.tsv`,
 `unresolved-units.tsv` once the phase ends, the campaign root's
-`fleet-state.json`, or in an old root the fleet state beside the policy its
-`execution-policy.json` names, `job-attempts.tsv`, and `unit-uploads.tsv`.
+`fleet-state.json`, which names each phase by its path in the root, so a root
+`finish` pulled reports the same, `job-attempts.tsv`, and `unit-uploads.tsv`.
 While the phase runs, its unresolved units are those a semantic failure or a
 rejection ended or that spent their attempts, as the controller's recovery
 reads them, and its queued units are those neither accepted, unresolved, nor
