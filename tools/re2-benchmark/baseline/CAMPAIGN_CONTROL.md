@@ -365,10 +365,13 @@ other command, `stop`, `clear-spending-stop` and `authorize` among them, with
 
 There is no migration. A root with a `campaign-driver.txt`, a phase with a
 `driver-child.txt`, or any root whose `execution-policy.json` carries the
-removed share fields is an old root: the new controller refuses to run,
-resume or adopt it, naming the file it found. Old roots stay readable
-results: `status`, the reduction, `--results`, archiving and publication
-read their ledgers unchanged, because the ledger layout does not change.
+removed share fields is an old root, as is a root whose `fleet-state.json`
+names a phase by its absolute root on the control host rather than its key:
+the new controller refuses to run, resume or adopt it, naming the file it
+found. Old roots stay readable results: `status`, the reduction, `--results`,
+archiving and publication read their ledgers unchanged, because the ledger
+layout does not change, and `status` reads such a fleet's owners as the keys
+of the roots under the host's campaign root.
 `r20-20261029a` is archived as evidence of the failure and the 2.0 run starts
 in a new root.
 

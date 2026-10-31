@@ -803,9 +803,13 @@ and refuses a restart that changes them.
 The command refuses a campaign root the earlier controllers started, which ran
 each phase as its own process: one holding `campaign-driver.txt`, a phase
 holding `driver-child.txt`, or a phase's `execution-policy.json` that froze its
-share of the hosts or named a fleet policy file. It names the file it found,
-and the root is never migrated; start a new campaign root. `status`,
-`--results`, the reduction, and archiving still read such a root's ledgers.
+share of the hosts or named a fleet policy file. It also refuses a root whose
+`fleet-state.json` names a phase by its absolute root on the control host, as
+controllers before phase keys wrote it. It names the file it found, and the
+root is never migrated; start a new campaign root. `status`, `--results`, the
+reduction, and archiving still read such a root's ledgers, and `status` reads
+such a fleet's spend and boots by each phase's root under the host's campaign
+root.
 
 See a campaign's progress, or one phase's, without disturbing it:
 

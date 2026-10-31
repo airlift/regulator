@@ -12,11 +12,12 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import time
 from types import SimpleNamespace
 
 from campaign_settings import BOOT_WINDOW_MIN
+from control_host import CAMPAIGN_ROOT
 
 
 # Every On-Demand launch leaves this much of its region's On-Demand quota free.
@@ -299,12 +300,19 @@ def read_state(state_path):
     return json.loads(state_path.read_text()) if state_path.is_file() else None
 
 
+def owner_key(owner):
+    """The phase key an owner in the fleet's state names. Controllers before phase keys named each phase by its
+    absolute root on the control host, which reads as its key under the host's campaign root."""
+    path = PurePosixPath(owner)
+    return path.relative_to(CAMPAIGN_ROOT).as_posix() if path.is_relative_to(CAMPAIGN_ROOT) else owner
+
+
 def owner_fleet(state, owner, now):
     """What one owner, a phase's key, holds of the fleet whose state is state: its spend in USD so far, its completed
     hosts' actual hours and its reservations' hours since they started; what its reservations hold beyond now; its
     reservations, one per live host; and the seconds from each of its hosts' launch to its first report."""
-    completed = [item for item in state["completed"].values() if item["owner"] == owner]
-    live = [item for item in state["reservations"].values() if item["owner"] == owner]
+    completed = [item for item in state["completed"].values() if owner_key(item["owner"]) == owner]
+    live = [item for item in state["reservations"].values() if owner_key(item["owner"]) == owner]
     return SimpleNamespace(
         spent=sum(item["machine_hours"] * item["hourly_rate"] for item in completed) +
         sum(max(0, now - item["started_at"]) / 3600 * item["hourly_rate"] for item in live),
