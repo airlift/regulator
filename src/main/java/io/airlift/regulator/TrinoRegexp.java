@@ -44,6 +44,7 @@ public sealed class TrinoRegexp
                 TrinoRegexp.DotStarLiteralTrinoRegexp,
                 TrinoRegexp.ExactLiteralTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
+                TrinoRegexp.LiteralSetTrinoRegexp,
                 TrinoRegexp.OrderedLiteralTrinoRegexp
 {
     /// Mutable engine resource options. Compilation snapshots every option, so later changes do not
@@ -188,6 +189,10 @@ public sealed class TrinoRegexp
         long forwardMemory = Math.max(1, options.maxMemory() - Math.max(1, options.maxMemory() / 3));
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(patternCopy, literalAlternationMatcher);
+        }
+        LiteralSetSpanMatcher literalSetMatcher = LiteralSetSpanMatcher.analyze(parsed.regexp(), parsed.capturingGroupCount(), forwardMemory);
+        if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
+            return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
         }
         Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
@@ -348,6 +353,11 @@ public sealed class TrinoRegexp
     LiteralAlternationSpanMatcher literalAlternationSpanMatcher()
     {
         return null;
+    }
+
+    boolean usesLiteralSetMatcherForDiagnostics()
+    {
+        return false;
     }
 
     boolean usesOrderedLiteralMatcherForDiagnostics()
@@ -1390,6 +1400,219 @@ public sealed class TrinoRegexp
             if (group > 0) {
                 throw new IllegalArgumentException("pattern has 0 groups; cannot access group " + group);
             }
+        }
+    }
+
+    /// Runs every operation on a [LiteralSetSpanMatcher], repeating [LiteralAlternationTrinoRegexp]
+    /// with the automaton's span search, so a fix to either belongs in both.
+    private static final class LiteralSetTrinoRegexp
+            extends TrinoRegexp
+    {
+        // This subtype has no compiled RE2 pattern to hold the source bytes, so it keeps them.
+        private final Slice patternBytes;
+        private final LiteralSetSpanMatcher spanMatcher;
+
+        private LiteralSetTrinoRegexp(Slice patternBytes, LiteralSetSpanMatcher spanMatcher)
+        {
+            super();
+            this.patternBytes = requireNonNull(patternBytes, "patternBytes is null");
+            this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
+        }
+
+        @Override
+        boolean usesLiteralSetMatcherForDiagnostics()
+        {
+            return true;
+        }
+
+        @Override
+        public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
+        {
+            requireNonNull(source, "source is null");
+            if (retainedCapturingGroupCount != 0) {
+                throw new IllegalArgumentException("capturingGroupCount out of range: " + retainedCapturingGroupCount);
+            }
+            return TrinoRegexpMatcher.literalSet(spanMatcher, source);
+        }
+
+        @Override
+        public Slice pattern()
+        {
+            return patternBytes.copy();
+        }
+
+        @Override
+        public int capturingGroupCount()
+        {
+            return 0;
+        }
+
+        @Override
+        public Map<String, Integer> namedCapturingGroups()
+        {
+            return Map.of();
+        }
+
+        @Override
+        public Map<Integer, String> capturingGroupNames()
+        {
+            return Map.of();
+        }
+
+        @Override
+        public boolean contains(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            return spanMatcher.findSpan(source, 0, source.length()) >= 0;
+        }
+
+        @Override
+        public long count(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            long count = 0;
+            int searchStart = 0;
+            while (searchStart < source.length()) {
+                long span = spanMatcher.findSpan(source, searchStart, source.length());
+                if (span < 0) {
+                    break;
+                }
+                count++;
+                searchStart = spanEnd(span);
+            }
+            return count;
+        }
+
+        @Override
+        public long position(Slice source, long start, long occurrence)
+        {
+            requireNonNull(source, "source is null");
+            if (start < 1) {
+                throw new IllegalArgumentException("start position cannot be smaller than 1");
+            }
+            if (occurrence < 1) {
+                throw new IllegalArgumentException("occurrence cannot be smaller than 1");
+            }
+
+            long codePointStart = start - 1;
+            if (codePointStart > source.length()) {
+                return -1;
+            }
+            int byteStart = SliceUtf8.offsetOfCodePoint(source, toIntExact(codePointStart));
+            if (byteStart < 0) {
+                return -1;
+            }
+
+            long span = spanMatcher.findSpan(source, byteStart, source.length());
+            for (long match = 1; match < occurrence && span >= 0; match++) {
+                span = spanMatcher.findSpan(source, spanEnd(span), source.length());
+            }
+            if (span < 0) {
+                return -1;
+            }
+            return SliceUtf8.countCodePoints(source, 0, spanStart(span)) + 1L;
+        }
+
+        @Override
+        public Slice extract(Slice source, int group)
+        {
+            validateHandleGroup(group);
+            requireNonNull(source, "source is null");
+            long span = spanMatcher.findSpan(source, 0, source.length());
+            return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
+        }
+
+        @Override
+        public List<Slice> extractAll(Slice source, int group)
+        {
+            validateHandleGroup(group);
+            requireNonNull(source, "source is null");
+            List<Slice> matches = new ArrayList<>();
+            int searchStart = 0;
+            while (searchStart < source.length()) {
+                long span = spanMatcher.findSpan(source, searchStart, source.length());
+                if (span < 0) {
+                    break;
+                }
+                matches.add(source.slice(spanStart(span), spanEnd(span) - spanStart(span)));
+                searchStart = spanEnd(span);
+            }
+            return Collections.unmodifiableList(matches);
+        }
+
+        @Override
+        public List<Slice> split(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            List<Slice> parts = new ArrayList<>();
+            int previousEnd = 0;
+            int searchStart = 0;
+            while (searchStart < source.length()) {
+                long span = spanMatcher.findSpan(source, searchStart, source.length());
+                if (span < 0) {
+                    break;
+                }
+                parts.add(source.slice(previousEnd, spanStart(span) - previousEnd));
+                previousEnd = spanEnd(span);
+                searchStart = previousEnd;
+            }
+            parts.add(source.slice(previousEnd, source.length() - previousEnd));
+            return Collections.unmodifiableList(parts);
+        }
+
+        @Override
+        public Slice replace(Slice source, Slice replacement)
+        {
+            requireNonNull(source, "source is null");
+            requireNonNull(replacement, "replacement is null");
+
+            TrinoReplacementPlan.GroupFreeReplacer replacer = newReplacementPlan(source, replacement).groupFreeReplacer();
+            int searchStart = 0;
+            while (searchStart < source.length()) {
+                long span = spanMatcher.findSpan(source, searchStart, source.length());
+                if (span < 0) {
+                    break;
+                }
+                int matchStart = spanStart(span);
+                int matchEnd = spanEnd(span);
+                replacer.addMatch(matchStart, matchEnd);
+                searchStart = matchEnd;
+            }
+            return replacer.build();
+        }
+
+        @Override
+        public Slice replace(Slice source, Function<List<Slice>, Slice> replacement)
+        {
+            requireNonNull(source, "source is null");
+            requireNonNull(replacement, "replacement is null");
+            DynamicSliceOutput output = new DynamicSliceOutput(source.length());
+            int previousEnd = 0;
+            int searchStart = 0;
+            boolean matched = false;
+            List<Slice> groups = List.of();
+            while (searchStart < source.length()) {
+                long span = spanMatcher.findSpan(source, searchStart, source.length());
+                if (span < 0) {
+                    break;
+                }
+                matched = true;
+                int matchStart = spanStart(span);
+                int matchEnd = spanEnd(span);
+                output.writeBytes(source, previousEnd, matchStart - previousEnd);
+                Slice replacementValue = replacement.apply(groups);
+                if (replacementValue == null) {
+                    return null;
+                }
+                output.appendBytes(replacementValue);
+                previousEnd = matchEnd;
+                searchStart = matchEnd;
+            }
+            if (!matched) {
+                return source;
+            }
+            output.writeBytes(source, previousEnd, source.length() - previousEnd);
+            return output.slice();
         }
     }
 

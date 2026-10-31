@@ -29,6 +29,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -466,23 +468,28 @@ public class TestTrinoRegexpFunctions
                 backing.byteArrayOffset() + 1,
                 backing.length() - 2);
 
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.contains(source)).isTrue());
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.count(source)).isEqualTo(3));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.position(source, 1, 2)).isEqualTo(16));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.extract(source)).isEqualTo(utf8("WARN")));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(strings(regexp.extractAll(source)))
-                .containsExactly("WARN", "ERROR", "FATAL"));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(strings(regexp.split(source)))
-                .containsExactly("info ", " then ", " and ", ""));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.replace(source, utf8("_")))
-                .isEqualTo(utf8("info _ then _ and _")));
-        assertLiteralAlternationOperationDoesNotCreateDfa(regexp -> assertThat(regexp.replace(source, _ -> utf8("_")))
-                .isEqualTo(utf8("info _ then _ and _")));
+        // More than 64 literals take the literal set, whose filler words never occur in the source.
+        String largeSet = "ERROR|WARN|FATAL|" + IntStream.range(0, 62).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
+        assertThat(TrinoRegexp.compile(utf8(largeSet)).usesLiteralSetMatcherForDiagnostics()).isTrue();
+        for (String pattern : List.of("ERROR|WARN|FATAL", largeSet)) {
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.contains(source)).isTrue());
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.count(source)).isEqualTo(3));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.position(source, 1, 2)).isEqualTo(16));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.extract(source)).isEqualTo(utf8("WARN")));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(strings(regexp.extractAll(source)))
+                    .containsExactly("WARN", "ERROR", "FATAL"));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(strings(regexp.split(source)))
+                    .containsExactly("info ", " then ", " and ", ""));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.replace(source, utf8("_")))
+                    .isEqualTo(utf8("info _ then _ and _")));
+            assertLiteralAlternationOperationDoesNotCreateDfa(pattern, regexp -> assertThat(regexp.replace(source, _ -> utf8("_")))
+                    .isEqualTo(utf8("info _ then _ and _")));
+        }
     }
 
-    private static void assertLiteralAlternationOperationDoesNotCreateDfa(Consumer<TrinoRegexp> operation)
+    private static void assertLiteralAlternationOperationDoesNotCreateDfa(String pattern, Consumer<TrinoRegexp> operation)
     {
-        TrinoRegexp regexp = TrinoRegexp.compile(utf8("ERROR|WARN|FATAL"));
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8(pattern));
         operation.accept(regexp);
         assertThat(regexp.re2()).isNull();
     }

@@ -23,6 +23,8 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.airlift.slice.SliceUtf8.lengthOfCodePointFromStartByte;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
@@ -180,7 +182,10 @@ public class TestTrinoRegexpMatcher
     @Test
     public void testMatcherStateAndZeroCopyGroups()
     {
-        for (String pattern : List.of("foo", "foo|bar")) {
+        // More than 64 literals take the literal set, whose filler words never occur in the source.
+        String largeSet = "foo|bar|" + IntStream.range(0, 63).mapToObj(index -> "filler" + index).collect(Collectors.joining("|"));
+        assertThat(TrinoRegexp.compile(utf8Slice(largeSet)).usesLiteralSetMatcherForDiagnostics()).isTrue();
+        for (String pattern : List.of("foo", "foo|bar", largeSet)) {
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
             Slice source = utf8Slice("foo");
             TrinoRegexpMatcher matcher = regexp.matcher(source);

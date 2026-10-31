@@ -21,14 +21,31 @@ import java.util.Arrays;
 import java.util.List;
 
 import static io.airlift.regulator.Regexp.FOLD_CASE;
+import static io.airlift.regulator.Regexp.FULL_CASE_FOLD;
 import static io.airlift.regulator.Regexp.LATIN1;
 import static java.util.Objects.requireNonNull;
 
+/// Finds the leftmost-first match of an alternation of at most [#MAXIMUM_ALTERNATIVES] literal
+/// strings, such as `ERROR|WARN|FATAL`, by walking a trie from each position, which serves short
+/// Trino patterns. [LiteralSetSpanMatcher] searches a larger alternation, whose literals this
+/// class's analysis also extracts.
 final class LiteralAlternationSpanMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.class);
-    private static final int MAXIMUM_ALTERNATIVES = 64;
+    static final int MAXIMUM_ALTERNATIVES = 64;
     private static final int MAXIMUM_ANALYSIS_DEPTH = 256;
+    // Bounds the bytes a large alternation's factored prefixes expand to, and also the number of
+    // literals, since empty ones add no bytes; a dictionary of 43,029 English words holds about
+    // 400 KB.
+    private static final int MAXIMUM_LITERAL_BYTES = 1 << 22;
+    // Bounds the work of a whole extraction, the bytes its concatenations copy plus the entries
+    // its alternations add, which a long concatenation or nested choices make quadratic in the
+    // pattern even when each step stays under MAXIMUM_LITERAL_BYTES. A sorted dictionary of
+    // 43,029 words charges about 2 million units, and one of 235,976 words about 7 million.
+    private static final long MAXIMUM_EXTRACTION_WORK = 1L << 24;
+    // A class the parsers merge from a dictionary's single-character alternatives holds a few
+    // members, such as [ds] from word(?:d|s); a wider one, such as [!-~], is not a literal set.
+    private static final int MAXIMUM_CLASS_RUNES = 16;
 
     private final short[] rootStateByLeadingByte;
     private final short[] firstEdgeByState;
@@ -60,7 +77,7 @@ final class LiteralAlternationSpanMatcher
             return null;
         }
 
-        List<byte[]> literalAlternatives = extractLiteralAlternatives(expression, 0);
+        List<byte[]> literalAlternatives = extractLiteralAlternatives(expression, false, false, new long[1], 0);
         if (literalAlternatives == null || literalAlternatives.size() < 2) {
             return null;
         }
@@ -132,7 +149,22 @@ final class LiteralAlternationSpanMatcher
                 SizeOf.sizeOf(alternativeByState);
     }
 
-    private static List<byte[]> extractLiteralAlternatives(Regexp expression, int depth)
+    /// Expands `expression` into the literals of a large set for [LiteralSetSpanMatcher], in
+    /// leftmost-first priority order, or returns `null`.
+    static List<byte[]> extractLiteralSet(Regexp expression)
+    {
+        // The compiler reads a class as bytes when the whole program is Latin-1, so this does too.
+        boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
+        return extractLiteralAlternatives(expression, true, latin1Program, new long[1], 0);
+    }
+
+    /// Expands `expression` into its literals in leftmost-first priority order: a concatenation
+    /// lists each prefix choice's literals before the next prefix choice's. The trie takes literal
+    /// strings only, at most [#MAXIMUM_ALTERNATIVES]; a large set also takes empty matches and
+    /// small classes, and concatenations whose only choice of several literals ends them, up to
+    /// [#MAXIMUM_LITERAL_BYTES]. `work` holds the work charged so far, up to
+    /// [#MAXIMUM_EXTRACTION_WORK].
+    private static List<byte[]> extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
     {
         if (depth >= MAXIMUM_ANALYSIS_DEPTH) {
             return null;
@@ -140,26 +172,62 @@ final class LiteralAlternationSpanMatcher
         return switch (expression.op()) {
             case LITERAL -> literal(expression, new int[] {expression.rune()});
             case LITERAL_STRING -> literal(expression, expression.runes());
-            case ALTERNATE -> alternate(expression, depth);
-            case CONCAT -> concatenate(expression, depth);
+            case ALTERNATE -> alternate(expression, largeSet, latin1Program, work, depth);
+            case CONCAT -> concatenate(expression, largeSet, latin1Program, work, depth);
+            case EMPTY_MATCH -> largeSet ? List.of(new byte[0]) : null;
+            case CHAR_CLASS -> largeSet ? characterClass(expression, latin1Program) : null;
             default -> null;
         };
     }
 
     private static List<byte[]> literal(Regexp expression, int[] runes)
     {
-        if ((expression.parseFlags() & FOLD_CASE) != 0) {
+        if ((expression.parseFlags() & (FOLD_CASE | FULL_CASE_FOLD)) != 0) {
             return null;
         }
         return List.of(Regexp.convertRunesToBytes((expression.parseFlags() & LATIN1) != 0, runes));
     }
 
-    private static List<byte[]> alternate(Regexp expression, int depth)
+    // The ranges list every member, whatever CharClass.foldsAscii tells the compiler.
+    // Distinct code points never match at the same position, so the members need no order.
+    private static List<byte[]> characterClass(Regexp expression, boolean latin1Program)
+    {
+        CharClass characterClass = expression.charClass();
+        if ((expression.parseFlags() & (FOLD_CASE | FULL_CASE_FOLD)) != 0 || characterClass.runeCount() > MAXIMUM_CLASS_RUNES) {
+            return null;
+        }
+        boolean latin1 = latin1Program || (expression.parseFlags() & LATIN1) != 0;
+        List<byte[]> members = new ArrayList<>(characterClass.runeCount());
+        for (RuneRange range : characterClass.rangeView()) {
+            for (int rune = range.low(); rune <= range.high(); rune++) {
+                if (latin1 ? rune > 0xFF : (rune >= Character.MIN_SURROGATE && rune <= Character.MAX_SURROGATE)) {
+                    return null;
+                }
+                members.add(Regexp.convertRunesToBytes(latin1, new int[] {rune}));
+            }
+        }
+        return members;
+    }
+
+    private static List<byte[]> alternate(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
     {
         List<byte[]> alternatives = new ArrayList<>();
+        long alternativeBytes = 0;
         for (Regexp child : expression.children()) {
-            List<byte[]> childAlternatives = extractLiteralAlternatives(child, depth + 1);
-            if (childAlternatives == null || alternatives.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
+            List<byte[]> childAlternatives = extractLiteralAlternatives(child, largeSet, latin1Program, work, depth + 1);
+            if (childAlternatives == null) {
+                return null;
+            }
+            if (largeSet) {
+                alternativeBytes += totalLength(childAlternatives);
+                if (alternatives.size() + childAlternatives.size() > MAXIMUM_LITERAL_BYTES || alternativeBytes > MAXIMUM_LITERAL_BYTES) {
+                    return null;
+                }
+            }
+            else if (alternatives.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
+                return null;
+            }
+            if (!charge(work, childAlternatives.size())) {
                 return null;
             }
             alternatives.addAll(childAlternatives);
@@ -167,12 +235,35 @@ final class LiteralAlternationSpanMatcher
         return alternatives;
     }
 
-    private static List<byte[]> concatenate(Regexp expression, int depth)
+    private static List<byte[]> concatenate(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
     {
         List<byte[]> prefixes = List.of(new byte[0]);
         for (Regexp child : expression.children()) {
-            List<byte[]> suffixes = extractLiteralAlternatives(child, depth + 1);
-            if (suffixes == null || (long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
+            List<byte[]> suffixes = extractLiteralAlternatives(child, largeSet, latin1Program, work, depth + 1);
+            if (suffixes == null) {
+                return null;
+            }
+            long suffixBytes = totalLength(suffixes);
+            if (largeSet) {
+                // A large set takes the factored prefixes of a dictionary, such as
+                // word(?:s|ing|ed), whose choice of several literals ends the concatenation, so
+                // the literals share the pattern's prefixes and the automaton stays within the
+                // pattern's size. A choice before more text, as in (?:a|b)c or [ab][cd],
+                // expands to every combination. A child of empty literals only, such as the
+                // (?:|) of a duplicate word, adds nothing in either position.
+                if (suffixBytes == 0) {
+                    continue;
+                }
+                if (prefixes.size() > 1) {
+                    return null;
+                }
+            }
+            else if ((long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
+                return null;
+            }
+            // Measured only now, so a skipped child does not rescan the prefixes.
+            long combinedBytes = totalLength(prefixes) * suffixes.size() + suffixBytes * prefixes.size();
+            if ((largeSet && combinedBytes > MAXIMUM_LITERAL_BYTES) || !charge(work, combinedBytes)) {
                 return null;
             }
 
@@ -187,6 +278,21 @@ final class LiteralAlternationSpanMatcher
             prefixes = combined;
         }
         return prefixes;
+    }
+
+    private static boolean charge(long[] work, long amount)
+    {
+        work[0] += amount;
+        return work[0] <= MAXIMUM_EXTRACTION_WORK;
+    }
+
+    static long totalLength(List<byte[]> literals)
+    {
+        long length = 0;
+        for (byte[] literal : literals) {
+            length += literal.length;
+        }
+        return length;
     }
 
     long findSpan(Slice input, int start)
