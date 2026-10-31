@@ -137,8 +137,8 @@ not, so no version takes effect without its row. The controller itself
 changes only the phases' states, the boot window's size, and the spending
 stop.
 
-What decides the measurements stays frozen in `campaign-options.json`: the AWS
-account of the settings' buckets, `--spot-vcpu-reserve`, the vCPUs of each
+What decides the measurements stays frozen in `campaign-options.json`: the
+campaign the root belongs to, the AWS account of the settings' buckets, `--spot-vcpu-reserve`, the vCPUs of each
 region's Standard Spot quota the fleet leaves free (default 32), and
 `--phase-timeout-seconds`, beside the options [a campaign](#run-a-campaign)
 freezes. A restart that changes them is refused.
@@ -586,7 +586,10 @@ campaign's own 200 GiB gp3 volume, mounted at `/regulator`, so a replaced host
 carries on with it. The launch uploads its inputs to the Oregon bucket's
 `campaigns/<campaign>/control-host/`, creates the volume, starts the host, and
 registers it in the parameter's target group, which the internal load
-balancer forwards Grafana to. The host's user data,
+balancer forwards Grafana to. Since the one record serves one campaign, the
+launch and `control-host replace` refuse, before they create or terminate
+anything, while the target group holds a host whose `Campaign` tag names
+another campaign. The host's user data,
 `control-host/user-data.sh`:
 
 - installs the key `--ssh-public-key` names for `ec2-user`, and has sshd
@@ -692,12 +695,15 @@ python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confi
 ### Steer a campaign
 
 `control` changes a running campaign's settings, which its controller applies
-on its next loop. `--actor dain` or `--actor monitor` is required, and the
-settings' events record it:
+on its next loop. `--campaign <campaign>` is required, and refused unless the
+root's controller recorded that campaign in `campaign-options.json` as it
+started, so a command meant for one campaign never steers another's root.
+`--actor dain` or `--actor monitor` is required, and the settings' events
+record it:
 
 ```bash
-python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<campaign> --actor dain \
-  set-limit max-hosts 300
+python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<campaign> --campaign <campaign> \
+  --actor dain set-limit max-hosts 300
 ```
 
 - `add-region <region> --max-vcpus N [--on-demand-max-vcpus N]

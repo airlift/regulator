@@ -364,6 +364,10 @@ class FakeCloud:
         self.call("register_target", target_group, instance, port)
         self.targets.setdefault(target_group, set()).add((instance, port))
 
+    def registered_targets(self, region, target_group):
+        self.call("registered_targets", target_group)
+        return [instance for instance, _ in sorted(self.targets.get(target_group, ()))]
+
     def deregister_target(self, region, target_group, instance, port):
         self.call("deregister_target", target_group, instance, port)
         self.targets.get(target_group, set()).discard((instance, port))
@@ -616,6 +620,9 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_response("delete_volume", {}, {"VolumeId": "vol-new"})
         targets = {"TargetGroupArn": "arn:target-group", "Targets": [{"Id": "i-host", "Port": 3000}]}
         elbv2.add_response("register_targets", {}, targets)
+        elbv2.add_response("describe_target_health", {"TargetHealthDescriptions": [
+            {"Target": {"Id": "i-host", "Port": 3000}, "TargetHealth": {"State": "healthy"}}]},
+            {"TargetGroupArn": "arn:target-group"})
         elbv2.add_response("deregister_targets", {}, targets)
         aws = self.cloud
         self.assertEqual('{"vpc": "vpc-a"}', aws.parameter("us-west-2", "/network"))
@@ -636,6 +643,7 @@ class TestAwsCloud(unittest.TestCase):
         self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
         aws.delete_volume("us-west-2", "vol-new")
         aws.register_target("us-west-2", "arn:target-group", "i-host", 3000)
+        self.assertEqual(["i-host"], aws.registered_targets("us-west-2", "arn:target-group"))
         aws.deregister_target("us-west-2", "arn:target-group", "i-host", 3000)
 
     def test_worker_profile_and_prefix_deletion(self):
