@@ -25,6 +25,10 @@ class TestGenerateManifest(unittest.TestCase):
                 GENERATE_MANIFEST.Row(**row) for row in csv.DictReader(source, delimiter="\t")
                 if row["shard_id"] in shards]
         self.assertEqual(sorted(generated), sorted(recorded))
+        # Regulator LIKE matching promises no allocation; Trino's LIKE is a comparator.
+        self.assertEqual(
+            {(row.system, row.allocation_contract) for row in generated if row.shard_id == "trino-like-specialized"},
+            {("regulator", "allocation-free"), ("regulator-generated", "allocation-free"), ("trino-sql", "recorded")})
 
     def testEverydayTrinoRowsUseRotatingWorkloadManifest(self):
         header = "workload_id\tfamily\torigin\tsource_id\tslice_offset\texpected_match_count\tpattern\tsource\n"
@@ -51,6 +55,14 @@ class TestGenerateManifest(unittest.TestCase):
         self.assertEqual({"trino-everyday-operations"}, {row.suite for row in rows})
         self.assertEqual({f"workload=literal"}, {row.parameters for row in rows})
         self.assertEqual({f"everyday={digest}"}, {row.workload_checksum for row in rows})
+        # Only Regulator's contains and count promise no allocation; position creates a matcher
+        # per call on a pattern without a specialized path, and Joni is a comparator.
+        self.assertEqual(
+            {row.row_id for row in rows if row.allocation_contract == "allocation-free"},
+            {f"trino-operations/everyday/literal/{operation}/{system}"
+             for operation in ("contains", "count")
+             for system in ("regulator-native-access", "regulator-object-row")})
+        self.assertEqual({"allocation-free", "recorded"}, {row.allocation_contract for row in rows})
 
     def testEverydayTrinoRowsRejectWrongSourceCount(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
