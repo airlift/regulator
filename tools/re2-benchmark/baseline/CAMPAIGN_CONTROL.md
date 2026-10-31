@@ -367,7 +367,8 @@ in a new root.
 
 `run-campaign.py control <campaign> <command>` runs on the control host;
 from the Mac it is the same command over ssh on port 443 through the subnet router. Each takes the
-lock, validates, bumps the version and logs the event with its actor.
+lock, validates, bumps the version and logs the event with its actor; the
+new version takes effect only once its event is logged.
 
 - `add-region <region> --max-vcpus N [--on-demand-max-vcpus N] [--platforms ...]`:
   creates the region's bucket if absent with the same lifecycle rule, uploads

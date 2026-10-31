@@ -130,8 +130,12 @@ controller refuses settings it could not run under when it seeds them; on a
 reload it keeps the last version it loaded and logs why. Every change takes
 `campaign-settings.lock` while it rewrites the file, takes the next version,
 and appends a row naming its actor, `dain`, `monitor`, or `controller`, to
-`campaign-settings-events.tsv`. The controller itself changes only the phases'
-states, the boot window's size, and the spending stop.
+`campaign-settings-events.tsv`. The new version is written beside the file
+and put in place only once its row is recorded; the next change puts in place
+one whose row was recorded before a failure, and discards one whose row was
+not, so no version takes effect without its row. The controller itself
+changes only the phases' states, the boot window's size, and the spending
+stop.
 
 What decides the measurements stays frozen in `campaign-options.json`: the AWS
 account of the settings' buckets, `--spot-vcpu-reserve`, the vCPUs of each
