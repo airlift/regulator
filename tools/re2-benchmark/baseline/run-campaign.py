@@ -3796,6 +3796,10 @@ class UnitDispatcher:
             nonlocal blocked_vcpus
             if pool not in late:
                 late[pool] = self.late_items(pool, now)
+            # A pool with no room for another worker is not trying to launch, so no refusal stands for it.
+            if not self.launch_room(pool):
+                self.refused.pop(pool, None)
+                return False
             # A worker is planned only once its platform has room for it.
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
                 market = self.pool_demand(pool, now, late[pool])

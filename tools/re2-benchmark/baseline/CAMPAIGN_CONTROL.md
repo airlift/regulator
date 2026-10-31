@@ -405,7 +405,10 @@ turns their S3 evidence into:
   worker (minimum and count at zero), boot-to-ready, idle stops (with and
   without queued work), interruptions, stalled hosts, boot window, launch
   refusals by reason, spend and spend rate; per region: vCPUs by market,
-  pending launches; `spending_stop`, phase state, settings version.
+  pending launches; `spending_stop`, phase state, settings version. A
+  refusal, worker state or phase state that has cleared reads 0, so a
+  panel's current value never holds a stale one; a pool with no room for
+  another host is not launching, so it holds no refusal.
 - **Logs** (Loki): structured events: phase starts and completions, settings
   changes with their actor, pauses, leaks, leftovers, restarts, milestones
   (first host reporting, replica 1 accepted, phase complete), with the local
