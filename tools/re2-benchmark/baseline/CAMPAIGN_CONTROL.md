@@ -266,10 +266,13 @@ One loop, target under 30 s, every action a round trip:
    applied in the same allocation. A pinned share overrides. A phase above
    its target gives up hosts while another phase waits for them, or while the
    hosts held pass `max_hosts` or the per-platform cap, as once one is
-   lowered; it stop-leases idle workers first and never interrupts a lease. A
-   draining phase gives up the open hosts a lowered limit still leaves no room
-   for once the launching phases have given up theirs. A finished phase's
-   hosts flow to the others the same loop.
+   lowered; it stop-leases idle workers first and never interrupts a lease.
+   While it gives them up it launches no host past its target, so each host
+   it gives up goes to the phase waiting for it, by the loop after the host
+   ends, rather than back to it. A draining phase gives up the open hosts a
+   lowered limit still leaves no room for once the launching phases have
+   given up theirs. A finished phase's hosts flow to the others the same
+   loop.
 5. **Launch.** Admission per pool as today, with one fleet snapshot per loop,
    placement scores at `min(50, target)` cached five minutes, and the boot
    window below. A `RunInstances` round trip is about 1 s, not 2.5 s of

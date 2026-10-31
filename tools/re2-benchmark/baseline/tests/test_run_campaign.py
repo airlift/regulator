@@ -153,16 +153,16 @@ class TestRunCampaign(unittest.TestCase):
 
         # A phase over its target keeps the hosts it holds; the other's share grows only by what the limits leave
         # free, and once they leave none while it waits for more, the phase over its target gives up the hosts past
-        # it.
-        self.assertEqual([({"r8i": 6}, {"r8i": 4}), ({"r8i": 4}, {})], shares({"a": 6, "b": 0}))
+        # it, and launches none past it, so each one it gives up goes to the other.
+        self.assertEqual([({"r8i": 2}, {"r8i": 4}), ({"r8i": 4}, {})], shares({"a": 6, "b": 0}))
         # It keeps them while the other phase needs no more, as all its work has hosts, and gives up those past its
         # pin whether or not another phase waits.
         self.assertEqual([({"r8i": 8}, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, waiting=2))
-        self.assertEqual([({"r8i": 8}, {"r8i": 5}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, 3, waiting=2))
+        self.assertEqual([({"r8i": 3}, {"r8i": 5}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, 3, waiting=2))
         self.assertEqual([(None, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, paused="a"))
         # A phase with little work left beside one holding all but one of the hosts still takes the free one, and
         # the other gives up a host for the rest of its target.
-        self.assertEqual([({"r8i": 1}, {}), ({"r8i": 9}, {"r8i": 1})], shares({"a": 0, "b": 9}))
+        self.assertEqual([({"r8i": 1}, {}), ({"r8i": 8}, {"r8i": 1})], shares({"a": 0, "b": 9}))
         # A draining phase whose hosts go on taking its leases gives up those a lowered limit leaves no room for.
         self.assertEqual([(None, {"r8i": 2}), ({"r8i": 4}, {})], shares({"a": 8, "b": 4}, draining="a"))
 
@@ -4003,6 +4003,43 @@ class TestUnitWorkers(unittest.TestCase):
             ledger = self.unit_attempts(dispatchers["primary"].result_root)
             self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
                                       if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+
+    def test_phase_that_starts_on_a_full_platform_gets_the_first_host_given_up(self):
+        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
+                                      "estimated_seconds": "900",
+                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for shard, count in (("short", 1), ("long", 12)) for index in range(1, count + 1)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # The primary holds all four hosts, measuring twelve 15-minute units, when the smoke's setup finishes.
+            # Each platform's first host the primary gives up goes to the smoke, by the loop after it ends, while
+            # the primary still has work queued.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
+            check = RUN_CAMPAIGN.check_regions
+            given_up, taken = {}, {}
+
+            def late_smoke(arguments, platforms):
+                if arguments.phase == "smoke":
+                    fleet.clock += 600
+                return check(arguments, platforms)
+
+            def loop():
+                exited = {entry[1] for entry in fleet.log if entry[0] == "exit"}
+                for host in fleet.hosts:
+                    if host.session in exited:
+                        given_up.setdefault(host.platform, fleet.sleeps)
+                for worker in self.running["smoke"].workers.values():
+                    taken.setdefault(worker.job.platform.name, (fleet.sleeps, len(self.running["primary"].queued())))
+
+            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=late_smoke):
+                failed, _ = self.run_campaign(root, fleet, [("primary", "primary", ["long"], ()),
+                                                            ("smoke", "smoke", ["short"], ())], 4, 2, loop,
+                                              purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            self.assertEqual({"r8i", "r9g"}, taken.keys())
+            for platform, (loop_taken, queued) in taken.items():
+                self.assertLessEqual(loop_taken, given_up[platform] + 1, platform)
+                self.assertGreater(queued, 0, platform)
 
     def test_lowered_host_limit_sheds_hosts_behind_their_leases(self):
         units = {f"long-{index}": {"unit_id": f"long-{index}", "shard_id": "long", "unit_index": str(index),
