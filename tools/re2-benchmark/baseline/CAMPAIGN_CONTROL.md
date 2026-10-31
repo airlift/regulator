@@ -181,7 +181,11 @@ one bash process per host) is deleted. The controller launches with boto3:
    nothing booted, and its pool waits 30 s before it launches again, so an S3
    outage holds launches back without failing the phase.
    Workers admitted in a loop are launched even when a later admission
-   fails, so none stays recorded as starting without a launch.
+   fails, so none stays recorded as starting without a launch; one whose
+   launch an error kept the controller from asking for has failed to
+   launch, spending none of its slot's replacements. An admission whose
+   starting record fails releases its reservation, and the phase's fault
+   names every error the loop met.
 3. Calls `RunInstances` with user data naming the prefixes, the archives and
    the permanent profile, `InstanceInitiatedShutdownBehavior=terminate`, and
    tags the instance with campaign, phase, host epoch and session.

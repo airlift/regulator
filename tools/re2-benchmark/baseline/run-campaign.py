@@ -75,6 +75,9 @@ BOOT_DEADLINE_MISSED = "worker did not report by its boot deadline"
 # nothing, so it spends none of its slot's replacements, and its pool waits CAPACITY_RETRY_SECONDS before it launches
 # again.
 FIRST_LEASES_UNWRITTEN = "launch-infrastructure:first leases not written"
+# A worker admitted in a loop whose launch the controller never asked for, as when an error ended the loop first,
+# booted nothing either, and spends none of its slot's replacements.
+LAUNCH_NOT_ATTEMPTED = "launch-infrastructure:launch not attempted"
 # A request one region refused while its pool had another region to try spends none of its slot's replacements.
 REGION_REFUSAL = "launch-region-refused:"
 UNIT_WORKER_SHARD = "unit-worker"
@@ -3384,12 +3387,14 @@ class UnitDispatcher:
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
         its pool opens no new slot. A launch that found no capacity, that one region refused while its pool had
-        another to try, whose first leases S3 did not take, or whose instance was never found, booted nothing.
+        another to try, whose first leases S3 did not take, that was never asked for, or whose instance was never
+        found, booted nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
-        elif (status != 0 and not terminated and detail not in (LAUNCH_NOT_FOUND, FIRST_LEASES_UNWRITTEN) and
+        elif (status != 0 and not terminated and
+              detail not in (LAUNCH_NOT_FOUND, FIRST_LEASES_UNWRITTEN, LAUNCH_NOT_ATTEMPTED) and
               not detail.startswith(("launch-capacity:", REGION_REFUSAL))):
             failures += 1
         if failures > MAX_REPLACEMENTS_PER_JOB:
@@ -3778,26 +3783,23 @@ class UnitDispatcher:
         """Admit each pool's launches, then write each admitted worker's first leases and launch it, the workers on the
         request threads. A worker whose first leases S3 did not all take launches nothing, as a launch AWS refused
         does: it has ended, and is settled once its cleanup is proven. An exception during admission still launches
-        the workers admitted before it, so none stays recorded as starting with no launch."""
+        the workers admitted before it, so none stays recorded as starting with no launch, and an error launching
+        them is noted on the admission's."""
         starting = []
         try:
             self.admit(now, starting)
-        finally:
-            self.launch_admitted(starting)
+        except BaseException as error:
+            try:
+                self.launch_admitted(starting)
+            except Exception as failure:
+                error.add_note(f"launching the workers admitted before it also failed: {failure}")
+            raise
+        self.launch_admitted(starting)
 
     def launch_admitted(self, starting):
-        """Write the first leases of each worker in starting and launch it, as launch describes."""
-        requests, elsewhere = {}, set()
-        for worker in starting:
-            try:
-                requests[worker.job.host_epoch] = launch_requests(self.arguments, worker.job, worker.metadata)
-            except LaunchFailed as failure:
-                worker.launch_failure = (failure.classification, failure.detail)
-            # A region's refusal moves the pool to a region it has not cooled in the market.
-            if set(launch_regions(self.arguments, worker.job)) - {worker.job.region, *worker.job.capacity_failures}:
-                elsewhere.add(worker.job.host_epoch)
-        pending = [(worker, [(sequence, self.lease_document(worker, sequence)) for sequence in sorted(worker.unsent)])
-                   for worker in starting if worker.job.host_epoch in requests]
+        """Write the first leases of each worker in starting and launch it, as launch describes. A worker whose
+        launch an error kept the controller from asking for has failed to launch."""
+        requests, elsewhere, asked = {}, set(), set()
 
         def write_and_launch(entry):
             # The host finds its work waiting when its setup ends.
@@ -3805,21 +3807,40 @@ class UnitDispatcher:
             written = write_leases(self.arguments, worker, documents)
             if not documents or len(written) < len(documents):
                 return written, LaunchFailed("retryable-infrastructure", FIRST_LEASES_UNWRITTEN)
+            asked.add(worker.job.host_epoch)
             try:
                 return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch],
                                               worker.job.host_epoch in elsewhere)
             except LaunchFailed as failure:
                 return written, failure
 
-        for (worker, _), (written, launched) in zip(pending, self.concurrently(write_and_launch, pending)):
-            self.sent(worker, written)
-            if isinstance(launched, LaunchFailed):
-                worker.launch_failure = (launched.classification, launched.detail)
-                continue
-            worker.metadata["instance_id"], worker.metadata["availability_zone"] = launched
-            if worker.instance_id:
-                write_attempt(self.attempts_path, worker.job, "started",
-                              f"instance_id={worker.instance_id};availability_zone={launched[1]}")
+        try:
+            for worker in starting:
+                try:
+                    requests[worker.job.host_epoch] = launch_requests(self.arguments, worker.job, worker.metadata)
+                except LaunchFailed as failure:
+                    worker.launch_failure = (failure.classification, failure.detail)
+                # A region's refusal moves the pool to a region it has not cooled in the market.
+                if set(launch_regions(self.arguments, worker.job)) - {worker.job.region,
+                                                                      *worker.job.capacity_failures}:
+                    elsewhere.add(worker.job.host_epoch)
+            pending = [(worker, [(sequence, self.lease_document(worker, sequence))
+                                 for sequence in sorted(worker.unsent)])
+                       for worker in starting if worker.job.host_epoch in requests]
+            for (worker, _), (written, launched) in zip(pending, self.concurrently(write_and_launch, pending)):
+                self.sent(worker, written)
+                if isinstance(launched, LaunchFailed):
+                    worker.launch_failure = (launched.classification, launched.detail)
+                    continue
+                worker.metadata["instance_id"], worker.metadata["availability_zone"] = launched
+                if worker.instance_id:
+                    write_attempt(self.attempts_path, worker.job, "started",
+                                  f"instance_id={worker.instance_id};availability_zone={launched[1]}")
+        finally:
+            # A launch asked for whose answer was lost is found by its session's tag.
+            for worker in starting:
+                if worker.job.host_epoch not in asked and not worker.launch_failure:
+                    worker.launch_failure = ("retryable-infrastructure", LAUNCH_NOT_ATTEMPTED)
 
     def admit(self, now, starting):
         """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
@@ -3864,6 +3885,9 @@ class UnitDispatcher:
                                     UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
                 if blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                     return False
+                # Checked before the reservation, which a worker owns only once it starts.
+                self.check_frozen_inputs()
+                check_purchase(self.arguments, candidate)
                 candidate, ready_at, refusal, scan, blocked = admit_launch(
                     self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
                     self.observed)
@@ -3901,23 +3925,32 @@ class UnitDispatcher:
 
     def start(self, pool, job, now, starting):
         """Record an admitted worker in the phase's workers and in starting, and issue its first leases, before its
-        launch."""
+        launch. Until its starting record is written no worker owns the admission's reservation, so one whose record
+        fails releases it, noting any failure to."""
         del self.candidates[pool]
-        self.boot_room -= 1
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
-        slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
-        self.check_frozen_inputs()
-        check_purchase(self.arguments, job)
-        session = worker_session(self.arguments.campaign_id, job)
-        metadata = worker_metadata(self.arguments, job, session, f"campaigns/{self.arguments.campaign}/{session}")
-        # The starting record names the session before the launch, so a restart finds its instance by its tag.
-        write_attempt(
-            self.attempts_path, job, "starting",
-            f"region={job.region};placement_score={job.placement_score}" +
-            (f";capacity_failures={','.join(job.capacity_failures)}" if job.capacity_failures else "") +
-            f";slot={slot};slot_failures={slot_failures};boot_by={job.boot_by};stop_by={job.stop_by}"
-            f";session={session};prefix={metadata['prefix']}")
+        slot, slot_failures = slots[0] if slots else (job.host_epoch, 0)
+        try:
+            session = worker_session(self.arguments.campaign_id, job)
+            metadata = worker_metadata(self.arguments, job, session, f"campaigns/{self.arguments.campaign}/{session}")
+            # The starting record names the session before the launch, so a restart finds its instance by its tag.
+            write_attempt(
+                self.attempts_path, job, "starting",
+                f"region={job.region};placement_score={job.placement_score}" +
+                (f";capacity_failures={','.join(job.capacity_failures)}" if job.capacity_failures else "") +
+                f";slot={slot};slot_failures={slot_failures};boot_by={job.boot_by};stop_by={job.stop_by}"
+                f";session={session};prefix={metadata['prefix']}")
+        except BaseException as error:
+            # No host was launched for it.
+            try:
+                self.budget.release(self.arguments.campaign_id, job.host_epoch, cleanup_verified=True)
+            except Exception as failure:
+                error.add_note(f"releasing host epoch {job.host_epoch}'s reservation also failed: {failure}")
+            raise
+        if slots:
+            slots.pop(0)
+        self.boot_room -= 1
         # The worker boots from the poll that launched it, so a projection in that poll counts it as booting
         # no later than a further launch would.
         worker = self.workers[job.host_epoch] = UnitWorker(
@@ -4616,7 +4649,7 @@ class Campaign:
         self.telemetry.event("phase-failed", f"{phase.key}: failed: {phase.failure}", phase=phase.key)
 
     def fault(self, phase, error):
-        phase.fault = str(error) or type(error).__name__
+        phase.fault = "; ".join([str(error) or type(error).__name__, *getattr(error, "__notes__", ())])
         self.telemetry.event("phase-paused", f"{phase.key}: paused: {phase.fault}", phase=phase.key)
 
 

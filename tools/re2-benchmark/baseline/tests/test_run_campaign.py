@@ -4306,25 +4306,48 @@ class TestUnitWorkers(unittest.TestCase):
                 outcomes = {(row["outcome"], row["detail"]) for row in csv.DictReader(attempts, delimiter="\t")
                             if row["outcome"] not in ("starting", "started", "stopped")}
             self.assertEqual({("retryable-infrastructure", RUN_CAMPAIGN.FIRST_LEASES_UNWRITTEN)}, outcomes)
-        with self.subTest(scenario="admission fails"), tempfile.TemporaryDirectory() as temporary:
-            # The disk refuses the second worker's starting record: the first, admitted before it, still launches
-            # with its leases.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts")
-            write_attempt = RUN_CAMPAIGN.write_attempt
-            starts = []
+        for scenario in ("disk full", "user data unreadable"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                # In the loop that admits the smoke's two workers, the disk is full from the second's starting record
+                # on, or the controller cannot read their user data. The smoke pauses for every error the loop met,
+                # and Dain stops the campaign. A worker admitted before an admission error still launches with its
+                # leases, one whose launch was never asked for has ended, so the stop waits for no boot allowance,
+                # and no admission's reservation outlives the stop.
+                root = Path(temporary)
+                fleet = FakeUnitFleet(root / "hosts")
+                write_attempt = RUN_CAMPAIGN.write_attempt
+                starts, stopped = [], []
 
-            def full_disk(path, job, outcome, detail="-"):
-                if outcome == "starting":
-                    starts.append(job)
-                    if len(starts) == 2:
+                def full_disk(path, job, outcome, detail="-"):
+                    if outcome == "starting":
+                        starts.append((job, fleet.sleeps))
+                    if scenario == "disk full" and len(starts) > 1 and starts[1][1] == fleet.sleeps:
                         raise OSError(28, "No space left on device")
-                write_attempt(path, job, outcome, detail)
+                    write_attempt(path, job, outcome, detail)
 
-            with patch.object(RUN_CAMPAIGN, "write_attempt", side_effect=full_disk), \
-                    self.assertRaisesRegex(OSError, "No space left"):
-                self.run_phase(Path(temporary), fleet, "smoke", shards, 2, 1)
-            [launched] = fleet.hosts
-            self.assertEqual((starts[0].platform.name, [1, 2]), (launched.platform, sorted(launched.leases)))
+                def loop():
+                    if "smoke: paused: " in log.getvalue() and not stopped:
+                        self.control(root, "stop")
+                        stopped.append(fleet.sleeps)
+
+                unreadable = OSError(5, "Input/output error")
+                with patch.object(RUN_CAMPAIGN, "write_attempt", side_effect=full_disk), \
+                        patch.object(RUN_CAMPAIGN, "worker_user_data", side_effect=unreadable
+                                     if scenario == "user data unreadable" else RUN_CAMPAIGN.worker_user_data):
+                    failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", shards, ())], 2, 1, loop)
+                self.assertEqual([], failed)
+                self.assertEqual({}, json.loads((root / RUN_CAMPAIGN.STATE_FILE).read_text())["reservations"])
+                if scenario == "disk full":
+                    [launched] = fleet.hosts
+                    self.assertEqual((starts[0][0].platform.name, [1, 2]), (launched.platform, sorted(
+                        sequence for sequence, lease in launched.leases.items() if not lease.get("stop"))))
+                    self.assertIn("smoke: paused: [Errno 28] No space left on device; launching the workers admitted "
+                                  "before it also failed: [Errno 28] No space left on device", log.getvalue())
+                else:
+                    self.assertEqual([], fleet.hosts)
+                    self.assertEqual(stopped[0] + 2, fleet.sleeps)
+                    self.assertIn("smoke: paused: [Errno 5] Input/output error", log.getvalue())
 
     def test_boot_failures_pass_to_their_slots_replacements(self):
         shards = ["trino-like-specialized"]
