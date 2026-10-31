@@ -104,8 +104,12 @@ Each check runs on one **path**: the subnet router, through `host` and
      too, ask Dain with both journals' lines; never replace a host twice for
      one campaign without his answer.
 
-   When `host` fails, go to [Access failures](#access-failures) and run the
-   check from here on the Systems Manager path.
+   When `status` cannot run but `host true` succeeds, since the host has no
+   `/opt/regulator/venv` or no checkout, its boot is still installing them or
+   ended before it did: read `host cloud-init status` and the unit as for a
+   controller that is down. When `host` itself fails, go to
+   [Access failures](#access-failures) and run the check from here on the
+   Systems Manager path.
 2. **Health.** Read every panel of the Regulator health dashboard (see
    [Reading a panel](#reading-a-panel)) and mark each one red or green.
 3. **Act.** For each red panel, do what [Health panels](#health-panels) names,
