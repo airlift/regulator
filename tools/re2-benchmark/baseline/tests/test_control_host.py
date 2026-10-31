@@ -135,7 +135,7 @@ class TestControlHost(unittest.TestCase):
     def test_a_replacement_that_fails_partway_backs_out_and_names_what_is_unconfirmed(self):
         # Each replacement of campaign c's first host, i-control-1, launches i-control-2, which backs out of the
         # volume and the load balancer when it cannot attach the volume, look for a teardown of it, or tell it serves
-        # Grafana alone, and names each step AWS refused.
+        # Grafana alone, and names each step whose outcome AWS left unconfirmed.
         def refused(step, error):
             # Every call of the step fails with error.
             return lambda aws: {step: error}
@@ -188,28 +188,29 @@ class TestControlHost(unittest.TestCase):
         for name, patches, refusal, states, targets in (
                 ("attach refused", refused("attach_volume", CloudError("IncorrectState: busy")),
                  "cannot attach campaign c's volume vol-1 to its new control host i-control-2: IncorrectState: busy; "
-                 "that host is terminated; run control-host replace c again",
+                 "that host has its termination requested; run control-host replace c again",
                  ["terminated", "terminated"], set()),
                 ("teardown look failed", teardown_look_fails,
                  "cannot check that no teardown has begun on campaign c's volume vol-1: ThrottlingException: Rate "
-                 "exceeded; its new control host i-control-2 is terminated; run control-host replace c again",
+                 "exceeded; its new control host i-control-2 has its termination requested; run control-host replace "
+                 "c again",
                  ["terminated", "terminated"], set()),
                 # One whose termination then fails is left running for the next replace.
                 ("termination refused", attach_and_termination_refused,
-                 "control host i-control-2: IncorrectState: busy; that host still runs, since AWS refused to "
-                 "terminate it: RequestLimitExceeded: slow down; run control-host replace c again",
+                 "control host i-control-2: IncorrectState: busy; that host has its termination unconfirmed: "
+                 "RequestLimitExceeded: slow down; run control-host replace c again",
                  ["terminated", "running"], set()),
                 ("registration answer lost", answer_lost,
                  "cannot register campaign c's new control host i-control-2 .*: RequestTimeout: the answer was lost; "
-                 "that host is deregistered and terminated; run control-host replace c again",
+                 "that host has its deregistration and termination requested; run control-host replace c again",
                  ["terminated", "terminated"], set()),
                 ("target group look failed", look_failed,
                  "cannot register campaign c's new control host i-control-2 .*: ThrottlingException: Rate exceeded; "
-                 "that host is deregistered and terminated; run control-host replace c again",
+                 "that host has its deregistration and termination requested; run control-host replace c again",
                  ["terminated", "terminated"], set()),
                 ("another campaign registered", registered_beside,
-                 "also forwards Grafana to i-control-3 of campaign d, .* so that host is terminated, though AWS "
-                 "refused to deregister it: ThrottlingException: Rate exceeded; once",
+                 "also forwards Grafana to i-control-3 of campaign d, .* so that host has its termination requested, "
+                 "but its deregistration unconfirmed: ThrottlingException: Rate exceeded; once",
                  ["terminated", "terminated", "running"], {("i-control-2", 3000), ("i-control-3", 3000)})):
             with self.subTest(name), tempfile.TemporaryDirectory() as temporary:
                 aws = control_host_cloud()
@@ -237,7 +238,7 @@ class TestControlHost(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
             with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()), \
-                    self.assertRaisesRegex(SystemExit, "i-control-2: .* still runs, since AWS refused to terminate it"):
+                    self.assertRaisesRegex(SystemExit, "i-control-2: .* has its termination unconfirmed"):
                 for step, failure in attach_and_termination_refused(aws).items():
                     stack.enter_context(patch.object(aws, step, side_effect=failure))
                 control_host.replace(aws, "c", SSH_PUBLIC_KEY)
@@ -330,7 +331,7 @@ class TestControlHost(unittest.TestCase):
 
             with patch.object(aws, "run_control_host", side_effect=teardown_beside), \
                     self.assertRaisesRegex(SystemExit, "campaign d's teardown has begun .*; its new control host "
-                                                       "i-control-4 is terminated"):
+                                                       "i-control-4 has its termination requested"):
                 control_host.replace(aws, "d", SSH_PUBLIC_KEY)
         self.assertEqual(["terminated"] * 4, [host.state for host in aws.region_instances["us-west-2"]])
         self.assertEqual(([], [], 2), (aws.registered_targets("us-west-2", "arn:target-group"),
