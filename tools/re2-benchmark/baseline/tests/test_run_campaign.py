@@ -3308,9 +3308,26 @@ class TestUnitWorkers(unittest.TestCase):
                      for index in range(1, 301)}
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: setups[host.number - 1])
-            self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100,
-                           purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
+            late_items, validate = RUN_CAMPAIGN.UnitDispatcher.late_items, RUN_CAMPAIGN.validate_frozen_inputs
+            projections, checks = Counter(), Counter()
+
+            def project(dispatcher, pool, now):
+                projections[fleet.sleeps, pool] += 1
+                return late_items(dispatcher, pool, now)
+
+            def check(*arguments):
+                checks[fleet.sleeps] += 1
+                return validate(*arguments)
+
+            with patch.object(RUN_CAMPAIGN.UnitDispatcher, "late_items", project), \
+                    patch.object(RUN_CAMPAIGN, "validate_frozen_inputs", check):
+                self.run_phase(Path(temporary), fleet, "smoke", ["burst"], 200, 100,
+                               purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
             self.assertEqual(200, len(fleet.hosts))
+            # Each loop projects each pool's late items once, and checks the frozen inputs at most once however many
+            # workers it starts and settles.
+            self.assertEqual({1}, set(projections.values()))
+            self.assertEqual({1}, set(checks.values()))
             # The hosts launch in waves, each as large as the boot window, which doubles as each wave reports in
             # time, up to its largest.
             self.assertEqual([10, 20, 40, 50], self.boot_windows(Path(temporary)))

@@ -159,17 +159,22 @@ class FleetBudget:
 
     @contextmanager
     def locked(self):
+        """The fleet's state under its lock, written back durably once it changed."""
         with self.lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if self.state_path.exists():
-                state = json.loads(self.state_path.read_text())
+                text = self.state_path.read_text()
+                state = json.loads(text)
             else:
+                text = None
                 state = {"schema_version": 2, "reservations": {}, "completed": {}, "machine_hours": 0, "cost_usd": 0}
             yield state
+            written = json.dumps(state, sort_keys=True) + "\n"
+            if written == text:
+                return
             temporary = self.state_path.with_suffix(".new")
             with temporary.open("w") as output:
-                json.dump(state, output, sort_keys=True)
-                output.write("\n")
+                output.write(written)
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, self.state_path)

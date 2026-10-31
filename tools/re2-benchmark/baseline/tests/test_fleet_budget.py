@@ -4,11 +4,13 @@ import copy
 import io
 import json
 from operator import itemgetter
+import os
 from pathlib import Path
 import tempfile
 import sys
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from campaign_settings import CampaignSettings
@@ -294,6 +296,16 @@ class TestFleetBudget(unittest.TestCase):
         self.assertTrue(launch(12, 1300)[0])
         self.budget.boot_failed("baseline", 12, now=1350)
         self.assertEqual(5, window())
+
+    def test_look_that_changes_nothing_leaves_the_state_unwritten(self):
+        # Each loop reads its reservations and reports its boots; only a change rewrites the state and syncs it.
+        self.reserve(1)
+        with patch.object(fleet_budget.os, "replace", wraps=os.replace) as replace:
+            self.budget.reservations(self.root / "baseline")
+            self.budget.report_boots("baseline", [1], 1000)
+            self.assertEqual(0, replace.call_count)
+            self.budget.release("baseline", 1, cleanup_verified=True, now=2000)
+            self.assertEqual(1, replace.call_count)
 
 
 if __name__ == "__main__":
