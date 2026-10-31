@@ -62,7 +62,7 @@ class TestCampaignSettings(unittest.TestCase):
         with patch.object(campaign_settings.os, "replace", side_effect=OSError("interrupted")), \
                 self.assertRaises(OSError):
             settings.change("monitor", "max_hosts 200 to 100", lambda current: current.update(max_hosts=100))
-        with patch.object(campaign_settings, "ledger_lines", side_effect=OSError("I/O error")):
+        with patch.object(campaign_settings, "ledger_rows", side_effect=OSError("I/O error")):
             for attempt in (settings.reload, lambda: settings.change(
                     "dain", "max_usd to 100", lambda current: current.update(max_usd=100))):
                 with self.assertRaisesRegex(SettingsError, "cannot finish the campaign settings change staged"):

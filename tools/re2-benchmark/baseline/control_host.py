@@ -20,8 +20,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from campaign_io import fsync_directory
-from campaign_settings import locked
+from campaign_io import fsync_directory, locked
 from cloud import CloudError
 
 REGION = "us-west-2"
