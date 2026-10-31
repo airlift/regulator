@@ -795,6 +795,31 @@ class TestRunCampaign(unittest.TestCase):
             # A refused region gets no bucket.
             self.assertEqual([bucket], list(aws.buckets))
 
+    def test_settings_changes_are_logged_once_their_ledger_reads_again(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = campaign_settings(root)
+            logged = []
+            campaign = RUN_CAMPAIGN.Campaign(SimpleNamespace(settings=settings, telemetry=SimpleNamespace(
+                event=lambda name, text, **attributes: logged.append(attributes["change"]))), root, [])
+            # The controller's first loop logs none of the changes made before it started.
+            campaign.log_changes()
+            # A ledger that cannot be read, or is damaged, as a disk fault leaves it, stops no loop, and its changes
+            # are logged by the next loop that reads it.
+            path = settings.events_path
+            for damage in (lambda ledger: path.unlink(), lambda ledger: path.write_bytes(ledger + b"\xff\n")):
+                settings.change("dain", f"max hosts {len(logged) + 10}",
+                                lambda current: current.update(max_hosts=len(logged) + 10))
+                ledger = path.read_bytes()
+                damage(ledger)
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    campaign.log_changes()
+                self.assertRegex(printed.getvalue(), f"^logging no settings changes this loop, since {path} cannot be "
+                                                     "read: ")
+                path.write_bytes(ledger)
+                campaign.log_changes()
+            self.assertEqual(["max hosts 10", "max hosts 11"], logged)
+
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
         # tournament.a.lang, so they would reserve the fleet and number their hosts as one campaign.
