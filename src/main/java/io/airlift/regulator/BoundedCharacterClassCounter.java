@@ -35,7 +35,7 @@ final class BoundedCharacterClassCounter
     private final long[] matchingCodePoints;
     private final int minimum;
     private final int maximum;
-    private final boolean latin1;
+    private final boolean readsBytes;
     private final boolean matchesAllNonAscii;
 
     private BoundedCharacterClassCounter()
@@ -43,13 +43,16 @@ final class BoundedCharacterClassCounter
         matchingCodePoints = null;
         minimum = 0;
         maximum = 0;
-        latin1 = false;
+        readsBytes = false;
         matchesAllNonAscii = false;
     }
 
     private BoundedCharacterClassCounter(RuneRange[] ranges, int minimum, int maximum, boolean latin1)
     {
-        matchingCodePoints = new long[latin1 ? 4 : CODE_POINT_WORD_COUNT];
+        // Every byte of a non-ASCII character, malformed or not, is at least 0x80, so a class of
+        // only ASCII characters reads alike byte by byte, as a Latin-1 class does.
+        boolean readsBytes = latin1 || ranges[ranges.length - 1].high() <= 0x7F;
+        matchingCodePoints = new long[readsBytes ? 4 : CODE_POINT_WORD_COUNT];
         boolean matchesAllNonAscii = false;
         for (RuneRange range : ranges) {
             matchesAllNonAscii |= !latin1 && Compiler.holdsAllNonAscii(range);
@@ -61,7 +64,7 @@ final class BoundedCharacterClassCounter
         }
         this.minimum = minimum;
         this.maximum = maximum;
-        this.latin1 = latin1;
+        this.readsBytes = readsBytes;
         this.matchesAllNonAscii = matchesAllNonAscii;
     }
 
@@ -125,6 +128,11 @@ final class BoundedCharacterClassCounter
                 analysis.minimum(),
                 analysis.maximum(),
                 analysis.latin1());
+    }
+
+    boolean readsBytesForDiagnostics()
+    {
+        return readsBytes;
     }
 
     long estimatedRetainedSize()
@@ -198,7 +206,7 @@ final class BoundedCharacterClassCounter
         while (position < end) {
             int codePoint;
             int width;
-            if (latin1) {
+            if (readsBytes) {
                 codePoint = bytes[position] & 0xFF;
                 width = 1;
             }
@@ -319,7 +327,7 @@ final class BoundedCharacterClassCounter
 
     private long decode(byte[] bytes, int position, int end)
     {
-        if (latin1) {
+        if (readsBytes) {
             return (1L << 32) | (bytes[position] & 0xFFL);
         }
         long decoded = Utf8.decode(bytes, position, end);
