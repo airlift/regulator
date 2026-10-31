@@ -2784,7 +2784,7 @@ class FakeUnitFleet(FakeCloud):
     end.
     """
 
-    def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
+    def __init__(self, scratch, scripts=None, abort_after=None, full=None, failed_boot=lambda host: False,
                  unit_scripts=None, stuck_prefix=lambda host: False, unlisted=lambda host: False,
                  slow_boot=lambda host: False, slow_cleanup=lambda host: False, setup_seconds=lambda host: 0,
                  timed=False, pace=1, units=None, leaked=lambda host: False):
@@ -2807,8 +2807,8 @@ class FakeUnitFleet(FakeCloud):
         # The controller stops after this many polls, by raising this exception, as a crash does by default.
         self.abort_after = abort_after
         self.abort = SystemExit
-        # Each platform's first Spot launches that find no capacity.
-        self.full_spot = dict(full_spot or {})
+        # Each platform's first launches in each market that find no capacity.
+        self.full = dict(full or {})
         # The shared fleet's reservations a restart recovers.
         self.reservations = []
         # Every lease the controller wrote, by bucket and key.
@@ -2835,11 +2835,11 @@ class FakeUnitFleet(FakeCloud):
     def run_instance(self, region, spec):
         if (region, spec.token) not in self.launched:
             platform = spec.tags["Platform"]
-            refused = spec.market == "spot" and self.full_spot.get(platform, 0) > 0
+            refused = self.full.get((platform, spec.market), 0) > 0
             self.launches.append(SimpleNamespace(platform=platform, market=spec.market, region=region,
                                                  launched_at=self.clock, loop=self.sleeps, refused=refused))
             if refused:
-                self.full_spot[platform] -= 1
+                self.full[platform, spec.market] -= 1
                 self.call("run_instance", region, spec)
                 raise cloud.LaunchRejected("capacity", "InsufficientInstanceCapacity")
         host = FakeUnitHost(self, len(self.hosts) + 1, region, spec)
@@ -3295,7 +3295,7 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             # Both regions refuse the pool's first Spot launches, so each cools; before the wait is over the pool
             # tries Spot in every region again rather than asking for On-Demand.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 2})
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", full={("r8i", "spot"): 2})
             result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
                                          platform_regions={"r8i": ["us-east-2", "us-west-2"]})
             first, second, third = [launch for launch in fleet.launches if launch.platform == "r8i"][:3]
@@ -3311,7 +3311,7 @@ class TestUnitWorkers(unittest.TestCase):
                     [(row["event_type"], row["reason"], row["region"]) for row in csv.DictReader(events, delimiter="\t")])
         with tempfile.TemporaryDirectory() as temporary:
             # Spot stays short; once the wait is over the pool launches On-Demand in its list's first region.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1000})
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", full={("r8i", "spot"): 1000})
             result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
                                          platform_regions={"r8i": ["us-east-2", "us-west-2"]})
             launches = [launch for launch in fleet.launches if launch.platform == "r8i"]
@@ -3374,26 +3374,36 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(["us-east-2"] + ["us-west-2"] * (RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1)
                                  if expected else ["us-east-2"], refused)
 
-    def test_pool_short_of_spot_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            # Each pool has work for ten hosts, as many as the boot window first admits, and r8i's next 40 Spot
-            # launches find no capacity.
-            units = {f"short-{index}": {"unit_id": f"short-{index}", "shard_id": "short", "unit_index": str(index),
-                                        "estimated_seconds": "600",
-                                        "groups": [{"group_id": "1", "estimated_seconds": 600}]}
-                     for index in range(1, 21)}
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
-                                  full_spot={"r8i": 40})
-            self.run_phase(Path(temporary), fleet, "smoke", ["short"], 20, 10,
-                           purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
-            # The pools take turns in the window, so r9g launches its half in the loop r8i first finds no capacity.
-            refused = collections.Counter(launch.loop for launch in fleet.launches if launch.refused)
-            first = min(refused)
-            self.assertEqual(BOOT_WINDOW_FIRST // 2, refused[first])
-            self.assertEqual(BOOT_WINDOW_FIRST // 2, sum(launch.platform == "r9g" and launch.loop == first
-                                                         for launch in fleet.launches))
-            # From then on r8i tries one Spot launch a loop until one finds capacity.
-            self.assertEqual({1}, {count for loop, count in refused.items() if loop != first})
+    def test_pool_short_of_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
+        # Each pool has work for ten hosts, as many as the boot window first admits, and r8i's next 20 launches in
+        # the market it buys find no capacity. The region allows On-Demand hosts.
+        units = {f"short-{index}": {"unit_id": f"short-{index}", "shard_id": "short", "unit_index": str(index),
+                                    "estimated_seconds": "600",
+                                    "groups": [{"group_id": "1", "estimated_seconds": 600}]}
+                 for index in range(1, 21)}
+
+        def allow_on_demand(settings):
+            settings["regions"][RUN_CAMPAIGN.default_regions()[0]]["on_demand_max_vcpus"] = 736
+            for rates in settings["hourly_rates"].values():
+                rates["on_demand_total"] = 2 * rates["total"]
+
+        for market in ("spot", "on-demand"):
+            with self.subTest(market=market), tempfile.TemporaryDirectory() as temporary:
+                fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+                                      setup_seconds=lambda host: 67, full={("r8i", market): 20})
+                self.campaign_settings(Path(temporary), 20, 10, purchases={"r8i": market, "r9g": "spot"}).change(
+                    "dain", "On-Demand allowed", allow_on_demand)
+                self.run_phase(Path(temporary), fleet, "smoke", ["short"], 20, 10,
+                               purchases={"r8i": market, "r9g": "spot"}, shared=True)
+                # The pools take turns in the window, so r9g launches its half in the loop r8i first finds no
+                # capacity.
+                refused = collections.Counter(launch.loop for launch in fleet.launches if launch.refused)
+                first = min(refused)
+                self.assertEqual(BOOT_WINDOW_FIRST // 2, refused[first])
+                self.assertEqual(BOOT_WINDOW_FIRST // 2, sum(launch.platform == "r9g" and launch.loop == first
+                                                             for launch in fleet.launches))
+                # From then on r8i tries one launch a loop until one finds capacity.
+                self.assertEqual({1}, {count for loop, count in refused.items() if loop != first})
 
     def test_pool_launches_only_for_work_its_workers_would_start_after_a_boot(self):
         work = sum(float(unit["estimated_seconds"]) for unit in RUN_CAMPAIGN.work_units.load(SCRIPT.parent).values()
@@ -4504,7 +4514,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_restart_settles_a_worker_that_exited_before_its_first_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             # The controller stops before it settles a Spot launch that found no capacity.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1}, abort_after=1)
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", full={("r8i", "spot"): 1}, abort_after=1)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             fleet.abort_after = None

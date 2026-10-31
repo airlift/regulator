@@ -2558,8 +2558,9 @@ class UnitDispatcher:
                               [job.host_epoch for job in self.planned]) + 1
         self.candidates = {}
         self.pool_regions = {}
-        # When each pool's Spot launches first found no capacity since one of its Spot workers last started.
-        self.spot_shortages = {}
+        # When each pool's launches in each market first found no capacity since one of its workers in the market
+        # last started.
+        self.shortages = {}
         # Each pool's free launch slots, as (slot, consecutive failures), and the pools a slot gave up on.
         self.free_slots = {}
         self.exhausted = {}
@@ -3164,9 +3165,8 @@ class UnitDispatcher:
         never landed; its first lease runs from then."""
         if not worker.started and shows_worker_start(keys):
             worker.started, worker.running_since = True, time.monotonic()
-            if worker.job.market == "spot":
-                # Spot capacity has returned for the pool.
-                self.spot_shortages.pop(worker.pool, None)
+            # Capacity in the worker's market has returned for the pool.
+            self.shortages.pop((worker.pool, worker.job.market), None)
 
     def report_boots(self):
         """Report the workers that started to the fleet's boot window, and take the room it leaves."""
@@ -3370,13 +3370,13 @@ class UnitDispatcher:
         """Keep the pool's new workers in the market out of the region for its cool-down, as a shortage of its
         capacity there if shortage."""
         self.pool_regions.setdefault((pool, market), {})[region] = time.monotonic()
-        if shortage and market == "spot":
-            self.spot_shortages.setdefault(pool, time.monotonic())
+        if shortage:
+            self.shortages.setdefault((pool, market), time.monotonic())
 
     def spot_waited(self, pool, now):
         """Whether a spot-then-on-demand pool has been short of Spot capacity for its whole bounded wait."""
-        return (self.purchase(pool) == "spot-then-on-demand" and pool in self.spot_shortages and
-                now - self.spot_shortages[pool] >= SPOT_SHORTAGE_WAIT_SECONDS)
+        return (self.purchase(pool) == "spot-then-on-demand" and (pool, "spot") in self.shortages and
+                now - self.shortages[pool, "spot"] >= SPOT_SHORTAGE_WAIT_SECONDS)
 
     def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
         """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.
@@ -3824,10 +3824,10 @@ class UnitDispatcher:
     def admit(self, now, starting):
         """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
         starting. Each pool in turn first takes up to its even part of the boot window, and the pools that need more
-        then share what is left, so every pool that needs hosts gets its part; a pool short of Spot capacity tries
-        one Spot launch a loop until one of its Spot workers starts. Each pool's late items are projected once, and
-        each admitted worker's first leases take theirs off them; a first lease of an item not late projects them
-        again."""
+        then share what is left, so every pool that needs hosts gets its part; a pool short of capacity in a market
+        tries one launch a loop in it until one of its workers in the market starts. Each pool's late items are
+        projected once, and each admitted worker's first leases take theirs off them; a first lease of an item not
+        late projects them again."""
         blocked_vcpus = None
         late = {}
 
@@ -3883,7 +3883,7 @@ class UnitDispatcher:
                     return False if scan else None
                 self.start(pool, candidate, now, starting)
                 take_late(pool, starting[-1])
-                if candidate.market == "spot" and pool in self.spot_shortages:
+                if (pool, candidate.market) in self.shortages:
                     return False
                 limit -= 1
                 if not limit:

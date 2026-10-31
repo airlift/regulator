@@ -1413,13 +1413,14 @@ A worker whose launch found no capacity in any zone of its region, or no
 quota, cools that region for its pool's launches in that market for 15
 minutes, and the pool's new workers in that market launch in the list's other
 regions meanwhile. Such a refusal spends none of its slot's replacements. A
-region's refusal of the request cools it the same way, though it is no Spot
+region's refusal of the request cools it the same way, though it is no capacity
 shortage. While every region of the list cools, the pool tries every region
 again at once; a `spot-then-on-demand` pool whose Spot shortage has lasted its
 [bounded wait](#launch-regions-and-purchase) launches On-Demand instead, and
-Spot resumes in each region once its cool-down ends. Through its shortage the
-pool tries one Spot launch a loop, so a pool AWS keeps refusing leaves the boot
-window to the others. A restarted controller forgets the cool-downs.
+Spot resumes in each region once its cool-down ends. Through a shortage in
+either market the pool tries one launch a loop in that market, until one of its
+workers there starts, so a pool AWS keeps refusing leaves the boot window to the
+others. A restarted controller forgets the cool-downs.
 
 The controller writes a worker's first lease before it launches the host, so
 the host finds its work waiting when its setup ends. It also writes the second
