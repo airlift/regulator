@@ -4595,9 +4595,10 @@ class Campaign:
 
         A phase above its target gives up the hosts past it while its share is pinned, or while another phase is
         below its target on that platform, or anywhere once the fleet's limit leaves no host free, or while the hosts
-        held pass the fleet's or the platform's limit, as once a limit is lowered. Otherwise hosts move between
-        phases only when a phase is waiting for them, so the shares' changes as the work left is corrected move none
-        on their own."""
+        held pass the fleet's or the platform's limit, as once a limit is lowered. A draining phase's hosts go on
+        taking its leases, so it gives up as many of its open hosts as the open hosts still pass a limit by once the
+        launching phases have given up theirs. Otherwise hosts move between phases only when a phase is waiting for
+        them, so the shares' changes as the work left is corrected move none on their own."""
         settings = live_settings(self.arguments)
         limits = settings["max_hosts"], settings["max_hosts_per_platform"]
         launching = [phase for phase in running if phase.dispatcher.steering == "running"]
@@ -4622,14 +4623,22 @@ class Campaign:
                 if share[platform] < target:
                     waiting.add((phase.key, platform))
             phase.dispatcher.share = share
-        for phase in running:
+        open_hosts = {phase.key: phase.dispatcher.holding(open_only=True) for phase in running}
+        over_platform = sum(open_hosts.values(), Counter())
+        over = sum(over_platform.values()) - limits[0]
+        over_platform = {platform: hosts - limits[1] for platform, hosts in over_platform.items()}
+        for phase in launching + [phase for phase in running if phase not in launching]:
             shed = {}
-            for platform, hosts in phase.dispatcher.holding(open_only=True).items():
+            for platform, hosts in open_hosts[phase.key].items():
                 excess = hosts - targets.get(phase.key, {}).get(platform, 0)
                 if phase in launching and excess > 0 and (
                         phase.key in pinned or free < 0 or free_platform[platform] < 0 or any(
                             key != phase.key and (other == platform or free <= 0) for key, other in waiting)):
                     shed[platform] = excess
+                elif phase.dispatcher.steering == "draining" and max(over, over_platform[platform]) > 0:
+                    shed[platform] = min(hosts, max(over, over_platform[platform]))
+                over -= shed.get(platform, 0)
+                over_platform[platform] -= shed.get(platform, 0)
             phase.dispatcher.shed = shed
 
     def end(self, phase):
