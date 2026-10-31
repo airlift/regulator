@@ -2300,8 +2300,7 @@ class TestRunCampaign(unittest.TestCase):
                 EVENTS: (
                     lambda path, value: RUN_CAMPAIGN.append_ledger(
                         path, EVENT_FIELDS, {"version": 2, "at": 1, "actor": "dain", "change": value}),
-                    lambda path: [row["change"] for row in csv.DictReader(RUN_CAMPAIGN.ledger_lines(path),
-                                                                         delimiter="\t")]),
+                    lambda path: [row["change"] for row in RUN_CAMPAIGN.ledger_rows(path)]),
                 "campaign-events.tsv": (
                     lambda path, value: RUN_CAMPAIGN.write_event(path, "interruption", "baseline", job, worker, value),
                     lambda path: [row["reason"] for row in RUN_CAMPAIGN.aggregate_results.load_events([path])])}

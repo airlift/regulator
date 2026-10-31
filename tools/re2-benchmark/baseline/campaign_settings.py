@@ -7,16 +7,15 @@ the next change or reload finishes or discards one a failure interrupted, so no 
 event. What decides a measurement's validity is frozen elsewhere and never lives here.
 """
 
-import contextlib
+from contextlib import contextmanager
 import copy
 import csv
-import fcntl
 import json
 import os
 import re
 import time
 
-from campaign_io import append_ledger, fsync_directory, ledger_lines
+from campaign_io import append_ledger, fsync_directory, ledger_rows, locked as file_locked
 
 SETTINGS = "campaign-settings.json"
 LOCK = "campaign-settings.lock"
@@ -204,28 +203,23 @@ def recover(path, events_path):
         return
     try:
         text = staged(path).read_bytes()
+        recorded = None
         try:
-            recorded = [row["version"] for row in csv.DictReader(ledger_lines(events_path), delimiter="\t")]
+            for row in ledger_rows(events_path):
+                recorded = row["version"]
         except FileNotFoundError:
-            recorded = []
+            pass
     except (OSError, ValueError, KeyError, csv.Error) as error:
         raise SettingsError(f"cannot finish the campaign settings change staged in {staged(path)}: {error}") from error
     try:
         version = json.loads(text)["version"]
     except (ValueError, KeyError, TypeError):
         version = None
-    if recorded and recorded[-1] == str(version):
+    if recorded == str(version):
         os.replace(staged(path), path)
         fsync_directory(path.parent)
     else:
         staged(path).unlink()
-
-
-@contextlib.contextmanager
-def locked(lock_path):
-    with lock_path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
 
 
 def seeded(given):
@@ -257,16 +251,23 @@ class CampaignSettings:
     def seed(cls, root, given, actor="dain"):
         """Write the campaign's first settings, unless it has some, and load them."""
         path = root / SETTINGS
-        with locked(root / LOCK):
+        with file_locked(root / LOCK):
             recover(path, root / EVENTS)
             if not path.exists():
                 record(path, root / EVENTS, seeded(given), actor, "seed", round(time.time()))
         return cls(root)
 
+    @contextmanager
+    def locked(self):
+        """Hold the settings lock, once a change a failure interrupted is finished, so no change is made until the
+        block ends."""
+        with file_locked(self.lock_path):
+            recover(self.path, self.events_path)
+            yield
+
     def reload(self):
         """Read the settings as they stand now, once a change a failure interrupted is finished."""
-        with locked(self.lock_path):
-            recover(self.path, self.events_path)
+        with self.locked():
             self.current = read(self.path)
         return self.current
 
@@ -277,8 +278,7 @@ class CampaignSettings:
         records nothing, unless then is given: the change then takes its version and event whatever it changes, and
         then runs under the lock once its event is durable, as the step of the campaign the event records. Returns
         the settings."""
-        with locked(self.lock_path):
-            recover(self.path, self.events_path)
+        with self.locked():
             before = read(self.path)
             at = round(time.time())
             settings = changed(before, actor, update, at)

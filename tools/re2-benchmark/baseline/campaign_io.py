@@ -1,6 +1,8 @@
 """Durable ledger writes, command output and the unsafe-campaign error that a unit campaign's modules share."""
 
+import contextlib
 import csv
+import fcntl
 import io
 import os
 import subprocess
@@ -22,19 +24,21 @@ def fsync_directory(path):
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def locked(lock_path):
+    """Hold an exclusive lock on the file at lock_path, creating it if need be."""
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def append_ledger(path, fields, row):
     """Append one row to a TSV ledger durably. A new ledger gets its whole header before any row, a line break in a
     value is written as a space, so each row is one line, and a row a crash tore before its line end is cut off
     before the next is appended, so each line a ledger ends is a whole row."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        temporary_path = path.with_name(path.name + ".new")
-        with temporary_path.open("w", newline="") as output_file:
-            csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n").writeheader()
-            output_file.flush()
-            os.fsync(output_file.fileno())
-        os.replace(temporary_path, path)
-        fsync_directory(path.parent)
+        write_ledger(path, (), fields)
     line = io.StringIO()
     csv.DictWriter(line, fieldnames=fields, delimiter="\t", lineterminator="\n").writerow({
         name: value.replace("\r", " ").replace("\n", " ") if isinstance(value, str) else value
@@ -56,6 +60,11 @@ def ledger_lines(path):
     end, which the next append cuts off, even within a character."""
     data = path.read_bytes()
     return io.StringIO(data[:data.rfind(b"\n") + 1].decode(), newline="")
+
+
+def ledger_rows(path):
+    """A TSV ledger's rows, as a csv reader over its ledger lines."""
+    return csv.DictReader(ledger_lines(path), delimiter="\t")
 
 
 def write_ledger(path, rows, fields,

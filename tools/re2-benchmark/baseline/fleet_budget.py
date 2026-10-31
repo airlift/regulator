@@ -9,13 +9,13 @@ must prove resource cleanup before releasing it, including during recovery.
 """
 
 from contextlib import contextmanager
-import fcntl
 import json
 import os
 from pathlib import Path, PurePosixPath
 import time
 from types import SimpleNamespace
 
+from campaign_io import fsync_directory, locked as file_locked
 from campaign_settings import BOOT_WINDOW_MIN
 from control_host import CAMPAIGN_ROOT
 
@@ -162,8 +162,7 @@ class FleetBudget:
     @contextmanager
     def locked(self):
         """The fleet's state under its lock, written back durably once it changed."""
-        with self.lock_path.open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with file_locked(self.lock_path):
             if self.state_path.exists():
                 text = self.state_path.read_text()
                 state = json.loads(text)
@@ -180,11 +179,7 @@ class FleetBudget:
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(temporary, self.state_path)
-            descriptor = os.open(self.state_path.parent, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            fsync_directory(self.state_path.parent)
 
     def reserve(self, campaign_id, job, owner, snapshot_reader, now=None, *, until):
         """Admit a launch whose host stops by until, in epoch seconds, unless a later extension covers more."""

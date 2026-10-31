@@ -38,11 +38,11 @@ import work_units
 from acceptance import normalize_heap_size
 from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
-    changed as changed_settings, locked as settings_locked, read as read_settings, seeded as seeded_settings)
+    changed as changed_settings, read as read_settings, seeded as seeded_settings)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
     owner_fleet, read_state as read_fleet_state)
-from campaign_io import (UnsafeCampaignError, append_ledger, check_output, fsync_directory, ledger_lines,
+from campaign_io import (UnsafeCampaignError, append_ledger, check_output, fsync_directory, ledger_rows, locked,
                          write_ledger)
 from cloud import CloudError
 from unit_dispatch import (
@@ -1067,8 +1067,7 @@ def read_candidates(campaign_root):
 def record_candidate(campaign_root, candidate):
     """Record the candidate in the campaign's candidates.tsv, or check that it records the candidate at the same
     commit and archive."""
-    with (campaign_root / "candidates.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(campaign_root / "candidates.lock"):
         recorded = read_candidates(campaign_root)
         same = [row for row in recorded if row["name"] == candidate.name]
         if same and same != [candidate.row]:
@@ -1529,8 +1528,7 @@ def stage_jdks(arguments, jobs):
     directory.mkdir(parents=True, exist_ok=True)
     # Phases running side by side download one at a time. A copy appears only once verified, so a later phase or
     # a restart reuses it.
-    with (directory / "download.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(directory / "download.lock"):
         for job in jobs:
             path = jdk_archive(arguments.campaign_root, job.platform)
             if path.exists():
@@ -1567,7 +1565,7 @@ def upload_shared_archives(arguments, uploads):
 def read_shared_archives(path):
     if not path.is_file():
         return []
-    return list(csv.DictReader(ledger_lines(path), delimiter="\t"))
+    return list(ledger_rows(path))
 
 
 def put_shared_archive(aws, region, bucket, key, path, sha256, label):
@@ -2241,7 +2239,7 @@ def recover_accepted_units(validation, result_root, accepted_units):
 def read_attempts(path):
     if not path.exists():
         return []
-    reader = csv.DictReader(ledger_lines(path), delimiter="\t")
+    reader = ledger_rows(path)
     if tuple(reader.fieldnames or ()) != JOB_ATTEMPT_FIELDS:
         raise UnsafeCampaignError(f"unexpected attempt schema in {path}")
     return list(reader)
@@ -2321,7 +2319,7 @@ def paused_seconds(path, started_at, now):
     counted until now, and whether one is open."""
     paused, since = 0.0, None
     if path.exists():
-        for row in csv.DictReader(ledger_lines(path), delimiter="\t"):
+        for row in ledger_rows(path):
             at = float(row["at"])
             if row["event"] == "paused":
                 since = at if since is None else since
@@ -4443,7 +4441,7 @@ class Campaign:
         it missed."""
         path = self.arguments.settings.events_path
         try:
-            changes = list(csv.DictReader(ledger_lines(path), delimiter="\t"))
+            changes = list(ledger_rows(path))
         except (OSError, UnicodeDecodeError, csv.Error) as error:
             print(f"logging no settings changes this loop, since {path} cannot be read: {error}", flush=True)
             return
@@ -4867,7 +4865,7 @@ def run_campaign(arguments, root):
         # lock, so no control command changes the root once it is listed; one SIGTERM stopped leaves the root to the
         # next.
         if not campaign.terminated:
-            with settings_locked(arguments.settings.lock_path):
+            with locked(arguments.settings.lock_path):
                 control_host.write_manifest(arguments.campaign_root)
     if failed:
         message = "campaign finished with failed phases:\n" + "\n".join(
