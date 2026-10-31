@@ -583,6 +583,12 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_client_error("run_instances", "UnauthorizedOperation", "not authorized", http_status_code=403)
         for _ in range(cloud.LAUNCH_ATTEMPTS):
             ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
+        # A refusal after an unanswered request, or after botocore's own retries, proves nothing about the instance
+        # that request may have launched.
+        ec2.add_client_error("run_instances", "InternalError", http_status_code=500)
+        ec2.add_client_error("run_instances", "InsufficientInstanceCapacity")
+        ec2.add_client_error("run_instances", "UnauthorizedOperation", http_status_code=403,
+                             response_meta={"RetryAttempts": 1})
         ec2.add_response("terminate_instances", {}, {"InstanceIds": ["i-launched"]})
 
         aws = self.cloud
@@ -598,8 +604,9 @@ class TestAwsCloud(unittest.TestCase):
             aws.run_instance("us-west-2", spec)
         self.assertEqual(("request", "UnauthorizedOperation", "not authorized"),
                          (rejected.exception.kind, rejected.exception.code, rejected.exception.message))
-        with self.assertRaises(cloud.LaunchUnknown):
-            aws.run_instance("us-west-2", spec)
+        for _ in range(3):
+            with self.assertRaises(cloud.LaunchUnknown):
+                aws.run_instance("us-west-2", spec)
         aws.terminate("us-west-2", ["i-launched"])
 
     def test_control_host_is_launched_private_onto_its_volume_behind_its_load_balancer(self):

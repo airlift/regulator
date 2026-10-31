@@ -1212,7 +1212,10 @@ spends none of the slot's replacements. Otherwise its detail is
 `launch-infrastructure:<code>: <message>`, so the slot's replacements run out.
 A request whose answer never comes, a throttle or server error among them, is
 sent again with the same client token, so AWS launches at most one instance,
-and the controller then finds the instance by its session's tag.
+and the controller then finds the instance by its session's tag. A refusal
+counts as one only when it answers the launch's first request, before any
+retry, botocore's own included; after one, the request sent before it may
+have launched the instance, so the controller looks for it by its tag too.
 
 `worker-user-data.sh` starts the host's stop-time watchdog and startup
 timeline, waits for the profile's credentials, downloads and checks the frozen
