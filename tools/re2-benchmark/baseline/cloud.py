@@ -20,25 +20,30 @@ class CloudError(RuntimeError):
 
 
 class LaunchRejected(CloudError):
-    """AWS refused a launch, so no instance exists: kind is capacity, quota or price, and code is AWS's error code."""
+    """AWS refused a launch, so no instance exists: kind is capacity, quota or price for a shortage, or request for a
+    request AWS will never grant, such as one the role may not make or for an image the region lacks; code is AWS's
+    error code and message its explanation."""
 
-    def __init__(self, kind, code):
+    def __init__(self, kind, code, message=""):
         super().__init__(f"{kind}: {code}")
         self.kind = kind
         self.code = code
+        self.message = message
 
 
 class LaunchUnknown(CloudError):
     """A launch failed every attempt without AWS refusing it, so an instance may exist; its tags find it."""
 
 
-# The RunInstances errors that prove AWS launched nothing, by the kind of shortage each reports. Any other failure, a
-# timeout among them, is retried with the same client token, which AWS answers with the instance it launched.
+# The RunInstances errors that prove AWS launched nothing, by the kind of shortage each reports. Any other client
+# error but a throttle is a request AWS refused outright. Every other failure, a timeout or a server error among
+# them, is retried with the same client token, which AWS answers with the instance it launched.
 LAUNCH_REJECTIONS = {
     "InsufficientInstanceCapacity": "capacity", "UnfulfillableCapacity": "capacity",
     "VcpuLimitExceeded": "quota", "InstanceLimitExceeded": "quota", "MaxSpotInstanceCountExceeded": "quota",
     "SpotMaxPriceTooLow": "price",
 }
+THROTTLES = {"RequestLimitExceeded", "Throttling", "ThrottlingException", "EC2ThrottledException"}
 LAUNCH_ATTEMPTS = 3
 
 
@@ -359,6 +364,10 @@ class AwsCloud:
                 code = error_code(error.__cause__)
                 if code in LAUNCH_REJECTIONS:
                     raise LaunchRejected(LAUNCH_REJECTIONS[code], code) from error
+                response = getattr(error.__cause__, "response", None) or {}
+                status = response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+                if 400 <= status < 500 and code not in THROTTLES:
+                    raise LaunchRejected("request", code, response.get("Error", {}).get("Message", "")) from error
                 if attempt == LAUNCH_ATTEMPTS:
                     raise LaunchUnknown(str(error)) from error
 
