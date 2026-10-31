@@ -261,7 +261,7 @@ aws iam add-role-to-instance-profile --profile dev --instance-profile-name regul
   --role-name regulator-benchmark-worker
 ```
 
-The control host profile, which may launch, describe, and end
+The [control host](#control-host) profile, which may launch, describe, and end
 workers, pass the worker role, read and write the campaign buckets and create
 one for `add-region`, read the network parameter, and keep the campaign's
 Grafana credentials; `control-host/control-host-policy.json` is its policy,
@@ -464,10 +464,14 @@ one shard, before it freezes anything.
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   campaign <campaign> --execute \
   --candidate before=main --candidate after=user/me/faster-scan \
-  --campaign-root /durable/path/<campaign> \
-  --settings /durable/path/<campaign>-settings.json --spot-vcpu-reserve 16
+  --settings <campaign>-settings.json --spot-vcpu-reserve 16 \
+  --ssh-public-key ~/.ssh/id_ed25519.pub
 ```
 
+Run from the Mac with Dain's credentials, the command checks the candidates,
+the settings, and the account as the controller would, and then launches the
+campaign's [control host](#control-host), which runs the controller. The host
+fetches every candidate from GitHub, so push each one first.
 Every candidate's `tools/re2-benchmark` tree must be the controller's committed
 one, so `before=main` works only while `main` carries the same benchmark
 tooling as the checkout running the controller.
@@ -493,6 +497,57 @@ them, so the shares' changes as the work left is corrected move none on their
 own. A phase's share is never frozen, and the controller records each phase's
 state, `pending`, `running`, `paused` with its fault, `complete`, or `failed`,
 in the settings' `phases`.
+
+### Control host
+
+A campaign's controller runs on its own control host in `us-west-2`, an
+`m7i.large` with no public address in a private subnet that the company's
+Tailscale subnet router carries, as the
+[network parameter](#account-setup) names. The campaign root lives on the
+campaign's own 200 GiB gp3 volume, mounted at `/regulator`, so a replaced host
+carries on with it. The launch uploads its inputs to the Oregon bucket's
+`campaigns/<campaign>/control-host/`, creates the volume, starts the host, and
+points the parameter's record at it. The host's user data,
+`control-host/user-data.sh`:
+
+- installs the key `--ssh-public-key` names for `ec2-user`;
+- mounts the volume, formatting it the first time, and puts the campaign root
+  at `/regulator/campaign`;
+- unpacks the launch inputs onto the volume the first time: the controller's
+  command, the candidate commits, the settings, and the language plans;
+- fetches the candidate commits from GitHub and checks out the first, whose
+  benchmark tooling every candidate shares;
+- starts `regulator-campaign@<campaign>`, which runs the launch's command with
+  `--controller` and the host's paths; the unit restarts a controller that
+  crashes, up to five times in ten minutes, and leaves one whose campaign
+  ended, with failed phases or without;
+- starts `grafana/otel-lgtm`, pinned by digest, with Grafana on port 3000 and
+  OTLP on the host's loopback only, its data on the volume, and its dashboards
+  provisioned from `control-host/grafana/`;
+- keeps Grafana's admin password and a Viewer service-account token for the
+  monitor in the SSM SecureStrings
+  `/regulator-benchmark/campaigns/<campaign>/grafana-admin-password` and
+  `.../grafana-monitor-token`, generating them the first time; anonymous
+  access is off.
+
+Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
+across replacements, through the subnet router; Session Manager is the shell
+when the router is down. `status` and `control` run on the host, against
+`/regulator/campaign`:
+
+```bash
+ssh ec2-user@<record> /opt/regulator/venv/bin/python \
+  /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py status /regulator/campaign
+```
+
+The host outlives its campaign. To replace it, for instance once it fails,
+terminate it and launch another onto the campaign's volume, in the volume's
+zone, which unpacks nothing again:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py \
+  control-host replace <campaign> --ssh-public-key ~/.ssh/id_ed25519.pub
+```
 
 ### Steer a campaign
 

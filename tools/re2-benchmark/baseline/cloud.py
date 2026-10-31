@@ -76,7 +76,8 @@ class ObjectHead:
 
 @dataclass(frozen=True)
 class Instance:
-    """An EC2 instance in any state. lifecycle is spot or on-demand, and launched is in epoch seconds."""
+    """An EC2 instance in any state. lifecycle is spot or on-demand, launched is in epoch seconds, and address is its
+    private IPv4 address, if it has one."""
     id: str
     type: str
     lifecycle: str
@@ -84,6 +85,16 @@ class Instance:
     state_reason: str
     tags: dict
     launched: float
+    address: str = ""
+
+
+@dataclass(frozen=True)
+class Volume:
+    """An EBS volume: its availability zone, its state, such as available or in-use, and its tags."""
+    id: str
+    zone: str
+    state: str
+    tags: dict
 
 
 @dataclass(frozen=True)
@@ -227,8 +238,104 @@ class AwsCloud:
         return [Instance(item["InstanceId"], item["InstanceType"],
                          "spot" if item.get("InstanceLifecycle") == "spot" else "on-demand", item["State"]["Name"],
                          item.get("StateReason", {}).get("Code", ""), tag_dictionary(item.get("Tags")),
-                         item["LaunchTime"].timestamp())
+                         item["LaunchTime"].timestamp(), item.get("PrivateIpAddress", ""))
                 for reservation in reservations for item in reservation["Instances"]]
+
+    def run_control_host(self, region, image, instance_type, root_device, subnet, security_group, profile, user_data,
+                         tags):
+        """Launch a campaign's control host and return its ID and private address: On-Demand, with no public address,
+        and kept when it shuts down, since it outlives the campaign."""
+        instance = self.call("ec2", region, "run_instances", ImageId=image, InstanceType=instance_type, MinCount=1,
+                             MaxCount=1, UserData=user_data,
+                             BlockDeviceMappings=[{"DeviceName": root_device, "Ebs": {
+                                 "VolumeSize": 30, "VolumeType": "gp3", "DeleteOnTermination": True,
+                                 "Encrypted": True}}],
+                             MetadataOptions={"HttpTokens": "required", "HttpEndpoint": "enabled"},
+                             IamInstanceProfile={"Name": profile}, InstanceInitiatedShutdownBehavior="stop",
+                             NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": subnet, "Groups": [security_group],
+                                                 "AssociatePublicIpAddress": False}],
+                             TagSpecifications=[{"ResourceType": "instance", "Tags": [
+                                 {"Key": key, "Value": value} for key, value in tags.items()]}])["Instances"][0]
+        return instance["InstanceId"], instance["PrivateIpAddress"]
+
+    def wait(self, region, condition, resource):
+        """Wait, as the SDK's waiter polls every 15 seconds for up to an hour, for the condition: instance_running,
+        instance_terminated, volume_available, or snapshot_completed. A snapshot of a full volume takes the longest."""
+        key = {"instance": "InstanceIds", "volume": "VolumeIds", "snapshot": "SnapshotIds"}[condition.split("_")[0]]
+        with translated():
+            self.client("ec2", region).get_waiter(condition).wait(
+                **{key: [resource]}, WaiterConfig={"Delay": 15, "MaxAttempts": 240})
+
+    def parameter(self, region, name):
+        """The SSM parameter's value, decrypted, or None where there is no such parameter."""
+        try:
+            return self.call("ssm", region, "get_parameter", Name=name, WithDecryption=True)["Parameter"]["Value"]
+        except CloudError as error:
+            if error_code(error.__cause__) == "ParameterNotFound":
+                return None
+            raise
+
+    def delete_parameters(self, region, names):
+        self.call("ssm", region, "delete_parameters", Names=list(names))
+
+    def subnet_zones(self, region, subnets):
+        """Each subnet's availability zone."""
+        found = self.call("ec2", region, "describe_subnets", SubnetIds=list(subnets))["Subnets"]
+        return {subnet["SubnetId"]: subnet["AvailabilityZone"] for subnet in found}
+
+    def security_group(self, region, vpc, name):
+        """The VPC's security group of that name, as its ID and its inbound rules, each (protocol, from port, to port,
+        source), or None where it has none."""
+        groups = self.call("ec2", region, "describe_security_groups", Filters=[
+            {"Name": "vpc-id", "Values": [vpc]}, {"Name": "group-name", "Values": [name]}])["SecurityGroups"]
+        if not groups:
+            return None
+        rules = set()
+        for rule in groups[0]["IpPermissions"]:
+            sources = ([item["CidrIp"] for item in rule.get("IpRanges", ())] +
+                       [item["CidrIpv6"] for item in rule.get("Ipv6Ranges", ())] +
+                       [item["PrefixListId"] for item in rule.get("PrefixListIds", ())] +
+                       [item["GroupId"] for item in rule.get("UserIdGroupPairs", ())])
+            rules |= {(rule["IpProtocol"], rule.get("FromPort"), rule.get("ToPort"), source) for source in sources}
+        return groups[0]["GroupId"], rules
+
+    def volumes(self, region, tags):
+        """The volumes carrying all of the tags, in any state but deleted."""
+        found = self.pages("ec2", region, "describe_volumes", "Volumes", Filters=[
+            {"Name": f"tag:{key}", "Values": [value]} for key, value in tags.items()])
+        return [Volume(item["VolumeId"], item["AvailabilityZone"], item["State"], tag_dictionary(item.get("Tags")))
+                for item in found if item["State"] != "deleted"]
+
+    def create_volume(self, region, zone, gib, tags):
+        """Create an encrypted gp3 volume and return its ID."""
+        return self.call("ec2", region, "create_volume", AvailabilityZone=zone, Size=gib, VolumeType="gp3",
+                         Encrypted=True, TagSpecifications=[{"ResourceType": "volume", "Tags": [
+                             {"Key": key, "Value": value} for key, value in tags.items()]}])["VolumeId"]
+
+    def attach_volume(self, region, volume, instance, device):
+        self.call("ec2", region, "attach_volume", VolumeId=volume, InstanceId=instance, Device=device)
+
+    def delete_volume(self, region, volume):
+        self.call("ec2", region, "delete_volume", VolumeId=volume)
+
+    def create_snapshot(self, region, volume, tags):
+        """Snapshot the volume and return the snapshot's ID; it completes later."""
+        return self.call("ec2", region, "create_snapshot", VolumeId=volume, TagSpecifications=[
+            {"ResourceType": "snapshot", "Tags": [{"Key": key, "Value": value} for key, value in tags.items()]}])[
+            "SnapshotId"]
+
+    def change_record(self, region, zone, action, name, address):
+        """UPSERT or DELETE the zone's A record of that name at the address. A DELETE that finds the record naming
+        another address, or no record, changes nothing and returns False."""
+        try:
+            self.call("route53", region, "change_resource_record_sets", HostedZoneId=zone, ChangeBatch={"Changes": [
+                {"Action": action, "ResourceRecordSet": {"Name": name, "Type": "A", "TTL": 60,
+                                                         "ResourceRecords": [{"Value": address}]}}]})
+        except CloudError as error:
+            if action == "DELETE" and error_code(error.__cause__) == "InvalidChangeBatch":
+                return False
+            raise
+        return True
 
     def run_instance(self, region, spec):
         """Launch one instance, terminated when it shuts down, and return its ID. Raises LaunchRejected when AWS

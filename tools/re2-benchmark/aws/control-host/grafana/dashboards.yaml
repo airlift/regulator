@@ -1,0 +1,11 @@
+# Grafana's dashboard provider: every dashboard JSON file in this directory, which the control host mounts read-only
+# at /regulator-dashboards, in the Regulator folder.
+apiVersion: 1
+providers:
+  - name: regulator
+    folder: Regulator
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /regulator-dashboards
