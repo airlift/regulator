@@ -32,6 +32,7 @@ import aggregate_results
 import cloud
 import control_host
 import engine_build
+import telemetry
 import unit_session
 import work_units
 from acceptance import normalize_heap_size
@@ -46,7 +47,7 @@ from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result,
     get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key, lease_key,
-    list_unit_worker_results, marker_seconds, measured_group_seconds, persist_accepted_unit,
+    list_unit_worker_results, marker_seconds, marker_time, measured_group_seconds, persist_accepted_unit,
     persist_semantic_rejection, persist_unit_upload, read_accepted_units, read_semantic_rejections, read_unit_attempts,
     read_unit_receipt, read_unit_uploads, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
     unit_attempt_directory, unit_logical_identity, unit_upload_row, write_leases,
@@ -2275,9 +2276,9 @@ def campaign_started_at(path, arguments):
 def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, observed):
     """Place a launch candidate and reserve its capacity in the shared fleet, from the fleet observed this loop.
 
-    Returns the candidate as placed, when it may next be tried, whether it was admitted, whether
-    the launch scan may continue to later candidates, and the vCPU count a full fleet quota now
-    blocks, if any.
+    Returns the candidate as placed, when it may next be tried, why it was refused, or None once
+    admitted, whether the launch scan may continue to later candidates, and the vCPU count a full
+    fleet quota now blocks, if any.
     """
     budget = arguments.shared_budget
     placements = launch_placements(arguments, candidate)
@@ -2305,9 +2306,9 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
             capacity_waits.add((candidate.identity, reason))
             write_attempt(attempts_path, candidate, "queued-capacity", reason)
         if reason != "fleet quota" or candidate.platform.vcpus == 2:
-            return candidate, now + CAPACITY_RETRY_SECONDS, False, False, None
-        return candidate, now + CAPACITY_RETRY_SECONDS, False, True, candidate.platform.vcpus
-    return candidate, ready_at, True, False, None
+            return candidate, now + CAPACITY_RETRY_SECONDS, reason, False, None
+        return candidate, now + CAPACITY_RETRY_SECONDS, reason, True, candidate.platform.vcpus
+    return candidate, ready_at, None, False, None
 
 
 def launch_record(row):
@@ -2407,13 +2408,19 @@ class UnitWorker:
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
     # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
-    # the instance as its cleanup last saw it; when the controller asked EC2 to terminate it, in epoch seconds; and
-    # whether it leaked.
+    # the instance as its cleanup last saw it; when the controller asked EC2 to terminate it, in epoch seconds;
+    # whether it leaked; and whether its prefix was found a leftover.
     launch_failure: tuple = None
     missed_boot: bool = False
     instance: cloud.Instance = None
     terminate_requested: float = 0.0
     leaked: bool = False
+    leftover: bool = False
+    # The group it runs, as its lease, the group, and when its latest heartbeat began the group, in epoch seconds.
+    group: tuple = None
+    # Each work lease's steps so far, each by its name, in epoch seconds, for its trace: when it was leased, the host
+    # started its first group, finished its latest, and uploaded it, and the controller accepted it.
+    steps: dict = field(default_factory=dict)
     # The full keys of uploads and leases whose outcomes are durable, which the next deletion removes from S3.
     deletions: set = field(default_factory=set)
 
@@ -2539,6 +2546,16 @@ class UnitDispatcher:
         self.share = None
         self.shed = {}
         self.steering = "running"
+        # Where the phase's telemetry goes; each pool's launch refusal that stands, as its reason and when the pool
+        # first met it, in epoch seconds, until the pool launches or needs no launch; and the milestones it reached.
+        self.telemetry = getattr(arguments, "telemetry", None) or telemetry.Telemetry()
+        self.refused = {}
+        self.reached = set()
+
+    @property
+    def key(self):
+        """The phase's name in its telemetry: its root relative to the campaign root."""
+        return self.result_root.relative_to(self.arguments.campaign_root).as_posix()
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
@@ -2706,6 +2723,18 @@ class UnitDispatcher:
                     worker.unsent.discard(sequence)
                     worker.deletions.update((f"{worker.metadata['result_prefix']}/{heartbeat_key(sequence)}",
                                              lease_key(worker.metadata, sequence)))
+                elif sequence not in worker.abandoned:
+                    # Its trace begins with what its host reports.
+                    worker.steps[sequence] = {}
+        # A restart reaches no milestone the phase had reached.
+        self.reached = self.milestones()
+
+    def milestones(self):
+        """The milestones the phase has reached: its first host reporting, and every replica 1 accepted."""
+        return {name for name, reached in (
+            ("first host reporting", self.accepted or any(worker.started for worker in self.workers.values())),
+            ("replica 1 accepted", all(self.done(identity) for identity, item in self.items.items()
+                                       if item.replica == 1))) if reached}
 
     @staticmethod
     def recovered_start(directory):
@@ -2726,6 +2755,7 @@ class UnitDispatcher:
         identity = worker.leases[sequence]
         write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail,
                            worker.finished.get(sequence, {}))
+        self.trace(worker, sequence, outcome)
         worker.settled.add(sequence)
         # Its heartbeat and lease go from S3 once its outcome is durable; a restart needs neither.
         worker.deletions.update((f"{worker.metadata['result_prefix']}/{heartbeat_key(sequence)}",
@@ -2740,11 +2770,33 @@ class UnitDispatcher:
         identity = worker.leases[sequence]
         write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail,
                            worker.finished.get(sequence, {}))
+        self.trace(worker, sequence, outcome)
         worker.abandoned.add(sequence)
         if self.held.get(identity) == (worker.job.host_epoch, sequence):
             del self.held[identity]
         if outcome == "lost":
             self.count(self.items[identity], detail, (worker.job.host_epoch, sequence))
+
+    def trace(self, worker, sequence, outcome):
+        """Trace a work lease's attempt as it reaches its outcome, once: from its lease, or from its host's first
+        report of it, to now, with each step whose start and end are known."""
+        steps = worker.steps.pop(sequence, None)
+        if steps is None:
+            return
+        item = self.items[worker.leases[sequence]]
+        groups = worker.lease_groups[sequence]
+        attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
+        now = time.time()
+        times = [steps.get(name) for name in ("leased", "started", "finished", "uploaded", "accepted")]
+        self.telemetry.attempt(
+            {"phase": self.key, "pool": "/".join(worker.pool), "outcome": outcome, "unit": item.unit_id,
+             "replica": item.replica, "groups": ",".join(groups), "session": worker.host_session, "lease": sequence,
+             "region": worker.job.region, "market": worker.job.market,
+             "estimated_seconds": sum(seconds for group, seconds in item.groups if group in groups),
+             "measured_seconds": sum(self.uploads.get((attempt, group)) or 0 for group in groups)},
+            next((moment for moment in times if moment is not None), now), now,
+            [(name, begun, ended) for name, begun, ended in zip(("leased", "started", "uploaded", "accepted"), times,
+                                                                times[1:]) if begun is not None and ended is not None])
 
     def event_job(self, worker, item):
         return replace(worker.job, shard=item.shard, replica=item.replica)
@@ -2845,6 +2897,11 @@ class UnitDispatcher:
         if (attempt, group) not in self.uploads:
             persist_unit_upload(self.uploads_path, unit_upload_row(item, worker.host_session, sequence, marker))
             self.uploads[attempt, group] = marker_seconds(marker)
+        # The lease's trace runs from its first group's start through its latest group's upload.
+        steps = worker.steps.get(sequence, {})
+        steps.setdefault("started", marker_time(marker, "started_at"))
+        steps["finished"] = marker_time(marker, "finished_at")
+        steps["uploaded"] = steps["finished"] + float(marker["pack_seconds"]) + float(marker["upload_seconds"])
         finished = worker.finished[sequence]
         if marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
             # A verdict that the semantics are wrong rejects the unit for good, before or after another attempt.
@@ -2886,6 +2943,7 @@ class UnitDispatcher:
         if self.done(item.identity):
             self.unresolved.pop(item.identity, None)
         finished[group] = None
+        steps["accepted"] = time.time()
         # Once its acceptance is durable the group's uploads go from S3; the worker's state, or after a restart the
         # accepted ledger, keeps the group finished.
         worker.deletions.update(f"{worker.metadata['result_prefix']}/{key}"
@@ -3016,11 +3074,15 @@ class UnitDispatcher:
             seconds = dict(self.items[worker.leases[current]].groups)
             finished = worker.finished.get(current, {})
             unfinished = [group for group in worker.lease_groups[current] if group not in finished]
+            if unfinished:
+                # Its latest heartbeat began the group it runs.
+                worker.group = (current, unfinished[0], objects[heartbeat_key(current)])
             if time.time() - objects[heartbeat_key(current)] <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
             if not worker.stopping:
                 self.issue(worker, None)
             worker.lost = True
+            self.telemetry.count("regulator_stalled_hosts", phase=self.key)
             for sequence in worker.outstanding():
                 if worker.leases[sequence] is not None:
                     self.abandon(worker, sequence, "lost" if sequence == current else "released", STALLED)
@@ -3078,8 +3140,8 @@ class UnitDispatcher:
         if worker.leaked:
             return
         reason = f"instance {worker.instance_id} of {worker.host_session} did not terminate"
-        print(f"leak: {reason}; no launch or lease extension is admitted until the spending stop is cleared",
-              flush=True)
+        self.telemetry.event("leak", f"leak: {reason}; no launch or lease extension is admitted until the spending "
+                                     "stop is cleared", phase=self.key, session=worker.host_session)
         # Until the stop is recorded, the next loop tries again.
         worker.leaked = self.budget.stop_spending(reason)
 
@@ -3092,9 +3154,15 @@ class UnitDispatcher:
             self.arguments.cloud, worker.metadata, worker.directory / "recovered-uploads" / "objects"), terminated)
         for worker, held in zip(terminated, proven):
             if not held:
-                # A leftover: the host is gone, so it costs nothing, pauses nothing, and is retried.
-                print(f"leftover: the prefix of {worker.host_session}, whose instance terminated, is not yet "
-                      f"recovered and empty; retrying", flush=True)
+                # A leftover: the host is gone, so it costs nothing, pauses nothing, and is retried. Its event is
+                # logged once.
+                text = (f"leftover: the prefix of {worker.host_session}, whose instance terminated, is not yet "
+                        "recovered and empty; retrying")
+                if worker.leftover:
+                    print(text, flush=True)
+                else:
+                    self.telemetry.event("leftover", text, phase=self.key, session=worker.host_session)
+                worker.leftover = True
         return [worker for worker, held in zip(terminated, proven) if held]
 
     def instance_terminated(self, worker):
@@ -3151,6 +3219,12 @@ class UnitDispatcher:
         objects = worker.directory / "recovered-uploads" / "objects"
         keys = recovered_keys(objects)
         worker.started |= shows_worker_start(keys)
+        if status == 0 and worker.started and None not in worker.leases.values():
+            # With no stop lease, the host stopped itself once its idle time ran out.
+            self.telemetry.count("regulator_idle_stops", phase=self.key,
+                                 queued="true" if self.queued(worker.pool) else "false")
+        elif classification == "retryable-spot" and not worker.launch_failure:
+            self.telemetry.count("regulator_interruptions", phase=self.key)
         if not (worker.started or worker.launch_failure) and classification not in (
                 "none", "retryable-spot", "controller-abort"):
             # Its host ended before it reported, for a reason other than a Spot reclaim or the controller's stop.
@@ -3296,6 +3370,7 @@ class UnitDispatcher:
             worker.lease_stop_by[sequence] = stop_by
             worker.stop_by = max(worker.stop_by, stop_by)
             worker.units.add(item.unit_id)
+            worker.steps[sequence] = {"leased": time.time()}
             self.held[item.identity] = (worker.job.host_epoch, sequence)
 
     def send(self, workers):
@@ -3409,6 +3484,68 @@ class UnitDispatcher:
                 seconds, count = demand.get(self.platforms[pool].name, (0, 0))
                 demand[self.platforms[pool].name] = (seconds + left.corrected, count + left.items)
         return demand
+
+    def finish_estimate(self):
+        """The seconds until the phase's work left finishes at its open workers, or None while a pool with work left
+        has none."""
+        return finish_seconds(progress(self.items.values(), self.accepted, self.uploads, self.unresolved),
+                              Counter(worker.pool for worker in self.workers.values() if worker.open()))
+
+    def points(self, now):
+        """The phase's part of the progress model and of the campaign's health, at now, in epoch seconds, as the
+        campaign exports them each loop: its gauges' values by name."""
+        phase = {"phase": self.key}
+
+        def pool(name, **attributes):
+            return {**phase, "pool": "/".join(name), **attributes}
+
+        pools = progress(self.items.values(), self.accepted, self.uploads, self.unresolved)
+        hosts = Counter(worker.pool for worker in self.workers.values() if worker.open())
+        queued = Counter(item.pool for item in self.queued())
+        states = {epoch: worker.state(epoch in self.terminated) for epoch, worker in self.workers.items()}
+        running = [worker for epoch, worker in self.workers.items() if states[epoch] == "running"]
+        # A running worker's slack is the work leases it holds beyond the one it runs.
+        slack = {}
+        for worker in running:
+            slack.setdefault(worker.pool, []).append(
+                sum(worker.leases[sequence] is not None for sequence in worker.outstanding()) - 1)
+        groups = [(worker, self.items[worker.leases[worker.group[0]]], *worker.group) for worker in running
+                  if worker.group and worker.group[0] in worker.outstanding()]
+        refused = {}
+        for reason, since in self.refused.values():
+            refused[reason] = min(since, refused.get(reason, since))
+
+        def group(worker, item, sequence, name):
+            return pool(worker.pool, session=worker.host_session, region=worker.job.region,
+                        market=worker.job.market, unit=item.unit_id, replica=item.replica, group=name, lease=sequence)
+
+        return {
+            "regulator_workers": [(pool(name, state=state), count) for (name, state), count in Counter(
+                (self.workers[epoch].pool, state) for epoch, state in states.items()).items()],
+            "regulator_queued_items": [(pool(name), queued[name]) for name in self.pools],
+            "regulator_units": [(phase, len(self.items))],
+            "regulator_accepted_units": [(phase, sum(map(self.done, self.items)))],
+            "regulator_groups": [(phase, sum(len(item.groups) for item in self.items.values()))],
+            "regulator_accepted_groups": [(phase, sum(len(groups) for identity, groups in self.accepted.items()
+                                                       if identity in self.items))],
+            "regulator_unresolved_units": [(phase, len(self.unresolved_items()))],
+            "regulator_work_left_seconds": [(pool(name), left.seconds) for name, left in pools.items()],
+            "regulator_correction": [(pool(name), left.correction) for name, left in pools.items()],
+            "regulator_finish_time": [(pool(name), now + left.corrected / hosts[name]) for name, left in pools.items()
+                                      if left.items and hosts[name]],
+            "regulator_slack_min": [(pool(name), min(values)) for name, values in slack.items()],
+            "regulator_slack_zero_workers": [(pool(name), sum(value <= 0 for value in values) if queued[name] else 0)
+                                             for name, values in slack.items()],
+            "regulator_launch_refused_seconds": [({**phase, "reason": reason}, now - since)
+                                                 for reason, since in refused.items()],
+            "regulator_leftovers": [(phase, sum(worker.leftover for worker in self.workers.values()))],
+            "regulator_worker_group_estimated_seconds": [
+                (group(worker, item, sequence, name), dict(item.groups)[name])
+                for worker, item, sequence, name, _ in groups],
+            "regulator_worker_group_elapsed_seconds": [
+                (group(worker, item, sequence, name), max(0, now - started))
+                for worker, item, sequence, name, started in groups],
+        }
 
     def launch_room(self, pool):
         """How many more workers the pool may launch this loop beside the hosts the phase holds, within its share of
@@ -3572,6 +3709,7 @@ class UnitDispatcher:
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
                 market = self.pool_demand(pool, now)
                 if market is None:
+                    self.refused.pop(pool, None)
                     break
                 candidate = self.candidate(pool, market)
                 if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
@@ -3583,16 +3721,20 @@ class UnitDispatcher:
                                     UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
                 if blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                     break
-                candidate, ready_at, admitted, scan, blocked = admit_launch(
+                candidate, ready_at, refusal, scan, blocked = admit_launch(
                     self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
                     self.observed)
                 self.candidates[pool] = candidate
-                if not admitted and candidate.market == "on-demand" and market == "on-demand":
+                if not refusal:
+                    self.refused.pop(pool, None)
+                elif self.refused.get(pool, (None,))[0] != refusal:
+                    self.refused[pool] = (refusal, time.time())
+                if refusal and candidate.market == "on-demand" and market == "on-demand":
                     # The pool's Spot-eligible items need not wait for On-Demand admission.
                     self.on_demand_ready[pool] = ready_at
                     if self.pool_demand(pool, now) == "spot":
                         continue
-                if not admitted:
+                if refusal:
                     self.pool_ready[pool] = ready_at
                     blocked_vcpus = blocked or blocked_vcpus
                     if not scan:
@@ -3714,6 +3856,8 @@ class UnitDispatcher:
         self.send(self.workers.values())
         if not deadline_reached and self.steering == "running":
             self.launch(now)
+        else:
+            self.refused = {}
         for epoch, worker in self.workers.items():
             # A lost host is stopped at once; its cleanup still recovers a completion that lands.
             # So is a booting host once the pool has nothing it could take. Its stop lease first records
@@ -3725,6 +3869,9 @@ class UnitDispatcher:
                 self.terminated[epoch] = time.time()
             if epoch in self.terminated:
                 self.stop_host(worker)
+        for name in sorted(self.milestones() - self.reached):
+            self.reached.add(name)
+            self.telemetry.event("milestone", f"{self.key}: {name}", phase=self.key, milestone=name)
         return not self.workers and not self.queued()
 
     def end(self):
@@ -3934,9 +4081,11 @@ class Campaign:
         arguments.pools = (ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
         for cache in ("networks", "images", "zone_offerings", "placement_scores"):
             vars(arguments).setdefault(cache, {})
-        # Each phase's state as the settings last recorded it.
+        # Each phase's state as the settings last recorded it, and how many settings changes were logged.
         self.recorded = {}
+        self.changes = None
         self.terminated = False
+        self.telemetry = getattr(arguments, "telemetry", None) or telemetry.Telemetry()
 
     def run(self):
         """Run every step that can run, or once the campaign is stopped, until every worker's cleanup is proven;
@@ -3944,19 +4093,22 @@ class Campaign:
         only this process: its hosts go on with the leases they hold, which the next controller adopts, so it returns
         none."""
         previous = signal.signal(signal.SIGTERM, self.terminate)
+        self.telemetry.event("controller-started", f"controller started as process {os.getpid()}")
         try:
             while not self.terminated:
+                began = time.monotonic()
                 self.reload()
                 self.advance()
                 self.record()
+                self.log_changes()
                 running = [phase for phase in self.phases.values() if phase.state == "running"]
                 starting = any(phase.state == "starting" for phase in self.phases.values())
                 if not running and not starting:
                     break
                 stop = live_settings(self.arguments)["stop"]
                 if stop and not starting and not any(phase.dispatcher.workers for phase in running):
-                    print(f"campaign stopped by {stop['by']}: {stop['reason']}; every worker's cleanup is proven",
-                          flush=True)
+                    self.telemetry.event("campaign-stopped", f"campaign stopped by {stop['by']}: {stop['reason']}; "
+                                         "every worker's cleanup is proven", actor=stop["by"])
                     break
                 self.follow_regions(running)
                 self.steer(running)
@@ -3964,10 +4116,11 @@ class Campaign:
                 observed = {}
                 for phase in running:
                     self.step(phase, observed)
+                self.export(time.monotonic() - began)
                 time.sleep(UNIT_POLL_SECONDS)
             else:
-                print("controller stopped by SIGTERM; the campaign's hosts keep their leases for the next controller",
-                      flush=True)
+                self.telemetry.event("controller-stopped", "controller stopped by SIGTERM; the campaign's hosts keep "
+                                     "their leases for the next controller")
                 return []
         finally:
             signal.signal(signal.SIGTERM, previous)
@@ -3985,6 +4138,67 @@ class Campaign:
             settings.reload()
         except SettingsError as error:
             print(f"keeping campaign settings version {settings.current['version']}: {error}", flush=True)
+
+    def log_changes(self):
+        """Log each settings change made since the last loop, with its actor; a controller logs none made before it
+        started."""
+        with self.arguments.settings.events_path.open(newline="") as input_file:
+            changes = list(csv.DictReader(input_file, delimiter="\t"))
+        for change in changes[len(changes) if self.changes is None else self.changes:]:
+            self.telemetry.event("settings-change", f"settings version {change['version']} by {change['actor']}: "
+                                 f"{change['change']}", actor=change["actor"], version=change["version"],
+                                 change=change["change"])
+        self.changes = len(changes)
+
+    def export(self, loop_seconds):
+        """Export the campaign's health and each phase's state, progress and spend, as this loop, which took
+        loop_seconds, left them."""
+        settings = live_settings(self.arguments)
+        now = time.time()
+        fleet = read_fleet_state(self.arguments.shared_budget.state_path) or {"reservations": {}, "completed": {}}
+        live = list(fleet["reservations"].values())
+        window = settings["boot_window"]
+        points = {
+            "regulator_loop_seconds": [({}, loop_seconds)],
+            "regulator_spending_stop": [({}, int(bool(settings["spending_stop"])))],
+            "regulator_settings_version": [({}, settings["version"])],
+            "regulator_boot_window_hosts": [({}, min(window["size"], window["max"]))],
+            "regulator_max_usd": [({}, settings["max_usd"])],
+            "regulator_region_vcpus": [
+                ({"region": region, "market": market}, sum(item["vcpus"] for item in live
+                                                           if (item["region"], item["market"]) == (region, market)))
+                for region in settings["regions"] for market in ("spot", "on-demand")],
+            "regulator_region_max_vcpus": [
+                ({"region": region, "market": market}, limits[name]) for region, limits in settings["regions"].items()
+                for market, name in (("spot", "max_vcpus"), ("on-demand", "on_demand_max_vcpus")) if name in limits],
+            "regulator_region_booting_hosts": [
+                ({"region": region}, sum(item["region"] == region and "reported_at" not in item for item in live))
+                for region in settings["regions"]]}
+
+        def point(name, labels, value):
+            points.setdefault(name, []).append((labels, value))
+
+        for phase in self.phases.values():
+            labels = {"phase": phase.key}
+            point("regulator_phase_state", {**labels, "state": "paused" if phase.fault else
+                                            phase.dispatcher.steering if phase.state == "running" else phase.state}, 1)
+            if phase.reduction:
+                continue
+            finish = None
+            if phase.state == "running":
+                for name, values in phase.dispatcher.points(now).items():
+                    points.setdefault(name, []).extend(values)
+                point("regulator_deadline_time", labels, now + phase.deadline - time.monotonic())
+                finish = phase.dispatcher.finish_estimate()
+            held = owner_fleet(fleet, phase.root, now)
+            rate = sum(item["hourly_rate"] for item in held.hosts)
+            if held.ready:
+                point("regulator_boot_to_ready_seconds", labels, statistics.median(held.ready))
+            point("regulator_spend_usd", labels, held.spent)
+            point("regulator_spend_rate_usd_per_hour", labels, rate)
+            point("regulator_spend_projected_usd", labels, held.spent + (
+                held.reserved if finish is None else rate * finish / 3600))
+        self.telemetry.observe(points)
 
     def record(self):
         """Record in the settings each phase whose state changed since the settings last recorded it, one starting as
@@ -4051,7 +4265,7 @@ class Campaign:
                 self.start(phase)
 
     def start(self, phase):
-        print(f"{phase.key}: starting", flush=True)
+        self.telemetry.event("phase-starting", f"{phase.key}: starting", phase=phase.key)
         phase.state = "starting"
         phase.regions = self.regions()
         if phase.reduction:
@@ -4169,15 +4383,15 @@ class Campaign:
 
     def finish(self, phase):
         phase.state = "complete"
-        print(f"{phase.key}: complete", flush=True)
+        self.telemetry.event("phase-complete", f"{phase.key}: complete", phase=phase.key)
 
     def fail(self, phase, error):
         phase.state, phase.failure = "failed", str(error) or type(error).__name__
-        print(f"{phase.key}: failed: {phase.failure}", flush=True)
+        self.telemetry.event("phase-failed", f"{phase.key}: failed: {phase.failure}", phase=phase.key)
 
     def fault(self, phase, error):
         phase.fault = str(error) or type(error).__name__
-        print(f"{phase.key}: paused: {phase.fault}", flush=True)
+        self.telemetry.event("phase-paused", f"{phase.key}: paused: {phase.fault}", phase=phase.key)
 
 
 def refuse_old_root(campaign_root):
@@ -4294,8 +4508,12 @@ def run_campaign(arguments, root):
         for candidate in candidates:
             record_candidate(arguments.campaign_root, candidate)
         check_campaign_options(arguments)
+        arguments.telemetry = telemetry.start(arguments.campaign)
         campaign = Campaign(arguments, root, candidate_phases(arguments, candidates))
-        failed = campaign.run()
+        try:
+            failed = campaign.run()
+        finally:
+            arguments.telemetry.shutdown()
         # A controller that ended lists the root's files for finish to check its copy against; one SIGTERM stopped
         # leaves the root to the next.
         if not campaign.terminated:

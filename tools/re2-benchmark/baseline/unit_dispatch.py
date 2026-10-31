@@ -12,7 +12,7 @@ import re
 import shutil
 import tarfile
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import unit_session
@@ -111,11 +111,14 @@ def measured_group_seconds(path):
             for row in read_unit_uploads(path)}
 
 
+def marker_time(marker, field):
+    """A time a completion marker reports, a UTC time to the second, in epoch seconds."""
+    return datetime.strptime(marker[field], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
 def marker_seconds(marker):
-    """The seconds a group took to measure, from its completion marker's start and finish, each a UTC time to the
-    second."""
-    start, finish = (datetime.strptime(marker[field], "%Y-%m-%dT%H:%M:%SZ") for field in ("started_at", "finished_at"))
-    return (finish - start).total_seconds()
+    """The seconds a group took to measure, from its completion marker's start and finish."""
+    return marker_time(marker, "finished_at") - marker_time(marker, "started_at")
 
 
 def unit_upload_row(item, host_session, sequence, marker):

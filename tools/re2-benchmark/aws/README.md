@@ -530,6 +530,23 @@ points the parameter's record at it. The host's user data,
   `.../grafana-monitor-token`, generating them the first time; anonymous
   access is off.
 
+The controller is the campaign's only telemetry exporter, and its unit is what
+turns it on: it sets `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`, so
+the controller sends OTLP/HTTP to the collector beside it, and anywhere the
+variable is unset, as on the Mac, nothing is exported. Workers export nothing;
+the controller turns their S3 evidence into telemetry. Every loop sets its
+gauges, which `baseline/telemetry.py` lists: the progress model (each worker's
+group with its estimated and elapsed seconds, work left, correction, and
+finish by pool), workers by state, queued and accepted work, slack, launch
+refusals by reason, the boot window, spend, phase states, and the loop's
+seconds. It counts idle stops, Spot interruptions, and stalled hosts; logs its
+events (starts, completions, pauses, failures, settings changes with their
+actor, leaks, leftovers, and milestones) with the local Pacific time in each
+line; and traces each unit attempt as it settles, with its leased, started,
+uploaded, and accepted steps. Export runs on the SDK's own threads, so a
+collector that is down drops what it misses and the loop goes on; the
+controller's journal still has every event's line.
+
 Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
 across replacements, through the subnet router; Session Manager is the shell
 when the router is down. ssh logs in with the private key of the launch's

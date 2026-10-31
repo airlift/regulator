@@ -12,6 +12,9 @@ StartLimitBurst=5
 [Service]
 User=ec2-user
 EnvironmentFile=/regulator/control-host/controller.env
+# The controller exports its telemetry to the collector's OTLP/HTTP port on this host's loopback; without the
+# endpoint, as on the Mac, nothing is exported.
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 WorkingDirectory=/regulator/control-host/checkout
 ExecStart=/opt/regulator/venv/bin/python tools/re2-benchmark/baseline/run-campaign.py $CONTROLLER_ARGUMENTS
 Restart=on-failure

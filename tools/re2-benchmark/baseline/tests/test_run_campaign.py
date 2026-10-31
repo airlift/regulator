@@ -27,10 +27,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
+import telemetry  # noqa: E402
 from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENTS, CampaignSettings  # noqa: E402
 import test_engine_build  # noqa: E402
 import test_control_host  # noqa: E402
@@ -320,10 +326,10 @@ class TestRunCampaign(unittest.TestCase):
     def admit(self, arguments, result_root, job, observed=None):
         """Place and admit one launch as the unit dispatcher does, by default in a loop of its own: the job as placed,
         and whether it was admitted."""
-        candidate, _, admitted, _, _ = RUN_CAMPAIGN.admit_launch(
+        candidate, _, refusal, _, _ = RUN_CAMPAIGN.admit_launch(
             arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0,
             {} if observed is None else observed)
-        return candidate, admitted
+        return candidate, refusal is None
 
     @staticmethod
     def shared_fleet(arguments):
@@ -519,6 +525,12 @@ class TestRunCampaign(unittest.TestCase):
                 def step(self, deadline, observed):
                     self.loops -= 1
                     return not self.loops
+
+                def points(self, now):
+                    return {}
+
+                def finish_estimate(self):
+                    return None
 
                 def end(self):
                     events.append(("end", self.key))
@@ -2792,7 +2804,7 @@ class TestUnitWorkers(unittest.TestCase):
         result directory.
 
         The unit attempt ledger is left in self.ledger."""
-        with fleet.stubs():
+        with fleet.stubs(), contextlib.redirect_stdout(io.StringIO()):
             dispatcher = self.dispatcher(root, fleet, phase, shards, max_concurrent, per_platform, **options)
             try:
                 dispatcher.run()
@@ -2816,11 +2828,11 @@ class TestUnitWorkers(unittest.TestCase):
 
     def dispatcher(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None,
                    purchases=None, on_demand=True, deadline=None, confirmations=(), primary_results=None,
-                   release_version="", extend=True, shared=False, budget=None, results="results"):
+                   release_version="", extend=True, shared=False, budget=None, results="results", telemetry=None):
         """The controller of the phase's work items, with the fleet's stubs in place, its result directory in root,
         under the settings its campaign root, root, holds, or else settings it seeds there: its limits, each platform's
         regions, the default region unless platform_regions names others, and its purchases, its results in the
-        directory results names. With shared, its budget is the campaign's own, as its controller keeps it for every
+        directory results names, and its telemetry going where telemetry sends it, or nowhere. With shared, its budget is the campaign's own, as its controller keeps it for every
         phase, which sees EC2 hold none of its hosts, so only its host limit and its boot window pace launches. Unless
         given one, the stub budget admits every extension of a host's reservation if extend, logging each, and
         refuses every one otherwise, and keeps its boot window at its largest."""
@@ -2848,7 +2860,8 @@ class TestUnitWorkers(unittest.TestCase):
             phase=phase, campaign="campaign", campaign_id="campaign", campaign_root=root, candidate_archive=root / "candidate.tar.gz",
             candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             cloud=fleet, settings=settings, spot_vcpu_reserve=0, shared_budget=budget, selected_shards=shards,
-            topology_deadline_seconds=deadline, primary_results=primary_results, release_version=release_version)
+            topology_deadline_seconds=deadline, primary_results=primary_results, release_version=release_version,
+            telemetry=telemetry)
         self.arguments = arguments
         with gzip.open(arguments.candidate_archive, "wb") as candidate:
             candidate.write(b"candidate")
@@ -2880,21 +2893,23 @@ class TestUnitWorkers(unittest.TestCase):
             shared_budgets[root] = RUN_CAMPAIGN.FleetBudget(root, settings, 0)
         return shared_budgets[root]
 
-    def run_campaign(self, root, fleet, phases, max_hosts, per_platform, loop=lambda: None, **options):
+    def run_campaign(self, root, fleet, phases, max_hosts, per_platform, loop=lambda: None, telemetry=None,
+                     **options):
         """Run phases, each (key, phase, shards, after), as the campaign's controller runs them over the fleet, each
         phase's dispatcher built as dispatcher builds it with options, its key naming its results, and the campaign's
-        budget; loop runs before each of the controller's polls, with each phase's dispatcher so far in self.running.
-        Returns the steps that failed and each phase's dispatcher by key."""
+        budget, its telemetry going where telemetry sends it, or nowhere; loop runs before each of the controller's
+        polls, with each phase's dispatcher so far in self.running. Returns the steps that failed and each phase's
+        dispatcher by key."""
         budget = self.shared_budget(root, self.campaign_settings(root, max_hosts, per_platform,
                                                                  options.get("platform_regions"),
                                                                  options.get("purchases")))
-        arguments = SimpleNamespace(settings=budget.settings, shared_budget=budget)
+        arguments = SimpleNamespace(settings=budget.settings, shared_budget=budget, telemetry=telemetry)
         dispatchers = self.running = {}
 
         def prepare(phase, _):
             dispatcher = dispatchers[phase.key] = self.dispatcher(
                 root, fleet, phase.phase, phase.shards, max_hosts, per_platform, shared=True, results=phase.key,
-                **options)
+                telemetry=phase.telemetry, **options)
             # As its setup does, the phase checks AWS for its workers in their regions; the fleet's hosts install
             # no JDK and no candidate archive.
             vars(dispatcher.arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
@@ -3427,6 +3442,87 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertTrue(dispatcher.queued())
             self.assertFalse((dispatcher.result_root / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
             self.assertIn("campaign stopped by dain: enough", log.getvalue())
+
+    def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
+        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
+                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for index in range(1, 9)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # Two hosts of each platform measure eight 15-minute units, each in its estimate. Two and a half minutes in, with every host
+            # running its first lease and holding its next, Dain pauses the phase, and resumes it once its hosts have
+            # stopped.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
+            reader, spans, logs = InMemoryMetricReader(), InMemorySpanExporter(), InMemoryLogRecordExporter()
+            exported = telemetry.Telemetry("campaign", [reader], [SimpleSpanProcessor(spans)],
+                                           [SimpleLogRecordProcessor(logs)])
+            snapshots, steered = [], []
+
+            def loop():
+                data = reader.get_metrics_data()
+                snapshots.append({metric.name: {tuple(sorted(point.attributes.items())): point.value
+                                                for point in metric.data.data_points}
+                                  for resource in data.resource_metrics for scope in resource.scope_metrics
+                                  for metric in scope.metrics})
+                if fleet.sleeps == 10:
+                    self.control(root, "pause", "smoke", "--reason", "checking the image")
+                    steered.append("paused")
+                elif steered == ["paused"] and all(host.status is not None for host in fleet.hosts):
+                    self.control(root, "resume", "smoke")
+                    steered.append("resumed")
+
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 4, 2, loop,
+                                          exported, purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            # As the hosts run, the gauges hold the progress model: each worker's group with its estimate and
+            # elapsed seconds, the work left, its correction and finish, and each pool's slack.
+            running = snapshots[9]
+
+            def values(name, **labels):
+                return [value for attributes, value in running[name].items()
+                        if labels.items() <= dict(attributes).items()]
+
+            pools = {"r8i/r8i.large", "r9g/r9g.large"}
+            self.assertEqual(4, sum(values("regulator_workers", phase="smoke", state="running")))
+            self.assertEqual((16, 0, 8), (*values("regulator_units"), *values("regulator_accepted_units"),
+                                          sum(values("regulator_queued_items"))))
+            self.assertEqual(16 * 900, sum(values("regulator_work_left_seconds")))
+            self.assertEqual([1.0, 1.0, 1, 1], values("regulator_correction") + values("regulator_slack_min"))
+            self.assertEqual(pools, {dict(attributes)["pool"] for attributes in running["regulator_finish_time"]})
+            self.assertEqual([900] * 4, values("regulator_worker_group_estimated_seconds", group="1"))
+            self.assertEqual(4, len({dict(attributes)["session"] for attributes in
+                                     running["regulator_worker_group_elapsed_seconds"]}))
+            for name in ("regulator_loop_seconds", "regulator_boot_window_hosts", "regulator_spending_stop",
+                         "regulator_spend_usd", "regulator_spend_projected_usd", "regulator_max_usd",
+                         "regulator_region_vcpus", "regulator_deadline_time", "regulator_boot_to_ready_seconds"):
+                self.assertTrue(running[name], name)
+            # The pause shows as the phase's state, and each host that stopped itself idle while the pause held its
+            # queued work counts as an idle stop with work queued.
+            self.assertTrue(any(snapshot["regulator_phase_state"].get(
+                (("phase", "smoke"), ("state", "paused"))) for snapshot in snapshots))
+            self.assertEqual({(("phase", "smoke"), ("queued", "true")): 4}, snapshots[-1]["regulator_idle_stops"])
+            # Each unit attempt is traced from its lease to its acceptance, its steps one after another.
+            attempts = [span for span in spans.get_finished_spans() if span.name == "unit attempt"]
+            self.assertEqual(16, len(attempts))
+            for attempt in attempts:
+                steps = sorted((span for span in spans.get_finished_spans()
+                                if span.parent and span.parent.span_id == attempt.context.span_id),
+                               key=lambda span: span.start_time)
+                self.assertEqual((["leased", "started", "uploaded", "accepted"], "accepted", 900, 900.0),
+                                 ([span.name for span in steps], attempt.attributes["outcome"],
+                                  attempt.attributes["estimated_seconds"], attempt.attributes["measured_seconds"]))
+                self.assertEqual([attempt.start_time, *(span.end_time for span in steps)],
+                                 [*(span.start_time for span in steps), attempt.end_time])
+            # The events are logged with the local time in each line, Dain's changes in his name.
+            records = [record.log_record for record in logs.get_finished_logs()]
+            for record in records:
+                self.assertRegex(record.body, r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8} \S+ ")
+            self.assertEqual(["controller-started", "phase-starting", "milestone", "milestone", "phase-complete"],
+                             [record.event_name for record in records if record.event_name != "settings-change"])
+            self.assertEqual(["first host reporting", "replica 1 accepted"],
+                             [record.attributes["milestone"] for record in records if record.event_name == "milestone"])
+            self.assertEqual(["smoke paused: checking the image", "smoke running"],
+                             [record.attributes["change"] for record in records if record.attributes.get("actor") == "dain"])
 
     def test_a_new_region_a_raised_limit_a_pin_and_a_finished_phase_move_hosts_the_next_loop(self):
         units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),

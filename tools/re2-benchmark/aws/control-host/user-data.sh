@@ -13,6 +13,9 @@ CHECKOUT=${INPUTS}/checkout
 VENV=/opt/regulator/venv
 PARAMETERS=/regulator-benchmark/campaigns/${CAMPAIGN}
 
+# Every clock time the host prints, the controller's events and status over ssh alike, is Dain's local time.
+timedatectl set-timezone America/Los_Angeles
+
 install -d -m 700 -o ec2-user -g ec2-user /home/ec2-user/.ssh
 printf '%s\n' "${SSH_PUBLIC_KEY}" > /home/ec2-user/.ssh/authorized_keys
 chown ec2-user:ec2-user /home/ec2-user/.ssh/authorized_keys

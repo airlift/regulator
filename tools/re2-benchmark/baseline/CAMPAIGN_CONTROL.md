@@ -360,7 +360,7 @@ The controller is the only exporter, over OTLP to the `otel-lgtm` container
 on the same host. Workers get no new software or endpoint; the controller
 turns their S3 evidence into:
 
-- **Metrics** (Mimir): loop seconds; the progress model above; per phase:
+- **Metrics** (Prometheus): loop seconds; the progress model above; per phase:
   workers by state, queued, accepted units and groups, unresolved, slack per
   worker (minimum and count at zero), boot-to-ready, idle stops (with and
   without queued work), interruptions, stalled hosts, boot window, launch
