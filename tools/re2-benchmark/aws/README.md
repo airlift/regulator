@@ -1253,9 +1253,13 @@ spends none of the slot's replacements. Otherwise its detail is
 A request whose answer never comes, a throttle or server error among them, is
 sent again with the same client token, so AWS launches at most one instance,
 and the controller then finds the instance by its session's tag. A refusal
-counts as one only when it answers the launch's first request, before any
-retry, botocore's own included; after one, the request sent before it may
-have launched the instance, so the controller looks for it by its tag too.
+for capacity, quota, or price counts whichever request it answers, since AWS
+answers a request repeating the token of a launch that succeeded with its
+instance; EC2 sends capacity refusals as server errors, which botocore
+retries. Any other refusal counts only when it answers the launch's first
+request, before any retry, botocore's own included; after one, the request
+sent before it may have launched the instance, so the controller looks for it
+by its tag too.
 
 `worker-user-data.sh` starts the host's stop-time watchdog and startup
 timeline, waits for the profile's credentials, downloads and checks the frozen
