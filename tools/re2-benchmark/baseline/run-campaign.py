@@ -4422,11 +4422,10 @@ class Campaign:
                 phase.paused = paused
 
     def holds_hosts(self, phase):
-        """Whether the running phase has workers whose cleanup is not proven: those its dispatch follows, or with no
-        dispatch, those the fleet still reserves for it."""
-        if phase.dispatcher:
-            return bool(phase.dispatcher.workers)
-        return bool(self.arguments.shared_budget.reservations(phase.root))
+        """Whether the running phase has workers whose cleanup is not proven: those its dispatch follows, or those the
+        fleet still reserves for it, as for a phase whose setup or recovery failed before its dispatch adopted them."""
+        return bool(phase.dispatcher and phase.dispatcher.workers or
+                    self.arguments.shared_budget.reservations(phase.root))
 
     def reload(self):
         """Read the settings as they stand now, or keep the last good ones while they cannot be read or do not

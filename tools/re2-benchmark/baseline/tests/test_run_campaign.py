@@ -4864,6 +4864,45 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual([], self.budget.reservations(root / "smoke"))
             self.assertTrue(all(host.leases[max(host.leases)].get("stop") for host in fleet.hosts))
 
+    def test_phase_whose_recovery_fails_holds_its_hosts_until_it_is_resumed(self):
+        # The controller stops with the smoke's hosts live, and the restarted controller cannot read the smoke's unit
+        # attempt ledger as it recovers its dispatch, so the smoke pauses. Dain stops the campaign, which goes on
+        # while the fleet still reserves the smoke's hosts; once the ledger reads again he resumes the smoke, whose
+        # recovery adopts its hosts, and they take their stop leases and stop.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            phases = [("smoke", "smoke", ["trino-like-specialized"], ())]
+            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_campaign(root, fleet, phases, 2, 1)
+            fleet.abort_after = None
+            read = RUN_CAMPAIGN.read_unit_attempts
+            unreadable = [True]
+            stopped = []
+
+            def read_unit_attempts(path):
+                if unreadable[0]:
+                    raise OSError(f"[Errno 5] Input/output error: {path}")
+                return read(path)
+
+            def loop():
+                settings = CampaignSettings(root).current
+                if settings["stop"]:
+                    stopped.append(fleet.sleeps)
+                    if len(stopped) == 3:
+                        unreadable[0] = False
+                        self.control(root, "resume", "smoke")
+                elif settings["phases"]["smoke"]["state"] == "paused":
+                    self.control(root, "stop")
+
+            with patch.object(RUN_CAMPAIGN, "read_unit_attempts", side_effect=read_unit_attempts):
+                failed, _ = self.run_campaign(root, fleet, phases, 2, 1, loop)
+            self.assertEqual([], failed)
+            self.assertLess(3, len(stopped))
+            self.assertEqual(2, len(fleet.hosts))
+            self.assertEqual([], self.budget.reservations(root / "smoke"))
+            self.assertTrue(all(host.leases[max(host.leases)].get("stop") for host in fleet.hosts))
+
     def test_phase_paused_for_a_fault_reports_its_boots_and_takes_a_stop(self):
         # Host 1's marker names another campaign, so the smoke pauses while host 2 still boots, and Dain then stops the
         # campaign. Host 2's boot still reaches the boot window, and it takes its stop lease behind the leases it was
