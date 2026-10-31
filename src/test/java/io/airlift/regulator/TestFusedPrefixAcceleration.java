@@ -53,6 +53,18 @@ public class TestFusedPrefixAcceleration
     }
 
     @Test
+    public void testFoldCaseStrategyCutoff()
+    {
+        Prog program = configuredProgram("sherlock".getBytes(StandardCharsets.UTF_8), true);
+
+        assertThat(program.usesVectorForFoldCasePrefix(1_023)).isFalse();
+        assertThat(program.usesVectorForFoldCasePrefix(1_024)).isEqualTo(VectorSupport.isAvailable());
+        assertThat(program.usesVectorForFoldCasePrefix(1_025)).isEqualTo(VectorSupport.isAvailable());
+        // A single folded byte keeps its SWAR byte search.
+        assertThat(configuredProgram(new byte[] {'s'}, true).usesVectorForFoldCasePrefix(4_096)).isFalse();
+    }
+
+    @Test
     public void testVectorLaneAndTailBoundaries()
     {
         int vectorWidth = ByteVector.SPECIES_PREFERRED.length();

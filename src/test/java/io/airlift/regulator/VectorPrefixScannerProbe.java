@@ -43,6 +43,15 @@ public final class VectorPrefixScannerProbe
         }
         check(checksum == (data.length - prefix.length) * iterations, "prefix scan failed");
 
+        Prog foldCaseProgram = new Prog();
+        foldCaseProgram.configurePrefixAccel(Slices.utf8Slice("sherlock"), true);
+        byte[] foldCaseMatch = "SHERLOCK".getBytes(StandardCharsets.US_ASCII);
+        byte[] foldCaseData = new byte[4_096];
+        Arrays.fill(foldCaseData, (byte) 'x');
+        System.arraycopy(foldCaseMatch, 0, foldCaseData, foldCaseData.length - foldCaseMatch.length, foldCaseMatch.length);
+        check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorApiAvailable, "unexpected folded prefix strategy");
+        check(foldCaseProgram.prefixAccel(foldCaseData, 0, foldCaseData.length) == foldCaseData.length - foldCaseMatch.length, "folded prefix scan failed");
+
         ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[xy][0-9]{4}"), Regexp.LIKE_PERL);
         Prog smallSetProgram = Compiler.compile(parsed.regexp(), false, 0);
         Dfa.DfaInstance dfa = smallSetProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);

@@ -915,6 +915,14 @@ final class Prog
         return prefixFoldCase;
     }
 
+    /// True when a folded multi-byte prefix scans `length` bytes with
+    /// [VectorPrefixScanner#findFoldCase], under the same cutoff as
+    /// [PrefixAccelStrategy#FUSED_VECTOR].
+    boolean usesVectorForFoldCasePrefix(int length)
+    {
+        return prefixFoldCase && prefixSize > 1 && VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
+    }
+
     PrefixAccelStrategy prefixAccelStrategy(int length)
     {
         if (prefixFoldCase || prefixSize <= 1 || prefix[0] >= 0) {
@@ -1016,7 +1024,7 @@ final class Prog
     /// or `-1` if no match is found.
     ///
     /// Uses different strategies depending on configuration:
-    /// - Parallel front-and-back candidate scanning for folded prefixes
+    /// - First-byte and last-byte masks for folded prefixes, a vector at a time on long windows
     /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
     ///   non-ASCII first byte
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
@@ -1169,9 +1177,13 @@ final class Prog
         if (prefixSize == 1) {
             return indexOfFoldCase(data, offset, length, prefix[0]);
         }
+        if (usesVectorForFoldCasePrefix(length)) {
+            return VectorPrefixScanner.findFoldCase(data, offset, length, prefix, prefixSize);
+        }
         return prefixAccelFoldCaseFrontAndBackSWAR(data, offset, length);
     }
 
+    // Short windows, and JVMs that do not resolve jdk.incubator.vector.
     private int prefixAccelFoldCaseFrontAndBackSWAR(byte[] data, int offset, int length)
     {
         int candidateCount = length - prefixSize + 1;

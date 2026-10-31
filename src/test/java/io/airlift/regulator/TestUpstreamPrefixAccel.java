@@ -107,35 +107,52 @@ public class TestUpstreamPrefixAccel
     public void testFoldCasePrefixAccelCandidateScanMatchesReference()
     {
         Random random = new Random(1);
-        for (String prefix : List.of("ab", "aaaa", "abababa", "Sherlock Holmes", "ABCDEFGHIJKLMNO")) {
+        // Spaces, digits, punctuation, and non-ASCII bytes compare exactly, including as the
+        // first or last byte; setting bit 0x20 must not alias '@' with '`'. "Sherlock Holmes" is
+        // cut to nine bytes and ends with a space.
+        for (String prefix : List.of("ab", "aaaa", "abababa", "Sherlock Holmes", "ABCDEFGHIJKLMNO", "sherlock2", "1 x", "€uro", "@_`{")) {
+            byte[] literal = prefix.getBytes(StandardCharsets.UTF_8);
             Prog program = compile("x");
-            program.configurePrefixAccel(Slices.utf8Slice(prefix), true);
+            program.configurePrefixAccel(Slices.wrappedBuffer(literal), true);
             assertThat(program.canPrefixAccel()).as(prefix).isTrue();
-            int acceleratedPrefixLength = Math.min(prefix.length(), 9);
+            int acceleratedPrefixLength = Math.min(literal.length, 9);
 
-            for (int iteration = 0; iteration < 200; iteration++) {
-                byte[] data = new byte[6 + random.nextInt(507)];
-                random.nextBytes(data);
-                if (data.length >= prefix.length() && random.nextBoolean()) {
-                    int insertionPosition = random.nextInt(data.length - prefix.length() + 1);
-                    for (int index = 0; index < prefix.length(); index++) {
-                        char value = prefix.charAt(index);
-                        if (random.nextBoolean() && value >= 'a' && value <= 'z') {
-                            value -= 'a' - 'A';
-                        }
-                        else if (random.nextBoolean() && value >= 'A' && value <= 'Z') {
-                            value += 'a' - 'A';
-                        }
-                        data[insertionPosition + index] = (byte) value;
+            // Lengths on both sides of the vector cutoff. Half the texts are drawn mostly from the
+            // prefix's bytes in either case, so many candidate positions fail the complete prefix
+            // comparison; the rest are random bytes, so short prefixes also scan to the end.
+            for (int iteration = 0; iteration < 400; iteration++) {
+                byte[] data = new byte[6 + random.nextInt(2_600)];
+                boolean dense = random.nextBoolean();
+                for (int index = 0; index < data.length; index++) {
+                    data[index] = dense && random.nextInt(8) != 0 ? randomCase(random, literal[random.nextInt(literal.length)]) : (byte) random.nextInt(256);
+                }
+                if (data.length >= literal.length && random.nextBoolean()) {
+                    // Bias half the insertions toward the end.
+                    int lastStart = data.length - literal.length;
+                    int insertionPosition = random.nextBoolean() ? random.nextInt(lastStart + 1) : lastStart - random.nextInt(Math.min(lastStart, 80) + 1);
+                    for (int index = 0; index < literal.length; index++) {
+                        data[insertionPosition + index] = randomCase(random, literal[index]);
                     }
                 }
 
                 int offset = random.nextInt(4);
                 int length = data.length - offset - random.nextInt(4);
                 assertThat(program.prefixAccel(data, offset, length))
-                        .isEqualTo(referenceFoldCaseSearch(data, offset, length, prefix, acceleratedPrefixLength));
+                        .as("%s at offset %s length %s", prefix, offset, length)
+                        .isEqualTo(referenceFoldCaseSearch(data, offset, length, literal, acceleratedPrefixLength));
             }
         }
+    }
+
+    private static byte randomCase(Random random, byte value)
+    {
+        if (random.nextBoolean() && value >= 'a' && value <= 'z') {
+            return (byte) (value - ('a' - 'A'));
+        }
+        if (random.nextBoolean() && value >= 'A' && value <= 'Z') {
+            return (byte) (value + ('a' - 'A'));
+        }
+        return value;
     }
 
     private static Prog compile(String pattern)
@@ -144,14 +161,14 @@ public class TestUpstreamPrefixAccel
         return Compiler.compile(parsed.regexp(), false, 0);
     }
 
-    private static int referenceFoldCaseSearch(byte[] data, int offset, int length, String prefix, int prefixLength)
+    private static int referenceFoldCaseSearch(byte[] data, int offset, int length, byte[] prefix, int prefixLength)
     {
         int end = offset + length - prefixLength;
         for (int position = offset; position <= end; position++) {
             boolean matches = true;
             for (int index = 0; index < prefixLength; index++) {
                 int actual = data[position + index] & 0xFF;
-                int expected = prefix.charAt(index);
+                int expected = prefix[index] & 0xFF;
                 if (actual >= 'A' && actual <= 'Z') {
                     actual += 'a' - 'A';
                 }

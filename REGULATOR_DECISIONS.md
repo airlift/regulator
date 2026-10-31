@@ -1069,11 +1069,18 @@ supports changing it.
 ## Folded Prefix Candidate Scan
 
 Case-insensitive prefix acceleration keeps upstream's maximum nine-byte prefix
-but replaces ShiftDFA with fused first-byte and last-byte SWAR candidate masks.
-Each iteration evaluates eight candidate starts. Only positions where both
-folded boundary bytes match run the complete folded-prefix comparison. This
-route does not use the Vector API, keeping the candidate loop compact and
-avoiding architecture-dependent vector setup on short prefix scans.
+but replaces ShiftDFA with fused first-byte and last-byte candidate masks,
+evaluated a SWAR word or a vector of candidate starts at a time. Only positions
+surviving both folded boundary-byte masks run the complete folded-prefix
+comparison; the few starts left after the last word or vector are compared
+directly. Multi-byte prefix searches of at least 1 KiB use the platform's
+preferred Vector API species when the application resolves
+`jdk.incubator.vector`. There, when a boundary byte is an ASCII letter, each
+input byte is ORed with `0x20` before it is compared with the lowercase letter;
+other boundary bytes compare exactly. Shorter searches, and longer ones without
+the Vector API, use eight-byte SWAR words, so short scans pay no vector setup.
+A single folded byte keeps its SWAR byte search. Vector linkage stays in
+`VectorPrefixScanner`.
 
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
