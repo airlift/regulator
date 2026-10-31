@@ -1050,8 +1050,9 @@ preflight checks the tag and the bucket's region. A bucket holds two trees:
 - `shared/` holds the content-addressed archives described below, which
   every campaign reuses by key. The `ExpireSharedArchives` rule in
   `bucket-lifecycle.json` expires an object seven days after its upload, and a
-  phase, or a region `add-region` adds, puts an archive again once it is five
-  days old, so an archive outlives any phase that uses it.
+  phase's region check, which a running phase repeats every day, or a region
+  `add-region` adds, puts an archive again once it is five days old, so an
+  archive outlives any phase that uses it.
 - `campaigns/<campaign>/<session>/` holds each worker's leases and results.
   Cleanup removes the session's prefix, and the `ExpireCampaignSessions` rule
   expires what a lost controller leaves one day after it was written.

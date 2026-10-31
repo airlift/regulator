@@ -4212,6 +4212,39 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual([], failed)
             self.assert_accepted(dispatchers["primary"])
 
+    def test_a_phase_running_for_days_checks_its_regions_daily(self):
+        # Dain pauses the primary at its first poll and resumes it a day later. Each check of a phase's regions puts
+        # its archives again once they are five days old, so a phase that runs for a week cannot outlive them.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts")
+            checked, steered = [], []
+
+            def check(arguments, platforms):
+                checked.append(fleet.clock)
+                return check_regions(arguments, platforms)
+
+            def steer():
+                if not steered:
+                    self.control(root, "pause", "primary")
+                    steered.append("paused")
+                elif steered == ["paused"] and len(checked) == 1:
+                    fleet.clock += RUN_CAMPAIGN.REGION_RECHECK_SECONDS
+                    steered.append("a day later")
+                elif len(checked) == 2 and "resumed" not in steered:
+                    self.control(root, "resume", "primary")
+                    steered.append("resumed")
+
+            check_regions = RUN_CAMPAIGN.check_regions
+            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=check):
+                failed, dispatchers = self.run_campaign(root, fleet, [("primary", "primary", ["like-dfa-single-use"],
+                                                                       ())], 2, 1, steer)
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["primary"])
+            # Its setup checked them, and with no region changed, a day later its controller checked them again.
+            self.assertEqual(2, len(checked))
+            self.assertGreaterEqual(checked[1] - checked[0], RUN_CAMPAIGN.REGION_RECHECK_SECONDS)
+
     def test_notice_between_units_releases_the_waiting_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "notice"}})
