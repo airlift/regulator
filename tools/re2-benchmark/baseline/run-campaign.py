@@ -2679,9 +2679,9 @@ class UnitDispatcher:
         Each launch slot is rebuilt from its latest worker's starting record: a worker not yet settled holds it, and
         one settled leaves it free with its count, or given up.
 
-        A settled lease's uploads and an accepted group's are deleted from S3, so the ledgers alone show them: a
-        worker with a settled work lease started, a lease's groups accepted for it are finished, and a settled lease
-        is never written again.
+        A settled lease's uploads and an accepted group's are deleted from S3, so the ledgers alone show them. A
+        worker started if it has a settled work lease or a group accepted for one of its leases. A lease's groups
+        accepted for it are finished, and a settled lease is never written again.
         """
         attempts = read_unit_attempts(self.leases_path)
         ran = {int(row["host_epoch"]) for row in attempts
@@ -2805,6 +2805,7 @@ class UnitDispatcher:
                 accepted = [group for group in worker.lease_groups[sequence]
                             if self.accepted.get(identity, {}).get(group, {}).get("unit_attempt_id") == attempt]
                 worker.finished[sequence] = dict.fromkeys(accepted)
+                worker.started = worker.started or bool(accepted)
                 # A deletion the earlier controller had not made yet is made again.
                 worker.deletions.update(f"{worker.metadata['result_prefix']}/{key}" for group in accepted
                                         for key in (completion_key(sequence, group), result_key(sequence, group)))
@@ -2815,6 +2816,9 @@ class UnitDispatcher:
                 elif sequence not in worker.abandoned:
                     # Its trace begins with what its host reports.
                     worker.steps[sequence] = {}
+            # A started worker's running lease counts from its adoption, as one whose start is seen now would.
+            if worker.started:
+                worker.running_since = time.monotonic()
         # A restart reaches no milestone the phase had reached.
         self.reached = self.milestones()
 

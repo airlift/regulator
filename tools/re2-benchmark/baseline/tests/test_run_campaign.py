@@ -4292,16 +4292,24 @@ class TestUnitWorkers(unittest.TestCase):
                           "groups": [{"group_id": str(group), "estimated_seconds": 900} for group in (1, 2, 3)]}}
         # The first host's lease runs three 15-minute groups, and only the heartbeat that started it lands. Its
         # third group runs past twice its estimate from that heartbeat, but not from its second group's completion,
-        # so the host is never judged stalled: nor while the acceptance threads are slow to gather its completions,
-        # nor once a restart during its third group finds the groups before it accepted and gone from S3. With none
-        # of its heartbeats landing, its first group's completion still shows its progress, so once it stalls in its
-        # second group it is judged stalled.
+        # so the host is never judged stalled. That holds while the acceptance threads are slow to gather its
+        # completions, and after a restart during its third group finds the earlier groups accepted and gone from S3.
+        # When none of its heartbeats land, its first group's completion still shows its progress. So once it stalls
+        # in its second group it is judged stalled, not a host that never booted, even by a controller restarted once
+        # that group was accepted and gone from S3. A restarted controller counts the lease the first host runs from
+        # when it adopts the host, so it projects the host free no sooner than its running group's estimate later.
+        # Each restart's moment, in the controller's 15-second polls: during the first host's third group, or during its
+        # second, before it is judged stalled.
+        restarts = {"restart": 3600 // RUN_CAMPAIGN.UNIT_POLL_SECONDS,
+                    "restart before it is judged stalled": 2250 // RUN_CAMPAIGN.UNIT_POLL_SECONDS}
         for script, case, lost in (("silent-groups", "", []), ("silent-groups", "slow acceptance", []),
-                                   ("silent-groups", "restart", []), ("silent-stall", "", ["stalled"])):
+                                   ("silent-groups", "restart", []), ("silent-stall", "", ["stalled"]),
+                                   ("silent-stall", "restart before it is judged stalled", ["stalled"])):
             with self.subTest(script=script, case=case), tempfile.TemporaryDirectory() as temporary, \
                     contextlib.ExitStack() as stack:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, pace=1.9,
-                                      scripts={1: {1: script}}, abort_after=240 if case == "restart" else None)
+                                      scripts={1: {1: script}},
+                                      abort_after=restarts.get(case))
                 if case == "slow acceptance":
                     gather = RUN_CAMPAIGN.gather_group
 
@@ -4310,13 +4318,24 @@ class TestUnitWorkers(unittest.TestCase):
                         return gather(*arguments)
 
                     stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
-                if case == "restart":
+                if case.startswith("restart"):
                     with self.assertRaisesRegex(SystemExit, "controller stopped"):
                         self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
                     fleet.abort_after = None
+                    recover, projected = RUN_CAMPAIGN.UnitDispatcher.recover, []
+
+                    def recover_and_project(dispatcher):
+                        recover(dispatcher)
+                        now = fleet.monotonic()
+                        projected.append(dispatcher.free_at(dispatcher.workers[int(fleet.hosts[0].epoch)], now) - now)
+
+                    stack.enter_context(patch.object(RUN_CAMPAIGN.UnitDispatcher, "recover", autospec=True,
+                                                     side_effect=recover_and_project))
                 self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
                 self.assertEqual(lost, [row["detail"] for row in self.ledger if row["outcome"] == "lost"])
                 self.assertEqual(len(lost), fleet.hosts[0].terminations)
+                if case.startswith("restart"):
+                    self.assertGreaterEqual(projected[0], 900)
 
     def test_termination_that_keeps_failing_leaks_from_its_first_request(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
