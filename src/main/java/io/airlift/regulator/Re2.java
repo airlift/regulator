@@ -410,6 +410,8 @@ public sealed class Re2
     private final byte[] requiredPrefix;
     private final boolean requiredPrefixFoldCase;
     private final int matchLength;
+    // Every match is one character as the program reads it, as for \pL or (?s:.).
+    private final boolean singleCharacterMatch;
     private final int exactLiteralLength;
     private final BooleanPlans booleanPlans;
     // Cached directly on Re2 because an extra dependent load measurably affects tiny find operations.
@@ -465,6 +467,7 @@ public sealed class Re2
         this.requiredPrefix = requiredPrefix;
         this.requiredPrefixFoldCase = requiredPrefixFoldCase;
         this.matchLength = matchLength;
+        this.singleCharacterMatch = requiredPrefix == null && suffixRegexpOrFixedWidthMatcher instanceof Regexp suffix && matchesOneUtf8Character(suffix);
         this.exactLiteralLength = exactLiteralLength;
         this.partialProg = requireNonNull(partialProg, "partialProg is null");
         this.booleanPlans = requireNonNull(booleanPlans, "booleanPlans is null");
@@ -553,6 +556,7 @@ public sealed class Re2
         this.requiredPrefix = pattern.requiredPrefix;
         this.requiredPrefixFoldCase = pattern.requiredPrefixFoldCase;
         this.matchLength = pattern.matchLength;
+        this.singleCharacterMatch = pattern.singleCharacterMatch;
         this.exactLiteralLength = pattern.exactLiteralLength;
         this.booleanPlans = pattern.booleanPlans;
         this.booleanFindStrategy = pattern.booleanFindStrategy;
@@ -563,6 +567,14 @@ public sealed class Re2
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
         this.singleByteMatcher = pattern.singleByteMatcher;
+    }
+
+    private static boolean matchesOneUtf8Character(Regexp regexp)
+    {
+        while (regexp.op() == RegexpOp.CAPTURE) {
+            regexp = regexp.child(0);
+        }
+        return (regexp.op() == RegexpOp.CHAR_CLASS || regexp.op() == RegexpOp.ANY_CHAR) && (regexp.parseFlags() & Regexp.LATIN1) == 0;
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -1931,7 +1943,7 @@ public sealed class Re2
 
         int matchEnd = start + (int) forward;
         int fixedMatchLength = MatchLength.fixed(matchLength);
-        int matchStart;
+        int matchStart = -1;
         if (forward == 0) {
             matchStart = start;
         }
@@ -1943,7 +1955,16 @@ public sealed class Re2
             // search did, and the reverse pass that finds a start would return it.
             matchStart = start;
         }
-        else {
+        else if (singleCharacterMatch) {
+            // A one-character match that ends in a valid UTF-8 character starts at its lead byte.
+            // Any other ending takes the reverse pass.
+            int offset = input.byteArrayOffset();
+            int lead = Utf8.previousRuneStart(input.byteArray(), offset + start, offset + matchEnd);
+            if (lead >= 0) {
+                matchStart = lead - offset;
+            }
+        }
+        if (matchStart < 0) {
             Prog reverseProgram = reverseProg();
             if (reverseProgram == null) {
                 return Dfa.SEARCH_FAILED;

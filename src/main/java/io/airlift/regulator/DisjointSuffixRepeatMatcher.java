@@ -146,7 +146,7 @@ final class DisjointSuffixRepeatMatcher
     /// holds it, or `-1`.
     private int previousRepeatedStart(byte[] bytes, int start, int end)
     {
-        int previous = previousRuneStart(bytes, start, end);
+        int previous = Utf8.previousRuneStart(bytes, start, end);
         if (previous >= 0) {
             return containsRepeated(Utf8.decodedCodePoint(Utf8.decode(bytes, previous, end))) ? previous : -1;
         }
@@ -154,26 +154,8 @@ final class DisjointSuffixRepeatMatcher
         return malformed >= 0 && containsRepeated(Utf8.decodedCodePoint(malformed)) ? end - Utf8.decodedWidth(malformed) : -1;
     }
 
-    private static int previousRuneStart(byte[] bytes, int start, int end)
-    {
-        int position = end - 1;
-        if (bytes[position] >= 0) {
-            return position;
-        }
-        int minimum = Math.max(start, end - 4);
-        while (position > minimum && (bytes[position] & 0xC0) == 0x80) {
-            position--;
-        }
-        long decoded = Utf8.decode(bytes, position, end);
-        int width = Utf8.decodedWidth(decoded);
-        // A malformed byte decodes to RUNE_ERROR with width one, so this returns -1, and the
-        // caller reads it with previousMalformedCharacter. A real encoded U+FFFD has width three
-        // and remains eligible if B contains it.
-        return width > 1 && position + width == end ? position : -1;
-    }
-
     /// Returns the candidate character that ends at `end` and starts at or after `start` when
-    /// [#previousRuneStart] finds no valid character there, read as B's byte ranges would read it
+    /// [Utf8#previousRuneStart] finds no valid character there, read as B's byte ranges would read it
     /// and packed as [Utf8#decode] packs it, or `-1` when none ends there. The caller checks that
     /// B holds it.
     private long previousMalformedCharacter(byte[] bytes, int start, int end)
