@@ -565,6 +565,8 @@ class TestRunCampaign(unittest.TestCase):
                 run()
             self.assertEqual(RUN_CAMPAIGN.control_host.FAILED_PHASES_EXIT, failed.exception.code)
             self.assertIn("failed phases:\na/smoke: campaign completed with unresolved", errors.getvalue())
+            # Having ended, the controller lists every file of the root for finish to check its copy against.
+            self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
 
             order = [event[:2] for event in events]
             # B's primary starts once B's smoke passed, while A's smoke still runs, each phase taking the

@@ -4,13 +4,16 @@ import io
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+import cloud  # noqa: E402
 import control_host  # noqa: E402
 from test_cloud import FakeCloud  # noqa: E402
 
@@ -102,6 +105,58 @@ class TestControlHost(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, refusal):
                     control_host.launch(aws, "c", SSH_PUBLIC_KEY, Path(temporary) / "launch-inputs.tar.gz")
                 self.assertLessEqual({call[0] for call in aws.calls}, {"parameter", "security_group"})
+
+    def test_finish_pulls_an_ended_campaign_root_and_checks_it_against_its_controllers_manifest(self):
+        aws = control_host_cloud()
+        aws.region_instances["us-west-2"] = [cloud.Instance("i-host", "m7i.large", "on-demand", "running", "",
+                                                            control_host.tags("c"), 0, "10.0.0.1")]
+        with tempfile.TemporaryDirectory() as temporary:
+            host, local = Path(temporary) / "host", Path(temporary) / "local"
+            (host / "a" / "primary").mkdir(parents=True)
+            (host / "candidates.tsv").write_text("a\n")
+            (host / "a" / "primary" / "accepted-units.tsv").write_text("unit\n")
+            damaged = []
+            reachable = [False]
+
+            def run(command, check=False):
+                """ssh to the host, which fails as ssh does until it is reachable, and rsync, which copies the root
+                over the local one and damages any file damaged names."""
+                if command[0] == "ssh":
+                    return subprocess.CompletedProcess(command, 255 if not reachable[0] else
+                                                       0 if (host / control_host.MANIFEST).is_file() else 1)
+                # ssh offers only the key the host was launched with.
+                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -o StrictHostKeyChecking=accept-new -i "
+                                  "/keys/control-host -o IdentitiesOnly=yes", "ec2-user@10.0.0.1:/regulator/campaign/",
+                                  f"{local}/"], command)
+                shutil.rmtree(local)
+                shutil.copytree(host, local)
+                for name in damaged:
+                    (local / name).write_text("damaged\n")
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(control_host.subprocess, "run", side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                # A host ssh cannot reach is named as such, not as a controller still running.
+                with self.assertRaisesRegex(SystemExit, "cannot reach campaign c's control host at "
+                                                        "ec2-user@10.0.0.1 over ssh"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                reachable[0] = True
+                # A root whose controller has not ended has no manifest, and nothing is pulled.
+                with self.assertRaisesRegex(SystemExit, "controller has not ended"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertFalse(local.exists())
+                control_host.write_manifest(host)
+                control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual("unit\n", (local / "a" / "primary" / "accepted-units.tsv").read_text())
+                # A file that differs from the manifest is named, and a finish again replaces the copy.
+                damaged.append("a/primary/accepted-units.tsv")
+                with self.assertRaisesRegex(SystemExit, "differs from its controller's campaign-files.sha256: "
+                                                        "changed a/primary/accepted-units.tsv$"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                # A local root that no finish pulled is left alone.
+                (local / control_host.MANIFEST).unlink()
+                with self.assertRaisesRegex(SystemExit, "holds files but no campaign-files.sha256"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
 
     def test_user_data_and_units_agree_on_the_host_layout(self):
         with tempfile.TemporaryDirectory() as temporary:

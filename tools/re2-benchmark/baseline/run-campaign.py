@@ -4313,7 +4313,12 @@ def run_campaign(arguments, root):
         for candidate in candidates:
             record_candidate(arguments.campaign_root, candidate)
         check_campaign_options(arguments)
-        failed = Campaign(arguments, root, candidate_phases(arguments, candidates)).run()
+        campaign = Campaign(arguments, root, candidate_phases(arguments, candidates))
+        failed = campaign.run()
+        # A controller that ended lists the root's files for finish to check its copy against; one SIGTERM stopped
+        # leaves the root to the next.
+        if not campaign.terminated:
+            control_host.write_manifest(arguments.campaign_root)
     if failed:
         message = "campaign finished with failed phases:\n" + "\n".join(
             f"{phase.key}: {phase.failure}" for phase in failed)
@@ -4900,6 +4905,21 @@ def main():
         arguments = parser.parse_args(sys.argv[3:])
         control_host.replace(cloud.AwsCloud(), arguments.campaign,
                              control_host.read_ssh_public_key(arguments.ssh_public_key))
+        return
+    if sys.argv[1:2] == ["finish"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} finish",
+                                         description="pull an ended campaign's root from its control host and check "
+                                                     "it against its controller's manifest")
+        parser.add_argument("campaign")
+        parser.add_argument("--campaign-root", type=Path,
+                            help="where the root goes (default: benchmark-results/pre-review-baseline/<campaign>)")
+        parser.add_argument("--ssh-identity", type=Path,
+                            help="the private key of the --ssh-public-key the host was launched with, which ssh "
+                                 "then offers alone (default: ssh's own keys and agent)")
+        arguments = parser.parse_args(sys.argv[2:])
+        control_host.finish(cloud.AwsCloud(), arguments.campaign, (
+            arguments.campaign_root or REPOSITORY / "benchmark-results" / "pre-review-baseline" /
+            arguments.campaign).absolute(), arguments.ssh_identity)
         return
     arguments = parse_args()
     if arguments.controller and not arguments.execute:

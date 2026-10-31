@@ -532,11 +532,14 @@ points the parameter's record at it. The host's user data,
 
 Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
 across replacements, through the subnet router; Session Manager is the shell
-when the router is down. `status` and `control` run on the host, against
+when the router is down. ssh logs in with the private key of the launch's
+`--ssh-public-key`; name it with `-i` and `-o IdentitiesOnly=yes` when it is
+not ssh's default, since an agent holding many keys can spend the host's
+login attempts first. `status` and `control` run on the host, against
 `/regulator/campaign`:
 
 ```bash
-ssh ec2-user@<record> /opt/regulator/venv/bin/python \
+ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes ec2-user@<record> /opt/regulator/venv/bin/python \
   /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py status /regulator/campaign
 ```
 
@@ -547,6 +550,20 @@ zone, which unpacks nothing again:
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   control-host replace <campaign> --ssh-public-key ~/.ssh/id_ed25519.pub
+```
+
+A controller that ends, whether every phase completed, some failed, or the
+campaign was stopped, lists every file of the campaign root with its SHA-256
+in `campaign-files.sha256`; one that SIGTERM stopped lists nothing. `finish`
+pulls the root of an ended campaign over ssh with rsync into the results
+directory the reduction and archiving read, by default
+`benchmark-results/pre-review-baseline/<campaign>`, and checks every file
+against that list. It replaces a local root only where an earlier `finish`
+pulled it, and terminates nothing. `--ssh-identity` names the private key ssh
+offers alone, as `-i` does above:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-identity ~/.ssh/id_ed25519
 ```
 
 ### Steer a campaign
