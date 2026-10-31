@@ -40,7 +40,7 @@ from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
     changed as changed_settings, paused_seconds, read as read_settings, seeded as seeded_settings)
 from fleet_budget import (
-    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, earlier_owner,
+    ON_DEMAND_VCPU_SAFETY_RESERVE, QUOTA_REFUSALS, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, earlier_owner,
     on_demand_regions, owner_fleet, read_state as read_fleet_state)
 from campaign_io import (UnsafeCampaignError, append_ledger, check_output, fsync_directory, ledger_rows, locked,
                          write_ledger)
@@ -2360,7 +2360,7 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
         if (candidate.identity, reason) not in capacity_waits:
             capacity_waits.add((candidate.identity, reason))
             write_attempt(attempts_path, candidate, "queued-capacity", detail)
-        if reason != "fleet quota" or candidate.platform.vcpus == 2:
+        if reason not in QUOTA_REFUSALS.values() or candidate.platform.vcpus == 2:
             return candidate, now + CAPACITY_RETRY_SECONDS, reason, False, None
         return candidate, now + CAPACITY_RETRY_SECONDS, reason, True, candidate.platform.vcpus
     return candidate, ready_at, None, False, None

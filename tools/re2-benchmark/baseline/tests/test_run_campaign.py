@@ -380,8 +380,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual({"instances": 2, "spot_requests": 2, "vcpu_quota": 1, "vcpus": 1},
                              {operation: [call[0] for call in aws.calls].count(operation)
                               for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
-            self.assertIn("queued-capacity\tfleet quota",
-                          (root / "job-attempts.tsv").read_text())
+            self.assertIn("queued-capacity\tfleet Spot quota", (root / "job-attempts.tsv").read_text())
             # A fleet that cannot be read refuses the launch for one reason, however the read failed, and the attempt
             # records the error.
             with patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot", side_effect=OSError("connection reset")):
@@ -3100,7 +3099,7 @@ class TestUnitWorkers(unittest.TestCase):
         elif budget is None:
             budget = Mock()
             budget.reserve.side_effect = lambda campaign, job, *_, **__: (
-                on_demand or job.market == "spot", "fleet quota")
+                on_demand or job.market == "spot", "fleet On-Demand quota")
 
             def extend_reservation(campaign, epoch, *, until):
                 fleet.log.append(("extend", epoch, until, extend))
@@ -3868,7 +3867,7 @@ class TestUnitWorkers(unittest.TestCase):
                                  for scope in resource.scope_metrics for metric in scope.metrics
                                  if metric.name == "regulator_launch_refused_seconds"
                                  for point in metric.data.data_points})
-                if not pinned and refusals[-1].get("fleet quota", 0) >= 120:
+                if not pinned and refusals[-1].get("fleet Spot quota", 0) >= 120:
                     self.control(root, "set-limit", "max-hosts", "2")
                     pinned.append(len(refusals))
 
@@ -3877,7 +3876,7 @@ class TestUnitWorkers(unittest.TestCase):
                                           purchases={"r8i": "spot", "r9g": "spot"})
             self.assertEqual([], failed)
             # From the loop after the limit falls, the refusal reads 0, not its age.
-            self.assertEqual([{"fleet quota": 0}], list(map(dict, set(
+            self.assertEqual([{"fleet Spot quota": 0}], list(map(dict, set(
                 tuple(refused.items()) for refused in refusals[pinned[0] + 1:]))))
 
     def test_a_launch_refusal_ages_through_other_boots_until_a_fault_pause(self):
@@ -3918,12 +3917,13 @@ class TestUnitWorkers(unittest.TestCase):
                                               telemetry.Telemetry("campaign", [reader]), purchases=purchases,
                                               platform_regions=regions)
                 self.assertEqual([], failed)
-                # The refusal ages from the first loop's through r8i's boots, and from the loop after the pause reads
-                # 0.
-                ages = [refused["fleet quota"] for refused in refusals[1:paused[0]]]
+                # The refusal, which names the market's quota, ages from the first loop's through r8i's boots, and
+                # from the loop after the pause reads 0.
+                reason = "fleet Spot quota" if market == "spot" else "fleet On-Demand quota"
+                ages = [refused[reason] for refused in refusals[1:paused[0]]]
                 self.assertEqual(sorted(set(ages)), ages)
                 cleared = refusals[paused[0]:]
-                self.assertEqual([{"fleet quota": 0}] * len(cleared), cleared)
+                self.assertEqual([{reason: 0}] * len(cleared), cleared)
 
     def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
         units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),

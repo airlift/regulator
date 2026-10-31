@@ -22,6 +22,8 @@ from control_host import CAMPAIGN_ROOT
 
 # Every On-Demand launch leaves this much of its region's On-Demand quota free.
 ON_DEMAND_VCPU_SAFETY_RESERVE = 32
+# The refusal of a launch its market's quota in the region cannot hold, by market.
+QUOTA_REFUSALS = {"spot": "fleet Spot quota", "on-demand": "fleet On-Demand quota"}
 STATE_FILE = "fleet-state.json"
 # How soon after its launch a host must report.
 BOOT_REPORT_SECONDS = 5 * 60
@@ -203,7 +205,7 @@ class FleetBudget:
             if rate is None:
                 raise BudgetError(f"the campaign settings price no {job.platform.instance_type} hour")
             if job.market != "spot" and region not in on_demand_regions(settings):
-                return False, "fleet quota"
+                return False, QUOTA_REFUSALS["on-demand"]
             hourly_rate = rate["total"] if job.market == "spot" else rate["on_demand_total"]
             item = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": self.owner(owner),
                     "attempt": getattr(job, "attempt", 1),
@@ -215,7 +217,7 @@ class FleetBudget:
             available = capacity(snapshot_reader(), active, region, settings["regions"][region],
                                  self.spot_vcpu_reserve, market=job.market)
             if available["available"] < job.platform.vcpus:
-                return False, "fleet quota"
+                return False, QUOTA_REFUSALS[job.market]
             active[key] = item
             return True, "reserved"
 

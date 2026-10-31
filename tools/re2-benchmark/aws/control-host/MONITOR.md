@@ -189,7 +189,7 @@ there means the controller's telemetry is not arriving, which you report.
 | Workers at zero slack | a running worker has no next lease while work waits | Report with the Fleet Queued items. |
 | Idle stops with work queued | a host stopped idle while its pool had work | Report. |
 | Boot window change | the boot window shrank: hosts reported late or ended before reporting | Report; the window regrows itself. |
-| Longest launch refusal | a reason has refused launches for 10 minutes | By the series' `reason`: `fleet launch limit`, raise `max-hosts` or `max-hosts-per-platform`; `fleet quota`, raise a region's `max-vcpus` or `add-region` from `authorized.regions`; `fleet spending or machine-hour ceiling`, raise `max-usd`; each within `authorized`. `shared capacity query failed` means AWS is not answering the controller's capacity reads: report it with the error its phase's `queued-capacity` job attempt names. `spending_stop` follows the Spending stop row; `boot window` needs nothing. |
+| Longest launch refusal | a reason has refused launches for 10 minutes | By the series' `reason`: `fleet launch limit`, raise `max-hosts` or `max-hosts-per-platform`; `fleet Spot quota`, raise a region's `max-vcpus` or `add-region` from `authorized.regions`; `fleet On-Demand quota`, `add-region` from `authorized.regions` with `--on-demand-max-vcpus`, since no command raises a listed region's On-Demand allowance, or report it; `fleet spending or machine-hour ceiling`, raise `max-usd`; each within `authorized`. `shared capacity query failed` means AWS is not answering the controller's capacity reads: report it with the error its phase's `queued-capacity` job attempt names. `spending_stop` follows the Spending stop row; `boot window` needs nothing. |
 | Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
 | Projected spend over max | the campaign will reach `max_usd` | Raise `max-usd` within `authorized` only while a refusal or a late finish also stands; otherwise report. |
 | Spending stop | no launch or extension is admitted | Ask Dain, with the stop's reason from `status`. |
@@ -233,9 +233,9 @@ host /opt/regulator/venv/bin/python \
 
 The commands you use: `set-limit max-hosts|max-hosts-per-platform|max-usd N`,
 `set-limit region <region> max-vcpus N`,
-`add-region <region> --max-vcpus N`, and `resume <phase>`. The controller
-applies each on its next loop and logs it as a `settings-change` event in
-your name; confirm it there on the next check.
+`add-region <region> --max-vcpus N [--on-demand-max-vcpus N]`, and
+`resume <phase>`. The controller applies each on its next loop and logs it as
+a `settings-change` event in your name; confirm it there on the next check.
 
 Replacing the host runs on the Mac. It terminates the dead host, launches
 another onto the campaign's volume, and registers it with the load balancer,
