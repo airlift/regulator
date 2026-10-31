@@ -160,7 +160,11 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    one URL across host replacements, and returns with that URL and the ssh
    line, port 443 at the host's private address. One URL serves one
    campaign: the launch and `control-host replace` refuse while the target
-   group holds a host whose `Campaign` tag names another. Everything after this runs in AWS (principle 7).
+   group holds a host whose `Campaign` tag names another; a host that has
+   terminated serves none and does not count. `replace` and `teardown`
+   deregister every host of their campaign, whether or not it still runs,
+   and any host that has terminated. Everything after this runs in AWS
+   (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket
@@ -499,8 +503,9 @@ ssh on port 443 with rsync, verifies the file list and SHA-256s against the
 controller's manifest, and writes the results directory the reduction and
 archive read today. It terminates nothing.
 
-`run-campaign.py teardown <campaign> --confirm` deregisters the control host
-from the load balancer and terminates it, snapshots the volume, and deletes
+`run-campaign.py teardown <campaign> --confirm` deregisters every host of the
+campaign from the load balancer, terminates the one that runs, waits until
+the load balancer has drained and forgotten them, snapshots the volume, and deletes
 the volume and the Grafana parameters; the record and the load balancer stay. The host goes first so the snapshot holds the root as the
 controller last wrote it. Only Dain runs it, and it refuses without
 `--confirm`. The snapshot is the last copy until Dain deletes it. Each step

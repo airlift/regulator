@@ -379,9 +379,11 @@ listener=$(aws elbv2 create-listener --profile dev --region us-west-2 --load-bal
 ```
 
 The record is a permanent alias of the load balancer. The launch and
-`control-host replace` register each new host in the target group and
-deregister the hosts they replace; `teardown` deregisters the campaign's
-hosts and leaves the record, the load balancer, and the target group:
+`control-host replace` register each new host in the target group, and
+`replace` deregisters every earlier host of its campaign, including one that
+terminated on its own; `teardown` deregisters the campaign's hosts, waits
+until the load balancer has drained them, and leaves the record, the load
+balancer, and the target group:
 
 ```bash
 aws elbv2 describe-load-balancers --profile dev --region us-west-2 --load-balancer-arns "$balancer" \
@@ -594,7 +596,7 @@ registers it in the parameter's target group, which the internal load
 balancer forwards Grafana to. Since the one record serves one campaign, the
 launch and `control-host replace` refuse, before they create or terminate
 anything, while the target group holds a host whose `Campaign` tag names
-another campaign. The host's user data,
+another campaign; a host that has terminated serves none and does not count. The host's user data,
 `control-host/user-data.sh`:
 
 - installs the key `--ssh-public-key` names for `ec2-user`, and has sshd
@@ -705,8 +707,9 @@ python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-ide
 ```
 
 Only Dain tears a control host down, once the campaign's root is pulled and
-nothing more is wanted from its Grafana. `teardown` deregisters the host from
-the load balancer and terminates it, snapshots the volume, which is then the
+nothing more is wanted from its Grafana. `teardown` deregisters the
+campaign's hosts from the load balancer, terminates the one that runs, waits
+for the load balancer to drain them, snapshots the volume, which is then the
 root's last copy until Dain deletes it, and deletes the volume and the Grafana
 parameters; the record, the load balancer, and its target group stay. Each
 step finds what an earlier teardown did by the campaign's tags, so one that
