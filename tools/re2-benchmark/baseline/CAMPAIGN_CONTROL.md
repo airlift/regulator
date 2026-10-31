@@ -52,11 +52,14 @@ report never reached the coordinator, so nothing acted until morning.
   measurement validity and cannot.
 - **Pause** (phase): no new launches or leases; running leases finish and the
   workers idle-stop. A phase paused for a fault still reports its hosts' boots
-  to the boot window and still stop-leases them at a stop. A pause spends none
-  of the phase's deadline: the controller records each one in the phase's
-  `phase-pauses.tsv` and moves the deadline out by it, across restarts. A
-  pause or resume counts from when the settings took it, as the phase's
-  `since` there records, even one made while no controller ran.
+  to the boot window and still stop-leases them at a stop. A pause the
+  controller observes spends none of the phase's deadline: the controller
+  records it in the phase's `phase-pauses.tsv` from when the settings took
+  it, as the phase's `since` there records, and moves the deadline out by it,
+  across restarts. A pause still open when a controller starts counts from
+  when it was made. A pause and its resume both made while no controller ran
+  are never observed, so they are not credited; how a controller's downtime
+  spends the deadline is an open question.
   **Drain**: no new launches; queued work goes to live workers until they
   stop. **Stop** (campaign): stop-lease every worker, prove cleanup, exit.
   **Spending stop**: no launch anywhere until cleared.
