@@ -47,7 +47,8 @@ Run every command from the repository root with Dain's AWS credentials,
    ```bash
    address=$(AWS_PROFILE=dev python3 tools/re2-benchmark/baseline/run-campaign.py control-host known-host <campaign>)
    host() { ssh -p 443 -i <identity> -o IdentitiesOnly=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes \
-     -o UserKnownHostsFile=~/.ssh/regulator-control-hosts ec2-user@"$address" "$@"; }
+     -o UserKnownHostsFile=~/.ssh/regulator-control-hosts -o GlobalKnownHostsFile=/dev/null \
+     -o KnownHostsCommand=none ec2-user@"$address" "$@"; }
    ```
 
 4. Read the Grafana token once for the thread, and keep it in the thread's

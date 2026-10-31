@@ -671,7 +671,9 @@ the keys the host serves whose fingerprints its console lists in
 had, under a lock beside it, so commands recording keys at once take turns,
 and prints the address; it refuses a host that serves none of them, and
 one whose console lists none yet, as for a minute or two after its launch.
-ssh logs in with the private key of the launch's
+`GlobalKnownHostsFile=/dev/null` and `KnownHostsCommand=none` keep ssh from
+trusting a key the system's known-hosts file or a command its configuration
+names would. ssh logs in with the private key of the launch's
 `--ssh-public-key`; name it with `-i` and `-o IdentitiesOnly=yes` when it is
 not ssh's default, since an agent holding many keys can spend the host's
 login attempts first. `status` and `control` run on the host, against
@@ -680,7 +682,8 @@ login attempts first. `status` and `control` run on the host, against
 ```bash
 address=$(python3 tools/re2-benchmark/baseline/run-campaign.py control-host known-host <campaign>)
 ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile=~/.ssh/regulator-control-hosts ec2-user@"$address" /opt/regulator/venv/bin/python \
+  -o UserKnownHostsFile=~/.ssh/regulator-control-hosts -o GlobalKnownHostsFile=/dev/null \
+  -o KnownHostsCommand=none ec2-user@"$address" /opt/regulator/venv/bin/python \
   /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py status /regulator/campaign
 ```
 
