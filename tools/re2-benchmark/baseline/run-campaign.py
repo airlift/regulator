@@ -4513,10 +4513,12 @@ class Campaign:
             for key, state in changed.items():
                 steering = settings["phases"].setdefault(key, {"state": "pending", "share": "auto"})
                 if state == "paused":
-                    steering.update(state="paused", reason=self.phases[key].fault)
+                    # A phase Dain paused or drained stays his to resume.
+                    steering.update(state="paused", reason=self.phases[key].fault, by=steering.get("by", "controller"))
                 elif state in ("complete", "failed") or state == "running" and steering["state"] not in (
                         "paused", "draining"):
                     steering.pop("reason", None)
+                    steering.pop("by", None)
                     steering["state"] = state
 
         if self.arguments.settings.controller_change("; ".join(
@@ -5402,7 +5404,7 @@ def control_change(arguments, now):
         reason = arguments.reason or f"paused by {actor}"
 
         def update(settings):
-            phase(settings, "running", "draining", "paused").update(state="paused", reason=reason)
+            phase(settings, "running", "draining", "paused").update(state="paused", reason=reason, by=actor)
         return f"{arguments.phase} paused: {reason}", update
     if command in ("resume", "drain"):
         state, states = ("running", ("paused", "draining")) if command == "resume" else (
@@ -5411,7 +5413,10 @@ def control_change(arguments, now):
         def update(settings):
             steering = phase(settings, *states)
             steering.pop("reason", None)
+            steering.pop("by", None)
             steering["state"] = state
+            if command == "drain":
+                steering["by"] = actor
         return f"{arguments.phase} {state}", update
     if command == "clear-spending-stop":
         return "spending stop cleared", lambda settings: settings.update(spending_stop=None)

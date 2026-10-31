@@ -376,7 +376,9 @@ phase states and the boot window). `control` takes `--actor dain|monitor`;
 without it the command refuses, so no change is anonymous. Only Dain sets
 `authorized` and `hourly_rates`: the settings refuse a change to either by
 any other actor. The monitor runs only the commands the authority table
-grants it, `set-limit`, `add-region` and `resume`; `control` refuses every
+grants it, `set-limit`, `add-region` and `resume`, which the settings take
+from the monitor only for a phase the controller paused for a fault, as the
+phase's `by` records; `control` refuses every
 other command, `stop`, `clear-spending-stop` and `authorize` among them, with
 `--actor monitor`.
 
@@ -479,7 +481,7 @@ the spending stop.
 | The monitor may, unattended | The monitor must ask |
 |---|---|
 | `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
-| Resume a phase paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause |
+| Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
 | Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |

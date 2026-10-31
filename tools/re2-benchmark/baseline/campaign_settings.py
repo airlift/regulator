@@ -91,14 +91,15 @@ def validate(settings):
               rate["spot"] < rate["total"], f"{instance_type} hourly price ceiling")
     check(isinstance(settings["phases"], dict), "phases")
     for phase, steering in settings["phases"].items():
-        # A paused phase records why it was paused, and a phase since when it has had its state, as the change
-        # that set it recorded.
+        # A paused or draining phase records who paused or drained it, and a paused one why, and a phase since when
+        # it has had its state, as the change that set it recorded.
+        state = steering.get("state") if isinstance(steering, dict) else None
         check(isinstance(steering, dict) and set(steering) - {"since"} == {"state", "share"} | (
-                  {"reason"} if steering.get("state") == "paused" else set()) and
-              steering["state"] in PHASE_STATES and (steering["share"] == "auto" or positive_integer(
-                  steering["share"])) and (steering["state"] != "paused" or isinstance(steering["reason"], str) and
-                                           steering["reason"]) and positive_number(steering.get("since", 1)),
-              f"{phase} phase")
+                  {"by", "reason"} if state == "paused" else {"by"} if state == "draining" else set()) and
+              state in PHASE_STATES and (steering["share"] == "auto" or positive_integer(steering["share"])) and
+              steering.get("by", "dain") in ACTORS and (state != "paused" or isinstance(steering["reason"], str) and
+                                                         steering["reason"]) and
+              positive_number(steering.get("since", 1)), f"{phase} phase")
     window = settings["boot_window"]
     check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
           all(map(positive_integer, window.values())) and
@@ -122,7 +123,8 @@ def check_actor(actor, before, after):
     limit past it: hosts in all and per platform up to its hosts, spending up to its dollars, and a region's vCPUs, or
     a new region, only among its regions, where admission still holds the fleet within the region's quota after its
     reserve. The envelope names no machine hours, so the monitor never raises their limit. Any actor may lower a
-    limit."""
+    limit. The monitor changes a phase's state only to resume one the controller paused for a fault; a pause or a
+    drain Dain made is his."""
     for name, description in (("authorized", "the authorized envelope"), ("hourly_rates", "the hourly rates")):
         if after[name] != before[name] and actor != "dain":
             raise SettingsError(f"only dain changes {description}")
@@ -139,6 +141,12 @@ def check_actor(actor, before, after):
                 limits.get(name, 0) > earlier.get(name, 0) for name in ("max_vcpus", "on_demand_max_vcpus")):
             raise SettingsError(f"the monitor adds or raises only the authorized regions, "
                                 f"{', '.join(authorized['regions'])}, not {region}")
+    for phase, steering in after["phases"].items():
+        earlier = before["phases"].get(phase, {})
+        if steering["state"] != earlier.get("state") and (earlier.get("state"), earlier.get("by")) != (
+                "paused", "controller"):
+            raise SettingsError(f"the monitor resumes only a phase the controller paused for a fault; {phase} is "
+                                f"{earlier.get('state')} by {earlier.get('by')}")
 
 
 def changed(before, actor, update, at):

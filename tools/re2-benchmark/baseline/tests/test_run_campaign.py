@@ -708,9 +708,9 @@ class TestRunCampaign(unittest.TestCase):
                     (["set-purchase", "r9g", "on-demand"], "dain", "purchase", {"r9g": "on-demand"}),
                     (["set-share", "a/primary", "40"], "dain", "phases", {"state": "running", "share": 40}),
                     (["pause", "a/primary", "--reason", "bad AMI"], "dain", "phases",
-                     {"state": "paused", "share": 40, "reason": "bad AMI"}),
-                    (["drain", "a/primary"], "dain", "phases", {"state": "draining", "share": 40}),
-                    (["resume", "a/primary"], "monitor", "phases", {"state": "running", "share": 40}),
+                     {"state": "paused", "share": 40, "reason": "bad AMI", "by": "dain"}),
+                    (["drain", "a/primary"], "dain", "phases", {"state": "draining", "share": 40, "by": "dain"}),
+                    (["resume", "a/primary"], "dain", "phases", {"state": "running", "share": 40}),
                     (["set-share", "a/primary", "auto"], "dain", "phases", {"state": "running", "share": "auto"}),
                     (["clear-spending-stop"], "dain", "spending_stop", None),
                     (["authorize", "regions", "us-east-2", region], "dain", "authorized",
@@ -723,6 +723,17 @@ class TestRunCampaign(unittest.TestCase):
                                      if field == "phases" else
                                      {key: current[key] for key in value} if field in ("regions", "purchase") else
                                      current)
+            # The monitor resumes a phase the controller paused for a fault, but a pause or a drain Dain made is his.
+            settings.change("controller", "a/primary paused: bad marker", lambda current: current["phases"][
+                "a/primary"].update(state="paused", reason="bad marker", by="controller"))
+            self.assertEqual("running", control("resume", "a/primary", actor="monitor")["phases"]["a/primary"]["state"])
+            for command in (["pause", "a/primary"], ["drain", "a/primary"]):
+                with self.subTest(command=command):
+                    control(*command)
+                    with self.assertRaisesRegex(SystemExit, "the monitor resumes only a phase the controller paused "
+                                                            "for a fault; a/primary is (paused|draining) by dain"):
+                        control("resume", "a/primary", actor="monitor")
+                    control("resume", "a/primary")
             # A new region gets its shared bucket, private, tagged, and expiring objects as the checked-in rule
             # says, and every archive the campaign shared, before the platforms --platforms names list it.
             archive = root / "candidate.tar.gz"
@@ -798,8 +809,8 @@ class TestRunCampaign(unittest.TestCase):
             # spending stop and a stop.
             (campaign_root / "grafana-url.txt").write_text("https://control.test\n")
             campaign_settings(campaign_root).change("dain", "steer", lambda settings: settings.update(
-                phases={"a/primary": {"state": "paused", "share": "auto", "reason": "bad AMI"},
-                        "b/lang/smoke": {"state": "draining", "share": "auto"}},
+                phases={"a/primary": {"state": "paused", "share": "auto", "reason": "bad AMI", "by": "dain"},
+                        "b/lang/smoke": {"state": "draining", "share": "auto", "by": "dain"}},
                 spending_stop={"by": "controller", "at": round(now), "reason": "instance i-1 did not terminate"},
                 stop={"by": "dain", "at": round(now), "reason": "smoke over"}))
             build.mkdir(parents=True)
