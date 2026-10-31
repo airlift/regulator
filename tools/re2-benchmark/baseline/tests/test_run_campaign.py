@@ -3584,6 +3584,39 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertFalse((dispatcher.result_root / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
             self.assertIn("campaign stopped by dain: enough", log.getvalue())
 
+    def test_a_launch_refusal_reads_cleared_once_its_pool_stops_launching(self):
+        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
+                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for index in range(1, 9)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # Oregon's vCPUs hold two of the four hosts the limits allow, so the fleet's quota refuses the next
+            # launch. Two minutes into that refusal, Dain lowers the fleet to the two hosts it has: no pool then has
+            # room to launch, so none is refused.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
+            reader = InMemoryMetricReader()
+            self.campaign_settings(root, 4, 2)
+            self.control(root, "set-limit", "region", "us-west-2", "max-vcpus", "4")
+            refusals, pinned = [], []
+
+            def loop():
+                refusals.append({point.attributes["reason"]: point.value
+                                 for resource in reader.get_metrics_data().resource_metrics
+                                 for scope in resource.scope_metrics for metric in scope.metrics
+                                 if metric.name == "regulator_launch_refused_seconds"
+                                 for point in metric.data.data_points})
+                if not pinned and refusals[-1].get("fleet quota", 0) >= 120:
+                    self.control(root, "set-limit", "max-hosts", "2")
+                    pinned.append(len(refusals))
+
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 4, 2, loop,
+                                          telemetry.Telemetry("campaign", [reader]),
+                                          purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            # From the loop after the limit falls, the refusal reads 0, not its age.
+            self.assertEqual([{"fleet quota": 0}], list(map(dict, set(
+                tuple(refused.items()) for refused in refusals[pinned[0] + 1:]))))
+
     def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
         units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
                                     "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
@@ -3625,6 +3658,8 @@ class TestUnitWorkers(unittest.TestCase):
 
             pools = {"r8i/r8i.large", "r9g/r9g.large"}
             self.assertEqual(4, sum(values("regulator_workers", phase="smoke", state="running")))
+            # Once no worker boots, each pool's booting count reads 0 rather than the last count it had.
+            self.assertEqual([0, 0], values("regulator_workers", phase="smoke", state="booting"))
             self.assertEqual((16, 0, 8), (*values("regulator_units"), *values("regulator_accepted_units"),
                                           sum(values("regulator_queued_items"))))
             self.assertEqual(16 * 900, sum(values("regulator_work_left_seconds")))
@@ -3641,6 +3676,7 @@ class TestUnitWorkers(unittest.TestCase):
             # queued work counts as an idle stop with work queued.
             self.assertTrue(any(snapshot["regulator_phase_state"].get(
                 (("phase", "smoke"), ("state", "paused"))) for snapshot in snapshots))
+            self.assertEqual(0, snapshots[-1]["regulator_phase_state"][(("phase", "smoke"), ("state", "paused"))])
             self.assertEqual({(("phase", "smoke"), ("queued", "true")): 4}, snapshots[-1]["regulator_idle_stops"])
             # Each unit attempt is traced from its lease to its acceptance, its steps one after another.
             attempts = [span for span in spans.get_finished_spans() if span.name == "unit attempt"]

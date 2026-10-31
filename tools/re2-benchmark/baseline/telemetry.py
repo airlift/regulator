@@ -44,6 +44,10 @@ GAUGES = {
     "regulator_worker_group_estimated_seconds": "The estimated seconds of the group a worker runs",
     "regulator_worker_group_elapsed_seconds": "The seconds since the group a worker runs started",
 }
+# The gauges whose series each stand for a condition, a launch refusal or a worker's or phase's state: a series an
+# earlier loop observed and the latest does not reads 0, so a panel's current value shows the condition cleared
+# rather than the last value it had.
+CLEARED_GAUGES = ("regulator_launch_refused_seconds", "regulator_workers", "regulator_phase_state")
 # Each counter, with its description; Prometheus names each with _total.
 COUNTERS = {
     "regulator_idle_stops": "Hosts that stopped themselves idle, by whether their pool had work queued",
@@ -75,6 +79,8 @@ class Telemetry:
     def __init__(self, campaign="", readers=(), span_processors=(), log_processors=()):
         self.exporting = bool(readers or span_processors or log_processors)
         self.points = {}
+        # Every series of each of CLEARED_GAUGES observed so far, by its sorted attributes.
+        self.observed = {name: {} for name in CLEARED_GAUGES}
         if not self.exporting:
             return
         from opentelemetry import trace
@@ -104,10 +110,16 @@ class Telemetry:
 
     def observe(self, points):
         """Set every gauge to points, each gauge's values by its name as (attributes, value); a gauge points names no
-        value of reads none."""
+        value of reads none, but each series of CLEARED_GAUGES observed before reads 0."""
         unknown = set(points) - GAUGES.keys()
         if unknown:
             raise ValueError(f"no such gauge: {', '.join(sorted(unknown))}")
+        points = dict(points)
+        for name, observed in self.observed.items():
+            named = {tuple(sorted(attributes.items())): attributes for attributes, _ in points.get(name, ())}
+            observed.update(named)
+            points[name] = [*points.get(name, ()), *((attributes, 0) for key, attributes in observed.items()
+                                                     if key not in named)]
         self.points = points
 
     def count(self, name, **attributes):
