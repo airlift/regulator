@@ -1458,7 +1458,7 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
   tries its cleanup again; the phase does not complete while one remains. A
   leftover, a terminated worker's prefix that will not empty, is logged each
   loop and pauses nothing. A leak, an instance not terminated 15 minutes after
-  the controller asked EC2 to terminate it, is logged and sets the
+  the controller first asked EC2 to terminate it, is logged and sets the
   campaign's spending stop, as
   [recovering uploads during cleanup](#recovering-uploads-during-cleanup)
   describes.
@@ -1520,8 +1520,12 @@ and the next loop tries again. Only once both proofs hold does the controller
 release the reservation and settle the worker from its recovered uploads, as
 [unit dispatch](#unit-dispatch) describes.
 
-An instance still not terminated 15 minutes after the request is a leak: the
-controller logs it and sets the campaign settings' `spending_stop`, as its
+The controller asks EC2 to terminate an instance each loop until EC2 lists it
+shutting down, logging each request that fails. Before the first, it records a
+`terminating` row in `job-attempts.tsv` with the request's time
+(`requested_at`), from which a restarted controller resumes the clock. An
+instance still not terminated 15 minutes after that first request, whether or
+not it succeeded, is a leak: the controller logs it and sets the campaign settings' `spending_stop`, as its
 own settings change naming the reason. While the stop stands, the budget admits
 no launch and no lease extension for any phase, refusing each with reason
 `spending_stop`, but stops no controller, so every host finishes the leases it

@@ -287,13 +287,15 @@ request), wait for `terminated`, download any objects still in the prefix
 (today's recovered uploads, now a controller function rather than
 `verify-recovered-results.py`), delete the prefix, verify it empty. The proof
 has two parts, instance and prefix, instead of instance, profile, role,
-bucket and wrapper exit. An instance still not terminated 15 minutes after
-the request is a **leak**: spending stop and alert. A prefix that will not
-empty is a **leftover**: alert, retried each loop; the host is dead and the
-controller is the only other writer, so it is never a halt. A worker whose
-host has ended takes no further lease while its cleanup is proven, so the
-controller writes nothing more into its prefix. The budget's reservation is
-released at verified cleanup as today.
+bucket and wrapper exit. The controller asks again each loop until EC2 lists
+the instance shutting down. An instance still not terminated 15 minutes after
+the first request, whether or not it succeeded, is a **leak**: spending stop
+and alert. That request is recorded before it is made, so a restart keeps its
+clock. A prefix that will not empty is a **leftover**: alert, retried each
+loop; the host is dead and the controller is the only other writer, so it is
+never a halt. A worker whose host has ended takes no further lease while its
+cleanup is proven, so the controller writes nothing more into its prefix. The
+budget's reservation is released at verified cleanup as today.
 
 ### Failure scoping
 
