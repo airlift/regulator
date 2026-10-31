@@ -1510,7 +1510,7 @@ class TestRunCampaign(unittest.TestCase):
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
                 arguments = SimpleNamespace(settings=self.settings(platform_regions={"r8i": regions}), cloud=FakeCloud())
-                job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", capacity_failures=failures)
+                job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", cooled_regions=failures)
                 self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
                 self.assertEqual([], arguments.cloud.calls)
 

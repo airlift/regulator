@@ -691,8 +691,7 @@ class TestAwsCloud(unittest.TestCase):
         # A deregistered target drains before the load balancer forgets it.
         elbv2.add_response("describe_target_health", {"TargetHealthDescriptions": [
             {"Target": {"Id": "i-host", "Port": 3000}, "TargetHealth": {"State": "draining"}}]}, targets)
-        elbv2.add_client_error("describe_target_health", "InvalidTarget", http_status_code=400,
-                               expected_params=targets)
+        elbv2.add_client_error("describe_target_health", "InvalidTarget", http_status_code=400, expected_params=targets)
         aws = self.cloud
         self.assertEqual('{"vpc": "vpc-a"}', aws.parameter("us-west-2", "/network"))
         self.assertIsNone(aws.parameter("us-west-2", "/absent"))

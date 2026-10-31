@@ -81,6 +81,9 @@ LAUNCH_NOT_ATTEMPTED = "launch-infrastructure:launch not attempted"
 # When a pool with work left and no open host finishes. OpenTelemetry drops a gauge's non-finite values, so it is the
 # largest finite one, past every deadline.
 NEVER = sys.float_info.max
+# A launch AWS refused for its market's capacity or quota, or for the Spot price, spends none of its slot's
+# replacements.
+LAUNCH_CAPACITY = "launch-capacity:"
 # A request one region refused while its pool had another region to try spends none of its slot's replacements.
 REGION_REFUSAL = "launch-region-refused:"
 UNIT_WORKER_SHARD = "unit-worker"
@@ -317,8 +320,9 @@ class Job:
     # Chosen at launch; empty until the controller places the attempt.
     region: str = ""
     placement_score: str = ""
-    # Regions where the pool's launches in the job's market found no capacity within the cool-down.
-    capacity_failures: tuple = ()
+    # Regions where the pool's launches in the job's market found no capacity in it, or had their request refused,
+    # within the cool-down.
+    cooled_regions: tuple = ()
     # Chosen at admission, in epoch seconds: the end of the worker's boot allowance, and its host's first stop time.
     boot_by: int = 0
     stop_by: int = 0
@@ -341,8 +345,8 @@ def parse_args():
         allow_abbrev=False,
         epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers, "
                "and with --results each primary phase's, or the given phase's, ratios so far; "
-               f"{Path(__file__).name} control ROOT --campaign CAMPAIGN --actor ACTOR COMMAND changes a campaign's live "
-               "settings")
+               f"{Path(__file__).name} control ROOT --campaign CAMPAIGN --actor ACTOR COMMAND changes a campaign's "
+               "live settings")
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -679,10 +683,10 @@ def aggregate_language_plans(arguments, result_root):
     fsync_directory(result_root)
 
 
-def unit_worker_job(platform, ordinal, host_epoch, market, capacity_failures=()):
+def unit_worker_job(platform, ordinal, host_epoch, market, cooled_regions=()):
     """A unit worker host of a platform's pool; its replica is the worker's ordinal within the phase."""
     return Job(platform, UNIT_WORKER_SHARD, ordinal, host_epoch, 1, market, "unit-worker",
-               capacity_failures=tuple(capacity_failures))
+               cooled_regions=tuple(cooled_regions))
 
 
 def unit_worker_pool(job):
@@ -1440,9 +1444,14 @@ def check_regions(arguments, platforms):
     that may launch one, as its region_offerings then name them. A phase launches in a region only once this passed
     for it: the controller checks again for a running phase whenever the settings' regions change, on a copy of its
     namespace, and adopts the regions only once the check passes."""
-    workers = [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(arguments.unit_platforms.items())]
+    workers = region_check_workers(arguments)
     validate_aws(arguments, platforms, workers)
     put_archives(arguments, workers)
+
+
+def region_check_workers(arguments):
+    """One worker of each of the phase's platforms, as a check of its regions reads them."""
+    return [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(arguments.unit_platforms.items())]
 
 
 def recheck_regions(checked, platforms, offerings):
@@ -1453,11 +1462,13 @@ def recheck_regions(checked, platforms, offerings):
     try:
         check_regions(checked, platforms)
     except (Exception, SystemExit) as error:
-        workers = [unit_worker_job(platform, 0, 0, "spot") for _, platform in sorted(checked.unit_platforms.items())]
+        workers = region_check_workers(checked)
         for region in sorted({region for regions in offerings.values() for region in regions}):
             alone = SimpleNamespace(**vars(checked))
             alone.region_offerings = {instance_type: [region] for instance_type, regions in offerings.items()
                                       if region in regions}
+            # Each put reaches the regions launch_regions gives a worker, and it refuses a worker this region alone
+            # cannot launch, so the put takes only the region's workers.
             try:
                 put_archives(alone, [worker for worker in workers
                                      if worker.platform.instance_type in alone.region_offerings and
@@ -1640,8 +1651,9 @@ def launch_regions(arguments, job):
 def launch_placements(arguments, job):
     """Order the regions of the job's platform's list that can launch it, best Spot placement score first."""
     regions = launch_regions(arguments, job)
-    # A launch skips the regions where its pool's launches in its market found no capacity within the cool-down.
-    eligible = [region for region in regions if region not in job.capacity_failures]
+    # A launch skips the regions where its pool's launches in its market found no capacity in it, or had their request
+    # refused, within the cool-down.
+    eligible = [region for region in regions if region not in job.cooled_regions]
     if job.market != "spot" or len(eligible) <= 1:
         return [(region, "") for region in eligible]
     scores = spot_placement_scores(arguments, job.platform.instance_type, regions)
@@ -1885,7 +1897,7 @@ class LaunchFailed(Exception):
         self.detail = detail
 
 
-def launch_failure(market, rejection, elsewhere=False):
+def launch_failure(market, rejection, elsewhere):
     """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
     and an On-Demand one no capacity or vCPU quota. A request AWS will never grant fails as the infrastructure's,
     with AWS's explanation: as the region's refusal while its pool has another region elsewhere to try, and
@@ -1894,9 +1906,9 @@ def launch_failure(market, rejection, elsewhere=False):
         prefix = REGION_REFUSAL if elsewhere else "launch-infrastructure:"
         return "retryable-infrastructure", f"{prefix}{rejection.code}: {rejection.message}"
     if market == "spot":
-        return "retryable-spot", f"launch-capacity:{rejection.code}"
+        return "retryable-spot", f"{LAUNCH_CAPACITY}{rejection.code}"
     if rejection.kind in ("capacity", "quota"):
-        return "retryable-capacity", f"launch-capacity:{rejection.code}"
+        return "retryable-capacity", f"{LAUNCH_CAPACITY}{rejection.code}"
     return "retryable-infrastructure", f"launch-infrastructure:{rejection.code}"
 
 
@@ -2099,23 +2111,23 @@ def write_event(path, event_type, campaign_id, job, worker, reason, details="", 
         with path.open(newline="") as input_file:
             fields = tuple(csv.DictReader(input_file, delimiter="\t").fieldnames or fields)
     event = {
-            "event_type": event_type,
-            "campaign_id": campaign_id,
-            "platform": job.platform.name,
-            "shard_id": job.shard,
-            "replica_id": str(job.replica),
-            "instance_id": metadata["instance_id"],
-            "host_epoch": str(job.host_epoch),
-            "unit_id": unit_id or "",
-            "unit_attempt_id": unit_attempt_id,
-            "reason": reason,
-            "artifact_uri": str(worker.directory),
-            "artifact_sha256": "",
-            "region": metadata["aws_region"],
-            "availability_zone": metadata["availability_zone"],
-            "placement_score": metadata["placement_score"],
-            "failure_classification": failure_classification,
-            "details": details.replace("\t", " "),
+        "event_type": event_type,
+        "campaign_id": campaign_id,
+        "platform": job.platform.name,
+        "shard_id": job.shard,
+        "replica_id": str(job.replica),
+        "instance_id": metadata["instance_id"],
+        "host_epoch": str(job.host_epoch),
+        "unit_id": unit_id or "",
+        "unit_attempt_id": unit_attempt_id,
+        "reason": reason,
+        "artifact_uri": str(worker.directory),
+        "artifact_sha256": "",
+        "region": metadata["aws_region"],
+        "availability_zone": metadata["availability_zone"],
+        "placement_score": metadata["placement_score"],
+        "failure_classification": failure_classification,
+        "details": details.replace("\t", " "),
     }
     append_ledger(path, fields, {field: value for field, value in event.items() if field in fields})
 
@@ -2474,8 +2486,9 @@ class UnitWorker:
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
     # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
-    # the instance as its cleanup last saw it; when the controller first asked EC2 to terminate it, in epoch seconds;
-    # whether it leaked; and whether its prefix was found a leftover.
+    # the instance as its cleanup last saw it; when the controller first stopped it, asking EC2 to terminate it or
+    # finding it shutting down, in epoch seconds, which starts its leak clock; whether it leaked; and whether its
+    # prefix was found a leftover.
     launch_failure: tuple = None
     missed_boot: bool = False
     instance: cloud.Instance = None
@@ -2605,8 +2618,8 @@ class UnitDispatcher:
         self.capacity_waits = set()
         # How many more hosts the fleet's boot window admits this loop.
         self.boot_room = 0
-        # When the controller decided to stop each host it terminates, by host epoch.
-        self.terminated = {}
+        # The host epochs of the hosts the controller decided to stop.
+        self.terminated = set()
         # The host epochs of admissions that launched nothing and whose reservation could not be released.
         self.unreleased = set()
         # The loop's round trips run on the request threads, and gathering group completions on the acceptance
@@ -2692,19 +2705,22 @@ class UnitDispatcher:
         terminating = {}
         aborted = set()
         for row in read_attempts(self.attempts_path):
-            if row["shard_id"] == UNIT_WORKER_SHARD and row["outcome"] == "terminating":
+            if row["shard_id"] != UNIT_WORKER_SHARD:
+                continue
+            epoch = int(row["host_epoch"])
+            if row["outcome"] == "terminating":
                 # A termination request settles nothing; the first starts the worker's leak clock, and one the
                 # controller decided keeps it stopping the host as its own.
                 request = launch_record(row)
-                terminating.setdefault(int(row["host_epoch"]), float(request["requested_at"]))
+                terminating.setdefault(epoch, float(request["requested_at"]))
                 if request.get("classification") == "controller-abort":
-                    aborted.add(int(row["host_epoch"]))
-            elif row["shard_id"] == UNIT_WORKER_SHARD:
-                latest[int(row["host_epoch"])] = row
-                if row["outcome"] == "starting":
-                    placements[int(row["host_epoch"])] = launch_record(row)
-                elif row["outcome"] == "started":
-                    instances[int(row["host_epoch"])] = launch_record(row)
+                    aborted.add(epoch)
+                continue
+            latest[epoch] = row
+            if row["outcome"] == "starting":
+                placements[epoch] = launch_record(row)
+            elif row["outcome"] == "started":
+                instances[epoch] = launch_record(row)
         slots = {}
         for epoch, placement in placements.items():
             if "session" not in placement:
@@ -2726,8 +2742,8 @@ class UnitDispatcher:
                     # The earlier controller settled this worker; its slot is as that settlement left it.
                     self.release_slot(job, slot, slot_failures,
                                       job.host_epoch in ran or self.recovered_start(directory),
-                                      0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"],
-                                      row["outcome"] == "controller-abort")
+                                      0 if row["outcome"] == "stopped" else 1, row["detail"],
+                                      terminated=row["outcome"] == "controller-abort")
                 continue
             # The starting record names the region the worker was placed in.
             job = replace(job, market=row["market"], region=placement["region"],
@@ -2738,10 +2754,9 @@ class UnitDispatcher:
                              for field in ("instance_id", "availability_zone")})
             workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
                 job, metadata, directory, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
-                stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0),
-                adopted_at=time.time())
+                stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0), adopted_at=time.time())
             if job.host_epoch in aborted:
-                self.terminated[job.host_epoch] = terminating[job.host_epoch]
+                self.terminated.add(job.host_epoch)
         recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
                                     set(workers))
         for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
@@ -3125,7 +3140,7 @@ class UnitDispatcher:
     def partition(self):
         """The workers whose hosts are live, and those whose hosts have ended, each of which is marked gone."""
         live, ended = [], []
-        for worker in list(self.workers.values()):
+        for worker in self.workers.values():
             if self.ended(worker):
                 worker.gone = True
                 ended.append(worker)
@@ -3181,8 +3196,8 @@ class UnitDispatcher:
             seconds = dict(self.items[worker.leases[current]].groups)
             finished = worker.finished.get(current, {})
             groups = worker.lease_groups[current]
-            listed = [objects[key] for key in (heartbeat_key(current), *(completion_key(current, group)
-                                                                       for group in groups)) if key in objects]
+            progress_keys = (heartbeat_key(current), *(completion_key(current, group) for group in groups))
+            listed = [objects[key] for key in progress_keys if key in objects]
             unfinished = [group for group in groups
                           if group not in finished and completion_key(current, group) not in objects]
             if not (listed or finished) or not unfinished:
@@ -3245,10 +3260,13 @@ class UnitDispatcher:
         return instance.state not in ("pending", "running")
 
     def stop_host(self, worker):
-        """Ask EC2 to terminate the worker's instance until it lists it shutting down or terminated; one still not
-        terminated TERMINATION_LEAK_SECONDS after the first request, which job-attempts.tsv records before it is
-        made, has leaked. The record names a stop the controller decided, so a restart goes on stopping the host
-        and settles it as the controller's."""
+        """Ask EC2 to terminate the worker's instance until it lists it shutting down or terminated.
+
+        The first time the controller stops a host it finds not terminated, job-attempts.tsv records when, before any
+        request is made. It does so whether the controller then asks EC2 or the host is already shutting down on its
+        own. That time starts the leak clock: an instance still not terminated TERMINATION_LEAK_SECONDS later has
+        leaked. The record names a stop the controller decided, so a restart goes on stopping the host and settles it
+        as the controller's."""
         try:
             instance = None if worker.launch_failure else self.instance(worker)
         except CloudError:
@@ -3259,8 +3277,10 @@ class UnitDispatcher:
         if not worker.terminate_requested:
             requested_at = time.time()
             # Recorded first, so a request whose record failed is recorded again.
-            write_attempt(self.attempts_path, worker.job, "terminating", f"requested_at={requested_at:.3f}" + (
-                ";classification=controller-abort" if worker.job.host_epoch in self.terminated else ""))
+            detail = f"requested_at={requested_at:.3f}"
+            if worker.job.host_epoch in self.terminated:
+                detail += ";classification=controller-abort"
+            write_attempt(self.attempts_path, worker.job, "terminating", detail)
             worker.terminate_requested = requested_at
         elif time.time() - worker.terminate_requested >= TERMINATION_LEAK_SECONDS:
             self.leak(worker)
@@ -3270,8 +3290,7 @@ class UnitDispatcher:
             self.arguments.cloud.terminate(worker.metadata["aws_region"], [instance.id])
         except CloudError as error:
             # The next loop asks again.
-            print(f"terminating instance {instance.id} of {worker.host_session} failed: {error}; retrying",
-                  flush=True)
+            print(f"terminating instance {instance.id} of {worker.host_session} failed: {error}; retrying", flush=True)
 
     def leak(self, worker):
         """Stop the fleet's spending, once, for the worker's instance, which EC2 has not terminated; its reservation
@@ -3392,8 +3411,8 @@ class UnitDispatcher:
         write_attempt(self.attempts_path, worker.job, "stopped" if status == 0 else classification,
                       "; ".join(details) or "-")
         pool = worker.pool
-        self.release_slot(worker.job, worker.slot, worker.slot_failures, worker.started, status,
-                          classification, detail, worker.job.host_epoch in self.terminated)
+        self.release_slot(worker.job, worker.slot, worker.slot_failures, worker.started, status, detail,
+                          terminated=worker.job.host_epoch in self.terminated)
         if worker.started:
             return
         if status != 0 and worker.job.host_epoch not in self.terminated:
@@ -3403,9 +3422,10 @@ class UnitDispatcher:
                         self.arguments.campaign_id, worker.job, worker, detail if retryable else "job-failure",
                         f"status={status}; classification={classification}; detail={detail}", unit_id="",
                         failure_classification=classification)
-        if detail.startswith(("launch-capacity:", REGION_REFUSAL)):
+        shortage = detail.startswith(LAUNCH_CAPACITY)
+        if shortage or detail.startswith(REGION_REFUSAL):
             # The pool's launches in the market move past a region that found no capacity or refused the request.
-            self.cool_down(pool, worker.job.market, worker.job.region, detail.startswith("launch-capacity:"))
+            self.cool_down(pool, worker.job.market, worker.job.region, shortage)
         if classification == "retryable-capacity" or detail == FIRST_LEASES_UNWRITTEN:
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
@@ -3421,7 +3441,7 @@ class UnitDispatcher:
         return (self.purchase(pool) == "spot-then-on-demand" and (pool, "spot") in self.shortages and
                 now - self.shortages[pool, "spot"] >= SPOT_SHORTAGE_WAIT_SECONDS)
 
-    def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
+    def release_slot(self, job, slot, failures, started, status, detail, terminated=False):
         """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
@@ -3435,7 +3455,7 @@ class UnitDispatcher:
             failures = 0
         elif (status != 0 and not terminated and
               detail not in (LAUNCH_NOT_FOUND, FIRST_LEASES_UNWRITTEN, LAUNCH_NOT_ATTEMPTED) and
-              not detail.startswith(("launch-capacity:", REGION_REFUSAL))):
+              not detail.startswith((LAUNCH_CAPACITY, REGION_REFUSAL))):
             failures += 1
         if failures > MAX_REPLACEMENTS_PER_JOB:
             self.exhausted[pool] = (f"unit worker {job.identity} failed before it started: {detail}; "
@@ -3807,18 +3827,20 @@ class UnitDispatcher:
             cooling = self.pool_regions[pool, market] = {
                 region: failed_at for region, failed_at in self.pool_regions.get((pool, market), {}).items()
                 if now - failed_at < REGION_COOL_DOWN_SECONDS}
-            return replace(candidate, market=market, capacity_failures=tuple(cooling))
+            return replace(candidate, market=market, cooled_regions=tuple(cooling))
 
         candidate = cooled(market)
-        if not launch_placements(self.arguments, candidate):
-            # Each region of the platform's list has found no capacity in the market for this pool within its
-            # cool-down. A pool short of Spot for its bounded wait launches On-Demand; otherwise it tries every
-            # region again.
+        placements = launch_placements(self.arguments, candidate)
+        if not placements:
+            # Each region of the platform's list has found no capacity in the market for this pool, or refused its
+            # request, within its cool-down. A pool short of Spot for its bounded wait launches On-Demand; otherwise
+            # it tries every region again.
             if market == "spot" and self.spot_waited(pool, now):
                 candidate = cooled("on-demand")
-            if not launch_placements(self.arguments, candidate):
+                placements = launch_placements(self.arguments, candidate)
+            if not placements:
                 self.pool_regions.pop((pool, candidate.market), None)
-                candidate = replace(candidate, capacity_failures=())
+                candidate = replace(candidate, cooled_regions=())
         return candidate
 
     def launch(self, now):
@@ -3855,10 +3877,10 @@ class UnitDispatcher:
             written = write_leases(self.arguments, worker, documents)
             if not documents or len(written) < len(documents):
                 return written, LaunchFailed("retryable-infrastructure", FIRST_LEASES_UNWRITTEN)
-            asked.add(worker.job.host_epoch)
+            epoch = worker.job.host_epoch
+            asked.add(epoch)
             try:
-                return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch],
-                                              worker.job.host_epoch in elsewhere)
+                return written, launch_worker(self.arguments.cloud, worker.job, requests[epoch], epoch in elsewhere)
             except LaunchFailed as failure:
                 return written, failure
 
@@ -3870,7 +3892,7 @@ class UnitDispatcher:
                     worker.launch_failure = (failure.classification, failure.detail)
                 # A region's refusal moves the pool to a region it has not cooled in the market.
                 if set(launch_regions(self.arguments, worker.job)) - {worker.job.region,
-                                                                      *worker.job.capacity_failures}:
+                                                                      *worker.job.cooled_regions}:
                     elsewhere.add(worker.job.host_epoch)
             pending = [(worker, [(sequence, self.lease_document(worker, sequence))
                                  for sequence in sorted(worker.unsent)])
@@ -3907,8 +3929,10 @@ class UnitDispatcher:
             # lease of an item not late frees the worker that would have taken it for as many later items as their
             # estimates fit before then, which only the projection counts.
             leased = {worker.leases[sequence] for sequence in worker.outstanding()} - {None}
-            items = [item for item in late[pool] if item.identity not in leased]
-            late[pool] = items if len(late[pool]) - len(items) == len(leased) else self.late_items(pool, now)
+            if leased <= {item.identity for item in late[pool]}:
+                late[pool] = [item for item in late[pool] if item.identity not in leased]
+            else:
+                late[pool] = self.late_items(pool, now)
 
         def admit_pool(pool, limit):
             # Whether the pool admitted its limit and may take more; None once a refusal holds for every pool.
@@ -3958,8 +3982,7 @@ class UnitDispatcher:
                     self.pool_ready[pool] = ready_at
                     blocked_vcpus = blocked or blocked_vcpus
                     return False if scan else None
-                self.start(pool, candidate, now, starting)
-                take_late(pool, starting[-1])
+                take_late(pool, self.start(pool, candidate, now, starting))
                 if (pool, candidate.market) in self.shortages:
                     return False
                 limit -= 1
@@ -3978,7 +4001,7 @@ class UnitDispatcher:
 
     def start(self, pool, job, now, starting):
         """Record an admitted worker in the phase's workers and in starting, and issue its first leases, before its
-        launch. No worker owns the admission's reservation until its starting record is written,
+        launch; return the worker. No worker owns the admission's reservation until its starting record is written,
         so when the record fails, release the reservation. If the release fails too, add that as a note to the
         record's error and leave the reservation to the phase's cleanup."""
         del self.candidates[pool]
@@ -3992,7 +4015,7 @@ class UnitDispatcher:
             write_attempt(
                 self.attempts_path, job, "starting",
                 f"region={job.region};placement_score={job.placement_score}" +
-                (f";capacity_failures={','.join(job.capacity_failures)}" if job.capacity_failures else "") +
+                (f";cooled_regions={','.join(job.cooled_regions)}" if job.cooled_regions else "") +
                 f";slot={slot};slot_failures={slot_failures};boot_by={job.boot_by};stop_by={job.stop_by}"
                 f";session={session};prefix={metadata['prefix']}")
         except BaseException as error:
@@ -4015,6 +4038,13 @@ class UnitDispatcher:
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
         self.lease(worker, launching=True)
+        return worker
+
+    def stop_leases(self, workers):
+        """Issue a stop lease to each of the workers still open for work; the caller sends them."""
+        for worker in workers:
+            if worker.open():
+                self.issue(worker, None)
 
     def sweep(self, observed):
         """One loop of a phase paused for a fault. The phase trusts nothing more its hosts report but that they
@@ -4033,9 +4063,7 @@ class UnitDispatcher:
         self.report_boots()
         self.refused = {}
         if self.steering == "stopping":
-            for worker in live:
-                if worker.open():
-                    self.issue(worker, None)
+            self.stop_leases(live)
             self.send(live)
         for epoch, worker in self.workers.items():
             if epoch in self.terminated:
@@ -4132,9 +4160,7 @@ class UnitDispatcher:
         self.resolve_unlaunchable(deadline_reached)
         self.update_tail()
         if self.steering == "stopping":
-            for worker in self.workers.values():
-                if worker.open():
-                    self.issue(worker, None)
+            self.stop_leases(self.workers.values())
         else:
             self.shed_hosts()
         if self.steering in ("running", "draining"):
@@ -4153,7 +4179,7 @@ class UnitDispatcher:
             if (worker.lost or self.unneeded(worker)) and epoch not in self.terminated:
                 if not (worker.lost or worker.stopping):
                     self.issue(worker, None)
-                self.terminated[epoch] = time.time()
+                self.terminated.add(epoch)
             if epoch in self.terminated:
                 self.stop_host(worker)
         for name in sorted(self.milestones() - self.reached):
@@ -4436,7 +4462,7 @@ class Campaign:
     def holds_hosts(self, phase):
         """Whether the running phase has workers whose cleanup is not proven: those its dispatch follows, or those the
         fleet still reserves for it, as for a phase whose setup or recovery failed before its dispatch adopted them."""
-        return bool(phase.dispatcher and phase.dispatcher.workers or
+        return bool((phase.dispatcher and phase.dispatcher.workers) or
                     self.arguments.shared_budget.reservations(phase.root))
 
     def reload(self):
@@ -4714,17 +4740,18 @@ class Campaign:
                 if phase.dispatcher.share[platform] > target and gives_up(phase, platform):
                     phase.dispatcher.share[platform] = target
         open_hosts = {phase.key: phase.dispatcher.holding(open_only=True) for phase in running}
-        over_platform = sum(open_hosts.values(), Counter())
-        over = sum(over_platform.values()) - limits[0]
-        over_platform = {platform: hosts - limits[1] for platform, hosts in over_platform.items()}
-        for phase in launching + [phase for phase in running if phase not in launching]:
+        open_platform = sum(open_hosts.values(), Counter())
+        over = sum(open_platform.values()) - limits[0]
+        over_platform = {platform: hosts - limits[1] for platform, hosts in open_platform.items()}
+        for phase in launching + [phase for phase in running if phase.dispatcher.steering != "running"]:
             shed = {}
             for platform, hosts in open_hosts[phase.key].items():
                 excess = hosts - targets.get(phase.key, {}).get(platform, 0)
+                past_limit = max(over, over_platform[platform])
                 if phase in launching and excess > 0 and gives_up(phase, platform):
                     shed[platform] = excess
-                elif phase.dispatcher.steering == "draining" and max(over, over_platform[platform]) > 0:
-                    shed[platform] = min(hosts, max(over, over_platform[platform]))
+                elif phase.dispatcher.steering == "draining" and past_limit > 0:
+                    shed[platform] = min(hosts, past_limit)
                 over -= shed.get(platform, 0)
                 over_platform[platform] -= shed.get(platform, 0)
             phase.dispatcher.shed = shed
@@ -5497,6 +5524,8 @@ def add_region(arguments, store, aws, spot_reserve):
     limits = {"bucket": bucket, "max_vcpus": arguments.max_vcpus, **(
         {} if arguments.on_demand_max_vcpus is None else {"on_demand_max_vcpus": arguments.on_demand_max_vcpus})}
 
+    images = read_platform_regions(Path(__file__).resolve().parent)
+
     def update(settings):
         if region in settings["regions"]:
             raise SettingsError(f"the campaign has region {region} already; change its limit with set-limit")
@@ -5506,10 +5535,9 @@ def add_region(arguments, store, aws, spot_reserve):
                 raise SettingsError(f"the campaign has no platform {platform}")
             if (platform, region) not in images:
                 raise SettingsError(f"platform-regions.tsv has no {platform} image in {region}; name the platforms "
-                                    f"that have one with --platforms")
+                                    "that have one with --platforms")
             settings["platform_regions"][platform].append(region)
 
-    images = read_platform_regions(Path(__file__).resolve().parent)
     check_region_limits(spot_reserve, aws, store.current,
                         changed_settings(store.current, arguments.actor, update, time.time()))
     try:
@@ -5548,14 +5576,23 @@ def control(arguments, aws):
         """Refuse a command but reopen on an ended campaign, whose manifest lists its settings and their events, and
         reopen on one that has not ended."""
         if manifest.is_file() != (arguments.command == "reopen"):
-            raise SettingsError(f"campaign {arguments.campaign} has not ended: {arguments.root} has no "
-                                f"{manifest.name}" if arguments.command == "reopen" else
-                                f"campaign {arguments.campaign} has ended; only reopen changes its settings")
+            if arguments.command == "reopen":
+                message = f"campaign {arguments.campaign} has not ended: {arguments.root} has no {manifest.name}"
+            else:
+                message = f"campaign {arguments.campaign} has ended; only reopen changes its settings"
+            raise SettingsError(message)
 
     def checked(settings):
         # The change checks again under the settings lock, which the controller holds as it writes the manifest.
         check_ended()
         update(settings)
+
+    def reopened():
+        # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
+        # A second reopen then finds the campaign not ended, and one interrupted before this leaves the
+        # manifest for its retry.
+        manifest.unlink()
+        fsync_directory(arguments.root)
 
     try:
         check_ended()
@@ -5566,13 +5603,6 @@ def control(arguments, aws):
             description, update = control_change(arguments, time.time())
             check_region_limits(options["spot_vcpu_reserve"], aws, store.current,
                                 changed_settings(store.current, arguments.actor, update, time.time()))
-        def reopened():
-            # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
-            # A second reopen then finds the campaign not ended, and one interrupted before this leaves the
-            # manifest for its retry.
-            manifest.unlink()
-            fsync_directory(arguments.root)
-
         before = store.current["version"]
         settings = store.change(arguments.actor, description, checked,
                                 reopened if arguments.command == "reopen" else None)

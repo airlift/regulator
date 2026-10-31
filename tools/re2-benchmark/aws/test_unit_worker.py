@@ -545,8 +545,7 @@ class TestUnitWorker(unittest.TestCase):
 
             self.assertEqual(0, status, output)
             self.assertEqual(1, len((worker.s3 / 'failed-calls.log').read_text().splitlines()))
-            self.assertEqual(['results/heartbeat/1.json', 'results/units/1/groups/1/result.tar.gz'],
-                             worker.puts()[:2])
+            self.assertEqual(['results/heartbeat/1.json', 'results/units/1/groups/1/result.tar.gz'], worker.puts()[:2])
 
     def test_spot_notice_during_lease_acquisition_or_upload_is_bundled_within_two_minutes(self):
         # Every S3 call stalls until just before its timeout. A notice during the lease's listing or download
