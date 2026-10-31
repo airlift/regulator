@@ -4250,22 +4250,28 @@ class TestUnitWorkers(unittest.TestCase):
     def test_admitted_worker_launches_only_with_its_first_leases(self):
         shards = ["trino-like-specialized"]
         with self.subTest(scenario="leases denied"), tempfile.TemporaryDirectory() as temporary:
-            # S3 refuses every lease: no worker launches, each launch fails as infrastructure, and the pools give up.
+            # S3 refuses every lease for eight loops, longer than a slot's replacements would last: no worker
+            # launches meanwhile, and each pool waits a short cool-down after each launch that found its leases
+            # refused, spending none of its slot's replacements, so the phase finishes once S3 takes them again.
             fleet = FakeUnitFleet(Path(temporary) / "hosts")
             put = fleet.put
+            denied = collections.defaultdict(set)
 
             def deny_leases(region, bucket, key, body, **options):
-                if "/input/leases/" in key:
-                    raise cloud.CloudError("AccessDenied")
+                if "/input/leases/" in key and fleet.sleeps < 8:
+                    denied[json.loads(body)["platform"]].add(fleet.sleeps)
+                    raise cloud.CloudError("SlowDown")
                 return put(region, bucket, key, body, **options)
 
             fleet.put = deny_leases
-            with self.assertRaisesRegex(SystemExit, "unresolved units: .*exhausted their replacements"):
-                self.run_phase(Path(temporary), fleet, "smoke", shards, 2, 1)
-            self.assertEqual([], fleet.launches)
+            self.run_phase(Path(temporary), fleet, "smoke", shards, 2, 1)
+            self.assertLessEqual(8, min(launch.loop for launch in fleet.launches))
+            for loops in denied.values():
+                self.assertLess(RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB, len(loops))
+                self.assertFalse(any(loop + 1 in loops for loop in loops))
             with (Path(temporary) / "results" / "job-attempts.tsv").open(newline="") as attempts:
                 outcomes = {(row["outcome"], row["detail"]) for row in csv.DictReader(attempts, delimiter="\t")
-                            if row["outcome"] != "starting"}
+                            if row["outcome"] not in ("starting", "started", "stopped")}
             self.assertEqual({("retryable-infrastructure", RUN_CAMPAIGN.FIRST_LEASES_UNWRITTEN)}, outcomes)
         with self.subTest(scenario="admission fails"), tempfile.TemporaryDirectory() as temporary:
             # The disk refuses the second worker's starting record: the first, admitted before it, still launches
