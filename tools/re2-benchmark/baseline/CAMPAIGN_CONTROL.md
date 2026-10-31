@@ -52,9 +52,12 @@ report never reached the coordinator, so nothing acted until morning.
   measurement validity and cannot.
 - **Pause** (phase): no new launches or leases; running leases finish and the
   workers idle-stop. A phase paused for a fault still reports its hosts' boots
-  to the boot window and still stop-leases them at a stop. **Drain**: no new launches; queued work goes to live
-  workers until they stop. **Stop** (campaign): stop-lease every worker, prove
-  cleanup, exit. **Spending stop**: no launch anywhere until cleared.
+  to the boot window and still stop-leases them at a stop. A pause spends none
+  of the phase's deadline: the controller records each one in the phase's
+  `phase-pauses.tsv` and moves the deadline out by it, across restarts.
+  **Drain**: no new launches; queued work goes to live workers until they
+  stop. **Stop** (campaign): stop-lease every worker, prove cleanup, exit.
+  **Spending stop**: no launch anywhere until cleared.
 - **Leak**: an instance or Spot request that outlives its cleanup. **Leftover**:
   an S3 object that outlives its session; it costs nothing and is retried.
 - **Monitor**: the agent thread that reads Grafana on a schedule and acts
