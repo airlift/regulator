@@ -326,9 +326,10 @@ def teardown_begun(aws, campaign, volume):
 
 
 def discard(aws, network, instance, registered):
-    """Take a new control host of the campaign out of the load balancer's target group, where it was registered, and
-    terminate it, whether or not AWS takes it out; returns what became of it, naming each step AWS refused, for the
-    refusal that follows, which says what takes down a host left running or registered."""
+    """Deregister a new control host of the campaign from the load balancer's target group, if it was registered,
+    and request its termination either way. Return what became of it for the refusal that follows, which says what
+    takes down a host left running or registered. Each step whose request failed is named, since its outcome is
+    unconfirmed."""
     deregistration = termination = None
     if registered:
         try:
@@ -339,14 +340,15 @@ def discard(aws, network, instance, registered):
         aws.terminate(REGION, [instance])
     except CloudError as error:
         termination = error
-    refused = ", and ".join(f"to {step} it: {error}" for step, error in
-                            (("deregister", deregistration), ("terminate", termination)) if error)
-    if termination is None:
-        return (f"is terminated, though AWS refused {refused}" if deregistration else
-                "is deregistered and terminated" if registered else "is terminated")
-    left = ("still runs, registered" if deregistration else "is deregistered but still runs" if registered else
-            "still runs")
-    return f"{left}, since AWS refused {refused}"
+    if deregistration and termination:
+        return (f"has its deregistration and termination unconfirmed, since deregistering it failed: "
+                f"{deregistration}, and terminating it failed: {termination}")
+    if deregistration:
+        return f"has its termination requested, but its deregistration unconfirmed: {deregistration}"
+    if termination:
+        fate = f"its termination unconfirmed: {termination}"
+        return f"has its deregistration requested, but {fate}" if registered else f"has {fate}"
+    return "has its deregistration and termination requested" if registered else "has its termination requested"
 
 
 def root_files(root):
@@ -394,13 +396,15 @@ def known_host(aws, campaign):
                          "console; try again in a few minutes")
     name = f"[{host.address}]:{SSH_PORT}"
     try:
-        served = subprocess.run(["ssh-keyscan", "-p", str(SSH_PORT), "-T", "15", host.address], capture_output=True,
-                                text=True).stdout.splitlines()
+        scan = subprocess.run(["ssh-keyscan", "-p", str(SSH_PORT), "-T", "15", host.address], capture_output=True,
+                              text=True)
     except OSError as error:
         raise SystemExit(f"cannot run ssh-keyscan: {error}") from error
-    keys = [line for line in served if line.split()[:1] == [name]]
+    keys = [line for line in scan.stdout.splitlines() if line.split()[:1] == [name]]
     if not keys:
-        raise SystemExit(f"cannot read the ssh host keys of campaign {campaign}'s control host at {host.address}")
+        error = scan.stderr.strip() or "no error output"
+        raise SystemExit(f"cannot read the ssh host keys of campaign {campaign}'s control host at {host.address}: "
+                         f"ssh-keyscan exited with status {scan.returncode}: {error}")
     trusted = [line for line in keys if fingerprint(line.split()[2]) in listed]
     if not trusted:
         raise SystemExit(f"no ssh host key campaign {campaign}'s control host at {host.address} serves matches a "

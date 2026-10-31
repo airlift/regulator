@@ -701,9 +701,9 @@ ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=y
 The host outlives its campaign. To replace it, for instance once it fails,
 terminate it and launch another onto the campaign's volume, in the volume's
 zone, once the volume is free, which unpacks nothing again. A new host the
-volume cannot attach to is terminated, and the replacement can be run again;
-one AWS also refuses to terminate is named with both errors, and the next
-replacement terminates it:
+volume cannot attach to has its termination requested, and the replacement can
+be run again; one whose termination request also fails is named with both
+errors, its termination unconfirmed, and the next replacement terminates it:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
