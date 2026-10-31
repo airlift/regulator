@@ -4846,22 +4846,30 @@ def phase_progress(root, fleet, live):
         pools, {pool: hosts[pool[1]] for pool in pools}) if live else None)
 
 
+def phase_steering(root, settings, campaign_root):
+    """What a unit phase's campaign settings, or None, record of it, by its key in its campaign root, if any."""
+    return (settings or {}).get("phases", {}).get(root.relative_to(campaign_root).as_posix()
+                                                  if campaign_root else None, {})
+
+
+def phase_live(root, controller, steering):
+    """Whether a unit phase is still running: its campaign's controller, by its process ID or None, is live, and the
+    phase is neither complete nor, as its steering records, failed."""
+    return controller is not None and not (root / PHASE_COMPLETE).is_file() and steering.get("state") != "failed"
+
+
 def phase_status(label, root, now, fleets, controller, settings, zone=None, campaign_root=None):
     """A unit phase's lines for the status command, read from its ledgers alone, given the process ID of its
     campaign's live controller, or None, its campaign's settings, or None, and its campaign root, if any. fleets holds
     each fleet state, so the phases sharing a fleet read it once."""
-    steering = (settings or {}).get("phases", {}).get(root.relative_to(campaign_root).as_posix()
-                                                      if campaign_root else None, {})
+    steering = phase_steering(root, settings, campaign_root)
     state = steering.get("state", "running")
-    live = False
+    live = phase_live(root, controller, steering)
     if (root / PHASE_COMPLETE).is_file():
         state = "complete"
-    elif state == "failed":
-        state = "failed"
-    elif controller is not None:
-        live = True
+    elif live:
         state = f"{state} as process {controller}" + (f": {steering['reason']}" if steering.get("reason") else "")
-    else:
+    elif state != "failed":
         state = "no live controller" + (f", {state}: {steering['reason']}" if steering.get("reason") else "")
     lines = [f"  {label:<18}{state}"]
     if not (root / "work-items.tsv").is_file():
@@ -5094,10 +5102,12 @@ def campaign_results(root):
     phases = ([(*phase[:2], root)] if phase else
               [entry for entry in campaign_phases(root) if entry[1] in ("primary", "lang primary")])
     campaign_root = (phase[2] if phase else root)
-    live = campaign_root is not None and controller_process(campaign_root) is not None
+    controller = controller_process(campaign_root) if campaign_root else None
+    settings = campaign_lines(campaign_root)[1] if campaign_root else None
     results = []
     for candidate, label, directory in phases:
         try:
+            live = phase_live(directory, controller, phase_steering(directory, settings, campaign_root))
             results.append((candidate, label, phase_results(directory, live), None))
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError, tarfile.TarError) as error:
             results.append((candidate, label, [], f"{type(error).__name__}: {error}"))
