@@ -56,7 +56,7 @@ if ! grep -q " ${MOUNT} " /etc/fstab; then
     printf 'UUID=%s %s xfs defaults,nofail 0 2\n' "$(blkid -s UUID -o value "${device}")" "${MOUNT}" >> /etc/fstab
 fi
 mountpoint -q "${MOUNT}" || mount "${MOUNT}"
-install -d -o ec2-user -g ec2-user "${MOUNT}/campaign" "${INPUTS}"
+install -d -o ec2-user -g ec2-user "${MOUNT}/campaign"
 # The status command names the URL Grafana serves at, which the load balancer keeps across host replacements.
 printf '%s\n' "${GRAFANA_URL}" > "${MOUNT}/campaign/grafana-url.txt"
 chown ec2-user:ec2-user "${MOUNT}/campaign/grafana-url.txt"
@@ -64,17 +64,22 @@ chown ec2-user:ec2-user "${MOUNT}/campaign/grafana-url.txt"
 install -d -m 777 "${MOUNT}/lgtm"
 
 # The launch inputs: the controller's command, the candidate commits, the campaign's settings, and its language
-# plans. A replaced host finds them on the volume already.
+# plans. A replaced host finds them on the volume already. They are unpacked beside their place and moved into it
+# whole, so a first boot interrupted while unpacking leaves them for the next boot to unpack again.
 if [[ ! -f ${INPUTS}/controller.env ]]; then
     aws s3 cp --region "${CONTROL_HOST_REGION}" --no-progress "${LAUNCH_INPUTS_URI}" /var/tmp/launch-inputs.tar.gz
     printf '%s  %s\n' "${LAUNCH_INPUTS_SHA256}" /var/tmp/launch-inputs.tar.gz | sha256sum --check --strict
-    sudo -u ec2-user tar -xzf /var/tmp/launch-inputs.tar.gz -C "${INPUTS}"
+    rm -rf "${INPUTS}.new" "${INPUTS}"
+    install -d -o ec2-user -g ec2-user "${INPUTS}.new"
+    sudo -u ec2-user tar -xzf /var/tmp/launch-inputs.tar.gz -C "${INPUTS}.new"
+    mv -T "${INPUTS}.new" "${INPUTS}"
     rm /var/tmp/launch-inputs.tar.gz
 fi
 
-# The controller runs the first candidate's tooling, which every candidate shares.
-if [[ ! -d ${CHECKOUT}/.git ]]; then
-    sudo -u ec2-user git init -q "${CHECKOUT}"
+# The controller runs the first candidate's tooling, which every candidate shares. A first boot interrupted after
+# creating the repository may have left it without its remote.
+[[ -d ${CHECKOUT}/.git ]] || sudo -u ec2-user git init -q "${CHECKOUT}"
+if ! sudo -u ec2-user git -C "${CHECKOUT}" remote get-url origin > /dev/null 2>&1; then
     sudo -u ec2-user git -C "${CHECKOUT}" remote add origin https://github.com/airlift/regulator.git
 fi
 while read -r commit; do

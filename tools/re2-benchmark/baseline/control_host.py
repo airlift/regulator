@@ -17,6 +17,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from cloud import CloudError
+
 REGION = "us-west-2"
 # al2023-ami-2023.12.20261102.0-kernel-6.18-x86_64, resolved in us-west-2 on 2026-10-30.
 IMAGE = "ami-09f02015912e773f7"
@@ -209,7 +211,8 @@ def replace(aws, campaign, ssh_public_key):
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
-        aws.wait(REGION, "volume_available", volume.id)
+    # A host that has terminated may not yet have released the volume.
+    aws.wait(REGION, "volume_available", volume.id)
     start(aws, found, group, campaign, volume, ssh_public_key)
 
 
@@ -229,7 +232,14 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     instance, address = aws.run_control_host(REGION, IMAGE, INSTANCE_TYPE, image.root_device, subnet, group, PROFILE,
                                              data, tags(campaign))
     aws.wait(REGION, "instance_running", instance)
-    aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
+    try:
+        aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
+    except CloudError as error:
+        # A host without the campaign volume would wait for it and then fail, so it goes, and replace starts another.
+        aws.terminate(REGION, [instance])
+        raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
+                         f"{instance}, which is terminated; run control-host replace {campaign} again: "
+                         f"{error}") from error
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"

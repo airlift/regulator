@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 import cloud  # noqa: E402
 import control_host  # noqa: E402
 import telemetry  # noqa: E402
+from cloud import CloudError  # noqa: E402
 from test_cloud import FakeCloud  # noqa: E402
 
 # A network parameter of made-up identifiers, the CIDR from the documentation range.
@@ -95,6 +96,20 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual("subnet-b", aws.control_hosts[new.id]["subnet"])
         self.assertEqual({volume.id: new.id}, aws.attachments)
         self.assertEqual({"arn:target-group": {(new.id, 3000)}}, aws.targets)
+
+        # A host that ended on its own is replaced once it releases the volume.
+        aws.terminate("us-west-2", [new.id])
+        with contextlib.redirect_stdout(io.StringIO()):
+            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+        self.assertEqual(["terminated", "terminated", "running"],
+                         [host.state for host in aws.region_instances["us-west-2"]])
+        # A replacement the volume cannot attach to is terminated, leaving the volume to the next.
+        with patch.object(aws, "attach_volume", side_effect=CloudError("IncorrectState: busy")), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(SystemExit, "cannot attach campaign c's volume vol-1 to its new control host"):
+            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+        self.assertEqual(["terminated"] * 4, [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual(["available"], [volume.state for volume in aws.region_volumes["us-west-2"]])
 
     def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
         aws = control_host_cloud()
@@ -196,6 +211,10 @@ class TestControlHost(unittest.TestCase):
         user_data = control_host.USER_DATA.read_text()
         campaign = (CONTROL_HOST / "regulator-campaign@.service").read_text()
         lgtm = (CONTROL_HOST / "regulator-lgtm.service").read_text()
+        # A first boot interrupted while unpacking the launch inputs, or after creating the checkout, leaves the next
+        # boot to finish them.
+        self.assertIn('-C "${INPUTS}.new"\n    mv -T "${INPUTS}.new" "${INPUTS}"\n', user_data)
+        self.assertIn('git -C "${CHECKOUT}" remote get-url origin', user_data)
         # The controller unit runs the recorded command from the volume, with the environment user data built, and
         # leaves a campaign that ended with failed phases ended.
         venv = re.search(r"^VENV=(\S+)$", user_data, re.MULTILINE)[1]

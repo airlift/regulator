@@ -597,7 +597,9 @@ another campaign. The host's user data,
 - mounts the volume, formatting it the first time, and puts the campaign root
   at `/regulator/campaign`;
 - unpacks the launch inputs onto the volume the first time: the controller's
-  command, the candidate commits, the settings, and the language plans;
+  command, the candidate commits, the settings, and the language plans,
+  beside their place and then moved into it whole, so a first boot
+  interrupted while unpacking leaves them for the next boot;
 - fetches the candidate commits from GitHub and checks out the first, whose
   benchmark tooling every candidate shares;
 - starts `regulator-campaign@<campaign>`, which runs the launch's command with
@@ -661,7 +663,8 @@ ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes ec2-user@<address> /opt/re
 
 The host outlives its campaign. To replace it, for instance once it fails,
 terminate it and launch another onto the campaign's volume, in the volume's
-zone, which unpacks nothing again:
+zone, once the volume is free, which unpacks nothing again. A new host the
+volume cannot attach to is terminated, and the replacement can be run again:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
