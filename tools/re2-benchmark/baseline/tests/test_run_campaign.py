@@ -367,6 +367,13 @@ class TestRunCampaign(unittest.TestCase):
                               for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
             self.assertIn("queued-capacity\tfleet quota",
                           (root / "job-attempts.tsv").read_text())
+            # AWS raises the quota, which admission takes once its answer is five minutes old.
+            aws.quotas[("us-west-2", "spot")] = 16
+            second = replace(job, host_epoch=11)
+            self.assertFalse(self.admit(arguments, root, second)[1])
+            later = RUN_CAMPAIGN.time.monotonic() + RUN_CAMPAIGN.VCPU_QUOTA_CACHE_SECONDS
+            with patch.object(RUN_CAMPAIGN.time, "monotonic", return_value=later):
+                self.assertTrue(self.admit(arguments, root, second)[1])
             # A Spot platform launches no On-Demand host, and an On-Demand platform no Spot host.
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only Spot"):
                 RUN_CAMPAIGN.check_purchase(arguments, replace(launched, market="on-demand"))
@@ -1444,6 +1451,13 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         limit(48)
         RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        # Once AWS raises the quota, a check asks for it afresh, and admission takes what the check found.
+        aws.quotas[("us-west-2", "spot")] = 96
+        limit(80)
+        RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        aws.calls.clear()
+        self.assertEqual(96, RUN_CAMPAIGN.vcpu_quota(arguments, "us-west-2", "spot"))
+        self.assertEqual([], aws.calls)
 
     @staticmethod
     def replica_items(arguments, platforms, units, seconds):
