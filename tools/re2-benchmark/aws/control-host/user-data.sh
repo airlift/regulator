@@ -85,10 +85,15 @@ if [[ ! -f ${INPUTS}/controller.env ]]; then
     rm /var/tmp/launch-inputs.tar.gz
 fi
 
-# The controller runs the first candidate's tooling, which every candidate shares. A host whose boot ended while git
-# ran may have left the checkout locked, though no git process runs this early in a boot, or not yet a repository,
-# which is made again, or without its remote, or half checked out, which the checkout overwrites.
-rm -f "${CHECKOUT}"/.git/*.lock
+# The controller runs the first candidate's tooling, which every candidate shares. A boot that ended while git ran
+# may have left the checkout in any of these states, each repaired below:
+# - locked: no git process runs this early in a boot, so the locks are stale and go;
+# - with its index cut short, which git cannot read: the index only caches what is checked out, so it goes too, and
+#   the checkout writes it again;
+# - not yet a repository: it is made again;
+# - without its remote: the remote is added;
+# - half checked out: the checkout overwrites it.
+rm -f "${CHECKOUT}"/.git/*.lock "${CHECKOUT}/.git/index"
 if ! sudo -u ec2-user git -C "${CHECKOUT}" rev-parse --git-dir > /dev/null 2>&1; then
     rm -rf "${CHECKOUT}"
     sudo -u ec2-user git init -q "${CHECKOUT}"

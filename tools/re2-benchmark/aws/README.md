@@ -620,8 +620,8 @@ registration or the look with an error. The host's user data,
   interrupted while unpacking leaves them for the next host to unpack;
 - fetches the candidate commits from GitHub and checks out the first, whose
   benchmark tooling every candidate shares, over whatever a boot that ended
-  while git ran left: its stale locks go, and a checkout git cannot read is
-  made again;
+  while git ran left: its stale locks and its index, which may be cut short,
+  go, and a checkout git cannot read is made again;
 - starts `regulator-campaign@<campaign>`, which runs the launch's command with
   `--controller` and the host's paths; the unit restarts a controller that
   crashes, up to five times in ten minutes, and leaves one whose campaign
