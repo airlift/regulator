@@ -350,17 +350,18 @@ public final class DfaAbsolutePointerProbe
         }
     }
 
-    // Paired rows block pointer-table allocation, so once a count without a pending match has
-    // built them, a pending match continues through the paired after-match loop. Requesting the
+    // Paired rows block pointer-table allocation, so once an ordinary search has built them, a
+    // pending match continues through the paired after-match loop. Requesting the
     // pointer table instead would force an exclusive retry on every count and still fall back to
     // the compact loop.
     private static void exerciseCountSelfLoopMatchHandOffWithPairedRows()
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
-        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        Prog program = pattern.re2().forwardProgramForDiagnostics();
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
         Slice noMatch = utf8Slice("\u00e9a".repeat(200));
         for (int iteration = 0; iteration < 2; iteration++) {
-            check(pattern.count(noMatch) == 0, "count self-loop paired warm-up changed the count");
+            check(Dfa.search(program, noMatch, false, Prog.MatchKind.FIRST_MATCH, true) == Dfa.SEARCH_NO_MATCH, "count self-loop paired warm-up found a match");
         }
         check(dfa.pairedTransitionMemory() > 0, "count self-loop paired warm-up did not build paired transitions");
 

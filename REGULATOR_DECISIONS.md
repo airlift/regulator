@@ -719,23 +719,30 @@ current state, position, and match boundary; a later walk that reaches a dead
 or full-match state ends the search instead. The paired and pointer hand-offs
 need at least 256 bytes remaining, and a shorter remainder continues through
 the compact loop. Without a pending match the search continues through the
-ordinary paired or compact loop. With a pending first match it continues
-through the absolute-pointer loop when a pointer table exists or can be
-allocated, and through the paired after-match loop when the DFA already holds
-or has requested paired rows or no pointer table can be allocated, such as
-without native access. Paired rows prevent the pointer table from being
-allocated. A requested pointer table is allocated when the exclusive search
-that requests it ends, not during that search, which continues through the
-compact loop. The compact loop leaves its fast path on every match transition,
-and every transition out of a matching loop is one, so a matching dot loop over
-text with a multibyte character every few bytes ran the rest of the text byte
-by byte; on r9g, 32 KiB of `xaaaaaaaa` followed by repeated `éa` took 215 us
-against 58.6 us before the route. Longest match searches keep the compact loop,
-as they do after a paired search's first match. A paired search reached without
-a pending match reports the whole search length to the short-paired-search
-hint, as every other paired search does, so a short tail after a long scan does
-not disable paired transitions. The existing self-loop consumer ignores exit
-sets with the matching or high-bit flags, so its behavior is unchanged.
+absolute-pointer loop when a pointer table exists or can be allocated, and
+through the paired loop when the DFA already holds or has requested paired rows
+or no pointer table can be allocated, such as without native access. With a
+pending first match it chooses the same way between the absolute-pointer loop
+and the paired after-match loop. Paired rows prevent the pointer table from
+being allocated. The scan computes every transition of the states it visits,
+which adds self-loops the text never exercised. Previously, a hand-off without a
+pending match requested paired rows, which then blocked the pointer table, and
+Russian literal alternations, whose letters all start with one of two lead
+bytes, stopped the scan after a few short skips and ran the paired or compact
+loop, about 1.35 times slower on r9g than the pointer loop the ordinary route
+used before the scan existed. A requested pointer table is allocated when the
+exclusive search that requests it ends, not during that search, which continues
+through the compact loop. The compact loop leaves its fast path on every match
+transition, and every transition out of a matching loop is one, so a matching
+dot loop over text with a multibyte character every few bytes ran the rest of
+the text byte by byte; on r9g, 32 KiB of `xaaaaaaaa` followed by repeated `éa`
+took 215 us against 58.6 us before the route. A pending longest match keeps the
+compact loop, as it does after a paired search's first match. A paired search
+reached without a pending match reports the whole search length to the
+short-paired-search hint, as every other paired search does, so a short tail
+after a long scan does not disable paired transitions. The existing self-loop
+consumer ignores exit sets with the matching or high-bit flags, so its behavior
+is unchanged.
 
 Searches whose start state never reaches a qualifying loop pay the initial walk
 on every match. After eight consecutive searches in which the route does not
