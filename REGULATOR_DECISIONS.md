@@ -1223,18 +1223,20 @@ result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
 An eligible Unicode class lazily builds an exact Unicode membership bitset of
-136 KiB; a Latin-1 or Rust byte-mode class uses 32 bytes. Construction is
-single-writer and the table is retained by the compiled pattern. This fixed
-bound is independent of `maxMemory`, which remains the upstream-compatible
-program and DFA planning budget, and it does not scale with the expression or
-configured budget. Unsupported shapes continue through the ordinary DFA or
-matcher path. A Unicode class reads malformed UTF-8 as the ordinary engine's
-byte ranges for that class do, under the rule in
+136 KiB; an ASCII-only class in any language, or a Latin-1 or Rust byte-mode
+class, uses 32 bytes. Construction is single-writer and the table is retained by
+the compiled pattern. This fixed bound is independent of `maxMemory`, which
+remains the upstream-compatible program and DFA planning budget, and it does not
+scale with the expression or configured budget. Unsupported shapes continue
+through the ordinary DFA or matcher path. A Unicode class reads malformed UTF-8
+as the ordinary engine's byte ranges for that class do, under the rule in
 [RE2 Scan Plans](#re2-scan-plans). A class of every non-ASCII character reads
 leniently. Any other class accepts only the encodings of its members, including
 any encoded surrogates it holds. Any other invalid byte matches nothing.
 A valid encoded U+FFFD remains an ordinary code point; a byte class reads bytes
-undecoded, so it counts malformed bytes like any others.
+undecoded, so it counts malformed bytes like any others. An ASCII-only class
+also reads bytes undecoded, since every byte of a non-ASCII character, malformed
+or not, is at least 0x80 and matches none of its members.
 
 `Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter
 and the existing DFA counting path. Unsupported shapes use a fresh zero-capture
