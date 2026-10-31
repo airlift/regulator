@@ -90,15 +90,17 @@ def validate(settings):
               rate["spot"] < rate["total"], f"{instance_type} hourly price ceiling")
     check(isinstance(settings["phases"], dict), "phases")
     for phase, steering in settings["phases"].items():
-        # A paused or draining phase records who paused or drained it, and a paused one why, and a phase since when
-        # it has had its state, as the change that set it recorded.
-        state = steering.get("state") if isinstance(steering, dict) else None
-        check(isinstance(steering, dict) and set(steering) - {"since"} == {"state", "share"} | (
-                  {"by", "reason"} if state == "paused" else {"by"} if state == "draining" else set()) and
-              state in PHASE_STATES and (steering["share"] == "auto" or positive_integer(steering["share"])) and
-              steering.get("by", "dain") in ACTORS and (state != "paused" or isinstance(steering["reason"], str) and
-                                                         steering["reason"]) and
-              positive_number(steering.get("since", 1)), f"{phase} phase")
+        # A paused or draining phase records who paused or drained it, and a paused one why. A phase may record
+        # since when it has had its state, the time of the change that set it.
+        check(isinstance(steering, dict) and steering.get("state") in PHASE_STATES, f"{phase} state")
+        state = steering["state"]
+        required = {"state", "share"} | ({"by", "reason"} if state == "paused" else {"by"} if state == "draining" else
+                                         set())
+        check(set(steering) - {"since"} == required, f"{phase} takes {', '.join(sorted(required))} and since")
+        check(steering["share"] == "auto" or positive_integer(steering["share"]), f"{phase} share")
+        check("by" not in steering or steering["by"] in ACTORS, f"{phase} by")
+        check(state != "paused" or isinstance(steering["reason"], str) and steering["reason"], f"{phase} reason")
+        check("since" not in steering or positive_number(steering["since"]), f"{phase} since")
     window = settings["boot_window"]
     check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
           all(map(positive_integer, window.values())) and
@@ -158,8 +160,10 @@ def changed(before, actor, update, at):
         raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
     settings = copy.deepcopy(before)
     update(settings)
-    for phase, steering in settings["phases"].items():
-        if steering.get("state") != before["phases"].get(phase, {}).get("state"):
+    # An update may leave the phases malformed, which validation refuses below.
+    phases = settings.get("phases")
+    for phase, steering in phases.items() if isinstance(phases, dict) else ():
+        if isinstance(steering, dict) and steering.get("state") != before["phases"].get(phase, {}).get("state"):
             steering["since"] = at
     if settings != before:
         settings["version"] = before["version"] + 1

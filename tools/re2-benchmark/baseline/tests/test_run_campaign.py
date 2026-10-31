@@ -709,10 +709,12 @@ class TestRunCampaign(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             settings = campaign_settings(root, max_hosts=100, max_usd=50)
-            # The controller has recorded its phases' states.
-            settings.change("controller", "phases", lambda current: current["phases"].update({
-                "a/primary": {"state": "running", "share": "auto"},
-                "a/confirmation": {"state": "pending", "share": "auto"}}))
+            # The controller recorded its phases' states a minute before the commands run.
+            now = round(RUN_CAMPAIGN.time.time())
+            with patch.object(RUN_CAMPAIGN.time, "time", return_value=now - 60):
+                settings.change("controller", "phases", lambda current: current["phases"].update({
+                    "a/primary": {"state": "running", "share": "auto"},
+                    "a/confirmation": {"state": "pending", "share": "auto"}}))
             settings.change("controller", "spending stop", lambda current: current.update(
                 spending_stop={"by": "controller", "at": 1, "reason": "leak"}))
 
@@ -725,8 +727,8 @@ class TestRunCampaign(unittest.TestCase):
                 return settings.reload()
 
             region = RUN_CAMPAIGN.default_regions()[0]
-            # The clock stands still, so the stop records the time the test expects.
-            now = round(RUN_CAMPAIGN.time.time())
+            # The clock stands still, so the stop, and each phase state a command sets, records the time the test
+            # expects. A change of share alone keeps the time the phase took its state.
             clock = patch.object(RUN_CAMPAIGN.time, "time", return_value=now)
             clock.start()
             self.addCleanup(clock.stop)
@@ -736,12 +738,15 @@ class TestRunCampaign(unittest.TestCase):
                     (["set-limit", "region", region, "max-vcpus", "640"], "monitor", "regions",
                      {region: {"bucket": "bucket", "max_vcpus": 640}}),
                     (["set-purchase", "r9g", "on-demand"], "dain", "purchase", {"r9g": "on-demand"}),
-                    (["set-share", "a/primary", "40"], "dain", "phases", {"state": "running", "share": 40}),
+                    (["set-share", "a/primary", "40"], "dain", "phases",
+                     {"state": "running", "share": 40, "since": now - 60}),
                     (["pause", "a/primary", "--reason", "bad AMI"], "dain", "phases",
-                     {"state": "paused", "share": 40, "reason": "bad AMI", "by": "dain"}),
-                    (["drain", "a/primary"], "dain", "phases", {"state": "draining", "share": 40, "by": "dain"}),
-                    (["resume", "a/primary"], "dain", "phases", {"state": "running", "share": 40}),
-                    (["set-share", "a/primary", "auto"], "dain", "phases", {"state": "running", "share": "auto"}),
+                     {"state": "paused", "share": 40, "reason": "bad AMI", "by": "dain", "since": now}),
+                    (["drain", "a/primary"], "dain", "phases",
+                     {"state": "draining", "share": 40, "by": "dain", "since": now}),
+                    (["resume", "a/primary"], "dain", "phases", {"state": "running", "share": 40, "since": now}),
+                    (["set-share", "a/primary", "auto"], "dain", "phases",
+                     {"state": "running", "share": "auto", "since": now}),
                     (["clear-spending-stop"], "dain", "spending_stop", None),
                     (["authorize", "regions", "us-east-2", region], "dain", "authorized",
                      {"max_hosts": 100, "max_usd": 50, "regions": sorted(["us-east-2", region])}),
@@ -749,8 +754,7 @@ class TestRunCampaign(unittest.TestCase):
                      {"by": "dain", "at": now, "reason": "release run done"})):
                 with self.subTest(command=command):
                     current = control(*command, actor=actor)[field]
-                    self.assertEqual(value, {key: item for key, item in current["a/primary"].items() if key != "since"}
-                                     if field == "phases" else
+                    self.assertEqual(value, current["a/primary"] if field == "phases" else
                                      {key: current[key] for key in value} if field in ("regions", "purchase") else
                                      current)
             # The monitor resumes a phase the controller paused for a fault, but a pause or a drain Dain made is his.
