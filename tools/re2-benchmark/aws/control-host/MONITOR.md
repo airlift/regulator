@@ -207,7 +207,7 @@ Steering runs on the host as the monitor:
 ```bash
 host /opt/regulator/venv/bin/python \
   /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py \
-  control /regulator/campaign --actor monitor set-limit max-hosts 300
+  control /regulator/campaign --campaign <campaign> --actor monitor set-limit max-hosts 300
 ```
 
 The commands you use: `set-limit max-hosts|max-hosts-per-platform|max-usd N`,

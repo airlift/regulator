@@ -324,7 +324,8 @@ def parse_args():
         allow_abbrev=False,
         epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers, "
                "and with --results each primary phase's, or the given phase's, ratios so far; "
-               f"{Path(__file__).name} control ROOT --actor ACTOR COMMAND changes a campaign's live settings")
+               f"{Path(__file__).name} control ROOT --campaign CAMPAIGN --actor ACTOR COMMAND changes a campaign's live "
+               "settings")
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -4611,6 +4612,7 @@ def check_campaign_options(arguments):
     are in, or refuse a restart that changes them: the restart skips each completed phase, so it would measure
     nothing under the new options."""
     options = json.dumps({
+        "campaign": arguments.campaign,
         "account": arguments.cloud.account(next(iter(live_settings(arguments)["regions"]))),
         "spot_vcpu_reserve": arguments.spot_vcpu_reserve,
         "phase_timeout_seconds": arguments.phase_timeout_seconds,
@@ -5149,6 +5151,8 @@ def control_parser():
         prog=f"{Path(sys.argv[0]).name} control", allow_abbrev=False,
         description="change a running campaign's live settings, which its controller applies on its next loop")
     parser.add_argument("root", type=Path, help="the campaign root")
+    parser.add_argument("--campaign", required=True,
+                        help="the campaign the change is for, which the root's controller must have recorded")
     parser.add_argument("--actor", required=True, choices=("dain", "monitor"),
                         help="who makes the change, which the settings' events record")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -5267,9 +5271,7 @@ def check_region_limits(root, aws, before, after):
     """Refuse settings whose raised or new region vCPU limits exceed the region's Standard quota after its reserve, the
     check each phase's setup makes, so a limit a phase could not run under never reaches the controller. A lowered
     limit needs no quota."""
-    options = root / CAMPAIGN_OPTIONS
-    spot_reserve = (json.loads(options.read_text())["spot_vcpu_reserve"] if options.is_file() else
-                    SPOT_VCPU_SAFETY_RESERVE)
+    spot_reserve = json.loads((root / CAMPAIGN_OPTIONS).read_text())["spot_vcpu_reserve"]
     for region, limits in after["regions"].items():
         for name, market, reserve in (("max_vcpus", "spot", spot_reserve),
                                       ("on_demand_max_vcpus", "on-demand", ON_DEMAND_VCPU_SAFETY_RESERVE)):
@@ -5320,6 +5322,14 @@ def control(arguments, aws):
     """Change the campaign's live settings as the actor's control command; add-region reaches AWS through aws."""
     if arguments.actor == "monitor" and arguments.command not in MONITOR_COMMANDS:
         raise SystemExit(f"only dain runs {arguments.command}; the monitor runs {', '.join(MONITOR_COMMANDS)}")
+    # The controller records its campaign as it starts, so a command for one campaign never steers another's root.
+    options = arguments.root / CAMPAIGN_OPTIONS
+    recorded = json.loads(options.read_text()).get("campaign") if options.is_file() else None
+    if recorded is None:
+        raise SystemExit(f"{arguments.root} records no campaign: its controller has not yet started, or an earlier "
+                         "controller started it")
+    if recorded != arguments.campaign:
+        raise SystemExit(f"{arguments.root} is campaign {recorded}'s root, not campaign {arguments.campaign}'s")
     try:
         store = CampaignSettings(arguments.root)
         if arguments.command == "add-region":

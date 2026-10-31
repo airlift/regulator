@@ -334,6 +334,12 @@ class AwsCloud:
         self.call("elbv2", region, "register_targets", TargetGroupArn=target_group,
                   Targets=[{"Id": instance, "Port": port}])
 
+    def registered_targets(self, region, target_group):
+        """The IDs of the instances registered in the load balancer's target group, in any health state."""
+        descriptions = self.call("elbv2", region, "describe_target_health",
+                                 TargetGroupArn=target_group)["TargetHealthDescriptions"]
+        return [description["Target"]["Id"] for description in descriptions]
+
     def deregister_target(self, region, target_group, instance, port):
         self.call("elbv2", region, "deregister_targets", TargetGroupArn=target_group,
                   Targets=[{"Id": instance, "Port": port}])

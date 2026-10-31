@@ -80,6 +80,10 @@ class TestControlHost(unittest.TestCase):
             # The volume holds the campaign root, so the campaign launches once.
             with self.assertRaisesRegex(SystemExit, "already has a control host volume"):
                 control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
+            # Grafana's one name serves one campaign, so another campaign launches nothing while its host serves.
+            with self.assertRaisesRegex(SystemExit, f"forwards Grafana to {first} of campaign c; "):
+                control_host.launch(aws, "d", SSH_PUBLIC_KEY, inputs)
+            self.assertEqual([volume], aws.region_volumes["us-west-2"])
 
         # A replacement takes the old host's place on the volume, in the volume's zone whatever order the subnets
         # are listed in, and in the target group.

@@ -53,16 +53,22 @@ import test_fleet  # noqa: E402
 
 
 def campaign_settings(root, platform_regions=None, purchase=None, buckets=None, **values):
-    """Seed the campaign root's settings as its first execution does, with values over test_fleet_budget's: each
-    platform's launch regions, by default the default region for both platforms, how it buys hosts, and each of those
-    regions with its bucket, which buckets names or is "bucket", and a limit of 736 vCPUs."""
+    """Seed the campaign root's settings, and record its options as campaign "campaign" with the default Spot vCPU
+    reserve, as its first execution does, with values over test_fleet_budget's: each platform's launch regions, by
+    default the default region for both platforms, how it buys hosts, and each of those regions with its bucket, which
+    buckets names or is "bucket", and a limit of 736 vCPUs."""
     platform_regions = platform_regions or dict.fromkeys(("r8i", "r9g"), RUN_CAMPAIGN.default_regions())
     regions = dict.fromkeys(region for listed in platform_regions.values() for region in listed)
     root.mkdir(parents=True, exist_ok=True)
-    return test_fleet_budget.seed_settings(root, **{
+    settings = test_fleet_budget.seed_settings(root, **{
         "platform_regions": platform_regions, "purchase": purchase or {},
         "regions": {region: {"bucket": (buckets or {}).get(region, "bucket"), "max_vcpus": 736} for region in regions},
         **values})
+    RUN_CAMPAIGN.check_campaign_options(SimpleNamespace(
+        campaign="campaign", campaign_root=root, cloud=FakeCloud(), settings=settings,
+        spot_vcpu_reserve=RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE, phase_timeout_seconds=None, selected_shards=None,
+        smoke_protocol="smoke", release_version="", language_plan=[]))
+    return settings
 
 
 def shell_function(source, name):
@@ -616,10 +622,11 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual((campaign_root / "a" / "reduction" / "confirmation-jobs.tsv", ["trino-like"]),
                              (confirmation.confirmation_jobs, confirmation.selected_shards))
             # A restart measures what the campaign started measuring, of the candidates it started with, with the
-            # Spot vCPU reserve it started with, in the AWS account it started in.
+            # Spot vCPU reserve it started with, in the AWS account it started in, as the campaign it started as.
             with self.assertRaisesRegex(SystemExit, "candidates differ"):
                 run(names=("a",))
-            for option, value in (("selected_shards", None), ("spot_vcpu_reserve", 16), ("account_id", "1" * 12)):
+            for option, value in (("selected_shards", None), ("spot_vcpu_reserve", 16), ("account_id", "1" * 12),
+                                  ("campaign", "other")):
                 options = arguments.cloud if option == "account_id" else arguments
                 with self.subTest(option=option), patch.object(options, option, value), \
                         self.assertRaisesRegex(SystemExit, "options differ"):
@@ -639,10 +646,10 @@ class TestRunCampaign(unittest.TestCase):
 
             aws = FakeCloud()
 
-            def control(*command, actor="dain"):
+            def control(*command, actor="dain", campaign="campaign"):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
-                        [str(root), "--actor", actor, *command]), aws)
+                        [str(root), "--campaign", campaign, "--actor", actor, *command]), aws)
                 return settings.reload()
 
             region = RUN_CAMPAIGN.default_regions()[0]
@@ -711,6 +718,9 @@ class TestRunCampaign(unittest.TestCase):
                      "no r9g image in ap-northeast-2")):
                 with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
                     control(*command, actor=actor)
+            # A command for another campaign never steers this one.
+            with self.assertRaisesRegex(SystemExit, "is campaign campaign's root, not campaign other's"):
+                control("set-limit", "max-hosts", "80", campaign="other")
             self.assertEqual(len(rows), len((root / EVENTS).read_text().splitlines()) - 1)
             # A refused region gets no bucket.
             self.assertEqual([bucket], list(aws.buckets))
@@ -2962,8 +2972,8 @@ class TestUnitWorkers(unittest.TestCase):
     def control(self, root, *command, actor="dain", aws=None):
         """Run a control command on the campaign root, as the actor, reaching AWS through aws."""
         with contextlib.redirect_stdout(io.StringIO()):
-            RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args([str(root), "--actor", actor, *command]),
-                                 aws)
+            RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
+                [str(root), "--campaign", "campaign", "--actor", actor, *command]), aws)
 
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]

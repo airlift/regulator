@@ -162,10 +162,24 @@ def live_hosts(aws, campaign):
             all(instance.tags.get(key) == value for key, value in tags(campaign).items())]
 
 
+def check_target_group(aws, network, campaign):
+    """Refuse to put the campaign's host in the load balancer's target group while another campaign's host, by its
+    Campaign tag, is registered there: the one name would serve both campaigns' Grafana by turns."""
+    registered = set(aws.registered_targets(REGION, network["target_group"]))
+    campaigns = {instance.id: instance.tags.get("Campaign", "") for instance in aws.instances(REGION)
+                 if instance.id in registered}
+    others = sorted(f"{host} of campaign {campaigns.get(host) or 'unknown'}" for host in registered
+                    if campaigns.get(host) != campaign)
+    if others:
+        raise SystemExit(f"the load balancer forwards Grafana to {', '.join(others)}; one name serves one "
+                         f"campaign, so tear that campaign's host down before starting campaign {campaign}'s")
+
+
 def launch(aws, campaign, ssh_public_key, inputs):
     """Launch the campaign's control host onto a new campaign volume, with the launch inputs archive at inputs."""
     found = network(aws)
     group = security_group(aws, found)
+    check_target_group(aws, found, campaign)
     if aws.volumes(REGION, tags(campaign)):
         raise SystemExit(f"campaign {campaign} already has a control host volume; replace its host with control-host "
                          f"replace {campaign}, or tear it down first")
@@ -186,6 +200,7 @@ def replace(aws, campaign, ssh_public_key):
     zone."""
     found = network(aws)
     group = security_group(aws, found)
+    check_target_group(aws, found, campaign)
     volume = campaign_volume(aws, campaign)
     hosts = live_hosts(aws, campaign)
     if hosts:

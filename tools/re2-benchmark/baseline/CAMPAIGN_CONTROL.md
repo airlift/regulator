@@ -150,7 +150,9 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    control host.
 3. Registers the host in the load balancer's target group, so Grafana keeps
    one URL across host replacements, and returns with that URL and the ssh
-   line, port 443 at the host's private address. Everything after this runs in AWS (principle 7).
+   line, port 443 at the host's private address. One URL serves one
+   campaign: the launch and `control-host replace` refuse while the target
+   group holds a host whose `Campaign` tag names another. Everything after this runs in AWS (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket
@@ -365,8 +367,10 @@ in a new root.
 
 ### Commands
 
-`run-campaign.py control <campaign> <command>` runs on the control host;
-from the Mac it is the same command over ssh on port 443 through the subnet router. Each takes the
+`run-campaign.py control <root> --campaign <campaign> <command>` runs on the
+control host; from the Mac it is the same command over ssh on port 443
+through the subnet router. It refuses a root whose controller recorded
+another campaign in `campaign-options.json` as it started. Each takes the
 lock, validates, bumps the version and logs the event with its actor; the
 new version takes effect only once its event is logged.
 
