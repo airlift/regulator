@@ -35,9 +35,10 @@ class LaunchUnknown(CloudError):
     """A launch failed every attempt without AWS refusing it, so an instance may exist; its tags find it."""
 
 
-# The RunInstances errors that prove AWS launched nothing, by the kind of shortage each reports. Any other client
-# error but a throttle is a request AWS refused outright. Every other failure, a timeout or a server error among
-# them, is retried with the same client token, which AWS answers with the instance it launched.
+# The RunInstances errors that prove AWS launched nothing, as the answer to a launch's first request, by the kind of
+# shortage each reports. Any other client error but a throttle is a request AWS refused outright. Every other
+# failure, a timeout or a server error among them, is retried with the same client token, which AWS answers with the
+# instance it launched.
 LAUNCH_REJECTIONS = {
     "InsufficientInstanceCapacity": "capacity", "UnfulfillableCapacity": "capacity",
     "InsufficientFreeAddressesInSubnet": "capacity",
@@ -367,7 +368,7 @@ class AwsCloud:
 
     def run_instance(self, region, spec):
         """Launch one instance, terminated when it shuts down, and return its ID. Raises LaunchRejected when AWS
-        refuses it, and LaunchUnknown when every attempt failed otherwise."""
+        refuses its first request, and LaunchUnknown when it refuses a later one or every attempt failed otherwise."""
         parameters = {
             "ImageId": spec.image, "InstanceType": spec.instance_type, "MinCount": 1, "MaxCount": 1,
             "ClientToken": spec.token, "UserData": spec.user_data,
@@ -389,11 +390,17 @@ class AwsCloud:
                 return self.call("ec2", region, "run_instances", **parameters)["Instances"][0]["InstanceId"]
             except CloudError as error:
                 code = error_code(error.__cause__)
+                response = getattr(error.__cause__, "response", None) or {}
+                metadata = response.get("ResponseMetadata", {})
+                status = metadata.get("HTTPStatusCode", 0)
+                refused = code in LAUNCH_REJECTIONS or (400 <= status < 500 and code not in THROTTLES)
+                # A refusal proves nothing launched only when it answered the launch's first request; a request
+                # sent before it, by this loop or by botocore's own retries, may have launched the instance.
+                if refused and (attempt > 1 or metadata.get("RetryAttempts", 0)):
+                    raise LaunchUnknown(str(error)) from error
                 if code in LAUNCH_REJECTIONS:
                     raise LaunchRejected(LAUNCH_REJECTIONS[code], code) from error
-                response = getattr(error.__cause__, "response", None) or {}
-                status = response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
-                if 400 <= status < 500 and code not in THROTTLES:
+                if refused:
                     raise LaunchRejected("request", code, response.get("Error", {}).get("Message", "")) from error
                 if attempt == LAUNCH_ATTEMPTS:
                     raise LaunchUnknown(str(error)) from error
