@@ -220,7 +220,9 @@ within 5 minutes of launch, it doubles, up to its `max`, 50 by default, and
 once any is late, or ends before it reported for a reason other than a Spot
 reclaim, it halves, down to 5. Each resize is the controller's settings change
 of its `size`, so the events record the window's history. A launch it refuses
-waits with reason `boot window`.
+waits with reason `boot window`. Each loop, a phase's pools in turn first take
+up to an even part of the room the window has left, and the pools that need
+more then share the rest.
 
 Multicore workers, the Spot reserve, unrelated Spot use, and spending
 reservations can keep the fleet below `max_hosts`. A phase's derived deadline
@@ -1354,7 +1356,9 @@ in the list's other regions meanwhile. While every region of the list cools,
 the pool tries every region again at once until its Spot shortage has lasted
 its [bounded wait](#launch-regions-and-purchase); a `spot-then-on-demand`
 pool's new workers then launch On-Demand, and Spot resumes in each region once
-its cool-down ends. A restarted controller forgets the cool-downs.
+its cool-down ends. Through its shortage the pool tries one Spot launch a loop,
+so a pool AWS keeps refusing leaves the boot window to the others. A restarted
+controller forgets the cool-downs.
 
 The controller writes a worker's first lease before it launches the host, so
 the host finds its work waiting when its setup ends. It also writes the second

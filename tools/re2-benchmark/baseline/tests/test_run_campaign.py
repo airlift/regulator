@@ -2678,7 +2678,8 @@ class FakeUnitFleet(FakeCloud):
         self.reservations = []
         # Every lease the controller wrote, by bucket and key.
         self.written_leases = {}
-        # Every launch the controller asked for, in order, and whether AWS refused it.
+        # Every launch the controller asked for, in order, with the controller loop that asked, and whether AWS
+        # refused it.
         self.launches = []
         self.synthetic = units is not None
         self.units = units or RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
@@ -2701,7 +2702,7 @@ class FakeUnitFleet(FakeCloud):
             platform = spec.tags["Platform"]
             refused = spec.market == "spot" and self.full_spot.get(platform, 0) > 0
             self.launches.append(SimpleNamespace(platform=platform, market=spec.market, region=region,
-                                                 launched_at=self.clock, refused=refused))
+                                                 launched_at=self.clock, loop=self.sleeps, refused=refused))
             if refused:
                 self.full_spot[platform] -= 1
                 self.call("run_instance", region, spec)
@@ -3183,6 +3184,27 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn(("on-demand", "us-east-2"),
                           {(receipt["market"], receipt["region"])
                            for receipt in RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")})
+
+    def test_pool_short_of_spot_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # Each pool has work for ten hosts, as many as the boot window first admits, and r8i's next 40 Spot
+            # launches find no capacity.
+            units = {f"short-{index}": {"unit_id": f"short-{index}", "shard_id": "short", "unit_index": str(index),
+                                        "estimated_seconds": "600",
+                                        "groups": [{"group_id": "1", "estimated_seconds": 600}]}
+                     for index in range(1, 21)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                  full_spot={"r8i": 40})
+            self.run_phase(Path(temporary), fleet, "smoke", ["short"], 20, 10,
+                           purchases={"r8i": "spot", "r9g": "spot"}, shared=True)
+            # The pools take turns in the window, so r9g launches its half in the loop r8i first finds no capacity.
+            refused = collections.Counter(launch.loop for launch in fleet.launches if launch.refused)
+            first = min(refused)
+            self.assertEqual(BOOT_WINDOW_FIRST // 2, refused[first])
+            self.assertEqual(BOOT_WINDOW_FIRST // 2, sum(launch.platform == "r9g" and launch.loop == first
+                                                         for launch in fleet.launches))
+            # From then on r8i tries one Spot launch a loop until one finds capacity.
+            self.assertEqual({1}, {count for loop, count in refused.items() if loop != first})
 
     def test_pool_launches_only_for_work_its_workers_would_start_after_a_boot(self):
         work = sum(float(unit["estimated_seconds"]) for unit in RUN_CAMPAIGN.work_units.load(SCRIPT.parent).values()

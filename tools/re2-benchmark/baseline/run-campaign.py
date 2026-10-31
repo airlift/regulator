@@ -3702,25 +3702,30 @@ class UnitDispatcher:
 
     def admit(self, now, starting):
         """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
-        starting."""
+        starting. Each pool in turn first takes up to its even part of the boot window, and the pools that need more
+        then share what is left, so every pool that needs hosts gets its part; a pool short of Spot capacity tries
+        one Spot launch a loop until one of its Spot workers starts."""
         blocked_vcpus = None
-        for pool in self.pools:
+
+        def admit_pool(pool, limit):
+            # Whether the pool admitted its limit and may take more; None once a refusal holds for every pool.
+            nonlocal blocked_vcpus
             # A worker is planned only once its platform has room for it.
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
                 market = self.pool_demand(pool, now)
                 if market is None:
                     self.refused.pop(pool, None)
-                    break
+                    return False
                 candidate = self.candidate(pool, market)
                 if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
-                    break
+                    return False
                 # A launch reserves the worker's boot and a first lease of the pool's longest queued item.
                 boot_by = math.ceil(time.time()) + UNIT_WORKER_BOOT_ALLOWANCE_SECONDS
                 first_lease = lease_timeout(max(map(self.remaining_seconds, self.queued(pool)), default=0))
                 candidate = replace(candidate, boot_by=boot_by, stop_by=boot_by + first_lease +
                                     UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
                 if blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
-                    break
+                    return False
                 candidate, ready_at, refusal, scan, blocked = admit_launch(
                     self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
                     self.observed)
@@ -3737,10 +3742,23 @@ class UnitDispatcher:
                 if refusal:
                     self.pool_ready[pool] = ready_at
                     blocked_vcpus = blocked or blocked_vcpus
-                    if not scan:
-                        return
-                    break
+                    return False if scan else None
                 starting.append(self.start(pool, candidate, now))
+                if candidate.market == "spot" and pool in self.spot_shortages:
+                    return False
+                limit -= 1
+                if not limit:
+                    return True
+            return False
+
+        wanting = list(self.pools)
+        for limit in (math.ceil(self.boot_room / len(self.pools)), math.inf):
+            for pool in list(wanting):
+                admitted = admit_pool(pool, limit)
+                if admitted is None:
+                    return
+                if not admitted:
+                    wanting.remove(pool)
 
     def start(self, pool, job, now):
         """Record an admitted worker and issue its first leases, before its launch."""
