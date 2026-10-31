@@ -532,8 +532,12 @@ campaign's tags, so a teardown that failed partway finishes when run again,
 with no second snapshot. Once the volume carries the tag, `control-host
 replace` refuses, and a replace that checked the volume before the tag looks
 again once the volume is attached, and terminates its host before its
-controller starts; either way no host writes the volume after its last copy.
-The tag lives in AWS, so the two commands need not run on the same machine.
+controller starts. A host that attaches as the snapshot is taken may still
+write its boot files, such as the checkout, which the next host writes again.
+Only a replace that stalls for minutes between the attach and that look, as
+on a Mac that sleeps, lets its controller start and write after the snapshot.
+Never run teardown and replace at the same time. The tag lives in AWS, so the
+two commands need not run on the same machine.
 
 ## Lower stakes before launch
 
