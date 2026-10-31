@@ -288,10 +288,15 @@ class TestControlHost(unittest.TestCase):
         user_data = control_host.USER_DATA.read_text()
         campaign = (CONTROL_HOST / "regulator-campaign@.service").read_text()
         lgtm = (CONTROL_HOST / "regulator-lgtm.service").read_text()
-        # A first boot interrupted while unpacking the launch inputs, or after creating the checkout, leaves the next
-        # boot to finish them.
+        # A first boot interrupted while unpacking the launch inputs, or while git writes the checkout, leaves the
+        # next boot to finish them: git's stale locks go, a checkout git cannot read is made again, and the commit is
+        # checked out over whatever half of it was.
         self.assertIn('-C "${INPUTS}.new"\n    mv -T "${INPUTS}.new" "${INPUTS}"\n', user_data)
+        self.assertIn('rm -f "${CHECKOUT}"/.git/*.lock\n'
+                      'if ! sudo -u ec2-user git -C "${CHECKOUT}" rev-parse --git-dir > /dev/null 2>&1; then\n'
+                      '    rm -rf "${CHECKOUT}"\n', user_data)
         self.assertIn('git -C "${CHECKOUT}" remote get-url origin', user_data)
+        self.assertIn('git -C "${CHECKOUT}" checkout -q -f --detach', user_data)
         # The controller unit runs the recorded command from the volume, with the environment user data built, and
         # leaves a campaign that ended with failed phases ended.
         venv = re.search(r"^VENV=(\S+)$", user_data, re.MULTILINE)[1]
