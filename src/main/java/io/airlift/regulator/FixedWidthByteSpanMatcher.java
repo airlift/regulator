@@ -193,6 +193,23 @@ final class FixedWidthByteSpanMatcher
         return true;
     }
 
+    /// Returns the number of non-overlapping matches in `input`. Matches are never empty, so
+    /// each search resumes where the previous match ended.
+    long count(Slice input)
+    {
+        long count = 0;
+        int searchStart = 0;
+        while (searchStart < input.length()) {
+            long span = findSpan(input, searchStart);
+            if (span < 0) {
+                break;
+            }
+            count++;
+            searchStart = (int) span;
+        }
+        return count;
+    }
+
     long findSpan(Slice input, int start)
     {
         requireNonNull(input, "input is null");

@@ -18,9 +18,11 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -64,13 +66,15 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(regexp.split(repeated)).containsExactly(utf8Slice("!"), utf8Slice("?"), utf8Slice("."));
         assertThat(regexp.replace(repeated, _ -> utf8Slice("X"))).isEqualTo(utf8Slice("!X?X."));
 
-        // The fixed-width Trino subtype handles every public operation from the retained
-        // byte predicates. Its semantic program must therefore be the compact sentinel rather
-        // than the otherwise unused 37-state OnePass program.
+        // The fixed-width Trino subtype handles every public operation from the retained byte
+        // predicates; its compiled pattern uses them for boolean find and count. Its semantic
+        // program must therefore be the compact sentinel rather than the otherwise unused
+        // 37-state OnePass program.
         assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).isTrue();
+        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
 
-        // Keep the optimization isolated to Trino's compiled fixed-width route.
+        // Only Trino's fixed-width route drops the semantic program.
         assertThat(Re2.compile(expression).forwardProgramForDiagnostics().isOnePass()).isTrue();
     }
 
@@ -153,7 +157,8 @@ public class TestFixedWidthByteSpanMatcher
     {
         List<String> patterns = List.of(
                 "[0-9]{4}-[0-9]{2}-[0-9]{2}",
-                "\\d{3}/\\d{3}/\\d{4}",
+                // Not \d, because Rust's Unicode \d is not a one-byte class.
+                "[0-9]{3}/[0-9]{3}/[0-9]{4}",
                 "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}");
         List<Slice> inputs = List.of(
                 utf8Slice(""),
@@ -163,7 +168,26 @@ public class TestFixedWidthByteSpanMatcher
                 utf8Slice("212/555/0101 or 650/555/0142"),
                 utf8Slice("01234567-89ab"),
                 utf8Slice("é💰2025-12-09ж終"),
-                wrappedBuffer(new byte[] {'1', (byte) 0xFF, '-', '3', '4'}));
+                wrappedBuffer(new byte[] {'1', (byte) 0xFF, '-', '3', '4'}),
+                wrappedBuffer("\u00FF2025-12-09\u00C3212/555/0101\u00E201234567-89ab2024-01-31\u00F0".getBytes(ISO_8859_1)));
+
+        // Boolean find and count of RE2, Java, and Rust patterns run on the matcher and agree
+        // with the general engine, including on malformed UTF-8.
+        for (String expression : patterns) {
+            for (Map.Entry<String, Re2> entry : re2JavaAndRustPatterns(expression).entrySet()) {
+                String label = entry.getKey();
+                Re2 pattern = entry.getValue();
+                assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
+                // Count answers from the matcher without building the general engine's DFA.
+                pattern.count(inputs.getLast());
+                assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(label).isNull();
+                for (Slice input : inputs) {
+                    long expectedCount = generalEngineCount(pattern, input);
+                    assertThat(pattern.find(input)).as("%s input %s", label, input.toStringUtf8()).isEqualTo(expectedCount > 0);
+                    assertThat(pattern.count(input)).as("%s input %s", label, input.toStringUtf8()).isEqualTo(expectedCount);
+                }
+            }
+        }
 
         for (String expression : patterns) {
             Re2 pattern = Re2.compile(utf8Slice(expression));
@@ -186,6 +210,27 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
+    }
+
+    // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.
+    // Trino's fixed-width subtype is covered separately.
+    private static Map<String, Re2> re2JavaAndRustPatterns(String expression)
+    {
+        return Map.of(
+                "RE2 " + expression, Re2.compile(utf8Slice(expression)),
+                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)).re2(),
+                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)).re2(),
+                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()).re2());
+    }
+
+    private static long generalEngineCount(Re2 pattern, Slice input)
+    {
+        RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        long count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     private static FixedWidthByteSpanMatcher matcher(String pattern)

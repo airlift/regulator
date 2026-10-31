@@ -833,6 +833,15 @@ other unproven forms retain the ordinary path. The single-byte table is
 initialized lazily; subsequent direct boolean calls allocate no matching
 storage.
 
+When the general engine would otherwise answer, full-Slice boolean `find` and
+count in RE2, Java, and Rust use the literal-alternation and fixed-width span
+matchers Trino uses. Trino's subtypes call these matchers directly because
+routing through the compiled pattern's dispatch measured about 9% more per
+call on Graviton. The literal-alternation matcher restarts its trie at every
+input byte, so it takes only alternatives of at most 64 bytes; a longer
+literal keeps the general engine, whose DFA scans each byte once. The longest
+literal among the measured rows is 35 bytes, in rebar's Russian Sherlock names.
+
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
 Empty-pattern advancement is unchanged. The new core single-byte boolean/count
