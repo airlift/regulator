@@ -193,7 +193,7 @@ there means the controller's telemetry is not arriving, which you report.
 | Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
 | Projected spend over max | the campaign will reach `max_usd` | Raise `max-usd` within `authorized` only while a refusal or a late finish also stands; otherwise report. |
 | Spending stop | no launch or extension is admitted | Ask Dain, with the stop's reason from `status`. |
-| Phases paused | a phase is paused | Read its reason from `status`, and who paused it from the phase's `by` in the settings. Resume a phase the controller paused once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause or a drain Dain made is his, and `control` refuses to resume it for you. |
+| Phases paused | a phase is paused | Read its reason from `status`, and who paused it from the phase's `by` in the settings; a pause spends none of the phase's deadline. Resume a phase the controller paused once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause or a drain Dain made is his, and `control` refuses to resume it for you. |
 | Leftovers | an ended host's prefix is not yet empty | Report; the controller retries every loop. |
 | Interruptions and stalls | no threshold | Report a sudden rise. |
 | Faults and leaks | no threshold | Report each new line. |

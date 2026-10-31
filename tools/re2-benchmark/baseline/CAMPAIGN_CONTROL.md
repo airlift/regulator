@@ -52,14 +52,8 @@ report never reached the coordinator, so nothing acted until morning.
   measurement validity and cannot.
 - **Pause** (phase): no new launches or leases; running leases finish and the
   workers idle-stop. A phase paused for a fault still reports its hosts' boots
-  to the boot window and still stop-leases them at a stop. A pause the
-  controller observes spends none of the phase's deadline: the controller
-  records it in the phase's `phase-pauses.tsv` from when the settings took
-  it, as the phase's `since` there records, and moves the deadline out by it,
-  across restarts. A pause still open when a controller starts counts from
-  when it was made. A pause and its resume both made while no controller ran
-  are never observed, so they are not credited; how a controller's downtime
-  spends the deadline is an open question.
+  to the boot window and still stop-leases them at a stop. A pause spends none
+  of the phase's deadline (see [Progress and finish](#progress-and-finish)).
   **Drain**: no new launches; queued work goes to live workers until they
   stop. **Stop** (campaign): stop-lease every worker, prove cleanup, exit.
   **Spending stop**: no launch anywhere until cleared.
@@ -315,6 +309,16 @@ The dashboards are built around one model, exported every loop:
   ones; the phase's is its latest pool's. It responds to a
   capacity change on the next loop, so adding a region moves the estimate at
   once. It also weights the shares.
+
+A phase's launches end at its deadline: its timeout after its first start,
+moved out by every second its settings record it paused since then. A
+settings change that ends a pause adds the time since the phase's `since` in
+the settings to the phase's `paused_seconds` there, and a pause still open
+counts until now, so a restarted controller reads every pause back, including
+a pause and its resume both made while no controller ran. A fault pause counts
+from the loop whose settings change records it. Time with no controller and
+no pause still spends the deadline. A first start records the seconds the
+settings already hold, so a pause before the phase started credits nothing.
 
 The ledgers record estimated seconds with each work item and the actual
 seconds in each accepted group's unit session, so `status` reproduces the

@@ -234,13 +234,14 @@ settled in the loop that launched it, so it holds none of the window from the
 phases that launch after it.
 
 Multicore workers, the Spot reserve, unrelated Spot use, and spending
-reservations can keep the fleet below `max_hosts`. A phase's derived deadline
+reservations can keep the fleet below `max_hosts`. A phase's derived timeout
 uses the settings' host, per-platform, and vCPU limits when it first starts,
 plus one retry wave and a capacity allowance; the vCPU limit is the sum of the
 launch regions' `max_vcpus`. Every worker type, including each unit pool's
 host, must fit the largest `max_vcpus` among the regions of its platform's
 list. An explicit `--phase-timeout-seconds` is frozen on first execution and
-cannot change on resume.
+cannot change on resume. A phase's launch deadline is its timeout, derived or
+explicit, past its first start, moved out by each pause.
 
 For a focused change, budget only the affected cases and protected controls.
 Preserve accepted work and resume with unchanged frozen inputs instead
@@ -789,8 +790,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   hold, finish, and its workers stop at their idle stop. `drain <phase>`
   launches nothing for it, while its live workers take its queued work until
   they stop. `resume <phase>` runs a paused or draining phase again. The
-  settings record who paused or drained a phase as its `by`, and a pause's
-  `reason`. A restart keeps a phase paused or draining.
+  settings record who paused or drained a phase as its `by`, a pause's
+  `reason`, and the seconds its ended pauses lasted as its `paused_seconds`.
+  A restart keeps a phase paused or draining. A pause spends none of the
+  phase's deadline, even one made and resumed while no controller ran; time
+  with no controller and no pause spends it.
 - `clear-spending-stop` admits launches and lease extensions again after a
   [spending stop](#recovering-uploads-during-cleanup).
 - `stop [--reason TEXT]` stop-leases every worker, each behind the leases it
