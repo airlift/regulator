@@ -135,13 +135,13 @@ class TestRunCampaign(unittest.TestCase):
                          RUN_CAMPAIGN.allocate({"a": {"r8i": (900, 50), "r9g": (100, 50)}, "b": {"r8i": (100, 50)}},
                                                20, 4, {"a": 3}))
 
-        def shares(held, pinned=None, waiting=50, paused=()):
+        def shares(held, pinned=None, waiting=50, paused=(), draining=()):
             # Phases a and b, a with little work left and b with much, of waiting items, holding hosts. A paused
-            # phase launches nothing, and neither takes nor gives up hosts.
+            # phase launches nothing, and neither takes nor gives up hosts; a draining one launches nothing.
             running = [SimpleNamespace(key=key, dispatcher=SimpleNamespace(
                 demand=lambda seconds=seconds, items=items: {"r8i": (seconds, items)},
                 holding=lambda open_only=False, held=held[key]: Counter(r8i=held),
-                steering="paused" if key in paused else "running", share=None))
+                steering="paused" if key in paused else "draining" if key in draining else "running", share=None))
                 for key, seconds, items in (("a", 100, 50), ("b", 900, waiting))]
             settings = self.settings(max_hosts=10, max_hosts_per_platform=10)
             if pinned:
@@ -160,6 +160,8 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual([({"r8i": 8}, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, waiting=2))
         self.assertEqual([({"r8i": 8}, {"r8i": 5}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, 3, waiting=2))
         self.assertEqual([(None, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, paused="a"))
+        # A draining phase whose hosts go on taking its leases gives up those a lowered limit leaves no room for.
+        self.assertEqual([(None, {"r8i": 2}), ({"r8i": 4}, {})], shares({"a": 8, "b": 4}, draining="a"))
 
     def test_engine_builds_are_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
