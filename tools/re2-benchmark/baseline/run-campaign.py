@@ -4872,9 +4872,9 @@ def run_campaign(arguments, root):
             arguments.telemetry.shutdown()
         # A controller that ended lists the root's files for finish to check its copy against, under the settings
         # lock, so no control command changes the root once it is listed; one SIGTERM stopped leaves the root to the
-        # next.
+        # next. A settings change a failure interrupted is finished first, as a later command would finish it.
         if not campaign.terminated:
-            with locked(arguments.settings.lock_path):
+            with arguments.settings.locked():
                 control_host.write_manifest(arguments.campaign_root)
     if failed:
         message = "campaign finished with failed phases:\n" + "\n".join(
