@@ -131,9 +131,12 @@ reload it keeps the last version it loaded and logs why. Every change takes
 `campaign-settings.lock` while it rewrites the file, takes the next version,
 and appends a row naming its actor, `dain`, `monitor`, or `controller`, to
 `campaign-settings-events.tsv`. The new version is written beside the file
-and put in place only once its row is recorded; the next change puts in place
-one whose row was recorded before a failure, and discards one whose row was
-not, so no version takes effect without its row. The controller itself
+and put in place only once its row is recorded; the next change or reload,
+under the lock, puts in place one whose row was recorded before a failure,
+and discards one whose row was not, so no version takes effect without its
+row. While the events cannot be read, the new version stays beside the file,
+and every reload keeps the last version and every change is refused, since
+its row may be recorded. The controller itself
 changes only the phases' states, the boot window's size, and the spending
 stop.
 

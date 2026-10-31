@@ -56,11 +56,18 @@ class TestCampaignSettings(unittest.TestCase):
         self.assertEqual(368, settings.reload()["max_hosts"])
         settings.change(*change)
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
-        # A change interrupted once its event was recorded takes effect under the next change, and its retry changes
-        # nothing more.
+        # A change interrupted once its event was recorded takes effect at the next reload, and its retry changes
+        # nothing more. While its events cannot be read, it stays staged and no other change is made, since another
+        # would take its version.
         with patch.object(campaign_settings.os, "replace", side_effect=OSError("interrupted")), \
                 self.assertRaises(OSError):
             settings.change("monitor", "max_hosts 200 to 100", lambda current: current.update(max_hosts=100))
+        with patch.object(campaign_settings, "ledger_lines", side_effect=OSError("I/O error")):
+            for attempt in (settings.reload, lambda: settings.change(
+                    "dain", "max_usd to 100", lambda current: current.update(max_usd=100))):
+                with self.assertRaisesRegex(SettingsError, "cannot finish the campaign settings change staged"):
+                    attempt()
+        self.assertEqual((3, 100), (settings.reload()["version"], settings.current["max_hosts"]))
         settings.change("monitor", "max_hosts 200 to 100", lambda current: current.update(max_hosts=100))
         self.assertEqual((3, 100), (settings.reload()["version"], settings.current["max_hosts"]))
         self.assertEqual([("1", "dain", "seed"), ("2", "monitor", "max_hosts 368 to 200"),
