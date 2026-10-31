@@ -156,8 +156,8 @@ class FleetBudget:
         self.settings = settings
         self.spot_vcpu_reserve = spot_vcpu_reserve
         self.campaign_root = Path(campaign_root).resolve()
-        self.state_path = Path(campaign_root) / STATE_FILE
-        self.lock_path = Path(campaign_root) / "fleet-budget.lock"
+        self.state_path = self.campaign_root / STATE_FILE
+        self.lock_path = self.campaign_root / "fleet-budget.lock"
 
     @contextmanager
     def locked(self):
@@ -277,8 +277,9 @@ class FleetBudget:
         return Path(root).resolve().relative_to(self.campaign_root).as_posix()
 
     def reservations(self, owner):
+        owner = self.owner(owner)
         with self.locked() as state:
-            return [item.copy() for item in state["reservations"].values() if item["owner"] == self.owner(owner)]
+            return [item.copy() for item in state["reservations"].values() if item["owner"] == owner]
 
     def stop_spending(self, reason):
         """Stop the fleet's spending, as the controller's settings change: no launch or extension is admitted until
@@ -295,11 +296,20 @@ def read_state(state_path):
     return json.loads(state_path.read_text()) if state_path.is_file() else None
 
 
+def earlier_owner(owner):
+    """Whether an owner in the fleet's state is an earlier controller's. Controllers before phase keys named each
+    phase by its absolute root on the control host. r20's root names its phases so, and status still reads it, but
+    no controller resumes such a root."""
+    return PurePosixPath(owner).is_absolute()
+
+
 def owner_key(owner):
-    """The phase key an owner in the fleet's state names. Controllers before phase keys named each phase by its
-    absolute root on the control host, which reads as its key under the host's campaign root."""
+    """The phase key an owner in the fleet's state names. An earlier controller's owner reads as its key under the
+    host's campaign root."""
     path = PurePosixPath(owner)
-    return path.relative_to(CAMPAIGN_ROOT).as_posix() if path.is_relative_to(CAMPAIGN_ROOT) else owner
+    if earlier_owner(owner) and path.is_relative_to(CAMPAIGN_ROOT):
+        return path.relative_to(CAMPAIGN_ROOT).as_posix()
+    return owner
 
 
 def owner_fleet(state, owner, now):

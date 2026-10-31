@@ -801,7 +801,7 @@ class TestRunCampaign(unittest.TestCase):
                     (["add-region", "ap-south-1", "--max-vcpus", "256", "--platforms", "r8i"], "monitor",
                      "only the authorized regions"),
                     (["set-limit", "region", region, "max-vcpus", "969"], "dain",
-                     "max_vcpus 969 exceeds the Standard spot quota of 1000 vCPUs after its reserve of 32"),
+                     "max_vcpus 969 exceeds the Standard Spot quota of 1000 vCPUs after its reserve of 32"),
                     (["add-region", "us-east-2", "--max-vcpus", "969"], "dain", "max_vcpus 969 exceeds"),
                     (["add-region", "ap-northeast-2", "--max-vcpus", "256"], "dain",
                      "no r9g image in ap-northeast-2")):
