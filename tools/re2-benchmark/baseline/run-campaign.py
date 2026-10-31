@@ -4906,6 +4906,15 @@ def main():
         control_host.replace(cloud.AwsCloud(), arguments.campaign,
                              control_host.read_ssh_public_key(arguments.ssh_public_key))
         return
+    if sys.argv[1:2] == ["teardown"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} teardown",
+                                         description="terminate a campaign's control host and delete its volume, "
+                                                     "keeping a snapshot; only Dain runs it")
+        parser.add_argument("campaign")
+        parser.add_argument("--confirm", action="store_true", help="tear the control host down")
+        arguments = parser.parse_args(sys.argv[2:])
+        control_host.teardown(cloud.AwsCloud(), arguments.campaign, arguments.confirm)
+        return
     if sys.argv[1:2] == ["finish"]:
         parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} finish",
                                          description="pull an ended campaign's root from its control host and check "
