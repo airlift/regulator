@@ -71,6 +71,15 @@ def campaign_settings(root, platform_regions=None, purchase=None, buckets=None, 
     return settings
 
 
+def launch_refusals(reader):
+    """The age of each launch refusal reader last collected, by its reason."""
+    return {point.attributes["reason"]: point.value
+            for resource in reader.get_metrics_data().resource_metrics
+            for scope in resource.scope_metrics for metric in scope.metrics
+            if metric.name == "regulator_launch_refused_seconds"
+            for point in metric.data.data_points}
+
+
 def shell_function(source, name):
     """Returns one function definition from a shell script's source."""
     start = source.index(f"\n{name}()\n") + 1
@@ -3829,40 +3838,46 @@ class TestUnitWorkers(unittest.TestCase):
         units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
                                     "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
                  for index in range(1, 17)}
-        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
-            # Ohio's vCPUs hold one r8i host, so the fleet's quota refuses the pool's next launch, while Oregon's r9g
-            # hosts fill the boot window. Host 6, of r9g's second wave, reports a marker naming another campaign, so
-            # the phase pauses for the fault, and Dain stops the campaign.
-            root = Path(temporary)
-            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
-                                  scripts={6: {1: "foreign-marker"}})
-            fleet.buckets["ohio"] = cloud.BucketInfo("us-east-2", RUN_CAMPAIGN.SHARED_BUCKET_TAGS)
-            regions = {"r8i": ["us-east-2"], "r9g": ["us-west-2"]}
-            campaign_settings(root, regions, {"r8i": "spot", "r9g": "spot"}, {"us-east-2": "ohio"}, max_hosts=12,
-                              max_hosts_per_platform=10, boot_window={"initial": 5, "max": 5})
-            self.control(root, "set-limit", "region", "us-east-2", "max-vcpus", "2")
-            reader = InMemoryMetricReader()
-            refusals, paused = [], []
+        for market in ("spot", "on-demand"):
+            with self.subTest(market=market), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.redirect_stdout(io.StringIO()) as log:
+                # A launch refusal keeps aging while the boot window is full, an On-Demand one while its retry waits.
+                # Ohio's vCPUs in the market r9g buys hold one r9g host, so the fleet's quota refuses the pool's next
+                # launch, while Oregon's r8i hosts fill the boot window. Host 6, of r8i's second wave, reports a marker
+                # naming another campaign, so the phase pauses for the fault, and Dain stops the campaign.
+                root = Path(temporary)
+                fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                      scripts={6: {1: "foreign-marker"}})
+                fleet.buckets["ohio"] = cloud.BucketInfo("us-east-2", RUN_CAMPAIGN.SHARED_BUCKET_TAGS)
+                regions, purchases = {"r8i": ["us-west-2"], "r9g": ["us-east-2"]}, {"r8i": "spot", "r9g": market}
+                on_demand = {"regions": {"us-west-2": {"bucket": "bucket", "max_vcpus": 736},
+                                         "us-east-2": {"bucket": "ohio", "max_vcpus": 736, "on_demand_max_vcpus": 2}},
+                             "hourly_rates": {name: {**rates, "on_demand_total": 2 * rates["total"]}
+                                              for name, rates in test_fleet_budget.SETTINGS["hourly_rates"].items()}}
+                campaign_settings(root, regions, purchases, {"us-east-2": "ohio"}, max_hosts=12,
+                                  max_hosts_per_platform=10, boot_window={"initial": 5, "max": 5},
+                                  **(on_demand if market == "on-demand" else {}))
+                if market == "spot":
+                    self.control(root, "set-limit", "region", "us-east-2", "max-vcpus", "2")
+                reader = InMemoryMetricReader()
+                refusals, paused = [], []
 
-            def loop():
-                refusals.append({point.attributes["reason"]: point.value
-                                 for resource in reader.get_metrics_data().resource_metrics
-                                 for scope in resource.scope_metrics for metric in scope.metrics
-                                 if metric.name == "regulator_launch_refused_seconds"
-                                 for point in metric.data.data_points})
-                if not paused and "smoke: paused: " in log.getvalue():
-                    self.control(root, "stop")
-                    paused.append(len(refusals))
+                def loop():
+                    refusals.append(launch_refusals(reader))
+                    if not paused and "smoke: paused: " in log.getvalue():
+                        self.control(root, "stop")
+                        paused.append(len(refusals))
 
-            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 12, 10, loop,
-                                          telemetry.Telemetry("campaign", [reader]),
-                                          purchases={"r8i": "spot", "r9g": "spot"}, platform_regions=regions)
-            self.assertEqual([], failed)
-            # The refusal ages from the first loop's through r9g's boots, and from the loop after the pause reads 0.
-            ages = [refused["fleet quota"] for refused in refusals[1:paused[0]]]
-            self.assertEqual(sorted(set(ages)), ages)
-            self.assertEqual([{"fleet quota": 0}], list(map(dict, set(
-                tuple(refused.items()) for refused in refusals[paused[0]:]))))
+                failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 12, 10, loop,
+                                              telemetry.Telemetry("campaign", [reader]), purchases=purchases,
+                                              platform_regions=regions)
+                self.assertEqual([], failed)
+                # The refusal ages from the first loop's through r8i's boots, and from the loop after the pause reads
+                # 0.
+                ages = [refused["fleet quota"] for refused in refusals[1:paused[0]]]
+                self.assertEqual(sorted(set(ages)), ages)
+                cleared = refusals[paused[0]:]
+                self.assertEqual([{"fleet quota": 0}] * len(cleared), cleared)
 
     def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
         units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
