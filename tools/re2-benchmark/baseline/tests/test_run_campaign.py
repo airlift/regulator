@@ -4252,12 +4252,14 @@ class TestUnitWorkers(unittest.TestCase):
                 with self.dispatchers() as dispatchers, self.assertRaisesRegex(SystemExit, "unresolved units"):
                     self.run_phase(root, fleet, "smoke", ["like-dfa-single-use"], 4, 2, shared=True)
             stopped = int(fleet.hosts[2].epoch)
-            self.assertEqual("controller-abort", [row["outcome"] for row in RUN_CAMPAIGN.read_attempts(
-                root / "results" / "job-attempts.tsv") if int(row["host_epoch"]) == stopped][-1])
+            attempts = [row for row in RUN_CAMPAIGN.read_attempts(root / "results" / "job-attempts.tsv")
+                        if int(row["host_epoch"]) == stopped]
+            self.assertEqual("controller-abort", attempts[-1]["outcome"])
             self.assertEqual([BOOT_WINDOW_FIRST], self.boot_windows(root))
             with (root / "results" / "campaign-events.tsv").open(newline="") as events:
                 self.assertNotIn(str(stopped), [row["host_epoch"] for row in csv.DictReader(events, delimiter="\t")])
-            self.assertIn((stopped, 0), dispatchers[0][0].free_slots[("r8i", fleet.hosts[2].instance_type)])
+            [slot] = [int(RUN_CAMPAIGN.launch_record(row)["slot"]) for row in attempts if row["outcome"] == "starting"]
+            self.assertIn((slot, 0), dispatchers[0][0].free_slots[("r8i", fleet.hosts[2].instance_type)])
 
     def test_tail_stops_spot_workers_and_finishes_on_demand(self):
         with tempfile.TemporaryDirectory() as temporary, \
