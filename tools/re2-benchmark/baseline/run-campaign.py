@@ -4439,8 +4439,14 @@ class Campaign:
 
     def log_changes(self):
         """Log each settings change made since the last loop, with its actor; a controller logs none made before it
-        started."""
-        changes = list(csv.DictReader(ledger_lines(self.arguments.settings.events_path), delimiter="\t"))
+        started. While the settings' events cannot be read it logs none, and the next loop that reads them logs what
+        it missed."""
+        path = self.arguments.settings.events_path
+        try:
+            changes = list(csv.DictReader(ledger_lines(path), delimiter="\t"))
+        except (OSError, UnicodeDecodeError, csv.Error) as error:
+            print(f"logging no settings changes this loop, since {path} cannot be read: {error}", flush=True)
+            return
         for change in changes[len(changes) if self.changes is None else self.changes:]:
             self.telemetry.event("settings-change", f"settings version {change['version']} by {change['actor']}: "
                                  f"{change['change']}", actor=change["actor"], version=change["version"],
