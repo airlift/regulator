@@ -728,7 +728,8 @@ class TestRunCampaign(unittest.TestCase):
 
             region = RUN_CAMPAIGN.default_regions()[0]
             # The clock stands still, so the stop, and each phase state a command sets, records the time the test
-            # expects. A change of share alone keeps the time the phase took its state.
+            # expects, and the pause the drain ends lasted no time. A change of share alone keeps the time the phase
+            # took its state.
             clock = patch.object(RUN_CAMPAIGN.time, "time", return_value=now)
             clock.start()
             self.addCleanup(clock.stop)
@@ -743,10 +744,11 @@ class TestRunCampaign(unittest.TestCase):
                     (["pause", "a/primary", "--reason", "bad AMI"], "dain", "phases",
                      {"state": "paused", "share": 40, "reason": "bad AMI", "by": "dain", "since": now}),
                     (["drain", "a/primary"], "dain", "phases",
-                     {"state": "draining", "share": 40, "by": "dain", "since": now}),
-                    (["resume", "a/primary"], "dain", "phases", {"state": "running", "share": 40, "since": now}),
+                     {"state": "draining", "share": 40, "by": "dain", "since": now, "paused_seconds": 0}),
+                    (["resume", "a/primary"], "dain", "phases",
+                     {"state": "running", "share": 40, "since": now, "paused_seconds": 0}),
                     (["set-share", "a/primary", "auto"], "dain", "phases",
-                     {"state": "running", "share": "auto", "since": now}),
+                     {"state": "running", "share": "auto", "since": now, "paused_seconds": 0}),
                     (["clear-spending-stop"], "dain", "spending_stop", None),
                     (["authorize", "regions", "us-east-2", region], "dain", "authorized",
                      {"max_hosts": 100, "max_usd": 50, "regions": sorted(["us-east-2", region])}),
@@ -1834,7 +1836,7 @@ class TestRunCampaign(unittest.TestCase):
             phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g",
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
             candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory},
-            settings=self.settings(max_hosts=2), shared_budget=Mock(**{
+            campaign_root=result_root.parent, settings=self.settings(max_hosts=2), shared_budget=Mock(**{
                 "reservations.return_value": [], "report_boots.return_value": BOOT_WINDOW_MAX}))
 
         def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
@@ -4149,13 +4151,14 @@ class TestUnitWorkers(unittest.TestCase):
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
                                   stuck_prefix=lambda host: host.epoch == "1", leaked=lambda host: host.epoch == "2")
             with fleet.stubs():
-                running = {}
+                running = []
                 # The campaign's controller gives each phase its share of each platform's hosts.
                 for phase, shard, share in (("smoke", "short", 1), ("primary", "long", 2)):
                     dispatcher = self.dispatcher(Path(temporary), fleet, phase, [shard], 6, 3,
                                                  purchases={"r8i": "spot", "r9g": "spot"}, shared=True, results=phase)
                     dispatcher.share = dict.fromkeys(("r8i", "r9g"), share)
-                    running[dispatcher] = dispatcher.begin()
+                    dispatcher.begin()
+                    running.append(dispatcher)
                     dispatcher.recover()
                 smoke, primary = phases = list(running)
                 budget = self.budget
@@ -4163,9 +4166,9 @@ class TestUnitWorkers(unittest.TestCase):
                 def run(until):
                     # Each loop runs each phase not yet over, as one controller would.
                     while running and not until():
-                        for dispatcher, deadline in list(running.items()):
-                            if dispatcher.step(deadline):
-                                del running[dispatcher]
+                        for dispatcher in list(running):
+                            if dispatcher.step(dispatcher.deadline()):
+                                running.remove(dispatcher)
                         fleet.sleep(RUN_CAMPAIGN.UNIT_POLL_SECONDS)
 
                 def spending_stop():
@@ -4667,12 +4670,16 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn((stalled.session, "lost"), {(row["host_session"], row["outcome"]) for row in self.ledger})
 
     def test_pause_spends_none_of_the_phase_deadline(self):
-        # The primary's controller stops and is down for half an hour. Paused before the stop, or by Dain as the
-        # controller went down, and resumed ten minutes after the restart, three times its ten-minute deadline later,
-        # it still launches for its queued work. Resumed as the controller went down, the outage spends its deadline.
-        for paused, outage, failed in (("before the stop", None, []), ("in the outage", "pause", []),
-                                       ("before the stop", "resume", ["primary"])):
-            with self.subTest(paused=paused, outage=outage), tempfile.TemporaryDirectory() as temporary, \
+        # The primary's controller stops and is down for half an hour, three times the phase's ten-minute deadline.
+        # Paused before the stop, or by Dain as the controller went down, and resumed ten minutes after the restart,
+        # it still launches for its queued work, as it does paused as the controller went down and resumed just
+        # before the restart. Resumed as the controller went down, the outage spends its deadline.
+        for paused, at_stop, at_restart, expected_failed in (("before the stop", (), (), []),
+                                                             ("in the outage", ("pause",), (), []),
+                                                             ("in the outage", ("pause",), ("resume",), []),
+                                                             ("before the stop", ("resume",), (), ["primary"])):
+            with self.subTest(paused=paused, at_stop=at_stop, at_restart=at_restart), \
+                    tempfile.TemporaryDirectory() as temporary, \
                     contextlib.redirect_stdout(io.StringIO()):
                 root = Path(temporary)
                 phases = [("primary", "primary", ["like-dfa-single-use"], ())]
@@ -4686,10 +4693,12 @@ class TestUnitWorkers(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "controller stopped"):
                     self.run_campaign(root, fleet, phases, 2, 1, pause, deadline=600)
                 fleet.abort_after = None
-                if outage:
-                    with fleet.stubs():
-                        self.control(root, outage, "primary")
-                fleet.outage(1800)
+                with fleet.stubs():
+                    for command in at_stop:
+                        self.control(root, command, "primary")
+                    fleet.outage(1800)
+                    for command in at_restart:
+                        self.control(root, command, "primary")
                 resume_at = fleet.clock + 600
 
                 def resume():
@@ -4697,8 +4706,8 @@ class TestUnitWorkers(unittest.TestCase):
                             CampaignSettings(root).current["phases"]["primary"]["state"] == "paused":
                         self.control(root, "resume", "primary")
 
-                self.assertEqual(failed, [phase.key for phase in self.run_campaign(
-                    root, fleet, phases, 2, 1, resume, deadline=600)[0]])
+                failed, _ = self.run_campaign(root, fleet, phases, 2, 1, resume, deadline=600)
+                self.assertEqual(expected_failed, [phase.key for phase in failed])
 
     def test_a_phase_running_for_days_checks_its_regions_daily(self):
         # Dain pauses the primary at its first poll and resumes it a day later. Each check of a phase's regions puts
@@ -4954,6 +4963,91 @@ class TestUnitWorkers(unittest.TestCase):
             leased = [(row["platform"], row["unit_id"], row["replica"])
                       for row in self.unit_attempts(dispatchers["smoke"].result_root) if row["outcome"] == "leased"]
             self.assertEqual(len(leased), len(set(leased)))
+
+    def test_pause_before_its_phase_starts_extends_no_deadline(self):
+        # The region's Spot quota is below its limit from the start, so the smoke's setup refuses it before the phase
+        # starts. An hour later Dain lowers the limit and resumes it, and the phase starts with its ten-minute
+        # deadline ahead of it, no more and no less, and completes.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            region = RUN_CAMPAIGN.default_regions()[0]
+            fleet = FakeUnitFleet(root / "hosts")
+            fleet.quotas[region, "spot"] = 512
+            resume_at = fleet.clock + 3600
+            ahead = []
+
+            def loop():
+                smoke = self.running["smoke"]
+                if fleet.clock >= resume_at and CampaignSettings(root).current["phases"]["smoke"]["state"] == "paused":
+                    self.control(root, "set-limit", "region", region, "max-vcpus",
+                                 str(512 - RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE))
+                    self.control(root, "resume", "smoke")
+                elif smoke.started_at is not None and not ahead:
+                    ahead.append(smoke.deadline() - fleet.monotonic())
+
+            failed, dispatchers = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())],
+                                                    2, 1, loop, deadline=600)
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["smoke"])
+            self.assertAlmostEqual(600, ahead[0])
+
+    def test_phase_seeded_paused_keeps_its_deadline_until_resumed(self):
+        # The campaign's settings seed the smoke paused from input that omits since, so seeding records when the
+        # pause began. An hour later, long past its ten-minute timeout, Dain resumes it, and its pause has held its
+        # deadline, so it launches and completes.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts")
+            with fleet.stubs():
+                campaign_settings(root, max_hosts=2, max_hosts_per_platform=1, phases={
+                    "smoke": {"state": "paused", "share": "auto", "by": "dain", "reason": "wait for the AMI"}})
+            resume_at = fleet.clock + 3600
+
+            def loop():
+                if fleet.clock >= resume_at and CampaignSettings(root).current["phases"]["smoke"]["state"] == "paused":
+                    self.control(root, "resume", "smoke")
+
+            failed, dispatchers = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())],
+                                                    2, 1, loop, deadline=600)
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["smoke"])
+
+    def test_pause_changed_during_its_phase_setup_moves_no_deadline(self):
+        # As the smoke's setup checks its regions, after the controller last loaded the settings, Dain pauses the
+        # smoke the settings seeded running and resumes it ten seconds later, or resumes the smoke they seeded paused,
+        # and the setup starts the phase ten seconds after each change. Neither pause runs past the start, so once the
+        # controller loads the settings again the phase's budget is its ten-minute timeout, no more and no less.
+        running = {"state": "running", "share": "auto"}
+        paused = {"state": "paused", "share": "auto", "by": "dain", "reason": "wait for the AMI"}
+        for case, seeded, commands in (("paused and resumed", running,
+                                        [("pause", "smoke", "--reason", "checking the image"), ("resume", "smoke")]),
+                                       ("resumed", paused, [("resume", "smoke")])):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                fleet = FakeUnitFleet(root / "hosts")
+                with fleet.stubs():
+                    campaign_settings(root, max_hosts=2, max_hosts_per_platform=1, phases={"smoke": seeded})
+                check = RUN_CAMPAIGN.check_regions
+                budgets = []
+
+                def steered_check(arguments, platforms):
+                    while commands:
+                        self.control(root, *commands.pop(0))
+                        fleet.clock += 10
+                    return check(arguments, platforms)
+
+                def loop():
+                    smoke = self.running["smoke"]
+                    if smoke.started_at is not None and fleet.time() >= smoke.started_at and not budgets:
+                        budgets.append(smoke.deadline() - fleet.monotonic() + fleet.time() - smoke.started_at)
+
+                with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=steered_check):
+                    failed, dispatchers = self.run_campaign(
+                        root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1, loop, deadline=600)
+                self.assertEqual([], failed)
+                self.assert_accepted(dispatchers["smoke"])
+                self.assertAlmostEqual(600, budgets[0])
 
     def test_phase_whose_setup_fails_holds_its_hosts_until_they_stop(self):
         # The controller stops with the smoke's hosts live, and the restarted controller's setup of the smoke fails

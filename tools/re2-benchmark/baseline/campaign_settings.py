@@ -91,16 +91,20 @@ def validate(settings):
     check(isinstance(settings["phases"], dict), "phases")
     for phase, steering in settings["phases"].items():
         # A paused or draining phase records who paused or drained it, and a paused one why. A phase may record
-        # since when it has had its state, the time of the change that set it.
+        # since when it has had its state, the time of the change that set it, and the seconds its pauses that ended
+        # lasted.
         check(isinstance(steering, dict) and steering.get("state") in PHASE_STATES, f"{phase} state")
         state = steering["state"]
         required = {"state", "share"} | ({"by", "reason"} if state == "paused" else {"by"} if state == "draining" else
                                          set())
-        check(set(steering) - {"since"} == required, f"{phase} takes {', '.join(sorted(required))} and since")
+        check(set(steering) - {"since", "paused_seconds"} == required,
+              f"{phase} takes {', '.join(sorted(required))} and may also take since and paused_seconds")
         check(steering["share"] == "auto" or positive_integer(steering["share"]), f"{phase} share")
         check("by" not in steering or steering["by"] in ACTORS, f"{phase} by")
         check(state != "paused" or isinstance(steering["reason"], str) and steering["reason"], f"{phase} reason")
         check("since" not in steering or positive_number(steering["since"]), f"{phase} since")
+        paused = steering.get("paused_seconds", 0)
+        check(type(paused) in (int, float) and 0 <= paused < 2 ** 63, f"{phase} paused_seconds")
     window = settings["boot_window"]
     check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
           all(map(positive_integer, window.values())) and
@@ -153,9 +157,16 @@ def check_actor(actor, before, after):
             raise SettingsError(f"the monitor only resumes {phase} to running, not to {steering['state']}")
 
 
+def paused_seconds(steering, at):
+    """The seconds a phase's settings record it paused by epoch time at: its pauses that ended, and one still open."""
+    open_pause = at - steering.get("since", at) if steering.get("state") == "paused" else 0
+    return steering.get("paused_seconds", 0) + max(0, open_pause)
+
+
 def changed(before, actor, update, at):
-    """The settings update makes of before, as the actor's change at epoch time at, once they validate and the actor
-    may make it; each phase whose state it changes has it since then."""
+    """Apply update to a copy of before, as the actor's change at epoch time at, and return the result once it
+    validates and the actor may make it. Each phase whose state the change sets records at as its since, and one it
+    resumes, drains or ends from a pause adds that pause to its paused seconds."""
     if actor not in ACTORS:
         raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
     settings = copy.deepcopy(before)
@@ -163,8 +174,11 @@ def changed(before, actor, update, at):
     # An update may leave the phases malformed, which validation refuses below.
     phases = settings.get("phases")
     for phase, steering in phases.items() if isinstance(phases, dict) else ():
-        if isinstance(steering, dict) and steering.get("state") != before["phases"].get(phase, {}).get("state"):
+        earlier = before["phases"].get(phase, {})
+        if isinstance(steering, dict) and steering.get("state") != earlier.get("state"):
             steering["since"] = at
+            if earlier.get("state") == "paused":
+                steering["paused_seconds"] = paused_seconds(earlier, at)
     if settings != before:
         settings["version"] = before["version"] + 1
         validate(settings)
@@ -256,12 +270,17 @@ class CampaignSettings:
 
     @classmethod
     def seed(cls, root, given, actor="dain"):
-        """Write the campaign's first settings, unless it has some, and load them."""
+        """Write the campaign's first settings, unless it has some, and load them. Each phase they give a state takes
+        the seed event's time as its since unless they name one, as a change that sets a state does."""
         path = root / SETTINGS
         with file_locked(root / LOCK):
             recover(path, root / EVENTS)
             if not path.exists():
-                record(path, root / EVENTS, seeded(given), actor, "seed", round(time.time()))
+                at = round(time.time())
+                settings = seeded(given)
+                for steering in settings["phases"].values():
+                    steering.setdefault("since", at)
+                record(path, root / EVENTS, settings, actor, "seed", at)
         return cls(root)
 
     @contextmanager
