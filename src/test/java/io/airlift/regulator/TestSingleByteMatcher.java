@@ -96,6 +96,39 @@ public class TestSingleByteMatcher
     }
 
     @Test
+    public void testOneByteRunFindAgreesWithRegularMatching()
+    {
+        // Boolean find of a run of one-byte members tests for one member, in every language.
+        List<Re2> patterns = List.of(
+                Re2.compile(Slices.utf8Slice("\\s+")),
+                Re2.compile(Slices.utf8Slice("[,;]{1,}")),
+                Re2.compile(Slices.utf8Slice("[\\x80-\\xff]+"), Re2.Options.latin1()),
+                JavaRegexp.compile(Slices.utf8Slice("\\s+")).re2(),
+                TrinoRegexp.compile(Slices.utf8Slice("\\s+")).re2(),
+                RustRegexp.compile(Slices.utf8Slice("[\\t\\n\\f\\r ]+")).re2(),
+                RustRegexp.compile(Slices.utf8Slice("(?-u)[\\x80-\\xff]+"), RustRegexp.Options.bytes()).re2());
+        List<Slice> inputs = List.of(
+                Slices.EMPTY_SLICE,
+                Slices.utf8Slice("no_whitespace_here"),
+                Slices.utf8Slice("東京 München;"),
+                Slices.utf8Slice("x".repeat(70) + " ,"),
+                Slices.utf8Slice("x".repeat(70)),
+                Slices.wrappedBuffer(new byte[] {'z', (byte) 0xFF, (byte) 0xC2, ' ', 'a'}));
+
+        for (Re2 re2 : patterns) {
+            assertThat(re2.booleanPartialMatchStrategyForDiagnostics()).as(re2.pattern().toStringUtf8()).isEqualTo(Re2.BooleanPartialMatchStrategy.BYTE_RUN);
+            // A short find answers from the byte table without building the general engine's DFA.
+            re2.find(inputs.get(2));
+            assertThat(re2.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(re2.pattern().toStringUtf8()).isNull();
+            for (Slice input : inputs) {
+                assertThat(re2.find(input)).as("pattern %s, input %s", re2.pattern().toStringUtf8(), input).isEqualTo(re2.genericGroupZeroMatcherForDiagnostics(input).find());
+            }
+        }
+        // Rust's Unicode \s also matches non-ASCII spaces, so it keeps the general engine.
+        assertThat(RustRegexp.compile(Slices.utf8Slice("\\s+")).re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
+    }
+
+    @Test
     public void testSupportedRepeatedMatchersAgreeWithRegularMatching()
     {
         List<PatternCase> patterns = List.of(

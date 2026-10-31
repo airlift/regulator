@@ -44,6 +44,7 @@ public sealed class Re2
         LOWERED_PROGRAM,
         LITERAL_ALTERNATION,
         FIXED_WIDTH_BYTE,
+        BYTE_RUN,
     }
 
     enum BooleanPlanKind
@@ -102,13 +103,14 @@ public sealed class Re2
     private static final byte BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA = 12;
     private static final byte BOOLEAN_FIND_LITERAL_ALTERNATION = 13;
     private static final byte BOOLEAN_FIND_FIXED_WIDTH_BYTE = 14;
-    private static final byte BOOLEAN_FIND_SINGLE_BYTE = 15;
-    private static final byte BOOLEAN_FIND_SCAN_PLAN = 16;
-    private static final byte BOOLEAN_FIND_PARTIAL_SCAN_PLAN = 17;
-    private static final byte BOOLEAN_FIND_UNANCHORED_SCAN_PLAN = 18;
-    private static final byte BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN = 19;
-    private static final byte BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN = 20;
-    private static final byte BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN = 21;
+    private static final byte BOOLEAN_FIND_BYTE_RUN = 15;
+    private static final byte BOOLEAN_FIND_SINGLE_BYTE = 16;
+    private static final byte BOOLEAN_FIND_SCAN_PLAN = 17;
+    private static final byte BOOLEAN_FIND_PARTIAL_SCAN_PLAN = 18;
+    private static final byte BOOLEAN_FIND_UNANCHORED_SCAN_PLAN = 19;
+    private static final byte BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN = 20;
+    private static final byte BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN = 21;
+    private static final byte BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN = 22;
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
@@ -528,13 +530,17 @@ public sealed class Re2
                 findStrategy = scanPlanStrategy;
             }
         }
-        // A retained span matcher answers full-Slice find only in place of the general engine.
+        // A retained span or byte-run matcher answers full-Slice find only in place of the
+        // general engine.
         if (findStrategy == BOOLEAN_FIND_GENERAL) {
             if (booleanPlans.literalAlternationMatcher() != null) {
                 findStrategy = BOOLEAN_FIND_LITERAL_ALTERNATION;
             }
             else if (booleanPlans.fixedWidthByteMatcher() != null) {
                 findStrategy = BOOLEAN_FIND_FIXED_WIDTH_BYTE;
+            }
+            else if (booleanPlans.byteRunMatcher() != null) {
+                findStrategy = BOOLEAN_FIND_BYTE_RUN;
             }
         }
         this.booleanFindStrategy = findStrategy;
@@ -1124,6 +1130,14 @@ public sealed class Re2
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - fixedWidthByteMatcher.estimatedRetainedSize());
             booleanPlans = booleanPlans.withFixedWidthByteMatcher(fixedWidthByteMatcher);
         }
+        // A run of one-byte members, such as [\t\n\f\r ]+, exists exactly where one member does.
+        SingleByteMatcher byteRunMatcher = generalFind && literalAlternationMatcher == null && fixedWidthByteMatcher == null && capturingGroupCount == 0
+                ? SingleByteMatcher.analyzeRun(entireRegexp, caseFolding)
+                : null;
+        if (byteRunMatcher != null && SingleByteMatcher.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
+            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - SingleByteMatcher.estimatedRetainedSize());
+            booleanPlans = booleanPlans.withByteRunMatcher(byteRunMatcher);
+        }
 
         return new Re2(
                 flags,
@@ -1213,7 +1227,7 @@ public sealed class Re2
         BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
                 ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
                 : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher());
+        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher(), plans.byteRunMatcher());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1597,7 +1611,7 @@ public sealed class Re2
             }
             if (strategy == BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS ||
                     strategy == BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA) {
-                return boundedCharacterClassCounter.findSpan(input, 0, input.length(), 0) >= 0;
+                return boundedCharacterClassCounter.contains(input);
             }
             return optimizedPartialMatch(input, strategy);
         }
@@ -1712,6 +1726,9 @@ public sealed class Re2
             case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> endsWithFinalLineBooleanPlanLiteral(input, literal);
             case BOOLEAN_FIND_LITERAL_ALTERNATION -> booleanPlans.literalAlternationMatcher().findSpan(input, 0) >= 0;
             case BOOLEAN_FIND_FIXED_WIDTH_BYTE -> booleanPlans.fixedWidthByteMatcher().findSpan(input, 0) >= 0;
+            case BOOLEAN_FIND_BYTE_RUN -> input.length() > MAX_DIRECT_BYTE_SCAN_BYTES
+                    ? matchInto(input, Anchor.UNANCHORED, null)
+                    : booleanPlans.byteRunMatcher().find(input, 0) >= 0;
             default -> throw new IllegalStateException("strategy cannot be executed directly: " + strategy);
         };
     }
@@ -3128,9 +3145,9 @@ public sealed class Re2
             case EQUALS_FINAL_LINE -> BooleanPlanKind.EQUALS_FINAL_LINE;
             case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
-            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE -> throw new IllegalStateException("construction selects this matcher strategy: " + partialMatchStrategy);
+            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE, BYTE_RUN -> throw new IllegalStateException("construction selects this matcher strategy: " + partialMatchStrategy);
         };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null);
+        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
@@ -3170,7 +3187,7 @@ public sealed class Re2
             case EQUALS_FINAL_LINE -> BOOLEAN_FIND_EQUALS_FINAL_LINE;
             case ENDS_WITH_FINAL_LINE -> BOOLEAN_FIND_ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BOOLEAN_FIND_LOWERED_PROGRAM;
-            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE -> throw new IllegalStateException("construction selects this matcher strategy: " + strategy);
+            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE, BYTE_RUN -> throw new IllegalStateException("construction selects this matcher strategy: " + strategy);
         };
     }
 
@@ -3189,6 +3206,7 @@ public sealed class Re2
             case BOOLEAN_FIND_LOWERED_PROGRAM, BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
             case BOOLEAN_FIND_LITERAL_ALTERNATION -> BooleanPartialMatchStrategy.LITERAL_ALTERNATION;
             case BOOLEAN_FIND_FIXED_WIDTH_BYTE -> BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE;
+            case BOOLEAN_FIND_BYTE_RUN -> BooleanPartialMatchStrategy.BYTE_RUN;
             case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE,
                  BOOLEAN_FIND_SCAN_PLAN, BOOLEAN_FIND_PARTIAL_SCAN_PLAN, BOOLEAN_FIND_UNANCHORED_SCAN_PLAN,
                  BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN, BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN,
@@ -3297,47 +3315,55 @@ public sealed class Re2
             // general engine; null leaves them on it. Trino's fixed-width subtype answers its
             // other operations from the same fixed-width matcher.
             LiteralAlternationSpanMatcher literalAlternationMatcher,
-            FixedWidthByteSpanMatcher fixedWidthByteMatcher)
+            FixedWidthByteSpanMatcher fixedWidthByteMatcher,
+            // Answers full-Slice boolean find of a one-byte member run on inputs of at most 64
+            // bytes; null leaves it on the general engine.
+            SingleByteMatcher byteRunMatcher)
     {
         private BooleanPlans withScanPlan(ScanPlan scanPlan)
         {
             ScanPlan scanBooleanPlan = scanPlan == null ? null : scanPlan.booleanPlan();
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withLiteralSearch(LiteralSearchKernel literalSearch)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withLiteralAlternationMatcher(LiteralAlternationSpanMatcher literalAlternationMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withFixedWidthByteMatcher(FixedWidthByteSpanMatcher fixedWidthByteMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+        }
+
+        private BooleanPlans withByteRunMatcher(SingleByteMatcher byteRunMatcher)
+        {
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
     }
 

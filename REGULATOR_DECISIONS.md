@@ -846,12 +846,14 @@ Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
 Empty-pattern advancement is unchanged. The new core single-byte boolean/count
 route applies only to inputs of at most 64 bytes; larger inputs retain the DFA
-and its ordinary failure fallback. Trino's existing byte count and explicit
-matcher routes share the same table without changing their input-size policy.
-Capture-retaining iteration remains generic.
-The table's retained size is reserved before a DFA can snapshot its memory
-budget. If it does not fit, the pattern keeps its generic execution route.
-Trino delegates to this cache instead of retaining a second table.
+and its ordinary failure fallback. Full-Slice boolean `find` of a capture-free
+one-byte member run (`x+`) tests bytes with the single-byte table under the same
+64-byte limit, and `find` of a compact class run stops at the first run reaching
+its minimum. Trino's existing byte count and explicit matcher routes share the
+same table without changing their input-size policy. Capture-retaining iteration
+remains generic. The table's retained size is reserved before a DFA can snapshot
+its memory budget. If it does not fit, the pattern keeps its generic execution
+route. Trino delegates to this cache instead of retaining a second table.
 
 Targeted Java 25 measurements on C9g, C8g, and C8i retain this bounded sharing.
 Unconditional scalar literal and byte-table counting were rejected because
@@ -866,8 +868,9 @@ Instruction-level attribution has not been established.
 
 The focused C8i native whitespace-contains control changes from 27.49 to
 36.29 ns, +8.80 ns or 32%, with effectively zero allocation. Safe mode adds
-0.44 ns, and neither Graviton CPU regresses. This pattern still selects the
-general DFA route and bypasses the new byte scanner. Dispatch code size and
+0.44 ns, and neither Graviton CPU regresses. At that time this pattern selected
+the general DFA route and bypassed the new byte scanner; a one-byte member run
+now takes the byte scanner on inputs of at most 64 bytes. Dispatch code size and
 compiled layout change, making JIT/inlining sensitivity plausible without
 establishing a specific instruction-level cause. Generic iteration stays
 within one percent on all three CPUs, and key/value contains adds at most
