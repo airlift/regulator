@@ -603,7 +603,8 @@ another campaign. The host's user data,
 - starts `regulator-campaign@<campaign>`, which runs the launch's command with
   `--controller` and the host's paths; the unit restarts a controller that
   crashes, up to five times in ten minutes, and leaves one whose campaign
-  ended, with failed phases or without;
+  ended, with failed phases or without, and one that refused to start, which
+  exits 3, since a restart would refuse the same way;
 - starts `grafana/otel-lgtm`, pinned by digest, with Grafana on port 3000 for
   the load balancer and its links built from `https://<record>`, OTLP on the
   host's loopback only, its data on the volume, and its dashboards provisioned
@@ -669,7 +670,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 
 A controller that ends, whether every phase completed, some failed, or the
 campaign was stopped, lists every file of the campaign root with its SHA-256
-in `campaign-files.sha256`; one that SIGTERM stopped lists nothing. `finish`
+in `campaign-files.sha256`; one that SIGTERM stopped lists nothing. A
+controller refuses to start on a root that has the list, so a reboot or a
+replaced host never runs an ended campaign again; `control ... --actor dain
+reopen` deletes the list and clears any stop, and the unit's next start runs
+the campaign again. `finish`
 pulls the root of an ended campaign over ssh on port 443 with rsync into the results
 directory the reduction and archiving read, by default
 `benchmark-results/pre-review-baseline/<campaign>`, and checks every file
@@ -734,7 +739,12 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
 - `stop [--reason TEXT]` stop-leases every worker, each behind the leases it
   holds, waits for every worker's cleanup to be proven, and ends the
   controller with status 0; the phases keep their queued work. A restart of a
-  stopped campaign only stops the hosts an earlier controller left.
+  stopped campaign that has not ended only stops the hosts an earlier
+  controller left.
+- `reopen` lets an ended campaign's controller start again: it clears any
+  stop and deletes `campaign-files.sha256`, so `finish` waits for the list
+  the next controller writes as it ends. Start the controller again with
+  `sudo systemctl restart regulator-campaign@<campaign>` on the host.
 - `authorize max-hosts N`, `authorize max-usd N`, and
   `authorize regions <region>...` set the `authorized` envelope, which only
   `--actor dain` changes, as only Dain changes `hourly_rates`. The monitor

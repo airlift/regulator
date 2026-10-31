@@ -43,9 +43,9 @@ MANIFEST = "campaign-files.sha256"
 # Where the host records, in the campaign root, the URL its Grafana serves at, for the status command.
 GRAFANA_URL_FILE = "grafana-url.txt"
 USER_DATA = Path(__file__).resolve().parents[1] / "aws" / "control-host" / "user-data.sh"
-# The exit status of a controller whose campaign ended with failed phases, which the host's controller unit does not
-# restart.
-FAILED_PHASES_EXIT = 3
+# The exit status of a controller whose campaign ended with failed phases, or that refused to start, as it does the
+# same way on every start, which the host's controller unit does not restart.
+ENDED_EXIT = 3
 
 
 def tags(campaign):

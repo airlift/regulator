@@ -388,7 +388,7 @@ the quota cannot hold it, so no phase starts under a limit it would refuse.
 - `pause <phase> [--reason]`, `resume <phase>`, `drain <phase>`
 - `set-share <phase> N|auto` (how hosts move between phases)
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand`
-- `clear-spending-stop`, `stop`
+- `clear-spending-stop`, `stop`, `reopen` (an ended campaign)
 - From the Mac: `control-host replace`, `finish`, `teardown` (below).
 
 ### Telemetry: one health path
@@ -443,7 +443,7 @@ the spending stop.
 
 | The monitor may, unattended | The monitor must ask |
 |---|---|
-| `control-host replace` when the controller or host is dead and systemd has given up | Clear a spending stop |
+| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
@@ -456,7 +456,10 @@ The runbook is an agent instruction file written with `writing-for-agents`.
 The control host outlives the campaign. After every chain completes, after a
 spending stop, and after a failure, the controller writes its marker and the
 host keeps serving Grafana so Dain can see what happened; idle it costs a few
-dollars a day.
+dollars a day. A controller refuses to start on a root with the marker, so a
+reboot or a replaced host never runs an ended campaign again; Dain's
+`control ... reopen` clears it. A controller's refusal, of an ended root or
+any other a restart would repeat, exits 3, which systemd does not restart.
 
 `run-campaign.py finish <campaign>` from the Mac pulls the campaign root over
 ssh on port 443 with rsync, verifies the file list and SHA-256s against the

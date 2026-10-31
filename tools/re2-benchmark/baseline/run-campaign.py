@@ -4588,6 +4588,16 @@ def refuse_old_root(campaign_root):
                          "controller cannot resume it, so start a new campaign root")
 
 
+def refuse_ended_root(arguments):
+    """Refuse a campaign root whose controller ended, as its manifest shows, so a reboot or a replaced host never runs
+    an ended campaign again; Dain reopens one with control's reopen."""
+    manifest = arguments.campaign_root / control_host.MANIFEST
+    if manifest.is_file():
+        raise SystemExit(f"campaign {arguments.campaign} has ended, as {manifest} shows; to run it again, reopen it "
+                         f"with {Path(__file__).name} control {arguments.campaign_root} --campaign "
+                         f"{arguments.campaign} --actor dain reopen")
+
+
 def load_settings(arguments):
     """The campaign's settings: those its root holds, or on its first execution, the ones --settings names as their
     version 1. A restart keeps the root's whatever --settings names, so the command that started the campaign restarts
@@ -4680,6 +4690,7 @@ def run_campaign(arguments, root):
     if arguments.settings is None and not (arguments.campaign_root / CAMPAIGN_SETTINGS).is_file():
         raise SystemExit("a campaign's first execution seeds its settings; name them with --settings FILE")
     with controller_lock(arguments.campaign_root):
+        refuse_ended_root(arguments)
         arguments.settings = load_settings(arguments)
         arguments.shared_budget = FleetBudget(arguments.campaign_root, arguments.settings, arguments.spot_vcpu_reserve)
         candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
@@ -4707,7 +4718,7 @@ def run_campaign(arguments, root):
             return
         # The control host's unit restarts a controller that fails, but not one whose campaign ended.
         print(message, file=sys.stderr, flush=True)
-        raise SystemExit(control_host.FAILED_PHASES_EXIT)
+        raise SystemExit(control_host.ENDED_EXIT)
 
 
 def controller_command(arguments, commits):
@@ -5181,6 +5192,7 @@ def control_parser():
         if name == "pause":
             command.add_argument("--reason")
     commands.add_parser("clear-spending-stop", help="admit launches and lease extensions again")
+    commands.add_parser("reopen", help="let an ended campaign's controller start again, clearing any stop")
     command = commands.add_parser("stop", help="stop-lease every worker, prove their cleanup, and end the campaign")
     command.add_argument("--reason")
     command = commands.add_parser("authorize", help="set the envelope the monitor raises limits within: max-hosts "
@@ -5253,6 +5265,8 @@ def control_change(arguments, now):
         return f"{arguments.phase} {state}", update
     if command == "clear-spending-stop":
         return "spending stop cleared", lambda settings: settings.update(spending_stop=None)
+    if command == "reopen":
+        return "campaign reopened", lambda settings: settings.update(stop=None)
     if command == "stop":
         stop = {"by": actor, "at": round(now), "reason": arguments.reason or f"stopped by {actor}"}
         return f"campaign stop: {stop['reason']}", lambda settings: settings.update(stop=settings["stop"] or stop)
@@ -5330,6 +5344,9 @@ def control(arguments, aws):
                          "controller started it")
     if recorded != arguments.campaign:
         raise SystemExit(f"{arguments.root} is campaign {recorded}'s root, not campaign {arguments.campaign}'s")
+    manifest = arguments.root / control_host.MANIFEST
+    if arguments.command == "reopen" and not manifest.is_file():
+        raise SystemExit(f"campaign {arguments.campaign} has not ended: {arguments.root} has no {manifest.name}")
     try:
         store = CampaignSettings(arguments.root)
         if arguments.command == "add-region":
@@ -5346,6 +5363,10 @@ def control(arguments, aws):
         print(f"campaign settings version {before} already hold {description}")
     else:
         print(f"campaign settings version {settings['version']}: {description}")
+    if arguments.command == "reopen":
+        # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
+        manifest.unlink()
+        print(f"campaign {arguments.campaign} reopened; start its controller again")
 
 
 def main():
@@ -5416,7 +5437,14 @@ def main():
     arguments.campaign_root = (arguments.campaign_root or
                                root / "benchmark-results" / "pre-review-baseline" / arguments.campaign).absolute()
     if arguments.phase == "campaign":
-        run_campaign(arguments, root)
+        try:
+            run_campaign(arguments, root)
+        except SystemExit as refusal:
+            # A controller's refusal, unlike a crash, recurs on every start, so its unit leaves it ended.
+            if not arguments.controller or not isinstance(refusal.code, str):
+                raise
+            print(refusal.code, file=sys.stderr, flush=True)
+            raise SystemExit(control_host.ENDED_EXIT) from None
         return
     if arguments.execute:
         raise SystemExit(f"a phase runs only inside its campaign's controller; run {Path(__file__).name} campaign "
