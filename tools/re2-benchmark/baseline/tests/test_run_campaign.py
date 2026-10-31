@@ -37,7 +37,8 @@ SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
 import telemetry  # noqa: E402
-from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENT_FIELDS, EVENTS, CampaignSettings  # noqa: E402
+from campaign_settings import (  # noqa: E402
+    BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENT_FIELDS, EVENTS, CampaignSettings, staged)
 import test_engine_build  # noqa: E402
 import test_control_host  # noqa: E402
 import test_fleet_budget  # noqa: E402
@@ -607,14 +608,31 @@ class TestRunCampaign(unittest.TestCase):
                         patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
 
-            # A's failure stops only A, and the campaign then exits naming it, with the status the control host's
-            # unit does not restart.
+            # A's failure stops only A. The campaign then exits naming it, with a status the control host's unit does
+            # not restart. Its last change to the phases' states is interrupted after its event is durable.
+            ended = {"a/build": "complete", "a/smoke": "failed", "a/primary": "pending", "a/confirmation": "pending",
+                     "b/build": "complete", "b/smoke": "complete", "b/primary": "complete",
+                     "b/confirmation": "complete"}
+            rename, interrupted = os.replace, []
+
+            def interrupt(source, destination):
+                if not interrupted and Path(source).name == staged(Path(RUN_CAMPAIGN.CAMPAIGN_SETTINGS)).name and {
+                        key: steering["state"]
+                        for key, steering in json.loads(Path(source).read_text())["phases"].items()} == ended:
+                    interrupted.append(source)
+                    raise OSError(28, "No space left on device")
+                rename(source, destination)
+
             errors = io.StringIO()
-            with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as failed:
+            with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as failed, \
+                    patch.object(os, "replace", side_effect=interrupt):
                 run()
             self.assertEqual(RUN_CAMPAIGN.control_host.ENDED_EXIT, failed.exception.code)
             self.assertIn("failed phases:\na/smoke: campaign completed with unresolved", errors.getvalue())
-            # Having ended, the controller lists every file of the root for finish to check its copy against.
+            # Having ended, the controller finishes that change and lists every file of the root for finish to check
+            # its copy against.
+            self.assertEqual(1, len(interrupted))
+            self.assertFalse(Path(interrupted[0]).exists())
             self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
 
             order = [event[:2] for event in events]
@@ -634,10 +652,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(str(os.getpid()), RUN_CAMPAIGN.read_properties(
                 campaign_root / RUN_CAMPAIGN.CONTROLLER_RECORD)["pid"])
             settings = CampaignSettings(campaign_root).current
-            self.assertEqual({"a/build": "complete", "a/smoke": "failed", "a/primary": "pending",
-                              "a/confirmation": "pending", "b/build": "complete", "b/smoke": "complete",
-                              "b/primary": "complete", "b/confirmation": "complete"},
-                             {key: steering["state"] for key, steering in settings["phases"].items()})
+            self.assertEqual(ended, {key: steering["state"] for key, steering in settings["phases"].items()})
             self.assertEqual((16, {"controller"}), (settings["max_hosts"], {
                 row["actor"] for row in csv.DictReader((campaign_root / EVENTS).read_text().splitlines(),
                                                        delimiter="\t") if row["change"] != "seed"}))
