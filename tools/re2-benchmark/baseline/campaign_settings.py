@@ -270,18 +270,24 @@ class CampaignSettings:
             self.current = read(self.path)
         return self.current
 
-    def change(self, actor, change, update):
+    def change(self, actor, change, update, then=None):
         """Apply update to the settings as they stand, as the actor's change, described by change: once the result
         validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded,
         the time its event records being when each phase it steers took its state. An update that changes nothing
-        records nothing. Returns the settings."""
+        records nothing, unless then is given: the change then takes its version and event whatever it changes, and
+        then runs under the lock once its event is durable, as the step of the campaign the event records. Returns
+        the settings."""
         with locked(self.lock_path):
             recover(self.path, self.events_path)
             before = read(self.path)
             at = round(time.time())
             settings = changed(before, actor, update, at)
+            if then is not None and settings == before:
+                settings["version"] = before["version"] + 1
             if settings != before:
                 record(self.path, self.events_path, settings, actor, change, at)
+            if then is not None:
+                then()
         self.current = settings
         return settings
 

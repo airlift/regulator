@@ -5524,8 +5524,16 @@ def control(arguments, aws):
             description, update = control_change(arguments, time.time())
             check_region_limits(arguments.root, aws, store.current,
                                 changed_settings(store.current, arguments.actor, update, time.time()))
+        def reopened():
+            # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
+            # A second reopen then finds the campaign not ended, and one interrupted before this leaves the
+            # manifest for its retry.
+            manifest.unlink()
+            fsync_directory(arguments.root)
+
         before = store.current["version"]
-        settings = store.change(arguments.actor, description, checked)
+        settings = store.change(arguments.actor, description, checked,
+                                reopened if arguments.command == "reopen" else None)
     except SettingsError as error:
         raise SystemExit(str(error)) from error
     except CloudError as error:
@@ -5535,8 +5543,6 @@ def control(arguments, aws):
     else:
         print(f"campaign settings version {settings['version']}: {description}")
     if arguments.command == "reopen":
-        # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
-        manifest.unlink()
         print(f"campaign {arguments.campaign} reopened; start its controller again")
 
 

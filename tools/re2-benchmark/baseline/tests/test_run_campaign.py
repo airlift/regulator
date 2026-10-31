@@ -649,7 +649,13 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
 
             def reopen():
+                # Dain's reopen is recorded whether or not it clears a stop, and a second finds the campaign running.
                 control("reopen")
+                with (campaign_root / EVENTS).open(newline="") as events_file:
+                    last = list(csv.DictReader(events_file, delimiter="\t"))[-1]
+                self.assertEqual(("dain", "campaign reopened"), (last["actor"], last["change"]))
+                with self.assertRaisesRegex(SystemExit, "campaign tournament has not ended"):
+                    control("reopen")
 
             reopen()
             # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
