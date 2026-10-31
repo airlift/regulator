@@ -2,10 +2,14 @@
 
 The controller reloads the settings every loop. Every change is made under campaign-settings.lock, held only while
 the file is rewritten: it bumps the version and appends an event naming its actor to campaign-settings-events.tsv,
-so no change is anonymous. What decides a measurement's validity is frozen elsewhere and never lives here.
+so no change is anonymous. A change is staged beside the file and takes effect only once its event is recorded, and
+the next change finishes or discards one a failure interrupted, so no version takes effect without its event. What
+decides a measurement's validity is frozen elsewhere and never lives here.
 """
 
+import contextlib
 import copy
+import csv
 import fcntl
 import json
 import math
@@ -71,9 +75,11 @@ def validate(settings):
         check(positive_integer(limits.get("on_demand_max_vcpus", 1)), f"{region} on_demand_max_vcpus")
     check(isinstance(settings["platform_regions"], dict), "platform_regions")
     for platform, listed in settings["platform_regions"].items():
-        check(isinstance(listed, list) and listed and len(listed) == len(set(listed)) and
-              all(region in regions for region in listed), f"{platform} platform_regions")
-    check(isinstance(settings["purchase"], dict) and set(settings["purchase"].values()) <= set(PURCHASE_POLICIES),
+        check(isinstance(listed, list) and listed and all(isinstance(region, str) for region in listed) and
+              len(listed) == len(set(listed)) and all(region in regions for region in listed),
+              f"{platform} platform_regions")
+    check(isinstance(settings["purchase"], dict) and all(policy in PURCHASE_POLICIES
+                                                         for policy in settings["purchase"].values()),
           f"purchase is one of {', '.join(PURCHASE_POLICIES)} per platform")
     # Settings allowing On-Demand anywhere price every worker type's On-Demand hour.
     on_demand = any("on_demand_max_vcpus" in limits for limits in regions.values())
@@ -155,15 +161,47 @@ def read(path):
     return settings
 
 
-def write(path, settings):
-    temporary = path.with_name(path.name + ".new")
-    with temporary.open("w") as output:
+def staged(path):
+    return path.with_name(path.name + ".new")
+
+
+def record(path, events_path, settings, actor, change):
+    """Make settings the campaign's, as the actor's change: staged beside the file first, then its event recorded,
+    and only then put in place, so no version takes effect without its event."""
+    with staged(path).open("w") as output:
         json.dump(settings, output, indent=2, sort_keys=True)
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
-    os.replace(temporary, path)
+    append_ledger(events_path, EVENT_FIELDS, {"version": settings["version"], "at": round(time.time()),
+                                              "actor": actor, "change": change})
+    os.replace(staged(path), path)
     fsync_directory(path.parent)
+
+
+def recover(path, events_path):
+    """Finish the change a failure interrupted, under the lock: staged settings whose event was recorded take effect,
+    and any others are discarded, since their change was never recorded."""
+    if not staged(path).exists():
+        return
+    try:
+        version = json.loads(staged(path).read_text())["version"]
+        with events_path.open(newline="") as input_file:
+            recorded = [row["version"] for row in csv.DictReader(input_file, delimiter="\t")]
+    except (OSError, ValueError, KeyError, TypeError):
+        version, recorded = None, []
+    if recorded and recorded[-1] == str(version):
+        os.replace(staged(path), path)
+        fsync_directory(path.parent)
+    else:
+        staged(path).unlink()
+
+
+@contextlib.contextmanager
+def locked(lock_path):
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def seeded(given):
@@ -195,11 +233,10 @@ class CampaignSettings:
     def seed(cls, root, given, actor="dain"):
         """Write the campaign's first settings, unless it has some, and load them."""
         path = root / SETTINGS
-        if not path.exists():
-            settings = seeded(given)
-            write(path, settings)
-            append_ledger(root / EVENTS, EVENT_FIELDS, {"version": 1, "at": round(time.time()), "actor": actor,
-                                                         "change": "seed"})
+        with locked(root / LOCK):
+            recover(path, root / EVENTS)
+            if not path.exists():
+                record(path, root / EVENTS, seeded(given), actor, "seed")
         return cls(root)
 
     def reload(self):
@@ -211,15 +248,12 @@ class CampaignSettings:
         """Apply update to the settings as they stand, as the actor's change, described by change: once the result
         validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded.
         An update that changes nothing records nothing. Returns the settings."""
-        with self.lock_path.open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with locked(self.lock_path):
+            recover(self.path, self.events_path)
             before = read(self.path)
             settings = changed(before, actor, update)
             if settings != before:
-                write(self.path, settings)
-                append_ledger(self.events_path, EVENT_FIELDS, {"version": settings["version"],
-                                                               "at": round(time.time()), "actor": actor,
-                                                               "change": change})
+                record(self.path, self.events_path, settings, actor, change)
         self.current = settings
         return settings
 

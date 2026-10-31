@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 import campaign_settings
@@ -42,6 +43,26 @@ class TestCampaignSettings(unittest.TestCase):
             other.change("someone", "max_hosts 200 to 1", lambda current: current.update(max_hosts=1))
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
         self.assertEqual([("1", "dain", "seed"), ("2", "monitor", "max_hosts 368 to 200")], self.events())
+
+    def test_a_change_takes_effect_only_with_its_event(self):
+        settings = seed_settings(self.root)
+        change = ("monitor", "max_hosts 368 to 200", lambda current: current.update(max_hosts=200))
+        # A change whose event could not be recorded never took effect, and its retry records it.
+        with patch.object(campaign_settings, "append_ledger", side_effect=OSError("disk full")), \
+                self.assertRaises(OSError):
+            settings.change(*change)
+        self.assertEqual(368, settings.reload()["max_hosts"])
+        settings.change(*change)
+        self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
+        # A change interrupted once its event was recorded takes effect under the next change, and its retry changes
+        # nothing more.
+        with patch.object(campaign_settings.os, "replace", side_effect=OSError("interrupted")), \
+                self.assertRaises(OSError):
+            settings.change("monitor", "max_hosts 200 to 100", lambda current: current.update(max_hosts=100))
+        settings.change("monitor", "max_hosts 200 to 100", lambda current: current.update(max_hosts=100))
+        self.assertEqual((3, 100), (settings.reload()["version"], settings.current["max_hosts"]))
+        self.assertEqual([("1", "dain", "seed"), ("2", "monitor", "max_hosts 368 to 200"),
+                          ("3", "monitor", "max_hosts 200 to 100")], self.events())
 
     def test_the_monitor_raises_limits_only_within_what_dain_authorized(self):
         settings = seed_settings(self.root, max_hosts=100, max_hosts_per_platform=50, max_usd=60)
@@ -82,8 +103,9 @@ class TestCampaignSettings(unittest.TestCase):
                    "regions": [[], {}, {"bad region": region}, {"us-west-2": {**region, "max_vcpus": 0}},
                                {"us-west-2": {"max_vcpus": 8}}, {"us-west-2": {**region, "on_demand_max_vcpus": 0}},
                                {"us-west-2": {**region, "vcpus": 8}}],
-                   "platform_regions": [{"r8i": []}, {"r8i": ["eu-west-1"]}, {"r8i": ["us-west-2", "us-west-2"]}],
-                   "purchase": [{"r8i": "cheapest"}],
+                   "platform_regions": [{"r8i": []}, {"r8i": ["eu-west-1"]}, {"r8i": ["us-west-2", "us-west-2"]},
+                                        {"r8i": [["us-west-2"]]}],
+                   "purchase": [{"r8i": "cheapest"}, {"r8i": ["spot"]}],
                    "hourly_rates": [{}, {"r8i.huge": {"spot": 0.1, "total": 0.2}},
                                     {"r8i.large": {"spot": 0.2, "total": 0.1}}],
                    "phases": [{"a/primary": {"state": "sleeping", "share": "auto"}},
