@@ -166,7 +166,7 @@ class FakeCloud:
         self.region_volumes = {}
         # Each volume's instance, by volume ID.
         self.attachments = {}
-        self.snapshots = []
+        self.region_snapshots = {}
         # Each target group's registered (instance, port) targets, by ARN.
         self.targets = {}
         # Each control host launch's parameters, by instance ID.
@@ -309,6 +309,9 @@ class FakeCloud:
         if condition == "instance_running":
             self.region_instances[region] = [replace(instance, state="running") if instance.id == resource else
                                              instance for instance in self.region_instances[region]]
+        elif condition == "snapshot_completed":
+            self.region_snapshots[region] = [replace(snapshot, state="completed") if snapshot.id == resource else
+                                             snapshot for snapshot in self.region_snapshots[region]]
         elif condition == "volume_available":
             holder = self.attachments.get(resource)
             if any(instance.id == holder and instance.state != "terminated"
@@ -360,8 +363,14 @@ class FakeCloud:
 
     def create_snapshot(self, region, volume, tags):
         self.call("create_snapshot", region, volume)
-        self.snapshots.append((volume, dict(tags)))
-        return f"snap-{len(self.snapshots)}"
+        snapshots = self.region_snapshots.setdefault(region, [])
+        snapshots.append(cloud.Snapshot(f"snap-{len(snapshots) + 1}", volume, "pending", dict(tags)))
+        return snapshots[-1].id
+
+    def snapshots(self, region, tags):
+        self.call("snapshots", region)
+        return [snapshot for snapshot in self.region_snapshots.get(region, ())
+                if all(snapshot.tags.get(key) == value for key, value in tags.items())]
 
     def register_target(self, region, target_group, instance, port):
         self.call("register_target", target_group, instance, port)
@@ -620,6 +629,10 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_response("attach_volume", {}, {"VolumeId": "vol-new", "InstanceId": "i-host", "Device": "/dev/sdf"})
         ec2.add_response("create_snapshot", {"SnapshotId": "snap-a"}, {
             "VolumeId": "vol-new", "TagSpecifications": [{"ResourceType": "snapshot", "Tags": tags}]})
+        ec2.add_response("describe_snapshots", {"Snapshots": [
+            {"SnapshotId": "snap-a", "VolumeId": "vol-new", "State": "pending", "Tags": tags},
+            {"SnapshotId": "snap-failed", "VolumeId": "vol-new", "State": "error", "Tags": tags}]},
+            {"OwnerIds": ["self"], "Filters": [{"Name": "tag:Campaign", "Values": ["c"]}]})
         ec2.add_response("delete_volume", {}, {"VolumeId": "vol-new"})
         targets = {"TargetGroupArn": "arn:target-group", "Targets": [{"Id": "i-host", "Port": 3000}]}
         elbv2.add_response("register_targets", {}, targets)
@@ -644,6 +657,8 @@ class TestAwsCloud(unittest.TestCase):
         aws.wait("us-west-2", "instance_running", "i-host")
         aws.attach_volume("us-west-2", "vol-new", "i-host", "/dev/sdf")
         self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
+        self.assertEqual([cloud.Snapshot("snap-a", "vol-new", "pending", {"Campaign": "c"})],
+                         aws.snapshots("us-west-2", {"Campaign": "c"}))
         aws.delete_volume("us-west-2", "vol-new")
         aws.register_target("us-west-2", "arn:target-group", "i-host", 3000)
         self.assertEqual(["i-host"], aws.registered_targets("us-west-2", "arn:target-group"))

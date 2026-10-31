@@ -123,9 +123,24 @@ class TestControlHost(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "only Dain runs it, with --confirm"):
                 control_host.teardown(aws, "c", confirm=False)
             self.assertEqual("running", aws.region_instances["us-west-2"][0].state)
+            # A teardown interrupted while its snapshot completes, and again as it deletes the credentials, finishes
+            # when run again, taking no second snapshot.
+            wait = aws.wait
+
+            def snapshot_never_completes(region, condition, resource):
+                if condition == "snapshot_completed":
+                    raise CloudError("Waiter SnapshotCompleted failed: Max attempts exceeded")
+                wait(region, condition, resource)
+
+            for step, failure in (("wait", snapshot_never_completes),
+                                  ("delete_parameters", CloudError("ThrottlingException: Rate exceeded"))):
+                with self.subTest(step=step), patch.object(aws, step, side_effect=failure), \
+                        self.assertRaises(CloudError):
+                    control_host.teardown(aws, "c", confirm=True)
             control_host.teardown(aws, "c", confirm=True)
         self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
-        self.assertEqual([(volume.id, control_host.tags("c"))], aws.snapshots)
+        self.assertEqual([cloud.Snapshot("snap-1", volume.id, "completed", control_host.tags("c"))],
+                         aws.region_snapshots["us-west-2"])
         # The load balancer forwards to no host of the campaign, and the account setup's own resources stay.
         self.assertEqual(({"arn:target-group": set()}, []), (aws.targets, aws.region_volumes["us-west-2"]))
         self.assertEqual([control_host.NETWORK_PARAMETER], list(aws.parameters))
