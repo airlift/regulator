@@ -572,8 +572,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to a lazily compiled reverse program.
 - Compilation accounts for the program and list-head storage before assigning the
-  remaining budget to DFA caches. Internal compilation with a non-positive budget
-  uses upstream's 1 MiB default DFA allowance.
+  remaining budget to DFA caches. List heads are charged under upstream's rule,
+  only for a program of at most 512 instructions. The 2-byte-per-instruction
+  list-head array a larger program keeps is not charged. Internal compilation
+  with a non-positive budget uses upstream's 1 MiB default DFA allowance.
 - A forward program divides its DFA allowance between first-match and
   longest-match caches. A reverse longest-match DFA and a set's many-match DFA use
   their program's complete allowance.
@@ -1268,6 +1270,15 @@ Upstream caps this bitmap at 256 Kibit (32 KiB). The Java port deliberately uses
 more temporary memory because it targets server workloads where a bounded
 256 KiB workspace is small compared with input pages and can replace multiple
 boundary and capture passes.
+
+Upstream gives list heads, and so BitState, only to programs of at most 512
+instructions. Regulator gives list heads to every program with at most 32,767
+lists, so BitState also runs on a larger program whenever the visited bitmap
+bound fits the span. A large program, such as a Unicode letter class with a
+dozen captures, otherwise extracted every short match's groups with the NFA,
+where the Rust crate runs its bounded backtracker. The bitmap grows with the
+list count, not the instruction count, so its bound alone limits the span, as
+the crate bounds its backtracker.
 
 ## Matcher-Owned Capture Workspaces
 

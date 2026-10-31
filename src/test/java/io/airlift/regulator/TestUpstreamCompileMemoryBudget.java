@@ -98,13 +98,22 @@ public class TestUpstreamCompileMemoryBudget
         Prog program = Compiler.compile(parsed.regexp(), false, maxMemory);
 
         long programMemory = 512L + ((long) program.size() * 8);
-        if (program.canBitState()) {
+        if (program.hasUpstreamListHeads()) {
             programMemory += (long) program.size() * 2;
         }
         long onePassMemory = (long) program.onePassStateCount() *
                 (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
         assertThat(program.isOnePass()).isTrue();
         assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - onePassMemory);
+
+        // A program over upstream's 512 instructions keeps list heads for BitState, but they are
+        // not charged, as upstream gives it none.
+        int largeMaxMemory = 1 << 20;
+        Prog large = Compiler.compile(parse("(\\pL+)(\\pL*) ([0-9]+)"), false, largeMaxMemory);
+        assertThat(large.size()).isGreaterThan(512);
+        assertThat(large.canBitState()).isTrue();
+        assertThat(large.isOnePass()).isFalse();
+        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - 512L - ((long) large.size() * 8));
     }
 
     @Test
@@ -114,7 +123,7 @@ public class TestUpstreamCompileMemoryBudget
         Prog reference = Compiler.compile(parsed.regexp(), false, 4096);
 
         long programMemory = 512L + ((long) reference.size() * 8);
-        if (reference.canBitState()) {
+        if (reference.hasUpstreamListHeads()) {
             programMemory += (long) reference.size() * 2;
         }
         int maximumOnePassStates = 2 + 1;

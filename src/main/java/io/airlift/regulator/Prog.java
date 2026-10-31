@@ -34,6 +34,7 @@ import static java.util.Objects.requireNonNull;
 final class Prog
 {
     private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
     private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
     public enum MatchKind
@@ -660,6 +661,14 @@ final class Prog
     public boolean canBitState()
     {
         return listHeads != null;
+    }
+
+    /// Returns whether upstream RE2 would give this program list heads, which it charges to the
+    /// compile memory budget. It reads the final instruction count, so it is only valid after
+    /// [#flatten()] has been called.
+    boolean hasUpstreamListHeads()
+    {
+        return instructionCount <= UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS;
     }
 
     public int listCount()
@@ -2647,12 +2656,15 @@ final class Prog
         insts = flattenedInstructions.instructions;
         instructionCount = flattenedInstructions.size();
 
-        // Populate the list-head mapping used by the BitState engine.
-        // Upstream limits this to <= 512 instructions to keep the bitmap small.
+        // Populate the list-head mapping used by the BitState engine. Upstream gives list heads
+        // only to programs of at most 512 instructions, which sends a large program's captures to
+        // the NFA even for a short match. The visited bitmap grows with the list count, not the
+        // instruction count, so the bitmap bound below alone limits the text, as the Rust crate
+        // bounds its backtracker.
         listCount = rootIdsByInstruction.size();
         listHeads = null;
         bitStateTextMaxSize = 0;
-        if (instructionCount <= 512) {
+        if (listCount <= Short.MAX_VALUE) {
             short[] heads = new short[instructionCount];
             Arrays.fill(heads, (short) -1);
             for (int i = 0; i < listCount; i++) {
