@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, ValidationError, exceeds_published_limit
+from campaign_io import ledger_lines
 import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
@@ -113,9 +114,11 @@ def unit_columns(fields, *extra):
     return (*fields[:index], *UNIT_ATTEMPT_FIELDS, *extra, *fields[index:])
 
 
-def read_tsv(path: Path, required=(), exact=None):
+def read_tsv(path: Path, required=(), exact=None, ledger=False):
+    """A TSV file's rows, each with its source and line; a ledger's are read as ledger_lines reads them, without a
+    row a crash tore."""
     try:
-        input_file = path.open(newline="", encoding="utf-8")
+        input_file = ledger_lines(path) if ledger else path.open(newline="", encoding="utf-8")
     except OSError as error:
         raise ReductionError(f"cannot read {path}: {error}") from error
     with input_file:
@@ -514,7 +517,7 @@ def verify_campaign_source_manifest(campaign_artifact, source_manifest, sessions
 def load_events(paths, fields=EVENT_FIELDS):
     events = []
     for path in paths:
-        rows = read_tsv(path, ("event_type", "reason"))
+        rows = read_tsv(path, ("event_type", "reason"), ledger=True)
         for row in rows:
             if row["event_type"] not in {"interruption", "rejected-session", "exclusion"}:
                 raise ReductionError(f"unknown campaign event type {row['event_type']!r} in {path}")
