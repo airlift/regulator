@@ -70,6 +70,8 @@ ON_DEMAND_TAIL_PERCENT = 10
 # nothing.
 LAUNCH_NOT_FOUND = "launched instance was not found"
 BOOT_DEADLINE_MISSED = "worker did not report by its boot deadline"
+# A worker launches only once S3 holds every lease it was launched with.
+FIRST_LEASES_UNWRITTEN = "launch-infrastructure:first leases not written"
 UNIT_WORKER_SHARD = "unit-worker"
 # run-unit-worker.sh exits with this status after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS = 43
@@ -3703,9 +3705,17 @@ class UnitDispatcher:
 
     def launch(self, now):
         """Admit each pool's launches, then write each admitted worker's first leases and launch it, the workers on the
-        request threads. A launch AWS refused leaves a worker that has ended, settled once its cleanup is proven."""
+        request threads. A worker whose first leases S3 did not all take launches nothing, as a launch AWS refused
+        does: it has ended, and is settled once its cleanup is proven. An exception during admission still launches
+        the workers admitted before it, so none stays recorded as starting with no launch."""
         starting = []
-        self.admit(now, starting)
+        try:
+            self.admit(now, starting)
+        finally:
+            self.launch_admitted(starting)
+
+    def launch_admitted(self, starting):
+        """Write the first leases of each worker in starting and launch it, as launch describes."""
         requests = {}
         for worker in starting:
             try:
@@ -3716,10 +3726,11 @@ class UnitDispatcher:
                    for worker in starting if worker.job.host_epoch in requests]
 
         def write_and_launch(entry):
-            # The host finds its work waiting when its setup ends; a lease that could not be written is retried
-            # each loop.
+            # The host finds its work waiting when its setup ends.
             worker, documents = entry
             written = write_leases(self.arguments, worker, documents)
+            if not documents or len(written) < len(documents):
+                return written, LaunchFailed("retryable-infrastructure", FIRST_LEASES_UNWRITTEN)
             try:
                 return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch])
             except LaunchFailed as failure:
@@ -3778,7 +3789,7 @@ class UnitDispatcher:
                     self.pool_ready[pool] = ready_at
                     blocked_vcpus = blocked or blocked_vcpus
                     return False if scan else None
-                starting.append(self.start(pool, candidate, now))
+                self.start(pool, candidate, now, starting)
                 if candidate.market == "spot" and pool in self.spot_shortages:
                     return False
                 limit -= 1
@@ -3795,8 +3806,9 @@ class UnitDispatcher:
                 if not admitted:
                     wanting.remove(pool)
 
-    def start(self, pool, job, now):
-        """Record an admitted worker and issue its first leases, before its launch."""
+    def start(self, pool, job, now, starting):
+        """Record an admitted worker in the phase's workers and in starting, and issue its first leases, before its
+        launch."""
         del self.candidates[pool]
         self.boot_room -= 1
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
@@ -3819,10 +3831,10 @@ class UnitDispatcher:
         worker = self.workers[job.host_epoch] = UnitWorker(
             job, metadata, job_result_root(self.result_root, job) / session, slot=slot, slot_failures=slot_failures,
             launched_at=now, stop_by=job.stop_by)
+        starting.append(worker)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
         self.lease(worker, launching=True)
-        return worker
 
     def sweep(self, observed):
         """One loop of a phase paused for a fault, which trusts nothing more its hosts report but that they booted:
