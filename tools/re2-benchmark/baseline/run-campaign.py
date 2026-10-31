@@ -4429,11 +4429,12 @@ class Campaign:
         return bool(self.arguments.shared_budget.reservations(phase.root))
 
     def reload(self):
-        """Read the settings as they stand now, or keep the last good ones while the file does not validate."""
+        """Read the settings as they stand now, or keep the last good ones while they cannot be read or do not
+        validate."""
         settings = self.arguments.settings
         try:
             settings.reload()
-        except SettingsError as error:
+        except (OSError, SettingsError) as error:
             print(f"keeping campaign settings version {settings.current['version']}: {error}", flush=True)
 
     def log_changes(self):

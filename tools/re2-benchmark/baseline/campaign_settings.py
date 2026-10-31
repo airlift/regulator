@@ -3,8 +3,8 @@
 The controller reloads the settings every loop. Every change is made under campaign-settings.lock, held only while
 the file is rewritten: it bumps the version and appends an event naming its actor to campaign-settings-events.tsv,
 so no change is anonymous. A change is staged beside the file and takes effect only once its event is recorded, and
-the next change finishes or discards one a failure interrupted, so no version takes effect without its event. What
-decides a measurement's validity is frozen elsewhere and never lives here.
+the next change or reload finishes or discards one a failure interrupted, so no version takes effect without its
+event. What decides a measurement's validity is frozen elsewhere and never lives here.
 """
 
 import contextlib
@@ -197,14 +197,23 @@ def record(path, events_path, settings, actor, change, at):
 
 def recover(path, events_path):
     """Finish the change a failure interrupted, under the lock: staged settings whose event was recorded take effect,
-    and any others are discarded, since their change was never recorded."""
+    and any others are discarded, since their change was never recorded, as a staged file torn before its event was
+    recorded never was. While the staged file or the events cannot be read, the change stays staged and no other is
+    made, since its event may be recorded."""
     if not staged(path).exists():
         return
     try:
-        version = json.loads(staged(path).read_text())["version"]
-        recorded = [row["version"] for row in csv.DictReader(ledger_lines(events_path), delimiter="\t")]
-    except (OSError, ValueError, KeyError, TypeError):
-        version, recorded = None, []
+        text = staged(path).read_bytes()
+        try:
+            recorded = [row["version"] for row in csv.DictReader(ledger_lines(events_path), delimiter="\t")]
+        except FileNotFoundError:
+            recorded = []
+    except (OSError, ValueError, KeyError, csv.Error) as error:
+        raise SettingsError(f"cannot finish the campaign settings change staged in {staged(path)}: {error}") from error
+    try:
+        version = json.loads(text)["version"]
+    except (ValueError, KeyError, TypeError):
+        version = None
     if recorded and recorded[-1] == str(version):
         os.replace(staged(path), path)
         fsync_directory(path.parent)
@@ -242,7 +251,7 @@ class CampaignSettings:
         self.path = root / SETTINGS
         self.lock_path = root / LOCK
         self.events_path = root / EVENTS
-        self.current = read(self.path)
+        self.reload()
 
     @classmethod
     def seed(cls, root, given, actor="dain"):
@@ -255,8 +264,10 @@ class CampaignSettings:
         return cls(root)
 
     def reload(self):
-        """Read the settings as they stand now."""
-        self.current = read(self.path)
+        """Read the settings as they stand now, once a change a failure interrupted is finished."""
+        with locked(self.lock_path):
+            recover(self.path, self.events_path)
+            self.current = read(self.path)
         return self.current
 
     def change(self, actor, change, update):
