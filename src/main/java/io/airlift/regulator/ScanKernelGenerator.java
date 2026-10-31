@@ -786,7 +786,8 @@ final class ScanKernelGenerator
         {
             return CodeBlock.block(
                     IfStatement.builder()
-                            .condition(groups.isNotNull())
+                            // ScanPlan.END_ONLY_GROUPS records nothing.
+                            .condition(groups.isNotNull().and(groups.length().notEqual(constantInt(0))))
                             .then(CodeBlock.block(
                                     groups.setElement(constantInt(0), matchStart.subtract(base)),
                                     groups.setElement(constantInt(1), cursor.subtract(base))))
@@ -968,15 +969,21 @@ final class ScanKernelGenerator
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             BytecodeExpression attemptAtCandidate = invokeStatic(attemptLoop, bytes, base, end, candidate, fullMatch, groups);
+            // A successful attempt returns its end when the caller passes groups or
+            // ScanPlan.END_ONLY_GROUPS, and the search returns it Slice-relative. A boolean search
+            // without groups may return any nonnegative value for a match.
+            BytecodeExpression matchEnd = result.cast(int.class).subtract(offset);
 
             if (region != null) {
                 // An anchored search makes at most one attempt and never hands off.
                 body.append(IfStatement.builder()
                         .condition(region.anchored())
                         .then(CodeBlock.block(
+                                ifThenJump(candidate.greaterThanOrEqual(end), done),
+                                result.set(attemptAtCandidate),
                                 IfStatement.builder()
-                                        .condition(candidate.lessThan(end).and(attemptAtCandidate.greaterThanOrEqual(constantLong(0))))
-                                        .then(constantInt(ScanPlan.SEARCH_MATCHED).ret())
+                                        .condition(result.greaterThanOrEqual(constantLong(0)))
+                                        .then(matchEnd.ret())
                                         .build(),
                                 CodeBlock.blockBuilder().jump(done).build()))
                         .build());
@@ -997,7 +1004,7 @@ final class ScanKernelGenerator
             if (!beforeHandoff) {
                 handOffBlock.append(fillIfNotNull(groups));
             }
-            handOffBlock.ret(candidate.subtract(offset));
+            handOffBlock.ret(candidate.subtract(offset).bitwiseXor(constantInt(-1)));
             body.append(IfStatement.builder()
                     .condition(handOff)
                     .then(handOffBlock.build())
@@ -1007,7 +1014,7 @@ final class ScanKernelGenerator
             body.append(result.set(attemptAtCandidate));
             body.append(IfStatement.builder()
                     .condition(result.greaterThanOrEqual(constantLong(0)))
-                    .then(constantInt(ScanPlan.SEARCH_MATCHED).ret())
+                    .then(matchEnd.ret())
                     .build());
             body.append(failure.set(result.bitwiseXor(constantLong(-1))));
             body.append(failedWork.set(failedWork.add(failure.shiftRightUnsigned(constantInt(32)).cast(int.class).subtract(candidate).cast(long.class))));
@@ -1112,8 +1119,12 @@ final class ScanKernelGenerator
         private BytecodeExpression finishSearch(CodeBlock.Builder body, Parameter input, Variable result, BytecodeExpression groups)
         {
             body.append(IfStatement.builder()
-                    .condition(result.lessThan(constantInt(0)))
-                    .then(result.equal(constantInt(ScanPlan.SEARCH_MATCHED)).ret())
+                    .condition(result.greaterThanOrEqual(constantInt(0)))
+                    .then(constantTrue().ret())
+                    .build());
+            body.append(IfStatement.builder()
+                    .condition(result.equal(constantInt(ScanPlan.NO_MATCH)))
+                    .then(constantFalse().ret())
                     .build());
             return boundConstant(routes.pattern(), Re2.class)
                     .invoke("continueScanSearch", boolean.class, input, result, groups);
@@ -1134,31 +1145,48 @@ final class ScanKernelGenerator
             body.ret(finishSearch(body, input, result, noGroups));
         }
 
+        // The loop of Re2.countUnanchoredScanMatches; keep in step.
         private void defineCount()
         {
             Parameter input = arg("input", Slice.class);
             CodeBlock.Builder body = entry("count", MethodType.methodType(long.class, Slice.class), input).body();
-            if (routes.count() == Re2.ScanPlanCount.SINGLE_ATTEMPT) {
-                if (!anchored) {
-                    throw new IllegalStateException("an unanchored plan counts by searching");
-                }
+            if (routes.count() == Re2.ScanPlanCount.SINGLE_ATTEMPT && !anchored) {
+                throw new IllegalStateException("an unanchored plan counts by searching");
+            }
+            if (anchored) {
+                // Only the first find of a start-anchored plan can match, so a search loop counts
+                // what the single attempt counts.
                 body.ret(inlineIf(
                         invokeStatic(attemptLoop, input, constantInt(0), length(input), constantFalse(), constantNull(int[].class)),
                         constantLong(1),
                         constantLong(0)));
                 return;
             }
-            Variable groups = body.declare("groups", newArray(int[].class, 2));
             Variable length = body.declare("length", length(input));
             Variable count = body.declare("count", constantLong(0));
             Variable start = body.declare("start", constantInt(0));
+            Variable matchEnd = body.declare(int.class, "matchEnd");
+            // A search that hands off finishes on the ordinary engine, which reports the end in
+            // group storage. The first handoff allocates it, and later ones in this call reuse it.
+            Variable handoffGroups = body.declare("handoffGroups", constantNull(int[].class));
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
             body.append(ifThenJump(start.greaterThanOrEqual(length), done));
-            body.append(ifThenJump(invokeStatic(find, input, start, groups).not(), done));
+            body.append(matchEnd.set(invokeStatic(search, input, start, boundConstant(ScanPlan.END_ONLY_GROUPS, int[].class))));
+            body.append(IfStatement.builder()
+                    .condition(matchEnd.lessThan(constantInt(0)))
+                    .then(CodeBlock.block(
+                            ifThenJump(matchEnd.equal(constantInt(ScanPlan.NO_MATCH)), done),
+                            IfStatement.builder()
+                                    .condition(handoffGroups.isNull())
+                                    .then(handoffGroups.set(newArray(int[].class, 2)))
+                                    .build(),
+                            ifThenJump(boundConstant(routes.pattern(), Re2.class).invoke("continueScanSearch", boolean.class, input, matchEnd, handoffGroups).not(), done),
+                            matchEnd.set(handoffGroups.getElement(1))))
+                    .build());
             body.append(count.set(count.add(constantLong(1))));
-            body.append(start.set(groups.getElement(1)));
+            body.append(start.set(matchEnd));
             body.jump(loop);
             body.mark(done);
             body.ret(count);

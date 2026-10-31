@@ -2314,12 +2314,12 @@ public class TestScanPlan
         String padding = " ".repeat(256);
         String dense = "1 2 3 4 5 6 7 8 9zz" + padding;
         Slice denseInput = view(dense);
-        assertThat(plan.searchBeforeHandoff(denseInput, 0, denseInput.length(), 0, false)).isEqualTo(dense.indexOf('8') + 1);
+        assertThat(plan.searchBeforeHandoff(denseInput, 0, denseInput.length(), 0, false)).isEqualTo(~(dense.indexOf('8') + 1));
         Slice shortInput = view("1 2 3 4 5 6 7 8 9zz");
-        assertThat(plan.searchBeforeHandoff(shortInput, 0, shortInput.length(), 0, false)).isEqualTo(ScanPlan.SEARCH_MATCHED);
+        assertThat(plan.searchBeforeHandoff(shortInput, 0, shortInput.length(), 0, false)).isNotNegative();
         String sparse = String.join(" ".repeat(40), "1", "2", "3", "4", "5", "6", "7", "8", "9zz") + padding;
         Slice sparseInput = view(sparse);
-        assertThat(plan.searchBeforeHandoff(sparseInput, 0, sparseInput.length(), 0, false)).isEqualTo(ScanPlan.SEARCH_MATCHED);
+        assertThat(plan.searchBeforeHandoff(sparseInput, 0, sparseInput.length(), 0, false)).isNotNegative();
         Slice missingLiteral = view("1 2 3 4 5 6 7 8 9z" + padding);
         assertThat(plan.searchBeforeHandoff(missingLiteral, 0, missingLiteral.length(), 0, false)).isEqualTo(ScanPlan.NO_MATCH);
 
@@ -2414,13 +2414,13 @@ public class TestScanPlan
             boolean folded = plan.usesAsciiFoldedExecutor();
             int[] groups = new int[2 * (regexp.capturingGroupCount() + 1)];
             for (int[] searchGroups : Arrays.asList(null, groups)) {
-                int resume = folded
+                int result = folded
                         ? plan.searchAsciiFolded(input, 0, input.length(), 0, false, false, searchGroups)
                         : plan.search(input, 0, input.length(), 0, false, false, searchGroups);
-                assertThat(resume).as(expression).isEqualTo(1);
+                assertThat(result).as(expression).isEqualTo(~1);
             }
             assertThat(groups).as(expression).containsOnly(-1);
-            assertThat(plan.searchBeforeHandoff(input, 0, input.length(), 0, folded)).as(expression).isEqualTo(1);
+            assertThat(plan.searchBeforeHandoff(input, 0, input.length(), 0, folded)).as(expression).isEqualTo(~1);
             // An anchored search makes one attempt and never hands off.
             int anchored = folded
                     ? plan.searchAsciiFolded(input, 0, input.length(), 0, true, false, groups)
@@ -2487,10 +2487,10 @@ public class TestScanPlan
 
         ScanPlan plan = requireNonNull(analyze(expression));
         int[] groups = new int[6];
-        assertThat(plan.search(input, 0, input.length(), 0, false, false, groups)).isEqualTo(ScanPlan.SEARCH_MATCHED);
+        assertThat(plan.search(input, 0, input.length(), 0, false, false, groups)).isEqualTo(5);
         assertThat(groups).containsExactly(0, 5, 0, 1, 2, 3);
         // The attempt at the space reads to the first '!' and fails; the next candidate follows its leading run.
-        assertThat(plan.search(input, 0, input.length(), 5, false, false, groups)).isEqualTo(7);
+        assertThat(plan.search(input, 0, input.length(), 5, false, false, groups)).isEqualTo(~7);
 
         List<int[]> matches = joniMatches(oracle, input);
         assertThat(matches).hasSize(2);

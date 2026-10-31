@@ -305,31 +305,93 @@ public class TestRe2Allocations
     }
 
     @Test
-    public void testTrinoUnanchoredScanCountAllocatesOnlySearchResult()
+    public void testScanPlanCountDoesNotAllocate()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
         assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
-        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/"));
-        Slice source = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
-        assertThat(pattern.re2().usesScanPlanForDiagnostics()).isTrue();
+        // Rows of the everyday keyValue and specialized queryParameterNames workloads, a plan led
+        // by a whole literal, and an ASCII-folded plan, which has no generated class. The key-value
+        // and folded inputs hold a match start inside a value, which a count skips only by
+        // resuming at the match end.
+        String keyValueExpression = "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)";
+        Slice keyValueSource = Slices.utf8Slice("node=other=7 state=ready attempts=2");
+        Slice querySource = Slices.utf8Slice("https://example.org/search?q=regex&lang=en&page=2");
+        Slice linkSource = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
+        Slice foldedSource = Slices.utf8Slice("?ID=xid=7&name=x&id=8");
+        TrinoRegexp folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)id=([^&]+)"));
+        assertThat(folded.re2().usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
 
-        for (int iteration = 0; iteration < 20_000; iteration++) {
-            assertThat(pattern.count(source)).isEqualTo(2);
-        }
+        for (boolean generateBytecode : new boolean[] {false, true}) {
+            TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setGenerateBytecode(generateBytecode);
+            TrinoRegexp keyValue = TrinoRegexp.compile(Slices.utf8Slice(keyValueExpression), options);
+            TrinoRegexp queryParameterNames = TrinoRegexp.compile(Slices.utf8Slice("[?&]([^=]+)="), options);
+            TrinoRegexp link = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/"), options);
+            // An RE2 pattern's generated class counts with its own copy of the count loop.
+            Re2 re2KeyValue = Re2.compile(Slices.utf8Slice(keyValueExpression), Re2.Options.defaults().setGenerateBytecode(generateBytecode));
+            assertThat(List.of(keyValue, queryParameterNames, link, folded)).allMatch(pattern -> pattern.re2().usesScanPlanForDiagnostics());
+            assertThat(link.re2().caseSensitiveScanPlan().hasWholeLiteralCandidates()).isTrue();
+            assertThat(List.of(keyValue, queryParameterNames, link)).allMatch(pattern -> pattern.usesGeneratedBytecode() == generateBytecode);
+            assertThat(re2KeyValue.usesScanPlanForDiagnostics()).isTrue();
+            assertThat(re2KeyValue.usesGeneratedBytecode()).isEqualTo(generateBytecode);
+            LongSupplier counts = () -> keyValue.count(keyValueSource) + queryParameterNames.count(querySource) + link.count(linkSource) +
+                    folded.count(foldedSource) + re2KeyValue.count(keyValueSource);
 
-        long allocatedBytes = minimumAllocatedBytes(20_000, () -> {
-            long matchCount = 0;
-            for (int iteration = 0; iteration < 10_000; iteration++) {
-                matchCount += pattern.count(source);
+            for (int iteration = 0; iteration < 20_000; iteration++) {
+                assertThat(counts.getAsLong()).isEqualTo(13);
             }
-            return matchCount;
-        });
 
-        assertThat(allocatedBytes / 10_000)
-                .as("each count allocates only its int[2] search result, 24 bytes with compressed class pointers")
-                .isLessThanOrEqualTo(24);
+            long allocatedBytes = minimumAllocatedBytes(130_000, () -> {
+                long matchCount = 0;
+                for (int iteration = 0; iteration < 10_000; iteration++) {
+                    matchCount += counts.getAsLong();
+                }
+                return matchCount;
+            });
+
+            assertThat(allocatedBytes / 10_000).as("generateBytecode=%s", generateBytecode).isZero();
+        }
+    }
+
+    @Test
+    public void testScanPlanCountHandoffAllocatesOncePerCall()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // Each of the three searches hands off to the ordinary engine, which reports the match end
+        // in group storage. A count call allocates that storage once, an int[2] of 24 bytes with
+        // compressed class pointers, rather than once per handoff.
+        Slice expression = Slices.utf8Slice("https?://([^/]+)/");
+        Slice source = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
+        for (boolean generateBytecode : new boolean[] {false, true}) {
+            TrinoRegexp handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(expression, TrinoRegexp.Options.defaults().setGenerateBytecode(generateBytecode));
+            // An RE2 pattern's generated class counts with its own copy of the count loop.
+            Re2 re2Handoff = Re2.compileForcingScanPlanHandoffForTesting(expression, Re2.Options.defaults().setGenerateBytecode(generateBytecode));
+            assertThat(handoff.re2().usesScanPlanForDiagnostics()).isTrue();
+            assertThat(handoff.re2().scanPlanCount()).isEqualTo(Re2.ScanPlanCount.SEARCH_LOOP);
+            assertThat(handoff.usesGeneratedBytecode()).isEqualTo(generateBytecode);
+            assertThat(re2Handoff.usesScanPlanForDiagnostics()).isTrue();
+            assertThat(re2Handoff.scanPlanCount()).isEqualTo(Re2.ScanPlanCount.SEARCH_LOOP);
+            assertThat(re2Handoff.usesGeneratedBytecode()).isEqualTo(generateBytecode);
+            LongSupplier counts = () -> handoff.count(source) + re2Handoff.count(source);
+
+            for (int iteration = 0; iteration < 20_000; iteration++) {
+                assertThat(counts.getAsLong()).isEqualTo(4);
+            }
+
+            long allocatedBytes = minimumAllocatedBytes(40_000, () -> {
+                long matchCount = 0;
+                for (int iteration = 0; iteration < 10_000; iteration++) {
+                    matchCount += counts.getAsLong();
+                }
+                return matchCount;
+            });
+
+            assertThat(allocatedBytes / 10_000).as("generateBytecode=%s", generateBytecode).isLessThanOrEqualTo(2 * 24);
+        }
     }
 
     private static int runScanPlanOperations(Re2 anchored, Re2 folded, Re2 unanchored, Re2 handoff, Slice url, Slice header, Slice link, int[] groups)

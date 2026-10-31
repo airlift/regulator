@@ -275,14 +275,14 @@ public class TestRe2ScanPlan
         // count toward the budget in both executors.
         for (String expression : List.of("x([^z]+)zq", "x([^z\\x{85}]+)zq", "([^/]+)/([^!]+)!x")) {
             Slice witness = witness(expression);
-            assertThat(plan(expression).search(witness, 0, witness.length(), 0, false, false, null)).as(expression).isEqualTo(1);
+            assertThat(plan(expression).search(witness, 0, witness.length(), 0, false, false, null)).as(expression).isEqualTo(~1);
         }
         ScanPlan folded = plan("(?i)x([^z\\x{85}]+)zq");
         assertThat(folded.usesAsciiFoldedExecutor()).isTrue();
         Slice foldedWitness = utf8Slice("xA".repeat(1100) + "ZrxbZQxczq");
-        assertThat(folded.searchAsciiFolded(foldedWitness, 0, foldedWitness.length(), 0, false, false, null)).isEqualTo(1);
+        assertThat(folded.searchAsciiFolded(foldedWitness, 0, foldedWitness.length(), 0, false, false, null)).isEqualTo(~1);
         Slice dense = witness("[0-9]([0-9]*)zz");
-        assertThat(plan("[0-9]([0-9]*)zz").searchBeforeHandoff(dense, 0, dense.length(), 0, false)).isEqualTo(dense.toStringUtf8().indexOf('8') + 1);
+        assertThat(plan("[0-9]([0-9]*)zz").searchBeforeHandoff(dense, 0, dense.length(), 0, false)).isEqualTo(~(dense.toStringUtf8().indexOf('8') + 1));
         // The four excluded ASCII bytes keep this a run rather than a delimited capture, so the
         // case reaches the run's vector scan.
         assertThat(plan("^x([^/:?#]+)/$").operationsForDiagnostics()).isEqualTo("LITERAL,RE2_RUN,LITERAL,END");
