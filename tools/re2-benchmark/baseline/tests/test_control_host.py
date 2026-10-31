@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
 import cloud  # noqa: E402
 import control_host  # noqa: E402
+import telemetry  # noqa: E402
 from test_cloud import FakeCloud  # noqa: E402
 
 # A network parameter of made-up identifiers, the CIDR from the documentation range.
@@ -210,6 +211,25 @@ class TestControlHost(unittest.TestCase):
         provider = re.search(r"^      path: (\S+)$", (CONTROL_HOST / "grafana" / "dashboards.yaml").read_text(),
                              re.MULTILINE)[1]
         self.assertIn(f"/aws/control-host/grafana:{provider}:ro", lgtm)
+
+    def test_dashboards_query_only_what_the_controller_exports(self):
+        # Prometheus names each counter with _total.
+        exported = set(telemetry.GAUGES) | {f"{name}_total" for name in telemetry.COUNTERS}
+        paths = sorted((CONTROL_HOST / "grafana").glob("*.json"))
+        self.assertEqual(["fleet.json", "health.json", "spend.json"], [path.name for path in paths])
+        for path in paths:
+            with self.subTest(dashboard=path.name):
+                panels = json.loads(path.read_text())["panels"]
+                # The monitor's runbook finds each panel by its title.
+                titles = [panel["title"] for panel in panels]
+                self.assertEqual(sorted(set(titles)), sorted(titles))
+                for panel in panels:
+                    for target in panel["targets"]:
+                        # Each query reads a datasource otel-lgtm provisions, and each metric one the controller
+                        # exports.
+                        self.assertIn(target["datasource"]["uid"], ("prometheus", "loki", "tempo"))
+                        self.assertLessEqual(set(re.findall(r"\bregulator_[a-z_]+", target.get("expr", ""))),
+                                             exported, panel["title"])
 
 
 if __name__ == "__main__":
