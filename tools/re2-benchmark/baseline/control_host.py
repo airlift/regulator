@@ -271,20 +271,19 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
         aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
     except CloudError as error:
         # A host without the campaign volume would wait for it and then fail, so it goes, and replace starts another.
-        discard(aws, network, instance, registered=False)
+        fate = discard(aws, network, campaign, instance, registered=False)
         raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
-                         f"{instance}, which is terminated; run control-host replace {campaign} again: "
-                         f"{error}") from error
+                         f"{instance}: {error}; that host {fate}; run control-host replace {campaign} again") from error
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
     # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
     # out before its controller starts.
     if others := other_hosts(aws, network, campaign):
-        discard(aws, network, instance, registered=True)
+        fate = discard(aws, network, campaign, instance, registered=True)
         raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, which was registered as "
                          f"campaign {campaign}'s new control host {instance} was; one name serves one campaign, so "
-                         f"that host is deregistered and terminated; once the other campaign's host is torn down, "
-                         f"run control-host replace {campaign}")
+                         f"that host {fate}; once the other campaign's host is torn down, run control-host replace "
+                         f"{campaign}")
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
           f"ssh, once control-host known-host {campaign} records its keys: ssh -p {SSH_PORT} "
@@ -292,11 +291,18 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
 
-def discard(aws, network, instance, registered):
-    """Take a new control host out of the load balancer's target group, where it was registered, and terminate it."""
-    if registered:
-        aws.deregister_target(REGION, network["target_group"], instance, GRAFANA_PORT)
-    aws.terminate(REGION, [instance])
+def discard(aws, network, campaign, instance, registered):
+    """Take a new control host of the campaign out of the load balancer's target group, where it was registered, and
+    terminate it; returns what became of it, for the refusal that follows, which names AWS's error where it refused,
+    since the host then still runs until the campaign's next replace terminates it."""
+    try:
+        if registered:
+            aws.deregister_target(REGION, network["target_group"], instance, GRAFANA_PORT)
+        aws.terminate(REGION, [instance])
+    except CloudError as error:
+        return (f"still runs, since AWS refused to take it down: {error}; the next control-host replace {campaign} "
+                "terminates it")
+    return "is deregistered and terminated" if registered else "is terminated"
 
 
 def root_files(root):
