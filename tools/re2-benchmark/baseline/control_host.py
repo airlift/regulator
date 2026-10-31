@@ -208,11 +208,16 @@ def launch(aws, campaign, ssh_public_key, inputs):
 
 def replace(aws, campaign, ssh_public_key):
     """Terminate the campaign's control host, if it has one, and launch another onto its volume, in the volume's
-    zone."""
+    zone; once a teardown has snapshotted the volume, its snapshot is the root's last copy and no host writes the
+    volume again."""
     found = network(aws)
     group = security_group(aws, found)
     check_target_group(aws, found, campaign)
     volume = campaign_volume(aws, campaign)
+    if any(snapshot.volume == volume.id for snapshot in aws.snapshots(REGION, tags(campaign))):
+        raise SystemExit(f"campaign {campaign}'s teardown snapshotted its volume {volume.id} as its root's last "
+                         f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown "
+                         f"{campaign} --confirm")
     hosts = live_hosts(aws, campaign)
     if hosts:
         for host in hosts:
