@@ -37,8 +37,13 @@ class TestCampaignSettings(unittest.TestCase):
         other.change("monitor", "max_hosts 200 to 200", lambda current: current.update(max_hosts=200))
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
         # A change the settings could not run under is refused whole, as is one naming no actor.
-        with self.assertRaisesRegex(SettingsError, "max_usd"):
-            other.change("dain", "max_usd to nothing", lambda current: current.update(max_usd=0, max_hosts=1))
+        for change, update, refusal in (
+                ("max_usd to nothing", lambda current: current.update(max_usd=0, max_hosts=1), "max_usd"),
+                ("phases to a list", lambda current: current.update(phases=[]), "phases"),
+                ("a/primary to nothing", lambda current: current["phases"].update({"a/primary": None}), "a/primary")):
+            with self.subTest(change=change), \
+                    self.assertRaisesRegex(SettingsError, f"invalid campaign settings: {refusal}"):
+                other.change("dain", change, update)
         with self.assertRaisesRegex(SettingsError, "actor"):
             other.change("someone", "max_hosts 200 to 1", lambda current: current.update(max_hosts=1))
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
@@ -124,7 +129,11 @@ class TestCampaignSettings(unittest.TestCase):
                    "hourly_rates": [{}, {"r8i.huge": {"spot": 0.1, "total": 0.2}},
                                     {"r8i.large": {"spot": 0.2, "total": 0.1}}],
                    "phases": [{"a/primary": {"state": "sleeping", "share": "auto"}},
-                              {"a/primary": {"state": "running", "share": 0}}],
+                              {"a/primary": {"state": "running", "share": 0}},
+                              {"a/primary": {"state": "paused", "share": "auto", "reason": "bad AMI"}},
+                              {"a/primary": {"state": "draining", "share": "auto", "by": "someone"}},
+                              {"a/primary": {"state": "running", "share": "auto", "since": 0}},
+                              {"a/primary": {"state": "running", "share": "auto", "since": "now"}}],
                    "boot_window": [{"initial": 4, "max": 50}, {"initial": 20, "max": 10}],
                    "spending_stop": [{"by": "someone", "at": 1, "reason": "leak"}, {"by": "dain", "at": 1}],
                    "authorized": [{"max_hosts": 1, "max_usd": 1}],
