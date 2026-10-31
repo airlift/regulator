@@ -280,6 +280,58 @@ public class TestRegexpMatcher
     }
 
     @Test
+    public void testGroupZeroMatcherFindsOneCharacterStartsWithoutReversePass()
+    {
+        Re2 pattern = Re2.compile(Slices.utf8Slice("(\\pL)"));
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("aé-有𝐀b"), null);
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(0);
+        assertThat(matcher.end()).isEqualTo(1);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(1);
+        assertThat(matcher.end()).isEqualTo(3);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(4);
+        assertThat(matcher.end()).isEqualTo(7);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(7);
+        assertThat(matcher.end()).isEqualTo(11);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(11);
+        assertThat(matcher.end()).isEqualTo(12);
+        assertThat(matcher.find()).isFalse();
+        assertThat(pattern.isReverseProgramComputed()).isFalse();
+
+        // Starts stay relative to a Slice that begins inside its byte array.
+        pattern = Re2.compile(Slices.utf8Slice("\\pL"));
+        matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(Slices.utf8Slice("xxé𝐀xx").getBytes(), 2, 6), null);
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(0);
+        assertThat(matcher.end()).isEqualTo(2);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(2);
+        assertThat(matcher.end()).isEqualTo(6);
+        assertThat(matcher.find()).isFalse();
+        assertThat(pattern.isReverseProgramComputed()).isFalse();
+
+        // The program matches an encoded surrogate as one character. Those bytes are not valid
+        // UTF-8, so the surrogate's start comes from the reverse pass.
+        pattern = Re2.compile(Slices.utf8Slice("(?s:.)"));
+        matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(new byte[] {'a', (byte) 0xED, (byte) 0xA0, (byte) 0x80, 'b'}), null);
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(0);
+        assertThat(matcher.end()).isEqualTo(1);
+        assertThat(pattern.isReverseProgramComputed()).isFalse();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(1);
+        assertThat(matcher.end()).isEqualTo(4);
+        assertThat(pattern.isReverseProgramComputed()).isTrue();
+    }
+
+    @Test
     public void testGroupZeroMatcherPreservesMatchBoundaries()
     {
         assertGroupZeroMatchesFull("(a+)", "zaaazaa");

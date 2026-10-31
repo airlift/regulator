@@ -234,6 +234,25 @@ final class Utf8
         return offset == input.length() || (input.getByte(offset) & 0xC0) != 0x80;
     }
 
+    /// Returns the start of the valid UTF-8 character that ends at `end` and starts at or after
+    /// `start`, or `-1` when the bytes before `end` do not end in one. Requires `start < end`.
+    static int previousRuneStart(byte[] bytes, int start, int end)
+    {
+        int position = end - 1;
+        if (bytes[position] >= 0) {
+            return position;
+        }
+        int minimum = Math.max(start, end - 4);
+        while (position > minimum && (bytes[position] & 0xC0) == 0x80) {
+            position--;
+        }
+        long decoded = decode(bytes, position, end);
+        int width = decodedWidth(decoded);
+        // A malformed byte decodes to RUNE_ERROR with width one, so this returns -1. A real
+        // encoded U+FFFD has width three and is a valid character.
+        return width > 1 && position + width == end ? position : -1;
+    }
+
     static int encodedLength(int codePoint)
     {
         if (!Character.isValidCodePoint(codePoint)) {

@@ -1350,8 +1350,20 @@ the search. Repeated `find()` calls then use the existing count-search traversal
 to return one forward boundary without rediscovering the DFA, match mode, and
 acceleration state for every match. Fixed-length expressions derive the start
 from that boundary. Expressions that match empty at every position, with no
-assertion that could refuse one, start where the search did. Other
-variable-length expressions retain the existing reverse DFA boundary recovery.
+assertion that could refuse one, start where the search did. One-character
+expressions such as `\pL` start at the lead byte of a valid UTF-8 character
+that ends at the boundary. Other matches retain the existing reverse DFA
+boundary recovery.
+
+The one-character rule takes 0.55x to 0.61x the base's time on the dense letter
+rows. Its first shape, measured on 97dd595b with 2 hosts a side, made r8i
+`letters-upper` (Java `\p{Lu}`, where matches are sparse) take about 1.15x the
+base's time; against the empty-match rule alone, 3 hosts a side, that cost was
+the one-character rule's, 1.125x native and 1.093x safe. The final shape, which
+shares the UTF-8 step-back helper and its ASCII early return and flattens the
+start chain, took 0.86x the first shape's time on r8i `letters-upper` and 0.91x
+to 0.94x on the letter rows, 3 hosts a side, so `letters-upper` is about 1.00x
+the base. r9g `letters-upper` is flat throughout.
 
 Eligibility is limited to first-match programs without a required prefix,
 anchors, or text-dependent assertions. Empty matches are still handled by the
