@@ -913,8 +913,10 @@ class TestRunCampaign(unittest.TestCase):
                                   ("CONTAINS_ABSENT", "regulator", score, "accepted"),
                                   ("CONTAINS_ABSENT", "trino-sql", "100", outcome),
                                   ("RETIRED", "regulator", score, "accepted"))])
-            # The phase ended with a unit that spent its attempts, and another accepted group's retained directory is
-            # gone.
+            # The phase failed with a unit that spent its attempts while the language primary runs on, and another
+            # accepted group's retained directory is gone.
+            campaign_settings(campaign_root).controller_change("a/primary failed", lambda settings: settings.update(
+                phases={"a/primary": {"state": "failed", "share": "auto"}}))
             write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"), [
                 {"platform": "r9g", "unit_id": "u2", "replica": "3",
                  "detail": "unit failed with status 1; spent its 3 attempts"}])
@@ -949,9 +951,10 @@ class TestRunCampaign(unittest.TestCase):
                     RUN_CAMPAIGN.main()
                 return output.getvalue().split("\n")[:-1]
 
-            lines, table = status(campaign_root, "--results"), status(campaign_root, "--results", "--tsv")
-            # Given one phase's root, the command reports that phase as the campaign labels it.
-            self.assertEqual(lines[6:12], status(language, "--results"))
+            with RUN_CAMPAIGN.controller_lock(campaign_root):
+                lines, table = status(campaign_root, "--results"), status(campaign_root, "--results", "--tsv")
+                # Given one phase's root, the command reports that phase as the campaign labels it.
+                self.assertEqual(lines[6:12], status(language, "--results"))
 
         # Missing results and an unresolved unit come first, then a row this checkout's rows.tsv does not list, then
         # the slowest rows, each against its 1.0 ratio, then a row the comparison does not time, counting the hosts
