@@ -555,7 +555,10 @@ check, red at its threshold: loop seconds over 30, a worker at zero slack, an
 idle stop with work queued, the boot window shrinking, a launch refusal over
 10 minutes, a finish past the deadline, projected spend at `max_usd`, a
 spending stop, a paused phase, and a leftover), and Regulator spend. There is
-no Grafana alerting; the monitor reads the panels by their titles.
+no Grafana alerting; the monitor, a thread on the Mac that
+[`control-host/MONITOR.md`](control-host/MONITOR.md) instructs, reads the
+panels by their titles every 15 minutes and steers through
+`control --actor monitor`.
 
 Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
 across replacements, through the subnet router; Session Manager is the shell
