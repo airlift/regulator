@@ -1065,9 +1065,12 @@ not an invalid sequence that the rule reads as U+FFFD.
 Exact, prefix, and suffix literals of 1-16 UTF-8 bytes use precomputed
 overlapping word comparisons. Longer literals retain Slice equality. Check
 input length first, then the short comparator, then the ordinary strategy
-switch. Complex plans keep their interface call in a separate helper. This
-shape reduces `matches()` from 270 to 187 bytecode bytes, with a 78-byte helper;
-it changes compilation boundaries, not complex matching algorithms.
+switch. Complex plans keep their interface call in a separate helper. Measured
+with the comparison words in a separate short-literal object, this shape
+reduced `matches()` from 270 to 187 bytecode bytes, with a 78-byte helper; it
+changes compilation boundaries, not complex matching algorithms. The literal's
+words now live in the pattern's own fields, and `matches()` is 203 bytecode
+bytes.
 
 Focused Java 25 qualification on C8i, C8g, and C9g compared isolated callers,
 constant-pattern generated callers with mixed shared profiles, and callers
@@ -1084,9 +1087,9 @@ prototype gain and returns close to the pre-kernel control. Long C8g literal
 comparisons also lose several nanoseconds in some caller profiles; the
 interleaved 512-byte suffix changes from 30.43 to 33.82 ns with overlapping
 fork ranges. Normalize that comparison against its 512 compared bytes, not
-the full input. Construction remains 144 bytes per pattern, retaining the
-short kernel's 40-byte increase. C9g exact compilation plus first use remains
-slower than the pre-kernel control, 15.71 to 16.84 ns.
+the full input. With the separate short-literal object, construction took 144
+bytes per pattern, including that object's 40 bytes. C9g exact compilation
+plus first use remains slower than the pre-kernel control, 15.71 to 16.84 ns.
 
 A merged comparison branch sometimes wins long ARM literals but costs about
 0.4-0.5 ns on short ARM exact/prefix cases and fails to recover the original

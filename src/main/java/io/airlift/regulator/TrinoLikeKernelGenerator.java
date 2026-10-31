@@ -952,7 +952,7 @@ final class TrinoLikeKernelGenerator
     }
 
     /// Returns true when `literal` does not occur at `position`, which leaves room for
-    /// it, with the comparisons of `LiteralMatchKernel.ShortLiteral` for a short literal.
+    /// it, with the comparisons of `LiteralMatchKernel.matchesShortLiteralAt` for a short literal.
     private static BytecodeExpression literalDiffers(BytecodeExpression bytes, Variable position, byte[] literal)
     {
         int length = literal.length;
@@ -969,7 +969,7 @@ final class TrinoLikeKernelGenerator
                     constantInt(length))
                     .not();
         }
-        int width = Math.min(Integer.highestOneBit(length), Long.BYTES);
+        int width = LiteralMatchKernel.shortLiteralWidth(length);
         int lastOffset = length - width;
         if (width == 1) {
             return bytes.getElement(position).cast(int.class).notEqual(constantInt(literal[0]));
