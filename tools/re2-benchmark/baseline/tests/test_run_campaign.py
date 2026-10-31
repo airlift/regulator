@@ -794,6 +794,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertIn(("monitor", "a/primary running"), [(row["actor"], row["change"]) for row in rows])
             # A command the settings cannot take, its actor may not make, or the region's quota after its reserve or
             # its images cannot hold, changes nothing. The monitor runs only the commands its runbook grants.
+            settings_bytes = (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).read_bytes()
             for command, actor, refusal in (
                     (["set-limit", "max-hosts", "101"], "monitor", "max_hosts only within the authorized"),
                     *((command, "monitor", f"only dain runs {command[0]}") for command in (
@@ -811,16 +812,30 @@ class TestRunCampaign(unittest.TestCase):
                     (["add-region", "us-east-2", "--max-vcpus", "969"], "dain", "max_vcpus 969 exceeds"),
                     (["add-region", "ap-northeast-2", "--max-vcpus", "256"], "dain",
                      "no r9g image in ap-northeast-2")):
-                with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
-                    control(*command, actor=actor)
-            # One whose check AWS does not answer is refused too.
+                with self.subTest(command=command):
+                    with self.assertRaisesRegex(SystemExit, refusal):
+                        control(*command, actor=actor)
+                    self.assertEqual(settings_bytes, (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).read_bytes())
+            # One whose check AWS refuses or does not answer is refused too.
             with patch.object(aws, "vcpu_quota", side_effect=cloud.CloudError("ThrottlingException: Rate exceeded")), \
-                    self.assertRaisesRegex(SystemExit, "^set-limit cannot reach AWS, so the settings are unchanged: "
-                                                       "ThrottlingException"):
+                    self.assertRaisesRegex(SystemExit, "^set-limit: AWS refused or did not answer, so the settings are "
+                                                       "unchanged: ThrottlingException"):
                 control("set-limit", "region", region, "max-vcpus", "700")
-            # A command for another campaign never steers this one.
-            with self.assertRaisesRegex(SystemExit, "is campaign campaign's root, not campaign other's"):
-                control("set-limit", "max-hosts", "80", campaign="other")
+            # A command for another campaign never steers this one, nor one for a root whose options record no
+            # campaign or cannot be read.
+            options_path = root / RUN_CAMPAIGN.CAMPAIGN_OPTIONS
+            options = options_path.read_bytes()
+            unnamed = json.dumps({key: value for key, value in json.loads(options).items() if key != "campaign"})
+            for recorded, refusal in ((options, "is campaign campaign's root, not campaign other's"),
+                                      (unnamed.encode(), "records no campaign"),
+                                      (b"", f"cannot read the campaign options {re.escape(str(options_path))}: "),
+                                      (b"[]\n", "cannot read the campaign options .* not a JSON object")):
+                with self.subTest(options=recorded[:20]):
+                    options_path.write_bytes(recorded)
+                    with self.assertRaisesRegex(SystemExit, refusal):
+                        control("set-limit", "max-hosts", "80", campaign="other" if recorded == options else "campaign")
+                    self.assertEqual(settings_bytes, (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).read_bytes())
+            options_path.write_bytes(options)
             self.assertEqual(len(rows), len((root / EVENTS).read_text().splitlines()) - 1)
             # A refused region gets no bucket.
             self.assertEqual([bucket], list(aws.buckets))
