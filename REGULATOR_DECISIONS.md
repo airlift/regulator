@@ -866,6 +866,21 @@ other unproven forms retain the ordinary path. The single-byte table is
 initialized lazily; subsequent direct boolean calls allocate no matching
 storage.
 
+When the general engine would otherwise answer, full-Slice boolean `find` and
+count in RE2, Java, and Rust use the literal-alternation and fixed-width span
+matchers Trino uses. Trino's subtypes call these matchers directly because
+routing through the compiled pattern's dispatch measured about 9% more per
+call on Graviton. The literal-alternation matcher restarts its trie at every
+input byte, so it takes only alternatives of at most 64 bytes; a longer
+literal keeps the general engine, whose DFA scans each byte once. The longest
+literal among the measured rows is 35 bytes, in rebar's Russian Sherlock names.
+
+The fixed-width matcher checks every occurrence of one byte, such as the `s` of
+`[a-z]shing`, which English text holds far more often than `shing`. RE2, Java,
+and Rust therefore keep the DFA's inner literal search when its literal has two
+or more bytes. The DFA searches for that literal on inputs of 64 bytes or more;
+shorter inputs run the plain DFA. Trino's fixed-width subtype keeps the matcher.
+
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
 Empty-pattern advancement is unchanged. The new core single-byte boolean/count
@@ -1494,9 +1509,11 @@ Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
 trie. RE2, Java, and Rust route only `RegexpMatcher.find()`; count, boolean,
 anchored, and capture operations keep the program. Smaller alternations keep the
-Trino trie where it is eligible; the other languages run them on the program.
-Trino checks the automaton against the forward-DFA budget, while RE2, Java, and
-Rust charge it to that budget.
+Trino trie where it is eligible; RE2, Java, and Rust search the same trie for
+full-Slice boolean `find` and count when the general engine would otherwise
+answer, and run their other operations on the program. Trino checks the
+automaton against the forward-DFA budget, while RE2, Java, and Rust charge it to
+that budget.
 
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at

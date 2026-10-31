@@ -18,7 +18,9 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -58,14 +60,40 @@ public class TestLiteralAlternationSpanMatcher
                 "ERROR|WARN|FATAL",
                 "foo|far|beta",
                 "βeta|γamma|alpha",
-                "alpha|βeta|終端");
+                "alpha|βeta|終端",
+                // The first alternative wins over a longer later one at the same start.
+                "xa|b|xab");
         List<Slice> inputs = List.of(
                 utf8Slice(""),
                 utf8Slice("ordinary text"),
                 utf8Slice("FATAL then ERROR"),
                 utf8Slice("xxfar then foo"),
                 utf8Slice("xxβeta終端alpha"),
-                wrappedBuffer(new byte[] {(byte) 0xFF, 'E', 'R', 'R', 'O', 'R'}));
+                utf8Slice("xab xa b xxab ÿþ"),
+                wrappedBuffer(new byte[] {(byte) 0xFF, 'E', 'R', 'R', 'O', 'R'}),
+                wrappedBuffer("\u00FFFATAL\u00CEWARN\u00CE\u00CE\u00B2eta\u00E7\u00B5ERROR\u00FF\u00FE".getBytes(ISO_8859_1)));
+
+        // Boolean find and count of RE2, Java, and Rust patterns run on the matcher and agree
+        // with the general engine, including on malformed UTF-8.
+        Map<String, Re2> compiledPatterns = new LinkedHashMap<>();
+        for (String expression : patterns) {
+            compiledPatterns.putAll(re2JavaAndRustPatterns(expression));
+        }
+        // A Rust byte-mode escape is a single byte, not a code point.
+        compiledPatterns.put("Rust bytes (?-u)ERROR|\\xFF\\xFE", RustRegexp.compile(utf8Slice("(?-u)ERROR|\\xFF\\xFE"), RustRegexp.Options.bytes()).re2());
+        for (Map.Entry<String, Re2> entry : compiledPatterns.entrySet()) {
+            String label = entry.getKey();
+            Re2 pattern = entry.getValue();
+            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+            // Count answers from the matcher without building the general engine's DFA.
+            pattern.count(inputs.getLast());
+            assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(label).isNull();
+            for (Slice input : inputs) {
+                long expectedCount = generalEngineCount(pattern, input);
+                assertThat(pattern.find(input)).as("%s input %s", label, input.toStringUtf8()).isEqualTo(expectedCount > 0);
+                assertThat(pattern.count(input)).as("%s input %s", label, input.toStringUtf8()).isEqualTo(expectedCount);
+            }
+        }
 
         for (String expression : patterns) {
             LiteralAlternationSpanMatcher scanner = scanner(expression);
@@ -87,6 +115,11 @@ public class TestLiteralAlternationSpanMatcher
                 }
             }
         }
+
+        // The matcher reports leftmost-first matches, so a leftmost-longest pattern keeps the
+        // general engine.
+        assertThat(Re2.compile(utf8Slice("xa|b|xab"), Re2.Options.defaults().setLongestMatch(true)).booleanPartialMatchStrategyForDiagnostics())
+                .isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
     }
 
     @Test
@@ -103,6 +136,9 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalScanner("(?i:foo)|bar")).isNull();
         assertThat(optionalScanner("^foo|bar")).isNull();
         assertThat(optionalScanner("foo")).isNull();
+        // A literal over 64 bytes would cost its length per byte of a dense near-miss input.
+        assertThat(optionalScanner("a".repeat(63) + "b|x")).isNotNull();
+        assertThat(optionalScanner("a".repeat(64) + "b|x")).isNull();
 
         // Above the trie's limit, a literal set also takes the empty alternatives and merged
         // classes the parsers' factoring leaves in a dictionary.
@@ -226,6 +262,7 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(TrinoRegexp.compile(utf8Slice("foo|(bar)")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:foo)|bar")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("foo|")).literalAlternationSpanMatcher()).isNull();
+        assertThat(TrinoRegexp.compile(utf8Slice("a".repeat(64) + "b|x")).literalAlternationSpanMatcher()).isNull();
 
         assertThatThrownBy(() -> TrinoRegexp.compile(
                 utf8Slice("ERROR|WARN|FATAL"),
@@ -356,6 +393,27 @@ public class TestLiteralAlternationSpanMatcher
             spans.add(matcher.start() + "-" + matcher.end());
         }
         return spans;
+    }
+
+    // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.
+    // Trino's literal-alternation subtype is covered separately.
+    private static Map<String, Re2> re2JavaAndRustPatterns(String expression)
+    {
+        return Map.of(
+                "RE2 " + expression, Re2.compile(utf8Slice(expression)),
+                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)).re2(),
+                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)).re2(),
+                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()).re2());
+    }
+
+    private static long generalEngineCount(Re2 pattern, Slice input)
+    {
+        RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        long count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     private static LiteralAlternationSpanMatcher scanner(String pattern)

@@ -48,6 +48,10 @@ final class LiteralAlternationSpanMatcher
     // A class the parsers merge from a dictionary's single-character alternatives holds a few
     // members, such as [ds] from word(?:d|s); a wider one, such as [!-~], is not a literal set.
     private static final int MAXIMUM_CLASS_RUNES = 16;
+    // The search restarts the trie at every input byte, so a long literal costs its length per
+    // byte on a dense near-miss input; such a pattern keeps the general engine's linear scan.
+    // At most 64 alternatives of this length also keep every trie index within a short.
+    private static final int MAXIMUM_TRIE_LITERAL_BYTES = 64;
 
     private final short[] rootStateByLeadingByte;
     private final short[] firstEdgeByState;
@@ -86,7 +90,7 @@ final class LiteralAlternationSpanMatcher
 
         int totalLiteralBytes = 0;
         for (byte[] literal : literalAlternatives) {
-            if (literal.length == 0 || literal.length >= Short.MAX_VALUE - totalLiteralBytes) {
+            if (literal.length == 0 || literal.length > MAXIMUM_TRIE_LITERAL_BYTES) {
                 return null;
             }
             totalLiteralBytes += literal.length;
@@ -276,6 +280,23 @@ final class LiteralAlternationSpanMatcher
             length += literal.length;
         }
         return length;
+    }
+
+    /// Returns the number of non-overlapping matches in `input`. Matches are never empty, so
+    /// each search resumes where the previous match ended.
+    long count(Slice input)
+    {
+        long count = 0;
+        int searchStart = 0;
+        while (searchStart < input.length()) {
+            long span = findSpan(input, searchStart);
+            if (span < 0) {
+                break;
+            }
+            count++;
+            searchStart = (int) span;
+        }
+        return count;
     }
 
     long findSpan(Slice input, int start)
