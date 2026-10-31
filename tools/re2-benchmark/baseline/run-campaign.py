@@ -5529,6 +5529,8 @@ def control(arguments, aws):
         settings = store.change(arguments.actor, description, checked)
     except SettingsError as error:
         raise SystemExit(str(error)) from error
+    except CloudError as error:
+        raise SystemExit(f"{arguments.command} cannot reach AWS, so the settings are unchanged: {error}") from error
     if settings["version"] == before:
         print(f"campaign settings version {before} already hold {description}")
     else:
