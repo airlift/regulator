@@ -2327,7 +2327,7 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
 
 def launch_record(row):
     """The fields of an attempt row's detail: a starting row's placement, launch slot, session and prefix, a started
-    row's instance, and a terminating row's request."""
+    row's instance, and a terminating row's request, with the classification of a controller's stop."""
     return dict(item.split("=", 1) for item in row["detail"].split(";") if "=" in item)
 
 
@@ -2640,10 +2640,15 @@ class UnitDispatcher:
         placements = {}
         instances = {}
         terminating = {}
+        aborted = set()
         for row in read_attempts(self.attempts_path):
             if row["shard_id"] == UNIT_WORKER_SHARD and row["outcome"] == "terminating":
-                # A termination request settles nothing; the first starts the worker's leak clock.
-                terminating.setdefault(int(row["host_epoch"]), float(launch_record(row)["requested_at"]))
+                # A termination request settles nothing; the first starts the worker's leak clock, and one the
+                # controller decided keeps it stopping the host as its own.
+                request = launch_record(row)
+                terminating.setdefault(int(row["host_epoch"]), float(request["requested_at"]))
+                if request.get("classification") == "controller-abort":
+                    aborted.add(int(row["host_epoch"]))
             elif row["shard_id"] == UNIT_WORKER_SHARD:
                 latest[int(row["host_epoch"])] = row
                 if row["outcome"] == "starting":
@@ -2671,7 +2676,8 @@ class UnitDispatcher:
                     # The earlier controller settled this worker; its slot is as that settlement left it.
                     self.release_slot(job, slot, slot_failures,
                                       job.host_epoch in ran or self.recovered_start(directory),
-                                      0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"])
+                                      0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"],
+                                      row["outcome"] == "controller-abort")
                 continue
             # The starting record names the region the worker was placed in.
             job = replace(job, market=row["market"], region=placement["region"],
@@ -2683,6 +2689,8 @@ class UnitDispatcher:
             workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
                 job, metadata, directory, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
                 stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0))
+            if job.host_epoch in aborted:
+                self.terminated[job.host_epoch] = terminating[job.host_epoch]
         recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
                                     set(workers))
         for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
@@ -3173,7 +3181,8 @@ class UnitDispatcher:
     def stop_host(self, worker):
         """Ask EC2 to terminate the worker's instance until it lists it shutting down or terminated; one still not
         terminated TERMINATION_LEAK_SECONDS after the first request, which job-attempts.tsv records before it is
-        made, has leaked."""
+        made, has leaked. The record names a stop the controller decided, so a restart goes on stopping the host
+        and settles it as the controller's."""
         try:
             instance = None if worker.launch_failure else self.instance(worker)
         except CloudError:
@@ -3182,9 +3191,11 @@ class UnitDispatcher:
         if instance is None or instance.state == "terminated":
             return
         if not worker.terminate_requested:
-            worker.terminate_requested = time.time()
-            write_attempt(self.attempts_path, worker.job, "terminating",
-                          f"requested_at={worker.terminate_requested:.3f}")
+            requested_at = time.time()
+            # Recorded first, so a request whose record failed is recorded again.
+            write_attempt(self.attempts_path, worker.job, "terminating", f"requested_at={requested_at:.3f}" + (
+                ";classification=controller-abort" if worker.job.host_epoch in self.terminated else ""))
+            worker.terminate_requested = requested_at
         elif time.time() - worker.terminate_requested >= TERMINATION_LEAK_SECONDS:
             self.leak(worker)
         if instance.state == "shutting-down":

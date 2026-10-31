@@ -1566,7 +1566,10 @@ release the reservation and settle the worker from its recovered uploads, as
 The controller asks EC2 to terminate an instance each loop until EC2 lists it
 shutting down, logging each request that fails. Before the first, it records a
 `terminating` row in `job-attempts.tsv` with the request's time
-(`requested_at`), from which a restarted controller resumes the clock. An
+(`requested_at`), from which a restarted controller resumes the clock, and for
+a host the controller decided to stop, lost or no longer needed, its
+classification (`controller-abort`), so a restarted controller goes on
+stopping it and settles it as its own stop, never as a boot failure. An
 instance still not terminated 15 minutes after that first request, whether or
 not it succeeded, is a leak: the controller logs it and sets the campaign settings' `spending_stop`, as its
 own settings change naming the reason. While the stop stands, the budget admits
