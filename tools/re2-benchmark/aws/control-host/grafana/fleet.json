@@ -107,7 +107,7 @@
     {
       "type": "stat",
       "title": "Finish",
-      "description": "When each phase's latest pool finishes its corrected work left at its live hosts.",
+      "description": "When each phase's latest pool finishes its corrected work left at its live hosts, or never (the largest finite value; the panel shows infinity) for a pool with work left and no live host.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -379,7 +379,7 @@
     {
       "type": "table",
       "title": "Worker groups",
-      "description": "Each running worker's group with its estimated seconds, and its elapsed seconds over that estimate.",
+      "description": "Each running worker's group with its estimated seconds, and the seconds since its latest progress (a heartbeat, a group upload, or its adoption) over that estimate.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

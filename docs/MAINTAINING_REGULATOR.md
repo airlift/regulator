@@ -288,11 +288,12 @@ python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
   --campaign-root /durable/path/focused-change
 ```
 
-Execution additionally requires `--execute` and the candidate's accepted build
-phase, as the AWS guide describes. Primary collection requires the accepted
-smoke and the same selection. Resume an interrupted campaign
-with its original inputs; do not change source, heap, or selection inside a
-resumed run.
+Execution runs inside the campaign's controller:
+`run-campaign.py campaign <campaign> --execute` with the phase's candidate,
+once the candidate's build phase is accepted, as the AWS guide describes.
+Primary collection requires the accepted smoke and the same selection. Resume
+an interrupted campaign with its original inputs; do not change source, heap,
+or selection inside a resumed run.
 A new code change starts a new candidate and invalidates its affected results.
 
 ## Final qualification
