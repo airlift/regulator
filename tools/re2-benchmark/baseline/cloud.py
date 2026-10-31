@@ -40,6 +40,7 @@ class LaunchUnknown(CloudError):
 # them, is retried with the same client token, which AWS answers with the instance it launched.
 LAUNCH_REJECTIONS = {
     "InsufficientInstanceCapacity": "capacity", "UnfulfillableCapacity": "capacity",
+    "InsufficientFreeAddressesInSubnet": "capacity",
     "VcpuLimitExceeded": "quota", "InstanceLimitExceeded": "quota", "MaxSpotInstanceCountExceeded": "quota",
     "SpotMaxPriceTooLow": "price",
 }

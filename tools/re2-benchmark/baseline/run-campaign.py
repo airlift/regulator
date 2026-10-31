@@ -73,6 +73,8 @@ LAUNCH_NOT_FOUND = "launched instance was not found"
 BOOT_DEADLINE_MISSED = "worker did not report by its boot deadline"
 # A worker launches only once S3 holds every lease it was launched with.
 FIRST_LEASES_UNWRITTEN = "launch-infrastructure:first leases not written"
+# A request one region refused while its pool had another region to try spends none of its slot's replacements.
+REGION_REFUSAL = "launch-region-refused:"
 UNIT_WORKER_SHARD = "unit-worker"
 # run-unit-worker.sh exits with this status after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS = 43
@@ -87,7 +89,8 @@ UNIT_POLL_SECONDS = 15
 REQUEST_THREADS = 16
 # Group completions are downloaded, checked and extracted on this many threads, beside the loop.
 ACCEPTANCE_THREADS = 4
-# A unit pool's new workers in a market skip a region this long after it found no capacity in that market.
+# A unit pool's new workers in a market skip a region this long after it found no capacity in that market, or
+# refused their request.
 REGION_COOL_DOWN_SECONDS = 15 * 60
 # How a platform's workers buy capacity, unless the settings name a purchase policy for it: Spot only, waiting for it
 # however long; Spot, turning to On-Demand once Spot has fallen short for SPOT_SHORTAGE_WAIT_SECONDS; or On-Demand
@@ -1833,12 +1836,14 @@ class LaunchFailed(Exception):
         self.detail = detail
 
 
-def launch_failure(market, rejection):
+def launch_failure(market, rejection, elsewhere=False):
     """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
     and an On-Demand one no capacity or vCPU quota. A request AWS will never grant fails as the infrastructure's,
-    with AWS's explanation, so its slot's replacements run out."""
+    with AWS's explanation: as the region's refusal while its pool has another region elsewhere to try, and
+    otherwise so its slot's replacements run out."""
     if rejection.kind == "request":
-        return "retryable-infrastructure", f"launch-infrastructure:{rejection.code}: {rejection.message}"
+        prefix = REGION_REFUSAL if elsewhere else "launch-infrastructure:"
+        return "retryable-infrastructure", f"{prefix}{rejection.code}: {rejection.message}"
     if market == "spot":
         return "retryable-spot", f"launch-capacity:{rejection.code}"
     if rejection.kind in ("capacity", "quota"):
@@ -1883,10 +1888,10 @@ def launch_requests(arguments, job, metadata):
             for zone, subnet in subnets[first:] + subnets[:first]]
 
 
-def launch_worker(aws, job, requests):
+def launch_worker(aws, job, requests, elsewhere=False):
     """Launch the worker's instance by its requests in turn while AWS reports no capacity in their zone. Returns the
     instance ID, or "" when AWS's answer never came and only the session's tag can find the instance, and the zone;
-    raises LaunchFailed when AWS launched none."""
+    raises LaunchFailed when AWS launched none, its pool having another region elsewhere to try."""
     for offset, (zone, spec) in enumerate(requests):
         try:
             return aws.run_instance(job.region, spec), zone
@@ -1894,7 +1899,7 @@ def launch_worker(aws, job, requests):
             return "", zone
         except cloud.LaunchRejected as rejection:
             if rejection.kind != "capacity" or offset + 1 == len(requests):
-                raise LaunchFailed(*launch_failure(job.market, rejection)) from rejection
+                raise LaunchFailed(*launch_failure(job.market, rejection, elsewhere)) from rejection
 
 
 def recover_uploads(aws, metadata, objects):
@@ -3353,16 +3358,17 @@ class UnitDispatcher:
                         self.arguments.campaign_id, worker.job, worker, detail if retryable else "job-failure",
                         f"status={status}; classification={classification}; detail={detail}", unit_id="",
                         failure_classification=classification)
-        if detail.startswith("launch-capacity:"):
-            # The pool's launches in the market move past a region that found no capacity.
-            self.cool_down(pool, worker.job.market, worker.job.region)
+        if detail.startswith(("launch-capacity:", REGION_REFUSAL)):
+            # The pool's launches in the market move past a region that found no capacity or refused the request.
+            self.cool_down(pool, worker.job.market, worker.job.region, detail.startswith("launch-capacity:"))
         if classification == "retryable-capacity":
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
-    def cool_down(self, pool, market, region):
-        """Keep the pool's new workers in the market out of the region for its cool-down."""
+    def cool_down(self, pool, market, region, shortage):
+        """Keep the pool's new workers in the market out of the region for its cool-down, as a shortage of its
+        capacity there if shortage."""
         self.pool_regions.setdefault((pool, market), {})[region] = time.monotonic()
-        if market == "spot":
+        if shortage and market == "spot":
             self.spot_shortages.setdefault(pool, time.monotonic())
 
     def spot_waited(self, pool, now):
@@ -3375,14 +3381,14 @@ class UnitDispatcher:
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
-        its pool opens no new slot. A launch that found no capacity, or whose instance was never found, booted
-        nothing.
+        its pool opens no new slot. A launch that found no capacity, that one region refused while its pool had
+        another to try, or whose instance was never found, booted nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
         elif (status != 0 and not terminated and detail != LAUNCH_NOT_FOUND and
-              not detail.startswith("launch-capacity:")):
+              not detail.startswith(("launch-capacity:", REGION_REFUSAL))):
             failures += 1
         if failures > MAX_REPLACEMENTS_PER_JOB:
             self.exhausted[pool] = (f"unit worker {job.identity} failed before it started: {detail}; "
@@ -3779,12 +3785,15 @@ class UnitDispatcher:
 
     def launch_admitted(self, starting):
         """Write the first leases of each worker in starting and launch it, as launch describes."""
-        requests = {}
+        requests, elsewhere = {}, set()
         for worker in starting:
             try:
                 requests[worker.job.host_epoch] = launch_requests(self.arguments, worker.job, worker.metadata)
             except LaunchFailed as failure:
                 worker.launch_failure = (failure.classification, failure.detail)
+            # A region's refusal moves the pool to a region it has not cooled in the market.
+            if set(launch_regions(self.arguments, worker.job)) - {worker.job.region, *worker.job.capacity_failures}:
+                elsewhere.add(worker.job.host_epoch)
         pending = [(worker, [(sequence, self.lease_document(worker, sequence)) for sequence in sorted(worker.unsent)])
                    for worker in starting if worker.job.host_epoch in requests]
 
@@ -3795,7 +3804,8 @@ class UnitDispatcher:
             if not documents or len(written) < len(documents):
                 return written, LaunchFailed("retryable-infrastructure", FIRST_LEASES_UNWRITTEN)
             try:
-                return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch])
+                return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch],
+                                              worker.job.host_epoch in elsewhere)
             except LaunchFailed as failure:
                 return written, failure
 

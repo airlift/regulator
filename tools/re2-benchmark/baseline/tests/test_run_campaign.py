@@ -3350,6 +3350,30 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual(["us-east-2", "us-west-2"], list(refused.values())[:2])
             self.assertLess(RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1, len(refused))
 
+    def test_pool_moves_past_a_region_that_refuses_its_requests(self):
+        # The first region refuses every r8i request outright. Its pool moves to the second, as a refusal spends a
+        # slot's replacement only once no region is left to try, so a pool every region refuses still gives up.
+        for refusing, expected in ((("us-east-2",), None), (("us-east-2", "us-west-2"), "exhausted their replacements")):
+            with self.subTest(refusing=refusing), tempfile.TemporaryDirectory() as temporary:
+                fleet = FakeUnitFleet(Path(temporary) / "hosts")
+                run_instance = fleet.run_instance
+                refused = []
+
+                def refuse(region, spec):
+                    if spec.tags["Platform"] == "r8i" and region in refusing:
+                        refused.append(region)
+                        raise cloud.LaunchRejected("request", "UnauthorizedOperation", "denied in this region")
+                    return run_instance(region, spec)
+
+                fleet.run_instance = refuse
+                with contextlib.ExitStack() as stack:
+                    if expected:
+                        stack.enter_context(self.assertRaisesRegex(SystemExit, f"unresolved units: .*{expected}"))
+                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
+                                   platform_regions={"r8i": ["us-east-2", "us-west-2"]})
+                self.assertEqual(["us-east-2"] + ["us-west-2"] * (RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1)
+                                 if expected else ["us-east-2"], refused)
+
     def test_pool_short_of_spot_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
         with tempfile.TemporaryDirectory() as temporary:
             # Each pool has work for ten hosts, as many as the boot window first admits, and r8i's next 40 Spot

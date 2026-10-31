@@ -577,6 +577,8 @@ class TestAwsCloud(unittest.TestCase):
         on_demand = {key: value for key, value in request.items() if key != "InstanceMarketOptions"}
         ec2.add_client_error("run_instances", "VcpuLimitExceeded", expected_params=on_demand)
         ec2.add_client_error("run_instances", "InsufficientInstanceCapacity")
+        # A subnet with no address left to give is short of capacity too.
+        ec2.add_client_error("run_instances", "InsufficientFreeAddressesInSubnet")
         # A request AWS refuses outright is not resubmitted, and keeps AWS's explanation.
         ec2.add_client_error("run_instances", "UnauthorizedOperation", "not authorized", http_status_code=403)
         for _ in range(cloud.LAUNCH_ATTEMPTS):
@@ -588,9 +590,10 @@ class TestAwsCloud(unittest.TestCase):
         with self.assertRaises(LaunchRejected) as rejected:
             aws.run_instance("us-west-2", replace(spec, market="on-demand"))
         self.assertEqual(("quota", "VcpuLimitExceeded"), (rejected.exception.kind, rejected.exception.code))
-        with self.assertRaises(LaunchRejected) as rejected:
-            aws.run_instance("us-west-2", spec)
-        self.assertEqual("capacity", rejected.exception.kind)
+        for code in ("InsufficientInstanceCapacity", "InsufficientFreeAddressesInSubnet"):
+            with self.assertRaises(LaunchRejected) as rejected:
+                aws.run_instance("us-west-2", spec)
+            self.assertEqual(("capacity", code), (rejected.exception.kind, rejected.exception.code))
         with self.assertRaises(LaunchRejected) as rejected:
             aws.run_instance("us-west-2", spec)
         self.assertEqual(("request", "UnauthorizedOperation", "not authorized"),

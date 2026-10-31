@@ -1189,13 +1189,17 @@ in the worker's region with:
   time, and pinned identities, after the first line of
   `worker-user-data.sh`.
 
-A launch AWS refuses for capacity moves on to the region's next zone. A
+A launch AWS refuses for capacity, a subnet with no free address among them,
+moves on to the region's next zone. A
 refused Spot launch, for capacity, quota, or price, is `retryable-spot`; an
 On-Demand one, for capacity or quota, is `retryable-capacity`; either has
 detail `launch-capacity:<code>`. Any other client error but a throttle, such
 as `UnauthorizedOperation` or `InvalidAMIID.NotFound`, is a request AWS will
 never grant: it is not sent again, and in either market fails as
-`retryable-infrastructure`, with detail
+`retryable-infrastructure`. While its pool has a region it has not cooled in
+the market, the refusal is that region's, with detail
+`launch-region-refused:<code>: <message>`: it cools the region, as below, and
+spends none of the slot's replacements. Otherwise its detail is
 `launch-infrastructure:<code>: <message>`, so the slot's replacements run out.
 A request whose answer never comes, a throttle or server error among them, is
 sent again with the same client token, so AWS launches at most one instance,
@@ -1405,9 +1409,10 @@ keeps its reservation and takes no work until its cleanup is verified.
 A worker whose launch found no capacity in any zone of its region, or no
 quota, cools that region for its pool's launches in that market for 15
 minutes, and the pool's new workers in that market launch in the list's other
-regions meanwhile. Such a refusal spends none of its slot's replacements. While
-every region of the list cools, the pool tries every region again at once; a
-`spot-then-on-demand` pool whose Spot shortage has lasted its
+regions meanwhile. Such a refusal spends none of its slot's replacements. A
+region's refusal of the request cools it the same way, though it is no Spot
+shortage. While every region of the list cools, the pool tries every region
+again at once; a `spot-then-on-demand` pool whose Spot shortage has lasted its
 [bounded wait](#launch-regions-and-purchase) launches On-Demand instead, and
 Spot resumes in each region once its cool-down ends. Through its shortage the
 pool tries one Spot launch a loop, so a pool AWS keeps refusing leaves the boot
