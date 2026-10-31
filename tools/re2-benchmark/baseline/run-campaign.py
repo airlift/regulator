@@ -2422,6 +2422,8 @@ class UnitWorker:
     started: bool = False
     stopping: bool = False
     lost: bool = False
+    # Whether its host has ended, so it takes no lease while its cleanup is proven.
+    gone: bool = False
     # The launch slot this worker took over, as the host epoch of its first worker, and the slot's
     # consecutive failures before a start.
     slot: int = None
@@ -2468,13 +2470,13 @@ class UnitWorker:
         return sorted(sequence for sequence in self.leases if sequence not in done)
 
     def open(self):
-        return not (self.stopping or self.lost)
+        return not (self.stopping or self.lost or self.gone)
 
     def state(self, terminated=False):
-        """What the worker is doing: stopping once lost or terminated; otherwise booting until it starts, then
+        """What the worker is doing: stopping once lost, terminated or gone; otherwise booting until it starts, then
         running while it holds a work lease, even behind its stop lease, stopping once only its stop lease remains,
         and idle while it waits for a lease."""
-        if self.lost or terminated:
+        if self.lost or terminated or self.gone:
             return "stopping"
         if self.started and any(self.leases[sequence] is not None for sequence in self.outstanding()):
             return "running"
@@ -3036,12 +3038,10 @@ class UnitDispatcher:
                     self.abandon(worker, sequence, "lost", f"worker exited: classification={classification}")
 
     def poll(self):
-        """Follow every worker: list each live one's uploads and process them, and clean up each ended one, the
-        workers' round trips on the request threads; then delete from S3 what accepted groups and settled leases no
-        longer need."""
-        live, ended = [], []
-        for worker in list(self.workers.values()):
-            (ended if self.ended(worker) else live).append(worker)
+        """Follow every worker: list each live one's uploads and process them, and clean up each ended one, which
+        takes no lease from then on, the workers' round trips on the request threads; then delete from S3 what
+        accepted groups and settled leases no longer need."""
+        live, ended = self.partition()
         for worker, objects in zip(live, self.concurrently(self.listing, live)):
             if objects is not None:
                 self.follow(worker, objects)
@@ -3051,6 +3051,17 @@ class UnitDispatcher:
         for (worker, keys), deleted in zip(deleting, self.concurrently(self.delete, deleting)):
             if deleted:
                 worker.deletions.difference_update(keys)
+
+    def partition(self):
+        """The workers whose hosts are live, and those whose hosts have ended, each of which is marked gone."""
+        live, ended = [], []
+        for worker in list(self.workers.values()):
+            if self.ended(worker):
+                worker.gone = True
+                ended.append(worker)
+            else:
+                live.append(worker)
+        return live, ended
 
     def listing(self, worker):
         """The worker's uploads, or None while S3 cannot list them; the next poll, or cleanup's recovered uploads,
@@ -3412,10 +3423,11 @@ class UnitDispatcher:
 
     def send(self, workers):
         """Write the workers' unsent leases, each worker's in order and the workers on the request threads, but none
-        that was abandoned, whose item may already run elsewhere. A lease that could not be written is retried each
-        loop."""
+        that was abandoned, whose item may already run elsewhere, and none to a host that has ended. A lease that
+        could not be written is retried each loop."""
         pending = [(worker, [(sequence, self.lease_document(worker, sequence))
-                             for sequence in sorted(worker.unsent - worker.abandoned)]) for worker in workers]
+                             for sequence in sorted(worker.unsent - worker.abandoned)])
+                   for worker in workers if not worker.gone]
         pending = [(worker, documents) for worker, documents in pending if documents]
         for (worker, _), written in zip(pending, self.concurrently(
                 lambda entry: write_leases(self.arguments, *entry), pending)):
@@ -3844,9 +3856,7 @@ class UnitDispatcher:
         The phase's next dispatch, once it is resumed, settles each worker from its ledgers and recovered uploads, as
         a restart does."""
         self.observed = observed
-        live, ended = [], []
-        for worker in list(self.workers.values()):
-            (ended if self.ended(worker) else live).append(worker)
+        live, ended = self.partition()
         booting = [worker for worker in live if not worker.started]
         for worker, objects in zip(booting, self.concurrently(self.listing, booting)):
             if objects is not None:
