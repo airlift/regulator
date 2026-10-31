@@ -33,6 +33,7 @@ sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
 from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENTS, CampaignSettings  # noqa: E402
 import test_engine_build  # noqa: E402
+import test_control_host  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
 from shard_results import write_tsv  # noqa: E402
@@ -482,7 +483,7 @@ class TestRunCampaign(unittest.TestCase):
             arguments = SimpleNamespace(
                 campaign="tournament", campaign_root=campaign_root, language_plan=[], selected_shards=["trino-like"],
                 release_version="", smoke_protocol="smoke", smoke_results=None, primary_results=None,
-                confirmation_jobs=None, engine_builds=None, execute=True, spot_vcpu_reserve=32,
+                confirmation_jobs=None, engine_builds=None, execute=True, controller=True, spot_vcpu_reserve=32,
                 phase_timeout_seconds=None, cloud=FakeCloud())
             candidates = [RUN_CAMPAIGN.FrozenCandidate(name, commit * 40, f"refs/benchmarks/tournament/{name}",
                                                        campaign_root / name / "candidate", "0" * 64, "e" * 40)
@@ -557,10 +558,13 @@ class TestRunCampaign(unittest.TestCase):
                         patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
 
-            # A's failure stops only A, and the campaign then exits naming it.
-            with self.assertRaisesRegex(SystemExit, "failed phases:\na/smoke: campaign completed with unresolved") \
-                    as failed:
+            # A's failure stops only A, and the campaign then exits naming it, with the status the control host's
+            # unit does not restart.
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as failed:
                 run()
+            self.assertEqual(RUN_CAMPAIGN.control_host.FAILED_PHASES_EXIT, failed.exception.code)
+            self.assertIn("failed phases:\na/smoke: campaign completed with unresolved", errors.getvalue())
 
             order = [event[:2] for event in events]
             # B's primary starts once B's smoke passed, while A's smoke still runs, each phase taking the
@@ -573,7 +577,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual([campaign_root / "b" / "primary" / "campaign-events.tsv"], reduction.events)
             self.assertNotIn(("start", "a/primary"), order)
             self.assertNotIn(("start", "b/confirmation"), order)
-            self.assertNotIn("b/", str(failed.exception))
+            self.assertNotIn("b/", errors.getvalue())
             # The controller records itself in the campaign root, and each phase's state in the settings it seeded,
             # as its own changes.
             self.assertEqual(str(os.getpid()), RUN_CAMPAIGN.read_properties(
@@ -1520,8 +1524,13 @@ class TestRunCampaign(unittest.TestCase):
                     (["tournament", "--candidate", "a"], "--candidate takes one NAME=COMMITISH"),
                     (["tournament", "--candidate", "a/b=HEAD"], "--candidate takes one NAME=COMMITISH"),
                     (["tour/nament", "--candidate", "a=HEAD"], "candidate a's campaign ID must be"),
-                    # A campaign's first execution seeds its settings from the file it names.
-                    (["tournament", "--candidate", "a=HEAD", "--execute"], "name them with --settings FILE"),
+                    # A campaign's first execution seeds its settings from the file it names. Executing it from the
+                    # Mac launches its control host, reached by the key given, and the host's unit runs the
+                    # controller itself.
+                    (["tournament", "--candidate", "a=HEAD", "--execute", "--controller"],
+                     "name them with --settings FILE"),
+                    (["tournament", "--candidate", "a=HEAD", "--execute"], "requires --ssh-public-key PATH"),
+                    (["tournament", "--candidate", "a=HEAD", "--controller"], "it requires --execute"),
                     # The driver plans its language phases' units, so it refuses plans they would refuse.
                     (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "source")],
                      f"invalid language plan {(root / 'source').resolve()}"),
@@ -1540,7 +1549,7 @@ class TestRunCampaign(unittest.TestCase):
             # once, before it freezes anything, while the first owns the campaign root.
             given = root / "settings.json"
             given.write_text(json.dumps(test_fleet_budget.SETTINGS))
-            execute = ["--candidate", "lifecycle=HEAD", "--campaign-root", str(root), "--execute",
+            execute = ["--candidate", "lifecycle=HEAD", "--campaign-root", str(root), "--execute", "--controller",
                        "--settings", str(given)]
             for command, refusal in ((["smoke", "language", *execute], "a phase runs only inside its campaign's"),
                                      (["campaign", "language", *execute], f"owns campaign root {root}")):
@@ -1565,10 +1574,38 @@ class TestRunCampaign(unittest.TestCase):
                     arguments = SimpleNamespace(
                         campaign="tournament", campaign_root=Path(old) / "old", candidates=[("a", "main")],
                         smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None,
-                        language_plan=[], execute=True, settings=given)
+                        language_plan=[], execute=True, controller=True, settings=given)
                     with self.assertRaisesRegex(SystemExit, f"as {re.escape(str(path))} shows"):
                         RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
                     self.assertFalse((Path(old) / "old" / RUN_CAMPAIGN.CONTROLLER_LOCK).exists())
+            # Executed from the Mac, once the account passes the controller's checks, the campaign launches its
+            # control host with the command the host's unit runs: each candidate at its commit, and the settings and
+            # plan as the launch inputs hold them on the host's volume.
+            key = root / "control.pub"
+            key.write_text(f"{test_control_host.SSH_PUBLIC_KEY}\n")
+            aws = test_control_host.control_host_cloud()
+            with patch.object(sys, "argv", ["run-campaign.py", "campaign", "language", "--candidate", "lifecycle=HEAD",
+                                            "--language-plan", str(root / "plan"), "--execute", "--settings",
+                                            str(given), "--ssh-public-key", str(key)]), \
+                    patch.object(RUN_CAMPAIGN.cloud, "AwsCloud", return_value=aws), \
+                    patch.object(RUN_CAMPAIGN, "check_candidate_tooling"), \
+                    patch.object(RUN_CAMPAIGN, "validate_aws") as validate, contextlib.redirect_stdout(io.StringIO()):
+                RUN_CAMPAIGN.main()
+            validate.assert_called_once()
+            [(_, launched)] = aws.control_hosts.items()
+            uri = test_control_host.user_data_settings(launched["user_data"])["LAUNCH_INPUTS_URI"]
+            body = aws.objects[tuple(uri.removeprefix("s3://").split("/", 1))][0]
+            with tarfile.open(fileobj=io.BytesIO(body)) as archive:
+                inputs = {member.name: archive.extractfile(member).read() for member in archive if member.isfile()}
+            commit = RUN_CAMPAIGN.resolve_commit(SCRIPT.parents[3], "HEAD")
+            self.assertEqual(
+                "CONTROLLER_ARGUMENTS=campaign language --execute --controller --campaign-root /regulator/campaign "
+                "--settings /regulator/control-host/settings.json --spot-vcpu-reserve 32 --smoke-protocol smoke "
+                f"--candidate lifecycle={commit} --language-plan /regulator/control-host/language-plans/0\n",
+                inputs["controller.env"].decode())
+            self.assertEqual((f"{commit}\n".encode(), given.read_bytes(), (root / "plan" / "plan.json").read_bytes()),
+                             (inputs["candidate-commits"], inputs["settings.json"],
+                              inputs["language-plans/0/plan.json"]))
 
     def test_language_primary_accepts_its_attempts_and_exports_each_plan_once(self):
         fixture = test_fleet.TestFleet()

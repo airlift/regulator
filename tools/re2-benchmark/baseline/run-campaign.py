@@ -30,13 +30,14 @@ from types import SimpleNamespace
 
 import aggregate_results
 import cloud
+import control_host
 import engine_build
 import unit_session
 import work_units
 from acceptance import normalize_heap_size
 from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
-    changed as changed_settings)
+    changed as changed_settings, seeded as seeded_settings)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
     spend_by_owner)
@@ -335,7 +336,13 @@ def parse_args():
                         help="the campaign's results, holding candidates.tsv and <name>/candidate and each phase "
                              "(default: benchmark-results/pre-review-baseline/<campaign>)")
     parser.add_argument("--execute", action="store_true",
-                        help="run the campaign; a phase alone only plans its work items")
+                        help="launch the campaign's control host, which runs it; a phase alone only plans its work "
+                             "items")
+    parser.add_argument("--controller", action="store_true",
+                        help="with --execute, run the campaign's controller in this process, as the control host's "
+                             "unit does")
+    parser.add_argument("--ssh-public-key", type=Path,
+                        help="the public key ssh reaches the control host with, which launching one requires")
     parser.add_argument("--confirmation-jobs", type=Path)
     parser.add_argument("--smoke-results", type=Path,
                         help="accepted smoke a primary requires (default: the candidate's smoke)")
@@ -4291,6 +4298,9 @@ def run_campaign(arguments, root):
             print(f"candidate {name}: {resolve_commit(root, commitish)}, campaign "
                   f"{candidate_campaign_id(arguments.campaign, name)}, results {arguments.campaign_root / name}")
         return
+    if not arguments.controller:
+        launch_control_host(arguments, root)
+        return
     refuse_old_root(arguments.campaign_root)
     if arguments.settings is None and not (arguments.campaign_root / CAMPAIGN_SETTINGS).is_file():
         raise SystemExit("a campaign's first execution seeds its settings; name them with --settings FILE")
@@ -4311,7 +4321,57 @@ def run_campaign(arguments, root):
         if live_settings(arguments)["stop"]:
             print(message, flush=True)
             return
-        raise SystemExit(message)
+        # The control host's unit restarts a controller that fails, but not one whose campaign ended.
+        print(message, file=sys.stderr, flush=True)
+        raise SystemExit(control_host.FAILED_PHASES_EXIT)
+
+
+def controller_command(arguments, commits):
+    """The command the control host's unit runs the campaign's controller with: this one's options, each candidate
+    at its commit, and the settings and language plans as the host's launch inputs hold them."""
+    command = ["campaign", arguments.campaign, "--execute", "--controller",
+               "--campaign-root", control_host.CAMPAIGN_ROOT, "--settings", f"{control_host.INPUTS}/settings.json",
+               "--spot-vcpu-reserve", str(arguments.spot_vcpu_reserve), "--smoke-protocol", arguments.smoke_protocol]
+    for (name, _), commit in zip(arguments.candidates, commits):
+        command += ["--candidate", f"{name}={commit}"]
+    if arguments.release_version:
+        command += ["--release-version", arguments.release_version]
+    if arguments.phase_timeout_seconds is not None:
+        command += ["--phase-timeout-seconds", str(arguments.phase_timeout_seconds)]
+    for shard in arguments.selected_shards or ():
+        command += ["--shard", shard]
+    for index in range(len(arguments.language_plan)):
+        command += ["--language-plan", f"{control_host.INPUTS}/language-plans/{index}"]
+    return command
+
+
+def launch_control_host(arguments, root):
+    """Launch the control host that runs the campaign's controller, once its candidates, settings and AWS account
+    pass the checks the controller would make first. The candidates must be on GitHub, where the host fetches them."""
+    if arguments.ssh_public_key is None:
+        raise SystemExit("launching a campaign's control host requires --ssh-public-key PATH, the key ssh reaches it "
+                         "with")
+    if arguments.settings is None:
+        raise SystemExit("a campaign's first execution seeds its settings; name them with --settings FILE")
+    ssh_public_key = control_host.read_ssh_public_key(arguments.ssh_public_key)
+    commits = [resolve_commit(root, commitish) for _, commitish in arguments.candidates]
+    for commit in commits:
+        check_candidate_tooling(root, commit)
+    try:
+        given = arguments.settings.read_bytes()
+        arguments.settings = SimpleNamespace(current=seeded_settings(json.loads(given)))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"cannot read the campaign settings {arguments.settings}: {error}") from error
+    except SettingsError as error:
+        raise SystemExit(str(error)) from error
+    directory = Path(__file__).resolve().parent
+    arguments.regional_amis = read_platform_regions(directory)
+    validate_aws(arguments, read_platforms(directory))
+    command = controller_command(arguments, commits)
+    with tempfile.TemporaryDirectory(prefix="control-host-") as temporary:
+        inputs = Path(temporary) / "launch-inputs.tar.gz"
+        control_host.write_launch_inputs(inputs, command, commits, given, arguments.language_plan)
+        control_host.launch(arguments.cloud, arguments.campaign, ssh_public_key, inputs)
 
 
 def controller_process(campaign_root):
@@ -4830,7 +4890,20 @@ def main():
             lines = campaign_status(root)
         print("\n".join(lines))
         return
+    if sys.argv[1:3] == ["control-host", "replace"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} control-host replace",
+                                         description="terminate a campaign's control host, if it has one, and launch "
+                                                     "another onto its volume")
+        parser.add_argument("campaign")
+        parser.add_argument("--ssh-public-key", type=Path, required=True,
+                            help="the public key ssh reaches the new host with")
+        arguments = parser.parse_args(sys.argv[3:])
+        control_host.replace(cloud.AwsCloud(), arguments.campaign,
+                             control_host.read_ssh_public_key(arguments.ssh_public_key))
+        return
     arguments = parse_args()
+    if arguments.controller and not arguments.execute:
+        raise SystemExit("--controller runs a campaign's controller; it requires --execute")
     arguments.cloud = cloud.AwsCloud()
     root = REPOSITORY
     arguments.candidates = parse_candidates(arguments.candidate_values)

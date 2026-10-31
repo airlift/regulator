@@ -113,6 +113,10 @@ class FakeCloud:
     rejections refuse it: each is a function of the region and launch spec that returns a LaunchRejected to raise,
     or None. A terminated instance stays listed as terminated.
 
+    A control host's account also has the SSM parameters, security groups and subnets a test gives it, and the
+    volumes, snapshots and Route 53 records the commands create. Waiting for an instance to run starts it, and
+    waiting for a volume to be available finds it so once no running instance holds it.
+
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
     monotonic() read it, so a scenario takes the time its calls would. Calls made on a pool's threads, as executor
     gives them, take the time of their thread's lane.
@@ -152,6 +156,20 @@ class FakeCloud:
         self.rejections = []
         # Each launch's instance ID, by region and client token.
         self.launched = {}
+        # By name.
+        self.parameters = {}
+        # By (VPC, name), as (ID, inbound rules).
+        self.security_groups = {}
+        # Each subnet's zone.
+        self.subnets = {}
+        self.region_volumes = {}
+        # Each volume's instance, by volume ID.
+        self.attachments = {}
+        self.snapshots = []
+        # Each A record's address, by (zone, name).
+        self.records = {}
+        # Each control host launch's parameters, by instance ID.
+        self.control_hosts = {}
 
     def executor(self, max_workers):
         return FakeExecutor(self, max_workers)
@@ -275,6 +293,83 @@ class FakeCloud:
         _, modified, sha256 = self.objects[bucket, key]
         return cloud.ObjectHead(sha256, self.time() - modified)
 
+    def run_control_host(self, region, image, instance_type, root_device, subnet, security_group, profile, user_data,
+                         tags):
+        self.call("run_control_host", region, subnet)
+        instance = cloud.Instance(f"i-control-{len(self.control_hosts) + 1}", instance_type, "on-demand",
+                                  "pending", "", dict(tags), self.time(), f"10.0.0.{len(self.control_hosts) + 1}")
+        self.region_instances.setdefault(region, []).append(instance)
+        self.control_hosts[instance.id] = {"image": image, "subnet": subnet, "security_group": security_group,
+                                           "profile": profile, "user_data": user_data}
+        return instance.id, instance.address
+
+    def wait(self, region, condition, resource):
+        self.call("wait", region, condition, resource)
+        if condition == "instance_running":
+            self.region_instances[region] = [replace(instance, state="running") if instance.id == resource else
+                                             instance for instance in self.region_instances[region]]
+        elif condition == "volume_available":
+            holder = self.attachments.get(resource)
+            if any(instance.id == holder and instance.state != "terminated"
+                   for instance in self.region_instances.get(region, ())):
+                raise CloudError(f"Waiter VolumeAvailable failed: {resource} is in use")
+            self.attachments.pop(resource, None)
+            self.region_volumes[region] = [replace(volume, state="available") if volume.id == resource else volume
+                                           for volume in self.region_volumes[region]]
+
+    def parameter(self, region, name):
+        self.call("parameter", region, name)
+        return self.parameters.get(name)
+
+    def delete_parameters(self, region, names):
+        self.call("delete_parameters", region, *names)
+        for name in names:
+            self.parameters.pop(name, None)
+
+    def subnet_zones(self, region, subnets):
+        self.call("subnet_zones", region, *subnets)
+        return {subnet: self.subnets[subnet] for subnet in subnets}
+
+    def security_group(self, region, vpc, name):
+        self.call("security_group", region, vpc, name)
+        return self.security_groups.get((vpc, name))
+
+    def volumes(self, region, tags):
+        self.call("volumes", region)
+        return [volume for volume in self.region_volumes.get(region, ())
+                if all(volume.tags.get(key) == value for key, value in tags.items())]
+
+    def create_volume(self, region, zone, gib, tags):
+        self.call("create_volume", region, zone, gib)
+        volume = cloud.Volume(f"vol-{len(self.region_volumes.get(region, ())) + 1}", zone, "creating", dict(tags))
+        self.region_volumes.setdefault(region, []).append(volume)
+        return volume.id
+
+    def attach_volume(self, region, volume, instance, device):
+        self.call("attach_volume", region, volume, instance, device)
+        self.attachments[volume] = instance
+        self.region_volumes[region] = [replace(item, state="in-use") if item.id == volume else item
+                                       for item in self.region_volumes[region]]
+
+    def delete_volume(self, region, volume):
+        self.call("delete_volume", region, volume)
+        self.region_volumes[region] = [item for item in self.region_volumes[region] if item.id != volume]
+
+    def create_snapshot(self, region, volume, tags):
+        self.call("create_snapshot", region, volume)
+        self.snapshots.append((volume, dict(tags)))
+        return f"snap-{len(self.snapshots)}"
+
+    def change_record(self, region, zone, action, name, address):
+        self.call("change_record", action, name, address)
+        if action == "UPSERT":
+            self.records[zone, name] = address
+            return True
+        if self.records.get((zone, name)) != address:
+            return False
+        del self.records[zone, name]
+        return True
+
 
 class TestAwsCloud(unittest.TestCase):
     """The adapter's requests and its reading of the answers, against the SDK's stubbed responses."""
@@ -331,7 +426,7 @@ class TestAwsCloud(unittest.TestCase):
              "Tags": [{"Key": "HostEpoch", "Value": "7"}], "LaunchTime": launched}]}], "NextToken": "next"}, {})
         ec2.add_response("describe_instances", {"Reservations": [{"Instances": [
             {"InstanceId": "i-on-demand", "InstanceType": "r9g.large", "State": {"Name": "running"},
-             "LaunchTime": launched}]}]}, {"NextToken": "next"})
+             "LaunchTime": launched, "PrivateIpAddress": "10.0.0.9"}]}]}, {"NextToken": "next"})
         ec2.add_response("describe_spot_instance_requests", {"SpotInstanceRequests": [
             {"SpotInstanceRequestId": "sir-open", "LaunchSpecification": {"InstanceType": "r8i.large"}}]},
             {"Filters": [{"Name": "state", "Values": ["open", "active"]}]})
@@ -355,7 +450,8 @@ class TestAwsCloud(unittest.TestCase):
         self.assertEqual([
             cloud.Instance("i-spot", "r8i.large", "spot", "terminated", "Server.SpotInstanceTermination",
                            {"HostEpoch": "7"}, launched.timestamp()),
-            cloud.Instance("i-on-demand", "r9g.large", "on-demand", "running", "", {}, launched.timestamp())],
+            cloud.Instance("i-on-demand", "r9g.large", "on-demand", "running", "", {}, launched.timestamp(),
+                           "10.0.0.9")],
             aws.instances("us-west-2"))
         self.assertEqual([cloud.SpotRequest("sir-open", "", "r8i.large", {})], aws.spot_requests("us-west-2"))
         self.assertEqual({"us-west-2": 9, "us-east-2": 3},
@@ -475,6 +571,72 @@ class TestAwsCloud(unittest.TestCase):
         with self.assertRaises(cloud.LaunchUnknown):
             aws.run_instance("us-west-2", spec)
         aws.terminate("us-west-2", ["i-launched"])
+
+    def test_control_host_is_launched_private_onto_its_volume_and_named_by_its_record(self):
+        ec2, ssm, route53 = self.stub("ec2"), self.stub("ssm"), self.stub("route53")
+        tags = [{"Key": "Campaign", "Value": "c"}]
+        ssm.add_response("get_parameter", {"Parameter": {"Value": '{"vpc": "vpc-a"}'}},
+                         {"Name": "/network", "WithDecryption": True})
+        ssm.add_client_error("get_parameter", "ParameterNotFound", http_status_code=400)
+        ssm.add_response("delete_parameters", {}, {"Names": ["/a", "/b"]})
+        ec2.add_response("describe_subnets", {"Subnets": [{"SubnetId": "subnet-a", "AvailabilityZone": "us-west-2a"}]},
+                         {"SubnetIds": ["subnet-a"]})
+        # Every source of an inbound rule shows, so a rule admitting more than the router's CIDR is seen.
+        groups = {"Filters": [{"Name": "vpc-id", "Values": ["vpc-a"]}, {"Name": "group-name", "Values": ["host"]}]}
+        ec2.add_response("describe_security_groups", {"SecurityGroups": [{"GroupId": "sg-host", "IpPermissions": [
+            {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "IpRanges": [{"CidrIp": "10.0.0.0/16"}],
+             "Ipv6Ranges": [{"CidrIpv6": "::/0"}]}]}]}, groups)
+        ec2.add_response("describe_security_groups", {"SecurityGroups": []}, groups)
+        ec2.add_response("describe_volumes", {"Volumes": [
+            {"VolumeId": "vol-a", "AvailabilityZone": "us-west-2a", "State": "in-use", "Tags": tags},
+            {"VolumeId": "vol-gone", "AvailabilityZone": "us-west-2a", "State": "deleted", "Tags": tags}]},
+            {"Filters": [{"Name": "tag:Campaign", "Values": ["c"]}]})
+        ec2.add_response("create_volume", {"VolumeId": "vol-new"}, {
+            "AvailabilityZone": "us-west-2a", "Size": 200, "VolumeType": "gp3", "Encrypted": True,
+            "TagSpecifications": [{"ResourceType": "volume", "Tags": tags}]})
+        ec2.add_response("run_instances", {"Instances": [{"InstanceId": "i-host", "PrivateIpAddress": "10.0.1.5"}]}, {
+            "ImageId": "ami-test", "InstanceType": "m7i.large", "MinCount": 1, "MaxCount": 1,
+            "UserData": "#!/bin/bash\n",
+            "BlockDeviceMappings": [{"DeviceName": "/dev/xvda", "Ebs": {
+                "VolumeSize": 30, "VolumeType": "gp3", "DeleteOnTermination": True, "Encrypted": True}}],
+            "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+            "IamInstanceProfile": {"Name": "host-profile"}, "InstanceInitiatedShutdownBehavior": "stop",
+            "NetworkInterfaces": [{"DeviceIndex": 0, "SubnetId": "subnet-a", "Groups": ["sg-host"],
+                                   "AssociatePublicIpAddress": False}],
+            "TagSpecifications": [{"ResourceType": "instance", "Tags": tags}]})
+        ec2.add_response("describe_instances", {"Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]},
+                         {"InstanceIds": ["i-host"]})
+        ec2.add_response("attach_volume", {}, {"VolumeId": "vol-new", "InstanceId": "i-host", "Device": "/dev/sdf"})
+        ec2.add_response("create_snapshot", {"SnapshotId": "snap-a"}, {
+            "VolumeId": "vol-new", "TagSpecifications": [{"ResourceType": "snapshot", "Tags": tags}]})
+        ec2.add_response("delete_volume", {}, {"VolumeId": "vol-new"})
+        record = {"Name": "host.example", "Type": "A", "TTL": 60, "ResourceRecords": [{"Value": "10.0.1.5"}]}
+        route53.add_response("change_resource_record_sets", {"ChangeInfo": {
+            "Id": "change", "Status": "PENDING", "SubmittedAt": datetime(2026, 10, 30)}}, {
+            "HostedZoneId": "zone", "ChangeBatch": {"Changes": [{"Action": "UPSERT", "ResourceRecordSet": record}]}})
+        # A deletion that finds the record naming another host leaves it.
+        route53.add_client_error("change_resource_record_sets", "InvalidChangeBatch", http_status_code=400)
+
+        aws = self.cloud
+        self.assertEqual('{"vpc": "vpc-a"}', aws.parameter("us-west-2", "/network"))
+        self.assertIsNone(aws.parameter("us-west-2", "/absent"))
+        aws.delete_parameters("us-west-2", ["/a", "/b"])
+        self.assertEqual({"subnet-a": "us-west-2a"}, aws.subnet_zones("us-west-2", ["subnet-a"]))
+        self.assertEqual(("sg-host", {("tcp", 22, 22, "10.0.0.0/16"), ("tcp", 22, 22, "::/0")}),
+                         aws.security_group("us-west-2", "vpc-a", "host"))
+        self.assertIsNone(aws.security_group("us-west-2", "vpc-a", "host"))
+        self.assertEqual([cloud.Volume("vol-a", "us-west-2a", "in-use", {"Campaign": "c"})],
+                         aws.volumes("us-west-2", {"Campaign": "c"}))
+        self.assertEqual("vol-new", aws.create_volume("us-west-2", "us-west-2a", 200, {"Campaign": "c"}))
+        self.assertEqual(("i-host", "10.0.1.5"), aws.run_control_host(
+            "us-west-2", "ami-test", "m7i.large", "/dev/xvda", "subnet-a", "sg-host", "host-profile", "#!/bin/bash\n",
+            {"Campaign": "c"}))
+        aws.wait("us-west-2", "instance_running", "i-host")
+        aws.attach_volume("us-west-2", "vol-new", "i-host", "/dev/sdf")
+        self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
+        aws.delete_volume("us-west-2", "vol-new")
+        self.assertTrue(aws.change_record("us-west-2", "zone", "UPSERT", "host.example", "10.0.1.5"))
+        self.assertFalse(aws.change_record("us-west-2", "zone", "DELETE", "host.example", "10.0.1.5"))
 
     def test_worker_profile_and_prefix_deletion(self):
         iam = self.stub("iam")

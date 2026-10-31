@@ -1,0 +1,26 @@
+# The campaign's controller, which the control host's user data starts as regulator-campaign@<campaign> with the
+# command the Mac-side launch recorded on the campaign volume. A controller that crashes restarts; one that ends,
+# whether every phase completed or some failed, stays ended, and so does one that keeps crashing.
+[Unit]
+Description=Regulator benchmark campaign %i
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/regulator
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+User=ec2-user
+EnvironmentFile=/regulator/control-host/controller.env
+WorkingDirectory=/regulator/control-host/checkout
+ExecStart=/opt/regulator/venv/bin/python tools/re2-benchmark/baseline/run-campaign.py $CONTROLLER_ARGUMENTS
+Restart=on-failure
+RestartSec=30
+# run-campaign.py exits 3 when the campaign ended with failed phases.
+RestartPreventExitStatus=3
+# SIGTERM stops only the controller; the hosts keep their leases for the next one.
+KillMode=mixed
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

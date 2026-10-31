@@ -111,16 +111,19 @@ the buckets.
 
 ### Launch a campaign
 
-From the Mac, `run-campaign.py campaign <id> --execute ...`:
+From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...`:
 
 1. Validates options, plans, quotas and placement as today, with the SDK.
 2. Creates the campaign volume (gp3, 200 GB; past full campaign roots are
    16 to 28 GB and LGTM data is small) and launches the control host in
    us-west-2 (m7i.large, 8 GB, enough for the controller and `otel-lgtm`) in
    one of the router-carried private subnets, with no public address; its
-   outbound traffic goes through the VPC's NAT gateway. Its security group
-   admits only tcp 22 and 3000 from the VPC's CIDR, where tailnet traffic
-   arrives from the router; nothing is open to the internet. Session Manager
+   outbound traffic goes through the VPC's NAT gateway. Its security group,
+   from the account setup, admits only tcp 22 and 3000 from the VPC's CIDR,
+   where tailnet traffic arrives from the router; nothing is open to the
+   internet. The launch inputs (the controller's command, the candidate
+   commits, the settings and the language plans) travel through the Oregon
+   bucket onto the volume. Session Manager
    is the shell fallback when the router is down; the run never depends on
    the router. Its user data installs Python, boto3 and the OpenTelemetry SDK
    at pinned versions and Docker with `grafana/otel-lgtm` (Grafana on port
@@ -129,7 +132,10 @@ From the Mac, `run-campaign.py campaign <id> --execute ...`:
    the volume at the campaign root; clones the public repository at the
    candidate commit (the controller's tooling is the candidate's, which the
    campaign already requires); and starts the systemd unit
-   `regulator-campaign@<id>` with the recorded command.
+   `regulator-campaign@<id>` with the recorded command. That command is the
+   launch's with `--controller` and the host's paths: `--controller` runs
+   the controller in the process, and without it `--execute` launches a
+   control host.
 3. Upserts the private DNS record at the host's private address, so Grafana
    keeps one URL across host replacements, and returns with that URL and the
    ssh line. Everything after this runs in AWS (principle 7).

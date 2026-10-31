@@ -1,0 +1,28 @@
+# Grafana with Prometheus, Loki and Tempo behind it, from the pinned grafana/otel-lgtm image. Grafana listens on
+# port 3000 for the subnet router's traffic; OTLP listens on the host's loopback only, for the controller. Its data
+# lives on the campaign volume, and its dashboards come from the checkout.
+[Unit]
+Description=Regulator benchmark telemetry (grafana/otel-lgtm)
+Requires=docker.service
+After=docker.service
+RequiresMountsFor=/regulator
+
+[Service]
+EnvironmentFile=/etc/regulator/lgtm.env
+ExecStartPre=-/usr/bin/docker rm --force lgtm
+ExecStart=/usr/bin/docker run --rm --name lgtm \
+    -p 3000:3000 -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 \
+    -v /regulator/lgtm:/data \
+    -v /regulator/control-host/checkout/tools/re2-benchmark/aws/control-host/grafana:/regulator-dashboards:ro \
+    -v /regulator/control-host/checkout/tools/re2-benchmark/aws/control-host/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/regulator.yaml:ro \
+    -e GF_PATHS_DATA=/data/grafana \
+    -e GF_AUTH_ANONYMOUS_ENABLED=false \
+    -e GF_AUTH_DISABLE_LOGIN_FORM=false \
+    -e GF_SECURITY_ADMIN_PASSWORD \
+    grafana/otel-lgtm@sha256:0df9bc14142000b161344bd24caf6ddd319b7319055aedaf9b0692b125730af7
+ExecStop=/usr/bin/docker stop lgtm
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
