@@ -598,10 +598,13 @@ carries on with it. The launch uploads its inputs to the Oregon bucket's
 registers it in the parameter's target group, which the internal load
 balancer forwards Grafana to. Since the one record serves one campaign, the
 launch and `control-host replace` refuse, before they create or terminate
-anything, while the target group holds a host whose `Campaign` tag names
-another campaign; a host that has terminated serves none and does not count.
-Each looks again once it registers its host, and backs out, terminating that
-host, if another campaign's launch registered one meanwhile. The host's user data,
+anything, while the target group holds any live host not tagged for this
+campaign, whether its `Campaign` tag names another campaign or it has none,
+which the refusal names as campaign `unknown`. A registered host that has
+terminated, or that EC2 no longer lists, serves none and does not count;
+`replace` and `teardown` deregister it whatever its campaign. Each looks again
+once it registers its host, and backs out, terminating that host, if another
+campaign's launch registered one meanwhile. The host's user data,
 `control-host/user-data.sh`:
 
 - installs the key `--ssh-public-key` names for `ec2-user`, and has sshd
