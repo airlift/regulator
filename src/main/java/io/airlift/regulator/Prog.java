@@ -314,6 +314,7 @@ final class Prog
     private boolean anchorStart;
     private boolean anchorEnd;
     private boolean canMatchEmpty;
+    private boolean hasEmptyWidthAssertions;
     private int textDependentAssertions;
     private boolean hasFullCaseFold;
 
@@ -519,6 +520,14 @@ final class Prog
     public void setCanMatchEmpty(boolean canMatchEmpty)
     {
         this.canMatchEmpty = canMatchEmpty;
+    }
+
+    /// Returns whether any instruction is an empty-width assertion, such as `\b` or `(?m)^`. An
+    /// anchor the compiler records in [#anchorStart()] or [#anchorEnd()] leaves none. Set by
+    /// [#computeByteMap()].
+    public boolean hasEmptyWidthAssertions()
+    {
+        return hasEmptyWidthAssertions;
     }
 
     public boolean hasTextDependentAssertions()
@@ -1915,6 +1924,7 @@ final class Prog
                 builder.merge();
             }
             else if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
+                hasEmptyWidthAssertions = true;
                 int empty = instruction.empty();
                 if ((empty & EmptyOp.TEXT_DEPENDENT) != 0) {
                     textDependentAssertions |= empty & EmptyOp.TEXT_DEPENDENT;

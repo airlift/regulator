@@ -1337,8 +1337,9 @@ fixed-distance byte candidates after the bounded candidate-start route declines
 the search. Repeated `find()` calls then use the existing count-search traversal
 to return one forward boundary without rediscovering the DFA, match mode, and
 acceleration state for every match. Fixed-length expressions derive the start
-from that boundary; variable-length expressions retain the existing reverse DFA
-boundary recovery.
+from that boundary. Expressions that match empty at every position, with no
+assertion that could refuse one, start where the search did. Other
+variable-length expressions retain the existing reverse DFA boundary recovery.
 
 Eligibility is limited to first-match programs without a required prefix,
 anchors, or text-dependent assertions. Empty matches are still handled by the

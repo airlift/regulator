@@ -253,6 +253,33 @@ public class TestRegexpMatcher
     }
 
     @Test
+    public void testGroupZeroMatcherSkipsReversePassWhenEveryPositionMatches()
+    {
+        Re2 pattern = Re2.compile(Slices.utf8Slice(".*"));
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("ab\ncd"), null);
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(0);
+        assertThat(matcher.end()).isEqualTo(2);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(2);
+        assertThat(matcher.end()).isEqualTo(2);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(3);
+        assertThat(matcher.end()).isEqualTo(5);
+        assertThat(pattern.isReverseProgramComputed()).isFalse();
+
+        // An assertion can refuse the search start, so the start comes from the reverse pass.
+        pattern = Re2.compile(Slices.utf8Slice("\\ba*"));
+        matcher = pattern.groupZeroMatcher(Slices.utf8Slice("-aa"), null);
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(1);
+        assertThat(matcher.end()).isEqualTo(3);
+        assertThat(pattern.isReverseProgramComputed()).isTrue();
+    }
+
+    @Test
     public void testGroupZeroMatcherPreservesMatchBoundaries()
     {
         assertGroupZeroMatchesFull("(a+)", "zaaazaa");
