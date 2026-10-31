@@ -2610,6 +2610,8 @@ class UnitDispatcher:
         self.boot_room = 0
         # When the controller decided to stop each host it terminates, by host epoch.
         self.terminated = {}
+        # The host epochs of admissions that launched nothing and whose reservation could not be released.
+        self.unreleased = set()
         # The loop's round trips run on the request threads, and gathering group completions on the acceptance
         # threads, which a campaign's phases share; each group being gathered is kept by its worker's host epoch,
         # lease and group until it is applied.
@@ -3974,8 +3976,9 @@ class UnitDispatcher:
 
     def start(self, pool, job, now, starting):
         """Record an admitted worker in the phase's workers and in starting, and issue its first leases, before its
-        launch. Until its starting record is written no worker owns the admission's reservation, so one whose record
-        fails releases it, noting any failure to."""
+        launch. No worker owns the admission's reservation until its starting record is written,
+        so when the record fails, release the reservation. If the release fails too, add that as a note to the
+        record's error and leave the reservation to the phase's cleanup."""
         del self.candidates[pool]
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
@@ -3995,6 +3998,7 @@ class UnitDispatcher:
             try:
                 self.budget.release(self.arguments.campaign_id, job.host_epoch, cleanup_verified=True)
             except Exception as failure:
+                self.unreleased.add(job.host_epoch)
                 error.add_note(f"releasing host epoch {job.host_epoch}'s reservation also failed: {failure}")
             raise
         if slots:
@@ -4011,11 +4015,12 @@ class UnitDispatcher:
         self.lease(worker, launching=True)
 
     def sweep(self, observed):
-        """One loop of a phase paused for a fault, which trusts nothing more its hosts report but that they booted:
-        report each booting worker that started to the boot window, hold no launch refusal, as a phase not
-        launching, stop-lease every open worker once the campaign is stopping, prove each ended worker's cleanup,
-        releasing its reservation, and go on stopping the hosts asked to terminate. Its other hosts finish the leases
-        they hold and stop themselves once their idle time runs out. The phase's next dispatch, once it is resumed,
+        """One loop of a phase paused for a fault. The phase trusts nothing more its hosts report but that they
+        booted. Report each booting worker that started to the boot window, and hold no launch refusal, since the
+        phase is not launching. Stop-lease every open worker once the campaign is stopping. Prove each ended
+        worker's cleanup and release its reservation, release each reservation an admission left that launched
+        nothing, and go on stopping the hosts asked to terminate. The phase's other hosts finish the leases they
+        hold and stop themselves once their idle time runs out. Once the phase is resumed, its next dispatch
         settles each worker from its ledgers and recovered uploads, as a restart does."""
         self.observed = observed
         live, ended = self.partition()
@@ -4036,6 +4041,9 @@ class UnitDispatcher:
         for worker in self.clean_up(ended):
             self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
             del self.workers[worker.job.host_epoch]
+        for epoch in sorted(self.unreleased):
+            self.budget.release(self.arguments.campaign_id, epoch, cleanup_verified=True)
+            self.unreleased.remove(epoch)
 
     def start_campaign(self):
         """The phase's start time. A first start records the tooling digest and an empty semantic-rejection
