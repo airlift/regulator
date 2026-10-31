@@ -577,8 +577,10 @@ release campaign's work, takes most of the hosts as they free up beside the
 baseline's primary. Once the limits leave no host free for a phase below its
 target, a phase above its own gives up the hosts past it: it stop-leases its
 idle workers first, then those holding the least work, each behind the leases
-it holds, so no lease is interrupted. A draining phase's hosts go on taking
-its work, so once a lowered limit leaves more open hosts than it allows, the
+it holds, so no lease is interrupted, and launches none past its target
+meanwhile, so each host it gives up goes to the phase waiting for it once the
+host ends. A draining phase's hosts go on taking its work, so once a lowered
+limit leaves more open hosts than it allows, the
 draining phases give up, the same way, those the launching phases' do not
 cover. Hosts move only while a phase waits for them, so the shares' changes as
 the work left is corrected move none on their own. A phase's share is never frozen, and the controller records each phase's
