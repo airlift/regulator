@@ -4450,14 +4450,16 @@ class Campaign:
         it missed."""
         path = self.arguments.settings.events_path
         try:
-            changes = list(ledger_rows(path))
+            changes = [(row["version"], row["actor"], row["change"]) for row in ledger_rows(path)]
+        except KeyError as error:
+            print(f"logging no settings changes this loop, since {path} has no {error.args[0]} column", flush=True)
+            return
         except (OSError, UnicodeDecodeError, csv.Error) as error:
             print(f"logging no settings changes this loop, since {path} cannot be read: {error}", flush=True)
             return
-        for change in changes[len(changes) if self.changes is None else self.changes:]:
-            self.telemetry.event("settings-change", f"settings version {change['version']} by {change['actor']}: "
-                                 f"{change['change']}", actor=change["actor"], version=change["version"],
-                                 change=change["change"])
+        for version, actor, change in changes[len(changes) if self.changes is None else self.changes:]:
+            self.telemetry.event("settings-change", f"settings version {version} by {actor}: {change}", actor=actor,
+                                 version=version, change=change)
         self.changes = len(changes)
 
     def export(self, loop_seconds):
