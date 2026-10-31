@@ -160,6 +160,9 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual([({"r8i": 8}, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, waiting=2))
         self.assertEqual([({"r8i": 8}, {"r8i": 5}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, 3, waiting=2))
         self.assertEqual([(None, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, paused="a"))
+        # A phase with little work left beside one holding all but one of the hosts still takes the free one, and
+        # the other gives up a host for the rest of its target.
+        self.assertEqual([({"r8i": 1}, {}), ({"r8i": 9}, {"r8i": 1})], shares({"a": 0, "b": 9}))
         # A draining phase whose hosts go on taking its leases gives up those a lowered limit leaves no room for.
         self.assertEqual([(None, {"r8i": 2}), ({"r8i": 4}, {})], shares({"a": 8, "b": 4}, draining="a"))
 
