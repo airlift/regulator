@@ -3406,6 +3406,29 @@ class TestUnitWorkers(unittest.TestCase):
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "notice"}})
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like"], 4, 2)
                 self.assertEqual(workers, sum(host.platform == "r8i" for host in fleet.hosts))
+        # Dain raises the limits to ten hosts a platform as the first wave launches, two hosts a platform, one
+        # leasing its pool's 15-minute unit and a 36-second one and the other two short ones. The first r8i host is reclaimed as it boots, and its
+        # replacement takes the long unit back, which frees its partner for all but two of the short units, so a
+        # single further worker launches for those.
+        units = {name: {"unit_id": name, "shard_id": "mixed", "unit_index": str(index), "estimated_seconds": seconds,
+                        "groups": [{"group_id": "1", "estimated_seconds": int(seconds)}]}
+                 for index, (name, seconds) in enumerate([("long", "900")] +
+                                                         [(f"short-{index}", "36") for index in range(1, 13)])}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, scripts={1: {1: "notice"}})
+            raised = []
+
+            def loop():
+                if not raised and fleet.launches:
+                    self.control(root, "set-limit", "max-hosts", "20")
+                    self.control(root, "set-limit", "max-hosts-per-platform", "10")
+                    raised.append(fleet.sleeps + 1)
+
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["mixed"], ())], 4, 2, loop,
+                                          purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            self.assertEqual(2, sum(launch.platform == "r8i" and launch.loop == raised[0] for launch in fleet.launches))
 
     def test_worker_silent_past_its_boot_deadline_hands_back_its_leases(self):
         with tempfile.TemporaryDirectory() as temporary:

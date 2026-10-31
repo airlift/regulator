@@ -3826,16 +3826,18 @@ class UnitDispatcher:
         starting. Each pool in turn first takes up to its even part of the boot window, and the pools that need more
         then share what is left, so every pool that needs hosts gets its part; a pool short of Spot capacity tries
         one Spot launch a loop until one of its Spot workers starts. Each pool's late items are projected once, and
-        each admitted worker takes as many off them as its first leases hold."""
+        each admitted worker's first leases take theirs off them; a first lease of an item not late projects them
+        again."""
         blocked_vcpus = None
         late = {}
 
         def take_late(pool, worker):
-            # A first lease of a late item takes it off the list; one of an item not late frees the worker that
-            # would have taken it for the earliest late item.
+            # No worker reached a late item before a new worker's boot, so leasing one changes no earlier start. A
+            # lease of an item not late frees the worker that would have taken it for as many later items as their
+            # estimates fit before then, which only the projection counts.
             leased = {worker.leases[sequence] for sequence in worker.outstanding()} - {None}
             items = [item for item in late[pool] if item.identity not in leased]
-            late[pool] = items[len(leased) - (len(late[pool]) - len(items)):]
+            late[pool] = items if len(late[pool]) - len(items) == len(leased) else self.late_items(pool, now)
 
         def admit_pool(pool, limit):
             # Whether the pool admitted its limit and may take more; None once a refusal holds for every pool.
