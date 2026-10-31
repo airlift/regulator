@@ -4448,7 +4448,7 @@ class TestUnitWorkers(unittest.TestCase):
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "records no tooling digest"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
 
-    def test_admitted_worker_launches_only_with_its_first_leases(self):
+    def test_admitted_worker_launches_only_with_its_first_leases_and_strands_no_reservation(self):
         shards = ["trino-like-specialized"]
         with self.subTest(scenario="leases denied"), tempfile.TemporaryDirectory() as temporary:
             # S3 refuses every lease for eight loops, longer than a slot's replacements would last: no worker
@@ -4477,41 +4477,56 @@ class TestUnitWorkers(unittest.TestCase):
         for scenario in ("disk full", "user data unreadable"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary, \
                     contextlib.redirect_stdout(io.StringIO()) as log:
-                # In the loop that admits the smoke's two workers, the disk is full from the second's starting record
-                # on, or the controller cannot read their user data. The smoke pauses for every error the loop met,
-                # and Dain stops the campaign. A worker admitted before an admission error still launches with its
-                # leases, one whose launch was never asked for has ended, so the stop waits for no boot allowance,
-                # and no admission's reservation outlives the stop.
+                # In the loop that admits the smoke's two workers, one of two faults strikes. Either the disk is full
+                # from the second worker's starting record on, so its reservation cannot be released either, or the
+                # controller cannot read their user data. The smoke pauses for every error the loop met, and Dain
+                # stops the campaign. A worker admitted before an admission error still launches with its leases. One
+                # whose launch was never asked for has ended, so the stop waits for no boot allowance, and no
+                # admission's reservation outlives the stop.
                 root = Path(temporary)
                 fleet = FakeUnitFleet(root / "hosts")
-                write_attempt = RUN_CAMPAIGN.write_attempt
+                write = RUN_CAMPAIGN.write_attempt
+                release = RUN_CAMPAIGN.FleetBudget.release
                 starts, stopped = [], []
 
-                def full_disk(path, job, outcome, detail="-"):
+                def disk_is_full():
+                    return scenario == "disk full" and len(starts) > 1 and starts[1][1] == fleet.sleeps
+
+                def write_attempt_on_full_disk(path, job, outcome, *rest):
                     if outcome == "starting":
                         starts.append((job, fleet.sleeps))
-                    if scenario == "disk full" and len(starts) > 1 and starts[1][1] == fleet.sleeps:
+                    if disk_is_full():
                         raise OSError(28, "No space left on device")
-                    write_attempt(path, job, outcome, detail)
+                    write(path, job, outcome, *rest)
+
+                def release_on_full_disk(budget, *arguments, **options):
+                    if disk_is_full():
+                        raise OSError(28, "No space left on device")
+                    release(budget, *arguments, **options)
 
                 def loop():
                     if "smoke: paused: " in log.getvalue() and not stopped:
                         self.control(root, "stop")
                         stopped.append(fleet.sleeps)
 
-                unreadable = OSError(5, "Input/output error")
-                with patch.object(RUN_CAMPAIGN, "write_attempt", side_effect=full_disk), \
-                        patch.object(RUN_CAMPAIGN, "worker_user_data", side_effect=unreadable
-                                     if scenario == "user data unreadable" else RUN_CAMPAIGN.worker_user_data):
+                user_data = (OSError(5, "Input/output error") if scenario == "user data unreadable" else
+                             RUN_CAMPAIGN.worker_user_data)
+                with patch.object(RUN_CAMPAIGN, "write_attempt", side_effect=write_attempt_on_full_disk), \
+                        patch.object(RUN_CAMPAIGN.FleetBudget, "release", autospec=True,
+                                     side_effect=release_on_full_disk), \
+                        patch.object(RUN_CAMPAIGN, "worker_user_data", side_effect=user_data):
                     failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", shards, ())], 2, 1, loop)
                 self.assertEqual([], failed)
-                self.assertEqual({}, json.loads((root / RUN_CAMPAIGN.STATE_FILE).read_text())["reservations"])
+                self.assertEqual({}, RUN_CAMPAIGN.read_fleet_state(root / RUN_CAMPAIGN.STATE_FILE)["reservations"])
                 if scenario == "disk full":
                     [launched] = fleet.hosts
-                    self.assertEqual((starts[0][0].platform.name, [1, 2]), (launched.platform, sorted(
-                        sequence for sequence, lease in launched.leases.items() if not lease.get("stop"))))
-                    self.assertIn("smoke: paused: [Errno 28] No space left on device; launching the workers admitted "
-                                  "before it also failed: [Errno 28] No space left on device", log.getvalue())
+                    self.assertEqual(starts[0][0].platform.name, launched.platform)
+                    self.assertEqual([1, 2], sorted(sequence for sequence, lease in launched.leases.items()
+                                                    if not lease.get("stop")))
+                    self.assertIn(f"smoke: paused: [Errno 28] No space left on device; releasing host epoch "
+                                  f"{starts[1][0].host_epoch}'s reservation also failed: [Errno 28] No space left on "
+                                  "device; launching the workers admitted before it also failed: [Errno 28] No space "
+                                  "left on device", log.getvalue())
                 else:
                     self.assertEqual([], fleet.hosts)
                     self.assertEqual(stopped[0] + 2, fleet.sleeps)
