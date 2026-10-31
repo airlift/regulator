@@ -72,6 +72,14 @@ def campaign_settings(root, platform_regions=None, purchase=None, buckets=None, 
     return settings
 
 
+def synthetic_units(seconds, **counts):
+    """counts[shard] units of each shard, numbered from 1, each one group estimated at seconds."""
+    return {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
+                                 "estimated_seconds": str(seconds),
+                                 "groups": [{"group_id": "1", "estimated_seconds": seconds}]}
+            for shard, count in counts.items() for index in range(1, count + 1)}
+
+
 def launch_refusals(reader):
     """The age of each launch refusal reader last collected, by its reason."""
     return {point.attributes["reason"]: point.value
@@ -119,7 +127,7 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40,
-            spot_vcpu_reserve=0,
+            spot_vcpu_reserve=RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE,
             settings=campaign_settings(root, **settings))
 
     def settings(self, **options):
@@ -364,8 +372,9 @@ class TestRunCampaign(unittest.TestCase):
             arguments = self.arguments(root, platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"})
             aws = arguments.cloud = FakeCloud()
             arguments.shared_budget = self.shared_fleet(arguments)
-            # Other work holds the region's Spot quota, then ends.
-            aws.quotas[("us-west-2", "spot")] = 8
+            # Other work holds the region's Spot quota past its reserve, then ends.
+            reserve = RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE
+            aws.quotas[("us-west-2", "spot")] = reserve + 8
             aws.region_instances["us-west-2"] = [
                 cloud.Instance("i-other", "r8i.2xlarge", "spot", "running", "", {}, 0)]
             loop = {}
@@ -389,7 +398,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertIn("queued-capacity\tshared capacity query failed: connection reset",
                           (root / "job-attempts.tsv").read_text())
             # AWS raises the quota, which admission takes once its answer is five minutes old.
-            aws.quotas[("us-west-2", "spot")] = 16
+            aws.quotas[("us-west-2", "spot")] = reserve + 16
             second = replace(job, host_epoch=11)
             self.assertFalse(self.admit(arguments, root, second)[1])
             later = RUN_CAMPAIGN.time.monotonic() + RUN_CAMPAIGN.VCPU_QUOTA_CACHE_SECONDS
@@ -680,9 +689,17 @@ class TestRunCampaign(unittest.TestCase):
                 with (campaign_root / EVENTS).open(newline="") as events_file:
                     last = list(csv.DictReader(events_file, delimiter="\t"))[-1]
                 self.assertEqual(("dain", "campaign reopened"), (last["actor"], last["change"]))
+                self.assertIsNone(CampaignSettings(campaign_root).current["stop"])
                 with self.assertRaisesRegex(SystemExit, "campaign tournament has not ended"):
                     control("reopen")
 
+            # Reopened and stopped by Dain, the campaign ends again at once, starting nothing, and his next reopen
+            # clears that stop.
+            reopen()
+            control("stop", "--reason", "not yet")
+            run()
+            self.assertEqual([], events)
+            self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
             reopen()
             # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
             # listed on the shards it measured.
@@ -694,6 +711,33 @@ class TestRunCampaign(unittest.TestCase):
             confirmation = events[-2][2]
             self.assertEqual((campaign_root / "a" / "reduction" / "confirmation-jobs.tsv", ["trino-like"]),
                              (confirmation.confirmation_jobs, confirmation.selected_shards))
+            # A change that passed its first check as the controller ended is refused once it holds the settings lock,
+            # so the root still matches the manifest that controller wrote.
+            reopen()
+            change = RUN_CAMPAIGN.control_change
+
+            def change_as_it_ends(*arguments):
+                RUN_CAMPAIGN.control_host.write_manifest(campaign_root)
+                return change(*arguments)
+
+            with patch.object(RUN_CAMPAIGN, "control_change", side_effect=change_as_it_ends), \
+                    self.assertRaisesRegex(SystemExit, "campaign tournament has ended; only reopen"):
+                control("set-limit", "max-hosts", "8")
+            self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
+            # A reopen interrupted once its event is recorded, before the manifest is gone, leaves the campaign
+            # ended, so Dain runs it again.
+            unlink = Path.unlink
+
+            def unlink_interrupted(path, *arguments):
+                if path.name == RUN_CAMPAIGN.control_host.MANIFEST:
+                    raise OSError(5, "Input/output error", str(path))
+                return unlink(path, *arguments)
+
+            with patch.object(Path, "unlink", autospec=True, side_effect=unlink_interrupted), \
+                    self.assertRaisesRegex(OSError, "Input/output error"):
+                control("reopen")
+            with self.assertRaisesRegex(SystemExit, "campaign tournament has ended; only reopen"):
+                control("set-limit", "max-hosts", "8")
             # A restart measures what the campaign started measuring, of the candidates it started with, with the
             # Spot vCPU reserve it started with, in the AWS account it started in, as the campaign it started as.
             reopen()
@@ -762,8 +806,9 @@ class TestRunCampaign(unittest.TestCase):
                                      {key: current[key] for key in value} if field in ("regions", "purchase") else
                                      current)
             # The monitor resumes a phase the controller paused for a fault, but a pause or a drain Dain made is his.
-            settings.change("controller", "a/primary paused: bad marker", lambda current: current["phases"][
-                "a/primary"].update(state="paused", reason="bad marker", by="controller"))
+            paused = {"state": "paused", "reason": "bad marker", "by": "controller"}
+            settings.change("controller", "a/primary paused: bad marker",
+                            lambda current: current["phases"]["a/primary"].update(paused))
             self.assertEqual("running", control("resume", "a/primary", actor="monitor")["phases"]["a/primary"]["state"])
             for command in (["pause", "a/primary"], ["drain", "a/primary"]):
                 with self.subTest(command=command):
@@ -797,6 +842,8 @@ class TestRunCampaign(unittest.TestCase):
             # A command the settings cannot take, its actor may not make, or the region's quota after its reserve or
             # its images cannot hold, changes nothing. The monitor runs only the commands its runbook grants.
             settings_bytes = (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).read_bytes()
+            # One vCPU past what the region's quota holds after its reserve.
+            over = str(aws.default_quota - RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE + 1)
             for command, actor, refusal in (
                     (["set-limit", "max-hosts", "101"], "monitor", "max_hosts only within the authorized"),
                     *((command, "monitor", f"only dain runs {command[0]}") for command in (
@@ -809,11 +856,11 @@ class TestRunCampaign(unittest.TestCase):
                     (["add-region", "eu-central-1", "--max-vcpus", "256"], "dain", "has region eu-central-1"),
                     (["add-region", "ap-south-1", "--max-vcpus", "256", "--platforms", "r8i"], "monitor",
                      "only the authorized regions"),
-                    (["set-limit", "region", region, "max-vcpus", "969"], "dain",
-                     "max_vcpus 969 exceeds the Standard Spot quota of 1000 vCPUs after its reserve of 32"),
-                    (["add-region", "us-east-2", "--max-vcpus", "969"], "dain", "max_vcpus 969 exceeds"),
-                    (["add-region", "ap-northeast-2", "--max-vcpus", "256"], "dain",
-                     "no r9g image in ap-northeast-2")):
+                    (["set-limit", "region", region, "max-vcpus", over], "dain",
+                     f"max_vcpus {over} exceeds the Standard Spot quota of {aws.default_quota} vCPUs after its "
+                     f"reserve of {RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE}"),
+                    (["add-region", "us-east-2", "--max-vcpus", over], "dain", f"max_vcpus {over} exceeds"),
+                    (["add-region", "ap-northeast-2", "--max-vcpus", "256"], "dain", "no r9g image in ap-northeast-2")):
                 with self.subTest(command=command):
                     with self.assertRaisesRegex(SystemExit, refusal):
                         control(*command, actor=actor)
@@ -1058,7 +1105,7 @@ class TestRunCampaign(unittest.TestCase):
                                   ("RETIRED", "regulator", score, "accepted"))])
             # The phase failed with a unit that spent its attempts while the language primary runs on, and another
             # accepted group's retained directory is gone.
-            campaign_settings(campaign_root).controller_change("a/primary failed", lambda settings: settings.update(
+            campaign_settings(campaign_root).change("controller", "a/primary failed", lambda settings: settings.update(
                 phases={"a/primary": {"state": "failed", "share": "auto"}}))
             write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"), [
                 {"platform": "r9g", "unit_id": "u2", "replica": "3",
@@ -1788,9 +1835,10 @@ class TestRunCampaign(unittest.TestCase):
                 setup.assert_not_called()
             # A campaign root the earlier controllers started is refused, naming what shows it, and left as it was:
             # the per-phase controllers' records, or a fleet naming its phases by their roots on the control host.
+            owner = f"{RUN_CAMPAIGN.control_host.CAMPAIGN_ROOT}/a/primary"
             for path, content in ((root / "old" / "campaign-driver.txt", "pid=1\n"),
-                                  (root / "old" / RUN_CAMPAIGN.STATE_FILE, json.dumps({"reservations": {}, "completed": {
-                                      "x/1": {"owner": f"{RUN_CAMPAIGN.control_host.CAMPAIGN_ROOT}/a/primary"}}})),
+                                  (root / "old" / RUN_CAMPAIGN.STATE_FILE,
+                                   json.dumps({"reservations": {}, "completed": {"x/1": {"owner": owner}}})),
                                   (root / "old" / "a" / "lang" / "smoke" / "driver-child.txt", "pid=1\n"),
                                   (root / "old" / "a" / "primary" / "execution-policy.json",
                                    json.dumps({"max_concurrent": 16}))):
@@ -1938,24 +1986,25 @@ class TestRunCampaign(unittest.TestCase):
             return lambda region, spec: (cloud.LaunchRejected(kind, code, message)
                                          if spec.subnet[-1] in zones else None)
 
-        for market, rejection, expected in (
+        # Each failing case names how many zones its launch asks.
+        for market, rejection, asked, expected in (
                 # A full zone moves the launch to the next; only every zone full fails it.
-                ("spot", full("a"), "launched"),
-                ("spot", full("a", "b", "c"), ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity")),
+                ("spot", full("a"), None, "launched"),
+                ("spot", full("a", "b", "c"), 3, ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity")),
                 # A refused Spot price or quota is the Spot market's, an On-Demand capacity or quota the pool's
-                # capacity.
-                ("spot", full("a", "b", "c", kind="price", code="SpotMaxPriceTooLow"),
+                # capacity; only a full zone moves the launch on.
+                ("spot", full("a", "b", "c", kind="price", code="SpotMaxPriceTooLow"), 1,
                  ("retryable-spot", "launch-capacity:SpotMaxPriceTooLow")),
-                ("on-demand", full("a", "b", "c"),
+                ("on-demand", full("a", "b", "c"), 3,
                  ("retryable-capacity", "launch-capacity:InsufficientInstanceCapacity")),
-                ("on-demand", full("a", "b", "c", kind="quota", code="VcpuLimitExceeded"),
+                ("on-demand", full("a", "b", "c", kind="quota", code="VcpuLimitExceeded"), 1,
                  ("retryable-capacity", "launch-capacity:VcpuLimitExceeded")),
-                # A request AWS will never grant fails as the infrastructure's, in either market, with its explanation.
-                ("spot", full("a", "b", "c", kind="request", code="UnauthorizedOperation", message="not authorized"),
+                # A Spot request AWS will never grant fails as the infrastructure's, with its explanation.
+                ("spot", full("a", "b", "c", kind="request", code="UnauthorizedOperation", message="not authorized"), 1,
                  ("retryable-infrastructure", "launch-infrastructure:UnauthorizedOperation: not authorized")),
                 # A launch that offers the type in no public subnet fails before it asks.
-                ("spot", None, ("retryable-infrastructure",
-                                "launch-preflight:no public default-VPC subnet offers r8i.2xlarge"))):
+                ("spot", None, 0, ("retryable-infrastructure",
+                                   "launch-preflight:no public default-VPC subnet offers r8i.2xlarge"))):
             with self.subTest(market=market, expected=expected), tempfile.TemporaryDirectory() as temporary:
                 arguments, job, metadata, _ = self.worker(Path(temporary), language=False, market=market)
                 aws = arguments.cloud = FakeCloud()
@@ -1969,6 +2018,7 @@ class TestRunCampaign(unittest.TestCase):
                         aws, job, RUN_CAMPAIGN.launch_requests(arguments, job, metadata))
                 except RUN_CAMPAIGN.LaunchFailed as failure:
                     self.assertEqual(expected, (failure.classification, failure.detail))
+                    self.assertEqual(asked, [call[0] for call in aws.calls].count("run_instance"))
                     continue
                 self.assertEqual("launched", expected)
                 launches = [call[2] for call in aws.calls if call[0] == "run_instance"]
@@ -2341,10 +2391,10 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertRaises(OSError):
                 RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
             self.assertEqual([], RUN_CAMPAIGN.read_attempts(attempts))
-            # A crash partway through a row leaves it without its line end: a restart, and the reduction reading the
-            # events, read the rows before it, and its next row replaces it, though the crash tore a character or
-            # came past a line break in a value, as a settings change's reason may hold, which the row writes as a
-            # space.
+            # A crash partway through a row leaves the row without its line end. A restart and the reduction read the
+            # rows before it, and the next append replaces it, even when the crash tore a character. A value may hold
+            # a line break, as a settings change's reason may, and the row writes it as a space, so a crash past
+            # the break tears the row the same way.
             worker = SimpleNamespace(metadata=dict.fromkeys(
                 ("instance_id", "aws_region", "availability_zone", "placement_score"), "-"), directory=Path("worker"))
             ledgers = {
@@ -2367,7 +2417,8 @@ class TestRunCampaign(unittest.TestCase):
                     append, read = ledgers[ledger]
                     append(path, "first")
                     append(path, value)
-                    path.write_bytes(path.read_bytes()[:path.read_bytes().rindex(value[:4].encode()) + kept])
+                    data = path.read_bytes()
+                    path.write_bytes(data[:data.rindex(value[:4].encode()) + kept])
                     self.assertEqual(["first"], read(path))
                     append(path, value)
                     self.assertEqual(["first", value.replace("\n", " ")], read(path))
@@ -2474,6 +2525,28 @@ class TestRunCampaign(unittest.TestCase):
                                         "unit artifacts are not accepted .*did not complete"):
                 recover()
 
+    def test_upload_recovery_keeps_the_prefix_until_each_object_downloads_whole_and_safe(self):
+        metadata = {"aws_region": "us-west-2", "bucket": "bucket", "prefix": "campaign/s", "session": "s",
+                    "result_prefix": "campaign/s/results"}
+        with tempfile.TemporaryDirectory() as temporary:
+            objects = Path(temporary) / "objects"
+            aws = FakeCloud()
+            aws.objects["bucket", "campaign/s/results/host.tar.gz"] = (b"raw", 0.0, None)
+            # A download that comes up short deletes nothing, and the next try finishes it.
+            with patch.object(aws, "get", side_effect=lambda region, bucket, key, path: path.write_bytes(b"ra")):
+                self.assertFalse(RUN_CAMPAIGN.recover_uploads(aws, metadata, objects))
+            self.assertIn(("bucket", "campaign/s/results/host.tar.gz"), aws.objects)
+            self.assertTrue(RUN_CAMPAIGN.recover_uploads(aws, metadata, objects))
+            self.assertEqual(b"raw", (objects / "host.tar.gz").read_bytes())
+            self.assertNotIn(("bucket", "campaign/s/results/host.tar.gz"), aws.objects)
+            # A key that would escape the recovered objects is refused, and nothing is downloaded or deleted.
+            aws.objects["bucket", "campaign/s/results/../outside"] = (b"x", 0.0, None)
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "uploaded an unsafe key: "
+                                                                          "campaign/s/results/../outside"):
+                RUN_CAMPAIGN.recover_uploads(aws, metadata, objects)
+            self.assertIn(("bucket", "campaign/s/results/../outside"), aws.objects)
+            self.assertEqual([objects], list(Path(temporary).iterdir()))
+
     def test_shared_fleet_launches_on_demand_where_its_allowance_has_headroom(self):
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
         aws = FakeCloud()
@@ -2557,41 +2630,47 @@ class FakeUnitHost:
     """A unit worker host on the fleet's instance, as its user data runs it, exchanging its leases and uploads
     through the fleet's S3: each lease runs as fixture evidence.
 
-    The host acts each time the controller sleeps between polls. It boots once its setup, drawn by the fleet, has
-    passed since its launch, then reads its next lease from S3, and once that lease has been absent for the idle
-    time its user data names, claims it as its own stop, as the worker does, stopping if the claim wins and running
-    the controller's lease otherwise. A lease runs its groups in order, each for the time the fleet gives it,
-    uploading each group's result and marker as it finishes, and a failed group ends the lease; a host ends at most
-    one lease each time it acts, and takes its next lease the time after. As the worker does, it heartbeats only as
-    a lease starts, as each group completes, and as it stops or is interrupted. A script names what a lease does
-    instead of completing: "interrupt" uploads an interruption bundle and exits as a Spot interruption, with the
-    worker's status 43, "interrupt-progress" does so once the lease's first group finished, its bundle landing while
-    its instance still runs, as a notice's two minutes allow, and its exit the next time it acts, and "notice" does
-    so before it fetches the lease; "interrupt-semantic" is "interrupt-progress" whose first group is a semantic
-    failure. A host whose lease is scripted to "claim" claims it the moment its previous lease
-    ends, as if its idle time ran out then. A host scripted to "silent-interrupt" does so with none of its heartbeat
-    uploads landing, and one scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats
-    also lost; with "silent-groups" the lease completes with only the heartbeat that started it landing, and with
-    "silent-stall" it runs its first group and stalls, none of its heartbeats landing. "stall"
-    stops the host once its lease starts; once the controller terminates its instance, the lease's completion lands
-    late, after another host completed the same replica, or never, once no other host runs,
-    and with "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic"
-    the late completion is a semantic failure, and with "stall-semantic-early" it lands as soon as another host
-    leased the replica, before that host completes it. A host whose boot the fleet fails exits before its first
-    heartbeat. As the user data's watcher does, a host powers off at its stop time, the latest of the one it was
-    launched with and those of the work leases it read, whatever it is doing, and as the worker does, it takes no
-    lease once the lifetime its user data names has passed since it booted, stopping instead. A host whose boot the
-    fleet slows stays pending until it is terminated, one the fleet leaves unlisted
-    is launched without RunInstances's answer and is missing from EC2's listing while it stays unlisted, and one
-    whose cleanup the fleet slows keeps shutting down once terminated until every other host has exited. Every host
-    that booted uploads its host archive as it exits, as the user data's exit trap does, even one that failed during
-    bootstrap, and its instance then terminates, or while the fleet leaks it, keeps shutting down. A lease completes failed with "semantic-failure" (status 44),
-    "protocol-rejection" (status 42), "fail" (status 1), or "capacity-rejected", whose capacity gate failed it with
-    status 1. "corrupt-archive" uploads a result that differs from its marker's checksum, and "foreign-receipt" a
-    receipt that names another attempt. "foreign-marker" completes with a marker naming another campaign, and
-    "partial-marker" with one lacking its result checksum. A host whose user data names a release measures RELEASE's
-    JAR, except for a lease scripted to "unreleased", which measures the candidate's own classes. The fleet's unit
-    scripts give every lease of a unit, on any host, a behavior.
+    The host acts each time the controller sleeps between polls. It boots once its setup, drawn by the fleet, has passed
+    since its launch, then reads its next lease from S3, and once that lease has been absent for the idle time its user
+    data names, claims it as its own stop, as the worker does, stopping if the claim wins and running the controller's
+    lease otherwise. A lease runs its groups in order, each for the time the fleet gives it, uploading each group's
+    result and marker as it finishes, and a failed group ends the lease; a host ends at most one lease each time it
+    acts, and takes its next lease the time after. As the worker does, it heartbeats only as a lease starts, as each
+    group completes, and as it stops or is interrupted.
+
+    A host whose boot the fleet fails exits before its first heartbeat. As the user data's watcher does, a host powers
+    off at its stop time, the latest of the one it was launched with and those of the work leases it read, whatever it
+    is doing, and as the worker does, it takes no lease once the lifetime its user data names has passed since it
+    booted, stopping instead. A host whose boot the fleet slows stays pending until it is terminated, one the fleet
+    leaves unlisted is launched without RunInstances's answer and is missing from EC2's listing while it stays unlisted,
+    and one whose cleanup the fleet slows keeps shutting down once terminated until every other host has exited. Every
+    host that booted uploads its host archive as it exits, as the user data's exit trap does, even one that failed
+    during bootstrap, and its instance then terminates, or while the fleet leaks it, keeps shutting down.
+
+    A script names what a lease does instead of completing: "interrupt" uploads an interruption bundle and exits as a
+    Spot interruption, with the worker's status 43, "interrupt-progress" does so once the lease's first group finished,
+    its bundle landing while its instance still runs, as a notice's two minutes allow, and its exit the next time it
+    acts, and "notice" does so before it fetches the lease; "interrupt-semantic" is "interrupt-progress" whose first
+    group is a semantic failure. A host whose lease is scripted to "claim" claims it the moment its previous lease ends,
+    as if its idle time ran out then.
+
+    A host scripted to "silent-interrupt" does so with none of its heartbeat uploads landing, and one scripted to
+    "silent-crash" runs the lease's first group and then fails, its heartbeats also lost; with "silent-groups" the lease
+    completes with only the heartbeat that started it landing, and with "silent-stall" it runs its first group and
+    stalls, none of its heartbeats landing.
+
+    "stall" stops the host once its lease starts; once the controller terminates its instance, the lease's completion
+    lands late, after another host completed the same replica, or never, once no other host runs, and with
+    "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic" the late
+    completion is a semantic failure, and with "stall-semantic-early" it lands as soon as another host leased the
+    replica, before that host completes it.
+
+    A lease completes failed with "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1),
+    or "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a result that differs
+    from its marker's checksum, and "foreign-receipt" a receipt that names another attempt. "foreign-marker" completes
+    with a marker naming another campaign, and "partial-marker" with one lacking its result checksum. A host whose user
+    data names a release measures RELEASE's JAR, except for a lease scripted to "unreleased", which measures the
+    candidate's own classes. The fleet's unit scripts give every lease of a unit, on any host, a behavior.
     """
 
     # Each scripted failure's exit status, as run-unit.sh reports it.
@@ -3079,6 +3158,40 @@ class TestUnitWorkers(unittest.TestCase):
                                 for group, _ in item.groups),
                          sorted(RUN_CAMPAIGN.group_identity(receipt) for receipt in accepted))
 
+    def assert_leases_accepted(self, result_root):
+        """Assert that the phase whose results are in result_root accepted each replica of a unit it leased."""
+        ledger = self.unit_attempts(result_root)
+        self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
+                                  if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+
+    def assert_hosts_stopped(self, result_root, hosts):
+        """Assert that the phase whose results are in result_root reserves no host, and that each of hosts took a
+        stop as its last lease."""
+        self.assertEqual([], self.budget.reservations(result_root))
+        self.assertEqual([True] * len(hosts), [bool(host.leases[max(host.leases)].get("stop")) for host in hosts])
+
+    def interrupted_smoke(self, root, max_hosts):
+        """A fleet whose controller, running the smoke alone under root within max_hosts, stopped with its two hosts
+        live."""
+        fleet = FakeUnitFleet(root / "hosts", abort_after=2)
+        with self.assertRaisesRegex(SystemExit, "controller stopped"):
+            self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], max_hosts, 1)
+        fleet.abort_after = None
+        return fleet
+
+    def refusing_fleet(self, root, refusal):
+        """For r8i launches, refusal(region, session) returns the error to raise, or None to launch."""
+        fleet = FakeUnitFleet(root / "hosts")
+        run_instance = fleet.run_instance
+
+        def refuse(region, spec):
+            if spec.tags["Platform"] == "r8i" and (error := refusal(region, spec.tags["Session"])):
+                raise error
+            return run_instance(region, spec)
+
+        fleet.run_instance = refuse
+        return fleet
+
     def dispatcher(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None,
                    purchases=None, on_demand=True, deadline=None, confirmations=(), primary_results=None,
                    release_version="", extend=True, shared=False, budget=None, results="results", telemetry=None):
@@ -3110,11 +3223,12 @@ class TestUnitWorkers(unittest.TestCase):
             budget.report_boots.return_value = BOOT_WINDOW_MAX
         self.budget = budget
         arguments = SimpleNamespace(
-            phase=phase, campaign="campaign", campaign_id="campaign", campaign_root=root, candidate_archive=root / "candidate.tar.gz",
-            candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
-            cloud=fleet, settings=settings, spot_vcpu_reserve=0, shared_budget=budget, selected_shards=shards,
-            topology_deadline_seconds=deadline, primary_results=primary_results, release_version=release_version,
-            telemetry=telemetry)
+            phase=phase, campaign="campaign", campaign_id="campaign", campaign_root=root,
+            candidate_archive=root / "candidate.tar.gz", candidate_commit="a" * 40,
+            candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g", cloud=fleet,
+            settings=settings, spot_vcpu_reserve=RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE, shared_budget=budget,
+            selected_shards=shards, topology_deadline_seconds=deadline, primary_results=primary_results,
+            release_version=release_version, telemetry=telemetry)
         self.arguments = arguments
         with gzip.open(arguments.candidate_archive, "wb") as candidate:
             candidate.write(b"candidate")
@@ -3163,8 +3277,9 @@ class TestUnitWorkers(unittest.TestCase):
             dispatcher = dispatchers[phase.key] = self.dispatcher(
                 root, fleet, phase.phase, phase.shards, max_hosts, per_platform, shared=True, results=phase.key,
                 telemetry=phase.telemetry, **options)
-            # As its setup does, the phase checks AWS for its workers in their regions, returning a check that
-            # fails with its dispatcher; the fleet's hosts install no JDK and no candidate archive.
+            # As its setup does, the phase checks AWS for its workers in their regions and begins its dispatch,
+            # returning the dispatcher it built with the error of a check or begin that failed; the fleet's hosts
+            # install no JDK and no candidate archive.
             vars(dispatcher.arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
             try:
                 RUN_CAMPAIGN.check_regions(dispatcher.arguments, list(dispatcher.platforms.values()))
@@ -3409,7 +3524,7 @@ class TestUnitWorkers(unittest.TestCase):
                              accepted)
 
     def test_hosts_are_judged_as_of_their_listing_while_an_interruption_waits_for_its_completions(self):
-        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
+        with tempfile.TemporaryDirectory() as temporary:
             # Host 1 is interrupted after its first group, whose gathering outlasts host 2's boot deadline. Host 2
             # boots a minute after its launch, after the listing that found host 1's interruption, so it is not
             # judged to have missed its deadline while the controller waits for host 1's completion.
@@ -3422,8 +3537,8 @@ class TestUnitWorkers(unittest.TestCase):
                     fleet.clock += RUN_CAMPAIGN.UNIT_WORKER_BOOT_ALLOWANCE_SECONDS + 300
                 return gather(validation, result_root, staging, item, expected, *arguments)
 
-            stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
-            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            with patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             booting = fleet.hosts[1]
             self.assertEqual([], [row["detail"] for row in self.ledger
                                   if row["host_session"] == booting.session and row["outcome"] == "released"])
@@ -3468,42 +3583,37 @@ class TestUnitWorkers(unittest.TestCase):
             # three workers, more than a slot's replacements. Each refusal cools its region for the pool and spends
             # none of the slot's replacements, so the pool's next worker tries the other region and its work is all
             # accepted.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts")
-            run_instance = fleet.run_instance
             refused = {}
 
-            def refuse(region, spec):
+            def refuse(region, session):
                 # Every zone refuses a worker the region refuses.
-                session = spec.tags["Session"]
-                if spec.tags["Platform"] == "r8i" and (
-                        region == "us-east-2" or refused.get(session) == region or
-                        session not in refused and list(refused.values()).count("us-west-2") < 3):
+                if (region == "us-east-2" or refused.get(session) == region or session not in refused and
+                        list(refused.values()).count("us-west-2") <= RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB):
                     refused[session] = region
-                    raise cloud.LaunchRejected("capacity", "InsufficientInstanceCapacity")
-                return run_instance(region, spec)
+                    return cloud.LaunchRejected("capacity", "InsufficientInstanceCapacity")
+                return None
 
-            fleet.run_instance = refuse
+            fleet = self.refusing_fleet(Path(temporary), refuse)
             self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
                            purchases={"r8i": "on-demand"}, platform_regions={"r8i": ["us-east-2", "us-west-2"]})
             self.assertEqual(["us-east-2", "us-west-2"], list(refused.values())[:2])
-            self.assertLess(RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1, len(refused))
+            self.assertGreater(len(refused), RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1)
 
     def test_pool_moves_past_a_region_that_refuses_its_requests(self):
         # The first region refuses every r8i request outright. Its pool moves to the second, as a refusal spends a
         # slot's replacement only once no region is left to try, so a pool every region refuses still gives up.
-        for refusing, expected in ((("us-east-2",), None), (("us-east-2", "us-west-2"), "exhausted their replacements")):
+        for refusing, expected in ((("us-east-2",), None),
+                                   (("us-east-2", "us-west-2"), "exhausted their replacements")):
             with self.subTest(refusing=refusing), tempfile.TemporaryDirectory() as temporary:
-                fleet = FakeUnitFleet(Path(temporary) / "hosts")
-                run_instance = fleet.run_instance
                 refused = []
 
-                def refuse(region, spec):
-                    if spec.tags["Platform"] == "r8i" and region in refusing:
-                        refused.append(region)
-                        raise cloud.LaunchRejected("request", "UnauthorizedOperation", "denied in this region")
-                    return run_instance(region, spec)
+                def refuse(region, session):
+                    if region not in refusing:
+                        return None
+                    refused.append(region)
+                    return cloud.LaunchRejected("request", "UnauthorizedOperation", "denied in this region")
 
-                fleet.run_instance = refuse
+                fleet = self.refusing_fleet(Path(temporary), refuse)
                 with contextlib.ExitStack() as stack:
                     if expected:
                         stack.enter_context(self.assertRaisesRegex(SystemExit, f"unresolved units: .*{expected}"))
@@ -3515,10 +3625,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_pool_short_of_capacity_tries_one_launch_a_loop_while_the_other_pool_fills_the_boot_window(self):
         # Each pool has work for ten hosts, as many as the boot window first admits, and r8i's next 20 launches in
         # the market it buys find no capacity. The region allows On-Demand hosts.
-        units = {f"short-{index}": {"unit_id": f"short-{index}", "shard_id": "short", "unit_index": str(index),
-                                    "estimated_seconds": "600",
-                                    "groups": [{"group_id": "1", "estimated_seconds": 600}]}
-                 for index in range(1, 21)}
+        units = synthetic_units(600, short=20)
 
         def allow_on_demand(settings):
             settings["regions"][RUN_CAMPAIGN.default_regions()[0]]["on_demand_max_vcpus"] = 736
@@ -3559,9 +3666,10 @@ class TestUnitWorkers(unittest.TestCase):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like"], 4, 2)
                 self.assertEqual(workers, sum(host.platform == "r8i" for host in fleet.hosts))
         # Dain raises the limits to ten hosts a platform as the first wave launches, two hosts a platform, one
-        # leasing its pool's 15-minute unit and a 36-second one and the other two short ones. The first r8i host is reclaimed as it boots, and its
-        # replacement takes the long unit back, which frees its partner for all but two of the short units, so a
-        # single further worker launches for those.
+        # leasing its pool's 15-minute unit and a 36-second one and the other two short ones. The first r8i host is
+        # reclaimed as it boots, and its replacement takes the long unit back, which frees its partner for all but two
+        # of the short units, so the loop after the raise launches two r8i workers: the replacement, and a single
+        # further worker for those.
         units = {name: {"unit_id": name, "shard_id": "mixed", "unit_index": str(index), "estimated_seconds": seconds,
                         "groups": [{"group_id": "1", "estimated_seconds": int(seconds)}]}
                  for index, (name, seconds) in enumerate([("long", "900")] +
@@ -3619,10 +3727,7 @@ class TestUnitWorkers(unittest.TestCase):
             # three 10-minute units each.
             boots = random.Random(5)
             setups = [boots.uniform(60, 75) if boots.random() < 0.95 else boots.uniform(120, 240) for _ in range(200)]
-            units = {f"burst-{index}": {"unit_id": f"burst-{index}", "shard_id": "burst", "unit_index": str(index),
-                                        "estimated_seconds": "600",
-                                        "groups": [{"group_id": "1", "estimated_seconds": 600}]}
-                     for index in range(1, 301)}
+            units = synthetic_units(600, burst=300)
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: setups[host.number - 1])
             late_items, validate = RUN_CAMPAIGN.UnitDispatcher.late_items, RUN_CAMPAIGN.validate_frozen_inputs
@@ -3662,10 +3767,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_steady_fleet_keeps_its_slack_and_its_listings_short_for_hours(self):
         with tempfile.TemporaryDirectory() as temporary:
             # 200 hosts of two platforms measure 15-minute units for about five hours, each in 90% of its estimate.
-            units = {f"steady-{index}": {"unit_id": f"steady-{index}", "shard_id": "steady", "unit_index": str(index),
-                                         "estimated_seconds": "900",
-                                         "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                     for index in range(1, 2301)}
+            units = synthetic_units(900, steady=2300)
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, pace=0.9,
                                   setup_seconds=lambda host: 67)
             results = Path(temporary) / "results"
@@ -3710,10 +3812,7 @@ class TestUnitWorkers(unittest.TestCase):
             # 20 hosts of two platforms measure four 15-minute units each. The controller stops seven minutes in,
             # with every host on its first lease and its second waiting, and is gone for 10 minutes, during which
             # every host finishes its first lease.
-            units = {f"outage-{index}": {"unit_id": f"outage-{index}", "shard_id": "outage", "unit_index": str(index),
-                                         "estimated_seconds": "900",
-                                         "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                     for index in range(1, 41)}
+            units = synthetic_units(900, outage=40)
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
                                   abort_after=28)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
@@ -3772,10 +3871,7 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             # 20 hosts measure two 10-minute units each. The first ten take six minutes to boot, a minute past the
             # five they have to report in; the rest boot in about one.
-            units = {f"boot-{index}": {"unit_id": f"boot-{index}", "shard_id": "boot", "unit_index": str(index),
-                                       "estimated_seconds": "600",
-                                       "groups": [{"group_id": "1", "estimated_seconds": 600}]}
-                     for index in range(1, 21)}
+            units = synthetic_units(600, boot=20)
             fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
                                   setup_seconds=lambda host: 360 if host.number <= 10 else 67)
             self.run_phase(Path(temporary), fleet, "smoke", ["boot"], 20, 10,
@@ -3788,9 +3884,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertGreaterEqual(launched[10], launched[0] + 360)
 
     def test_paused_phase_leases_nothing_a_draining_one_launches_nothing_and_a_stop_ends_every_worker(self):
-        units = {f"steer-{index}": {"unit_id": f"steer-{index}", "shard_id": "steer", "unit_index": str(index),
-                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for index in range(1, 17)}
+        units = synthetic_units(900, steer=16)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             # Four hosts measure 15-minute units. Two and a half minutes in, with every host running its first
             # lease and holding its next, Dain pauses the phase, and resumes it once its hosts have stopped. Once
@@ -3847,9 +3941,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn("campaign stopped by dain: enough", log.getvalue())
 
     def test_a_launch_refusal_reads_cleared_once_its_pool_stops_launching(self):
-        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
-                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for index in range(1, 9)}
+        units = synthetic_units(900, watch=8)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # Oregon's vCPUs hold two of the four hosts the limits allow, so the fleet's quota refuses the next
             # launch. Two minutes into that refusal, Dain lowers the fleet to the two hosts it has: no pool then has
@@ -3862,11 +3954,7 @@ class TestUnitWorkers(unittest.TestCase):
             refusals, pinned = [], []
 
             def loop():
-                refusals.append({point.attributes["reason"]: point.value
-                                 for resource in reader.get_metrics_data().resource_metrics
-                                 for scope in resource.scope_metrics for metric in scope.metrics
-                                 if metric.name == "regulator_launch_refused_seconds"
-                                 for point in metric.data.data_points})
+                refusals.append(launch_refusals(reader))
                 if not pinned and refusals[-1].get("fleet Spot quota", 0) >= 120:
                     self.control(root, "set-limit", "max-hosts", "2")
                     pinned.append(len(refusals))
@@ -3876,13 +3964,11 @@ class TestUnitWorkers(unittest.TestCase):
                                           purchases={"r8i": "spot", "r9g": "spot"})
             self.assertEqual([], failed)
             # From the loop after the limit falls, the refusal reads 0, not its age.
-            self.assertEqual([{"fleet Spot quota": 0}], list(map(dict, set(
-                tuple(refused.items()) for refused in refusals[pinned[0] + 1:]))))
+            cleared = refusals[pinned[0]:]
+            self.assertEqual([{"fleet Spot quota": 0}] * len(cleared), cleared)
 
     def test_a_launch_refusal_ages_through_other_boots_until_a_fault_pause(self):
-        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
-                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for index in range(1, 17)}
+        units = synthetic_units(900, watch=16)
         for market in ("spot", "on-demand"):
             with self.subTest(market=market), tempfile.TemporaryDirectory() as temporary, \
                     contextlib.redirect_stdout(io.StringIO()) as log:
@@ -3926,9 +4012,7 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual([{reason: 0}] * len(cleared), cleared)
 
     def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
-        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
-                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for index in range(1, 9)}
+        units = synthetic_units(900, watch=8)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # Two hosts of each platform measure eight 15-minute units, each in its estimate. Two and a half minutes in, with every host
             # running its first lease and holding its next, Dain pauses the phase, and resumes it once it holds no
@@ -3938,9 +4022,11 @@ class TestUnitWorkers(unittest.TestCase):
             reader, spans, logs = InMemoryMetricReader(), InMemorySpanExporter(), InMemoryLogRecordExporter()
             exported = telemetry.Telemetry("campaign", [reader], [SimpleSpanProcessor(spans)],
                                            [SimpleLogRecordProcessor(logs)])
-            snapshots, steered = [], []
+            snapshots = []
+            paused = emptied = None
 
             def loop():
+                nonlocal paused, emptied
                 data = reader.get_metrics_data()
                 snapshots.append({metric.name: {tuple(sorted(point.attributes.items())): point.value
                                                 for point in metric.data.data_points}
@@ -3948,10 +4034,10 @@ class TestUnitWorkers(unittest.TestCase):
                                   for metric in scope.metrics})
                 if fleet.sleeps == 10:
                     self.control(root, "pause", "smoke", "--reason", "checking the image")
-                    steered.append("paused")
-                elif steered == ["paused"] and not sum(snapshots[-1]["regulator_workers"].values()):
+                    paused = True
+                elif paused and emptied is None and not sum(snapshots[-1]["regulator_workers"].values()):
                     self.control(root, "resume", "smoke")
-                    steered.append(snapshots[-1])
+                    emptied = snapshots[-1]
 
             failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 4, 2, loop,
                                           exported, purchases={"r8i": "spot", "r9g": "spot"})
@@ -3987,7 +4073,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual(0, snapshots[-1]["regulator_phase_state"][(("phase", "smoke"), ("state", "paused"))])
             self.assertEqual({(("phase", "smoke"), ("queued", "true")): 4}, snapshots[-1]["regulator_idle_stops"])
             # Once the pause has stopped every host, each pool, its work left and no host, never finishes.
-            self.assertEqual([RUN_CAMPAIGN.NEVER] * 2, list(steered[1]["regulator_finish_time"].values()))
+            self.assertEqual([RUN_CAMPAIGN.NEVER] * 2, list(emptied["regulator_finish_time"].values()))
             # Each unit attempt is traced from its lease to its acceptance, its steps one after another.
             attempts = [span for span in spans.get_finished_spans() if span.name == "unit attempt"]
             self.assertEqual(16, len(attempts))
@@ -4012,10 +4098,7 @@ class TestUnitWorkers(unittest.TestCase):
                              [record.attributes["change"] for record in records if record.attributes.get("actor") == "dain"])
 
     def test_a_new_region_a_raised_limit_a_pin_and_a_finished_phase_move_hosts_the_next_loop(self):
-        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
-                                      "estimated_seconds": "900",
-                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for shard, count in (("short", 2), ("long", 6)) for index in range(1, count + 1)}
+        units = synthetic_units(900, short=2, long=6)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # The smoke and primary phases share four hosts, all Oregon's vCPUs allow, measuring 15-minute units.
             # Once the hosts run, Dain adds Frankfurt, and two loops later raises the limits to eight hosts. Once the
@@ -4085,15 +4168,10 @@ class TestUnitWorkers(unittest.TestCase):
             _, idle = marks["pinned"]
             epochs = {host.session: int(host.epoch) for host in fleet.hosts}
             self.assertEqual(["r8i", "r9g"], sorted(idle.get(epochs[session], "running") for session in marks["shed"]))
-            ledger = self.unit_attempts(dispatchers["primary"].result_root)
-            self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
-                                      if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+            self.assert_leases_accepted(dispatchers["primary"].result_root)
 
     def test_phase_that_starts_on_a_full_platform_gets_the_first_host_given_up(self):
-        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
-                                      "estimated_seconds": "900",
-                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for shard, count in (("short", 1), ("long", 12)) for index in range(1, count + 1)}
+        units = synthetic_units(900, short=1, long=12)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # The primary holds all four hosts, measuring twelve 15-minute units, when the smoke's setup finishes.
             # Each platform's first host the primary gives up goes to the smoke, by the loop after it ends, while
@@ -4127,9 +4205,7 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertGreater(queued, 0, platform)
 
     def test_lowered_host_limit_sheds_hosts_behind_their_leases(self):
-        units = {f"long-{index}": {"unit_id": f"long-{index}", "shard_id": "long", "unit_index": str(index),
-                                   "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for index in range(1, 7)}
+        units = synthetic_units(900, long=6)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             # Four hosts run the primary's 15-minute units, and once all four run, Dain lowers the fleet's limit to
             # two hosts. The next loop stop-leases one host of each platform behind the leases it holds, and every
@@ -4139,10 +4215,7 @@ class TestUnitWorkers(unittest.TestCase):
             marks = {}
 
             def loop():
-                dispatcher = self.running.get("primary")
-                if dispatcher is None:
-                    return
-                workers = dispatcher.workers.values()
+                workers = self.running["primary"].workers.values()
                 if "lowered" not in marks and len(workers) == 4 and all(worker.started for worker in workers):
                     self.control(root, "set-limit", "max-hosts", "2")
                     marks["lowered"] = True
@@ -4153,15 +4226,10 @@ class TestUnitWorkers(unittest.TestCase):
                                                     purchases={"r8i": "spot", "r9g": "spot"})
             self.assertEqual([], failed)
             self.assertEqual(["r8i", "r9g"], marks["open"])
-            ledger = self.unit_attempts(dispatchers["primary"].result_root)
-            self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
-                                      if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+            self.assert_leases_accepted(dispatchers["primary"].result_root)
 
     def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
-        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
-                                      "estimated_seconds": "900",
-                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
-                 for shard, count in (("short", 1), ("long", 4)) for index in range(1, count + 1)}
+        units = synthetic_units(900, short=1, long=4)
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             # Two phases share the fleet. The smoke phase's two hosts measure a unit each and stop: the r8i host's
             # prefix will not empty, and the r9g host's instance never terminates. The primary phase's four hosts
@@ -4205,9 +4273,7 @@ class TestUnitWorkers(unittest.TestCase):
                 run(lambda: not primary.workers)
                 # The primary phase's hosts finished every lease they held: each unit leased was accepted. With no
                 # extension or launch admitted, its remaining work waits.
-                ledger = self.unit_attempts(primary.result_root)
-                self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
-                                          if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+                self.assert_leases_accepted(primary.result_root)
                 self.assertEqual(launches, len(fleet.launches))
                 self.assertIn("queued-capacity\tspending_stop", primary.attempts_path.read_text())
                 # The prefix that would not empty was retried every loop since its host stopped, and the primary
@@ -4302,8 +4368,9 @@ class TestUnitWorkers(unittest.TestCase):
         # second, before it is judged stalled.
         restarts = {"restart": 3600 // RUN_CAMPAIGN.UNIT_POLL_SECONDS,
                     "restart before it is judged stalled": 2250 // RUN_CAMPAIGN.UNIT_POLL_SECONDS}
-        for script, case, lost in (("silent-groups", "", []), ("silent-groups", "slow acceptance", []),
-                                   ("silent-groups", "restart", []), ("silent-stall", "", ["stalled"]),
+        for script, case, lost in (("silent-groups", "uninterrupted", []),
+                                   ("silent-groups", "slow acceptance", []), ("silent-groups", "restart", []),
+                                   ("silent-stall", "uninterrupted", ["stalled"]),
                                    ("silent-stall", "restart before it is judged stalled", ["stalled"])):
             with self.subTest(script=script, case=case), tempfile.TemporaryDirectory() as temporary, \
                     contextlib.ExitStack() as stack:
@@ -4352,10 +4419,10 @@ class TestUnitWorkers(unittest.TestCase):
                 if stop and not leaks:
                     leaks.append(fleet.time())
                     self.control(root, "clear-spending-stop")
-                if fleet.hosts[0].instance_id not in ids or requests and fleet.time() >= requests[0] + 1800:
+                if fleet.hosts[0].instance_id not in ids or (requests and fleet.time() >= requests[0] + 1800):
                     return terminate(region, ids)
                 if not requests:
-                    fleet.abort_after = fleet.sleeps + 40
+                    fleet.abort_after = fleet.sleeps + 600 // RUN_CAMPAIGN.UNIT_POLL_SECONDS
                 requests.append(fleet.time())
                 raise cloud.CloudError("RequestLimitExceeded")
 
@@ -4382,7 +4449,7 @@ class TestUnitWorkers(unittest.TestCase):
             terminate = fleet.terminate
 
             def stop_then_restart(region, ids):
-                if fleet.hosts[2:] and fleet.hosts[2].instance_id in ids:
+                if len(fleet.hosts) > 2 and fleet.hosts[2].instance_id in ids:
                     fleet.abort_after = fleet.sleeps + 1
                 terminate(region, ids)
 
@@ -4393,13 +4460,13 @@ class TestUnitWorkers(unittest.TestCase):
             for _ in range(2):
                 with self.dispatchers() as dispatchers, self.assertRaisesRegex(SystemExit, "unresolved units"):
                     self.run_phase(root, fleet, "smoke", ["like-dfa-single-use"], 4, 2, shared=True)
-            stopped = int(fleet.hosts[2].epoch)
+            stopped = fleet.hosts[2].epoch
             attempts = [row for row in RUN_CAMPAIGN.read_attempts(root / "results" / "job-attempts.tsv")
-                        if int(row["host_epoch"]) == stopped]
+                        if row["host_epoch"] == stopped]
             self.assertEqual("controller-abort", attempts[-1]["outcome"])
             self.assertEqual([BOOT_WINDOW_FIRST], self.boot_windows(root))
             with (root / "results" / "campaign-events.tsv").open(newline="") as events:
-                self.assertNotIn(str(stopped), [row["host_epoch"] for row in csv.DictReader(events, delimiter="\t")])
+                self.assertNotIn(stopped, [row["host_epoch"] for row in csv.DictReader(events, delimiter="\t")])
             [slot] = [int(RUN_CAMPAIGN.launch_record(row)["slot"]) for row in attempts if row["outcome"] == "starting"]
             self.assertIn((slot, 0), dispatchers[0][0].free_slots[("r8i", fleet.hosts[2].instance_type)])
 
@@ -4551,9 +4618,9 @@ class TestUnitWorkers(unittest.TestCase):
             for loops in denied.values():
                 self.assertLess(RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB, len(loops))
                 self.assertFalse(any(loop + 1 in loops for loop in loops))
-            with (Path(temporary) / "results" / "job-attempts.tsv").open(newline="") as attempts:
-                outcomes = {(row["outcome"], row["detail"]) for row in csv.DictReader(attempts, delimiter="\t")
-                            if row["outcome"] not in ("starting", "started", "stopped")}
+            outcomes = {(row["outcome"], row["detail"])
+                        for row in RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")
+                        if row["outcome"] not in ("starting", "started", "stopped")}
             self.assertEqual({("retryable-infrastructure", RUN_CAMPAIGN.FIRST_LEASES_UNWRITTEN)}, outcomes)
         for scenario in ("disk full", "user data unreadable"):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temporary, \
@@ -4758,13 +4825,14 @@ class TestUnitWorkers(unittest.TestCase):
             regions = {"r8i": ["us-west-2", "us-east-2"], "r9g": ["us-west-2"]}
             campaign_settings(root, regions, None, {"us-east-2": "ohio"}, max_hosts=2, max_hosts_per_platform=1)
             checked, steered, uploads = [], [], []
+            check = RUN_CAMPAIGN.check_regions
 
-            def check(arguments, platforms):
+            def second_check_fails(arguments, platforms):
                 checked.append(fleet.clock)
                 if len(checked) == 2:
                     raise SystemExit("the campaign settings' max_vcpus exceeds the Standard Spot quota after its "
                                      "reserve in us-east-2")
-                return check_regions(arguments, platforms)
+                return check(arguments, platforms)
 
             def upload(arguments, jobs):
                 uploads.append({region for job in jobs for region in RUN_CAMPAIGN.launch_regions(arguments, job)})
@@ -4774,6 +4842,7 @@ class TestUnitWorkers(unittest.TestCase):
             def steer():
                 if not steered:
                     self.control(root, "pause", "primary")
+                    # Watched from the pause on, so uploads holds the later region checks' uploads, not the setup's.
                     RUN_CAMPAIGN.upload_candidate_archive.side_effect = upload
                     steered.append("paused")
                 elif steered == ["paused"] and len(checked) == 1:
@@ -4783,10 +4852,9 @@ class TestUnitWorkers(unittest.TestCase):
                     self.control(root, "resume", "primary")
                     steered.append("resumed")
 
-            check_regions = RUN_CAMPAIGN.check_regions
-            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=check):
-                failed, dispatchers = self.run_campaign(root, fleet, [("primary", "primary", ["like-dfa-single-use"],
-                                                                       ())], 2, 1, steer, platform_regions=regions)
+            phases = [("primary", "primary", ["like-dfa-single-use"], ())]
+            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=second_check_fails):
+                failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1, steer, platform_regions=regions)
             self.assertEqual([], failed)
             self.assert_accepted(dispatchers["primary"])
             # Its setup checked them, and with no region changed, a day later its controller checked them again.
@@ -4932,11 +5000,12 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assert_accepted(dispatchers["primary"])
 
     def test_resumed_phase_gathers_no_completion_its_paused_dispatch_still_gathers(self):
-        # Host 2's first completion takes ten minutes to gather, and host 1's marker names another campaign before
-        # that is done, so the smoke pauses. Dain resumes it at once; its next dispatch gathers host 2's completion
-        # only once the paused dispatch's gathering of it has finished, since both write the same staging.
-        with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack, \
-                contextlib.redirect_stdout(io.StringIO()) as log:
+        # Each gather of a host 2 completion takes ten minutes, and host 1's marker names another campaign before the
+        # first is done, so the smoke pauses. Dain resumes it at once; its next dispatch gathers host 2's completion
+        # only once the paused dispatch's gathering of it has finished, since both write the same staging. The smoke
+        # pauses again as its dispatch restarts from its ledgers, since the marker still stands, so he stops the
+        # campaign.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             root = Path(temporary)
             fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: "foreign-marker"}},
                                   setup_seconds=lambda host: 60 if host.number == 1 else 0)
@@ -4960,14 +5029,16 @@ class TestUnitWorkers(unittest.TestCase):
                 elif pauses == 2 and not CampaignSettings(root).current["stop"]:
                     self.control(root, "stop")
 
-            stack.enter_context(patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow))
-            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1,
-                                          loop)
+            with patch.object(RUN_CAMPAIGN, "gather_group", side_effect=slow):
+                failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2,
+                                              1, loop)
             self.assertEqual([], failed)
             self.assertEqual(2, log.getvalue().count("smoke: paused: "))
-            for key, started, ended in gathers:
-                self.assertEqual([], [(key, started, ended, other) for other, before, after in gathers
-                                      if other == key and before < started < after])
+            # No two gathers of one completion overlap, even ones that start together.
+            for key in {key for key, _, _ in gathers}:
+                spans = sorted((started, ended) for other, started, ended in gathers if other == key)
+                self.assertEqual([], [(key, earlier, later) for earlier, later in zip(spans, spans[1:])
+                                      if later[0] < earlier[1]])
 
     def test_setup_that_fails_pauses_its_phase_until_it_is_resumed(self):
         # The controller stops with the smoke's hosts live, and the region's Spot quota then drops below its limit,
@@ -4976,10 +5047,7 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)
             phases = [("smoke", "smoke", ["trino-like-specialized"], ())]
-            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
-            with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_campaign(root, fleet, phases, 2, 1)
-            fleet.abort_after = None
+            fleet = self.interrupted_smoke(root, 2)
             region = RUN_CAMPAIGN.default_regions()[0]
             fleet.quotas[region, "spot"] = 512
             reasons = []
@@ -4988,7 +5056,8 @@ class TestUnitWorkers(unittest.TestCase):
                 steering = CampaignSettings(root).current["phases"]["smoke"]
                 if not reasons and steering["state"] == "paused":
                     reasons.append(steering["reason"])
-                    self.control(root, "set-limit", "region", region, "max-vcpus", "512")
+                    self.control(root, "set-limit", "region", region, "max-vcpus",
+                                 str(512 - RUN_CAMPAIGN.SPOT_VCPU_SAFETY_RESERVE))
                     self.control(root, "resume", "smoke")
 
             failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1, loop)
@@ -5000,6 +5069,32 @@ class TestUnitWorkers(unittest.TestCase):
             leased = [(row["platform"], row["unit_id"], row["replica"])
                       for row in self.unit_attempts(dispatchers["smoke"].result_root) if row["outcome"] == "leased"]
             self.assertEqual(len(leased), len(set(leased)))
+
+    def test_setup_returns_the_dispatcher_it_built_with_the_check_that_failed(self):
+        # The region's Spot quota is below its limit, so a phase's setup, its planning and installation stubbed,
+        # returns the dispatcher it built with the check's error and its dispatch not begun, so the phase can still
+        # stop the hosts its ledgers name. Once the quota is raised again, the setup begins the dispatch.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            region = RUN_CAMPAIGN.default_regions()[0]
+            fleet = FakeUnitFleet(root / "hosts")
+            fleet.quotas[region, "spot"] = 512
+            dispatcher = self.dispatcher(root, fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            arguments = dispatcher.arguments
+            vars(arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
+            planned = (None, "baseline", None, list(dispatcher.platforms.values()), dispatcher.result_root)
+            with fleet.stubs(), patch.object(RUN_CAMPAIGN, "plan_phase", return_value=planned), \
+                    patch.object(RUN_CAMPAIGN, "UnitDispatcher", return_value=dispatcher), \
+                    patch.multiple(RUN_CAMPAIGN, validate_source=Mock(), validate_dependencies=Mock(),
+                                   resolve_engine_builds=Mock(), unit_validation=Mock(),
+                                   validate_prerequisites=Mock(), stage_jdks=Mock(), upload_candidate_archive=Mock()):
+                built, error = RUN_CAMPAIGN.prepare_phase(arguments, SCRIPT.parents[3])
+                self.assertEqual((dispatcher, None), (built, dispatcher.started_at))
+                self.assertEqual("the campaign settings' max_vcpus exceeds the Standard Spot quota after its reserve "
+                                 f"in {region}", str(error))
+                fleet.quotas[region, "spot"] = fleet.default_quota
+                self.assertEqual((dispatcher, None), RUN_CAMPAIGN.prepare_phase(arguments, SCRIPT.parents[3]))
+                self.assertIsNotNone(dispatcher.started_at)
 
     def test_pause_before_its_phase_starts_extends_no_deadline(self):
         # The region's Spot quota is below its limit from the start, so the smoke's setup refuses it before the phase
@@ -5092,33 +5187,29 @@ class TestUnitWorkers(unittest.TestCase):
         # once Dain stops the campaign they take their stop leases and stop, each one's cleanup proven.
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)
-            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
-            with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 4, 1)
-            fleet.abort_after = None
-            check_regions = RUN_CAMPAIGN.check_regions
+            fleet = self.interrupted_smoke(root, 4)
+            check = RUN_CAMPAIGN.check_regions
             paused = []
 
-            def check(arguments, platforms):
+            def smoke_check_fails(arguments, platforms):
                 if arguments.phase == "smoke":
                     raise SystemExit("the smoke's regions failed their check")
-                return check_regions(arguments, platforms)
+                return check(arguments, platforms)
 
             def loop():
                 # The primary has three loops to launch beside the paused smoke before Dain stops the campaign.
                 if CampaignSettings(root).current["phases"]["smoke"]["state"] == "paused":
-                    paused.append("loop")
+                    paused.append(fleet.sleeps)
                     if len(paused) == 3:
                         self.control(root, "stop")
 
-            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=check):
+            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=smoke_check_fails):
                 failed, _ = self.run_campaign(
                     root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ()),
                                   ("primary", "primary", ["like-dfa-single-use"], ())], 4, 1, loop)
             self.assertEqual([], failed)
             self.assertEqual(2, len(fleet.hosts))
-            self.assertEqual([], self.budget.reservations(root / "smoke"))
-            self.assertTrue(all(host.leases[max(host.leases)].get("stop") for host in fleet.hosts))
+            self.assert_hosts_stopped(root / "smoke", fleet.hosts)
 
     def test_phase_whose_recovery_fails_holds_its_hosts_until_it_is_resumed(self):
         # The controller stops with the smoke's hosts live, and the restarted controller cannot read the smoke's unit
@@ -5128,36 +5219,33 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)
             phases = [("smoke", "smoke", ["trino-like-specialized"], ())]
-            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
-            with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_campaign(root, fleet, phases, 2, 1)
-            fleet.abort_after = None
+            fleet = self.interrupted_smoke(root, 2)
             read = RUN_CAMPAIGN.read_unit_attempts
-            unreadable = [True]
+            unreadable = True
             stopped = []
 
-            def read_unit_attempts(path):
-                if unreadable[0]:
-                    raise OSError(f"[Errno 5] Input/output error: {path}")
+            def read_while_unreadable(path):
+                if unreadable:
+                    raise OSError(5, "Input/output error", str(path))
                 return read(path)
 
             def loop():
+                nonlocal unreadable
                 settings = CampaignSettings(root).current
                 if settings["stop"]:
                     stopped.append(fleet.sleeps)
                     if len(stopped) == 3:
-                        unreadable[0] = False
+                        unreadable = False
                         self.control(root, "resume", "smoke")
                 elif settings["phases"]["smoke"]["state"] == "paused":
                     self.control(root, "stop")
 
-            with patch.object(RUN_CAMPAIGN, "read_unit_attempts", side_effect=read_unit_attempts):
+            with patch.object(RUN_CAMPAIGN, "read_unit_attempts", side_effect=read_while_unreadable):
                 failed, _ = self.run_campaign(root, fleet, phases, 2, 1, loop)
             self.assertEqual([], failed)
             self.assertLess(3, len(stopped))
             self.assertEqual(2, len(fleet.hosts))
-            self.assertEqual([], self.budget.reservations(root / "smoke"))
-            self.assertTrue(all(host.leases[max(host.leases)].get("stop") for host in fleet.hosts))
+            self.assert_hosts_stopped(root / "smoke", fleet.hosts)
 
     def test_phase_paused_for_a_fault_reports_its_boots_and_takes_a_stop(self):
         # Host 1's marker names another campaign, so the smoke pauses while host 2 still boots, and Dain then stops the
@@ -5173,15 +5261,14 @@ class TestUnitWorkers(unittest.TestCase):
                     self.assertFalse(fleet.hosts[1].booted)
                     self.control(root, "stop")
 
-            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1,
-                                          loop)
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 2, 1, loop)
             self.assertEqual([], failed)
             booting = fleet.hosts[1]
-            [reservation] = [item for item in json.loads((root / RUN_CAMPAIGN.STATE_FILE).read_text())[
-                "completed"].values() if str(item["host_epoch"]) == booting.epoch]
+            completed = RUN_CAMPAIGN.read_fleet_state(root / RUN_CAMPAIGN.STATE_FILE)["completed"]
+            [reservation] = [item for item in completed.values() if str(item["host_epoch"]) == booting.epoch]
             self.assertIn("reported_at", reservation)
-            self.assertTrue(booting.leases[max(booting.leases)].get("stop"))
-            self.assertNotIn("claim", [entry[0] for entry in fleet.log if entry[1:2] == (booting.session,)])
+            self.assert_hosts_stopped(root / "smoke", [booting])
+            self.assertNotIn(("claim", booting.session), [entry[:2] for entry in fleet.log])
 
     def test_semantic_failure_or_protocol_rejection_is_final(self):
         # A semantic failure stands though the host's interruption notice lands with it.

@@ -32,8 +32,9 @@ FAR_STOP_BY = 4102444800
 # clock until just before its timeout and then succeeds, logged as its operation,
 # key, start, and end. A Spot notice arrives as the first such call starts whose
 # operation FAKE_NOTICE_DURING_STALLED_CALL names, or whose key or body it is a
-# fragment of, logged as a notice at that start. Every PUT but a heartbeat's must
-# carry the conditional-write and checksum options. FAKE_RACING_LEASES holds
+# fragment of, logged as a notice at that start. Every PUT must carry the
+# checksum options, and every PUT but a heartbeat's, which replaces its lease's
+# last one, the conditional-write option. FAKE_RACING_LEASES holds
 # leases, by key, that the controller writes just before the worker's own put of
 # that key.
 FAKE_AWS = r'''#!/usr/bin/env python3
@@ -71,9 +72,9 @@ if os.environ.get('FAKE_CLOCK') and any(
         set_clock(clock, end)
         log.write(f'{operation} {target} {start} {end}\n')
 failures = root / 'failed-calls.log'
-failure = 1 + (len(failures.read_text().splitlines()) if failures.exists() else 0)
-if any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED_CALLS', '[]'))) and \
-        failure <= int(os.environ.get('FAKE_FAILED_CALL_LIMIT', failure)):
+failing = any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED_CALLS', '[]')))
+failure = 1 + (len(failures.read_text().splitlines()) if failing and failures.exists() else 0)
+if failing and failure <= int(os.environ.get('FAKE_FAILED_CALL_LIMIT', failure)):
     if os.environ.get('FAKE_NOTICE_DURING_FAILED_CALL') == str(failure):
         notice.write_text('{"action": "terminate", "time": "2026-10-24T12:02:00Z"}')
     line = target
@@ -102,9 +103,8 @@ elif operation == 'put-object':
     if racing is not None and not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(racing)
-    if '/heartbeat/' not in options['--key'] and (
-            options.get('--if-none-match') != '*' or options.get('--checksum-algorithm') != 'SHA256' or
-            '--checksum-sha256' not in options):
+    if options.get('--checksum-algorithm') != 'SHA256' or '--checksum-sha256' not in options or (
+            '/heartbeat/' not in options['--key'] and options.get('--if-none-match') != '*'):
         sys.exit(f'PUT of {options["--key"]} lacks its conditional-write and checksum options')
     if options.get('--if-none-match') == '*' and path.exists():
         sys.exit('An error occurred (PreconditionFailed) when calling the PutObject operation')
