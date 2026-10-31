@@ -19,6 +19,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -30,6 +31,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestJavaRegexp
 {
+    // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, LF, both
+    // bytes of ², and both bytes of a combining acute accent.
+    private static final List<byte[]> WORD_BOUNDARY_TEXTS = TestingEngineAgreement.shortTexts(
+            (byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81);
+
     @Test
     public void testCaptureResultsUseUtf8ByteOffsets()
     {
@@ -187,6 +193,37 @@ public class TestJavaRegexp
         };
 
         assertThat(actual).isEqualTo(expected).isEqualTo(matchCase.expected());
+    }
+
+    @Test
+    public void testWordBoundariesRunOnDfaAndOnePass()
+    {
+        // Java's \b and \B decode the character on each side, and a nonspacing mark after a
+        // letter or digit counts as a word character. The forward and reverse DFAs evaluate them
+        // between ASCII bytes and quit next to any other byte, and OnePass evaluates them as
+        // BitState does, over text with ², a combining acute accent, and their bytes alone.
+        Slice text = utf8Slice("x foo bar");
+        Re2 words = JavaRegexp.compile(utf8Slice("\\bfoo\\b")).re2();
+        assertThat(words.findInto(text, new int[2])).isTrue();
+        assertThat(words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+
+        for (String pattern : List.of("\\ba\\b", "\\B", "a\\b", "\\b", "(?U)\\b", "(?U)\\B")) {
+            Prog forward = compileJavaProgram(pattern, false);
+            assertThat(forward.hasDfaUnsupportedAssertions()).as(pattern).isFalse();
+            TestingEngineAgreement.assertDfaAgreesWithNfa(pattern, forward, compileJavaProgram(pattern, true), WORD_BOUNDARY_TEXTS, "Java");
+        }
+        for (Map.Entry<String, Integer> entry : Map.of("(a+)\\b( *)", 6, "\\B(.)", 4, "(?U)\\b(.)\\b", 4).entrySet()) {
+            Prog program = compileJavaProgram(entry.getKey(), false);
+            assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
+            TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), WORD_BOUNDARY_TEXTS, "Java");
+        }
+    }
+
+    private static Prog compileJavaProgram(String pattern, boolean reversed)
+    {
+        ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.RE2, parsed.caseFolding());
     }
 
     private static Stream<MatchCase> matchCases()
