@@ -31,6 +31,8 @@
           },
           "expr": "regulator_phase_state == 1",
           "legendFormat": "{{phase}}: {{state}}",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ],
@@ -118,6 +120,8 @@
           },
           "expr": "max by (phase) (regulator_finish_time) * 1000",
           "legendFormat": "{{phase}}",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ],
