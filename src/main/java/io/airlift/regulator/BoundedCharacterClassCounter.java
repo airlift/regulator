@@ -254,6 +254,30 @@ final class BoundedCharacterClassCounter
         return matchingCodePoints;
     }
 
+    /// Returns whether `input` has a match: a run of at least `minimum` matching code points.
+    /// Unlike [#findSpan], it returns as soon as a run reaches that length rather than reading to
+    /// the run's end.
+    boolean contains(Slice input)
+    {
+        byte[] bytes = input.byteArray();
+        int position = input.byteArrayOffset();
+        int end = position + input.length();
+        int runLength = 0;
+        while (position < end) {
+            long decoded = decode(bytes, position, end);
+            if (matches(Utf8.decodedCodePoint(decoded))) {
+                if (++runLength >= minimum) {
+                    return true;
+                }
+            }
+            else {
+                runLength = 0;
+            }
+            position += Utf8.decodedWidth(decoded);
+        }
+        return false;
+    }
+
     long findSpan(Slice input, int contextStart, int contextEnd, int start)
     {
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > input.length() ||
