@@ -37,7 +37,7 @@ SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
 import cloud  # noqa: E402
 import telemetry  # noqa: E402
-from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENTS, CampaignSettings  # noqa: E402
+from campaign_settings import BOOT_WINDOW_FIRST, BOOT_WINDOW_MAX, EVENT_FIELDS, EVENTS, CampaignSettings  # noqa: E402
 import test_engine_build  # noqa: E402
 import test_control_host  # noqa: E402
 import test_fleet_budget  # noqa: E402
@@ -2197,17 +2197,37 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertRaises(OSError):
                 RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
             self.assertEqual([], RUN_CAMPAIGN.read_attempts(attempts))
-            RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
-            # A crash partway through a row leaves it without its line end: a restart reads the rows before it, and
-            # its next row replaces it.
-            RUN_CAMPAIGN.write_attempt(attempts, job, "stopped", "lease written")
-            attempts.write_bytes(attempts.read_bytes()[:-5])
-            self.assertEqual([("starting", "session=baseline-e10")],
-                             [(row["outcome"], row["detail"]) for row in RUN_CAMPAIGN.read_attempts(attempts)])
-            RUN_CAMPAIGN.write_attempt(attempts, job, "retryable-infrastructure", "controller stopped before launch")
-            self.assertEqual([("starting", "session=baseline-e10"),
-                              ("retryable-infrastructure", "controller stopped before launch")],
-                             [(row["outcome"], row["detail"]) for row in RUN_CAMPAIGN.read_attempts(attempts)])
+            # A crash partway through a row leaves it without its line end: a restart, and the reduction reading the
+            # events, read the rows before it, and its next row replaces it, though the crash tore a character or
+            # came past a line break in a value, as a settings change's reason may hold, which the row writes as a
+            # space.
+            worker = SimpleNamespace(metadata=dict.fromkeys(
+                ("instance_id", "aws_region", "availability_zone", "placement_score"), "-"), directory=Path("worker"))
+            ledgers = {
+                "job-attempts.tsv": (
+                    lambda path, value: RUN_CAMPAIGN.write_attempt(path, job, "stopped", value),
+                    lambda path: [row["detail"] for row in RUN_CAMPAIGN.read_attempts(path)]),
+                EVENTS: (
+                    lambda path, value: RUN_CAMPAIGN.append_ledger(
+                        path, EVENT_FIELDS, {"version": 2, "at": 1, "actor": "dain", "change": value}),
+                    lambda path: [row["change"] for row in csv.DictReader(RUN_CAMPAIGN.ledger_lines(path),
+                                                                         delimiter="\t")]),
+                "campaign-events.tsv": (
+                    lambda path, value: RUN_CAMPAIGN.write_event(path, "interruption", "baseline", job, worker, value),
+                    lambda path: [row["reason"] for row in RUN_CAMPAIGN.aggregate_results.load_events([path])])}
+            # Each crash keeps the first bytes of the row's value it names.
+            for case, (ledger, value, kept) in enumerate((
+                    ("job-attempts.tsv", "lease written", 8), ("job-attempts.tsv", "bail é", 6),
+                    (EVENTS, "a paused: fault\nsee the log", 16), ("campaign-events.tsv", "spot-interruption", 4))):
+                with self.subTest(ledger=ledger, value=value):
+                    path = Path(temporary_directory) / str(case) / ledger
+                    append, read = ledgers[ledger]
+                    append(path, "first")
+                    append(path, value)
+                    path.write_bytes(path.read_bytes()[:path.read_bytes().rindex(value[:4].encode()) + kept])
+                    self.assertEqual(["first"], read(path))
+                    append(path, value)
+                    self.assertEqual(["first", value.replace("\n", " ")], read(path))
 
     def test_tooling_digest_covers_each_tracked_files_path_and_content(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

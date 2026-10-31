@@ -23,8 +23,9 @@ def fsync_directory(path):
 
 
 def append_ledger(path, fields, row):
-    """Append one row to a TSV ledger durably. A new ledger gets its whole header before any row, and a row a crash
-    tore before its line end is cut off before the next is appended, so each line a ledger ends is a whole row."""
+    """Append one row to a TSV ledger durably. A new ledger gets its whole header before any row, a line break in a
+    value is written as a space, so each row is one line, and a row a crash tore before its line end is cut off
+    before the next is appended, so each line a ledger ends is a whole row."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         temporary_path = path.with_name(path.name + ".new")
@@ -35,7 +36,9 @@ def append_ledger(path, fields, row):
         os.replace(temporary_path, path)
         fsync_directory(path.parent)
     line = io.StringIO()
-    csv.DictWriter(line, fieldnames=fields, delimiter="\t", lineterminator="\n").writerow(row)
+    csv.DictWriter(line, fieldnames=fields, delimiter="\t", lineterminator="\n").writerow({
+        name: value.replace("\r", " ").replace("\n", " ") if isinstance(value, str) else value
+        for name, value in row.items()})
     with path.open("rb+") as output_file:
         end = output_file.seek(-1, os.SEEK_END) + 1
         if output_file.read(1) != b"\n":
@@ -50,10 +53,9 @@ def append_ledger(path, fields, row):
 
 def ledger_lines(path):
     """A TSV ledger's lines, to read with csv: those its appends ended, without a row a crash tore before its line
-    end, which the next append cuts off."""
-    with path.open(newline="") as input_file:
-        text = input_file.read()
-    return io.StringIO(text[:text.rfind("\n") + 1], newline="")
+    end, which the next append cuts off, even within a character."""
+    data = path.read_bytes()
+    return io.StringIO(data[:data.rfind(b"\n") + 1].decode(), newline="")
 
 
 def write_ledger(path, rows, fields,

@@ -2019,7 +2019,7 @@ def boot_to_first_unit(directory, job):
 def write_attempt(path, job, outcome, detail="-"):
     append_ledger(path, JOB_ATTEMPT_FIELDS, dict(zip(JOB_ATTEMPT_FIELDS, (
         job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market, outcome,
-        detail.replace("\t", " ").replace("\n", " ")))))
+        detail.replace("\t", " ")))))
 
 
 def write_event(path, event_type, campaign_id, job, worker, reason, details="", unit_id=None, unit_attempt_id="",
@@ -2056,7 +2056,7 @@ def write_event(path, event_type, campaign_id, job, worker, reason, details="", 
             "availability_zone": metadata["availability_zone"],
             "placement_score": metadata["placement_score"],
             "failure_classification": failure_classification,
-            "details": details.replace("\t", " ").replace("\n", " "),
+            "details": details.replace("\t", " "),
     }
     append_ledger(path, fields, {field: value for field, value in event.items() if field in fields})
 
