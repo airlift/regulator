@@ -4448,7 +4448,8 @@ class Campaign:
         draining phase holds count against the limits until they stop.
 
         A phase above its target gives up the hosts past it while its share is pinned, or while another phase is
-        below its target on that platform, or anywhere once the fleet's limit leaves no host free. Hosts move between
+        below its target on that platform, or anywhere once the fleet's limit leaves no host free, or while the hosts
+        held pass the fleet's or the platform's limit, as once a limit is lowered. Otherwise hosts move between
         phases only when a phase is waiting for them, so the shares' changes as the work left is corrected move none
         on their own."""
         settings = live_settings(self.arguments)
@@ -4479,8 +4480,9 @@ class Campaign:
             shed = {}
             for platform, hosts in phase.dispatcher.holding(open_only=True).items():
                 excess = hosts - targets.get(phase.key, {}).get(platform, 0)
-                if phase in launching and excess > 0 and (phase.key in pinned or any(
-                        key != phase.key and (other == platform or free <= 0) for key, other in waiting)):
+                if phase in launching and excess > 0 and (
+                        phase.key in pinned or free < 0 or free_platform[platform] < 0 or any(
+                            key != phase.key and (other == platform or free <= 0) for key, other in waiting)):
                     shed[platform] = excess
             phase.dispatcher.shed = shed
 
