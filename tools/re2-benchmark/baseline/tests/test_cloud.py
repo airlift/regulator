@@ -362,6 +362,8 @@ class FakeCloud:
 
     def attach_volume(self, region, volume, instance, device):
         self.call("attach_volume", region, volume, instance, device)
+        if not any(item.id == volume for item in self.region_volumes[region]):
+            raise CloudError(f"InvalidVolume.NotFound: the volume {volume} does not exist")
         if any(item.id == volume and item.state != "available" for item in self.region_volumes[region]):
             raise CloudError(f"VolumeInUse: {volume} is not available")
         self.attachments[volume] = instance
@@ -380,11 +382,11 @@ class FakeCloud:
 
     def snapshots(self, region, tags):
         self.call("snapshots", region)
-        return [snapshot for snapshot in self.region_snapshots.get(region, ())
-                if all(snapshot.tags.get(key) == value for key, value in tags.items())]
+        return [snapshot for snapshot in self.region_snapshots.get(region, ()) if snapshot.state != "error" and
+                all(snapshot.tags.get(key) == value for key, value in tags.items())]
 
     def console_output(self, region, instance):
-        self.call("console_output", instance)
+        self.call("console_output", region, instance)
         return self.consoles.get(instance, "")
 
     def register_target(self, region, target_group, instance, port):
@@ -626,14 +628,17 @@ class TestAwsCloud(unittest.TestCase):
                          (rejected.exception.kind, rejected.exception.code, rejected.exception.message))
         with self.assertRaises(cloud.LaunchUnknown):
             aws.run_instance("us-west-2", spec)
-        for _ in range(2):
-            with self.assertRaises(LaunchRejected) as rejected:
-                aws.run_instance("us-west-2", spec)
-            self.assertEqual(("capacity", "InsufficientInstanceCapacity"),
-                             (rejected.exception.kind, rejected.exception.code))
-        for _ in range(2):
-            with self.assertRaises(cloud.LaunchUnknown):
-                aws.run_instance("us-west-2", spec)
+        # Each queued in turn: after an unanswered request, then after botocore's retries.
+        with self.assertRaises(LaunchRejected) as unanswered:
+            aws.run_instance("us-west-2", spec)
+        with self.assertRaises(LaunchRejected) as retried:
+            aws.run_instance("us-west-2", spec)
+        self.assertEqual([("capacity", "InsufficientInstanceCapacity")] * 2,
+                         [(rejected.exception.kind, rejected.exception.code) for rejected in (unanswered, retried)])
+        with self.assertRaises(cloud.LaunchUnknown):
+            aws.run_instance("us-west-2", spec)
+        with self.assertRaises(cloud.LaunchUnknown):
+            aws.run_instance("us-west-2", spec)
         aws.terminate("us-west-2", ["i-launched"])
 
     def test_control_host_is_launched_private_onto_its_volume_behind_its_load_balancer(self):

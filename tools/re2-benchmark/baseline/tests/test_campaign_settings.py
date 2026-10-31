@@ -115,7 +115,7 @@ class TestCampaignSettings(unittest.TestCase):
             rates["on_demand_total"] = 2 * rates["total"]
         campaign_settings.seeded(on_demand)
         region = SETTINGS["regions"]["us-west-2"]
-        # A number exports in 64 bits.
+        # OpenTelemetry exports an integer setting as a signed 64-bit number, so 2 ** 63 is one past the largest.
         invalid = {"max_hosts": [0, True, 1.5, None, 2 ** 63],
                    "max_hosts_per_platform": [0, -1],
                    "max_machine_hours": [0, -1, True, float("inf"), float("nan")],

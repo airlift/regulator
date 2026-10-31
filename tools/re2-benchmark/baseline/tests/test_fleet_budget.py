@@ -297,15 +297,15 @@ class TestFleetBudget(unittest.TestCase):
         self.budget.boot_failed("baseline", 12, now=1350)
         self.assertEqual(5, window())
 
-    def test_look_that_changes_nothing_leaves_the_state_unwritten(self):
+    def test_reading_reservations_and_reporting_boots_leaves_the_state_unwritten(self):
         # Each loop reads its reservations and reports its boots; only a change rewrites the state and syncs it.
         self.reserve(1)
         with patch.object(fleet_budget.os, "replace", wraps=os.replace) as replace:
             self.budget.reservations(self.root / "baseline")
             self.budget.report_boots("baseline", [1], 1000)
-            self.assertEqual(0, replace.call_count)
+            replace.assert_not_called()
             self.budget.release("baseline", 1, cleanup_verified=True, now=2000)
-            self.assertEqual(1, replace.call_count)
+            replace.assert_called_once()
 
 
 if __name__ == "__main__":

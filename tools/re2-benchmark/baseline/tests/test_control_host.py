@@ -309,27 +309,24 @@ class TestControlHost(unittest.TestCase):
             def launch_beside(region, ids):
                 terminate(region, ids)
                 if not late:
-                    late.append(aws.run_control_host(region, control_host.IMAGE, "m7i.large", "/dev/xvda",
-                                                     "subnet-b", "sg-control", control_host.PROFILE, "",
-                                                     control_host.tags("c"))[0])
+                    late.append(launch_host(aws, "c", "subnet-b"))
 
             with patch.object(aws, "terminate", side_effect=launch_beside):
                 control_host.teardown(aws, "c", confirm=True)
             self.assertEqual(["terminated", "terminated"], [host.state for host in aws.region_instances["us-west-2"]])
-            operations = [call[:3] for call in aws.calls]
-            self.assertLess(operations.index(("terminate", "us-west-2", late[0])),
-                            operations.index(("create_snapshot", "us-west-2", "vol-1")))
+            self.assertLess(aws.calls.index(("wait", "us-west-2", "instance_terminated", late[0])),
+                            aws.calls.index(("create_snapshot", "us-west-2", "vol-1")))
 
-            # A replace whose check passed, but whose teardown runs while it launches, terminates its host before
-            # the controller starts.
+            # A replace whose check passed, but whose teardown runs once it has attached the volume, terminates its
+            # host before the controller starts.
             control_host.launch(aws, "d", SSH_PUBLIC_KEY, inputs)
-            run = aws.run_control_host
+            attach = aws.attach_volume
 
-            def teardown_beside(*arguments):
+            def teardown_after_attach(*arguments):
+                attach(*arguments)
                 control_host.teardown(aws, "d", confirm=True)
-                return run(*arguments)
 
-            with patch.object(aws, "run_control_host", side_effect=teardown_beside), \
+            with patch.object(aws, "attach_volume", side_effect=teardown_after_attach), \
                     self.assertRaisesRegex(SystemExit, "campaign d's teardown has begun .*; its new control host "
                                                        "i-control-4 has its termination requested"):
                 control_host.replace(aws, "d", SSH_PUBLIC_KEY)
