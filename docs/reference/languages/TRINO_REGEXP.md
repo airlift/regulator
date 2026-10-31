@@ -300,6 +300,17 @@ report of it:
 split, and replacement operations. Replacement strings use Trino's Java-style
 `$1` and `${name}` references rather than RE2 rewrite syntax.
 
+Contains and count are not always allocation-free. Once a pattern is warm,
+they allocate nothing when it runs on a [scan plan](../../benchmarks/SCAN_PLAN.md)
+or a specialized path, including a contains whose scan-plan search hands off to
+the ordinary engine. A count whose search hands off allocates one small array
+per call, and count creates a matcher for a pattern without a specialized
+counting path. Other patterns may allocate on each call: a contains of a
+pattern using `\b` allocates search state, though a warm contains of
+`(?:ab|cd)+e` does not. Position and extraction create a matcher on each call
+for a pattern without a specialized path. Iterating with a reused matcher can
+avoid these allocations; compare the complete operation on your workload.
+
 Use `matcher` to iterate matches or captures without constructing extraction
 lists or replacement output:
 

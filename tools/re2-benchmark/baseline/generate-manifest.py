@@ -29,10 +29,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def allocation_contract(operation):
-    if operation in {"contains", "count", "positionThird"}:
-        return "allocation-free"
-    if operation in {"extract", "extractAll", "replace", "replaceLambda", "split"}:
+def allocation_contract(system, operation):
+    """Return the allocation contract of a row measuring the system's operation.
+
+    Rows of Regulator's contains, count, and LIKE matching are held allocation-free, so
+    allocation there is investigated. These operations allocate nothing once warm on a pattern
+    that runs on a scan plan or a specialized matcher, including a contains that hands off to the
+    ordinary engine. A count whose search hands off allocates one small array per call, a count
+    without a specialized path creates a matcher, and other patterns may allocate per call, such
+    as ordinary-engine search state for a word boundary, though a warm DFA search does not.
+    Regulator's position and extraction create a matcher per call on a pattern without a
+    specialized path, as release 1.0 did, and a JVM comparator promises nothing, so those rows
+    record allocation. A native runner records none.
+    """
+    if system in row_protocol.NATIVE_SYSTEMS:
+        return "not-measured"
+    if operation in {"contains", "count", "matches"}:
+        return "recorded" if system in row_protocol.COMPARATOR_SYSTEMS else "allocation-free"
+    if operation in {"positionThird", "extract", "extractAll", "replace", "replaceLambda", "split", "compile", "singleUse"}:
         return "recorded"
     raise ValueError(f"missing operation-specific allocation contract: {operation}")
 
@@ -92,7 +106,7 @@ def add_everyday_trino_rows(rows, root):
                     parameters,
                     "joni",
                     "joni-differential",
-                    allocation_contract(operation),
+                    allocation_contract(system, operation),
                     f"everyday={actual_checksum}"))
 
 
@@ -173,8 +187,7 @@ def add_specialized_rows(rows, root):
                     f"workload={workload}",
                     comparator,
                     f"{comparator}-differential",
-                    # A native runner records no allocation.
-                    "not-measured" if system in row_protocol.NATIVE_SYSTEMS else allocation_contract(operation),
+                    allocation_contract(system, operation),
                     checksum))
         elif shard == "trino-like-specialized":
             if operation != "matches":
@@ -185,7 +198,7 @@ def add_specialized_rows(rows, root):
                 rows.append(Row(
                     f"trino-like-specialized/{workload}/{system}", "trino-like-specialized", "trino-like-specialized",
                     system, operation, f"workload={workload}", "trino-like", "trino-differential",
-                    "allocation-free", "candidate-source"))
+                    allocation_contract(system, operation), "candidate-source"))
         else:
             raise ValueError(f"unknown specialized-pattern shard: {shard}")
 
@@ -206,7 +219,7 @@ def add_trino_like_rows(rows):
                 f"scenario={scenario}",
                 "trino-like",
                 "trino-differential",
-                "allocation-free",
+                allocation_contract(system, "matches"),
                 "candidate-source"))
 
     for shard, operation in (("like-compile", "compile"), ("like-single-use", "singleUse")):
@@ -215,14 +228,14 @@ def add_trino_like_rows(rows):
                 rows.append(Row(
                     f"{shard}/{scenario}/{system}", shard, "trino-like", system,
                     operation, f"scenario={scenario}", "trino-like",
-                    "trino-differential", "recorded", "candidate-source"))
+                    "trino-differential", allocation_contract(system, operation), "candidate-source"))
 
     for scenario in ("ANY_ASCII", "ANY_MULTIBYTE"):
         for system in ("regulator", "trino-sql", "trino-optimized"):
             rows.append(Row(
                 f"like-dfa-single-use/{scenario}/{system}", "like-dfa-single-use", "trino-like", system,
                 "singleUse", f"scenario={scenario}", "trino-like",
-                "trino-differential", "recorded", "candidate-source"))
+                "trino-differential", allocation_contract(system, "singleUse"), "candidate-source"))
 
 
 def validate(rows, shards):

@@ -22,6 +22,10 @@ class TestLikeLifecycle(unittest.TestCase):
             recorded = list(csv.DictReader(source, delimiter='\t'))
         selected = [row for row in recorded if row['suite'] == 'trino-like']
         self.assertEqual({row.row_id for row in rows}, {row['row_id'] for row in selected})
+        subset = [row for row in rows if row.shard_id == 'trino-like']
+        self.assertEqual(
+            {(row.system, row.allocation_contract) for row in subset},
+            {('regulator', 'allocation-free'), ('trino-sql', 'recorded'), ('trino-optimized', 'recorded')})
         for shard in ('like-compile', 'like-single-use'):
             subset = [row for row in rows if row.shard_id == shard]
             self.assertEqual(len(subset), 24)
