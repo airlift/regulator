@@ -64,7 +64,7 @@ report never reached the coordinator, so nothing acted until morning.
 
 ### Account setup, once
 
-Like the shared buckets, two IAM resources exist before any campaign and are
+Like the shared buckets, these resources exist before any campaign and are
 never created or deleted per host or per campaign (principle 3; today each
 host creates four IAM resources and deletes three):
 
@@ -75,11 +75,17 @@ host creates four IAM resources and deletes three):
   `campaigns/*/input/leases/*` for the self-stop claim. A host of one campaign could write another session's
   prefix; every result is checked against its marker's SHA-256 and lease
   identity, and the hosts are ours, so this is accepted.
-- the **control host role**: run, describe, tag and terminate instances and
-  cancel Spot requests; placement scores, offerings, images, service quotas;
-  read and write the campaign buckets; read the network parameter and write
-  the Grafana password parameter; update the control host's DNS record;
-  Session Manager (`AmazonSSMManagedInstanceCore`); pass the worker role.
+- the **control host role**: run, describe and tag instances, and terminate
+  workers and cancel their Spot requests; placement scores, offerings, images,
+  service quotas; read and write the campaign buckets and create one for
+  `add-region`; read the network parameter and keep the campaign's Grafana
+  credentials; Session Manager (`AmazonSSMManagedInstanceCore`); pass the
+  worker role. It has no Route 53 permission: a policy scoped to the zone
+  would name the zone in this public repository, so the Mac-side commands,
+  under Dain's credentials, write the control host's DNS record.
+- the control host's **security group** in the router's VPC, admitting only
+  tcp 22 and 3000 from the VPC's CIDR, shared by every campaign's control
+  host.
 
 Every campaign bucket keeps two trees with their own lifecycle rules, from
 `../aws/bucket-lifecycle.json`. The content-addressed archives every campaign

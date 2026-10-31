@@ -235,6 +235,136 @@ For a focused change, budget only the affected cases and protected controls.
 Preserve accepted work and resume with unchanged frozen inputs instead
 of starting collection over.
 
+## Account setup
+
+A few resources exist before any campaign and are never created or deleted
+per host or per campaign. Create them once in the account, with the `dev`
+profile and from the repository root; the controller and the control host only
+check them. A create step fails on a resource that already exists, with
+`EntityAlreadyExists`, `LimitExceeded` for an instance profile's second role,
+`InvalidGroup.Duplicate`, `InvalidPermission.Duplicate`, or
+`BucketAlreadyOwnedByYou`, and changes nothing, so the sequence is safe to
+re-run; the policy, parameter, and lifecycle steps overwrite, so re-run them
+whenever their file changes.
+
+The [worker profile](#worker-profile), which every worker runs under:
+
+```bash
+aws iam create-role --profile dev --role-name regulator-benchmark-worker \
+  --assume-role-policy-document '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+    "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}'
+aws iam put-role-policy --profile dev --role-name regulator-benchmark-worker \
+  --policy-name regulator-benchmark-worker \
+  --policy-document file://tools/re2-benchmark/aws/worker-policy.json
+aws iam create-instance-profile --profile dev --instance-profile-name regulator-benchmark-worker
+aws iam add-role-to-instance-profile --profile dev --instance-profile-name regulator-benchmark-worker \
+  --role-name regulator-benchmark-worker
+```
+
+The control host profile, which may launch, describe, and end
+workers, pass the worker role, read and write the campaign buckets and create
+one for `add-region`, read the network parameter, and keep the campaign's
+Grafana credentials; `control-host/control-host-policy.json` is its policy,
+and Session Manager's managed policy gives the shell fallback:
+
+```bash
+aws iam create-role --profile dev --role-name regulator-benchmark-control-host \
+  --assume-role-policy-document '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+    "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}'
+aws iam put-role-policy --profile dev --role-name regulator-benchmark-control-host \
+  --policy-name regulator-benchmark-control-host \
+  --policy-document file://tools/re2-benchmark/aws/control-host/control-host-policy.json
+aws iam attach-role-policy --profile dev --role-name regulator-benchmark-control-host \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam create-instance-profile --profile dev --instance-profile-name regulator-benchmark-control-host
+aws iam add-role-to-instance-profile --profile dev --instance-profile-name regulator-benchmark-control-host \
+  --role-name regulator-benchmark-control-host
+```
+
+The control host's network, which this public repository never names, is one
+JSON SSM parameter, `/regulator-benchmark/control-host-network` in
+`us-west-2`. Write it to a file outside the repository with these keys:
+
+```json
+{"vpc": "vpc-<id>", "subnets": ["subnet-<id>", "subnet-<id>"],
+ "ingress_cidr": "<cidr>", "zone": "<hosted-zone-id>", "record": "<name>"}
+```
+
+- `vpc`: the VPC whose private subnets the company's Tailscale subnet router
+  carries onto the tailnet.
+- `subnets`: only the private subnets of that VPC the router carries; their
+  outbound traffic goes through the VPC's NAT gateway. A host in a subnet the
+  router does not carry is unreachable.
+- `ingress_cidr`: the VPC's CIDR, where tailnet traffic arrives from the
+  router.
+- `zone`: the ID of the private Route 53 hosted zone associated with the VPC.
+- `record`: the fully qualified name in that zone that names the control host,
+  so Grafana keeps the URL `http://<record>:3000` across host replacements.
+
+```bash
+aws ssm put-parameter --profile dev --region us-west-2 --overwrite --type String \
+  --name /regulator-benchmark/control-host-network --value file://<network.json>
+```
+
+The control host's security group, `regulator-benchmark-control-host` in that
+VPC, admits only tcp 22 and 3000 from `ingress_cidr`, and launch refuses a
+group that admits anything else. On a re-run, `create-security-group` fails
+and the `describe-security-groups` line finds the existing group:
+
+```bash
+network=$(aws ssm get-parameter --profile dev --region us-west-2 \
+  --name /regulator-benchmark/control-host-network --query Parameter.Value --output text)
+field() { python3 -c 'import json, sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$network" "$1"; }
+aws ec2 create-security-group --profile dev --region us-west-2 \
+  --group-name regulator-benchmark-control-host --vpc-id "$(field vpc)" \
+  --description "regulator-benchmark control host: ssh and Grafana from the subnet router" \
+  --tag-specifications 'ResourceType=security-group,Tags=[{Key=Project,Value=regulator-benchmark}]'
+group=$(aws ec2 describe-security-groups --profile dev --region us-west-2 \
+  --filters Name=vpc-id,Values="$(field vpc)" Name=group-name,Values=regulator-benchmark-control-host \
+  --query 'SecurityGroups[0].GroupId' --output text)
+for port in 22 3000; do
+  aws ec2 authorize-security-group-ingress --profile dev --region us-west-2 --group-id "$group" \
+    --protocol tcp --port "$port" --cidr "$(field ingress_cidr)"
+done
+```
+
+A shared bucket in each launch region, named
+`regulator-benchmark-938463256137-<region>`, is private, encrypted, tagged,
+and carries the lifecycle rules of the
+[bucket layout](#launch-regions-and-purchase); `add-region` creates one the
+same way. Omit `--create-bucket-configuration` in `us-east-1`:
+
+```bash
+aws s3api create-bucket --profile dev --bucket <bucket> --region <region> \
+  --create-bucket-configuration LocationConstraint=<region>
+aws s3api put-public-access-block --profile dev --bucket <bucket> --region <region> \
+  --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-encryption --profile dev --bucket <bucket> --region <region> \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+aws s3api put-bucket-tagging --profile dev --bucket <bucket> --region <region> \
+  --tagging 'TagSet=[{Key=Project,Value=regulator-benchmark}]'
+aws s3api put-bucket-lifecycle-configuration --profile dev --bucket <bucket> --region <region> \
+  --lifecycle-configuration file://tools/re2-benchmark/aws/bucket-lifecycle.json
+```
+
+Put the lifecycle configuration on every existing campaign bucket as well,
+which replaces whatever rules it had; this lists them with their regions:
+
+```bash
+aws s3api list-buckets --profile dev --prefix regulator-benchmark-938463256137- \
+  --query 'Buckets[].[Name,BucketRegion]' --output text
+```
+
+Objects outside `shared/` and `campaigns/` never expire, so remove what an
+older layout left in a bucket once:
+
+```bash
+aws s3 rm --profile dev "s3://<bucket>/" --region <region> --recursive \
+  --exclude 'shared/*' --exclude 'campaigns/*'
+```
+
 ## Qualification inputs
 
 Execution requires:
@@ -246,7 +376,9 @@ Execution requires:
   and stages each platform's pinned JDK
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
-- the account's [worker profile](#worker-profile), which workers run under
+- the [account setup](#account-setup): the worker and control host profiles,
+  the control host's network and security group, and a shared bucket in each
+  launch region
 
 Keep the campaign root outside Maven's `target` directory. The controller
 rejects volatile paths and revalidates the candidate, manifests, and accepted
@@ -690,24 +822,8 @@ preflight checks the tag and the bucket's region. A bucket holds two trees:
   expires what a lost controller leaves one day after it was written.
 
 Both rules also abort a multipart upload left incomplete for a day. An object
-outside both trees never expires, so remove any left by an older layout by
-hand. To create a shared bucket by hand as `add-region` does, omitting
-`--create-bucket-configuration` in `us-east-1`:
-
-```bash
-aws s3api create-bucket --bucket <bucket> --region <region> \
-  --create-bucket-configuration LocationConstraint=<region>
-aws s3api put-public-access-block --bucket <bucket> --region <region> \
-  --public-access-block-configuration \
-  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws s3api put-bucket-encryption --bucket <bucket> --region <region> \
-  --server-side-encryption-configuration \
-  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
-aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
-  --tagging 'TagSet=[{Key=Project,Value=regulator-benchmark}]'
-aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --region <region> \
-  --lifecycle-configuration file://tools/re2-benchmark/aws/bucket-lifecycle.json
-```
+outside both trees never expires; the [account setup](#account-setup) removes
+any an older layout left, and creates each bucket as `add-region` does.
 
 ### Engine builds
 
@@ -854,23 +970,7 @@ Every worker runs under one permanent instance profile,
 shared archives, and write its results and lease claims, in the
 `regulator-benchmark-938463256137-*` buckets; `worker-policy.json` is its
 policy. Preflight checks that the profile exists, with one IAM read, and the
-controller never writes IAM. Create it once per account:
-
-```bash
-aws iam create-role --role-name regulator-benchmark-worker \
-  --assume-role-policy-document '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
-    "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}'
-aws iam put-role-policy --role-name regulator-benchmark-worker \
-  --policy-name regulator-benchmark-worker \
-  --policy-document file://tools/re2-benchmark/aws/worker-policy.json
-aws iam create-instance-profile --instance-profile-name regulator-benchmark-worker
-aws iam add-role-to-instance-profile --instance-profile-name regulator-benchmark-worker \
-  --role-name regulator-benchmark-worker
-```
-
-The controller's own credentials need `iam:GetInstanceProfile` on the profile
-and `iam:PassRole` on its role, in addition to EC2 launch, describe, and
-terminate and S3 access to the shared buckets.
+controller never writes IAM. The [account setup](#account-setup) creates it.
 
 ## Unit workers
 
