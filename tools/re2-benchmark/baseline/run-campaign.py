@@ -5466,11 +5466,10 @@ def control_change(arguments, now):
     return f"authorized {name} to {value:g}", lambda settings: settings["authorized"].update({name: value})
 
 
-def check_region_limits(root, aws, before, after):
+def check_region_limits(spot_reserve, aws, before, after):
     """Refuse settings whose raised or new region vCPU limits exceed the region's Standard quota after its reserve, the
     check each phase's setup makes, so no raised limit reaches the controller that a phase could not run under. A
-    lowered limit needs no quota."""
-    spot_reserve = json.loads((root / CAMPAIGN_OPTIONS).read_text())["spot_vcpu_reserve"]
+    lowered limit needs no quota. The campaign froze spot_reserve, its Spot vCPU reserve, in its options."""
     for region, limits in after["regions"].items():
         over = region_limit_over_quota(limits, lambda market: aws.vcpu_quota(region, market), spot_reserve,
                                        before["regions"].get(region, {}))
@@ -5480,11 +5479,11 @@ def check_region_limits(root, aws, before, after):
                                 f"quota of {quota:g} vCPUs after its reserve of {reserve:g}")
 
 
-def add_region(arguments, store, aws):
+def add_region(arguments, store, aws, spot_reserve):
     """Add a region to the campaign: create its shared bucket unless it has one, put every archive the campaign has
     shared in it, each verified by its SHA-256, and only then add the region to the settings, listed for the platforms
-    --platforms names, or for every platform. A change the settings, the actor's bounds, the region's quotas or its
-    images would refuse is refused before anything is created."""
+    --platforms names, or for every platform. A change the settings, the actor's bounds, the region's quotas after
+    each market's reserve or its images would refuse is refused before anything is created."""
     region = arguments.region
     bucket = f"regulator-benchmark-{aws.account(region)}-{region}"
     limits = {"bucket": bucket, "max_vcpus": arguments.max_vcpus, **(
@@ -5503,7 +5502,7 @@ def add_region(arguments, store, aws):
             settings["platform_regions"][platform].append(region)
 
     images = read_platform_regions(Path(__file__).resolve().parent)
-    check_region_limits(arguments.root, aws, store.current,
+    check_region_limits(spot_reserve, aws, store.current,
                         changed_settings(store.current, arguments.actor, update, time.time()))
     try:
         check_bucket(aws, region, bucket)
@@ -5522,8 +5521,14 @@ def control(arguments, aws):
     if arguments.actor == "monitor" and arguments.command not in MONITOR_COMMANDS:
         raise SystemExit(f"only dain runs {arguments.command}; the monitor runs {', '.join(MONITOR_COMMANDS)}")
     # The controller records its campaign as it starts, so a command for one campaign never steers another's root.
-    options = arguments.root / CAMPAIGN_OPTIONS
-    recorded = json.loads(options.read_text()).get("campaign") if options.is_file() else None
+    options_path = arguments.root / CAMPAIGN_OPTIONS
+    try:
+        options = json.loads(options_path.read_text()) if options_path.is_file() else {}
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"cannot read the campaign options {options_path}: {error}") from error
+    if not isinstance(options, dict):
+        raise SystemExit(f"cannot read the campaign options {options_path}: they are not a JSON object")
+    recorded = options.get("campaign")
     if recorded is None:
         raise SystemExit(f"{arguments.root} records no campaign: its controller has not yet started, or an earlier "
                          "controller started it")
@@ -5548,10 +5553,10 @@ def control(arguments, aws):
         check_ended()
         store = CampaignSettings(arguments.root)
         if arguments.command == "add-region":
-            description, update = add_region(arguments, store, aws)
+            description, update = add_region(arguments, store, aws, options["spot_vcpu_reserve"])
         else:
             description, update = control_change(arguments, time.time())
-            check_region_limits(arguments.root, aws, store.current,
+            check_region_limits(options["spot_vcpu_reserve"], aws, store.current,
                                 changed_settings(store.current, arguments.actor, update, time.time()))
         def reopened():
             # Without the manifest the controller starts again, and finish waits for the one it writes as it ends.
@@ -5566,7 +5571,8 @@ def control(arguments, aws):
     except SettingsError as error:
         raise SystemExit(str(error)) from error
     except CloudError as error:
-        raise SystemExit(f"{arguments.command} cannot reach AWS, so the settings are unchanged: {error}") from error
+        raise SystemExit(f"{arguments.command}: AWS refused or did not answer, so the settings are unchanged: "
+                         f"{error}") from error
     if settings["version"] == before:
         print(f"campaign settings version {before} already hold {description}")
     else:
