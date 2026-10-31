@@ -291,7 +291,9 @@ The dashboards are built around one model, exported every loop:
 - **Correction**: the observed ratio of actual to estimated seconds over the
   phase's finished groups, per pool, 1.0 until the first finishes.
 - **Finish estimate**: corrected remaining work divided by live hosts of the
-  pool, as a time; the phase's is its latest pool's. It responds to a
+  pool, as a time, or never for a pool with work left and no live host,
+  exported as the largest finite value since OpenTelemetry drops infinite
+  ones; the phase's is its latest pool's. It responds to a
   capacity change on the next loop, so adding a region moves the estimate at
   once. It also weights the shares.
 
