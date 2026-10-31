@@ -3640,6 +3640,37 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
                                       if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
 
+    def test_lowered_host_limit_sheds_hosts_behind_their_leases(self):
+        units = {f"long-{index}": {"unit_id": f"long-{index}", "shard_id": "long", "unit_index": str(index),
+                                   "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for index in range(1, 7)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # Four hosts run the primary's 15-minute units, and once all four run, Dain lowers the fleet's limit to
+            # two hosts. The next loop stop-leases one host of each platform behind the leases it holds, and every
+            # lease is still accepted.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True)
+            marks = {}
+
+            def loop():
+                dispatcher = self.running.get("primary")
+                if dispatcher is None:
+                    return
+                workers = dispatcher.workers.values()
+                if "lowered" not in marks and len(workers) == 4 and all(worker.started for worker in workers):
+                    self.control(root, "set-limit", "max-hosts", "2")
+                    marks["lowered"] = True
+                elif "lowered" in marks and "open" not in marks:
+                    marks["open"] = sorted(worker.job.platform.name for worker in workers if worker.open())
+
+            failed, dispatchers = self.run_campaign(root, fleet, [("primary", "primary", ["long"], ())], 4, 2, loop,
+                                                    purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            self.assertEqual(["r8i", "r9g"], marks["open"])
+            ledger = self.unit_attempts(dispatchers["primary"].result_root)
+            self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
+                                      if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+
     def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
         units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
                                       "estimated_seconds": "900",

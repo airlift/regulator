@@ -230,7 +230,9 @@ One loop, target under 30 s, every action a round trip:
 4. **Shares.** Each running phase's target = its weight among running phases
    by corrected seconds left, over `max_hosts`, with the per-platform cap
    applied in the same allocation. A pinned share overrides. A phase above
-   its target stop-leases idle workers first and never interrupts a lease. A
+   its target gives up hosts while another phase waits for them, or while the
+   hosts held pass `max_hosts` or the per-platform cap, as once one is
+   lowered; it stop-leases idle workers first and never interrupts a lease. A
    finished phase's hosts flow to the others the same loop.
 5. **Launch.** Admission per pool as today, with one fleet snapshot per loop,
    placement scores at `min(50, target)` cached five minutes, and the boot
