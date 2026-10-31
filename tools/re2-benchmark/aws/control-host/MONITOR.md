@@ -191,6 +191,12 @@ on the host; read it with `host cat` before each raise.
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
 | Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
 
+`control` enforces the table: with `--actor monitor` it runs only
+`set-limit`, `add-region` and `resume`, and refuses every other command,
+`stop`, `clear-spending-stop` and `authorize` among them, as Dain's. The
+settings refuse a monitor change to `authorized` or the hourly rates, and
+any raise past `authorized`.
+
 To ask, send the push notification with the question and the evidence, and
 wait for Dain's answer in this thread.
 
