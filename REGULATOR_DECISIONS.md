@@ -299,8 +299,11 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   `find()`.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
-  assertion, using the same context-sensitive fallback. UNIX multiline `$`
-  retains its LF-only rule, including a boundary between CR and LF.
+  assertion, using the same context-sensitive fallback. When every path from
+  the caret to a match consumes a byte, the caret is never at the end of the
+  input, so it compiles to RE2's beginning-of-line alone and no longer keeps
+  the program off the DFA and OnePass. UNIX multiline `$` retains its LF-only
+  rule, including a boundary between CR and LF.
 - Unicode character classes and properties use the pinned database, as
   described in Pinned Unicode Properties, and case folding uses its case
   mappings, as described in Pinned Unicode Case Folding. Word boundaries read

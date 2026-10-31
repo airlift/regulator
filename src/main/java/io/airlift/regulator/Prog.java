@@ -179,6 +179,11 @@ final class Prog
             this.opcode = requireNonNull(opcode, "opcode is null");
         }
 
+        public void setEmpty(int empty)
+        {
+            this.empty = empty;
+        }
+
         Inst copy()
         {
             Inst inst = new Inst(opcode);
@@ -2477,6 +2482,89 @@ final class Prog
         void clear()
         {
             visitCounts.clear();
+        }
+    }
+
+    /// Drops the end-of-input check from each Java `UNIX_LINES` multiline caret after which every
+    /// path to a match consumes a byte. That caret is RE2's begin-line that also fails at the end
+    /// of the input, and a caret with a byte still to match is never there, so it becomes RE2's
+    /// begin-line and no longer keeps the program off the DFA and OnePass. A reversed program
+    /// holds the caret as an end-line and matches the bytes after it before reaching it, so there
+    /// the check is dropped when no path from the start reaches the caret without consuming a byte.
+    void dropImpliedJavaCaretExclusions()
+    {
+        int javaLine = reversed ? EmptyOp.EMPTY_JAVA_END_LINE : EmptyOp.EMPTY_JAVA_BEGIN_LINE;
+        int caret = (reversed ? EmptyOp.EMPTY_END_LINE : EmptyOp.EMPTY_BEGIN_LINE) | javaLine;
+        boolean hasCaret = false;
+        for (int id = 0; id < size(); id++) {
+            Inst instruction = inst(id);
+            if (instruction.opcode() == InstOp.EMPTY_WIDTH && instruction.empty() == caret) {
+                hasCaret = true;
+                break;
+            }
+        }
+        if (!hasCaret) {
+            return;
+        }
+
+        // Only the edges of instructions the start reaches are followed, because a fragment the
+        // compiler drops for a never-matching operand, such as `[a&&b]`, still holds patch-list
+        // entries in place of instruction ids.
+        SparseSet reachable = new SparseSet(size() + 1);
+        addToQueue(reachable, start);
+        for (int index = 0; index < reachable.size(); index++) {
+            Inst instruction = inst(reachable.denseAt(index));
+            addToQueue(reachable, instruction.out());
+            if (instruction.opcode() == InstOp.ALT || instruction.opcode() == InstOp.ALT_MATCH) {
+                addToQueue(reachable, instruction.out1());
+            }
+        }
+
+        // Forward, the instructions that reach a match without consuming a byte; reversed, the
+        // instructions the start reaches without consuming one.
+        SparseSet emptyReach = new SparseSet(size() + 1);
+        if (reversed) {
+            addToQueue(emptyReach, start);
+            for (int index = 0; index < emptyReach.size(); index++) {
+                Inst instruction = inst(emptyReach.denseAt(index));
+                switch (instruction.opcode()) {
+                    case ALT, ALT_MATCH -> {
+                        addToQueue(emptyReach, instruction.out());
+                        addToQueue(emptyReach, instruction.out1());
+                    }
+                    case CAPTURE, EMPTY_WIDTH, NOP -> addToQueue(emptyReach, instruction.out());
+                    case BYTE_RANGE, MATCH, FAIL -> {}
+                }
+            }
+        }
+        else {
+            PredecessorLists predecessors = new PredecessorLists(size());
+            for (int index = 0; index < reachable.size(); index++) {
+                int id = reachable.denseAt(index);
+                Inst instruction = inst(id);
+                switch (instruction.opcode()) {
+                    case ALT, ALT_MATCH -> {
+                        predecessors.add(instruction.out(), id);
+                        predecessors.add(instruction.out1(), id);
+                    }
+                    case CAPTURE, EMPTY_WIDTH, NOP -> predecessors.add(instruction.out(), id);
+                    case MATCH -> emptyReach.insert(id);
+                    case BYTE_RANGE, FAIL -> {}
+                }
+            }
+            for (int index = 0; index < emptyReach.size(); index++) {
+                for (int edge = predecessors.firstEdge(emptyReach.denseAt(index)); edge >= 0; edge = predecessors.nextEdge(edge)) {
+                    emptyReach.insert(predecessors.predecessorInstructionId(edge));
+                }
+            }
+        }
+
+        for (int index = 0; index < reachable.size(); index++) {
+            int id = reachable.denseAt(index);
+            Inst instruction = inst(id);
+            if (instruction.opcode() == InstOp.EMPTY_WIDTH && instruction.empty() == caret && !emptyReach.contains(id)) {
+                instruction.setEmpty(caret & ~javaLine);
+            }
         }
     }
 
