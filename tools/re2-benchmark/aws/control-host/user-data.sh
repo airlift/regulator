@@ -3,7 +3,9 @@
 # host's settings exported after its first line, as control_host.py's user_data names them. It installs Dain's ssh
 # key, has sshd listen on 443, mounts the campaign volume, unpacks the launch inputs onto it the first time, checks
 # out the candidate commits, starts the campaign's controller, and then starts Grafana with credentials it keeps in
-# SSM. Nothing here stops the host: it outlives the campaign until teardown.
+# SSM. Nothing here stops the host: it outlives the campaign until teardown. cloud-init runs it once per instance, so
+# a reboot runs none of it again; what it repairs on the volume, an interrupted first boot left for the next host
+# control-host replace starts there.
 set -Eeuo pipefail
 exec > >(tee -a /var/log/regulator-control-host.log) 2>&1
 
@@ -72,7 +74,7 @@ install -d -m 777 "${MOUNT}/lgtm"
 
 # The launch inputs: the controller's command, the candidate commits, the campaign's settings, and its language
 # plans. A replaced host finds them on the volume already. They are unpacked beside their place and moved into it
-# whole, so a first boot interrupted while unpacking leaves them for the next boot to unpack again.
+# whole, so a first boot interrupted while unpacking leaves them for the next host to unpack again.
 if [[ ! -f ${INPUTS}/controller.env ]]; then
     aws s3 cp --region "${CONTROL_HOST_REGION}" --no-progress "${LAUNCH_INPUTS_URI}" /var/tmp/launch-inputs.tar.gz
     printf '%s  %s\n' "${LAUNCH_INPUTS_SHA256}" /var/tmp/launch-inputs.tar.gz | sha256sum --check --strict
@@ -83,9 +85,9 @@ if [[ ! -f ${INPUTS}/controller.env ]]; then
     rm /var/tmp/launch-inputs.tar.gz
 fi
 
-# The controller runs the first candidate's tooling, which every candidate shares. A boot that ended while git ran
-# may have left the checkout locked, though no git process runs this early in a boot, or not yet a repository, which
-# is made again, or without its remote, or half checked out, which the checkout overwrites.
+# The controller runs the first candidate's tooling, which every candidate shares. A host whose boot ended while git
+# ran may have left the checkout locked, though no git process runs this early in a boot, or not yet a repository,
+# which is made again, or without its remote, or half checked out, which the checkout overwrites.
 rm -f "${CHECKOUT}"/.git/*.lock
 if ! sudo -u ec2-user git -C "${CHECKOUT}" rev-parse --git-dir > /dev/null 2>&1; then
     rm -rf "${CHECKOUT}"

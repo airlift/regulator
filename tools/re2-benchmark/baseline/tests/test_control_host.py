@@ -380,8 +380,8 @@ class TestControlHost(unittest.TestCase):
         campaign = (CONTROL_HOST / "regulator-campaign@.service").read_text()
         lgtm = (CONTROL_HOST / "regulator-lgtm.service").read_text()
         # A first boot interrupted while unpacking the launch inputs, or while git writes the checkout, leaves the
-        # next boot to finish them: git's stale locks go, a checkout git cannot read is made again, and the commit is
-        # checked out over whatever half of it was.
+        # next host on the volume to finish them: git's stale locks go, a checkout git cannot read is made again, and
+        # the commit is checked out over whatever half of it was.
         self.assertIn('-C "${INPUTS}.new"\n    mv -T "${INPUTS}.new" "${INPUTS}"\n', user_data)
         self.assertIn('rm -f "${CHECKOUT}"/.git/*.lock\n'
                       'if ! sudo -u ec2-user git -C "${CHECKOUT}" rev-parse --git-dir > /dev/null 2>&1; then\n'
