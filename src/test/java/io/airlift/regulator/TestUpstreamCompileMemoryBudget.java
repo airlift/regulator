@@ -107,6 +107,15 @@ public class TestUpstreamCompileMemoryBudget
         Prog forwardProgram = Re2.compile(Slices.utf8Slice("abcabd"), Re2.Options.defaults().setMaxMemory(forwardMemory * 3 / 2))
                 .forwardProgramForDiagnostics();
         assertThat(Compiler.estimatedProgramMemory(forwardProgram) + forwardProgram.dfaMemory()).isEqualTo(forwardMemory);
+
+        // A program over upstream's 512 instructions keeps list heads for BitState, but they are
+        // not charged, as upstream gives it none.
+        int largeMaxMemory = 1 << 20;
+        Prog large = Compiler.compile(parse("(\\pL+)(\\pL*) ([0-9]+)"), false, largeMaxMemory);
+        assertThat(large.size()).isGreaterThan(512);
+        assertThat(large.canBitState()).isTrue();
+        assertThat(large.isOnePass()).isFalse();
+        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - 512L - ((long) large.size() * 8));
     }
 
     @Test
@@ -116,7 +125,7 @@ public class TestUpstreamCompileMemoryBudget
         Prog reference = Compiler.compile(parsed.regexp(), false, 4096);
 
         long programMemory = 512L + ((long) reference.size() * 8);
-        if (reference.canBitState()) {
+        if (reference.hasUpstreamListHeads()) {
             programMemory += (long) reference.size() * 2;
         }
         int maximumOnePassStates = 2 + 1;
@@ -146,7 +155,7 @@ public class TestUpstreamCompileMemoryBudget
         Prog program = Compiler.compile(parse(pattern), false, maxMemory);
 
         long programMemory = 512L + ((long) program.size() * 8);
-        if (program.canBitState()) {
+        if (program.hasUpstreamListHeads()) {
             programMemory += (long) program.size() * 2;
         }
         long onePassMemory = (long) program.onePassStateCount() *

@@ -83,17 +83,11 @@ public class TestNfaWorkspace
     public void testMatcherOwnsAndReusesWorkspace()
             throws ReflectiveOperationException
     {
-        String patternText = "((?:a|aa){100})(b{100})(c{100})(d{100})(e{100})(f{100})";
-        Slice input = Slices.utf8Slice(
-                "a".repeat(100) +
-                        "b".repeat(100) +
-                        "c".repeat(100) +
-                        "d".repeat(100) +
-                        "e".repeat(100) +
-                        "f".repeat(100));
+        String patternText = "((?:a|aa){1000})(b{1000})(c{1000})(d{1000})(e{1000})(f{1000})";
+        Slice input = Slices.utf8Slice("a".repeat(1000) + "b".repeat(1000) + "c".repeat(1000) + "d".repeat(1000) + "e".repeat(1000) + "f".repeat(1000));
         Re2 pattern = Re2.compile(Slices.utf8Slice(patternText));
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
-        assertThat(pattern.forwardProgramForDiagnostics().canBitState()).isFalse();
+        assertThat(input.length()).isGreaterThan(pattern.forwardProgramForDiagnostics().bitStateTextMaxSize());
 
         RegexpMatcher matcher = pattern.matcher(input);
         Field workspaceField = RegexpMatcher.class.getDeclaredField("nfaWorkspace");

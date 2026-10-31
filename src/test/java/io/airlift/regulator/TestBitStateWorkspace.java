@@ -103,6 +103,24 @@ public class TestBitStateWorkspace
     }
 
     @Test
+    public void testLargeProgramExtractsCapturesWithBitState()
+    {
+        // Upstream gives only programs of at most 512 instructions list heads. The visited bitmap
+        // grows with the list count and the span, not with the instruction count.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("(\\pL+)(\\pL*) ([0-9]+)"));
+        assertThat(pattern.forwardProgramForDiagnostics().size()).isGreaterThan(512);
+        assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
+
+        RegexpMatcher matcher = pattern.matcher(Slices.utf8Slice("see Genèse 12 for"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.group(1).toStringUtf8()).isEqualTo("Genèse");
+        assertThat(matcher.group(2).toStringUtf8()).isEmpty();
+        assertThat(matcher.group(3).toStringUtf8()).isEqualTo("12");
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    @Test
     public void testGrownJobStackIsRetained()
             throws ReflectiveOperationException
     {
