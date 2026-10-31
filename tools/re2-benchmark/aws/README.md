@@ -283,7 +283,11 @@ aws iam add-role-to-instance-profile --profile dev --instance-profile-name regul
 
 The control host's network, which this public repository never names, is one
 JSON SSM parameter, `/regulator-benchmark/control-host-network` in
-`us-west-2`. Write it to a file outside the repository with these keys:
+`us-west-2`. The company's Tailscale subnet router forwards only tcp 443 into
+the VPC, so Grafana is served by an internal Network Load Balancer with a TLS
+listener on 443, and the host's sshd listens on 443 as well. Write the
+parameter to a file outside the repository, `<network.json>`, starting with
+the keys that name the existing network:
 
 ```json
 {"vpc": "vpc-<id>", "subnets": ["subnet-<id>", "subnet-<id>"],
@@ -298,34 +302,102 @@ JSON SSM parameter, `/regulator-benchmark/control-host-network` in
 - `ingress_cidr`: the VPC's CIDR, where tailnet traffic arrives from the
   router.
 - `zone`: the ID of the private Route 53 hosted zone associated with the VPC.
-- `record`: the fully qualified name in that zone that names the control host,
-  so Grafana keeps the URL `http://<record>:3000` across host replacements.
+- `record`: the fully qualified name in that zone that names the load
+  balancer, covered by the account's wildcard certificate, so Grafana keeps
+  the URL `https://<record>` across host replacements.
+
+The steps below create the rest, each shared by every campaign's control host,
+and add their IDs to the file. On a re-run, a `create-*` command fails for a
+resource that exists; describe it instead. The control host's security group,
+`regulator-benchmark-control-host`, and the load balancer's,
+`regulator-benchmark-control-nlb`, both in that VPC:
+
+```bash
+field() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' <network.json> "$1"; }
+host_group=$(aws ec2 create-security-group --profile dev --region us-west-2 \
+  --group-name regulator-benchmark-control-host --vpc-id "$(field vpc)" \
+  --description "regulator-benchmark control host: ssh and Grafana from the subnet router" \
+  --tag-specifications 'ResourceType=security-group,Tags=[{Key=Project,Value=regulator-benchmark}]' \
+  --query GroupId --output text)
+balancer_group=$(aws ec2 create-security-group --profile dev --region us-west-2 \
+  --group-name regulator-benchmark-control-nlb --vpc-id "$(field vpc)" \
+  --description "Regulator campaign Grafana load balancer: TLS from the VPC" \
+  --tag-specifications 'ResourceType=security-group,Tags=[{Key=Project,Value=regulator-benchmark}]' \
+  --query GroupId --output text)
+```
+
+The load balancer's group admits tcp 443 from `ingress_cidr` and sends only
+tcp 3000 to the host's group. The host's group admits only tcp 443, ssh, from
+`ingress_cidr` and tcp 3000, Grafana, from the load balancer's group, and
+launch refuses a group that admits anything else:
+
+```bash
+aws ec2 authorize-security-group-ingress --profile dev --region us-west-2 --group-id "$balancer_group" \
+  --protocol tcp --port 443 --cidr "$(field ingress_cidr)"
+aws ec2 revoke-security-group-egress --profile dev --region us-west-2 --group-id "$balancer_group" \
+  --protocol all --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-egress --profile dev --region us-west-2 --group-id "$balancer_group" \
+  --ip-permissions "IpProtocol=tcp,FromPort=3000,ToPort=3000,UserIdGroupPairs=[{GroupId=$host_group}]"
+aws ec2 authorize-security-group-ingress --profile dev --region us-west-2 --group-id "$host_group" \
+  --protocol tcp --port 443 --cidr "$(field ingress_cidr)"
+aws ec2 authorize-security-group-ingress --profile dev --region us-west-2 --group-id "$host_group" \
+  --protocol tcp --port 3000 --source-group "$balancer_group"
+```
+
+The internal load balancer, `regulator-control`, in the router's subnets with
+cross-zone balancing on, so it reaches a host in either subnet's zone; its
+target group, `regulator-control-grafana`, forwarding tcp 3000 to instances
+and checking Grafana's health over HTTP; and its TLS listener on 443 with the
+account's wildcard certificate for `<record>`:
+
+```bash
+balancer=$(aws elbv2 create-load-balancer --profile dev --region us-west-2 --name regulator-control \
+  --type network --scheme internal --subnets <subnet-id> <subnet-id> --security-groups "$balancer_group" \
+  --tags Key=Project,Value=regulator-benchmark --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+aws elbv2 modify-load-balancer-attributes --profile dev --region us-west-2 --load-balancer-arn "$balancer" \
+  --attributes Key=load_balancing.cross_zone.enabled,Value=true
+target_group=$(aws elbv2 create-target-group --profile dev --region us-west-2 \
+  --name regulator-control-grafana --protocol TCP --port 3000 --vpc-id "$(field vpc)" --target-type instance \
+  --health-check-protocol HTTP --health-check-path /api/health --health-check-interval-seconds 10 \
+  --healthy-threshold-count 2 --unhealthy-threshold-count 2 --matcher HttpCode=200 \
+  --tags Key=Project,Value=regulator-benchmark --query 'TargetGroups[0].TargetGroupArn' --output text)
+certificate=$(aws acm list-certificates --profile dev --region us-west-2 \
+  --query "CertificateSummaryList[?DomainName=='<wildcard-domain>'].CertificateArn | [0]" --output text)
+listener=$(aws elbv2 create-listener --profile dev --region us-west-2 --load-balancer-arn "$balancer" \
+  --protocol TLS --port 443 --certificates CertificateArn="$certificate" \
+  --ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06 \
+  --default-actions Type=forward,TargetGroupArn="$target_group" \
+  --query 'Listeners[0].ListenerArn' --output text)
+```
+
+The record is a permanent alias of the load balancer. The launch and
+`control-host replace` register each new host in the target group and
+deregister the hosts they replace; `teardown` deregisters the campaign's
+hosts and leaves the record, the load balancer, and the target group:
+
+```bash
+aws elbv2 describe-load-balancers --profile dev --region us-west-2 --load-balancer-arns "$balancer" \
+  --query 'LoadBalancers[0].[DNSName, CanonicalHostedZoneId]' --output text
+aws route53 change-resource-record-sets --profile dev --hosted-zone-id "$(field zone)" --change-batch \
+  '{"Changes": [{"Action": "UPSERT", "ResourceRecordSet": {"Name": "<record>", "Type": "A", "AliasTarget": {
+    "DNSName": "<load-balancer-dns-name>", "HostedZoneId": "<load-balancer-hosted-zone-id>",
+    "EvaluateTargetHealth": false}}}]}'
+```
+
+Add the IDs to `<network.json>`, which then holds every key launch reads, and
+put it in the parameter:
+
+```json
+{"vpc": "vpc-<id>", "subnets": ["subnet-<id>", "subnet-<id>"],
+ "ingress_cidr": "<cidr>", "zone": "<hosted-zone-id>", "record": "<name>",
+ "security_group": "<host-group-id>", "load_balancer_security_group": "<balancer-group-id>",
+ "target_group": "<target-group-arn>", "load_balancer": "<load-balancer-arn>",
+ "listener": "<listener-arn>", "certificate": "<certificate-arn>"}
+```
 
 ```bash
 aws ssm put-parameter --profile dev --region us-west-2 --overwrite --type String \
   --name /regulator-benchmark/control-host-network --value file://<network.json>
-```
-
-The control host's security group, `regulator-benchmark-control-host` in that
-VPC, admits only tcp 22 and 3000 from `ingress_cidr`, and launch refuses a
-group that admits anything else. On a re-run, `create-security-group` fails
-and the `describe-security-groups` line finds the existing group:
-
-```bash
-network=$(aws ssm get-parameter --profile dev --region us-west-2 \
-  --name /regulator-benchmark/control-host-network --query Parameter.Value --output text)
-field() { python3 -c 'import json, sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$network" "$1"; }
-aws ec2 create-security-group --profile dev --region us-west-2 \
-  --group-name regulator-benchmark-control-host --vpc-id "$(field vpc)" \
-  --description "regulator-benchmark control host: ssh and Grafana from the subnet router" \
-  --tag-specifications 'ResourceType=security-group,Tags=[{Key=Project,Value=regulator-benchmark}]'
-group=$(aws ec2 describe-security-groups --profile dev --region us-west-2 \
-  --filters Name=vpc-id,Values="$(field vpc)" Name=group-name,Values=regulator-benchmark-control-host \
-  --query 'SecurityGroups[0].GroupId' --output text)
-for port in 22 3000; do
-  aws ec2 authorize-security-group-ingress --profile dev --region us-west-2 --group-id "$group" \
-    --protocol tcp --port "$port" --cidr "$(field ingress_cidr)"
-done
 ```
 
 A shared bucket in each launch region, named
@@ -507,10 +579,12 @@ Tailscale subnet router carries, as the
 campaign's own 200 GiB gp3 volume, mounted at `/regulator`, so a replaced host
 carries on with it. The launch uploads its inputs to the Oregon bucket's
 `campaigns/<campaign>/control-host/`, creates the volume, starts the host, and
-points the parameter's record at it. The host's user data,
+registers it in the parameter's target group, which the internal load
+balancer forwards Grafana to. The host's user data,
 `control-host/user-data.sh`:
 
-- installs the key `--ssh-public-key` names for `ec2-user`;
+- installs the key `--ssh-public-key` names for `ec2-user`, and has sshd
+  listen on port 443 beside 22, since the subnet router forwards only 443;
 - mounts the volume, formatting it the first time, and puts the campaign root
   at `/regulator/campaign`;
 - unpacks the launch inputs onto the volume the first time: the controller's
@@ -521,9 +595,10 @@ points the parameter's record at it. The host's user data,
   `--controller` and the host's paths; the unit restarts a controller that
   crashes, up to five times in ten minutes, and leaves one whose campaign
   ended, with failed phases or without;
-- starts `grafana/otel-lgtm`, pinned by digest, with Grafana on port 3000 and
-  OTLP on the host's loopback only, its data on the volume, and its dashboards
-  provisioned from `control-host/grafana/`;
+- starts `grafana/otel-lgtm`, pinned by digest, with Grafana on port 3000 for
+  the load balancer and its links built from `https://<record>`, OTLP on the
+  host's loopback only, its data on the volume, and its dashboards provisioned
+  from `control-host/grafana/`;
 - keeps Grafana's admin password and a Viewer service-account token for the
   monitor in the SSM SecureStrings
   `/regulator-benchmark/campaigns/<campaign>/grafana-admin-password` and
@@ -560,16 +635,17 @@ no Grafana alerting; the monitor, a thread on the Mac that
 panels by their titles every 15 minutes and steers through
 `control --actor monitor`.
 
-Grafana is then `http://<record>:3000` and the host `ssh ec2-user@<record>`
-across replacements, through the subnet router; Session Manager is the shell
-when the router is down. ssh logs in with the private key of the launch's
+Grafana is then `https://<record>` across replacements, through the subnet
+router and the load balancer. ssh reaches the host on port 443 at its private
+address, which the launch prints and a replacement changes; Session Manager is
+the shell when the router is down. ssh logs in with the private key of the launch's
 `--ssh-public-key`; name it with `-i` and `-o IdentitiesOnly=yes` when it is
 not ssh's default, since an agent holding many keys can spend the host's
 login attempts first. `status` and `control` run on the host, against
 `/regulator/campaign`:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes ec2-user@<record> /opt/regulator/venv/bin/python \
+ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes ec2-user@<address> /opt/regulator/venv/bin/python \
   /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py status /regulator/campaign
 ```
 
@@ -585,7 +661,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 A controller that ends, whether every phase completed, some failed, or the
 campaign was stopped, lists every file of the campaign root with its SHA-256
 in `campaign-files.sha256`; one that SIGTERM stopped lists nothing. `finish`
-pulls the root of an ended campaign over ssh with rsync into the results
+pulls the root of an ended campaign over ssh on port 443 with rsync into the results
 directory the reduction and archiving read, by default
 `benchmark-results/pre-review-baseline/<campaign>`, and checks every file
 against that list. It replaces a local root only where an earlier `finish`
@@ -597,10 +673,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-ide
 ```
 
 Only Dain tears a control host down, once the campaign's root is pulled and
-nothing more is wanted from its Grafana. `teardown` terminates the host,
-snapshots the volume, which is then the root's last copy until Dain deletes
-it, and deletes the record where it still names the host, the volume, and the
-Grafana parameters. It refuses without `--confirm`:
+nothing more is wanted from its Grafana. `teardown` deregisters the host from
+the load balancer and terminates it, snapshots the volume, which is then the
+root's last copy until Dain deletes it, and deletes the volume and the Grafana
+parameters; the record, the load balancer, and its target group stay. It
+refuses without `--confirm`:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confirm
@@ -696,7 +773,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campa
 
 ```text
 campaign /durable/path/<campaign>: controller running as process 4242
-Grafana   http://<record>:3000
+Grafana   https://<record>
 candidate before at 0c1d2e3f4a5b
   build             complete
   smoke             complete

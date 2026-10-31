@@ -324,18 +324,14 @@ class AwsCloud:
             {"ResourceType": "snapshot", "Tags": [{"Key": key, "Value": value} for key, value in tags.items()]}])[
             "SnapshotId"]
 
-    def change_record(self, region, zone, action, name, address):
-        """UPSERT or DELETE the zone's A record of that name at the address. A DELETE that finds the record naming
-        another address, or no record, changes nothing and returns False."""
-        try:
-            self.call("route53", region, "change_resource_record_sets", HostedZoneId=zone, ChangeBatch={"Changes": [
-                {"Action": action, "ResourceRecordSet": {"Name": name, "Type": "A", "TTL": 60,
-                                                         "ResourceRecords": [{"Value": address}]}}]})
-        except CloudError as error:
-            if action == "DELETE" and error_code(error.__cause__) == "InvalidChangeBatch":
-                return False
-            raise
-        return True
+    def register_target(self, region, target_group, instance, port):
+        """Register the instance in the load balancer's target group, which forwards to it at the port."""
+        self.call("elbv2", region, "register_targets", TargetGroupArn=target_group,
+                  Targets=[{"Id": instance, "Port": port}])
+
+    def deregister_target(self, region, target_group, instance, port):
+        self.call("elbv2", region, "deregister_targets", TargetGroupArn=target_group,
+                  Targets=[{"Id": instance, "Port": port}])
 
     def run_instance(self, region, spec):
         """Launch one instance, terminated when it shuts down, and return its ID. Raises LaunchRejected when AWS

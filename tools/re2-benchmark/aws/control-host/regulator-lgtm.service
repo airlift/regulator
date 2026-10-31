@@ -1,6 +1,7 @@
 # Grafana with Prometheus, Loki and Tempo behind it, from the pinned grafana/otel-lgtm image. Grafana listens on
-# port 3000 for the subnet router's traffic; OTLP listens on the host's loopback only, for the controller. Its data
-# lives on the campaign volume, and its dashboards come from the checkout.
+# port 3000 for the internal load balancer, which serves it over TLS on 443 to the subnet router's traffic; OTLP
+# listens on the host's loopback only, for the controller. Its data lives on the campaign volume, and its dashboards
+# come from the checkout.
 [Unit]
 Description=Regulator benchmark telemetry (grafana/otel-lgtm)
 Requires=docker.service
@@ -19,6 +20,7 @@ ExecStart=/usr/bin/docker run --rm --name lgtm \
     -e GF_AUTH_ANONYMOUS_ENABLED=false \
     -e GF_AUTH_DISABLE_LOGIN_FORM=false \
     -e GF_SECURITY_ADMIN_PASSWORD \
+    -e GF_SERVER_ROOT_URL \
     grafana/otel-lgtm@sha256:0df9bc14142000b161344bd24caf6ddd319b7319055aedaf9b0692b125730af7
 ExecStop=/usr/bin/docker stop lgtm
 Restart=always

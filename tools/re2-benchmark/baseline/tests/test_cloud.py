@@ -114,8 +114,8 @@ class FakeCloud:
     or None. A terminated instance stays listed as terminated.
 
     A control host's account also has the SSM parameters, security groups and subnets a test gives it, and the
-    volumes, snapshots and Route 53 records the commands create. Waiting for an instance to run starts it, and
-    waiting for a volume to be available finds it so once no running instance holds it.
+    volumes, snapshots and load balancer targets the commands create. Waiting for an instance to
+    run starts it, and waiting for a volume to be available finds it so once no running instance holds it.
 
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
     monotonic() read it, so a scenario takes the time its calls would. Calls made on a pool's threads, as executor
@@ -166,8 +166,8 @@ class FakeCloud:
         # Each volume's instance, by volume ID.
         self.attachments = {}
         self.snapshots = []
-        # Each A record's address, by (zone, name).
-        self.records = {}
+        # Each target group's registered (instance, port) targets, by ARN.
+        self.targets = {}
         # Each control host launch's parameters, by instance ID.
         self.control_hosts = {}
 
@@ -360,15 +360,13 @@ class FakeCloud:
         self.snapshots.append((volume, dict(tags)))
         return f"snap-{len(self.snapshots)}"
 
-    def change_record(self, region, zone, action, name, address):
-        self.call("change_record", action, name, address)
-        if action == "UPSERT":
-            self.records[zone, name] = address
-            return True
-        if self.records.get((zone, name)) != address:
-            return False
-        del self.records[zone, name]
-        return True
+    def register_target(self, region, target_group, instance, port):
+        self.call("register_target", target_group, instance, port)
+        self.targets.setdefault(target_group, set()).add((instance, port))
+
+    def deregister_target(self, region, target_group, instance, port):
+        self.call("deregister_target", target_group, instance, port)
+        self.targets.get(target_group, set()).discard((instance, port))
 
 
 class TestAwsCloud(unittest.TestCase):
@@ -572,8 +570,8 @@ class TestAwsCloud(unittest.TestCase):
             aws.run_instance("us-west-2", spec)
         aws.terminate("us-west-2", ["i-launched"])
 
-    def test_control_host_is_launched_private_onto_its_volume_and_named_by_its_record(self):
-        ec2, ssm, route53 = self.stub("ec2"), self.stub("ssm"), self.stub("route53")
+    def test_control_host_is_launched_private_onto_its_volume_behind_its_load_balancer(self):
+        ec2, ssm, elbv2 = self.stub("ec2"), self.stub("ssm"), self.stub("elbv2")
         tags = [{"Key": "Campaign", "Value": "c"}]
         ssm.add_response("get_parameter", {"Parameter": {"Value": '{"vpc": "vpc-a"}'}},
                          {"Name": "/network", "WithDecryption": True})
@@ -610,13 +608,9 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_response("create_snapshot", {"SnapshotId": "snap-a"}, {
             "VolumeId": "vol-new", "TagSpecifications": [{"ResourceType": "snapshot", "Tags": tags}]})
         ec2.add_response("delete_volume", {}, {"VolumeId": "vol-new"})
-        record = {"Name": "host.example", "Type": "A", "TTL": 60, "ResourceRecords": [{"Value": "10.0.1.5"}]}
-        route53.add_response("change_resource_record_sets", {"ChangeInfo": {
-            "Id": "change", "Status": "PENDING", "SubmittedAt": datetime(2026, 10, 30)}}, {
-            "HostedZoneId": "zone", "ChangeBatch": {"Changes": [{"Action": "UPSERT", "ResourceRecordSet": record}]}})
-        # A deletion that finds the record naming another host leaves it.
-        route53.add_client_error("change_resource_record_sets", "InvalidChangeBatch", http_status_code=400)
-
+        targets = {"TargetGroupArn": "arn:target-group", "Targets": [{"Id": "i-host", "Port": 3000}]}
+        elbv2.add_response("register_targets", {}, targets)
+        elbv2.add_response("deregister_targets", {}, targets)
         aws = self.cloud
         self.assertEqual('{"vpc": "vpc-a"}', aws.parameter("us-west-2", "/network"))
         self.assertIsNone(aws.parameter("us-west-2", "/absent"))
@@ -635,8 +629,8 @@ class TestAwsCloud(unittest.TestCase):
         aws.attach_volume("us-west-2", "vol-new", "i-host", "/dev/sdf")
         self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
         aws.delete_volume("us-west-2", "vol-new")
-        self.assertTrue(aws.change_record("us-west-2", "zone", "UPSERT", "host.example", "10.0.1.5"))
-        self.assertFalse(aws.change_record("us-west-2", "zone", "DELETE", "host.example", "10.0.1.5"))
+        aws.register_target("us-west-2", "arn:target-group", "i-host", 3000)
+        aws.deregister_target("us-west-2", "arn:target-group", "i-host", 3000)
 
     def test_worker_profile_and_prefix_deletion(self):
         iam = self.stub("iam")

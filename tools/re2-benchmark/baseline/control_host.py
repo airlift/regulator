@@ -2,10 +2,11 @@
 Mac-side steps that launch, replace, finish and tear it down.
 
 The host's network, which this public repository never names, is the JSON SSM parameter NETWORK_PARAMETER: the VPC,
-the private subnets the company's Tailscale subnet router carries, the CIDR the router's traffic arrives from, and the
-private zone and record name that keep Grafana at one URL. The campaign root lives on the campaign's own EBS volume,
-so a replaced host carries on with it. The Mac-side steps run under Dain's credentials, which alone may write the
-record.
+the private subnets the company's Tailscale subnet router carries, the CIDR the router's traffic arrives from, the
+host's security group, and the internal load balancer, its security group and target group, whose record keeps
+Grafana at one URL. The router forwards only tcp 443, so the load balancer's TLS listener carries Grafana and the
+host's sshd listens on 443 too. The campaign root lives on the campaign's own EBS volume, so a replaced host carries
+on with it. The Mac-side steps run under Dain's credentials, which alone may register hosts in the target group.
 """
 
 import hashlib
@@ -23,9 +24,12 @@ INSTANCE_TYPE = "m7i.large"
 PROFILE = "regulator-benchmark-control-host"
 SECURITY_GROUP = "regulator-benchmark-control-host"
 NETWORK_PARAMETER = "/regulator-benchmark/control-host-network"
-NETWORK_KEYS = ("vpc", "subnets", "ingress_cidr", "zone", "record")
-# ssh and Grafana, the only ports the security group admits.
-PORTS = (22, 3000)
+NETWORK_KEYS = ("vpc", "subnets", "ingress_cidr", "zone", "record", "security_group", "load_balancer_security_group",
+                "target_group", "load_balancer", "listener", "certificate")
+# The port the host's sshd listens on beside 22, the only one the subnet router forwards.
+SSH_PORT = 443
+# The port Grafana answers the load balancer on.
+GRAFANA_PORT = 3000
 # The status ssh exits with when it cannot reach or log in to the host, rather than the remote command's.
 SSH_FAILED = 255
 VOLUME_GIB = 200
@@ -75,12 +79,14 @@ def network(aws):
 
 
 def security_group(aws, network):
-    """The control host's security group, which admits only ssh and Grafana from the network's ingress CIDR."""
+    """The control host's security group, which admits only ssh from the network's ingress CIDR and Grafana from the
+    load balancer."""
     found = aws.security_group(REGION, network["vpc"], SECURITY_GROUP)
-    if found is None or found[1] != {("tcp", port, port, network["ingress_cidr"]) for port in PORTS}:
+    if found is None or found[1] != {("tcp", SSH_PORT, SSH_PORT, network["ingress_cidr"]),
+                                     ("tcp", GRAFANA_PORT, GRAFANA_PORT, network["load_balancer_security_group"])}:
         raise SystemExit(f"the control host's VPC has no {SECURITY_GROUP} security group admitting only tcp "
-                         f"{' and '.join(map(str, PORTS))} from its ingress CIDR; create it as aws/README.md "
-                         "\"Account setup\" describes")
+                         f"{SSH_PORT} from its ingress CIDR and tcp {GRAFANA_PORT} from its load balancer's security "
+                         "group; create it as aws/README.md \"Account setup\" describes")
     return found[0]
 
 
@@ -117,8 +123,9 @@ def write_launch_inputs(path, controller_arguments, commits, settings, plans):
 
 
 def grafana_url(network):
-    """The URL the campaign's Grafana serves at, the network's record, which follows the host across replacements."""
-    return f"http://{network['record']}:3000"
+    """The URL the campaign's Grafana serves at, the network's record, which names the load balancer that forwards to
+    whichever host is registered."""
+    return f"https://{network['record']}"
 
 
 def user_data(campaign, volume, ssh_public_key, inputs_uri, inputs_sha256, url):
@@ -182,6 +189,8 @@ def replace(aws, campaign, ssh_public_key):
     volume = campaign_volume(aws, campaign)
     hosts = live_hosts(aws, campaign)
     if hosts:
+        for host in hosts:
+            aws.deregister_target(REGION, found["target_group"], host.id, GRAFANA_PORT)
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
@@ -190,8 +199,8 @@ def replace(aws, campaign, ssh_public_key):
 
 
 def start(aws, network, group, campaign, volume, ssh_public_key):
-    """Start a control host in the network's subnet in the volume's zone, attach the volume, and point the record at
-    the host."""
+    """Start a control host in the network's subnet in the volume's zone, attach the volume, and register the host in
+    the load balancer's target group."""
     zones = aws.subnet_zones(REGION, network["subnets"])
     subnet = next((subnet for subnet in network["subnets"] if zones[subnet] == volume.zone), None)
     if subnet is None:
@@ -206,10 +215,10 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
                                              data, tags(campaign))
     aws.wait(REGION, "instance_running", instance)
     aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
-    aws.change_record(REGION, network["zone"], "UPSERT", network["record"], address)
+    aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
-          f"ssh: ssh ec2-user@{network['record']}\n"
+          f"ssh: ssh -p {SSH_PORT} ec2-user@{address}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
 
@@ -241,9 +250,10 @@ def manifest_problems(root):
 
 
 def finish(aws, campaign, local_root, identity=None):
-    """Pull the campaign root from its control host into local_root over ssh, with only the private key identity
-    when one is given, once its controller has ended, and check it against the controller's manifest. A local root
-    that holds files is replaced only where an earlier finish pulled it."""
+    """Pull the campaign root from its control host into local_root over ssh on SSH_PORT to the host's private
+    address, with only the private key identity when one is given, once its controller has ended, and check it
+    against the controller's manifest. A local root that holds files is replaced only where an earlier finish pulled
+    it."""
     hosts = [host for host in live_hosts(aws, campaign) if host.state == "running"]
     if len(hosts) != 1:
         raise SystemExit(f"campaign {campaign} has {len(hosts)} running control hosts; expected one")
@@ -252,7 +262,7 @@ def finish(aws, campaign, local_root, identity=None):
                          "--campaign-root")
     remote = f"ec2-user@{hosts[0].address}"
     # An agent holding many keys would spend the host's authentication attempts before it offered the right one.
-    ssh = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+    ssh = ["ssh", "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=accept-new",
            *(["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else [])]
     try:
         status = subprocess.run([*ssh, remote, "test", "-f", f"{CAMPAIGN_ROOT}/{MANIFEST}"]).returncode
@@ -275,9 +285,9 @@ def finish(aws, campaign, local_root, identity=None):
 
 
 def teardown(aws, campaign, confirm):
-    """Remove the campaign's control host for good, as only Dain does: terminate it, snapshot its volume, which is
-    then the campaign root's last copy, and delete the record where it names the host, the volume, and the Grafana
-    credentials."""
+    """Remove the campaign's control host for good, as only Dain does: deregister it from the load balancer and
+    terminate it, snapshot its volume, which is then the campaign root's last copy, and delete the volume and the
+    Grafana credentials. The record, the load balancer and its target group belong to the account setup."""
     if not confirm:
         raise SystemExit(f"teardown terminates campaign {campaign}'s control host and deletes its volume, keeping a "
                          "snapshot; only Dain runs it, with --confirm")
@@ -286,16 +296,14 @@ def teardown(aws, campaign, confirm):
     # The host goes first, so the snapshot holds the root as its controller last wrote it.
     hosts = live_hosts(aws, campaign)
     if hosts:
+        for host in hosts:
+            aws.deregister_target(REGION, found["target_group"], host.id, GRAFANA_PORT)
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
         aws.wait(REGION, "volume_available", volume.id)
     snapshot = aws.create_snapshot(REGION, volume.id, tags(campaign))
     aws.wait(REGION, "snapshot_completed", snapshot)
-    # The record names the host started last; one that names another address belongs to another campaign's host.
-    if not any([aws.change_record(REGION, found["zone"], "DELETE", found["record"], host.address)
-                for host in hosts if host.address]):
-        print(f"left {found['record']}, which names none of campaign {campaign}'s hosts", flush=True)
     aws.delete_volume(REGION, volume.id)
     aws.delete_parameters(REGION, grafana_parameters(campaign))
     print(f"tore down campaign {campaign}'s control host; its root's last copy is snapshot {snapshot}", flush=True)
