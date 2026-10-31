@@ -780,8 +780,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   stopped campaign that has not ended only stops the hosts an earlier
   controller left.
 - `reopen` lets an ended campaign's controller start again: it clears any
-  stop and deletes `campaign-files.sha256`, so `finish` waits for the list
-  the next controller writes as it ends. Start the controller again with
+  stop and records its event whether or not there was one, and then, under
+  the settings lock the controller writes the list under, deletes
+  `campaign-files.sha256`, so `finish` waits for the list the next controller
+  writes as it ends, and a second reopen finds the campaign not ended. One
+  interrupted before it deletes the list is run again. Start the controller again with
   `sudo systemctl restart regulator-campaign@<campaign>` on the host.
 - `authorize max-hosts N`, `authorize max-usd N`, and
   `authorize regions <region>...` set the `authorized` envelope, which only

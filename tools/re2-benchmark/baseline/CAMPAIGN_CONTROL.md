@@ -499,8 +499,9 @@ spending stop, and after a failure, the controller writes its marker and the
 host keeps serving Grafana so Dain can see what happened; idle it costs a few
 dollars a day. A controller refuses to start on a root with the marker, so a
 reboot or a replaced host never runs an ended campaign again, and `control`
-refuses every command on it but Dain's `control ... reopen`, which clears it,
-so the root stays as the manifest lists it. A controller's refusal, of an
+refuses every command on it but Dain's `control ... reopen`, which records
+its event and then clears the marker under the settings lock, so the root
+stays as the manifest lists it. A controller's refusal, of an
 ended root or any other a restart would repeat, exits 3, which systemd does
 not restart.
 
