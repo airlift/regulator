@@ -71,7 +71,9 @@ ON_DEMAND_TAIL_PERCENT = 10
 # nothing.
 LAUNCH_NOT_FOUND = "launched instance was not found"
 BOOT_DEADLINE_MISSED = "worker did not report by its boot deadline"
-# A worker launches only once S3 holds every lease it was launched with.
+# A worker launches only once S3 holds every lease it was launched with. One whose leases S3 did not take booted
+# nothing, so it spends none of its slot's replacements, and its pool waits CAPACITY_RETRY_SECONDS before it launches
+# again.
 FIRST_LEASES_UNWRITTEN = "launch-infrastructure:first leases not written"
 # A request one region refused while its pool had another region to try spends none of its slot's replacements.
 REGION_REFUSAL = "launch-region-refused:"
@@ -3361,7 +3363,7 @@ class UnitDispatcher:
         if detail.startswith(("launch-capacity:", REGION_REFUSAL)):
             # The pool's launches in the market move past a region that found no capacity or refused the request.
             self.cool_down(pool, worker.job.market, worker.job.region, detail.startswith("launch-capacity:"))
-        if classification == "retryable-capacity":
+        if classification == "retryable-capacity" or detail == FIRST_LEASES_UNWRITTEN:
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
 
     def cool_down(self, pool, market, region, shortage):
@@ -3382,12 +3384,12 @@ class UnitDispatcher:
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
         its pool opens no new slot. A launch that found no capacity, that one region refused while its pool had
-        another to try, or whose instance was never found, booted nothing.
+        another to try, whose first leases S3 did not take, or whose instance was never found, booted nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
-        elif (status != 0 and not terminated and detail != LAUNCH_NOT_FOUND and
+        elif (status != 0 and not terminated and detail not in (LAUNCH_NOT_FOUND, FIRST_LEASES_UNWRITTEN) and
               not detail.startswith(("launch-capacity:", REGION_REFUSAL))):
             failures += 1
         if failures > MAX_REPLACEMENTS_PER_JOB:

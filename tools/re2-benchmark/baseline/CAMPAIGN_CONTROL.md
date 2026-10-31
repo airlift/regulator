@@ -177,7 +177,9 @@ one bash process per host) is deleted. The controller launches with boto3:
    instance ID the host reports. The boot deadline releases the leases of a
    host that never boots, without spending an attempt. A worker whose first
    leases S3 did not all take is not launched: its launch fails as
-   `retryable-infrastructure`, and its slot's replacement tries again.
+   `retryable-infrastructure`, spends none of its slot's replacements, since
+   nothing booted, and its pool waits 30 s before it launches again, so an S3
+   outage holds launches back without failing the phase.
    Workers admitted in a loop are launched even when a later admission
    fails, so none stays recorded as starting without a launch.
 3. Calls `RunInstances` with user data naming the prefixes, the archives and
