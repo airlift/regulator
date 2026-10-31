@@ -98,9 +98,9 @@ host creates four IAM resources and deletes three):
 Every campaign bucket keeps two trees with their own lifecycle rules, from
 `../aws/bucket-lifecycle.json`. The content-addressed archives every campaign
 reuses (candidates, engine builds, plan bundles, JDKs) live under `shared/`
-and expire seven days after upload; a phase, or a region `add-region` adds,
-puts an archive again once it is five days old, so no phase outlives its
-archives. Each campaign's worker sessions live under
+and expire seven days after upload; a phase's region check, which a running
+phase repeats every day, or a region `add-region` adds, puts an archive again
+once it is five days old, so no phase outlives its archives. Each campaign's worker sessions live under
 `campaigns/<campaign>/<session>/` and expire after one day, which sweeps what
 a lost controller leaves. One rule over the whole bucket could not serve both:
 a one-day expiry would delete archives that a later phase skips uploading

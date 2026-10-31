@@ -176,10 +176,12 @@ JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
 SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
 # Each shared bucket keeps every campaign's content-addressed archives under this prefix, which its lifecycle rule
 # expires seven days after upload, and each campaign's host sessions under campaigns/<campaign>, which it expires
-# after one day. A phase, or a region added to the campaign, puts an archive again once it is older than this, so it
-# outlives the phase.
+# after one day. A phase's region check, or a region added to the campaign, puts an archive again once it is older
+# than this, and a running phase checks its regions again every REGION_RECHECK_SECONDS, so an archive outlives the
+# phase however long it runs.
 SHARED_PREFIX = "shared"
 SHARED_ARCHIVE_REFRESH_SECONDS = 5 * 24 * 60 * 60
+REGION_RECHECK_SECONDS = 24 * 60 * 60
 # Every archive the campaign has put in its regions' shared buckets, by key, in the campaign root, so a region added
 # later gets each one before any phase may launch there.
 SHARED_ARCHIVES = "shared-archives.tsv"
@@ -4062,9 +4064,10 @@ class Phase:
     fault: str = ""
     # When, in epoch seconds, the pause the phase's pauses ledger records open began, while it lasts.
     paused_since: float = None
-    # The settings' regions as they stood when the phase's regions were last checked, and a check of a running
-    # phase's regions on the setup thread, with the copy of its namespace it checks.
+    # The settings' regions as they stood when the phase's regions were last checked, and when, on the monotonic
+    # clock, and a check of a running phase's regions on the setup thread, with the copy of its namespace it checks.
     regions: str = None
+    checked_at: float = None
     checking: tuple = None
 
     @property
@@ -4444,7 +4447,7 @@ class Campaign:
     def start(self, phase):
         self.telemetry.event("phase-starting", f"{phase.key}: starting", phase=phase.key)
         phase.state = "starting"
-        phase.regions = self.regions()
+        phase.regions, phase.checked_at = self.regions(), time.monotonic()
         if phase.reduction:
             phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
         else:
@@ -4457,9 +4460,11 @@ class Campaign:
 
     def follow_regions(self, running):
         """Check each running phase's regions again once the settings' regions or a platform's list of them
-        changed, as its setup did, on the setup thread; a phase launches in the regions that check finds only once it
-        passes, and until then where it did. A check that fails is logged and runs again at the next change."""
+        changed, and every REGION_RECHECK_SECONDS, which puts its archives again before they expire, as its setup
+        did, on the setup thread; a phase launches in the regions that check finds only once it passes, and until
+        then where it did. A check that fails is logged and runs again at the next change or the next day."""
         regions = self.regions()
+        now = time.monotonic()
         for phase in running:
             if phase.checking is not None and phase.checking[0].done():
                 future, checked, namespace = phase.checking
@@ -4470,8 +4475,9 @@ class Campaign:
                     print(f"{phase.key}: launches stay in the regions checked before: {error}", flush=True)
                 else:
                     namespace.ami_names, namespace.region_offerings = checked.ami_names, checked.region_offerings
-            if phase.checking is None and phase.regions != regions and not phase.fault:
-                phase.regions = regions
+            if (phase.checking is None and not phase.fault and
+                    (phase.regions != regions or now - phase.checked_at >= REGION_RECHECK_SECONDS)):
+                phase.regions, phase.checked_at = regions, now
                 namespace = phase.dispatcher.arguments
                 checked = SimpleNamespace(**vars(namespace))
                 phase.checking = (self.setup.submit(check_regions, checked, list(phase.dispatcher.platforms.values())),
