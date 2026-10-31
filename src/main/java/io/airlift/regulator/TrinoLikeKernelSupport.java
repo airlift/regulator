@@ -116,12 +116,34 @@ final class TrinoLikeKernelSupport
     /// `literal` occur at `inputOffset`.
     static int matchingPrefixLength(byte[] input, int inputOffset, byte[] literal)
     {
-        for (int index = 0; index < literal.length; index++) {
+        int length = literal.length;
+        if (length >= Long.BYTES) {
+            int index = 0;
+            for (; index < length - Long.BYTES; index += Long.BYTES) {
+                long difference = ((long) LONG.get(input, inputOffset + index)) ^ ((long) LONG.get(literal, index));
+                if (difference != 0) {
+                    return index + (Long.numberOfTrailingZeros(difference) >>> 3);
+                }
+            }
+            index = length - Long.BYTES;
+            long difference = ((long) LONG.get(input, inputOffset + index)) ^ ((long) LONG.get(literal, index));
+            return difference == 0 ? length : index + (Long.numberOfTrailingZeros(difference) >>> 3);
+        }
+        if (length >= Integer.BYTES) {
+            int difference = ((int) INT.get(input, inputOffset)) ^ ((int) INT.get(literal, 0));
+            if (difference != 0) {
+                return Integer.numberOfTrailingZeros(difference) >>> 3;
+            }
+            int index = length - Integer.BYTES;
+            difference = ((int) INT.get(input, inputOffset + index)) ^ ((int) INT.get(literal, index));
+            return difference == 0 ? length : index + (Integer.numberOfTrailingZeros(difference) >>> 3);
+        }
+        for (int index = 0; index < length; index++) {
             if (input[inputOffset + index] != literal[index]) {
                 return index;
             }
         }
-        return literal.length;
+        return length;
     }
 
     /// A copy of `LiteralSearchKernel.findKmp`: the first position in
