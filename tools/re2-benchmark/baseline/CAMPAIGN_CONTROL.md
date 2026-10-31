@@ -163,15 +163,17 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    one URL across host replacements, and returns with that URL and the ssh
    line, port 443 at the host's private address. One URL serves one
    campaign: the launch and `control-host replace` refuse while the target
-   group holds a host whose `Campaign` tag names another; a host that has
-   terminated serves none and does not count. Two launches can pass that
-   check at once, as when one starts while a `replace` has deregistered the
-   host it replaces, so each looks again once it registers its host, and one
-   that finds another campaign's host there deregisters and terminates its
-   own before its controller starts, and refuses. `replace` and `teardown`
-   deregister every host of their campaign, whether or not it still runs,
-   and any host that has terminated. Everything after this runs in AWS
-   (principle 7).
+   group holds any live host not tagged for this campaign, whether its
+   `Campaign` tag names another or it has none, which the refusal names as
+   campaign `unknown`. A registered host that has terminated, or that EC2 no
+   longer lists, serves none and does not count; `replace` and `teardown`
+   deregister it whatever its campaign, along with every host of their own
+   campaign, whether or not it still runs. Two launches can pass that check
+   at once, as when one starts while a `replace` has deregistered the host it
+   replaces, so each looks again once it registers its host, and one that
+   finds another campaign's host there deregisters and terminates its own
+   before its controller starts, and refuses. Everything after this runs in
+   AWS (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket
