@@ -142,11 +142,17 @@ public class TestRustScanPlan
             assertThat(RustRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics()).as(expression).isFalse();
             assertThat(RustRegexp.compile(utf8Slice(expression), GENERATING).usesGeneratedBytecode()).as(expression).isFalse();
         }
-        // Byte mode builds no scan plan, even for an ASCII pattern that builds one outside byte
-        // mode. Only byte constructs carry the Latin-1 flag the analysis checks, so the analysis
-        // alone would still admit an ASCII-only byte-mode pattern.
-        for (String expression : List.of(PLAN_CASES.getFirst().expression(), "^x(?-u:[a-z]+)/")) {
+        // Byte mode builds the same plan, since the analysis declines every construct that reads
+        // bytes differently, one that can match a byte above 0x7F. The Unicode dot-all dot still
+        // reads UTF-8.
+        for (String expression : List.of(PLAN_CASES.getFirst().expression(), "^x(?-u:[a-z]+)/", "^x([a-z]+)/(?s:.*)")) {
             assertThat(RustRegexp.compile(utf8Slice(expression)).re2().usesScanPlanForDiagnostics()).as(expression).isTrue();
+            assertThat(RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes()).re2().usesScanPlanForDiagnostics()).as(expression).isTrue();
+            assertThat(RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setGenerateBytecode(true)).usesGeneratedBytecode()).as(expression).isTrue();
+        }
+        // A byte class or literal declines by its Latin-1 flag, and the any-byte dot, which has no
+        // such flag, by its kind.
+        for (String expression : List.of("^x(?-u:[^/]+)/", "^x(?-u:\\xFF)([a-z]+)/", "^x([a-z]+)/(?s-u:.*)")) {
             assertThat(RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes()).re2().usesScanPlanForDiagnostics()).as(expression).isFalse();
             assertThat(RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setGenerateBytecode(true)).usesGeneratedBytecode()).as(expression).isFalse();
         }
@@ -213,7 +219,7 @@ public class TestRustScanPlan
         for (PlanCase planCase : PLAN_CASES) {
             RustRegexp expected = RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(planCase.expression()), RustRegexp.Options.defaults());
             assertThat(expected.find(utf8Slice(planCase.witness()))).as(planCase.expression()).isTrue();
-            List<NamedRegexp> planned = planned(planCase.expression());
+            List<NamedRegexp> planned = planned(planCase.expression(), false);
             for (String input : inputs(planCase.witness())) {
                 Slice source = utf8Slice(input);
                 List<String> expectedResults = results(expected, source);
@@ -228,7 +234,7 @@ public class TestRustScanPlan
         Slice rejected = utf8Slice("x\u0085é");
         RustRegexp expected = RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(partial), RustRegexp.Options.defaults());
         assertThat(expected.find(rejected)).isFalse();
-        for (NamedRegexp regexp : planned(partial)) {
+        for (NamedRegexp regexp : planned(partial, false)) {
             assertThat(results(regexp.regexp(), rejected)).as(regexp.name()).isEqualTo(results(expected, rejected));
         }
     }
@@ -264,14 +270,16 @@ public class TestRustScanPlan
     public void testPlansMatchTheOrdinaryEngineOnMalformedInput()
     {
         // Outside byte mode, results on malformed UTF-8 are unspecified, but a plan must still
-        // report what the ordinary engine reports.
-        for (PlanCase planCase : PLAN_CASES) {
-            RustRegexp expected = RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(planCase.expression()), RustRegexp.Options.defaults());
-            List<NamedRegexp> planned = planned(planCase.expression());
-            for (Slice source : sources(new Random(planCase.expression().hashCode()), planCase.witness().getBytes(UTF_8))) {
-                List<String> expectedResults = results(expected, source);
-                for (NamedRegexp regexp : planned) {
-                    assertThat(results(regexp.regexp(), source)).as("%s %s on %s", regexp.name(), planCase.expression(), HexFormat.of().formatHex(source.getBytes())).isEqualTo(expectedResults);
+        // report what the ordinary engine reports. In byte mode, that is the crate's result.
+        for (boolean bytes : new boolean[] {false, true}) {
+            for (PlanCase planCase : PLAN_CASES) {
+                RustRegexp expected = RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(planCase.expression()), options(bytes));
+                List<NamedRegexp> planned = planned(planCase.expression(), bytes);
+                for (Slice source : sources(new Random(planCase.expression().hashCode()), planCase.witness().getBytes(UTF_8))) {
+                    List<String> expectedResults = results(expected, source);
+                    for (NamedRegexp regexp : planned) {
+                        assertThat(results(regexp.regexp(), source)).as("%s %s %s on %s", regexp.name(), bytes ? "bytes" : "str", planCase.expression(), HexFormat.of().formatHex(source.getBytes())).isEqualTo(expectedResults);
+                    }
                 }
             }
         }
@@ -373,20 +381,26 @@ public class TestRustScanPlan
         return plan == null ? 0 : Arrays.stream(plan.operationsForDiagnostics().split(",")).filter("RE2_SET_RUN"::equals).count();
     }
 
-    /// Returns the pattern compiled with its plan, and with its plan forced to hand every
-    /// unanchored search to the ordinary engine, each with and without generated bytecode.
-    private static List<NamedRegexp> planned(String expression)
+    /// Returns the pattern compiled with its plan, in byte mode when `bytes` is set, and with its
+    /// plan forced to hand every unanchored search to the ordinary engine, each with and without
+    /// generated bytecode.
+    private static List<NamedRegexp> planned(String expression, boolean bytes)
     {
         Slice pattern = utf8Slice(expression);
         List<NamedRegexp> planned = List.of(
-                new NamedRegexp("plan", RustRegexp.compile(pattern)),
-                new NamedRegexp("handoff", RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, RustRegexp.Options.defaults())),
-                new NamedRegexp("generated", RustRegexp.compile(pattern, GENERATING)),
-                new NamedRegexp("generated handoff", RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, GENERATING)));
+                new NamedRegexp("plan", RustRegexp.compile(pattern, options(bytes))),
+                new NamedRegexp("handoff", RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, options(bytes))),
+                new NamedRegexp("generated", RustRegexp.compile(pattern, options(bytes).setGenerateBytecode(true))),
+                new NamedRegexp("generated handoff", RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, options(bytes).setGenerateBytecode(true))));
         for (NamedRegexp regexp : planned) {
             assertThat(regexp.regexp().re2().usesScanPlanForDiagnostics()).as("%s %s", regexp.name(), expression).isTrue();
         }
         return planned;
+    }
+
+    private static RustRegexp.Options options(boolean bytes)
+    {
+        return bytes ? RustRegexp.Options.bytes() : RustRegexp.Options.defaults();
     }
 
     /// Returns the witness with each line end appended, after a lead and doubled, and without its
