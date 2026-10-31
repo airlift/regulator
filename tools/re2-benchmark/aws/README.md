@@ -666,7 +666,8 @@ the shell when the router is down. ssh trusts a host's keys only once its
 console lists their fingerprints: `control-host known-host <campaign>` records
 the keys the host serves whose fingerprints its console lists in
 `~/.ssh/regulator-control-hosts`, replacing any an earlier host at the address
-had, and prints the address; it refuses a host that serves none of them, and
+had, under a lock beside it, so commands recording keys at once take turns,
+and prints the address; it refuses a host that serves none of them, and
 one whose console lists none yet, as for a minute or two after its launch.
 ssh logs in with the private key of the launch's
 `--ssh-public-key`; name it with `-i` and `-o IdentitiesOnly=yes` when it is

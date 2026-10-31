@@ -17,9 +17,11 @@ import re
 import shlex
 import subprocess
 import tarfile
+import tempfile
 from pathlib import Path
 
 from campaign_io import fsync_directory
+from campaign_settings import locked
 from cloud import CloudError
 
 REGION = "us-west-2"
@@ -353,12 +355,19 @@ def known_host(aws, campaign):
     if not trusted:
         raise SystemExit(f"no ssh host key campaign {campaign}'s control host at {host.address} serves matches a "
                          f"fingerprint its console {host.id} lists, so ssh to it is refused")
-    kept = [line for line in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.is_file() else [])
-            if line.split()[:1] != [name]]
     KNOWN_HOSTS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = KNOWN_HOSTS.with_name(f"{KNOWN_HOSTS.name}.new")
-    temporary.write_text("".join(f"{line}\n" for line in [*kept, *trusted]))
-    os.replace(temporary, KNOWN_HOSTS)
+    # Commands recording keys at once, as finish and known-host may, each rewrite the file from the one before, so
+    # each waits for the other, and stages its own copy.
+    with locked(KNOWN_HOSTS.with_name(f"{KNOWN_HOSTS.name}.lock")):
+        kept = [line for line in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.is_file() else [])
+                if line.split()[:1] != [name]]
+        descriptor, temporary = tempfile.mkstemp(prefix=f"{KNOWN_HOSTS.name}.", suffix=".new", dir=KNOWN_HOSTS.parent)
+        try:
+            with os.fdopen(descriptor, "w") as output:
+                output.write("".join(f"{line}\n" for line in [*kept, *trusted]))
+            os.replace(temporary, KNOWN_HOSTS)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
     return host.address
 
 
