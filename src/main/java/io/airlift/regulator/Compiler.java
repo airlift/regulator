@@ -830,6 +830,7 @@ final class Compiler
         private Prog finish(CompileStage stage)
         {
             if (stage.ordinal() >= CompileStage.OPTIMIZED.ordinal()) {
+                program.dropImpliedJavaCaretExclusions();
                 program.optimize();
             }
             if (stage.ordinal() >= CompileStage.FLATTENED.ordinal()) {

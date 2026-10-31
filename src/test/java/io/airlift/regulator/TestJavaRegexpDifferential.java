@@ -109,7 +109,13 @@ public class TestJavaRegexpDifferential
                 "(?m)^",
                 "(?dm)$",
                 "(?dm:^a)|(?m:^b)",
-                "(?m:^a)|(?dm:^b)")) {
+                "(?m:^a)|(?dm:^b)",
+                "(?dm)^a|a$",
+                "(?dm)(?:^a)+",
+                "(?dm)(?:^b?)+",
+                // The empty intersection drops a fragment whose open exits hold patch-list
+                // entries, and the run of a's makes them land past the last instruction.
+                "(?dm)aaaaaaaa(?:^|$)([a&&b])|^b")) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             for (String input : List.of("", "\n", "a\n", "a\nb", "\rb", "a\r\nb", "\u0085b", "é\nb", "\u2028b")) {
@@ -284,6 +290,27 @@ public class TestJavaRegexpDifferential
             assertThat(actual.end()).isEqualTo(expected.end());
         }
         assertThat(actual.find()).isFalse();
+    }
+
+    @Test
+    public void testUnixMultilineCaretBeforeByteUsesDfa()
+    {
+        // A caret after which every path to a match consumes a byte is never at the end of the
+        // input, so both programs drop its end-of-input check and the search runs on the DFA.
+        Re2 re2 = JavaRegexp.compile(utf8Slice("(?dm)^ab+|ab+$")).re2();
+        Prog program = re2.forwardProgramForDiagnostics();
+        assertThat(program.hasTextDependentAssertions()).isFalse();
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+
+        // A match of variable length takes its start from the reverse program.
+        int[] groups = new int[2];
+        assertThat(re2.findInto(utf8Slice("x\nabb"), groups)).isTrue();
+        assertThat(groups).containsExactly(2, 5);
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+        Prog reverse = re2.reverseProgramIfComputedForDiagnostics();
+        assertThat(reverse).isNotNull();
+        assertThat(reverse.hasTextDependentAssertions()).isFalse();
+        assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).isNotNull();
     }
 
     @Test
