@@ -372,6 +372,13 @@ class TestRunCampaign(unittest.TestCase):
                               for operation in ("instances", "spot_requests", "vcpu_quota", "vcpus")})
             self.assertIn("queued-capacity\tfleet quota",
                           (root / "job-attempts.tsv").read_text())
+            # A fleet that cannot be read refuses the launch for one reason, however the read failed, and the attempt
+            # records the error.
+            with patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot", side_effect=OSError("connection reset")):
+                self.assertEqual("shared capacity query failed", RUN_CAMPAIGN.admit_launch(
+                    arguments, root, root / "job-attempts.tsv", set(), replace(job, host_epoch=12), 0, 0, {})[2])
+            self.assertIn("queued-capacity\tshared capacity query failed: connection reset",
+                          (root / "job-attempts.tsv").read_text())
             # AWS raises the quota, which admission takes once its answer is five minutes old.
             aws.quotas[("us-west-2", "spot")] = 16
             second = replace(job, host_epoch=11)
@@ -3745,6 +3752,45 @@ class TestUnitWorkers(unittest.TestCase):
             # From the loop after the limit falls, the refusal reads 0, not its age.
             self.assertEqual([{"fleet quota": 0}], list(map(dict, set(
                 tuple(refused.items()) for refused in refusals[pinned[0] + 1:]))))
+
+    def test_a_launch_refusal_ages_through_other_boots_until_a_fault_pause(self):
+        units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
+                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for index in range(1, 17)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
+            # Ohio's vCPUs hold one r8i host, so the fleet's quota refuses the pool's next launch, while Oregon's r9g
+            # hosts fill the boot window. Host 6, of r9g's second wave, reports a marker naming another campaign, so
+            # the phase pauses for the fault, and Dain stops the campaign.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                  scripts={6: {1: "foreign-marker"}})
+            fleet.buckets["ohio"] = cloud.BucketInfo("us-east-2", RUN_CAMPAIGN.SHARED_BUCKET_TAGS)
+            regions = {"r8i": ["us-east-2"], "r9g": ["us-west-2"]}
+            campaign_settings(root, regions, {"r8i": "spot", "r9g": "spot"}, {"us-east-2": "ohio"}, max_hosts=12,
+                              max_hosts_per_platform=10, boot_window={"initial": 5, "max": 5})
+            self.control(root, "set-limit", "region", "us-east-2", "max-vcpus", "2")
+            reader = InMemoryMetricReader()
+            refusals, paused = [], []
+
+            def loop():
+                refusals.append({point.attributes["reason"]: point.value
+                                 for resource in reader.get_metrics_data().resource_metrics
+                                 for scope in resource.scope_metrics for metric in scope.metrics
+                                 if metric.name == "regulator_launch_refused_seconds"
+                                 for point in metric.data.data_points})
+                if not paused and "smoke: paused: " in log.getvalue():
+                    self.control(root, "stop")
+                    paused.append(len(refusals))
+
+            failed, _ = self.run_campaign(root, fleet, [("smoke", "smoke", ["watch"], ())], 12, 10, loop,
+                                          telemetry.Telemetry("campaign", [reader]),
+                                          purchases={"r8i": "spot", "r9g": "spot"}, platform_regions=regions)
+            self.assertEqual([], failed)
+            # The refusal ages from the first loop's through r9g's boots, and from the loop after the pause reads 0.
+            ages = [refused["fleet quota"] for refused in refusals[1:paused[0]]]
+            self.assertEqual(sorted(set(ages)), ages)
+            self.assertEqual([{"fleet quota": 0}], list(map(dict, set(
+                tuple(refused.items()) for refused in refusals[paused[0]:]))))
 
     def test_controller_exports_its_progress_health_events_and_unit_attempts(self):
         units = {f"watch-{index}": {"unit_id": f"watch-{index}", "shard_id": "watch", "unit_index": str(index),
