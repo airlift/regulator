@@ -1429,7 +1429,10 @@ could take every queued item, so a burst spreads its first leases across its
 hosts. A worker whose first leases S3 did not take is not launched; its launch
 fails with detail `launch-infrastructure:first leases not written`, spends none
 of its slot's replacements, and its pool waits 30 seconds before it launches
-again. Once the worker reports, the controller keeps one lease written ahead
+again. One whose launch an error in its loop kept the controller from asking
+for fails with detail `launch-infrastructure:launch not attempted`, and also
+spends no replacement; an admission whose starting record fails releases its
+reservation. Once the worker reports, the controller keeps one lease written ahead
 while no idle worker of the pool could take the
 item. Eligible items lease by On-Demand priority, then replica, then remaining
 work: On-Demand work first, then the item of the lowest replica, and of those
