@@ -4197,19 +4197,24 @@ def reduce_primary(arguments, phase):
 
 def prepare_phase(arguments, root):
     """Plan one of the campaign's phases, check that it may run, stage what its hosts read, and begin its dispatch;
-    returns its dispatcher and when, on the monotonic clock, its launches end. This runs on the campaign's setup
+    returns its dispatcher, when, on the monotonic clock, its launches end, and no fault. A check its launches need
+    that fails once its dispatcher is built, as when its region's quota no longer holds its limit, comes back as
+    the fault, with no end, so the phase still stops the hosts its ledgers name. This runs on the campaign's setup
     thread, so the controller's loop never waits for it."""
     items, kind, plans, platforms, result_root = plan_phase(arguments, root)
     validate_source(root, arguments)
     validate_dependencies(root, arguments)
     resolve_engine_builds(root, arguments)
     validation = unit_validation(root, arguments, kind, plans)
-    validate_prerequisites(arguments, validation)
-    if arguments.language_plan:
-        write_language_bundles(arguments, result_root)
-    check_regions(arguments, platforms)
     dispatcher = UnitDispatcher(arguments, root, result_root, items, platforms, validation)
-    return dispatcher, dispatcher.begin()
+    try:
+        validate_prerequisites(arguments, validation)
+        if arguments.language_plan:
+            write_language_bundles(arguments, result_root)
+        check_regions(arguments, platforms)
+        return dispatcher, dispatcher.begin(), None
+    except (Exception, SystemExit) as error:
+        return dispatcher, None, error
 
 
 class Campaign:
@@ -4260,7 +4265,7 @@ class Campaign:
                                          "every worker's cleanup is proven", actor=stop["by"])
                     break
                 self.track_pauses(running)
-                # A phase paused because its setup failed has no dispatch until it is resumed.
+                # A phase paused because its setup failed before it built its dispatch has none until it is resumed.
                 running = [phase for phase in running if phase.dispatcher]
                 self.follow_regions(running)
                 self.steer(running)
@@ -4366,7 +4371,8 @@ class Campaign:
             if phase.state == "running" and phase.dispatcher:
                 for name, values in phase.dispatcher.points(now).items():
                     points.setdefault(name, []).extend(values)
-                point("regulator_deadline_time", labels, now + self.deadline(phase) - time.monotonic())
+                if phase.deadline is not None:
+                    point("regulator_deadline_time", labels, now + self.deadline(phase) - time.monotonic())
                 finish = phase.dispatcher.finish_estimate()
             held = owner_fleet(fleet, phase.key, now)
             rate = sum(item["hourly_rate"] for item in held.hosts)
@@ -4409,7 +4415,8 @@ class Campaign:
         """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
         reduction, and start each step whose predecessors completed, unless it is complete already or has nothing
         to do. A setup that fails, as one whose region's quota no longer holds its limit, pauses its phase for that
-        fault, with no dispatch, so its hosts wait for it. A phase paused for a fault starts again once it is
+        fault; once it built the phase's dispatch, the phase still sweeps the hosts it holds, which count against
+        the limits, and with none, its hosts wait for it. A phase paused for a fault starts again once it is
         resumed, as it would under a restarted controller, which rebuilds its dispatch from its ledgers."""
         settings = live_settings(self.arguments)
         for phase in self.phases.values():
@@ -4426,13 +4433,17 @@ class Campaign:
                 if phase.reduction:
                     self.finish(phase)
                     continue
-                # Its setup's start of the dispatch ended any pause its ledger recorded open.
-                phase.dispatcher, phase.deadline, phase.paused_since = *result, None
+                phase.dispatcher, phase.deadline, fault = result
                 phase.state = "running"
+                if fault is None:
+                    # Its setup's start of the dispatch ended any pause its ledger recorded open.
+                    phase.paused_since = None
                 try:
                     phase.dispatcher.recover()
                 except (Exception, SystemExit) as error:
-                    self.fault(phase, error)
+                    fault = fault or error
+                if fault is not None:
+                    self.fault(phase, fault)
             elif phase.fault:
                 # Resumed once its pause was recorded.
                 if self.recorded.get(phase.key) == "paused" and settings["phases"][phase.key]["state"] != "paused":

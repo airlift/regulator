@@ -570,7 +570,7 @@ class TestRunCampaign(unittest.TestCase):
                 with patch.object(RUN_CAMPAIGN, "freeze_candidate",
                                   side_effect=lambda root, campaign_root, campaign, name, commitish: frozen[name]), \
                         patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=lambda arguments, root: (
-                            Dispatch(arguments), 0)), \
+                            Dispatch(arguments), 0, None)), \
                         patch.object(RUN_CAMPAIGN.aggregate_results, "aggregate", side_effect=reduce), \
                         patch.object(RUN_CAMPAIGN, "ThreadPoolExecutor", side_effect=FakeCloud().executor), \
                         patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
@@ -3015,11 +3015,14 @@ class TestUnitWorkers(unittest.TestCase):
             dispatcher = dispatchers[phase.key] = self.dispatcher(
                 root, fleet, phase.phase, phase.shards, max_hosts, per_platform, shared=True, results=phase.key,
                 telemetry=phase.telemetry, **options)
-            # As its setup does, the phase checks AWS for its workers in their regions; the fleet's hosts install
-            # no JDK and no candidate archive.
+            # As its setup does, the phase checks AWS for its workers in their regions, returning a check that
+            # fails with its dispatcher; the fleet's hosts install no JDK and no candidate archive.
             vars(dispatcher.arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
-            RUN_CAMPAIGN.check_regions(dispatcher.arguments, list(dispatcher.platforms.values()))
-            return dispatcher, dispatcher.begin()
+            try:
+                RUN_CAMPAIGN.check_regions(dispatcher.arguments, list(dispatcher.platforms.values()))
+                return dispatcher, dispatcher.begin(), None
+            except (Exception, SystemExit) as error:
+                return dispatcher, None, error
 
         poll = fleet.sleep
 
@@ -4522,6 +4525,40 @@ class TestUnitWorkers(unittest.TestCase):
             leased = [(row["platform"], row["unit_id"], row["replica"])
                       for row in self.unit_attempts(dispatchers["smoke"].result_root) if row["outcome"] == "leased"]
             self.assertEqual(len(leased), len(set(leased)))
+
+    def test_phase_whose_setup_fails_holds_its_hosts_until_they_stop(self):
+        # The controller stops with the smoke's hosts live, and the restarted controller's setup of the smoke fails
+        # its check of AWS. Its hosts still count against the limits, so the primary launches none beside them, and
+        # once Dain stops the campaign they take their stop leases and stop, each one's cleanup proven.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", abort_after=2)
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_campaign(root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ())], 4, 1)
+            fleet.abort_after = None
+            check_regions = RUN_CAMPAIGN.check_regions
+            paused = []
+
+            def check(arguments, platforms):
+                if arguments.phase == "smoke":
+                    raise SystemExit("the smoke's regions failed their check")
+                return check_regions(arguments, platforms)
+
+            def loop():
+                # The primary has three loops to launch beside the paused smoke before Dain stops the campaign.
+                if CampaignSettings(root).current["phases"]["smoke"]["state"] == "paused":
+                    paused.append("loop")
+                    if len(paused) == 3:
+                        self.control(root, "stop")
+
+            with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=check):
+                failed, _ = self.run_campaign(
+                    root, fleet, [("smoke", "smoke", ["trino-like-specialized"], ()),
+                                  ("primary", "primary", ["like-dfa-single-use"], ())], 4, 1, loop)
+            self.assertEqual([], failed)
+            self.assertEqual(2, len(fleet.hosts))
+            self.assertEqual([], self.budget.reservations(root / "smoke"))
+            self.assertTrue(all(host.leases[max(host.leases)].get("stop") for host in fleet.hosts))
 
     def test_phase_paused_for_a_fault_reports_its_boots_and_takes_a_stop(self):
         # Host 1's marker names another campaign, so the smoke pauses while host 2 still boots, and Dain then stops the

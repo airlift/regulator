@@ -774,8 +774,11 @@ The controller pauses a phase itself for a fault in its dispatch, logging
 It trusts nothing more the phase's hosts report and only proves each one's
 cleanup as it stops at its idle stop. `resume` restarts the phase's dispatch
 from its ledgers, as a restarted controller would, and the phase pauses again
-while its fault stands. The controller keeps running while a phase is paused
-for a fault; `stop` ends the campaign.
+while its fault stands. A check of its setup that fails, as when a region's
+quota no longer holds its limit, pauses it the same way: its hosts, rebuilt
+from its ledgers, count against the limits until each one's cleanup is
+proven. The controller keeps running while a phase is paused for a fault;
+`stop` ends the campaign.
 
 Each phase's setup, which plans its work items, checks its prerequisites and
 AWS, and uploads what its hosts read, runs on a setup thread, and a
