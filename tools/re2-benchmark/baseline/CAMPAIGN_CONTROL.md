@@ -161,7 +161,11 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    line, port 443 at the host's private address. One URL serves one
    campaign: the launch and `control-host replace` refuse while the target
    group holds a host whose `Campaign` tag names another; a host that has
-   terminated serves none and does not count. `replace` and `teardown`
+   terminated serves none and does not count. Two launches can pass that
+   check at once, as when one starts while a `replace` has deregistered the
+   host it replaces, so each looks again once it registers its host, and one
+   that finds another campaign's host there deregisters and terminates its
+   own before its controller starts, and refuses. `replace` and `teardown`
    deregister every host of their campaign, whether or not it still runs,
    and any host that has terminated. Everything after this runs in AWS
    (principle 7).
