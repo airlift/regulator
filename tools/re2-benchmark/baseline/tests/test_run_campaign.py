@@ -695,6 +695,11 @@ class TestRunCampaign(unittest.TestCase):
                 return settings.reload()
 
             region = RUN_CAMPAIGN.default_regions()[0]
+            # The clock stands still, so the stop records the time the test expects.
+            now = round(RUN_CAMPAIGN.time.time())
+            clock = patch.object(RUN_CAMPAIGN.time, "time", return_value=now)
+            clock.start()
+            self.addCleanup(clock.stop)
             for command, actor, field, value in (
                     (["set-limit", "max-hosts", "80"], "monitor", "max_hosts", 80),
                     (["set-limit", "max-usd", "45.5"], "dain", "max_usd", 45.5),
@@ -711,7 +716,7 @@ class TestRunCampaign(unittest.TestCase):
                     (["authorize", "regions", "us-east-2", region], "dain", "authorized",
                      {"max_hosts": 100, "max_usd": 50, "regions": sorted(["us-east-2", region])}),
                     (["stop", "--reason", "release run done"], "dain", "stop",
-                     {"by": "dain", "at": round(RUN_CAMPAIGN.time.time()), "reason": "release run done"})):
+                     {"by": "dain", "at": now, "reason": "release run done"})):
                 with self.subTest(command=command):
                     current = control(*command, actor=actor)[field]
                     self.assertEqual(value, {key: item for key, item in current["a/primary"].items() if key != "since"}
