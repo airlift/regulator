@@ -549,6 +549,19 @@ slower, so their per-cell noise is wide; the cause is not established. The r8i
 1.17x, came from that fast mode: in the initial comparison the pair scan matched
 the previous route's slower mode, 22.7 against 22.9 ns per row.
 
+Candidates are verified in 8-byte words for literals of 8 or more bytes, in two
+4-byte reads for literals of 4 to 7 bytes, and a byte at a time below 4 bytes.
+Against verifying a byte at a time, everyday Trino dot-star rows took 0.83x the
+time on r9g and 0.82x on r8i, recovering about 81% and 64% of the short-row
+slowdown against release 1.0 that the pair scan opened; `.*coolfunctionname.*`
+contains went from 18.2 to 13.8 ns per row on r9g. The nginx IP-literal row
+(`173.203.157.20`) is accepted at 1.08x to 1.13x on both platforms, 3 to 4 ns
+per row: 94% of its candidates differ at the second byte, where a word compare
+costs more than a byte compare. r8i also accepts gharchive `"PullRequestEvent"`
+at up to 1.07x and LIKE `WILDCARD_CHAIN` at 1.07x. An early exit after the
+second byte removed the r9g loss but cost 1.33x on r8i gharchive, so it was not
+taken.
+
 Exact-literal spans on short rows, which count, position, and extract a plain
 literal, keep their first-byte search, and RE2, Java, and Rust keep
 `Slice.indexOf`; only Trino rows were measured. Alternatives rejected:

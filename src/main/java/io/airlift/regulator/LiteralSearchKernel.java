@@ -26,6 +26,7 @@ import static java.util.Objects.requireNonNull;
 final class LiteralSearchKernel
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSearchKernel.class);
+    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
@@ -263,15 +264,40 @@ final class LiteralSearchKernel
         return -1;
     }
 
-    // Copied as TrinoLikeKernelSupport.matchingPrefixLength; keep the copy in step.
+    // Compares 8-byte words for literals of 8 or more bytes, two 4-byte reads for 4 to 7 bytes,
+    // and single bytes below 4. The last read overlaps the bytes already compared and finds the
+    // first difference past them. Copied as TrinoLikeKernelSupport.matchingPrefixLength; keep
+    // the copy in step.
     private int matchingPrefixLength(byte[] input, int inputOffset)
     {
-        for (int index = 0; index < literal.length; index++) {
+        int length = literal.length;
+        if (length >= Long.BYTES) {
+            int index = 0;
+            for (; index < length - Long.BYTES; index += Long.BYTES) {
+                long difference = ((long) LONG_HANDLE.get(input, inputOffset + index)) ^ ((long) LONG_HANDLE.get(literal, index));
+                if (difference != 0) {
+                    return index + (Long.numberOfTrailingZeros(difference) >>> 3);
+                }
+            }
+            index = length - Long.BYTES;
+            long difference = ((long) LONG_HANDLE.get(input, inputOffset + index)) ^ ((long) LONG_HANDLE.get(literal, index));
+            return difference == 0 ? length : index + (Long.numberOfTrailingZeros(difference) >>> 3);
+        }
+        if (length >= Integer.BYTES) {
+            int difference = ((int) INT_HANDLE.get(input, inputOffset)) ^ ((int) INT_HANDLE.get(literal, 0));
+            if (difference != 0) {
+                return Integer.numberOfTrailingZeros(difference) >>> 3;
+            }
+            int index = length - Integer.BYTES;
+            difference = ((int) INT_HANDLE.get(input, inputOffset + index)) ^ ((int) INT_HANDLE.get(literal, index));
+            return difference == 0 ? length : index + (Integer.numberOfTrailingZeros(difference) >>> 3);
+        }
+        for (int index = 0; index < length; index++) {
             if (input[inputOffset + index] != literal[index]) {
                 return index;
             }
         }
-        return literal.length;
+        return length;
     }
 
     private static int[] computePrefixShifts(byte[] literal)

@@ -95,11 +95,47 @@ public class TestLiteralSearchKernel
         Slice skippedInput = offsetSlice((skipped + periodic + periodicLiteral).getBytes(US_ASCII));
         assertSearch(periodicKernel, skippedInput, 0, skippedInput.length(), 595, skipped.length() + periodic.length());
 
-        // Four possible starts, fewer than a word, exercise only the byte-at-a-time loop
+        // Four possible starts, fewer than a word, exercise only the scan's one-start-at-a-time tail
         String tailLiteral = "a".repeat(38) + "ba";
         Slice tailInput = offsetSlice(("aaa" + tailLiteral).getBytes(US_ASCII));
         LiteralSearchKernel tailKernel = kernel(tailLiteral.toCharArray());
         assertSearch(tailKernel, tailInput, 0, tailInput.length(), 2, 3);
+    }
+
+    @Test
+    public void testCandidatePrefixLength()
+    {
+        // A literal of "a"s with a "b" at the mismatch index, compared against "a"s, matches exactly
+        // the bytes before that index; `mismatch == length` means no mismatch. Each array ends with
+        // the compared bytes and has no padding.
+        // The kernel's verification is observed through its KMP switch: after 512 covered bytes,
+        // every candidate compares one byte past its prefix and covers one, so the switch point
+        // differs for every prefix length. Only a mismatch inside the literal leaves a candidate's
+        // first and last bytes matching, and only one at the end yields a match.
+        int covered = 512;
+        for (int length = 1; length <= 24; length++) {
+            for (int mismatch = 0; mismatch <= length; mismatch++) {
+                byte[] literal = new byte[length];
+                Arrays.fill(literal, (byte) 'a');
+                if (mismatch < length) {
+                    literal[mismatch] = 'b';
+                }
+                byte[] candidateBytes = ("x" + "a".repeat(length)).getBytes(US_ASCII);
+                assertThat(TrinoLikeKernelSupport.matchingPrefixLength(candidateBytes, 1, literal))
+                        .as("length %s, mismatch %s", length, mismatch)
+                        .isEqualTo(mismatch);
+
+                LiteralSearchKernel kernel = new LiteralSearchKernel(Slices.wrappedBuffer(literal));
+                if (mismatch == length && length >= 2) {
+                    Slice input = Slices.wrappedBuffer(("x".repeat(covered) + "a".repeat(length)).getBytes(US_ASCII));
+                    assertSearch(kernel, input, 0, input.length(), -1, covered);
+                }
+                else if (mismatch > 0 && mismatch < length - 1) {
+                    Slice input = Slices.wrappedBuffer(("x".repeat(covered) + "a".repeat(1024)).getBytes(US_ASCII));
+                    assertSearch(kernel, input, 0, input.length(), kmpHandoff(covered, mismatch), -1);
+                }
+            }
+        }
     }
 
     @Test
@@ -151,6 +187,19 @@ public class TestLiteralSearchKernel
     {
         assertThat(kernel.kmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
         assertThat(kernel.findContains(input, offset, length)).isEqualTo(match);
+    }
+
+    /// Returns where a contains search switches to KMP when every candidate, one per byte from
+    /// `covered`, matches `prefixLength` bytes and then fails.
+    private static int kmpHandoff(int covered, int prefixLength)
+    {
+        int comparisonEnd = -LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET;
+        for (int candidate = covered; ; candidate++) {
+            comparisonEnd += prefixLength + 1;
+            if (comparisonEnd > candidate) {
+                return candidate + 1;
+            }
+        }
     }
 
     private static void assertCandidateHeavySearch(byte[] literal, byte fill)

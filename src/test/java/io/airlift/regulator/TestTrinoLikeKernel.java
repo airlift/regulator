@@ -238,7 +238,7 @@ public class TestTrinoLikeKernel
             // Each run position compares at least two more bytes than it covers, so the longer
             // runs overrun the budget. For the 40-byte literal, the one-byte run and the
             // "aa" + literal tail make a 43-byte input with four possible starts, fewer than a
-            // word, so the byte-at-a-time loop switches to KMP just before the match.
+            // word, so the scan's one-start-at-a-time tail switches to KMP just before the match.
             for (int length : new int[] {1, 9, CANDIDATE_COMPARISON_BUDGET, 3 * CANDIDATE_COMPARISON_BUDGET}) {
                 String run = "a".repeat(length);
                 for (String tail : search.tails()) {
