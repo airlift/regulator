@@ -4608,8 +4608,8 @@ class Campaign:
 
 def refuse_old_root(campaign_root):
     """Refuse a campaign root the earlier controllers started, which ran each phase as its own process with its
-    share of the hosts frozen in its execution policy; a root is never migrated. status, --results, the reduction,
-    and archiving still read its ledgers."""
+    share of the hosts frozen in its execution policy, or one whose fleet names its phases by their roots on the
+    control host; a root is never migrated. status, --results, the reduction, and archiving still read its ledgers."""
     candidates = [campaign_root / OLD_DRIVER_RECORD]
     for pattern in ("*/*/", "*/lang/*/"):
         candidates += sorted(campaign_root.glob(pattern + OLD_PHASE_RECORD))
@@ -4619,6 +4619,11 @@ def refuse_old_root(campaign_root):
     if found is not None:
         raise SystemExit(f"{campaign_root} was started by the earlier per-phase controllers, as {found} shows; this "
                          "controller cannot resume it, so start a new campaign root")
+    fleet = read_fleet_state(campaign_root / STATE_FILE) or {"reservations": {}, "completed": {}}
+    if any(item["owner"].startswith("/") for item in [*fleet["reservations"].values(), *fleet["completed"].values()]):
+        raise SystemExit(f"{campaign_root} was started by a controller that named its phases by their roots on the "
+                         f"control host, as {campaign_root / STATE_FILE} shows; this controller cannot resume it, so "
+                         "start a new campaign root")
 
 
 def load_settings(arguments):

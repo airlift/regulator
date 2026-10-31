@@ -871,9 +871,15 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.control_host.write_manifest(campaign_root)
             ended = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
             self.assertIn("stopped by dain: smoke over", ended)
-            # Its root, pulled to the Mac, reports the same spend and medians there.
+            # Its root, pulled to the Mac, reports the same spend and medians there, as does one whose fleet names
+            # each phase by its root on the control host, as earlier controllers wrote it.
             pulled = Path(temporary_directory) / "pulled"
             shutil.copytree(campaign_root, pulled)
+            self.assertEqual(ended[1:], RUN_CAMPAIGN.campaign_status(pulled, now, timezone.utc)[1:])
+            state = json.loads((pulled / RUN_CAMPAIGN.STATE_FILE).read_text())
+            for item in [*state["reservations"].values(), *state["completed"].values()]:
+                item["owner"] = f"{RUN_CAMPAIGN.control_host.CAMPAIGN_ROOT}/{item['owner']}"
+            (pulled / RUN_CAMPAIGN.STATE_FILE).write_text(json.dumps(state))
             self.assertEqual(ended[1:], RUN_CAMPAIGN.campaign_status(pulled, now, timezone.utc)[1:])
 
         # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the three live hosts.
@@ -1662,9 +1668,11 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertIn(refusal, f"{refused.exception}{errors.getvalue()}")
                 freeze.assert_not_called()
                 setup.assert_not_called()
-            # A campaign root the earlier per-phase controllers started is refused, naming what shows it, and left
-            # as it was.
+            # A campaign root the earlier controllers started is refused, naming what shows it, and left as it was:
+            # the per-phase controllers' records, or a fleet naming its phases by their roots on the control host.
             for path, content in ((root / "old" / "campaign-driver.txt", "pid=1\n"),
+                                  (root / "old" / RUN_CAMPAIGN.STATE_FILE, json.dumps({"reservations": {}, "completed": {
+                                      "x/1": {"owner": f"{RUN_CAMPAIGN.control_host.CAMPAIGN_ROOT}/a/primary"}}})),
                                   (root / "old" / "a" / "lang" / "smoke" / "driver-child.txt", "pid=1\n"),
                                   (root / "old" / "a" / "primary" / "execution-policy.json",
                                    json.dumps({"max_concurrent": 16}))):
