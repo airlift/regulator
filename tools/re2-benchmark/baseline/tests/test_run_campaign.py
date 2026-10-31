@@ -4012,6 +4012,38 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertGreaterEqual(leak - requests[0], RUN_CAMPAIGN.TERMINATION_LEAK_SECONDS)
             self.assertLess(leak - requests[0], RUN_CAMPAIGN.TERMINATION_LEAK_SECONDS + RUN_CAMPAIGN.UNIT_POLL_SECONDS)
 
+    def test_host_the_controller_stopped_settles_as_its_stop_across_restarts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # Host 1 stalls, and its late semantic failure lands once its unit's replacement, host 3, is leased and
+            # still booting, so host 3 can take nothing and is stopped. The controller restarts as it asks EC2 to
+            # terminate host 3, which terminates during the outage. The restarted controller settles it as its own
+            # stop: no boot failure shrinks the boot window, no failed session is logged, and once it is settled, a
+            # restart leaves its slot uncharged.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: "stall-semantic-early"}},
+                                  setup_seconds=lambda host: 600 if host.number == 3 else 0)
+            terminate = fleet.terminate
+
+            def stop_then_restart(region, ids):
+                if fleet.hosts[2:] and fleet.hosts[2].instance_id in ids:
+                    fleet.abort_after = fleet.sleeps + 1
+                terminate(region, ids)
+
+            fleet.terminate = stop_then_restart
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_phase(root, fleet, "smoke", ["like-dfa-single-use"], 4, 2, shared=True)
+            fleet.abort_after, fleet.terminate = None, terminate
+            for _ in range(2):
+                with self.dispatchers() as dispatchers, self.assertRaisesRegex(SystemExit, "unresolved units"):
+                    self.run_phase(root, fleet, "smoke", ["like-dfa-single-use"], 4, 2, shared=True)
+            stopped = int(fleet.hosts[2].epoch)
+            self.assertEqual("controller-abort", [row["outcome"] for row in RUN_CAMPAIGN.read_attempts(
+                root / "results" / "job-attempts.tsv") if int(row["host_epoch"]) == stopped][-1])
+            self.assertEqual([BOOT_WINDOW_FIRST], self.boot_windows(root))
+            with (root / "results" / "campaign-events.tsv").open(newline="") as events:
+                self.assertNotIn(str(stopped), [row["host_epoch"] for row in csv.DictReader(events, delimiter="\t")])
+            self.assertIn((stopped, 0), dispatchers[0][0].free_slots[("r8i", fleet.hosts[2].instance_type)])
+
     def test_tail_stops_spot_workers_and_finishes_on_demand(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 70):
