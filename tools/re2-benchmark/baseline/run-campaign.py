@@ -5404,6 +5404,15 @@ def main():
         control_host.replace(cloud.AwsCloud(), arguments.campaign,
                              control_host.read_ssh_public_key(arguments.ssh_public_key))
         return
+    if sys.argv[1:3] == ["control-host", "known-host"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} control-host known-host",
+                                         description="record the ssh host keys of a campaign's control host that its "
+                                                     f"console lists in {control_host.KNOWN_HOSTS}, and print its "
+                                                     "address")
+        parser.add_argument("campaign")
+        arguments = parser.parse_args(sys.argv[3:])
+        print(control_host.known_host(cloud.AwsCloud(), arguments.campaign))
+        return
     if sys.argv[1:2] == ["teardown"]:
         parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} teardown",
                                          description="terminate a campaign's control host and delete its volume, "

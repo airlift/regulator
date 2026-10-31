@@ -28,6 +28,13 @@ if [[ $(getenforce 2> /dev/null) == Enforcing ]]; then
     semanage port -a -t ssh_port_t -p tcp 443 2> /dev/null || semanage port -m -t ssh_port_t -p tcp 443
 fi
 systemctl restart sshd
+# The Mac trusts the host's ssh keys only once its console lists their fingerprints, which cloud-init does only after
+# this script ends, so the script lists them first; its output reaches the console.
+printf '%s\n' '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
+for key in /etc/ssh/ssh_host_*_key.pub; do
+    ssh-keygen -l -f "${key}"
+done
+printf '%s\n' '-----END SSH HOST KEY FINGERPRINTS-----'
 
 dnf install -y docker git python3.12 python3.12-pip rsync zstd
 systemctl enable --now docker

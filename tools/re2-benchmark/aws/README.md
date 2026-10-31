@@ -650,14 +650,22 @@ panels by their titles every 15 minutes and steers through
 Grafana is then `https://<record>` across replacements, through the subnet
 router and the load balancer. ssh reaches the host on port 443 at its private
 address, which the launch prints and a replacement changes; Session Manager is
-the shell when the router is down. ssh logs in with the private key of the launch's
+the shell when the router is down. ssh trusts a host's keys only once its
+console lists their fingerprints: `control-host known-host <campaign>` records
+the keys the host serves whose fingerprints its console lists in
+`~/.ssh/regulator-control-hosts`, replacing any an earlier host at the address
+had, and prints the address; it refuses a host that serves none of them, and
+one whose console lists none yet, as for a minute or two after its launch.
+ssh logs in with the private key of the launch's
 `--ssh-public-key`; name it with `-i` and `-o IdentitiesOnly=yes` when it is
 not ssh's default, since an agent holding many keys can spend the host's
 login attempts first. `status` and `control` run on the host, against
 `/regulator/campaign`:
 
 ```bash
-ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes ec2-user@<address> /opt/regulator/venv/bin/python \
+address=$(python3 tools/re2-benchmark/baseline/run-campaign.py control-host known-host <campaign>)
+ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=~/.ssh/regulator-control-hosts ec2-user@"$address" /opt/regulator/venv/bin/python \
   /regulator/control-host/checkout/tools/re2-benchmark/baseline/run-campaign.py status /regulator/campaign
 ```
 
@@ -681,7 +689,8 @@ the campaign again. `finish`
 pulls the root of an ended campaign over ssh on port 443 with rsync into the results
 directory the reduction and archiving read, by default
 `benchmark-results/pre-review-baseline/<campaign>`, and checks every file
-against that list. It replaces a local root only where an earlier `finish`
+against that list. It records the host's keys as `control-host known-host`
+does and trusts no other, replaces a local root only where an earlier `finish`
 pulled it, and terminates nothing. `--ssh-identity` names the private key ssh
 offers alone, as `-i` does above:
 

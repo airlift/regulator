@@ -111,7 +111,10 @@ The control host is reached through the company's existing Tailscale subnet
 router, which carries the dev VPC's private subnets onto the tailnet but
 forwards only tcp 443: Grafana through the internal load balancer at
 `https://<record>`, and ssh on port 443 at the host's private address.
-Nothing for access is installed on the host, and no key or tag is needed. The
+Nothing for access is installed on the host, and no key or tag is needed.
+ssh trusts a host's keys only once its console lists their fingerprints:
+`control-host known-host`, which `finish` and the monitor's `host` share,
+records those keys alone for the host's address. The
 VPC, the subnets the router carries, the ingress CIDR, the private DNS zone,
 the record name, and the security groups, load balancer, target group,
 listener and certificate the account setup creates are stored as one JSON SSM
