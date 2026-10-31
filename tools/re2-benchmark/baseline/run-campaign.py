@@ -3914,10 +3914,11 @@ class UnitDispatcher:
             nonlocal blocked_vcpus
             if pool not in late:
                 late[pool] = self.late_items(pool, now)
-            # A pool with no room for another worker, or none it needs, is not trying to launch, so no refusal
-            # stands for it. One waiting only on the boot window still is, so its refusal keeps its age.
+            # A pool with no room for another worker, or no need of one, is not trying to launch, so no refusal
+            # stands for it. A pool whose late items wait only on the boot window is still trying, so its refusal
+            # keeps its age, even while an On-Demand refusal's retry delay leaves it no market for now.
             if not self.launch_room(pool):
-                if self.host_room(pool) <= 0 or self.pool_demand(pool, now, late[pool]) is None:
+                if self.host_room(pool) <= 0 or not late[pool] or self.gave_up(pool):
                     self.refused.pop(pool, None)
                 return False
             # A worker is planned only once its platform has room for it.
