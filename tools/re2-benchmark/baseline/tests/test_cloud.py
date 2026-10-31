@@ -117,7 +117,8 @@ class FakeCloud:
     A control host's account also has the SSM parameters, security groups and subnets a test gives it, and the
     volumes, snapshots and load balancer targets the commands create. Waiting for an instance to
     run starts it, and waiting for a volume to be available finds it so once no running instance holds it; only an
-    available volume attaches.
+    available volume attaches. A deregistered target is listed, draining, until a wait for its deregistration, and a
+    terminated instance's target stays registered.
 
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
     monotonic() read it, so a scenario takes the time its calls would. Calls made on a pool's threads, as executor
@@ -168,8 +169,10 @@ class FakeCloud:
         # Each volume's instance, by volume ID.
         self.attachments = {}
         self.region_snapshots = {}
-        # Each target group's registered (instance, port) targets, by ARN.
+        # Each target group's registered (instance, port) targets, and those deregistered and still draining, which
+        # it lists until a wait for their deregistration, by ARN.
         self.targets = {}
+        self.draining = {}
         # Each control host launch's parameters, by instance ID.
         self.control_hosts = {}
         # Each instance's serial console output, by instance ID.
@@ -385,11 +388,18 @@ class FakeCloud:
 
     def registered_targets(self, region, target_group):
         self.call("registered_targets", target_group)
-        return [instance for instance, _ in sorted(self.targets.get(target_group, ()))]
+        return [instance for instance, _ in sorted(self.targets.get(target_group, set()) |
+                                                   self.draining.get(target_group, set()))]
 
     def deregister_target(self, region, target_group, instance, port):
         self.call("deregister_target", target_group, instance, port)
-        self.targets.get(target_group, set()).discard((instance, port))
+        if (instance, port) in self.targets.get(target_group, ()):
+            self.targets[target_group].discard((instance, port))
+            self.draining.setdefault(target_group, set()).add((instance, port))
+
+    def wait_deregistered(self, region, target_group, instances, port):
+        self.call("wait_deregistered", target_group, *instances)
+        self.draining.get(target_group, set()).difference_update((instance, port) for instance in instances)
 
 
 class TestAwsCloud(unittest.TestCase):
@@ -659,6 +669,11 @@ class TestAwsCloud(unittest.TestCase):
             {"Target": {"Id": "i-host", "Port": 3000}, "TargetHealth": {"State": "healthy"}}]},
             {"TargetGroupArn": "arn:target-group"})
         elbv2.add_response("deregister_targets", {}, targets)
+        # A deregistered target drains before the load balancer forgets it.
+        elbv2.add_response("describe_target_health", {"TargetHealthDescriptions": [
+            {"Target": {"Id": "i-host", "Port": 3000}, "TargetHealth": {"State": "draining"}}]}, targets)
+        elbv2.add_client_error("describe_target_health", "InvalidTarget", http_status_code=400,
+                               expected_params=targets)
         aws = self.cloud
         self.assertEqual('{"vpc": "vpc-a"}', aws.parameter("us-west-2", "/network"))
         self.assertIsNone(aws.parameter("us-west-2", "/absent"))
@@ -683,6 +698,8 @@ class TestAwsCloud(unittest.TestCase):
         aws.register_target("us-west-2", "arn:target-group", "i-host", 3000)
         self.assertEqual(["i-host"], aws.registered_targets("us-west-2", "arn:target-group"))
         aws.deregister_target("us-west-2", "arn:target-group", "i-host", 3000)
+        with patch("time.sleep"):
+            aws.wait_deregistered("us-west-2", "arn:target-group", ["i-host"], 3000)
 
     def test_worker_profile_and_prefix_deletion(self):
         iam = self.stub("iam")

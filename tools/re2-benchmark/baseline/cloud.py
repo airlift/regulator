@@ -366,6 +366,14 @@ class AwsCloud:
         self.call("elbv2", region, "deregister_targets", TargetGroupArn=target_group,
                   Targets=[{"Id": instance, "Port": port}])
 
+    def wait_deregistered(self, region, target_group, instances, port):
+        """Wait, as the SDK's waiter polls every 15 seconds for up to 10 minutes, until the load balancer's target
+        group has drained the deregistered instances and lists them no more."""
+        with translated():
+            self.client("elbv2", region).get_waiter("target_deregistered").wait(
+                TargetGroupArn=target_group, Targets=[{"Id": instance, "Port": port} for instance in instances],
+                WaiterConfig={"Delay": 15, "MaxAttempts": 40})
+
     def run_instance(self, region, spec):
         """Launch one instance, terminated when it shuts down, and return its ID. Raises LaunchRejected when AWS
         refuses its first request, and LaunchUnknown when it refuses a later one or every attempt failed otherwise."""

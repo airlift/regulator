@@ -173,17 +173,34 @@ def live_hosts(aws, campaign):
             all(instance.tags.get(key) == value for key, value in tags(campaign).items())]
 
 
+def registered_hosts(aws, network):
+    """The hosts registered in the load balancer's target group, by ID, each with its Campaign tag, "" where it has
+    none, or None where it has terminated, or is gone from EC2's listing, as an hour after, so it serves no campaign."""
+    registered = aws.registered_targets(REGION, network["target_group"])
+    instances = {instance.id: instance for instance in aws.instances(REGION)}
+    return {host: (instances[host].tags.get("Campaign", "")
+                   if host in instances and instances[host].state != "terminated" else None)
+            for host in registered}
+
+
 def check_target_group(aws, network, campaign):
-    """Refuse to put the campaign's host in the load balancer's target group while another campaign's host, by its
-    Campaign tag, is registered there: the one name would serve both campaigns' Grafana by turns."""
-    registered = set(aws.registered_targets(REGION, network["target_group"]))
-    campaigns = {instance.id: instance.tags.get("Campaign", "") for instance in aws.instances(REGION)
-                 if instance.id in registered}
-    others = sorted(f"{host} of campaign {campaigns.get(host) or 'unknown'}" for host in registered
-                    if campaigns.get(host) != campaign)
+    """Refuse to put the campaign's host in the load balancer's target group while a host not tagged for the campaign
+    is registered there: the one name would serve both campaigns' Grafana by turns. A host that has terminated serves
+    none."""
+    others = sorted(f"{host} of campaign {owner or 'unknown'}"
+                    for host, owner in registered_hosts(aws, network).items() if owner not in (None, campaign))
     if others:
         raise SystemExit(f"the load balancer forwards Grafana to {', '.join(others)}; one name serves one "
                          f"campaign, so tear that campaign's host down before starting campaign {campaign}'s")
+
+
+def deregister_hosts(aws, network, campaign):
+    """Deregister from the load balancer's target group every host of the campaign, live or not, and every host that
+    has terminated; return the hosts deregistered."""
+    hosts = [host for host, owner in registered_hosts(aws, network).items() if owner in (None, campaign)]
+    for host in hosts:
+        aws.deregister_target(REGION, network["target_group"], host, GRAFANA_PORT)
+    return hosts
 
 
 def launch(aws, campaign, ssh_public_key, inputs):
@@ -218,10 +235,9 @@ def replace(aws, campaign, ssh_public_key):
         raise SystemExit(f"campaign {campaign}'s teardown snapshotted its volume {volume.id} as its root's last "
                          f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown "
                          f"{campaign} --confirm")
+    deregister_hosts(aws, found, campaign)
     hosts = live_hosts(aws, campaign)
     if hosts:
-        for host in hosts:
-            aws.deregister_target(REGION, found["target_group"], host.id, GRAFANA_PORT)
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
@@ -366,9 +382,10 @@ def finish(aws, campaign, local_root, identity=None):
 
 
 def teardown(aws, campaign, confirm):
-    """Remove the campaign's control host for good, as only Dain does: deregister it from the load balancer and
-    terminate it, snapshot its volume, which is then the campaign root's last copy, and delete the volume and the
-    Grafana credentials. The record, the load balancer and its target group belong to the account setup.
+    """Remove the campaign's control host for good, as only Dain does: deregister it from the load balancer, with
+    any earlier host of the campaign still registered, terminate it, wait for the load balancer to forget it,
+    snapshot its volume, which is then the campaign root's last copy, and delete the volume and the Grafana
+    credentials. The record, the load balancer and its target group belong to the account setup.
 
     Each step finds what an earlier, interrupted teardown left by the campaign's tags, so running it again finishes:
     a host already terminated is not waited for, a snapshot already taken of the volume is not taken again, and with
@@ -380,14 +397,16 @@ def teardown(aws, campaign, confirm):
     volumes = aws.volumes(REGION, tags(campaign))
     if len(volumes) > 1:
         raise SystemExit(f"campaign {campaign} has {len(volumes)} control host volumes; expected one")
-    # The host goes first, so the snapshot holds the root as its controller last wrote it.
+    # The host goes first, so the snapshot holds the root as its controller last wrote it, and the load balancer
+    # forgets it, so no other campaign's launch finds it there.
+    deregistered = deregister_hosts(aws, found, campaign)
     hosts = live_hosts(aws, campaign)
     if hosts:
-        for host in hosts:
-            aws.deregister_target(REGION, found["target_group"], host.id, GRAFANA_PORT)
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
+    if deregistered:
+        aws.wait_deregistered(REGION, found["target_group"], deregistered, GRAFANA_PORT)
     for volume in volumes:
         aws.wait(REGION, "volume_available", volume.id)
         snapshot = next((snapshot.id for snapshot in aws.snapshots(REGION, tags(campaign))

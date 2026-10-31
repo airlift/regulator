@@ -104,12 +104,13 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual({volume.id: new.id}, aws.attachments)
         self.assertEqual({"arn:target-group": {(new.id, 3000)}}, aws.targets)
 
-        # A host that ended on its own is replaced once it releases the volume.
+        # A host that ended on its own is replaced once it releases the volume, and leaves the target group.
         aws.terminate("us-west-2", [new.id])
         with contextlib.redirect_stdout(io.StringIO()):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
         self.assertEqual(["terminated", "terminated", "running"],
                          [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual({"arn:target-group": {(aws.region_instances["us-west-2"][2].id, 3000)}}, aws.targets)
         # A replacement the volume cannot attach to is terminated, leaving the volume to the next.
         with patch.object(aws, "attach_volume", side_effect=CloudError("IncorrectState: busy")), \
                 contextlib.redirect_stdout(io.StringIO()), \
@@ -126,10 +127,13 @@ class TestControlHost(unittest.TestCase):
             control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
             aws.parameters.update(dict.fromkeys(control_host.grafana_parameters("c"), "secret"))
             [volume] = aws.region_volumes["us-west-2"]
+            # The host ended on its own, so only its registration is left of it.
+            aws.terminate("us-west-2", [aws.region_instances["us-west-2"][0].id])
             # Only Dain tears a host down, and says so.
+            calls = len(aws.calls)
             with self.assertRaisesRegex(SystemExit, "only Dain runs it, with --confirm"):
                 control_host.teardown(aws, "c", confirm=False)
-            self.assertEqual("running", aws.region_instances["us-west-2"][0].state)
+            self.assertEqual(calls, len(aws.calls))
             # A teardown interrupted while its snapshot completes, and again as it deletes the credentials, finishes
             # when run again, taking no second snapshot.
             wait = aws.wait
@@ -152,8 +156,9 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
         self.assertEqual([cloud.Snapshot("snap-1", volume.id, "completed", control_host.tags("c"))],
                          aws.region_snapshots["us-west-2"])
-        # The load balancer forwards to no host of the campaign, and the account setup's own resources stay.
-        self.assertEqual(({"arn:target-group": set()}, []), (aws.targets, aws.region_volumes["us-west-2"]))
+        # The load balancer has forgotten every host of the campaign, and the account setup's own resources stay.
+        self.assertEqual(([], []), (aws.registered_targets("us-west-2", "arn:target-group"),
+                                    aws.region_volumes["us-west-2"]))
         self.assertEqual([control_host.NETWORK_PARAMETER], list(aws.parameters))
 
     def test_network_and_security_group_are_checked_before_anything_is_created(self):
