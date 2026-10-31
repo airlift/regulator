@@ -134,11 +134,20 @@ class TestControlHost(unittest.TestCase):
 
     def test_a_replacement_that_fails_partway_backs_out_and_names_what_is_unconfirmed(self):
         # Each replacement of campaign c's first host, i-control-1, launches i-control-2, which backs out of the
-        # volume and the load balancer when it cannot attach the volume or tell it serves Grafana alone, and names
-        # each step AWS refused.
+        # volume and the load balancer when it cannot attach the volume, look for a teardown of it, or tell it serves
+        # Grafana alone, and names each step AWS refused.
         def refused(step, error):
             # Every call of the step fails with error.
             return lambda aws: {step: error}
+
+        def teardown_look_fails(aws):
+            volumes = aws.volumes
+
+            def look(region, tags):
+                if "i-control-2" in aws.attachments.values():
+                    raise CloudError("ThrottlingException: Rate exceeded")
+                return volumes(region, tags)
+            return {"volumes": look}
 
         def answer_lost(aws):
             # AWS answers the registration with an error, though it took effect.
@@ -180,6 +189,10 @@ class TestControlHost(unittest.TestCase):
                 ("attach refused", refused("attach_volume", CloudError("IncorrectState: busy")),
                  "cannot attach campaign c's volume vol-1 to its new control host i-control-2: IncorrectState: busy; "
                  "that host is terminated; run control-host replace c again",
+                 ["terminated", "terminated"], set()),
+                ("teardown look failed", teardown_look_fails,
+                 "cannot check that no teardown has begun on campaign c's volume vol-1: ThrottlingException: Rate "
+                 "exceeded; its new control host i-control-2 is terminated; run control-host replace c again",
                  ["terminated", "terminated"], set()),
                 # One whose termination then fails is left running for the next replace.
                 ("termination refused", attach_and_termination_refused,

@@ -274,9 +274,17 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
         fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
                          f"{instance}: {error}; that host {fate}; run control-host replace {campaign} again") from error
-    # A teardown that began once this replace had checked the volume terminates every host it finds, and snapshots
-    # the volume once they are gone; a host it did not find goes before its controller starts.
-    if refusal := teardown_begun(aws, campaign, volume.id):
+    # A teardown may have begun after this replace checked the volume. It terminates every host it finds and
+    # snapshots the volume once they are gone. So look for it again: a host the teardown did not find goes before its
+    # controller starts, and so does one whose look fails.
+    try:
+        refusal = teardown_begun(aws, campaign, volume.id)
+    except CloudError as error:
+        fate = discard(aws, network, instance, registered=False)
+        raise SystemExit(f"cannot check that no teardown has begun on campaign {campaign}'s volume {volume.id}: "
+                         f"{error}; its new control host {instance} {fate}; run control-host replace {campaign} "
+                         "again") from error
+    if refusal:
         fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"{refusal}; its new control host {instance} {fate}")
     # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
