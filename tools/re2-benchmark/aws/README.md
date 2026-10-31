@@ -1146,10 +1146,14 @@ in the worker's region with:
 A launch AWS refuses for capacity moves on to the region's next zone. A
 refused Spot launch, for capacity, quota, or price, is `retryable-spot`; an
 On-Demand one, for capacity or quota, is `retryable-capacity`; either has
-detail `launch-capacity:<code>`. Anything else is
-`retryable-infrastructure`. A request whose answer never comes is sent again
-with the same client token, so AWS launches at most one instance, and the
-controller then finds the instance by its session's tag.
+detail `launch-capacity:<code>`. Any other client error but a throttle, such
+as `UnauthorizedOperation` or `InvalidAMIID.NotFound`, is a request AWS will
+never grant: it is not sent again, and in either market fails as
+`retryable-infrastructure`, with detail
+`launch-infrastructure:<code>: <message>`, so the slot's replacements run out.
+A request whose answer never comes, a throttle or server error among them, is
+sent again with the same client token, so AWS launches at most one instance,
+and the controller then finds the instance by its session's tag.
 
 `worker-user-data.sh` starts the host's stop-time watchdog and startup
 timeline, waits for the profile's credentials, downloads and checks the frozen

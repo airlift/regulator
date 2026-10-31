@@ -1749,8 +1749,8 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual([f"r8i/{identity}" for identity in expected], order)
 
     def test_launch_tries_each_zone_with_capacity_and_classifies_what_aws_refused(self):
-        def full(*zones, kind="capacity", code="InsufficientInstanceCapacity"):
-            return lambda region, spec: (cloud.LaunchRejected(kind, code)
+        def full(*zones, kind="capacity", code="InsufficientInstanceCapacity", message=""):
+            return lambda region, spec: (cloud.LaunchRejected(kind, code, message)
                                          if spec.subnet[-1] in zones else None)
 
         for market, rejection, expected in (
@@ -1765,8 +1765,9 @@ class TestRunCampaign(unittest.TestCase):
                  ("retryable-capacity", "launch-capacity:InsufficientInstanceCapacity")),
                 ("on-demand", full("a", "b", "c", kind="quota", code="VcpuLimitExceeded"),
                  ("retryable-capacity", "launch-capacity:VcpuLimitExceeded")),
-                ("on-demand", full("a", "b", "c", kind="ambiguous", code="InternalError"),
-                 ("retryable-infrastructure", "launch-infrastructure:InternalError")),
+                # A request AWS will never grant fails as the infrastructure's, in either market, with its explanation.
+                ("spot", full("a", "b", "c", kind="request", code="UnauthorizedOperation", message="not authorized"),
+                 ("retryable-infrastructure", "launch-infrastructure:UnauthorizedOperation: not authorized")),
                 # A launch that offers the type in no public subnet fails before it asks.
                 ("spot", None, ("retryable-infrastructure",
                                 "launch-preflight:no public default-VPC subnet offers r8i.2xlarge"))):

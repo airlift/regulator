@@ -1826,7 +1826,10 @@ class LaunchFailed(Exception):
 
 def launch_failure(market, rejection):
     """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
-    and an On-Demand one no capacity or vCPU quota."""
+    and an On-Demand one no capacity or vCPU quota. A request AWS will never grant fails as the infrastructure's,
+    with AWS's explanation, so its slot's replacements run out."""
+    if rejection.kind == "request":
+        return "retryable-infrastructure", f"launch-infrastructure:{rejection.code}: {rejection.message}"
     if market == "spot":
         return "retryable-spot", f"launch-capacity:{rejection.code}"
     if rejection.kind in ("capacity", "quota"):
