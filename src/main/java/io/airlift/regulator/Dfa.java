@@ -1142,11 +1142,25 @@ final class Dfa
             }
         }
 
+        // Without a pending match the search continues as a pending first match does: through the
+        // absolute-pointer loop unless the DFA holds or has requested paired rows or cannot
+        // allocate a pointer table. The scan computes every transition of the states it visits,
+        // so a paired request from here selects rows the text never exercised, and those rows
+        // block the pointer table, the faster loop on dense multibyte text.
         if (lastMatchBoundary < 0 && contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            dfa.requestPairedTransitions();
-            if (dfa.hasPairedTransitions(stateOffset)) {
-                // Measure from the search start so the short-search hint sees the whole search.
-                return searchForwardPairs(dfa, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+            if (!dfa.hasAbsolutePointerTransitions(stateOffset) && !countHandoffKeepsPairedRows(dfa)) {
+                dfa.requestAbsolutePointerTransitions();
+            }
+            if (dfa.hasAbsolutePointerTransitions(stateOffset)) {
+                dfa.countSelfLoopNoMatchPointerHandOffCount++;
+                return searchForwardAbsolutePointers(dfa, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
+            }
+            if (countHandoffKeepsPairedRows(dfa)) {
+                dfa.requestPairedTransitions();
+                if (dfa.hasPairedTransitions(stateOffset)) {
+                    // Measure from the search start so the short-search hint sees the whole search.
+                    return searchForwardPairs(dfa, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+                }
             }
         }
         // A pending first match continues through the absolute-pointer loop the ordinary search
@@ -1157,10 +1171,7 @@ final class Dfa
         if (lastMatchBoundary >= 0 &&
                 dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
                 contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            if (!dfa.hasAbsolutePointerTransitions(stateOffset) &&
-                    !dfa.absolutePointerTransitionsUnavailable &&
-                    !dfa.pairedTransitionsRequested &&
-                    dfa.pairedStateRefArrays == null) {
+            if (!dfa.hasAbsolutePointerTransitions(stateOffset) && !countHandoffKeepsPairedRows(dfa)) {
                 dfa.requestAbsolutePointerTransitions();
             }
             if (dfa.hasAbsolutePointerTransitions(stateOffset)) {
@@ -1177,9 +1188,7 @@ final class Dfa
                         false,
                         false);
             }
-            if (dfa.absolutePointerTransitionsUnavailable ||
-                    dfa.pairedTransitionsRequested ||
-                    dfa.pairedStateRefArrays != null) {
+            if (countHandoffKeepsPairedRows(dfa)) {
                 dfa.requestPairedTransitions();
                 if (dfa.hasPairedTransitions(stateOffset)) {
                     dfa.countSelfLoopMatchHandOffCount++;
@@ -1209,6 +1218,14 @@ final class Dfa
                 lastMatchBoundary,
                 false,
                 false);
+    }
+
+    // Whether a count self-loop scan hands off to paired rows rather than the absolute-pointer
+    // loop: the DFA cannot allocate a pointer table, or it holds or has requested paired rows,
+    // which block one.
+    private static boolean countHandoffKeepsPairedRows(DfaInstance dfa)
+    {
+        return dfa.absolutePointerTransitionsUnavailable || dfa.pairedTransitionsRequested || dfa.pairedStateRefArrays != null;
     }
 
     private static long countMatchResult(long result, boolean byteScanRejected)
@@ -4470,6 +4487,7 @@ final class Dfa
         private int selfLoopExitByteScanCount;
         private int countSelfLoopScanCount;
         private int countSelfLoopMatchHandOffCount;
+        private int countSelfLoopNoMatchPointerHandOffCount;
         // Consecutive count searches whose start states did not reach an eligible self-loop.
         private int countSelfLoopNotApplicableCount;
         private int matchingSelfLoopScanCount;
@@ -5240,6 +5258,11 @@ final class Dfa
         int countSelfLoopMatchHandOffCount()
         {
             return countSelfLoopMatchHandOffCount;
+        }
+
+        int countSelfLoopNoMatchPointerHandOffCount()
+        {
+            return countSelfLoopNoMatchPointerHandOffCount;
         }
 
         int countSelfLoopNotApplicableCount()
