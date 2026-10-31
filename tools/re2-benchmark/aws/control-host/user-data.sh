@@ -83,9 +83,14 @@ if [[ ! -f ${INPUTS}/controller.env ]]; then
     rm /var/tmp/launch-inputs.tar.gz
 fi
 
-# The controller runs the first candidate's tooling, which every candidate shares. A first boot interrupted after
-# creating the repository may have left it without its remote.
-[[ -d ${CHECKOUT}/.git ]] || sudo -u ec2-user git init -q "${CHECKOUT}"
+# The controller runs the first candidate's tooling, which every candidate shares. A boot that ended while git ran
+# may have left the checkout locked, though no git process runs this early in a boot, or not yet a repository, which
+# is made again, or without its remote, or half checked out, which the checkout overwrites.
+rm -f "${CHECKOUT}"/.git/*.lock
+if ! sudo -u ec2-user git -C "${CHECKOUT}" rev-parse --git-dir > /dev/null 2>&1; then
+    rm -rf "${CHECKOUT}"
+    sudo -u ec2-user git init -q "${CHECKOUT}"
+fi
 if ! sudo -u ec2-user git -C "${CHECKOUT}" remote get-url origin > /dev/null 2>&1; then
     sudo -u ec2-user git -C "${CHECKOUT}" remote add origin https://github.com/airlift/regulator.git
 fi
@@ -94,7 +99,7 @@ while read -r commit; do
         sudo -u ec2-user git -C "${CHECKOUT}" fetch -q --depth 1 origin "${commit}"
     fi
 done < "${INPUTS}/candidate-commits"
-sudo -u ec2-user git -C "${CHECKOUT}" checkout -q --detach "$(head -n 1 "${INPUTS}/candidate-commits")"
+sudo -u ec2-user git -C "${CHECKOUT}" checkout -q -f --detach "$(head -n 1 "${INPUTS}/candidate-commits")"
 
 python3.12 -m venv "${VENV}"
 "${VENV}/bin/pip" install --quiet --requirement "${CHECKOUT}/tools/re2-benchmark/requirements.txt"
