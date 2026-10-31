@@ -516,7 +516,7 @@ class TestRunCampaign(unittest.TestCase):
                     [(name, commit)] = arguments.candidates
                     self.arguments, self.loops = arguments, None
                     self.key = f"{name}/{'lang/' if arguments.language_plan else ''}{arguments.phase}"
-                    self.share, self.workers = None, {}
+                    self.share, self.workers, self.started_at = None, {}, 0
 
                 def recover(self):
                     self.loops = loops.get(self.key, 1)
@@ -527,6 +527,9 @@ class TestRunCampaign(unittest.TestCase):
 
                 def holding(self, open_only=False):
                     return Counter()
+
+                def deadline(self):
+                    return 0
 
                 def step(self, deadline, observed):
                     self.loops -= 1
@@ -570,7 +573,7 @@ class TestRunCampaign(unittest.TestCase):
                 with patch.object(RUN_CAMPAIGN, "freeze_candidate",
                                   side_effect=lambda root, campaign_root, campaign, name, commitish: frozen[name]), \
                         patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=lambda arguments, root: (
-                            Dispatch(arguments), 0, None)), \
+                            Dispatch(arguments), None)), \
                         patch.object(RUN_CAMPAIGN.aggregate_results, "aggregate", side_effect=reduce), \
                         patch.object(RUN_CAMPAIGN, "ThreadPoolExecutor", side_effect=FakeCloud().executor), \
                         patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
@@ -692,7 +695,8 @@ class TestRunCampaign(unittest.TestCase):
                      {"by": "dain", "at": round(RUN_CAMPAIGN.time.time()), "reason": "release run done"})):
                 with self.subTest(command=command):
                     current = control(*command, actor=actor)[field]
-                    self.assertEqual(value, current.get("a/primary", current) if field == "phases" else
+                    self.assertEqual(value, {key: item for key, item in current["a/primary"].items() if key != "since"}
+                                     if field == "phases" else
                                      {key: current[key] for key in value} if field in ("regions", "purchase") else
                                      current)
             # A new region gets its shared bucket, private, tagged, and expiring objects as the checked-in rule
@@ -3020,9 +3024,10 @@ class TestUnitWorkers(unittest.TestCase):
             vars(dispatcher.arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
             try:
                 RUN_CAMPAIGN.check_regions(dispatcher.arguments, list(dispatcher.platforms.values()))
-                return dispatcher, dispatcher.begin(), None
+                dispatcher.begin()
+                return dispatcher, None
             except (Exception, SystemExit) as error:
-                return dispatcher, None, error
+                return dispatcher, error
 
         poll = fleet.sleep
 
@@ -4307,31 +4312,38 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn((stalled.session, "lost"), {(row["host_session"], row["outcome"]) for row in self.ledger})
 
     def test_pause_spends_none_of_the_phase_deadline(self):
-        # Dain pauses the primary at its first poll, its controller stops and is down for half an hour, and he resumes
-        # the primary ten minutes after its restart: three times its ten-minute deadline later, it still launches for
-        # its queued work.
-        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
-            phases = [("primary", "primary", ["like-dfa-single-use"], ())]
-            fleet = FakeUnitFleet(root / "hosts", abort_after=10)
+        # The primary's controller stops and is down for half an hour. Paused before the stop, or by Dain as the
+        # controller went down, and resumed ten minutes after the restart, three times its ten-minute deadline later,
+        # it still launches for its queued work. Resumed as the controller went down, the outage spends its deadline.
+        for paused, outage, failed in (("before the stop", None, []), ("in the outage", "pause", []),
+                                       ("before the stop", "resume", ["primary"])):
+            with self.subTest(paused=paused, outage=outage), tempfile.TemporaryDirectory() as temporary, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                phases = [("primary", "primary", ["like-dfa-single-use"], ())]
+                fleet = FakeUnitFleet(root / "hosts", abort_after=10 if paused == "before the stop" else 1)
 
-            def pause():
-                if CampaignSettings(root).current["phases"]["primary"]["state"] == "running":
-                    self.control(root, "pause", "primary")
+                def pause():
+                    if paused == "before the stop" and \
+                            CampaignSettings(root).current["phases"]["primary"]["state"] == "running":
+                        self.control(root, "pause", "primary")
 
-            with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_campaign(root, fleet, phases, 2, 1, pause, deadline=600)
-            fleet.abort_after = None
-            fleet.outage(1800)
-            resume_at = fleet.clock + 600
+                with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                    self.run_campaign(root, fleet, phases, 2, 1, pause, deadline=600)
+                fleet.abort_after = None
+                if outage:
+                    with fleet.stubs():
+                        self.control(root, outage, "primary")
+                fleet.outage(1800)
+                resume_at = fleet.clock + 600
 
-            def resume():
-                if fleet.clock >= resume_at and CampaignSettings(root).current["phases"]["primary"]["state"] == "paused":
-                    self.control(root, "resume", "primary")
+                def resume():
+                    if fleet.clock >= resume_at and \
+                            CampaignSettings(root).current["phases"]["primary"]["state"] == "paused":
+                        self.control(root, "resume", "primary")
 
-            failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1, resume, deadline=600)
-            self.assertEqual([], failed)
-            self.assert_accepted(dispatchers["primary"])
+                self.assertEqual(failed, [phase.key for phase in self.run_campaign(
+                    root, fleet, phases, 2, 1, resume, deadline=600)[0]])
 
     def test_a_phase_running_for_days_checks_its_regions_daily(self):
         # Dain pauses the primary at its first poll and resumes it a day later. Each check of a phase's regions puts

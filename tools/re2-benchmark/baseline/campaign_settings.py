@@ -91,12 +91,14 @@ def validate(settings):
               rate["spot"] < rate["total"], f"{instance_type} hourly price ceiling")
     check(isinstance(settings["phases"], dict), "phases")
     for phase, steering in settings["phases"].items():
-        # A paused phase records why it was paused.
-        check(isinstance(steering, dict) and set(steering) == {"state", "share"} | (
+        # A paused phase records why it was paused, and a phase since when it has had its state, as the change
+        # that set it recorded.
+        check(isinstance(steering, dict) and set(steering) - {"since"} == {"state", "share"} | (
                   {"reason"} if steering.get("state") == "paused" else set()) and
               steering["state"] in PHASE_STATES and (steering["share"] == "auto" or positive_integer(
                   steering["share"])) and (steering["state"] != "paused" or isinstance(steering["reason"], str) and
-                                           steering["reason"]), f"{phase} phase")
+                                           steering["reason"]) and positive_number(steering.get("since", 1)),
+              f"{phase} phase")
     window = settings["boot_window"]
     check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
           all(map(positive_integer, window.values())) and
@@ -139,12 +141,16 @@ def check_actor(actor, before, after):
                                 f"{', '.join(authorized['regions'])}, not {region}")
 
 
-def changed(before, actor, update):
-    """The settings update makes of before, as the actor's change, once they validate and the actor may make it."""
+def changed(before, actor, update, at):
+    """The settings update makes of before, as the actor's change at epoch time at, once they validate and the actor
+    may make it; each phase whose state it changes has it since then."""
     if actor not in ACTORS:
         raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
     settings = copy.deepcopy(before)
     update(settings)
+    for phase, steering in settings["phases"].items():
+        if steering.get("state") != before["phases"].get(phase, {}).get("state"):
+            steering["since"] = at
     if settings != before:
         settings["version"] = before["version"] + 1
         validate(settings)
@@ -165,18 +171,18 @@ def staged(path):
     return path.with_name(path.name + ".new")
 
 
-def record(path, events_path, settings, actor, change):
-    """Make settings the campaign's, as the actor's change: staged beside the file first, then its event recorded,
-    and only then put in place, so no version takes effect without its event. The staged file and its name are
-    durable before the event is, so a crash never leaves an event whose change recovery cannot find."""
+def record(path, events_path, settings, actor, change, at):
+    """Make settings the campaign's, as the actor's change at epoch time at: staged beside the file first, then its
+    event recorded, and only then put in place, so no version takes effect without its event. The staged file and
+    its name are durable before the event is, so a crash never leaves an event whose change recovery cannot find."""
     with staged(path).open("w") as output:
         json.dump(settings, output, indent=2, sort_keys=True)
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
     fsync_directory(path.parent)
-    append_ledger(events_path, EVENT_FIELDS, {"version": settings["version"], "at": round(time.time()),
-                                              "actor": actor, "change": change})
+    append_ledger(events_path, EVENT_FIELDS, {"version": settings["version"], "at": at, "actor": actor,
+                                              "change": change})
     os.replace(staged(path), path)
     fsync_directory(path.parent)
 
@@ -237,7 +243,7 @@ class CampaignSettings:
         with locked(root / LOCK):
             recover(path, root / EVENTS)
             if not path.exists():
-                record(path, root / EVENTS, seeded(given), actor, "seed")
+                record(path, root / EVENTS, seeded(given), actor, "seed", round(time.time()))
         return cls(root)
 
     def reload(self):
@@ -247,14 +253,16 @@ class CampaignSettings:
 
     def change(self, actor, change, update):
         """Apply update to the settings as they stand, as the actor's change, described by change: once the result
-        validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded.
-        An update that changes nothing records nothing. Returns the settings."""
+        validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded,
+        the time its event records being when each phase it steers took its state. An update that changes nothing
+        records nothing. Returns the settings."""
         with locked(self.lock_path):
             recover(self.path, self.events_path)
             before = read(self.path)
-            settings = changed(before, actor, update)
+            at = round(time.time())
+            settings = changed(before, actor, update, at)
             if settings != before:
-                record(self.path, self.events_path, settings, actor, change)
+                record(self.path, self.events_path, settings, actor, change, at)
         self.current = settings
         return settings
 
