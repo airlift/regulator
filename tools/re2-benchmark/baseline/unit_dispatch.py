@@ -17,7 +17,7 @@ from pathlib import Path
 
 import unit_session
 from cloud import CloudError
-from campaign_io import UnsafeCampaignError, append_ledger, fsync_directory, write_ledger
+from campaign_io import UnsafeCampaignError, append_ledger, fsync_directory, ledger_lines, write_ledger
 
 # A lease row's groups are those it leased, in run order; an outcome row's are those whose markers it processed.
 UNIT_ATTEMPT_FIELDS = (
@@ -76,11 +76,10 @@ def read_unit_receipt(path):
 def read_accepted_units(path):
     if not path.exists():
         return []
-    with path.open(newline="") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != unit_session.UNIT_RECEIPT_FIELDS:
-            raise UnsafeCampaignError(f"unexpected unit receipt schema in {path}")
-        rows = list(reader)
+    reader = csv.DictReader(ledger_lines(path), delimiter="\t")
+    if tuple(reader.fieldnames or ()) != unit_session.UNIT_RECEIPT_FIELDS:
+        raise UnsafeCampaignError(f"unexpected unit receipt schema in {path}")
+    rows = list(reader)
     for identities in ([group_identity(row) for row in rows], [group_attempt(row) for row in rows]):
         if len(identities) != len(set(identities)):
             raise UnsafeCampaignError(f"accepted-unit ledger contains duplicate groups or attempts: {path}")
@@ -96,11 +95,10 @@ def persist_accepted_unit(path, receipt):
 def read_unit_uploads(path):
     if not path.exists():
         return []
-    with path.open(newline="") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) not in (UNIT_UPLOAD_FIELDS, UNIT_UPLOAD_FIELDS[:-1]):
-            raise UnsafeCampaignError(f"unexpected unit upload schema in {path}")
-        return list(reader)
+    reader = csv.DictReader(ledger_lines(path), delimiter="\t")
+    if tuple(reader.fieldnames or ()) not in (UNIT_UPLOAD_FIELDS, UNIT_UPLOAD_FIELDS[:-1]):
+        raise UnsafeCampaignError(f"unexpected unit upload schema in {path}")
+    return list(reader)
 
 
 def measured_group_seconds(path):
@@ -137,26 +135,18 @@ def persist_unit_upload(path, row):
 def read_unit_attempts(path):
     if not path.exists():
         return []
-    with path.open(newline="") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != UNIT_ATTEMPT_FIELDS:
-            raise UnsafeCampaignError(f"unexpected unit attempt schema in {path}")
-        return list(reader)
+    reader = csv.DictReader(ledger_lines(path), delimiter="\t")
+    if tuple(reader.fieldnames or ()) != UNIT_ATTEMPT_FIELDS:
+        raise UnsafeCampaignError(f"unexpected unit attempt schema in {path}")
+    return list(reader)
 
 
 def write_unit_attempt(path, worker, sequence, item, outcome, detail="-", groups=()):
     """Append one lease or lease outcome to unit-attempts.tsv. A stop lease names no unit."""
-    write_header = not path.exists()
-    with path.open("a", newline="") as output_file:
-        writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
-        if write_header:
-            writer.writerow(UNIT_ATTEMPT_FIELDS)
-        writer.writerow((worker.job.platform.name, item.unit_id if item else "-", item.replica if item else "-",
-                         ",".join(groups) or "-", worker.job.host_epoch,
-                         worker.host_session, sequence,
-                         worker.job.market, outcome, detail.replace("\t", " ").replace("\n", " ")))
-        output_file.flush()
-        os.fsync(output_file.fileno())
+    append_ledger(path, UNIT_ATTEMPT_FIELDS, dict(zip(UNIT_ATTEMPT_FIELDS, (
+        worker.job.platform.name, item.unit_id if item else "-", item.replica if item else "-", ",".join(groups) or "-",
+        worker.job.host_epoch, worker.host_session, sequence, worker.job.market, outcome,
+        detail.replace("\t", " ").replace("\n", " ")))))
 
 
 def write_unresolved(path, fields, rows):

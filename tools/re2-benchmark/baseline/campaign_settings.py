@@ -17,7 +17,7 @@ import os
 import re
 import time
 
-from campaign_io import append_ledger, fsync_directory
+from campaign_io import append_ledger, fsync_directory, ledger_lines
 
 SETTINGS = "campaign-settings.json"
 LOCK = "campaign-settings.lock"
@@ -186,8 +186,7 @@ def recover(path, events_path):
         return
     try:
         version = json.loads(staged(path).read_text())["version"]
-        with events_path.open(newline="") as input_file:
-            recorded = [row["version"] for row in csv.DictReader(input_file, delimiter="\t")]
+        recorded = [row["version"] for row in csv.DictReader(ledger_lines(events_path), delimiter="\t")]
     except (OSError, ValueError, KeyError, TypeError):
         version, recorded = None, []
     if recorded and recorded[-1] == str(version):

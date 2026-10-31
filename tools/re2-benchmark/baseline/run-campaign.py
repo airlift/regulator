@@ -42,7 +42,8 @@ from campaign_settings import (
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
     owner_fleet, read_state as read_fleet_state)
-from campaign_io import UnsafeCampaignError, append_ledger, check_output, fsync_directory, write_ledger
+from campaign_io import (UnsafeCampaignError, append_ledger, check_output, fsync_directory, ledger_lines,
+                         write_ledger)
 from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result,
@@ -231,6 +232,7 @@ SHARED_BUCKET_LIFECYCLE = REPOSITORY / BENCHMARK_TOOLING / "aws" / "bucket-lifec
 TRINO_REVISION = "c7503d170344c4e266f03fdb39e53c82aa7e3594"
 JOB_MANIFEST_FIELDS = (
     "platform", "shard_id", "replica", "host_epoch", "attempt", "market", "instance_type", "architecture")
+JOB_ATTEMPT_FIELDS = ("platform", "shard_id", "replica", "host_epoch", "attempt", "market", "outcome", "detail")
 PHASE_TIMEOUT_SECONDS = {
     "build": 3 * 60 * 60,
     "smoke": 6 * 60 * 60,
@@ -1524,8 +1526,7 @@ def upload_shared_archives(arguments, uploads):
 def read_shared_archives(path):
     if not path.is_file():
         return []
-    with path.open(newline="") as ledger:
-        return list(csv.DictReader(ledger, delimiter="\t"))
+    return list(csv.DictReader(ledger_lines(path), delimiter="\t"))
 
 
 def put_shared_archive(aws, region, bucket, key, path, sha256, label):
@@ -2016,16 +2017,9 @@ def boot_to_first_unit(directory, job):
 
 
 def write_attempt(path, job, outcome, detail="-"):
-    write_header = not path.exists()
-    with path.open("a", newline="") as output_file:
-        writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
-        if write_header:
-            writer.writerow(("platform", "shard_id", "replica", "host_epoch", "attempt", "market",
-                             "outcome", "detail"))
-        writer.writerow((job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt,
-                         job.market, outcome, detail.replace("\t", " ").replace("\n", " ")))
-        output_file.flush()
-        os.fsync(output_file.fileno())
+    append_ledger(path, JOB_ATTEMPT_FIELDS, dict(zip(JOB_ATTEMPT_FIELDS, (
+        job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market, outcome,
+        detail.replace("\t", " ").replace("\n", " ")))))
 
 
 def write_event(path, event_type, campaign_id, job, worker, reason, details="", unit_id=None, unit_attempt_id="",
@@ -2041,17 +2035,11 @@ def write_event(path, event_type, campaign_id, job, worker, reason, details="", 
     if unit_id is not None:
         index = fields.index("host_epoch") + 1
         fields = (*fields[:index], "unit_id", "unit_attempt_id", *fields[index:])
-    write_header = not path.exists()
-    if not write_header:
+    if path.exists():
         # Resumed campaigns keep the event columns their file started with.
         with path.open(newline="") as input_file:
             fields = tuple(csv.DictReader(input_file, delimiter="\t").fieldnames or fields)
-    with path.open("a", newline="") as output_file:
-        writer = csv.DictWriter(
-            output_file, fieldnames=fields, extrasaction="ignore", delimiter="\t", lineterminator="\n")
-        if write_header:
-            writer.writeheader()
-        writer.writerow({
+    event = {
             "event_type": event_type,
             "campaign_id": campaign_id,
             "platform": job.platform.name,
@@ -2069,9 +2057,8 @@ def write_event(path, event_type, campaign_id, job, worker, reason, details="", 
             "placement_score": metadata["placement_score"],
             "failure_classification": failure_classification,
             "details": details.replace("\t", " ").replace("\n", " "),
-        })
-        output_file.flush()
-        os.fsync(output_file.fileno())
+    }
+    append_ledger(path, fields, {field: value for field, value in event.items() if field in fields})
 
 
 def validate_unit_artifacts(validation, result_root, receipt, directory=None):
@@ -2209,13 +2196,10 @@ def recover_accepted_units(validation, result_root, accepted_units):
 def read_attempts(path):
     if not path.exists():
         return []
-    with path.open(newline="") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        expected_fields = (
-            "platform", "shard_id", "replica", "host_epoch", "attempt", "market", "outcome", "detail")
-        if tuple(reader.fieldnames or ()) != expected_fields:
-            raise UnsafeCampaignError(f"unexpected attempt schema in {path}")
-        return list(reader)
+    reader = csv.DictReader(ledger_lines(path), delimiter="\t")
+    if tuple(reader.fieldnames or ()) != JOB_ATTEMPT_FIELDS:
+        raise UnsafeCampaignError(f"unexpected attempt schema in {path}")
+    return list(reader)
 
 
 def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path, live):
@@ -2292,13 +2276,12 @@ def paused_seconds(path, started_at, now):
     counted until now, and whether one is open."""
     paused, since = 0.0, None
     if path.exists():
-        with path.open(newline="") as input_file:
-            for row in csv.DictReader(input_file, delimiter="\t"):
-                at = float(row["at"])
-                if row["event"] == "paused":
-                    since = at if since is None else since
-                elif since is not None:
-                    paused, since = paused + max(0.0, at - max(since, started_at)), None
+        for row in csv.DictReader(ledger_lines(path), delimiter="\t"):
+            at = float(row["at"])
+            if row["event"] == "paused":
+                since = at if since is None else since
+            elif since is not None:
+                paused, since = paused + max(0.0, at - max(since, started_at)), None
     if since is not None:
         paused += max(0.0, now - max(since, started_at))
     return paused, since is not None
@@ -4316,8 +4299,7 @@ class Campaign:
     def log_changes(self):
         """Log each settings change made since the last loop, with its actor; a controller logs none made before it
         started."""
-        with self.arguments.settings.events_path.open(newline="") as input_file:
-            changes = list(csv.DictReader(input_file, delimiter="\t"))
+        changes = list(csv.DictReader(ledger_lines(self.arguments.settings.events_path), delimiter="\t"))
         for change in changes[len(changes) if self.changes is None else self.changes:]:
             self.telemetry.event("settings-change", f"settings version {change['version']} by {change['actor']}: "
                                  f"{change['change']}", actor=change["actor"], version=change["version"],

@@ -2179,6 +2179,27 @@ class TestRunCampaign(unittest.TestCase):
                              [(row["host_epoch"], row["outcome"], row["detail"])
                               for row in RUN_CAMPAIGN.read_attempts(attempts)])
 
+    def test_a_crash_during_a_ledger_append_leaves_whole_rows(self):
+        job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            attempts = Path(temporary_directory) / "job-attempts.tsv"
+            # A crash as the ledger is created leaves none, rather than one without its header.
+            with patch.object(os, "replace", side_effect=OSError("crashed")), \
+                    self.assertRaises(OSError):
+                RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
+            self.assertEqual([], RUN_CAMPAIGN.read_attempts(attempts))
+            RUN_CAMPAIGN.write_attempt(attempts, job, "starting", "session=baseline-e10")
+            # A crash partway through a row leaves it without its line end: a restart reads the rows before it, and
+            # its next row replaces it.
+            RUN_CAMPAIGN.write_attempt(attempts, job, "stopped", "lease written")
+            attempts.write_bytes(attempts.read_bytes()[:-5])
+            self.assertEqual([("starting", "session=baseline-e10")],
+                             [(row["outcome"], row["detail"]) for row in RUN_CAMPAIGN.read_attempts(attempts)])
+            RUN_CAMPAIGN.write_attempt(attempts, job, "retryable-infrastructure", "controller stopped before launch")
+            self.assertEqual([("starting", "session=baseline-e10"),
+                              ("retryable-infrastructure", "controller stopped before launch")],
+                             [(row["outcome"], row["detail"]) for row in RUN_CAMPAIGN.read_attempts(attempts)])
+
     def test_tooling_digest_covers_each_tracked_files_path_and_content(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
