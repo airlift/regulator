@@ -37,6 +37,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDfaCountMatches
 {
+    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
+    // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
+    // and the pinned native RE2 counts still hold.
+    private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
+
     @Test
     public void testCountsSuccessiveMatchesInOneSearchSession()
     {
@@ -100,9 +105,7 @@ public class TestDfaCountMatches
     @Test
     public void testCountDfaThrashingSkipsDfaUntilCacheReset()
     {
-        Re2 pattern = Re2.compile(
-                utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(3L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
         byte[] bytes = stateExplosionInput(16 * 1024);
         var input = Slices.wrappedBuffer(bytes);
 
@@ -150,9 +153,7 @@ public class TestDfaCountMatches
     @Test
     public void testStartStateExhaustionDoesNotBecomeNoMatch()
     {
-        Re2 pattern = Re2.compile(
-                utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
         var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
 
         RegexpMatcher fillingMatcher = pattern.matcher(input);
@@ -169,9 +170,7 @@ public class TestDfaCountMatches
         RegexpMatcher reused = pattern.matcher(input).reset(input, knownMatchStart, input.length());
         assertThat(reused.lookingAt()).isTrue();
 
-        Re2 fresh = Re2.compile(
-                utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 fresh = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
         assertThat(fresh.matcher(input).reset(input, knownMatchStart, input.length()).lookingAt()).isTrue();
     }
 
@@ -216,9 +215,10 @@ public class TestDfaCountMatches
     @Test
     public void testSuccessfulCountDfaThrashingKeepsProductiveScanner()
     {
-        Re2 pattern = Re2.compile(
-                utf8Slice("[a-q][^u-z]{13}x"),
-                Re2.Options.latin1().setMaxMemory(3L << 19));
+        // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
+        // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
+        // and the pinned native RE2 count still holds.
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(3L << 19));
         var input = Slices.wrappedBuffer(stateExplosionInput(2 * 1024 * 1024));
 
         // Pinned native RE2 finds 1,074 non-overlapping matches in this deterministic input.

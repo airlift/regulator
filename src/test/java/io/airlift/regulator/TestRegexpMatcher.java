@@ -180,9 +180,9 @@ public class TestRegexpMatcher
     @Test
     public void testGroupZeroMatchUsesNoCaptureNfaWorkspaceWhenDfaFails()
     {
-        Re2 pattern = Re2.compile(
-                Slices.utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(4L << 20));
+        // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
+        // answer it without the DFA.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("(?i)[a-q][^u-z]{80}x"), Re2.Options.latin1().setMaxMemory(4L << 20));
         Slice input = Slices.wrappedBuffer(stateExplosionInput(1 << 20));
         Nfa.Workspace workspace = new Nfa.Workspace();
         int[] groupZero = new int[2];
