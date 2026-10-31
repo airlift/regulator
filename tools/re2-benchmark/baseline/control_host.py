@@ -272,20 +272,20 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
         aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
     except CloudError as error:
         # A host without the campaign volume would wait for it and then fail, so it goes, and replace starts another.
-        fate = discard(aws, network, campaign, instance, registered=False)
+        fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
                          f"{instance}: {error}; that host {fate}; run control-host replace {campaign} again") from error
     # A teardown that began once this replace had checked the volume terminates every host it finds, and snapshots
     # the volume once they are gone; a host it did not find goes before its controller starts.
     if refusal := teardown_begun(aws, campaign, volume.id):
-        fate = discard(aws, network, campaign, instance, registered=False)
+        fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"{refusal}; its new control host {instance} {fate}")
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
     # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
     # out before its controller starts.
     if others := other_hosts(aws, network, campaign):
-        fate = discard(aws, network, campaign, instance, registered=True)
+        fate = discard(aws, network, instance, registered=True)
         raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, which was registered as "
                          f"campaign {campaign}'s new control host {instance} was; one name serves one campaign, so "
                          f"that host {fate}; once the other campaign's host is torn down, run control-host replace "
@@ -307,18 +307,28 @@ def teardown_begun(aws, campaign, volume):
             "--confirm")
 
 
-def discard(aws, network, campaign, instance, registered):
+def discard(aws, network, instance, registered):
     """Take a new control host of the campaign out of the load balancer's target group, where it was registered, and
-    terminate it; returns what became of it, for the refusal that follows, which names AWS's error where it refused,
-    since the host then still runs until the campaign's next replace terminates it."""
-    try:
-        if registered:
+    terminate it, whether or not AWS takes it out; returns what became of it, naming each step AWS refused, for the
+    refusal that follows, which says what takes down a host left running or registered."""
+    deregistration = termination = None
+    if registered:
+        try:
             aws.deregister_target(REGION, network["target_group"], instance, GRAFANA_PORT)
+        except CloudError as error:
+            deregistration = error
+    try:
         aws.terminate(REGION, [instance])
     except CloudError as error:
-        return (f"still runs, since AWS refused to take it down: {error}; the next control-host replace {campaign} "
-                "terminates it")
-    return "is deregistered and terminated" if registered else "is terminated"
+        termination = error
+    refused = ", and ".join(f"to {step} it: {error}" for step, error in
+                            (("deregister", deregistration), ("terminate", termination)) if error)
+    if termination is None:
+        return (f"is terminated, though AWS refused {refused}" if deregistration else
+                "is deregistered and terminated" if registered else "is terminated")
+    left = ("still runs, registered" if deregistration else "is deregistered but still runs" if registered else
+            "still runs")
+    return f"{left}, since AWS refused {refused}"
 
 
 def root_files(root):
