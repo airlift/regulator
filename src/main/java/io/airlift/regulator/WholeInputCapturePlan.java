@@ -14,22 +14,26 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.SizeOf;
+import io.airlift.slice.Slice;
 
 import java.util.Arrays;
 
-/// Capture endpoints for one anchored, greedy run that accepts every valid UTF-8 code point.
+/// Capture endpoints for one anchored, greedy run that accepts every valid UTF-8 code point, or
+/// every byte.
 final class WholeInputCapturePlan
 {
     private final boolean[] atEnd;
+    private final boolean acceptsEveryByte;
 
-    private WholeInputCapturePlan(boolean[] atEnd)
+    private WholeInputCapturePlan(boolean[] atEnd, boolean acceptsEveryByte)
     {
         this.atEnd = atEnd;
+        this.acceptsEveryByte = acceptsEveryByte;
     }
 
     static WholeInputCapturePlan analyze(Regexp expression, int captureCount)
     {
-        if (captureCount == 0 || captureCount > 1024 || (expression.parseFlags() & Regexp.LATIN1) != 0) {
+        if (captureCount == 0 || captureCount > 1024) {
             return null;
         }
         Analyzer analyzer = new Analyzer(captureCount);
@@ -37,7 +41,14 @@ final class WholeInputCapturePlan
             return null;
         }
         analyzer.atEnd[1] = true;
-        return new WholeInputCapturePlan(analyzer.atEnd);
+        return new WholeInputCapturePlan(analyzer.atEnd, analyzer.acceptsEveryByte);
+    }
+
+    /// Returns whether the plan matches all of `input`. An any-byte dot, as in Rust's byte mode,
+    /// and a Latin-1 dot accept every byte, and a UTF-8 dot every valid character.
+    boolean matches(Slice input)
+    {
+        return acceptsEveryByte || Utf8.firstInvalidOffset(input) < 0;
     }
 
     long estimatedRetainedSize()
@@ -62,6 +73,7 @@ final class WholeInputCapturePlan
         private boolean begin;
         private boolean consumed;
         private boolean end;
+        private boolean acceptsEveryByte;
 
         private Analyzer(int captureCount)
         {
@@ -110,14 +122,15 @@ final class WholeInputCapturePlan
                     yield true;
                 }
                 case STAR -> {
-                    if (!begin || consumed || end ||
-                            (expression.parseFlags() & (Regexp.NON_GREEDY | Regexp.LATIN1)) != 0 ||
-                            expression.child(0).op() != RegexpOp.ANY_CHAR) {
+                    Regexp child = expression.child(0);
+                    if (!begin || consumed || end || (expression.parseFlags() & Regexp.NON_GREEDY) != 0 || (child.op() != RegexpOp.ANY_CHAR && child.op() != RegexpOp.ANY_BYTE)) {
                         yield false;
                     }
-                    // ANY_CHAR is already the parser's full code-point set. Non-DOTALL dots
-                    // are narrower classes. With only endpoint assertions after this run,
-                    // greedy priority selects the real end, even for Java's final-newline $.
+                    // ANY_CHAR is already the parser's full code-point set, or every byte in
+                    // Latin-1, and ANY_BYTE accepts every byte. Non-DOTALL dots are narrower
+                    // classes. With only endpoint assertions after this run, greedy priority
+                    // selects the real end, even for Java's final-newline $.
+                    acceptsEveryByte = child.op() == RegexpOp.ANY_BYTE || (child.parseFlags() & Regexp.LATIN1) != 0;
                     consumed = true;
                     yield true;
                 }

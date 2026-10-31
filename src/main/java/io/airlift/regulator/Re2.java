@@ -2769,7 +2769,7 @@ public sealed class Re2
 
         if (prog == partialProg && booleanPlans.wholeInputCapturePlan() != null &&
                 start == contextStart && end == contextEnd &&
-                Utf8.firstInvalidOffset(logicalContext(text, contextStart, contextEnd)) < 0) {
+                booleanPlans.wholeInputCapturePlan().matches(logicalContext(text, contextStart, contextEnd))) {
             booleanPlans.wholeInputCapturePlan().materialize(end - start, groupOffsets);
             return true;
         }

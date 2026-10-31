@@ -650,6 +650,11 @@ public final class RegexpMatcher
         this.dfaQuitStreak = dfaQuitStreak;
     }
 
+    boolean onePassWorkspaceInitializedForDiagnostics()
+    {
+        return onePassWorkspace != null;
+    }
+
     boolean bitStateWorkspaceInitializedForDiagnostics()
     {
         return bitStateWorkspace != null;
