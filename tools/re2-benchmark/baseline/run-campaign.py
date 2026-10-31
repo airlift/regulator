@@ -3782,9 +3782,10 @@ class UnitDispatcher:
     def launch(self, now):
         """Admit each pool's launches, then write each admitted worker's first leases and launch it, the workers on the
         request threads. A worker whose first leases S3 did not all take launches nothing, as a launch AWS refused
-        does: it has ended, and is settled once its cleanup is proven. An exception during admission still launches
-        the workers admitted before it, so none stays recorded as starting with no launch, and an error launching
-        them is noted on the admission's."""
+        does: it has ended, and is settled in the same loop once its cleanup is proven, so its reservation leaves the
+        boot window before the campaign's next phase launches. An exception during admission still launches the
+        workers admitted before it, so none stays recorded as starting with no launch, and an error launching them
+        is noted on the admission's."""
         starting = []
         try:
             self.admit(now, starting)
@@ -3795,6 +3796,11 @@ class UnitDispatcher:
                 error.add_note(f"launching the workers admitted before it also failed: {failure}")
             raise
         self.launch_admitted(starting)
+        failed = [worker for worker in starting if worker.launch_failure]
+        for worker in failed:
+            worker.gone = True
+        for worker in self.clean_up(failed):
+            self.finish(worker)
 
     def launch_admitted(self, starting):
         """Write the first leases of each worker in starting and launch it, as launch describes. A worker whose

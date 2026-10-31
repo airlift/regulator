@@ -273,7 +273,9 @@ minutes go.
 **Boot window.** Hosts launched but not yet reporting are capped
 campaign-wide: 10 at first, doubling after each wave whose hosts all
 reported within 5 minutes with no boot failure, up to 50; a boot failure or a
-late wave halves it (floor 5). The window bounds what a bad AMI, region or
+late wave halves it (floor 5). A launch that booted nothing is settled in
+the loop that made it, so it holds no room from the phases stepped after it.
+The window bounds what a bad AMI, region or
 user-data change can cost before it shows, which is the remaining reason to
 ramp once leases are written at launch.
 
