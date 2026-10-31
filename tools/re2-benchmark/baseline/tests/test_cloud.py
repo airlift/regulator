@@ -355,6 +355,11 @@ class FakeCloud:
         self.region_volumes.setdefault(region, []).append(volume)
         return volume.id
 
+    def tag_volume(self, region, volume, tags):
+        self.call("tag_volume", region, volume, *tags)
+        self.region_volumes[region] = [replace(item, tags={**item.tags, **tags}) if item.id == volume else item
+                                       for item in self.region_volumes[region]]
+
     def attach_volume(self, region, volume, instance, device):
         self.call("attach_volume", region, volume, instance, device)
         if any(item.id == volume and item.state != "available" for item in self.region_volumes[region]):
@@ -654,6 +659,8 @@ class TestAwsCloud(unittest.TestCase):
         ec2.add_response("describe_instances", {"Reservations": [{"Instances": [{"State": {"Name": "running"}}]}]},
                          {"InstanceIds": ["i-host"]})
         ec2.add_response("attach_volume", {}, {"VolumeId": "vol-new", "InstanceId": "i-host", "Device": "/dev/sdf"})
+        ec2.add_response("create_tags", {},
+                         {"Resources": ["vol-new"], "Tags": [{"Key": "Teardown", "Value": "started"}]})
         ec2.add_response("get_console_output", {"Output": base64.b64encode(b"host keys\n").decode()},
                          {"InstanceId": "i-host", "Latest": True})
         ec2.add_response("create_snapshot", {"SnapshotId": "snap-a"}, {
@@ -690,6 +697,7 @@ class TestAwsCloud(unittest.TestCase):
             {"Campaign": "c"}))
         aws.wait("us-west-2", "instance_running", "i-host")
         aws.attach_volume("us-west-2", "vol-new", "i-host", "/dev/sdf")
+        aws.tag_volume("us-west-2", "vol-new", {"Teardown": "started"})
         self.assertEqual("host keys\n", aws.console_output("us-west-2", "i-host"))
         self.assertEqual("snap-a", aws.create_snapshot("us-west-2", "vol-new", {"Campaign": "c"}))
         self.assertEqual([cloud.Snapshot("snap-a", "vol-new", "pending", {"Campaign": "c"})],

@@ -46,6 +46,9 @@ KNOWN_HOSTS = Path.home() / ".ssh" / "regulator-control-hosts"
 FINGERPRINTS = re.compile(r"-----BEGIN SSH HOST KEY FINGERPRINTS-----(.*?)-----END SSH HOST KEY FINGERPRINTS-----",
                           re.DOTALL)
 VOLUME_GIB = 200
+# The tag a teardown marks the campaign volume with before anything else, so no host is put on it after, and
+# its snapshot holds every write.
+TEARDOWN_TAG = {"Teardown": "started"}
 VOLUME_DEVICE = "/dev/sdf"
 # On the campaign volume: the campaign root, and the launch inputs with the controller's checkout.
 CAMPAIGN_ROOT = "/regulator/campaign"
@@ -230,16 +233,14 @@ def launch(aws, campaign, ssh_public_key, inputs):
 
 def replace(aws, campaign, ssh_public_key):
     """Terminate the campaign's control host, if it has one, and launch another onto its volume, in the volume's
-    zone; once a teardown has snapshotted the volume, its snapshot is the root's last copy and no host writes the
-    volume again."""
+    zone; once a teardown has begun, its snapshot is to be the root's last copy and no host writes the volume
+    again."""
     found = network(aws)
     group = security_group(aws, found)
     check_target_group(aws, found, campaign)
     volume = campaign_volume(aws, campaign)
-    if any(snapshot.volume == volume.id for snapshot in aws.snapshots(REGION, tags(campaign))):
-        raise SystemExit(f"campaign {campaign}'s teardown snapshotted its volume {volume.id} as its root's last "
-                         f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown "
-                         f"{campaign} --confirm")
+    if refusal := teardown_begun(aws, campaign, volume.id):
+        raise SystemExit(refusal)
     deregister_hosts(aws, found, campaign)
     hosts = live_hosts(aws, campaign)
     if hosts:
@@ -274,6 +275,11 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
         fate = discard(aws, network, campaign, instance, registered=False)
         raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
                          f"{instance}: {error}; that host {fate}; run control-host replace {campaign} again") from error
+    # A teardown that began once this replace had checked the volume terminates every host it finds, and snapshots
+    # the volume once they are gone; a host it did not find goes before its controller starts.
+    if refusal := teardown_begun(aws, campaign, volume.id):
+        fate = discard(aws, network, campaign, instance, registered=False)
+        raise SystemExit(f"{refusal}; its new control host {instance} {fate}")
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
     # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
@@ -289,6 +295,16 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
           f"ssh, once control-host known-host {campaign} records its keys: "
           f"{shlex.join([*trusted_ssh(), f'ec2-user@{address}'])}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
+
+
+def teardown_begun(aws, campaign, volume):
+    """Why no host goes on the campaign volume once a teardown has marked it, or deleted it, or "" before."""
+    if any(item.id == volume and not TEARDOWN_TAG.items() <= item.tags.items()
+           for item in aws.volumes(REGION, tags(campaign))):
+        return ""
+    return (f"campaign {campaign}'s teardown has begun on its volume {volume}, whose snapshot is its root's last "
+            f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown {campaign} "
+            "--confirm")
 
 
 def discard(aws, network, campaign, instance, registered):
@@ -421,10 +437,11 @@ def finish(aws, campaign, local_root, identity=None):
 
 
 def teardown(aws, campaign, confirm):
-    """Remove the campaign's control host for good, as only Dain does: deregister it from the load balancer, with
-    any earlier host of the campaign still registered, terminate it, wait for the load balancer to forget it,
-    snapshot its volume, which is then the campaign root's last copy, and delete the volume and the Grafana
-    credentials. The record, the load balancer and its target group belong to the account setup.
+    """Remove the campaign's control host for good, as only Dain does: mark its volume torn down, terminate every host
+    of the campaign, including one a replace launched since, deregister them from the load balancer and wait for it
+    to forget them, snapshot the volume once they are gone, which is then the campaign root's last copy, and delete
+    the volume and the Grafana credentials. The record, the load balancer and its target group belong to the account
+    setup.
 
     Each step finds what an earlier, interrupted teardown left by the campaign's tags, so running it again finishes:
     a host already terminated is not waited for, a snapshot already taken of the volume is not taken again, and with
@@ -436,15 +453,16 @@ def teardown(aws, campaign, confirm):
     volumes = aws.volumes(REGION, tags(campaign))
     if len(volumes) > 1:
         raise SystemExit(f"campaign {campaign} has {len(volumes)} control host volumes; expected one")
-    # The host goes first, so the snapshot holds the root as its controller last wrote it, and the load balancer
-    # forgets it, so no other campaign's launch finds it there.
-    deregistered = deregister_hosts(aws, found, campaign)
-    hosts = live_hosts(aws, campaign)
-    if hosts:
+    # The mark comes first, so a replace running beside the teardown puts no host on the volume after it. The hosts
+    # go next, with any a replace launched before the mark, so the snapshot holds the root as its controller last
+    # wrote it, and the load balancer forgets them, so no other campaign's launch finds them there.
+    for volume in volumes:
+        aws.tag_volume(REGION, volume.id, TEARDOWN_TAG)
+    while hosts := live_hosts(aws, campaign):
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
-    if deregistered:
+    if deregistered := deregister_hosts(aws, found, campaign):
         aws.wait_deregistered(REGION, found["target_group"], deregistered, GRAFANA_PORT)
     for volume in volumes:
         aws.wait(REGION, "volume_available", volume.id)

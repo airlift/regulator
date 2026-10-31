@@ -510,16 +510,21 @@ ssh on port 443 with rsync, verifies the file list and SHA-256s against the
 controller's manifest, and writes the results directory the reduction and
 archive read today. It terminates nothing.
 
-`run-campaign.py teardown <campaign> --confirm` deregisters every host of the
-campaign from the load balancer, terminates the one that runs, waits until
-the load balancer has drained and forgotten them, snapshots the volume, and deletes
-the volume and the Grafana parameters; the record and the load balancer stay. The host goes first so the snapshot holds the root as the
-controller last wrote it. Only Dain runs it, and it refuses without
-`--confirm`. The snapshot is the last copy until Dain deletes it. Each step
-finds what an earlier teardown did by the campaign's tags, so a teardown that
-failed partway finishes when run again, with no second snapshot. Once the
-snapshot exists, `control-host replace` refuses, so no host writes the volume
-after its last copy.
+`run-campaign.py teardown <campaign> --confirm` first tags the campaign's
+volume as torn down, then terminates every host of the campaign, again until
+none runs, so a host a concurrent `replace` launched goes too. It then
+deregisters them from the load balancer and waits until the load balancer has
+drained and forgotten them, snapshots the volume, and deletes the volume and
+the Grafana parameters; the record and the load balancer stay. The hosts go
+first so the snapshot holds the root as the controller last wrote it. Only
+Dain runs it, and it refuses without `--confirm`. The snapshot is the last copy
+until Dain deletes it. Each step finds what an earlier teardown did by the
+campaign's tags, so a teardown that failed partway finishes when run again,
+with no second snapshot. Once the volume carries the tag, `control-host
+replace` refuses, and a replace that checked the volume before the tag looks
+again once the volume is attached, and terminates its host before its
+controller starts; either way no host writes the volume after its last copy.
+The tag lives in AWS, so the two commands need not run on the same machine.
 
 ## Lower stakes before launch
 

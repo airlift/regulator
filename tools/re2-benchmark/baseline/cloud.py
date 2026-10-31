@@ -332,6 +332,11 @@ class AwsCloud:
                          Encrypted=True, TagSpecifications=[{"ResourceType": "volume", "Tags": [
                              {"Key": key, "Value": value} for key, value in tags.items()]}])["VolumeId"]
 
+    def tag_volume(self, region, volume, tags):
+        """Add the tags to the volume, or change their values."""
+        self.call("ec2", region, "create_tags", Resources=[volume],
+                  Tags=[{"Key": key, "Value": value} for key, value in tags.items()])
+
     def attach_volume(self, region, volume, instance, device):
         self.call("ec2", region, "attach_volume", VolumeId=volume, InstanceId=instance, Device=device)
 

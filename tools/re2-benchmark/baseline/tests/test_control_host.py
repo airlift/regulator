@@ -165,8 +165,8 @@ class TestControlHost(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "only Dain runs it, with --confirm"):
                 control_host.teardown(aws, "c", confirm=False)
             self.assertEqual(calls, len(aws.calls))
-            # A teardown interrupted while its snapshot completes, and again as it deletes the credentials, finishes
-            # when run again, taking no second snapshot.
+            # A teardown interrupted before its snapshot, again while its snapshot completes, and again as it deletes
+            # the credentials, finishes when run again, taking no second snapshot.
             wait = aws.wait
 
             def snapshot_never_completes(region, condition, resource):
@@ -174,15 +174,19 @@ class TestControlHost(unittest.TestCase):
                     raise CloudError("Waiter SnapshotCompleted failed: Max attempts exceeded")
                 wait(region, condition, resource)
 
-            for step, failure in (("wait", snapshot_never_completes),
+            for step, failure in (("create_snapshot", CloudError("SnapshotCreationPerVolumeRateExceeded: slow down")),
+                                  ("wait", snapshot_never_completes),
                                   ("delete_parameters", CloudError("ThrottlingException: Rate exceeded"))):
                 with self.subTest(step=step), patch.object(aws, step, side_effect=failure), \
                         self.assertRaises(CloudError):
                     control_host.teardown(aws, "c", confirm=True)
-                if step == "wait":
-                    # Its snapshot is the root's last copy, so no host is replaced onto the volume to write it again.
-                    with self.assertRaisesRegex(SystemExit, "finish the teardown"):
+                if step == "create_snapshot":
+                    # Its snapshot is to be the root's last copy, so once it has begun no host is replaced onto the
+                    # volume to write it again.
+                    calls = len(aws.calls)
+                    with self.assertRaisesRegex(SystemExit, "teardown has begun .* finish the teardown"):
                         control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+                    self.assertNotIn("run_control_host", [call[0] for call in aws.calls[calls:]])
             control_host.teardown(aws, "c", confirm=True)
         self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
         self.assertEqual([cloud.Snapshot("snap-1", volume.id, "completed", control_host.tags("c"))],
@@ -191,6 +195,48 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual(([], []), (aws.registered_targets("us-west-2", "arn:target-group"),
                                     aws.region_volumes["us-west-2"]))
         self.assertEqual([control_host.NETWORK_PARAMETER], list(aws.parameters))
+
+    def test_a_replace_beside_a_teardown_writes_nothing_after_its_snapshot(self):
+        aws = control_host_cloud()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            inputs = Path(temporary) / "launch-inputs.tar.gz"
+            inputs.write_bytes(b"inputs")
+            control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
+            # A replace that checked the volume before the teardown began launches its host as the teardown
+            # terminates the hosts it found; the teardown terminates that host too, and snapshots only once it is gone.
+            terminate = aws.terminate
+            late = []
+
+            def launch_beside(region, ids):
+                terminate(region, ids)
+                if not late:
+                    late.append(aws.run_control_host(region, control_host.IMAGE, "m7i.large", "/dev/xvda",
+                                                     "subnet-b", "sg-control", control_host.PROFILE, "",
+                                                     control_host.tags("c"))[0])
+
+            with patch.object(aws, "terminate", side_effect=launch_beside):
+                control_host.teardown(aws, "c", confirm=True)
+            self.assertEqual(["terminated", "terminated"], [host.state for host in aws.region_instances["us-west-2"]])
+            operations = [call[:3] for call in aws.calls]
+            self.assertLess(operations.index(("terminate", "us-west-2", late[0])),
+                            operations.index(("create_snapshot", "us-west-2", "vol-1")))
+
+            # A replace whose check passed, but whose teardown runs while it launches, terminates its host before
+            # the controller starts.
+            control_host.launch(aws, "d", SSH_PUBLIC_KEY, inputs)
+            run = aws.run_control_host
+
+            def teardown_beside(*arguments):
+                control_host.teardown(aws, "d", confirm=True)
+                return run(*arguments)
+
+            with patch.object(aws, "run_control_host", side_effect=teardown_beside), \
+                    self.assertRaisesRegex(SystemExit, "campaign d's teardown has begun .*; its new control host "
+                                                       "i-control-4 is terminated"):
+                control_host.replace(aws, "d", SSH_PUBLIC_KEY)
+        self.assertEqual(["terminated"] * 4, [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual(([], [], 2), (aws.registered_targets("us-west-2", "arn:target-group"),
+                                       aws.region_volumes["us-west-2"], len(aws.region_snapshots["us-west-2"])))
 
     def test_network_and_security_group_are_checked_before_anything_is_created(self):
         cidr = NETWORK["ingress_cidr"]
