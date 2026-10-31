@@ -140,6 +140,9 @@ OLD_PHASE_RECORD = "driver-child.txt"
 OLD_EXECUTION_POLICY_FIELDS = ("max_concurrent", "max_concurrent_per_platform", "fleet_budget", "fleet_policy")
 # A unit campaign phase's digest of the tooling that started it, in its result root.
 TOOLING_DIGEST = "tooling-digest.txt"
+# A unit phase's pauses, in its result root: each one's start and end, which its deadline does not count.
+PHASE_PAUSES = "phase-pauses.tsv"
+PHASE_PAUSE_FIELDS = ("event", "at")
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
 # a later phase consumes the result root only once it exists.
 PHASE_COMPLETE = "phase-complete.txt"
@@ -2273,6 +2276,28 @@ def campaign_started_at(path, arguments):
     return started_at
 
 
+def record_pause(path, event, at):
+    """Record in a phase's pauses ledger that a pause began, as "paused", or ended, as "resumed", at an epoch time."""
+    append_ledger(path, PHASE_PAUSE_FIELDS, {"event": event, "at": f"{at:.3f}"})
+
+
+def paused_seconds(path, started_at, now):
+    """The seconds a phase's pauses ledger records it paused since it started, at started_at, with a pause still open
+    counted until now, and whether one is open."""
+    paused, since = 0.0, None
+    if path.exists():
+        with path.open(newline="") as input_file:
+            for row in csv.DictReader(input_file, delimiter="\t"):
+                at = float(row["at"])
+                if row["event"] == "paused":
+                    since = at if since is None else since
+                elif since is not None:
+                    paused, since = paused + max(0.0, at - max(since, started_at)), None
+    if since is not None:
+        paused += max(0.0, now - max(since, started_at))
+    return paused, since is not None
+
+
 def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, observed):
     """Place a launch candidate and reserve its capacity in the shared fleet, from the fleet observed this loop.
 
@@ -3869,11 +3894,17 @@ class UnitDispatcher:
 
     def begin(self):
         """Check that the phase may run and record its start; returns when, on the monotonic clock, its launches
-        end. The caller then recovers it."""
+        end: its timeout after its start, plus the time it was paused. A pause still open, as when the controller
+        stopped during it, ends now; the campaign records it again while the phase stays paused. The caller then
+        recovers it."""
         validate_execution_policy(self.arguments, self.result_root)
         self.fingerprint = frozen_input_fingerprint(self.root, self.arguments, self.items_path)
         started_at = self.start_campaign()
-        return time.monotonic() + max(0, phase_timeout(self.arguments) - max(0, time.time() - started_at))
+        now = time.time()
+        paused, open_pause = paused_seconds(self.result_root / PHASE_PAUSES, started_at, now)
+        if open_pause:
+            record_pause(self.result_root / PHASE_PAUSES, "resumed", now)
+        return time.monotonic() + max(0, phase_timeout(self.arguments) + paused - max(0, now - started_at))
 
     def step(self, deadline, observed=None):
         """One loop of the phase, sharing what observed holds of each region's fleet with the campaign's other
@@ -3961,8 +3992,10 @@ class Phase:
     # A running phase's dispatcher, and when, on the monotonic clock, its launches end.
     dispatcher: object = None
     deadline: float = None
-    # Why the phase is paused for a fault in its dispatch, until it is resumed and its dispatch restarts.
+    # Why the phase is paused for a fault in its setup or dispatch, until it is resumed and its dispatch restarts.
     fault: str = ""
+    # When, in epoch seconds, the pause the phase's pauses ledger records open began, while it lasts.
+    paused_since: float = None
     # The settings' regions as they stood when the phase's regions were last checked, and a check of a running
     # phase's regions on the setup thread, with the copy of its namespace it checks.
     regions: str = None
@@ -4152,6 +4185,7 @@ class Campaign:
                     self.telemetry.event("campaign-stopped", f"campaign stopped by {stop['by']}: {stop['reason']}; "
                                          "every worker's cleanup is proven", actor=stop["by"])
                     break
+                self.track_pauses(running)
                 # A phase paused because its setup failed has no dispatch until it is resumed.
                 running = [phase for phase in running if phase.dispatcher]
                 self.follow_regions(running)
@@ -4174,6 +4208,26 @@ class Campaign:
 
     def terminate(self, signal_number, frame):
         self.terminated = True
+
+    def track_pauses(self, running):
+        """Record in each running phase's pauses ledger when it is paused, for a fault or by its settings, and when it
+        runs again, moving its deadline out by each pause, so a pause spends none of the phase's time. A phase whose
+        setup never made its root records none: its time has not begun."""
+        settings = live_settings(self.arguments)
+        now = time.time()
+        for phase in running:
+            paused = bool(phase.fault) or settings["phases"].get(phase.key, {}).get("state") == "paused"
+            if paused and phase.paused_since is None and phase.root.is_dir():
+                record_pause(phase.root / PHASE_PAUSES, "paused", now)
+                phase.paused_since = now
+            elif not paused and phase.paused_since is not None:
+                record_pause(phase.root / PHASE_PAUSES, "resumed", now)
+                phase.deadline += now - phase.paused_since
+                phase.paused_since = None
+
+    def deadline(self, phase):
+        """When, on the monotonic clock, the running phase's launches end, a pause that lasts moving it out."""
+        return phase.deadline + (0 if phase.paused_since is None else time.time() - phase.paused_since)
 
     def holds_hosts(self, phase):
         """Whether the running phase has workers whose cleanup is not proven: those its dispatch follows, or with no
@@ -4239,7 +4293,7 @@ class Campaign:
             if phase.state == "running" and phase.dispatcher:
                 for name, values in phase.dispatcher.points(now).items():
                     points.setdefault(name, []).extend(values)
-                point("regulator_deadline_time", labels, now + phase.deadline - time.monotonic())
+                point("regulator_deadline_time", labels, now + self.deadline(phase) - time.monotonic())
                 finish = phase.dispatcher.finish_estimate()
             held = owner_fleet(fleet, phase.root, now)
             rate = sum(item["hourly_rate"] for item in held.hosts)
@@ -4299,7 +4353,8 @@ class Campaign:
                 if phase.reduction:
                     self.finish(phase)
                     continue
-                phase.dispatcher, phase.deadline = result
+                # Its setup's start of the dispatch ended any pause its ledger recorded open.
+                phase.dispatcher, phase.deadline, phase.paused_since = *result, None
                 phase.state = "running"
                 try:
                     phase.dispatcher.recover()
@@ -4376,7 +4431,7 @@ class Campaign:
                 print(f"{phase.key}: cleanup failed: {error}; retrying", flush=True)
             return
         try:
-            finished = phase.dispatcher.step(phase.deadline, observed)
+            finished = phase.dispatcher.step(self.deadline(phase), observed)
         except AccountMismatch as error:
             print(f"spending stop: {error}; no launch or lease extension is admitted until it is cleared", flush=True)
             self.arguments.shared_budget.stop_spending(str(error))

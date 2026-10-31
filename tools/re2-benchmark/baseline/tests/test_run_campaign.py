@@ -3968,6 +3968,33 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertIn(("r8i", stalled.leases[1]["unit_id"], "1"), unresolved)
             self.assertIn((stalled.session, "lost"), {(row["host_session"], row["outcome"]) for row in self.ledger})
 
+    def test_pause_spends_none_of_the_phase_deadline(self):
+        # Dain pauses the primary at its first poll, its controller stops and is down for half an hour, and he resumes
+        # the primary ten minutes after its restart: three times its ten-minute deadline later, it still launches for
+        # its queued work.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            phases = [("primary", "primary", ["like-dfa-single-use"], ())]
+            fleet = FakeUnitFleet(root / "hosts", abort_after=10)
+
+            def pause():
+                if CampaignSettings(root).current["phases"]["primary"]["state"] == "running":
+                    self.control(root, "pause", "primary")
+
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_campaign(root, fleet, phases, 2, 1, pause, deadline=600)
+            fleet.abort_after = None
+            fleet.outage(1800)
+            resume_at = fleet.clock + 600
+
+            def resume():
+                if fleet.clock >= resume_at and CampaignSettings(root).current["phases"]["primary"]["state"] == "paused":
+                    self.control(root, "resume", "primary")
+
+            failed, dispatchers = self.run_campaign(root, fleet, phases, 2, 1, resume, deadline=600)
+            self.assertEqual([], failed)
+            self.assert_accepted(dispatchers["primary"])
+
     def test_notice_between_units_releases_the_waiting_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "notice"}})
