@@ -720,21 +720,24 @@ python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-ide
 ```
 
 Only Dain tears a control host down, once the campaign's root is pulled and
-nothing more is wanted from its Grafana. `teardown` deregisters the
-campaign's hosts from the load balancer, terminates the one that runs, waits
-for the load balancer to drain them, snapshots the volume, which is then the
-root's last copy until Dain deletes it, and deletes the volume and the Grafana
-parameters; the record, the load balancer, and its target group stay. Each
-step finds what an earlier teardown did by the campaign's tags, so one that
-failed partway finishes when run again, taking no second snapshot of the
+nothing more is wanted from its Grafana. `teardown` tags the campaign's
+volume as torn down, terminates every host of the campaign, including one a
+concurrent `control-host replace` launched, deregisters them from the load
+balancer and waits for it to drain them, snapshots the volume, which is then
+the root's last copy until Dain deletes it, and deletes the volume and the
+Grafana parameters; the record, the load balancer, and its target group stay.
+Each step finds what an earlier teardown did by the campaign's tags, so one
+that failed partway finishes when run again, taking no second snapshot of the
 volume. It refuses without `--confirm`:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confirm
 ```
 
-Once the snapshot exists, `control-host replace` refuses, so no host writes the
-volume after its last copy was taken.
+Once the volume carries the tag, `control-host replace` refuses, and a replace
+already under way checks again once the volume is attached and terminates its
+host before the controller starts, so no host writes the volume after its last
+copy was taken.
 
 ### Steer a campaign
 
