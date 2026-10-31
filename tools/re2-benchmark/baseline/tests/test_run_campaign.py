@@ -2329,8 +2329,10 @@ class FakeUnitHost:
     one lease each time it acts, and takes its next lease the time after. As the worker does, it heartbeats only as
     a lease starts, as each group completes, and as it stops or is interrupted. A script names what a lease does
     instead of completing: "interrupt" uploads an interruption bundle and exits as a Spot interruption, with the
-    worker's status 43, "interrupt-progress" does so once the lease's first group finished, and "notice" does so
-    before it fetches the lease. A host whose lease is scripted to "claim" claims it the moment its previous lease
+    worker's status 43, "interrupt-progress" does so once the lease's first group finished, its bundle landing while
+    its instance still runs, as a notice's two minutes allow, and its exit the next time it acts, and "notice" does
+    so before it fetches the lease; "interrupt-semantic" is "interrupt-progress" whose first group is a semantic
+    failure. A host whose lease is scripted to "claim" claims it the moment its previous lease
     ends, as if its idle time ran out then. A host scripted to "silent-interrupt" does so with none of its heartbeat
     uploads landing, and one scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats
     also lost. "stall" stops the host once its lease starts; once the controller terminates its instance, the
@@ -2359,6 +2361,7 @@ class FakeUnitHost:
         "semantic-failure": RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
         "stall-semantic": RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
         "stall-semantic-early": RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
+        "interrupt-semantic": RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
         "protocol-rejection": RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, "fail": 1, "capacity-rejected": 1,
     }
 
@@ -2402,11 +2405,15 @@ class FakeUnitHost:
         self.status = None
         self.ended_at = None
         self.leaking = False
+        # Whether the host uploaded its interruption bundle and exits the next time it acts.
+        self.interrupted = False
 
     def tick(self):
         if self.leaking and not self.fleet.leaked(self):
             self.leaking = False
             self.fleet.set_state(self, "terminated", self.shutdown_reason)
+        if self.interrupted and self.status is None:
+            return self.exit(RUN_CAMPAIGN.UNIT_WORKER_INTERRUPTED_STATUS)
         if self.status is None and not self.stopping and self.fleet.time() >= self.power_off_at:
             self.fleet.log.append(("power-off", self.session))
             return self.exit(143)
@@ -2464,15 +2471,15 @@ class FakeUnitHost:
         if behavior == "silent-crash":
             self.run_group(lease, lease["groups"][0], None)
             return self.exit(1)
-        if behavior == "interrupt-progress":
-            self.run_group(lease, lease["groups"][0], None)
-            return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1])
+        if behavior in ("interrupt-progress", "interrupt-semantic"):
+            self.run_group(lease, lease["groups"][0], behavior)
+            return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1], running_on=True)
         if behavior in ("stall", "stall-interrupt", "stall-semantic", "stall-semantic-early"):
             self.stalled = True
             return
         self.run(lease)
 
-    def interrupt(self, unit_id, finished=(), running=None):
+    def interrupt(self, unit_id, finished=(), running=None, running_on=False):
         notice = json.dumps({"schema_version": 2, "sequence": self.sequence, "unit_id": unit_id,
                              "finished_groups": list(finished), "running_group": running}).encode()
         bundle = io.BytesIO()
@@ -2481,7 +2488,9 @@ class FakeUnitHost:
             member.size = len(notice)
             archive.addfile(member, io.BytesIO(notice))
         self.put(f"events/{self.sequence}-interrupted.tar.gz", bundle.getvalue())
-        self.exit(RUN_CAMPAIGN.UNIT_WORKER_INTERRUPTED_STATUS)
+        self.interrupted = True
+        if not running_on:
+            self.exit(RUN_CAMPAIGN.UNIT_WORKER_INTERRUPTED_STATUS)
 
     def heartbeat(self, unit_id):
         if {"silent-interrupt", "silent-crash"} & set(self.script.values()):
@@ -4081,7 +4090,9 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assert_accepted(dispatchers["primary"])
 
     def test_semantic_failure_or_protocol_rejection_is_final(self):
+        # A semantic failure stands though the host's interruption notice lands with it.
         for script, detail in (("semantic-failure", "semantic failure: status 44"),
+                               ("interrupt-semantic", "semantic failure: status 44"),
                                ("protocol-rejection", "numerical protocol rejection: status 42")):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
