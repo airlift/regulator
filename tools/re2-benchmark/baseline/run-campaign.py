@@ -2339,8 +2339,8 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
 
 
 def launch_record(row):
-    """The fields of an attempt row's detail: a starting row's placement, launch slot, session and prefix, and a
-    started row's instance."""
+    """The fields of an attempt row's detail: a starting row's placement, launch slot, session and prefix, a started
+    row's instance, and a terminating row's request."""
     return dict(item.split("=", 1) for item in row["detail"].split(";") if "=" in item)
 
 
@@ -2437,7 +2437,7 @@ class UnitWorker:
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
     # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
-    # the instance as its cleanup last saw it; when the controller asked EC2 to terminate it, in epoch seconds;
+    # the instance as its cleanup last saw it; when the controller first asked EC2 to terminate it, in epoch seconds;
     # whether it leaked; and whether its prefix was found a leftover.
     launch_failure: tuple = None
     missed_boot: bool = False
@@ -2643,8 +2643,12 @@ class UnitDispatcher:
         latest = {}
         placements = {}
         instances = {}
+        terminating = {}
         for row in read_attempts(self.attempts_path):
-            if row["shard_id"] == UNIT_WORKER_SHARD:
+            if row["shard_id"] == UNIT_WORKER_SHARD and row["outcome"] == "terminating":
+                # A termination request settles nothing; the first starts the worker's leak clock.
+                terminating.setdefault(int(row["host_epoch"]), float(launch_record(row)["requested_at"]))
+            elif row["shard_id"] == UNIT_WORKER_SHARD:
                 latest[int(row["host_epoch"])] = row
                 if row["outcome"] == "starting":
                     placements[int(row["host_epoch"])] = launch_record(row)
@@ -2682,7 +2686,7 @@ class UnitDispatcher:
                              for field in ("instance_id", "availability_zone")})
             workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
                 job, metadata, directory, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
-                stop_by=job.stop_by)
+                stop_by=job.stop_by, terminate_requested=terminating.get(job.host_epoch, 0.0))
         recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
                                     set(workers))
         for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
@@ -3171,20 +3175,30 @@ class UnitDispatcher:
         return instance.state not in ("pending", "running")
 
     def stop_host(self, worker):
-        """Ask EC2, once, to terminate the worker's instance until it lists it terminated; one still not terminated
-        TERMINATION_LEAK_SECONDS after that has leaked."""
+        """Ask EC2 to terminate the worker's instance until it lists it shutting down or terminated; one still not
+        terminated TERMINATION_LEAK_SECONDS after the first request, which job-attempts.tsv records before it is
+        made, has leaked."""
         try:
             instance = None if worker.launch_failure else self.instance(worker)
-            if instance is None or instance.state == "terminated":
-                return
-            if not worker.terminate_requested:
-                self.arguments.cloud.terminate(worker.metadata["aws_region"], [instance.id])
-                worker.terminate_requested = time.time()
-            elif time.time() - worker.terminate_requested >= TERMINATION_LEAK_SECONDS:
-                self.leak(worker)
         except CloudError:
-            # The next loop asks again.
+            # The next loop looks again.
             return
+        if instance is None or instance.state == "terminated":
+            return
+        if not worker.terminate_requested:
+            worker.terminate_requested = time.time()
+            write_attempt(self.attempts_path, worker.job, "terminating",
+                          f"requested_at={worker.terminate_requested:.3f}")
+        elif time.time() - worker.terminate_requested >= TERMINATION_LEAK_SECONDS:
+            self.leak(worker)
+        if instance.state == "shutting-down":
+            return
+        try:
+            self.arguments.cloud.terminate(worker.metadata["aws_region"], [instance.id])
+        except CloudError as error:
+            # The next loop asks again.
+            print(f"terminating instance {instance.id} of {worker.host_session} failed: {error}; retrying",
+                  flush=True)
 
     def leak(self, worker):
         """Stop the fleet's spending, once, for the worker's instance, which EC2 has not terminated; its reservation

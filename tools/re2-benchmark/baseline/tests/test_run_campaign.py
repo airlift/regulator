@@ -3815,6 +3815,38 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual([], [row for row in self.ledger if row["outcome"] == "lost"])
             self.assertEqual(0, fleet.hosts[0].terminations)
 
+    def test_termination_that_keeps_failing_leaks_from_its_first_request(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # EC2 refuses to terminate the stalled host for half an hour, and the controller restarts ten minutes
+            # after its first request. The restarted controller still asks, and the instance has leaked 15 minutes
+            # after that first request.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", scripts={1: {1: "stall"}})
+            terminate = fleet.terminate
+            requests, leaks = [], []
+
+            def refuse(region, ids):
+                stop = CampaignSettings(root).current["spending_stop"]
+                if stop and not leaks:
+                    leaks.append(fleet.time())
+                    self.control(root, "clear-spending-stop")
+                if fleet.hosts[0].instance_id not in ids or requests and fleet.time() >= requests[0] + 1800:
+                    return terminate(region, ids)
+                if not requests:
+                    fleet.abort_after = fleet.sleeps + 40
+                requests.append(fleet.time())
+                raise cloud.CloudError("RequestLimitExceeded")
+
+            fleet.terminate = refuse
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_phase(root, fleet, "smoke", ["trino-like"], 4, 2, shared=True)
+            fleet.abort_after = None
+            self.run_phase(root, fleet, "smoke", ["trino-like"], 4, 2, shared=True)
+            self.assertLess(requests[0] + 600, max(requests))
+            [leak] = leaks
+            self.assertGreaterEqual(leak - requests[0], RUN_CAMPAIGN.TERMINATION_LEAK_SECONDS)
+            self.assertLess(leak - requests[0], RUN_CAMPAIGN.TERMINATION_LEAK_SECONDS + RUN_CAMPAIGN.UNIT_POLL_SECONDS)
+
     def test_tail_stops_spot_workers_and_finishes_on_demand(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 70):
