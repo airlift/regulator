@@ -983,8 +983,9 @@ region with headroom in the shared budget. Equal scores keep the list's order.
 When scores are unavailable, the first region of the list with headroom
 launches and the session records no score. On-Demand launches take the first
 region of the list with headroom. The budget's headroom counts the region's
-quota, read once per controller, and its instances and Spot requests, described
-at most once per dispatch loop. A list of one region asks for no score.
+quota, read again once five minutes old and whenever a phase's regions are
+checked, and its instances and Spot requests, described at most once per
+dispatch loop. A list of one region asks for no score.
 Within the chosen region, each worker starts in a zone its identity picks among
 those that offer the worker type, and a launch that finds a zone without
 capacity moves on to the region's next zone. The controller cleans up each

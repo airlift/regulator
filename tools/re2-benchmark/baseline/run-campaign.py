@@ -168,6 +168,8 @@ PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
 # Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
 PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
+# Admission reuses a region's vCPU quota this long, so one AWS raises or lowers soon holds.
+VCPU_QUOTA_CACHE_SECONDS = 5 * 60
 # AWS refused every placement query of the 2.0 run, whose target of 64 instances was above this.
 PLACEMENT_SCORE_MAXIMUM_TARGET = 50
 # A JDK download slower than this for a minute has stalled.
@@ -1335,7 +1337,8 @@ def validate_aws(arguments, platforms, jobs=None):
         public_zones[region] = {zone for _, zone in region_network(arguments, region).subnets}
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
-        spot_quota, on_demand_quota = vcpu_quota(arguments, region, "spot"), vcpu_quota(arguments, region, "on-demand")
+        spot_quota, on_demand_quota = (vcpu_quota(arguments, region, market, fresh=True)
+                                       for market in ("spot", "on-demand"))
         limits = settings["regions"][region]
         if limits["max_vcpus"] > spot_quota - arguments.spot_vcpu_reserve:
             raise SystemExit(f"the campaign settings' max_vcpus exceeds the Standard Spot quota after its reserve in "
@@ -1608,12 +1611,14 @@ def is_standard_instance_type(instance_type):
     return bool(instance_type) and instance_type[0].lower() in STANDARD_INSTANCE_FAMILIES
 
 
-def vcpu_quota(arguments, region, market):
-    """The region's Standard vCPU quota for the market, asked once per controller."""
+def vcpu_quota(arguments, region, market, fresh=False):
+    """The region's Standard vCPU quota for the market, asked again once it is VCPU_QUOTA_CACHE_SECONDS old, or when
+    fresh, as a check of a phase's regions asks; the campaign's phases and their admissions share it."""
     quotas = vars(arguments).setdefault("vcpu_quotas", {})
-    if (region, market) not in quotas:
-        quotas[region, market] = arguments.cloud.vcpu_quota(region, market)
-    return quotas[region, market]
+    cached, now = quotas.get((region, market)), time.monotonic()
+    if fresh or cached is None or now - cached[0] >= VCPU_QUOTA_CACHE_SECONDS:
+        cached = quotas[region, market] = (now, arguments.cloud.vcpu_quota(region, market))
+    return cached[1]
 
 
 def region_network(arguments, region):
@@ -4246,7 +4251,7 @@ class Campaign:
         self.setup = ThreadPoolExecutor(1)
         self.reductions = ThreadPoolExecutor(1)
         arguments.pools = (ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
-        for cache in ("networks", "images", "zone_offerings", "placement_scores"):
+        for cache in ("networks", "images", "zone_offerings", "placement_scores", "vcpu_quotas"):
             vars(arguments).setdefault(cache, {})
         # Each phase's state as the settings last recorded it, and how many settings changes were logged.
         self.recorded = {}
