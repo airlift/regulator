@@ -45,8 +45,9 @@ KNOWN_HOSTS = Path.home() / ".ssh" / "regulator-control-hosts"
 FINGERPRINTS = re.compile(r"-----BEGIN SSH HOST KEY FINGERPRINTS-----(.*?)-----END SSH HOST KEY FINGERPRINTS-----",
                           re.DOTALL)
 VOLUME_GIB = 200
-# The tag a teardown marks the campaign volume with before anything else, so no host is put on it after, and
-# its snapshot holds every write.
+# The tag a teardown marks the campaign volume with before anything else, so control-host replace starts no host on
+# it after. A replace under way terminates its host before its controller starts, unless it stalls between attaching
+# the volume and looking for the tag.
 TEARDOWN_TAG = {"Teardown": "started"}
 VOLUME_DEVICE = "/dev/sdf"
 # On the campaign volume: the campaign root, and the launch inputs with the controller's checkout.
@@ -232,8 +233,9 @@ def launch(aws, campaign, ssh_public_key, inputs):
 
 def replace(aws, campaign, ssh_public_key):
     """Terminate the campaign's control host, if it has one, and launch another onto its volume, in the volume's
-    zone; once a teardown has begun, its snapshot is to be the root's last copy and no host writes the volume
-    again."""
+    zone. It refuses once a teardown has begun. A host it launched as the teardown began goes before its controller
+    starts, unless the replace stalls between the attach and its look for the teardown. Either way the host may write
+    its boot files first. So never run teardown and replace at the same time."""
     found = network(aws)
     group = security_group(aws, found)
     check_target_group(aws, found, campaign)
@@ -276,7 +278,8 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
                          f"{instance}: {error}; that host {fate}; run control-host replace {campaign} again") from error
     # A teardown may have begun after this replace checked the volume. It terminates every host it finds and
     # snapshots the volume once they are gone. So look for it again: a host the teardown did not find goes before its
-    # controller starts, and so does one whose look fails.
+    # controller starts, and so does one whose look fails. Only a replace that stalls between the attach and this look
+    # can start its controller after the snapshot.
     try:
         refusal = teardown_begun(aws, campaign, volume.id)
     except CloudError as error:
@@ -478,9 +481,10 @@ def teardown(aws, campaign, confirm):
     volumes = aws.volumes(REGION, tags(campaign))
     if len(volumes) > 1:
         raise SystemExit(f"campaign {campaign} has {len(volumes)} control host volumes; expected one")
-    # The mark comes first, so a replace running beside the teardown puts no host on the volume after it. The hosts
-    # go next, with any a replace launched before the mark, so the snapshot holds the root as its controller last
-    # wrote it, and the load balancer forgets them, so no other campaign's launch finds them there.
+    # The mark comes first, so a replace running beside the teardown starts no controller on the volume after it,
+    # unless the replace stalls between the attach and its look. Either way the replace may still put a host there.
+    # The hosts go next, with any a replace launched before the mark, so the snapshot holds the root as its controller
+    # last wrote it, and the load balancer forgets them, so no other campaign's launch finds them there.
     for volume in volumes:
         aws.tag_volume(REGION, volume.id, TEARDOWN_TAG)
     while hosts := live_hosts(aws, campaign):

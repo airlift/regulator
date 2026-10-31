@@ -746,8 +746,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confi
 
 Once the volume carries the tag, `control-host replace` refuses, and a replace
 already under way checks again once the volume is attached and terminates its
-host before the controller starts, so no host writes the volume after its last
-copy was taken.
+host before the controller starts. A host that attaches as the snapshot is
+taken may still write its boot files, such as the checkout, and a replace that
+stalls between the attach and that check, as on a Mac that sleeps, lets its
+controller write after the snapshot. Never run teardown and `control-host
+replace` at the same time.
 
 ### Steer a campaign
 
