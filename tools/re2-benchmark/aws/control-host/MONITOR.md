@@ -156,11 +156,10 @@ query "$(panel regulator-health 'Loop seconds')"
 
 A panel is red when the latest value of any of its series falls in a red
 step of `fieldConfig.defaults.thresholds.steps`, each step running from its
-value up to the next step's, so Boot window change is red below 0 and the
-rest at or above their red value. A query that returns no series is green,
-since some gauges exist only while they have something to say, except Loop
-seconds, which every loop sets: none there means the controller's telemetry
-is not arriving, which you report.
+value up to the next step's, so each is red at or above its red value. A
+query that returns no series is green, since some gauges exist only while
+they have something to say, except Loop seconds, which every loop sets: none
+there means the controller's telemetry is not arriving, which you report.
 
 ## Health panels
 
