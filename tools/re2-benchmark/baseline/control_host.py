@@ -36,6 +36,8 @@ INPUTS = "/regulator/control-host"
 # The controller's list of every file of the campaign root with its SHA-256, which finish checks the pulled root
 # against.
 MANIFEST = "campaign-files.sha256"
+# Where the host records, in the campaign root, the URL its Grafana serves at, for the status command.
+GRAFANA_URL_FILE = "grafana-url.txt"
 USER_DATA = Path(__file__).resolve().parents[1] / "aws" / "control-host" / "user-data.sh"
 # The exit status of a controller whose campaign ended with failed phases, which the host's controller unit does not
 # restart.
@@ -114,10 +116,16 @@ def write_launch_inputs(path, controller_arguments, commits, settings, plans):
             archive.add(plan, f"language-plans/{index}")
 
 
-def user_data(campaign, volume, ssh_public_key, inputs_uri, inputs_sha256):
+def grafana_url(network):
+    """The URL the campaign's Grafana serves at, the network's record, which follows the host across replacements."""
+    return f"http://{network['record']}:3000"
+
+
+def user_data(campaign, volume, ssh_public_key, inputs_uri, inputs_sha256, url):
     """The host's EC2 user data: aws/control-host/user-data.sh with its settings exported after its first line."""
     settings = {"CAMPAIGN": campaign, "CAMPAIGN_VOLUME": volume, "SSH_PUBLIC_KEY": ssh_public_key,
-                "LAUNCH_INPUTS_URI": inputs_uri, "LAUNCH_INPUTS_SHA256": inputs_sha256, "CONTROL_HOST_REGION": REGION}
+                "LAUNCH_INPUTS_URI": inputs_uri, "LAUNCH_INPUTS_SHA256": inputs_sha256, "CONTROL_HOST_REGION": REGION,
+                "GRAFANA_URL": url}
     shebang, body = USER_DATA.read_text().split("\n", 1)
     return "".join([shebang, "\n", *(f"export {name}={shlex.quote(value)}\n" for name, value in settings.items()),
                     body])
@@ -193,14 +201,14 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     if image is None or (image.architecture, image.state) != ("x86_64", "available"):
         raise SystemExit(f"the control host's image {IMAGE} is not an available x86_64 image: {image}")
     data = user_data(campaign, volume.id, ssh_public_key, volume.tags["LaunchInputs"],
-                     volume.tags["LaunchInputsSha256"])
+                     volume.tags["LaunchInputsSha256"], grafana_url(network))
     instance, address = aws.run_control_host(REGION, IMAGE, INSTANCE_TYPE, image.root_device, subnet, group, PROFILE,
                                              data, tags(campaign))
     aws.wait(REGION, "instance_running", instance)
     aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
     aws.change_record(REGION, network["zone"], "UPSERT", network["record"], address)
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
-          f"Grafana: http://{network['record']}:3000 (admin password in SSM {grafana_parameters(campaign)[0]})\n"
+          f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
           f"ssh: ssh ec2-user@{network['record']}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 

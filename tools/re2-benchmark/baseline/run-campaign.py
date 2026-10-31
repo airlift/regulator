@@ -37,19 +37,19 @@ import work_units
 from acceptance import normalize_heap_size
 from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
-    changed as changed_settings, seeded as seeded_settings)
+    changed as changed_settings, read as read_settings, seeded as seeded_settings)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
-    spend_by_owner)
+    owner_fleet, read_state as read_fleet_state)
 from campaign_io import UnsafeCampaignError, append_ledger, check_output, fsync_directory, write_ledger
 from cloud import CloudError
 from unit_dispatch import (
-    UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
+    UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result,
     get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key, lease_key,
     list_unit_worker_results, marker_seconds, measured_group_seconds, persist_accepted_unit,
     persist_semantic_rejection, persist_unit_upload, read_accepted_units, read_semantic_rejections, read_unit_attempts,
     read_unit_receipt, read_unit_uploads, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
-    unit_attempt_directory, unit_logical_identity, unit_upload_row, unresolved_unit_rows, write_leases,
+    unit_attempt_directory, unit_logical_identity, unit_upload_row, write_leases,
     write_unit_attempt, write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
@@ -142,10 +142,6 @@ TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
 # a later phase consumes the result root only once it exists.
 PHASE_COMPLETE = "phase-complete.txt"
-# What only a running unit phase's controller knows, rewritten each poll for the status command: its live workers'
-# states, the number of items queued, and the units unresolved so far; unresolved-units.tsv, written when the
-# controller ends, lists every item not accepted.
-DISPATCH_STATUS = "dispatch-status.json"
 # The checkout this tooling runs from.
 REPOSITORY = Path(__file__).resolve().parents[3]
 # The status command's results compare each row with the 1.0 release's, from these repository files.
@@ -3235,20 +3231,6 @@ class UnitDispatcher:
                 for identity in sorted(identities) if identity in self.items and (
                     identity in self.semantic or ((ending or identity in self.unresolved) and not self.done(identity)))]
 
-    def write_status(self):
-        """Record the live workers' states, the number of items queued, and the items unresolved so far, in
-        unresolved-units.tsv's columns, for the status command."""
-        status = {"updated_at": round(time.time()), "queued": len(self.queued()),
-                  "unresolved": [dict(zip(UNRESOLVED_UNIT_FIELDS, row))
-                                 for row in unresolved_unit_rows(self.unresolved_items())],
-                  "workers": [{"host_epoch": epoch, "platform": worker.job.platform.name,
-                               "instance_type": worker.job.platform.instance_type, "region": worker.job.region,
-                               "market": worker.job.market, "state": worker.state(epoch in self.terminated)}
-                              for epoch, worker in sorted(self.workers.items())]}
-        temporary = self.result_root / (DISPATCH_STATUS + ".new")
-        temporary.write_text(json.dumps(status, sort_keys=True) + "\n")
-        os.replace(temporary, self.result_root / DISPATCH_STATUS)
-
     def resolve_unlaunchable(self, deadline_reached):
         """Leave unresolved the queued items no worker can take: past the deadline, or in a pool that gave up."""
         for pool in self.pools:
@@ -3743,7 +3725,6 @@ class UnitDispatcher:
                 self.terminated[epoch] = time.time()
             if epoch in self.terminated:
                 self.stop_host(worker)
-        self.write_status()
         return not self.workers and not self.queued()
 
     def end(self):
@@ -4399,52 +4380,92 @@ def clock_time(epoch, now, zone=None):
     return text if moment.date() == today.date() else f"{text} on {moment:%a %b} {moment.day}"
 
 
-def dispatch_snapshot(root):
-    """The latest snapshot a unit phase's controller wrote of what only it knows, or None before its first."""
-    path = root / DISPATCH_STATUS
-    return json.loads(path.read_text()) if path.is_file() else None
+def ledger_unresolved(root, items, accepted):
+    """The units a running phase has left unresolved so far, by identity, each with its detail, as its controller's
+    recovery reads them from its ledgers: each unit a semantic failure rejected, even where another attempt was
+    accepted, and each one not accepted that a rejection ended or that spent its attempts."""
+    def done(identity):
+        return len(accepted.get(identity, ())) == len(items[identity].groups)
+
+    unresolved, counted = {}, {}
+    for row in read_unit_attempts(root / "unit-attempts.tsv"):
+        identity = f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}"
+        if identity not in items:
+            continue
+        if row["outcome"] == "rejected":
+            unresolved[identity] = row["detail"]
+        elif row["outcome"] in COUNTED_UNIT_OUTCOMES:
+            counted.setdefault(identity, {})[row["host_epoch"], row["sequence"]] = row["detail"]
+    for identity, leases in counted.items():
+        if len(leases) >= MAX_UNIT_ATTEMPTS:
+            unresolved.setdefault(identity, f"{list(leases.values())[-1]}; spent its {MAX_UNIT_ATTEMPTS} attempts")
+    unresolved = {identity: detail for identity, detail in unresolved.items() if not done(identity)}
+    if (root / unit_session.SEMANTIC_REJECTIONS).is_file():
+        for row in read_semantic_rejections(root / unit_session.SEMANTIC_REJECTIONS):
+            unresolved[unit_logical_identity(row)] = SEMANTIC_FAILURE_DETAIL
+    return unresolved
 
 
-def phase_unresolved(root, snapshot, live):
-    """A unit phase's unresolved units, each with its platform, unit_id, replica, and detail: a live controller's
-    latest snapshot's, else those unresolved-units.tsv lists, else the latest snapshot's, else none."""
+def phase_unresolved(root, live):
+    """A unit phase's unresolved units, each with its platform, unit_id, replica, and detail: those unresolved-units.tsv
+    lists once the phase's controller ended it, and while it runs, or before its first end, those its ledgers show."""
     path = root / "unresolved-units.tsv"
-    # A controller writes its unresolved units when it ends, so a live one's snapshot is newer than them.
-    if path.is_file() and not (live and snapshot):
+    if path.is_file() and not live:
         with path.open(newline="") as input_file:
             return list(csv.DictReader(input_file, delimiter="\t"))
-    return snapshot["unresolved"] if snapshot else []
+    items = {item.identity: item for item in read_work_items(root / "work-items.tsv")}
+    accepted = {}
+    for row in read_accepted_units(root / "accepted-units.tsv"):
+        accepted.setdefault(unit_logical_identity(row), {})[row["group_id"]] = row
+    return [{"platform": items[identity].platform, "unit_id": items[identity].unit_id,
+             "replica": str(items[identity].replica), "detail": detail}
+            for identity, detail in sorted(ledger_unresolved(root, items, accepted).items())]
 
 
-def phase_progress(root, snapshot, live):
-    """A unit phase's progress, from its ledgers and its controller's latest snapshot: its work items, their accepted
-    receipts by identity and group, its unresolved units, each pool's work left, and the seconds until it finishes
-    at the snapshot's live workers, or None while some pool with work left has none, or no controller runs."""
+def held_items(root):
+    """The items of a phase's leases that unit-attempts.tsv records as leased and not yet settled or given up."""
+    leases = {}
+    for row in read_unit_attempts(root / "unit-attempts.tsv"):
+        lease = leases.setdefault((row["host_epoch"], row["sequence"]), [row, False])
+        lease[1] |= row["outcome"] in SETTLED_UNIT_OUTCOMES | {"lost", "released", "claimed"}
+    return {f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}" for row, ended in leases.values()
+            if row["outcome"] == "leased" and not ended}
+
+
+def phase_progress(root, fleet, live):
+    """A unit phase's progress, from its ledgers: its work items, their accepted receipts by identity and group, the
+    identities of its unresolved units, each pool's work left, and while its controller runs, the seconds until it
+    finishes at the live hosts its fleet, as owner_fleet reads it, holds, or None while some pool with work left has
+    none. A host holds its reservation until its cleanup is proven."""
     items = read_work_items(root / "work-items.tsv")
     accepted = {}
     for row in read_accepted_units(root / "accepted-units.tsv"):
         accepted.setdefault(unit_logical_identity(row), {})[row["group_id"]] = row
-    unresolved = phase_unresolved(root, snapshot, live)
-    pools = progress(items, accepted, measured_group_seconds(root / UNIT_UPLOADS),
-                     {f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}" for row in unresolved})
-    hosts = Counter((worker["platform"], worker["instance_type"]) for worker in (snapshot or {}).get("workers", ())
-                    if worker["state"] != "stopping")
-    return SimpleNamespace(items=items, accepted=accepted, unresolved=unresolved, pools=pools,
-                           finish=finish_seconds(pools, hosts) if live and snapshot else None)
+    unresolved = {f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}"
+                  for row in phase_unresolved(root, live)}
+    pools = progress(items, accepted, measured_group_seconds(root / UNIT_UPLOADS), unresolved)
+    hosts = Counter(host["instance_type"] for host in fleet.hosts) if fleet else Counter()
+    return SimpleNamespace(items=items, accepted=accepted, unresolved=unresolved, pools=pools, finish=finish_seconds(
+        pools, {pool: hosts[pool[1]] for pool in pools}) if live else None)
 
 
-def phase_status(label, root, now, fleets, controller, zone=None, campaign_root=None):
-    """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot, given
-    the process ID of its campaign's live controller, or None, and its campaign root, if any. fleets holds each fleet
-    state's spend_by_owner, so the phases sharing a fleet read its state once."""
+def phase_status(label, root, now, fleets, controller, settings, zone=None, campaign_root=None):
+    """A unit phase's lines for the status command, read from its ledgers alone, given the process ID of its
+    campaign's live controller, or None, its campaign's settings, or None, and its campaign root, if any. fleets holds
+    each fleet state, so the phases sharing a fleet read it once."""
+    steering = (settings or {}).get("phases", {}).get(root.relative_to(campaign_root).as_posix()
+                                                      if campaign_root else None, {})
+    state = steering.get("state", "running")
     live = False
     if (root / PHASE_COMPLETE).is_file():
         state = "complete"
+    elif state == "failed":
+        state = "failed"
     elif controller is not None:
-        state = f"running as process {controller}"
         live = True
+        state = f"{state} as process {controller}" + (f": {steering['reason']}" if steering.get("reason") else "")
     else:
-        state = "no live controller"
+        state = "no live controller" + (f", {state}: {steering['reason']}" if steering.get("reason") else "")
     lines = [f"  {label:<18}{state}"]
     if not (root / "work-items.tsv").is_file():
         return lines
@@ -4452,46 +4473,45 @@ def phase_status(label, root, now, fleets, controller, zone=None, campaign_root=
     def line(name, text):
         lines.append(f"    {name:<10}{text}")
 
-    snapshot = dispatch_snapshot(root)
-    phase = phase_progress(root, snapshot, live)
-    groups = sum(len(item.groups) for item in phase.items)
-    groups_accepted = sum(map(len, phase.accepted.values()))
-    units_accepted = sum(len(phase.accepted.get(item.identity, ())) == len(item.groups) for item in phase.items)
-    queued = f", {snapshot['queued']} queued" if snapshot and state != "complete" else ""
-    line("units", f"{units_accepted}/{len(phase.items)} accepted ({groups_accepted}/{groups} groups), "
-                  f"{len(phase.unresolved)} unresolved{queued}")
-    # Without a live controller, the snapshot's workers may since have stopped.
-    if snapshot and live:
-        workers = snapshot["workers"]
-        states = ("booting", "running", "idle", "stopping")
-
-        def counts(members):
-            tally = Counter(worker["state"] for worker in members)
-            return ", ".join(f"{tally[name]} {name}" for name in states if tally[name]) or "none"
-
-        line("workers", f"{counts(workers)}, as of {max(0, round(now - snapshot['updated_at']))}s ago")
-        for key in sorted({(worker["platform"], worker["instance_type"], worker["region"], worker["market"])
-                           for worker in workers}):
-            members = [worker for worker in workers
-                       if (worker["platform"], worker["instance_type"], worker["region"], worker["market"]) == key]
-            line("", f"{' '.join(key)}: {counts(members)}")
     # The fleet's state is at the campaign root, or for an old root's phase, beside the fleet policy it names.
     policy_path = root / "execution-policy.json"
     policy = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
-    state = (Path(policy).with_name(STATE_FILE) if policy else
-             campaign_root / STATE_FILE if campaign_root else None)
-    if state and state not in fleets:
-        fleets[state] = spend_by_owner(state, now)
-    if state and fleets[state] is not None:
-        spent, reserved = fleets[state].get(str(root.resolve()), (0.0, 0.0))
-        line("spend", f"${spent:.2f} so far, ${reserved:.2f} reserved")
+    state_path = (Path(policy).with_name(STATE_FILE) if policy else
+                  campaign_root / STATE_FILE if campaign_root else None)
+    if state_path and state_path not in fleets:
+        fleets[state_path] = read_fleet_state(state_path)
+    fleet = owner_fleet(fleets[state_path], root, now) if state_path and fleets[state_path] else None
+    phase = phase_progress(root, fleet, live)
+    groups = sum(len(item.groups) for item in phase.items)
+    groups_accepted = sum(map(len, phase.accepted.values()))
+    done = {item.identity for item in phase.items if len(phase.accepted.get(item.identity, ())) == len(item.groups)}
+    queued = ""
+    if live:
+        held = held_items(root)
+        queued = f", {sum(item.identity not in done | phase.unresolved | held for item in phase.items)} queued"
+    line("units", f"{len(done)}/{len(phase.items)} accepted ({groups_accepted}/{groups} groups), "
+                  f"{len(phase.unresolved)} unresolved{queued}")
+    if fleet and live:
+        # Each live host holds a reservation until its cleanup is proven; one not yet reporting has booted nothing.
+        def counts(hosts):
+            booting = sum("reported_at" not in host for host in hosts)
+            return f"{len(hosts)} live" + (f", {booting} not yet reporting" if booting else "")
+
+        line("hosts", counts(fleet.hosts))
+        for key in sorted({(host["instance_type"], host["region"], host["market"]) for host in fleet.hosts}):
+            line("", f"{' '.join(key)}: " + counts([host for host in fleet.hosts if (
+                host["instance_type"], host["region"], host["market"]) == key]))
+    if fleet:
+        line("spend", f"${fleet.spent:.2f} so far, ${fleet.reserved:.2f} reserved")
     if live and any(left.items for left in phase.pools.values()):
-        line("finish", "unknown; no worker runs" if phase.finish is None else clock_time(now + phase.finish, now, zone))
+        line("finish", "unknown; no host runs" if phase.finish is None else
+             clock_time(now + phase.finish, now, zone))
     boot = [float(match.group(1)) for row in read_attempts(root / "job-attempts.tsv")
             if (match := re.search(r"boot_to_first_unit_seconds=([0-9.]+)", row["detail"]))]
     uploads = [float(row["upload_seconds"]) for row in read_unit_uploads(root / UNIT_UPLOADS)]
     measured = [f"{name} {statistics.median(values):.0f}s" for name, values in
-                (("boot to first unit", boot), ("upload", uploads)) if values]
+                (("boot to ready", fleet.ready if fleet else ()), ("boot to first unit", boot), ("upload", uploads))
+                if values]
     if measured:
         line("medians", ", ".join(measured))
     return lines
@@ -4520,22 +4540,45 @@ def campaign_phases(root):
             if (prefix == "" or phase != "build") and (root / candidate["name"] / prefix / phase).is_dir()]
 
 
+def campaign_lines(root):
+    """The status command's lines for what a campaign root records of the whole campaign: where its Grafana serves
+    everything live, and any spending stop or stop its settings hold; and the settings, or None for an old root's."""
+    lines = []
+    if (root / control_host.GRAFANA_URL_FILE).is_file():
+        lines.append(f"Grafana   {(root / control_host.GRAFANA_URL_FILE).read_text().strip()}")
+    if not (root / CAMPAIGN_SETTINGS).is_file():
+        return lines, None
+    try:
+        settings = read_settings(root / CAMPAIGN_SETTINGS)
+    except SettingsError as error:
+        return [*lines, str(error)], None
+    # A stopped campaign's controller lists the root's files as it ends; until then it is still stopping.
+    ended = (root / control_host.MANIFEST).is_file()
+    for name, stop in (("spending stop", settings["spending_stop"]), ("stopped" if ended else "stopping",
+                                                                       settings["stop"])):
+        if stop:
+            lines.append(f"{name} by {stop['by']}: {stop['reason']}")
+    return lines, settings
+
+
 def campaign_status(root, now=None, zone=None):
-    """The status command's lines for a campaign root, or for one phase's root."""
+    """The status command's lines for a campaign root, or for one phase's root, from the ledgers alone."""
     now = time.time() if now is None else now
     if (phase := phase_root(root)) is not None:
         controller = controller_process(phase[2]) if phase[2] else None
-        return [f"phase {root}", *phase_status(phase[1], root, now, {}, controller, zone, phase[2])]
+        lines, settings = campaign_lines(phase[2]) if phase[2] else ([], None)
+        return [f"phase {root}", *lines, *phase_status(phase[1], root, now, {}, controller, settings, zone, phase[2])]
     phases = campaign_phases(root)
     controller = controller_process(root)
-    lines = [f"campaign {root}: " + (f"controller running as process {controller}" if controller else
-                                     "no live controller")]
+    lines, settings = campaign_lines(root)
+    lines.insert(0, f"campaign {root}: " + (f"controller running as process {controller}" if controller else
+                                            "no live controller"))
     fleets = {}
     for candidate in read_candidates(root):
         lines.append(f"candidate {candidate['name']} at {candidate['commit'][:12]}")
         for name, label, directory in phases:
             if name == candidate["name"]:
-                lines.extend(phase_status(label, directory, now, fleets, controller, zone, root))
+                lines.extend(phase_status(label, directory, now, fleets, controller, settings, zone, root))
     return lines
 
 
@@ -4639,9 +4682,9 @@ def phase_results(root, live=False):
             result(platform, row, len(hosts), ratios, candidate / comparator)
         else:
             result(platform, row, len(hosts), flags=[reduced["state"], reduced["reason"]], rank=3)
-    # The snapshot lists the units unresolved so far; unresolved-units.tsv, written when the controller ends, lists
-    # every item not accepted.
-    for unit in phase_unresolved(root, dispatch_snapshot(root), live):
+    # The ledgers show the units unresolved so far; unresolved-units.tsv, written when the controller ends, lists every
+    # item not accepted.
+    for unit in phase_unresolved(root, live):
         result(unit["platform"], f"{unit['unit_id']} replica {unit['replica']}", None,
                flags=[f"unresolved: {unit['detail']}"], rank=0, kind="unit")
     return sorted(results, key=lambda item: (item["rank"], -item["ratio"] if item["ratio"] is not None else 0,

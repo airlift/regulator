@@ -46,6 +46,9 @@ if ! grep -q " ${MOUNT} " /etc/fstab; then
 fi
 mountpoint -q "${MOUNT}" || mount "${MOUNT}"
 install -d -o ec2-user -g ec2-user "${MOUNT}/campaign" "${INPUTS}"
+# The status command names the URL Grafana serves at, which the record keeps across host replacements.
+printf '%s\n' "${GRAFANA_URL}" > "${MOUNT}/campaign/grafana-url.txt"
+chown ec2-user:ec2-user "${MOUNT}/campaign/grafana-url.txt"
 # The telemetry store belongs to the container's own user.
 install -d -m 777 "${MOUNT}/lgtm"
 

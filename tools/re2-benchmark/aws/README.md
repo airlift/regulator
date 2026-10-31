@@ -666,37 +666,46 @@ python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campa
 
 ```text
 campaign /durable/path/<campaign>: controller running as process 4242
+Grafana   http://<record>:3000
 candidate before at 0c1d2e3f4a5b
   build             complete
   smoke             complete
   primary           running as process 4242
     units     212/449 accepted (530/1104 groups), 1 unresolved, 180 queued
-    workers   2 booting, 24 running, 1 idle, as of 12s ago
-              r8i r8i.large us-east-2 spot: 2 booting, 14 running
-              r9g r9g.large us-west-2 on-demand: 10 running, 1 idle
+    hosts     27 live, 2 not yet reporting
+              r8i.large us-east-2 spot: 16 live, 2 not yet reporting
+              r9g.large us-west-2 on-demand: 11 live
     spend     $3.12 so far, $1.80 reserved
     finish    about 6:40 p.m. PDT
-    medians   boot to first unit 172s, upload 4s
+    medians   boot to ready 68s, boot to first unit 172s, upload 4s
 ```
 
-The command only reads files. Units and groups accepted, the estimate left,
-spend, and medians come from the phase's ledgers: `work-items.tsv`,
-`accepted-units.tsv`, `unresolved-units.tsv` once the phase ends, the
-campaign root's `fleet-state.json`, or in an old root the fleet state beside
-the policy its `execution-policy.json` names, `job-attempts.tsv`, and
-`unit-uploads.tsv`. Spend is the phase's completed hosts' cost plus the cost of
-its live hosts' hours so far; reserved is what their reservations hold beyond
-now. The workers, and the queued count and unresolved units while the phase
-runs, come from `dispatch-status.json`, which the controller rewrites for the phase
-every poll; its age shows how current they are. The finish is when the
-latest of the phase's pools, a platform's workers of one instance type,
-finishes its work left at its live workers, those not stopping, as a local
-clock time. A pool's work left is the estimated seconds of its groups not yet
-accepted, of units not left unresolved, corrected by the ratio of measured to
-estimated seconds over its groups accepted so far, and the controller weights
-the phases' shares of the hosts by the same corrected seconds. A phase that is
-not complete runs while the campaign's controller does. Given a phase's root,
-the command reports that phase alone.
+The command only reads the ledgers; everything live, each worker's lease and
+group among it, is in Grafana, whose URL the control host records in the
+campaign root's `grafana-url.txt`. A spending stop or a stop the settings hold
+follows it, with who made it and why. Units and groups accepted, the estimate
+left, spend, and medians come from the phase's ledgers: `work-items.tsv`,
+`accepted-units.tsv`, `unit-attempts.tsv`, `semantic-rejections.tsv`,
+`unresolved-units.tsv` once the phase ends, the campaign root's
+`fleet-state.json`, or in an old root the fleet state beside the policy its
+`execution-policy.json` names, `job-attempts.tsv`, and `unit-uploads.tsv`.
+While the phase runs, its unresolved units are those a semantic failure or a
+rejection ended or that spent their attempts, as the controller's recovery
+reads them, and its queued units are those neither accepted, unresolved, nor
+held by a lease not yet settled. Its hosts are its fleet reservations, each
+held until the host's cleanup is proven, and one not yet reporting has a
+reservation its controller has not seen report. Spend is the phase's completed
+hosts' cost plus the cost of its live hosts' hours so far; reserved is what
+their reservations hold beyond now. The finish is when the latest of the
+phase's pools, a platform's workers of one instance type, finishes its work
+left at its live hosts, as a local clock time. A pool's work left is the
+estimated seconds of its groups not yet accepted, of units not left
+unresolved, corrected by the ratio of measured to estimated seconds over its
+groups accepted so far, and the controller weights the phases' shares of the
+hosts by the same corrected seconds. A phase that is not complete runs, is
+paused with its reason, or drains, as the campaign's settings record it, while
+the campaign's controller does. Given a phase's root, the command reports that
+phase alone.
 
 With `--results`, the command reads each primary phase's accepted groups so
 far instead, or the given phase's, from the phase's retained group
@@ -732,10 +741,10 @@ whose hosts cannot be reduced, a row this checkout's `rows.tsv` does not list,
 and a row the comparison does not time, `not-compatible` or `did-not-finish`,
 with its reason. Units the phase left unresolved come first, each with its
 reason: a semantic verification failure, even where another attempt was
-accepted, or attempts spent, a rejection, the phase's launch limit, or no
-worker left to take it; once the phase ends, every other unit not accepted, as
-`not accepted`. A failed lease whose retry was accepted is not listed. While
-the phase runs they come from `dispatch-status.json`, and once it ends from
+accepted, or attempts spent, or a rejection; once the phase ends, also the
+phase's launch limit or no worker left to take it, and every other unit not
+accepted, as `not accepted`. A failed lease whose retry was accepted is not listed. While
+the phase runs they come from its ledgers, and once it ends from
 `unresolved-units.tsv`, as the unresolved count does. A row counting the
 accepted groups whose retained directories are missing also comes first. Rows
 that cannot be reduced or are not listed come next, then rows by ratio, slowest
