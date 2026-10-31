@@ -171,9 +171,9 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    campaign, whether or not it still runs. Two launches can pass that check
    at once, as when one starts while a `replace` has deregistered the host it
    replaces, so each looks again once it registers its host, and one that
-   finds another campaign's host there deregisters and terminates its own
-   before its controller starts, and refuses. Everything after this runs in
-   AWS (principle 7).
+   finds another campaign's host there, or cannot register or look, deregisters
+   and terminates its own before its controller starts, and refuses. Everything
+   after this runs in AWS (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket

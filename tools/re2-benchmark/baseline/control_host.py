@@ -280,11 +280,19 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     if refusal := teardown_begun(aws, campaign, volume.id):
         fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"{refusal}; its new control host {instance} {fate}")
-    aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
     # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
     # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
-    # out before its controller starts.
-    if others := other_hosts(aws, network, campaign):
+    # out before its controller starts. One that cannot tell backs out too, deregistering its host, since a
+    # registration whose answer was lost may have taken effect, and deregistering a host never registered is harmless.
+    try:
+        aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
+        others = other_hosts(aws, network, campaign)
+    except CloudError as error:
+        fate = discard(aws, network, instance, registered=True)
+        raise SystemExit(f"cannot register campaign {campaign}'s new control host {instance} in the load balancer's "
+                         f"target group and check that no other campaign's host is there: {error}; that host {fate}; "
+                         f"run control-host replace {campaign} again") from error
+    if others:
         fate = discard(aws, network, instance, registered=True)
         raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, which was registered as "
                          f"campaign {campaign}'s new control host {instance} was; one name serves one campaign, so "

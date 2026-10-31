@@ -606,7 +606,8 @@ which the refusal names as campaign `unknown`. A registered host that has
 terminated, or that EC2 no longer lists, serves none and does not count;
 `replace` and `teardown` deregister it whatever its campaign. Each looks again
 once it registers its host, and backs out, terminating that host, if another
-campaign's launch registered one meanwhile. The host's user data,
+campaign's launch registered one meanwhile, or if AWS answers the
+registration or the look with an error. The host's user data,
 `control-host/user-data.sh`:
 
 - installs the key `--ssh-public-key` names for `ec2-user`, and has sshd

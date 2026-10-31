@@ -129,14 +129,39 @@ class TestControlHost(unittest.TestCase):
                                                    "slow down; run control-host replace c again"):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
         self.assertEqual(["terminated"] * 4 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
+        # A replacement whose registration AWS answered with an error, though it took effect, or whose look at the
+        # target group after it failed, cannot tell it serves alone, so it backs out and leaves the target group.
+        register = aws.register_target
+        registered_targets = aws.registered_targets
+
+        def answer_lost(region, target_group, instance, port):
+            register(region, target_group, instance, port)
+            raise CloudError("RequestTimeout: the answer was lost")
+
+        def look_failed(region, target_group):
+            if aws.targets["arn:target-group"]:
+                raise CloudError("ThrottlingException: Rate exceeded")
+            return registered_targets(region, target_group)
+
+        for step, failure, host, error in (
+                ("register_target", answer_lost, "i-control-6", "RequestTimeout: the answer was lost"),
+                ("registered_targets", look_failed, "i-control-7", "ThrottlingException: Rate exceeded")):
+            with self.subTest(step=step), patch.object(aws, step, side_effect=failure), \
+                    contextlib.redirect_stdout(io.StringIO()) as printed, \
+                    self.assertRaisesRegex(SystemExit, f"cannot register campaign c's new control host {host} .*: "
+                                                       f"{error}; that host is deregistered and terminated; run "
+                                                       "control-host replace c again"):
+                control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+            self.assertEqual("", printed.getvalue())
+            self.assertEqual("terminated", aws.region_instances["us-west-2"][-1].state)
+            self.assertEqual({"arn:target-group": set()}, aws.targets)
         # Another campaign's launch passes its check of the target group while the replace has deregistered the host
         # it replaces, and registers its own host as the replacement registers. The replacement finds it there and
         # backs out, terminating its host though AWS refuses to deregister it.
-        register = aws.register_target
         deregister = aws.deregister_target
 
         def deregister_refused(region, target_group, instance, port):
-            if instance == "i-control-6":
+            if instance == "i-control-8":
                 raise CloudError("ThrottlingException: Rate exceeded")
             deregister(region, target_group, instance, port)
 
@@ -150,13 +175,13 @@ class TestControlHost(unittest.TestCase):
         with patch.object(aws, "register_target", side_effect=register_both), \
                 patch.object(aws, "deregister_target", side_effect=deregister_refused), \
                 contextlib.redirect_stdout(io.StringIO()) as printed, \
-                self.assertRaisesRegex(SystemExit, "also forwards Grafana to i-control-7 of campaign d, .* so that "
+                self.assertRaisesRegex(SystemExit, "also forwards Grafana to i-control-9 of campaign d, .* so that "
                                                    "host is terminated, though AWS refused to deregister it: "
                                                    "ThrottlingException: Rate exceeded; once"):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
         self.assertEqual("", printed.getvalue())
-        self.assertEqual(["terminated"] * 6 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
-        self.assertEqual({"arn:target-group": {("i-control-6", 3000), ("i-control-7", 3000)}}, aws.targets)
+        self.assertEqual(["terminated"] * 8 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual({"arn:target-group": {("i-control-8", 3000), ("i-control-9", 3000)}}, aws.targets)
 
     def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
         aws = control_host_cloud()
