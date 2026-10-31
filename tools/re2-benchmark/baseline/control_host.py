@@ -183,13 +183,16 @@ def registered_hosts(aws, network):
             for host in registered}
 
 
+def other_hosts(aws, network, campaign):
+    """The hosts registered in the load balancer's target group that are not tagged for the campaign, each named with
+    its campaign: the one name would serve both campaigns' Grafana by turns. A host that has terminated serves none."""
+    return sorted(f"{host} of campaign {owner or 'unknown'}"
+                  for host, owner in registered_hosts(aws, network).items() if owner not in (None, campaign))
+
+
 def check_target_group(aws, network, campaign):
-    """Refuse to put the campaign's host in the load balancer's target group while a host not tagged for the campaign
-    is registered there: the one name would serve both campaigns' Grafana by turns. A host that has terminated serves
-    none."""
-    others = sorted(f"{host} of campaign {owner or 'unknown'}"
-                    for host, owner in registered_hosts(aws, network).items() if owner not in (None, campaign))
-    if others:
+    """Refuse to put the campaign's host in the load balancer's target group while another host is registered there."""
+    if others := other_hosts(aws, network, campaign):
         raise SystemExit(f"the load balancer forwards Grafana to {', '.join(others)}; one name serves one "
                          f"campaign, so tear that campaign's host down before starting campaign {campaign}'s")
 
@@ -248,7 +251,7 @@ def replace(aws, campaign, ssh_public_key):
 
 def start(aws, network, group, campaign, volume, ssh_public_key):
     """Start a control host in the network's subnet in the volume's zone, attach the volume, and register the host in
-    the load balancer's target group."""
+    the load balancer's target group, unless another campaign's host is registered there too."""
     zones = aws.subnet_zones(REGION, network["subnets"])
     subnet = next((subnet for subnet in network["subnets"] if zones[subnet] == volume.zone), None)
     if subnet is None:
@@ -266,17 +269,32 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
         aws.attach_volume(REGION, volume.id, instance, VOLUME_DEVICE)
     except CloudError as error:
         # A host without the campaign volume would wait for it and then fail, so it goes, and replace starts another.
-        aws.terminate(REGION, [instance])
+        discard(aws, network, instance, registered=False)
         raise SystemExit(f"cannot attach campaign {campaign}'s volume {volume.id} to its new control host "
                          f"{instance}, which is terminated; run control-host replace {campaign} again: "
                          f"{error}") from error
     aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
+    # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
+    # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
+    # out before its controller starts.
+    if others := other_hosts(aws, network, campaign):
+        discard(aws, network, instance, registered=True)
+        raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, which was registered as "
+                         f"campaign {campaign}'s new control host {instance} was; one name serves one campaign, so "
+                         f"that host is deregistered and terminated; once the other campaign's host is torn down, "
+                         f"run control-host replace {campaign}")
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
           f"ssh, once control-host known-host {campaign} records its keys: ssh -p {SSH_PORT} "
           f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={KNOWN_HOSTS} ec2-user@{address}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
+
+def discard(aws, network, instance, registered):
+    """Take a new control host out of the load balancer's target group, where it was registered, and terminate it."""
+    if registered:
+        aws.deregister_target(REGION, network["target_group"], instance, GRAFANA_PORT)
+    aws.terminate(REGION, [instance])
 
 
 def root_files(root):
