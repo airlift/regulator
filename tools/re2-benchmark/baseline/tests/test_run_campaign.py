@@ -4535,19 +4535,33 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_a_phase_running_for_days_checks_its_regions_daily(self):
         # Dain pauses the primary at its first poll and resumes it a day later. Each check of a phase's regions puts
-        # its archives again once they are five days old, so a phase that runs for a week cannot outlive them.
-        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+        # its archives again once they are five days old, so a phase that runs for a week cannot outlive them. The
+        # day's check fails, as when Ohio's quota no longer holds its limit, and so does Ohio's upload, yet Oregon's
+        # archives still go up.
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
             root = Path(temporary)
             fleet = FakeUnitFleet(root / "hosts")
-            checked, steered = [], []
+            fleet.buckets["ohio"] = cloud.BucketInfo("us-east-2", RUN_CAMPAIGN.SHARED_BUCKET_TAGS)
+            regions = {"r8i": ["us-west-2", "us-east-2"], "r9g": ["us-west-2"]}
+            campaign_settings(root, regions, None, {"us-east-2": "ohio"}, max_hosts=2, max_hosts_per_platform=1)
+            checked, steered, uploads = [], [], []
 
             def check(arguments, platforms):
                 checked.append(fleet.clock)
+                if len(checked) == 2:
+                    raise SystemExit("the campaign settings' max_vcpus exceeds the Standard Spot quota after its "
+                                     "reserve in us-east-2")
                 return check_regions(arguments, platforms)
+
+            def upload(arguments, jobs):
+                uploads.append({region for job in jobs for region in RUN_CAMPAIGN.launch_regions(arguments, job)})
+                if uploads[-1] == {"us-east-2"}:
+                    raise SystemExit("could not upload the candidate archive to s3://ohio: timed out")
 
             def steer():
                 if not steered:
                     self.control(root, "pause", "primary")
+                    RUN_CAMPAIGN.upload_candidate_archive.side_effect = upload
                     steered.append("paused")
                 elif steered == ["paused"] and len(checked) == 1:
                     fleet.clock += RUN_CAMPAIGN.REGION_RECHECK_SECONDS
@@ -4559,12 +4573,14 @@ class TestUnitWorkers(unittest.TestCase):
             check_regions = RUN_CAMPAIGN.check_regions
             with patch.object(RUN_CAMPAIGN, "check_regions", side_effect=check):
                 failed, dispatchers = self.run_campaign(root, fleet, [("primary", "primary", ["like-dfa-single-use"],
-                                                                       ())], 2, 1, steer)
+                                                                       ())], 2, 1, steer, platform_regions=regions)
             self.assertEqual([], failed)
             self.assert_accepted(dispatchers["primary"])
             # Its setup checked them, and with no region changed, a day later its controller checked them again.
             self.assertEqual(2, len(checked))
             self.assertGreaterEqual(checked[1] - checked[0], RUN_CAMPAIGN.REGION_RECHECK_SECONDS)
+            self.assertEqual([{"us-east-2"}, {"us-west-2"}], uploads)
+            self.assertIn("in us-east-2; archives not refreshed in us-east-2: could not upload", log.getvalue())
 
     def test_notice_between_units_releases_the_waiting_lease(self):
         with tempfile.TemporaryDirectory() as temporary:

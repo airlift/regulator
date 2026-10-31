@@ -1069,7 +1069,9 @@ preflight checks the tag and the bucket's region. A bucket holds two trees:
   `bucket-lifecycle.json` expires an object seven days after its upload, and a
   phase's region check, which a running phase repeats every day, or a region
   `add-region` adds, puts an archive again once it is five days old, so an
-  archive outlives any phase that uses it.
+  archive outlives any phase that uses it. A check that fails still puts them
+  again in each region the phase launches in, each region on its own, so one
+  region's failure leaves the others' fresh.
 - `campaigns/<campaign>/<session>/` holds each worker's leases and results.
   Cleanup removes the session's prefix, and the `ExpireCampaignSessions` rule
   expires what a lost controller leaves one day after it was written.
