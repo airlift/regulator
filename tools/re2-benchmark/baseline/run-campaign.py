@@ -38,7 +38,7 @@ import work_units
 from acceptance import normalize_heap_size
 from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError,
-    changed as changed_settings, read as read_settings, seeded as seeded_settings)
+    changed as changed_settings, locked as settings_locked, read as read_settings, seeded as seeded_settings)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
     owner_fleet, read_state as read_fleet_state)
@@ -2343,9 +2343,11 @@ def process_start(process_id):
 
 
 @contextlib.contextmanager
-def controller_lock(campaign_root):
+def controller_lock(campaign_root, campaign):
     """Own campaign_root as its only controller, and once it does, record this process's ID and start time in its
-    controller record. While another controller owns it, refuse."""
+    controller record. While another controller owns it, refuse, and refuse a campaign that has ended, as its manifest
+    shows, before the record its manifest lists changes, so a reboot or a replaced host neither runs an ended campaign
+    again nor changes its root; Dain reopens one with control's reopen."""
     campaign_root.mkdir(parents=True, exist_ok=True)
     lock_path = campaign_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
@@ -2356,6 +2358,11 @@ def controller_lock(campaign_root):
             raise SystemExit(f"another controller{f' (process {owner})' if owner else ''} owns campaign root "
                              f"{campaign_root}; see its progress with {Path(__file__).name} status "
                              f"{campaign_root}") from None
+        manifest = campaign_root / control_host.MANIFEST
+        if manifest.is_file():
+            raise SystemExit(f"campaign {campaign} has ended, as {manifest} shows; to run it again, reopen it with "
+                             f"{Path(__file__).name} control {campaign_root} --campaign {campaign} --actor dain "
+                             "reopen")
         temporary = campaign_root / (CONTROLLER_RECORD + ".new")
         temporary.write_text(f"pid={os.getpid()}\nstarted={process_start(os.getpid())}\n")
         os.replace(temporary, campaign_root / CONTROLLER_RECORD)
@@ -4580,16 +4587,6 @@ def refuse_old_root(campaign_root):
                          "controller cannot resume it, so start a new campaign root")
 
 
-def refuse_ended_root(arguments):
-    """Refuse a campaign root whose controller ended, as its manifest shows, so a reboot or a replaced host never runs
-    an ended campaign again; Dain reopens one with control's reopen."""
-    manifest = arguments.campaign_root / control_host.MANIFEST
-    if manifest.is_file():
-        raise SystemExit(f"campaign {arguments.campaign} has ended, as {manifest} shows; to run it again, reopen it "
-                         f"with {Path(__file__).name} control {arguments.campaign_root} --campaign "
-                         f"{arguments.campaign} --actor dain reopen")
-
-
 def load_settings(arguments):
     """The campaign's settings: those its root holds, or on its first execution, the ones --settings names as their
     version 1. A restart keeps the root's whatever --settings names, so the command that started the campaign restarts
@@ -4681,8 +4678,7 @@ def run_campaign(arguments, root):
     refuse_old_root(arguments.campaign_root)
     if arguments.settings is None and not (arguments.campaign_root / CAMPAIGN_SETTINGS).is_file():
         raise SystemExit("a campaign's first execution seeds its settings; name them with --settings FILE")
-    with controller_lock(arguments.campaign_root):
-        refuse_ended_root(arguments)
+    with controller_lock(arguments.campaign_root, arguments.campaign):
         arguments.settings = load_settings(arguments)
         arguments.shared_budget = FleetBudget(arguments.campaign_root, arguments.settings, arguments.spot_vcpu_reserve)
         candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
@@ -4697,10 +4693,12 @@ def run_campaign(arguments, root):
             failed = campaign.run()
         finally:
             arguments.telemetry.shutdown()
-        # A controller that ended lists the root's files for finish to check its copy against; one SIGTERM stopped
-        # leaves the root to the next.
+        # A controller that ended lists the root's files for finish to check its copy against, under the settings
+        # lock, so no control command changes the root once it is listed; one SIGTERM stopped leaves the root to the
+        # next.
         if not campaign.terminated:
-            control_host.write_manifest(arguments.campaign_root)
+            with settings_locked(arguments.settings.lock_path):
+                control_host.write_manifest(arguments.campaign_root)
     if failed:
         message = "campaign finished with failed phases:\n" + "\n".join(
             f"{phase.key}: {phase.failure}" for phase in failed)
@@ -5345,9 +5343,22 @@ def control(arguments, aws):
     if recorded != arguments.campaign:
         raise SystemExit(f"{arguments.root} is campaign {recorded}'s root, not campaign {arguments.campaign}'s")
     manifest = arguments.root / control_host.MANIFEST
-    if arguments.command == "reopen" and not manifest.is_file():
-        raise SystemExit(f"campaign {arguments.campaign} has not ended: {arguments.root} has no {manifest.name}")
+
+    def check_ended():
+        """Refuse a command but reopen on an ended campaign, whose manifest lists its settings and their events, and
+        reopen on one that has not ended."""
+        if manifest.is_file() != (arguments.command == "reopen"):
+            raise SettingsError(f"campaign {arguments.campaign} has not ended: {arguments.root} has no "
+                                f"{manifest.name}" if arguments.command == "reopen" else
+                                f"campaign {arguments.campaign} has ended; only reopen changes its settings")
+
+    def checked(settings):
+        # The change checks again under the settings lock, which the controller holds as it writes the manifest.
+        check_ended()
+        update(settings)
+
     try:
+        check_ended()
         store = CampaignSettings(arguments.root)
         if arguments.command == "add-region":
             description, update = add_region(arguments, store, aws)
@@ -5356,7 +5367,7 @@ def control(arguments, aws):
             check_region_limits(arguments.root, aws, store.current,
                                 changed_settings(store.current, arguments.actor, update))
         before = store.current["version"]
-        settings = store.change(arguments.actor, description, update)
+        settings = store.change(arguments.actor, description, checked)
     except SettingsError as error:
         raise SystemExit(str(error)) from error
     if settings["version"] == before:

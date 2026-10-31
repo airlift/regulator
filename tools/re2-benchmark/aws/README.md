@@ -683,9 +683,10 @@ A controller that ends, whether every phase completed, some failed, or the
 campaign was stopped, lists every file of the campaign root with its SHA-256
 in `campaign-files.sha256`; one that SIGTERM stopped lists nothing. A
 controller refuses to start on a root that has the list, so a reboot or a
-replaced host never runs an ended campaign again; `control ... --actor dain
-reopen` deletes the list and clears any stop, and the unit's next start runs
-the campaign again. `finish`
+replaced host never runs an ended campaign again, and `control` refuses every
+command but reopen on it, so the root stays as listed; `control ... --actor
+dain reopen` deletes the list and clears any stop, and the unit's next start
+runs the campaign again. `finish`
 pulls the root of an ended campaign over ssh on port 443 with rsync into the results
 directory the reduction and archiving read, by default
 `benchmark-results/pre-review-baseline/<campaign>`, and checks every file

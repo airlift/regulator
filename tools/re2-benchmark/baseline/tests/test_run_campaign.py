@@ -611,15 +611,23 @@ class TestRunCampaign(unittest.TestCase):
                 row["actor"] for row in csv.DictReader((campaign_root / EVENTS).read_text().splitlines(),
                                                        delimiter="\t") if row["change"] != "seed"}))
 
-            # The ended campaign never starts again, as on a reboot or a replaced host, until Dain reopens it.
-            with self.assertRaisesRegex(SystemExit, "campaign tournament has ended"):
-                run()
-            self.assertEqual([], events)
-
-            def reopen():
+            def control(*command):
                 with contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
-                        [str(campaign_root), "--campaign", "tournament", "--actor", "dain", "reopen"]), FakeCloud())
+                        [str(campaign_root), "--campaign", "tournament", "--actor", "dain", *command]), FakeCloud())
+
+            # The ended campaign never starts again, as on a reboot or a replaced host, and takes no change but
+            # reopen, so its root still matches its manifest, until Dain reopens it.
+            with patch.object(RUN_CAMPAIGN, "process_start", return_value="Sat Oct 31 09:00:00 2026"), \
+                    self.assertRaisesRegex(SystemExit, "campaign tournament has ended"):
+                run()
+            self.assertEqual([], events)
+            with self.assertRaisesRegex(SystemExit, "campaign tournament has ended; only reopen"):
+                control("set-limit", "max-hosts", "8")
+            self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
+
+            def reopen():
+                control("reopen")
 
             reopen()
             # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
@@ -829,7 +837,7 @@ class TestRunCampaign(unittest.TestCase):
 
             # The campaign's controller runs as its record names it; status leaves the campaign's lock to any
             # controller starting meanwhile.
-            with RUN_CAMPAIGN.controller_lock(campaign_root), \
+            with RUN_CAMPAIGN.controller_lock(campaign_root, "campaign"), \
                     patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the campaign's lock")):
                 lines = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
                 # The command reports a campaign root or one phase's root.
@@ -951,7 +959,7 @@ class TestRunCampaign(unittest.TestCase):
                     RUN_CAMPAIGN.main()
                 return output.getvalue().split("\n")[:-1]
 
-            with RUN_CAMPAIGN.controller_lock(campaign_root):
+            with RUN_CAMPAIGN.controller_lock(campaign_root, "campaign"):
                 lines, table = status(campaign_root, "--results"), status(campaign_root, "--results", "--tsv")
                 # Given one phase's root, the command reports that phase as the campaign labels it.
                 self.assertEqual(lines[6:12], status(language, "--results"))
@@ -1628,7 +1636,7 @@ class TestRunCampaign(unittest.TestCase):
                                      (["campaign", "language", *execute], f"owns campaign root {root}")):
                 errors = io.StringIO()
                 with self.subTest(refusal=refusal), patch.object(sys, "argv", ["run-campaign.py", *command]), \
-                        RUN_CAMPAIGN.controller_lock(root), \
+                        RUN_CAMPAIGN.controller_lock(root, "language"), \
                         patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                         patch.object(RUN_CAMPAIGN, "validate_source") as setup, \
                         contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as refused:
