@@ -184,7 +184,7 @@ there means the controller's telemetry is not arriving, which you report.
 | Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
 | Projected spend over max | the campaign will reach `max_usd` | Raise `max-usd` within `authorized` only while a refusal or a late finish also stands; otherwise report. |
 | Spending stop | no launch or extension is admitted | Ask Dain, with the stop's reason from `status`. |
-| Phases paused | a phase is paused | Read its reason from `status`. Resume it once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause Dain made is his. |
+| Phases paused | a phase is paused | Read its reason from `status`, and who paused it from the phase's `by` in the settings. Resume a phase the controller paused once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause or a drain Dain made is his, and `control` refuses to resume it for you. |
 | Leftovers | an ended host's prefix is not yet empty | Report; the controller retries every loop. |
 | Interruptions and stalls | no threshold | Report a sudden rise. |
 | Faults and leaks | no threshold | Report each new line. |
@@ -197,7 +197,7 @@ on the host; read it with `host cat` before each raise.
 | The monitor may, unattended | The monitor must ask |
 |---|---|
 | `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
-| Resume a phase paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause |
+| Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
 | Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
@@ -205,8 +205,9 @@ on the host; read it with `host cat` before each raise.
 `control` enforces the table: with `--actor monitor` it runs only
 `set-limit`, `add-region` and `resume`, and refuses every other command,
 `stop`, `clear-spending-stop` and `authorize` among them, as Dain's. The
-settings refuse a monitor change to `authorized` or the hourly rates, and
-any raise past `authorized`.
+settings refuse a monitor change to `authorized` or the hourly rates, any
+raise past `authorized`, and a resume of a phase the controller did not
+pause.
 
 To ask, send the push notification with the question and the evidence, and
 wait for Dain's answer in this thread.

@@ -759,8 +759,9 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   or draining phase: its running leases, and the leases its workers already
   hold, finish, and its workers stop at their idle stop. `drain <phase>`
   launches nothing for it, while its live workers take its queued work until
-  they stop. `resume <phase>` runs a paused or draining phase again. A restart
-  keeps a phase paused or draining.
+  they stop. `resume <phase>` runs a paused or draining phase again. The
+  settings record who paused or drained a phase as its `by`, and a pause's
+  `reason`. A restart keeps a phase paused or draining.
 - `clear-spending-stop` admits launches and lease extensions again after a
   [spending stop](#recovering-uploads-during-cleanup).
 - `stop [--reason TEXT]` stop-leases every worker, each behind the leases it
@@ -775,14 +776,18 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
 - `authorize max-hosts N`, `authorize max-usd N`, and
   `authorize regions <region>...` set the `authorized` envelope, which only
   `--actor dain` changes, as only Dain changes `hourly_rates`. The monitor
-  runs only `set-limit`, `add-region` and `resume`. It raises `max_hosts`,
+  runs only `set-limit`, `add-region` and `resume`, and resumes only a phase
+  the controller paused for a fault, never one Dain paused or drained. It
+  raises `max_hosts`,
   `max_hosts_per_platform`, and `max_usd` only within it, and a region's vCPUs
   only in its regions, where admission still holds the fleet within the
   region's quota after its reserve; it never raises `max_machine_hours`, which
   the envelope does not name. Any actor may lower a limit.
 
 The controller pauses a phase itself for a fault in its dispatch, logging
-`<phase>: paused: <fault>` and recording the fault as the phase's `reason`.
+`<phase>: paused: <fault>` and recording the fault as the phase's `reason`
+and itself as its `by`, unless Dain had paused or drained the phase, which
+stays his to resume.
 It trusts nothing more the phase's hosts report and only proves each one's
 cleanup as it stops at its idle stop. `resume` restarts the phase's dispatch
 from its ledgers, as a restarted controller would, and the phase pauses again
