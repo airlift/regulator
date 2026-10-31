@@ -2978,6 +2978,10 @@ class UnitDispatcher:
         del self.accepting[key]
         return future.result()
 
+    def gathering(self):
+        """Whether the acceptance threads still gather a group's completion for this dispatch."""
+        return not all(future.done() for future in self.accepting.values())
+
     def complete(self, worker, sequence, group, evidence):
         """Accept or supersede one group of a lease from what the acceptance threads found of its completion, or
         settle the lease; returns whether the group finished and the lease goes on."""
@@ -4526,7 +4530,8 @@ class Campaign:
         to do. A setup that fails, as one whose region's quota no longer holds its limit, pauses its phase for that
         fault; once it built the phase's dispatch, the phase still sweeps the hosts it holds, which count against
         the limits, and with none, its hosts wait for it. A phase paused for a fault starts again once it is
-        resumed, as it would under a restarted controller, which rebuilds its dispatch from its ledgers."""
+        resumed, as it would under a restarted controller, which rebuilds its dispatch from its ledgers, once
+        the acceptance threads finish what its dispatch gave them."""
         settings = live_settings(self.arguments)
         for phase in self.phases.values():
             if phase.state == "starting" and phase.future.done():
@@ -4552,8 +4557,10 @@ class Campaign:
                 if fault is not None:
                     self.fault(phase, fault)
             elif phase.fault:
-                # Resumed once its pause was recorded.
-                if self.recorded.get(phase.key) == "paused" and settings["phases"][phase.key]["state"] != "paused":
+                # Resumed once its pause was recorded, and once its dispatch gathers nothing more into the staging
+                # its next dispatch gathers into.
+                if (self.recorded.get(phase.key) == "paused" and settings["phases"][phase.key]["state"] != "paused"
+                        and not (phase.dispatcher and phase.dispatcher.gathering())):
                     phase.fault, phase.dispatcher = "", None
                     self.start(phase)
             elif phase.state == "pending" and all(self.phases[key].state == "complete" for key in phase.after):
