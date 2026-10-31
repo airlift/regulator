@@ -21,7 +21,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -43,7 +42,7 @@ public class TestRustRegexp
             "(?-u)\\b{start}");
     // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, CR, LF, both
     // bytes of é, and a byte that is never UTF-8.
-    private static final List<byte[]> SHORT_TEXTS = shortTexts();
+    private static final List<byte[]> SHORT_TEXTS = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) '\r', (byte) '\n', (byte) 0xC3, (byte) 0xA9, (byte) 0xFF);
 
     @Test
     public void testParse()
@@ -328,17 +327,7 @@ public class TestRustRegexp
             for (String pattern : patterns) {
                 Prog forward = compileRustProgram(pattern, options, false);
                 Prog reverse = compileRustProgram(pattern, options, true);
-                boolean unicodeWordAssertions = (forward.textDependentAssertions() & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0;
-                for (byte[] text : SHORT_TEXTS) {
-                    Slice context = paddedView(text);
-                    String description = "%s on %s, bytes %s".formatted(pattern, HexFormat.of().formatHex(text), bytes);
-                    boolean mayQuit = unicodeWordAssertions && !isAscii(text);
-                    for (int start = 0; start <= text.length; start++) {
-                        for (int end = start; end <= text.length; end++) {
-                            assertDfaAgreesWithNfa(description, forward, reverse, context, start, end, mayQuit);
-                        }
-                    }
-                }
+                TestingEngineAgreement.assertDfaAgreesWithNfa(pattern, forward, reverse, SHORT_TEXTS, "bytes " + bytes);
             }
         }
     }
@@ -457,26 +446,7 @@ public class TestRustRegexp
                 assertThat(program.hasTextDependentAssertions()).as(pattern).isTrue();
                 assertThat(program.isOnePass()).as(pattern).isTrue();
                 int captureSlotCount = 2 * (RustRegexp.parse(utf8Slice(pattern), options).capturingGroupCount() + 1);
-                for (byte[] text : SHORT_TEXTS) {
-                    Slice context = paddedView(text);
-                    String hex = HexFormat.of().formatHex(text);
-                    for (int start = 0; start <= text.length; start++) {
-                        for (int end = start; end <= text.length; end++) {
-                            for (Prog.MatchKind matchKind : List.of(Prog.MatchKind.FIRST_MATCH, Prog.MatchKind.LONGEST_MATCH, Prog.MatchKind.FULL_MATCH)) {
-                                for (int slots : new int[] {0, 2, captureSlotCount}) {
-                                    int[] onePass = slots == 0 ? null : new int[slots];
-                                    int[] bitState = slots == 0 ? null : new int[slots];
-                                    boolean expected = BitState.search(program, context, start, end, true, matchKind, bitState);
-                                    String description = "%s on %s [%s, %s) %s, %s slots, bytes %s".formatted(pattern, hex, start, end, matchKind, slots, bytes);
-                                    assertThat(OnePass.search(program, context, start, end, true, matchKind, onePass)).as(description).isEqualTo(expected);
-                                    if (expected && slots != 0) {
-                                        assertThat(onePass).as(description).containsExactly(bitState);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                TestingEngineAgreement.assertOnePassAgreesWithBitState(pattern, program, captureSlotCount, SHORT_TEXTS, "bytes " + bytes);
             }
 
             // Alternatives that read the same byte under different word assertions are not
@@ -489,75 +459,6 @@ public class TestRustRegexp
                 assertThat(groups).as(pattern).containsExactly(1, 2, 1, 2);
             }
         }
-    }
-
-    private static void assertDfaAgreesWithNfa(String description, Prog forward, Prog reverse, Slice context, int start, int end, boolean mayQuit)
-    {
-        int[] groups = new int[2];
-        long expectedEnd = Nfa.search(forward, context, start, end, false, Prog.MatchKind.FIRST_MATCH, groups) ? groups[1] : Dfa.SEARCH_NO_MATCH;
-        long forwardEnd = Dfa.search(forward, context, start, end, false, Prog.MatchKind.FIRST_MATCH, true);
-        if (forwardEnd == Dfa.SEARCH_FAILED) {
-            assertThat(mayQuit).as("forward quit: %s [%s, %s)", description, start, end).isTrue();
-        }
-        else {
-            assertThat(forwardEnd).as("forward: %s [%s, %s)", description, start, end).isEqualTo(expectedEnd);
-        }
-
-        // The reverse program finds the leftmost start of a match that ends at the range end.
-        int matchStart = start;
-        while (matchStart <= end && !Nfa.search(forward, context, matchStart, end, true, Prog.MatchKind.FULL_MATCH, null)) {
-            matchStart++;
-        }
-        long expectedStart = matchStart <= end ? matchStart - start : Dfa.SEARCH_NO_MATCH;
-        long reverseStart = Dfa.search(reverse, context, start, end, true, Prog.MatchKind.LONGEST_MATCH, true);
-        if (reverseStart == Dfa.SEARCH_FAILED) {
-            assertThat(mayQuit).as("reverse quit: %s [%s, %s)", description, start, end).isTrue();
-        }
-        else {
-            assertThat(reverseStart).as("reverse: %s [%s, %s)", description, start, end).isEqualTo(expectedStart);
-        }
-    }
-
-    private static List<byte[]> shortTexts()
-    {
-        byte[] alphabet = {'a', ' ', '\r', '\n', (byte) 0xC3, (byte) 0xA9, (byte) 0xFF};
-        List<byte[]> texts = new ArrayList<>();
-        addTexts(texts, alphabet, new byte[0], 4);
-        return List.copyOf(texts);
-    }
-
-    private static void addTexts(List<byte[]> texts, byte[] alphabet, byte[] prefix, int remaining)
-    {
-        texts.add(prefix);
-        if (remaining == 0) {
-            return;
-        }
-        for (byte value : alphabet) {
-            byte[] text = Arrays.copyOf(prefix, prefix.length + 1);
-            text[prefix.length] = value;
-            addTexts(texts, alphabet, text, remaining - 1);
-        }
-    }
-
-    // A view of `text` between the two bytes of é, so a search that reads past the view decodes a
-    // word character.
-    private static Slice paddedView(byte[] text)
-    {
-        byte[] padded = new byte[text.length + 2];
-        padded[0] = (byte) 0xC3;
-        System.arraycopy(text, 0, padded, 1, text.length);
-        padded[padded.length - 1] = (byte) 0xA9;
-        return Slices.wrappedBuffer(padded, 1, text.length);
-    }
-
-    private static boolean isAscii(byte[] text)
-    {
-        for (byte value : text) {
-            if (value < 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static Prog compileRustProgram(String pattern, RustRegexp.Options options, boolean reversed)

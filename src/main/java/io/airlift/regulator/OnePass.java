@@ -577,12 +577,13 @@ final class OnePass
         return search(prog, text, 0, text.length(), anchored, matchKind, submatch);
     }
 
-    // A program with Rust assertions keeps each condition's full EmptyOp mask in a parallel array:
-    // an action's at its action index, and a match condition's at its node index, which every
-    // match condition in such a program carries above INDEX_SHIFT. These methods evaluate that
-    // mask; a condition that needs a Rust assertion carries Prog.ONEPASS_EXTENDED_ASSERTIONS
-    // among its empty-width bits, so the loops always call them for it. Each search reads the
-    // arrays once, so a program without Rust assertions pays only a null check per empty-width check.
+    // A program with Rust assertions or Java or Trino word boundaries keeps each condition's full
+    // EmptyOp mask in a parallel array: an action's at its action index, and a match condition's
+    // at its node index, which every match condition in such a program carries above INDEX_SHIFT.
+    // These methods evaluate that mask; a condition that needs one of those assertions carries
+    // Prog.ONEPASS_EXTENDED_ASSERTIONS among its empty-width bits, so the loops always call them
+    // for it. Each search reads the arrays once, so another program pays only a null check per
+    // empty-width check.
     private static boolean satisfyAction(int[] assertions, int condition, int actionIndex, Slice context, int position)
     {
         if (assertions == null) {

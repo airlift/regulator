@@ -270,8 +270,16 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
 - Java's `$`, `\Z`, multiline anchors, and combining-aware word boundaries use
   frontend-specific empty-width predicates, and a scan plan checks the same
   final-terminator rule for `$` and `\Z`. In the ordinary engine, programs
-  containing those text-dependent assertions use BitState or NFA; protected DFA
-  transition loops do not contain Java-language branches.
+  containing `$`, `\Z`, or a multiline anchor use BitState or NFA; protected DFA
+  transition loops do not contain Java-language branches. The word boundaries
+  run on the DFA as Rust's Unicode word assertions do (see
+  [Rust Frontend](#rust-frontend)): between ASCII bytes and region edges each
+  is its ASCII form, because the JDK's word characters there are
+  `[0-9A-Za-z_]` in both character-class modes and a nonspacing mark is never
+  ASCII. A search that reaches one next to any other byte quits to the
+  fallback engines. OnePass evaluates them exactly, as
+  [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
+  describes.
 - Java patterns use the shared `RegexpMatcher`. A matcher region is the
   assertion context, as a JDK region with default bounds is, except that, as in
   the JDK, `$` and `\Z` do not match at the start of a nonempty region that
@@ -382,7 +390,8 @@ original pattern, including when quoting rewrites it before parsing.
   completes ends the streak. The transition loops contain no Rust-language
   branches; the predicates live where states are built.
 - OnePass evaluates these predicates too, as
-  [Rust Assertions In OnePass](#rust-assertions-in-onepass) describes.
+  [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
+  describes.
 - Unicode properties, `\d`, `\s`, `\w`, and Unicode word boundaries read the
   pinned database, as Pinned Unicode Properties describes. `\w` and the word
   boundaries use the database's word characters, the UTS #18 class that Java's
@@ -1367,22 +1376,22 @@ deviation. It avoids sending deterministic high-capture expressions through
 BitState solely because of native RE2's packed-word limit, while keeping the
 more common small-capture loop unchanged.
 
-## Rust Assertions In OnePass
+## Text-Dependent Assertions In OnePass
 
 A OnePass condition holds RE2's six empty-width bits and a match-priority bit,
 and the rest of the 32-bit word holds the capture actions and the next node, so
-Rust's assertions do not fit. One-pass programs whose only text-dependent
-assertions are Rust's additionally build parallel EmptyOp masks for match and
-transition actions. The masks are charged to the OnePass share of the compiled
-memory budget. A condition that needs a Rust assertion carries one marker bit
-among the six, so the loops call the empty-width check for it, and in these
-programs that check evaluates the full mask against the text around the
-position. A match condition also carries its node index in the bits an action
-uses for its next node, which locates its mask without another loop variable.
-Building compares the full masks, so two actions that differ only in a Rust
-assertion still make the program not one-pass. Programs without Rust
-assertions allocate no masks, and their empty-width check reads only the six
-bits.
+Rust's assertions and Java's and Trino's word boundaries do not fit. One-pass
+programs whose only text-dependent assertions are those additionally build
+parallel EmptyOp masks for match and transition actions. The masks are charged
+to the OnePass share of the compiled memory budget. A condition that needs one
+of those assertions carries one marker bit among the six, so the loops call the
+empty-width check for it, and in these programs that check evaluates the full
+mask against the text around the position. A match condition also carries its
+node index in the bits an action uses for its next node, which locates its mask
+without another loop variable. Building compares the full masks, so two actions
+that differ only in such an assertion still make the program not one-pass.
+Other programs allocate no masks, and their empty-width check reads only the
+six bits.
 
 ## Java Representation Adaptations
 
@@ -1412,11 +1421,16 @@ construction supplies the Trino bit only when the next symbol is not
 end-of-text. The reversed program supplies the corresponding end-line bit when
 it crosses an internal LF or reaches the original input beginning, while
 suppressing it before a terminal LF. Start-state caches distinguish internal LF
-boundaries from a terminal LF, including nonzero Slice offsets. Other
-text-dependent assertions, except Rust's (see [Rust Frontend](#rust-frontend)),
-remain ineligible for DFA execution. OnePass evaluates only Rust's
-text-dependent assertions, so these Trino line anchors keep a program off
-OnePass.
+boundaries from a terminal LF, including nonzero Slice offsets. Unicode `\b`
+and `\B` run on the DFA as Rust's Unicode word assertions do (see
+[Rust Frontend](#rust-frontend)): between ASCII bytes and text edges each is
+its ASCII form, because Joni's word characters there are `[0-9A-Za-z_]` and its
+six extra Latin-1 numbers are outside ASCII. A search that reaches one next to
+any other byte quits to the fallback engines. Other text-dependent assertions,
+except Rust's and the Java word boundaries, remain ineligible for DFA
+execution. OnePass
+evaluates only Rust's assertions and the Java and Trino word boundaries, so
+these Trino line anchors keep a program off OnePass.
 
 Non-nullable counts containing only the Trino line assertions use the same DFA
 route and do not allocate a matcher. The exact multiline begin-line expression

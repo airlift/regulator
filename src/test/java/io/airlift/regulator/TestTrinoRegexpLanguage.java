@@ -680,6 +680,30 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("\\b中\\b")).contains(offsetInput)).isTrue();
     }
 
+    @Test
+    public void testUnicodeWordBoundariesRunOnDfaAndOnePass()
+    {
+        // The forward and reverse DFAs evaluate Unicode \b and \B between ASCII bytes and quit
+        // next to any other byte, and OnePass evaluates them as BitState does, over text with ²,
+        // which Joni counts as a word character, a combining acute accent, and their bytes alone.
+        Slice text = utf8Slice("x foo bar");
+        Re2 words = TrinoRegexp.compile(utf8Slice("\\bfoo\\b")).re2();
+        assertThat(words.findInto(text, new int[2])).isTrue();
+        assertThat(words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+
+        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81);
+        for (String pattern : List.of("\\ba\\b", "\\B", "a\\b", "\\b", "(?m)^\\b")) {
+            Prog forward = compileTrinoProgram(pattern, false);
+            assertThat(forward.hasDfaUnsupportedAssertions()).as(pattern).isFalse();
+            TestingEngineAgreement.assertDfaAgreesWithNfa(pattern, forward, compileTrinoProgram(pattern, true), texts, "Trino");
+        }
+        for (Map.Entry<String, Integer> entry : Map.of("(a+)\\b( *)", 6, "\\B(.)", 4).entrySet()) {
+            Prog program = compileTrinoProgram(entry.getKey(), false);
+            assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
+            TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), texts, "Trino");
+        }
+    }
+
     // Properties hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558 MODIFIER LETTER
     // ARMENIAN SMALL EH, a letter, and the Seal script, which starts at U+3D000.
     @Test

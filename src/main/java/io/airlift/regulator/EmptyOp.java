@@ -25,8 +25,8 @@ final class EmptyOp
     public static final int EMPTY_END_TEXT = 1 << 3;
     public static final int EMPTY_WORD_BOUNDARY = 1 << 4;
     public static final int EMPTY_NO_WORD_BOUNDARY = 1 << 5;
-    // The DFA keeps the first eight assertions as state flags and maps the Rust ones below onto
-    // its own flags; these use the last two of the eight.
+    // The DFA keeps the first eight assertions as state flags and maps the Rust ones and the Java
+    // and Trino word boundaries below onto its own flags; these use the last two of the eight.
     public static final int EMPTY_TRINO_BEGIN_LINE = 1 << 6;
     public static final int EMPTY_TRINO_END_LINE = 1 << 7;
     public static final int EMPTY_END_TEXT_OR_FINAL_NEWLINE = 1 << 8;
@@ -83,6 +83,11 @@ final class EmptyOp
     private static final int JAVA_UNICODE_WORD_BOUNDARIES = EMPTY_JAVA_UNICODE_WORD_BOUNDARY | EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
     // Assertions that hold only at a code point boundary.
     private static final int CODE_POINT_ASSERTIONS = JAVA_WORD_BOUNDARIES | JAVA_UNICODE_WORD_BOUNDARIES;
+    // Java's \b and \B and Trino's Unicode \b and \B, which decode the character on each side.
+    static final int JAVA_TRINO_WORD_BOUNDARIES = CODE_POINT_ASSERTIONS | EMPTY_UNICODE_WORD_BOUNDARY | EMPTY_NO_UNICODE_WORD_BOUNDARY;
+    // The word assertions that decode the text. Between ASCII bytes and text edges each is its
+    // ASCII form, so the DFA evaluates them there and quits next to a byte outside ASCII.
+    static final int DECODING_WORD_ASSERTIONS = RUST_UNICODE_WORD_ASSERTIONS | JAVA_TRINO_WORD_BOUNDARIES;
 
     public static final int TEXT_DEPENDENT =
             EMPTY_END_TEXT_OR_FINAL_NEWLINE |

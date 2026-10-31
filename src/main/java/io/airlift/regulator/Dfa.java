@@ -3506,10 +3506,10 @@ final class Dfa
     private static final int BYTE_END_TEXT = 256;
     // A state's flag word. Bits 0-13 are the assertions that hold at the state's position: the
     // first eight EmptyOp bits, then the DFA's own bits for the Rust CRLF anchors and word sides.
-    // Unicode \b and \B use the EmptyOp word boundary bits; dfaEmptyFlags maps each Rust
-    // assertion. Bit 14 marks a match, bits 15-17 describe the byte before the position, and the
-    // bits from FLAG_NEED_SHIFT up are the assertions the state's instructions need, numbered as
-    // bits 0-13.
+    // Rust's Unicode \b and \B and Java's and Trino's \b and \B use the EmptyOp word boundary
+    // bits; dfaEmptyFlags maps each of them. Bit 14 marks a match, bits 15-17 describe the byte
+    // before the position, and the bits from FLAG_NEED_SHIFT up are the assertions the state's
+    // instructions need, numbered as bits 0-13.
     private static final int FLAG_CRLF_BEGIN_LINE = 1 << 8;
     private static final int FLAG_CRLF_END_LINE = 1 << 9;
     private static final int FLAG_WORD_BEFORE = 1 << 10;
@@ -3565,27 +3565,29 @@ final class Dfa
     }
 
     /// Returns the DFA's assertion bits for an instruction's EmptyOp bits: the first eight EmptyOp
-    /// bits unchanged, and each Rust assertion as the DFA's evaluation of it. The other EmptyOp
-    /// bits are dropped; programs that need them never reach the DFA.
+    /// bits unchanged, and each Rust assertion and Java or Trino word boundary as the DFA's
+    /// evaluation of it. The other EmptyOp bits are dropped; programs that need them never reach
+    /// the DFA.
     private static int dfaEmptyFlags(int empty)
     {
-        int rustAssertions = empty & EmptyOp.RUST_ASSERTIONS;
+        int mappedAssertions = empty & (EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES);
         int flags = empty & 0xFF;
-        while (rustAssertions != 0) {
-            int assertion = Integer.lowestOneBit(rustAssertions);
-            flags |= rustAssertionFlag(assertion);
-            rustAssertions ^= assertion;
+        while (mappedAssertions != 0) {
+            int assertion = Integer.lowestOneBit(mappedAssertions);
+            flags |= assertionFlag(assertion);
+            mappedAssertions ^= assertion;
         }
         return flags;
     }
 
-    // The DFA evaluates a Unicode word assertion only where each neighbor is an ASCII byte or an
-    // edge of the text, and quits before evaluating it anywhere else. Between those neighbors the
-    // crate decodes each byte as its own character, every side decodes, and the Unicode word
-    // characters are the ASCII ones, so each Unicode assertion is its ASCII form. The valid-UTF-8
-    // assertions map to nothing because the compiler always pairs one with a non-word side in the
-    // same instruction, and that side carries the evaluation.
-    private static int rustAssertionFlag(int assertion)
+    // The DFA evaluates a word assertion that decodes the text only where each neighbor is an
+    // ASCII byte or an edge of the text, and quits before evaluating it anywhere else. Between
+    // those neighbors each byte is its own character, every side decodes, and the word characters
+    // are the ASCII ones: Rust's and Trino's Unicode word characters, and Java's, whose
+    // nonspacing-mark rule reads only a character outside ASCII. So each assertion is its ASCII
+    // form. The valid-UTF-8 assertions map to nothing because the compiler always pairs one with
+    // a non-word side in the same instruction, and that side carries the evaluation.
+    private static int assertionFlag(int assertion)
     {
         return switch (assertion) {
             case EmptyOp.EMPTY_RUST_CRLF_BEGIN_LINE -> FLAG_CRLF_BEGIN_LINE;
@@ -3594,10 +3596,16 @@ final class Dfa
             case EmptyOp.EMPTY_RUST_NON_WORD_BEFORE, EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_BEFORE -> FLAG_NON_WORD_BEFORE;
             case EmptyOp.EMPTY_RUST_WORD_AFTER, EmptyOp.EMPTY_RUST_UNICODE_WORD_AFTER -> FLAG_WORD_AFTER;
             case EmptyOp.EMPTY_RUST_NON_WORD_AFTER, EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_AFTER -> FLAG_NON_WORD_AFTER;
-            case EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_WORD_BOUNDARY;
-            case EmptyOp.EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_NO_WORD_BOUNDARY;
+            case EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_JAVA_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_JAVA_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_WORD_BOUNDARY;
+            case EmptyOp.EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_NO_UNICODE_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_JAVA_NO_WORD_BOUNDARY,
+                 EmptyOp.EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_NO_WORD_BOUNDARY;
             case EmptyOp.EMPTY_RUST_UNICODE_VALID_BEFORE, EmptyOp.EMPTY_RUST_UNICODE_VALID_AFTER -> 0;
-            default -> throw new IllegalArgumentException("not a Rust assertion: " + assertion);
+            default -> throw new IllegalArgumentException("not a DFA-mapped assertion: " + assertion);
         };
     }
 
@@ -3610,7 +3618,7 @@ final class Dfa
         }
     }
 
-    // A transition may evaluate a Unicode word assertion next to a byte outside ASCII. The search
+    // A transition may evaluate a decoding word assertion next to a byte outside ASCII. The search
     // fails, and the caller reruns it on an engine that decodes the text.
     private static final class QuitSearchException
             extends RuntimeException
@@ -4454,8 +4462,8 @@ final class Dfa
         private final StateData[][] startTrinoLine;
         private final StateData[][] startAfterWord = new StateData[2][2];
         private final StateData[][] startAfterNonWord = new StateData[2][2];
-        // Only programs with Rust CRLF anchors allocate the first, and only programs with a Unicode
-        // word assertion allocate the second.
+        // Only programs with Rust CRLF anchors allocate the first, and only programs with a word
+        // assertion that decodes the text allocate the second.
         private final StateData[][] startAfterCarriageReturn;
         private final StateData[][] startAfterNonAscii;
 
@@ -5806,15 +5814,15 @@ final class Dfa
             return computeTransitionLocked(stateOffset, c, cls);
         }
 
-        /// Returns whether the transition from a state with `flag` over `c` may evaluate a Unicode
-        /// word assertion next to a byte outside ASCII, where either the byte before the state's
-        /// position or `c` is outside ASCII. `c` is the next byte; at the end of a range that ends
-        /// before its context, it is the byte after the range. Any assertion the state needs
-        /// counts, because a line anchor that holds can lead to a word assertion that is not yet
-        /// among the state's needs. Every malformed UTF-8 sequence contains a byte outside ASCII,
-        /// so the DFA never evaluates the crate's decoding rules. A byte class shares one cached
-        /// transition, so this relies on the byte map never putting a byte outside ASCII in a
-        /// class with an ASCII byte.
+        /// Returns whether the transition from a state with `flag` over `c` may evaluate a word
+        /// assertion that decodes the text next to a byte outside ASCII, where either the byte
+        /// before the state's position or `c` is outside ASCII. `c` is the next byte; at the end
+        /// of a range that ends before its context, it is the byte after the range. Any assertion
+        /// the state needs counts, because a line anchor that holds can lead to a word assertion
+        /// that is not yet among the state's needs. Every malformed UTF-8 sequence and every
+        /// position inside a character is next to a byte outside ASCII, so the DFA never evaluates
+        /// a decoding rule. A byte class shares one cached transition, so this relies on the byte
+        /// map never putting a byte outside ASCII in a class with an ASCII byte.
         private static boolean quits(int flag, int c)
         {
             return (flag >>> FLAG_NEED_SHIFT) != 0 && ((flag & FLAG_LAST_NON_ASCII) != 0 || (c >= 0x80 && c != BYTE_END_TEXT));

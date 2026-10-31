@@ -346,8 +346,8 @@ final class Prog
     // Only programs exceeding upstream's capture-bit capacity allocate these parallel masks.
     private long[] onePassMatchCapture;
     private long[] onePassActionCapture;
-    // Only programs with Rust assertions allocate these parallel EmptyOp masks; see
-    // ONEPASS_EXTENDED_ASSERTIONS.
+    // Only programs with ONEPASS_TEXT_DEPENDENT_ASSERTIONS allocate these parallel EmptyOp masks;
+    // see ONEPASS_EXTENDED_ASSERTIONS.
     private int[] onePassMatchAssertions;
     private int[] onePassActionAssertions;
 
@@ -528,15 +528,16 @@ final class Prog
 
     public boolean hasDfaUnsupportedAssertions()
     {
-        int dfaSupported = EmptyOp.EMPTY_TRINO_BEGIN_LINE | EmptyOp.EMPTY_TRINO_END_LINE | EmptyOp.RUST_ASSERTIONS;
+        int dfaSupported = EmptyOp.EMPTY_TRINO_BEGIN_LINE | EmptyOp.EMPTY_TRINO_END_LINE | EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
         return (textDependentAssertions & ~dfaSupported) != 0;
     }
 
     /// Returns whether this program's DFA can quit on a byte outside ASCII, as one with a Rust
-    /// Unicode word assertion does, so that an engine that decodes the text runs the search.
+    /// Unicode word assertion or a Java or Trino word boundary does, so that an engine that
+    /// decodes the text runs the search.
     public boolean dfaQuitsOnNonAscii()
     {
-        return (textDependentAssertions & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0;
+        return (textDependentAssertions & EmptyOp.DECODING_WORD_ASSERTIONS) != 0;
     }
 
     public int textDependentAssertions()
@@ -1928,21 +1929,22 @@ final class Prog
                     builder.merge();
                     markedLineBoundaries = true;
                 }
-                // The DFA evaluates a Rust CRLF anchor from CR and LF separately, and a Rust word
+                // The DFA evaluates a Rust CRLF anchor from CR and LF separately, and a word
                 // assertion from whether each neighboring byte is an ASCII word byte. In a program
-                // with a Unicode word assertion, it quits on a byte outside ASCII, which a byte
-                // class can carry only if the bytes 0x80-0xFF never share it with an ASCII byte.
+                // with a word assertion that decodes the text, it quits on a byte outside ASCII,
+                // which a byte class can carry only if the bytes 0x80-0xFF never share it with an
+                // ASCII byte.
                 if ((empty & EmptyOp.RUST_CRLF_LINE) != 0 && !markedCarriageReturn) {
                     builder.mark('\r', '\r');
                     builder.merge();
                     markedCarriageReturn = true;
                 }
-                if ((empty & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0 && !markedNonAscii) {
+                if ((empty & EmptyOp.DECODING_WORD_ASSERTIONS) != 0 && !markedNonAscii) {
                     builder.mark(0x80, 0xFF);
                     builder.merge();
                     markedNonAscii = true;
                 }
-                if ((empty & (EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY | EmptyOp.RUST_WORD_ASSERTIONS)) != 0 && !markedWordBoundaries) {
+                if ((empty & (EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY | EmptyOp.RUST_WORD_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES)) != 0 && !markedWordBoundaries) {
                     // Keep the original two-phase order:
                     // first mark word ranges, then mark non-word ranges.
                     markRanges(builder, WORD_RANGES);
@@ -2692,12 +2694,14 @@ final class Prog
 
     private static final int ONEPASS_MATCH_WINS = 1 << ONEPASS_EMPTY_SHIFT;
     private static final int ONEPASS_IMPOSSIBLE = EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY;
-    // Rust assertions do not fit in a condition's six empty-width bits. A condition that needs one
-    // carries this bit instead, which sends the search to OnePass.satisfyAction or
-    // OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from the parallel assertion
-    // arrays. In a program with Rust assertions, every match condition also carries its node
+    // The text-dependent assertions OnePass evaluates: Rust's, and Java's and Trino's word
+    // boundaries. They do not fit in a condition's six empty-width bits. A condition that needs one
+    // carries ONEPASS_EXTENDED_ASSERTIONS instead, which sends the search to OnePass.satisfyAction
+    // or OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from the parallel assertion
+    // arrays. In a program with one of them, every match condition also carries its node
     // index above ONEPASS_INDEX_SHIFT, where an action keeps its next node. The bit is never part
     // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
+    private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
     private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
     // Action entries allocated before one-pass analysis starts growing node storage.
     private static final int ONEPASS_INITIAL_ACTIONS = 8192;
@@ -2710,9 +2714,9 @@ final class Prog
 
     private boolean computeOnePass()
     {
-        // OnePass evaluates Rust's assertions from parallel masks; other text-dependent ones keep
-        // it off.
-        if ((textDependentAssertions & ~EmptyOp.RUST_ASSERTIONS) != 0) {
+        // OnePass evaluates some text-dependent assertions from parallel masks; the others keep it
+        // off.
+        if ((textDependentAssertions & ~ONEPASS_TEXT_DEPENDENT_ASSERTIONS) != 0) {
             return false;
         }
         boolean hasExtendedAssertions = textDependentAssertions != 0;
@@ -2957,11 +2961,11 @@ final class Prog
                             }
                             if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
                                 int empty = instruction.empty();
-                                if ((empty & EmptyOp.RUST_ASSERTIONS) == 0) {
+                                if ((empty & ONEPASS_TEXT_DEPENDENT_ASSERTIONS) == 0) {
                                     condition |= empty;
                                 }
                                 else {
-                                    condition |= (empty & ~EmptyOp.RUST_ASSERTIONS) | ONEPASS_EXTENDED_ASSERTIONS;
+                                    condition |= (empty & ~ONEPASS_TEXT_DEPENDENT_ASSERTIONS) | ONEPASS_EXTENDED_ASSERTIONS;
                                 }
                                 assertions |= empty;
                             }
