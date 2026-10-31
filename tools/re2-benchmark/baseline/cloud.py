@@ -103,6 +103,15 @@ class Volume:
 
 
 @dataclass(frozen=True)
+class Snapshot:
+    """An EBS snapshot: the volume it was taken of, its state, such as pending or completed, and its tags."""
+    id: str
+    volume: str
+    state: str
+    tags: dict
+
+
+@dataclass(frozen=True)
 class SpotRequest:
     """An open or active Spot request; instance_id is empty until it is fulfilled."""
     id: str
@@ -328,6 +337,13 @@ class AwsCloud:
         return self.call("ec2", region, "create_snapshot", VolumeId=volume, TagSpecifications=[
             {"ResourceType": "snapshot", "Tags": [{"Key": key, "Value": value} for key, value in tags.items()]}])[
             "SnapshotId"]
+
+    def snapshots(self, region, tags):
+        """The account's snapshots carrying all of the tags, in any state but error."""
+        found = self.pages("ec2", region, "describe_snapshots", "Snapshots", OwnerIds=["self"], Filters=[
+            {"Name": f"tag:{key}", "Values": [value]} for key, value in tags.items()])
+        return [Snapshot(item["SnapshotId"], item["VolumeId"], item["State"], tag_dictionary(item.get("Tags")))
+                for item in found if item["State"] != "error"]
 
     def register_target(self, region, target_group, instance, port):
         """Register the instance in the load balancer's target group, which forwards to it at the port."""

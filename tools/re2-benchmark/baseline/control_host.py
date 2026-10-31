@@ -312,12 +312,18 @@ def finish(aws, campaign, local_root, identity=None):
 def teardown(aws, campaign, confirm):
     """Remove the campaign's control host for good, as only Dain does: deregister it from the load balancer and
     terminate it, snapshot its volume, which is then the campaign root's last copy, and delete the volume and the
-    Grafana credentials. The record, the load balancer and its target group belong to the account setup."""
+    Grafana credentials. The record, the load balancer and its target group belong to the account setup.
+
+    Each step finds what an earlier, interrupted teardown left by the campaign's tags, so running it again finishes:
+    a host already terminated is not waited for, a snapshot already taken of the volume is not taken again, and with
+    the volume deleted only the credentials are left to delete."""
     if not confirm:
         raise SystemExit(f"teardown terminates campaign {campaign}'s control host and deletes its volume, keeping a "
                          "snapshot; only Dain runs it, with --confirm")
     found = network(aws)
-    volume = campaign_volume(aws, campaign)
+    volumes = aws.volumes(REGION, tags(campaign))
+    if len(volumes) > 1:
+        raise SystemExit(f"campaign {campaign} has {len(volumes)} control host volumes; expected one")
     # The host goes first, so the snapshot holds the root as its controller last wrote it.
     hosts = live_hosts(aws, campaign)
     if hosts:
@@ -326,9 +332,14 @@ def teardown(aws, campaign, confirm):
         aws.terminate(REGION, [host.id for host in hosts])
         for host in hosts:
             aws.wait(REGION, "instance_terminated", host.id)
+    for volume in volumes:
         aws.wait(REGION, "volume_available", volume.id)
-    snapshot = aws.create_snapshot(REGION, volume.id, tags(campaign))
-    aws.wait(REGION, "snapshot_completed", snapshot)
-    aws.delete_volume(REGION, volume.id)
+        snapshot = next((snapshot.id for snapshot in aws.snapshots(REGION, tags(campaign))
+                         if snapshot.volume == volume.id), None) or aws.create_snapshot(REGION, volume.id,
+                                                                                         tags(campaign))
+        aws.wait(REGION, "snapshot_completed", snapshot)
+        aws.delete_volume(REGION, volume.id)
     aws.delete_parameters(REGION, grafana_parameters(campaign))
-    print(f"tore down campaign {campaign}'s control host; its root's last copy is snapshot {snapshot}", flush=True)
+    snapshots = sorted(snapshot.id for snapshot in aws.snapshots(REGION, tags(campaign)))
+    print(f"tore down campaign {campaign}'s control host; its root's last copy is snapshot "
+          f"{', '.join(snapshots) or 'none'}", flush=True)

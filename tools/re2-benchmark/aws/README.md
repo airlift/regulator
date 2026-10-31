@@ -693,8 +693,10 @@ Only Dain tears a control host down, once the campaign's root is pulled and
 nothing more is wanted from its Grafana. `teardown` deregisters the host from
 the load balancer and terminates it, snapshots the volume, which is then the
 root's last copy until Dain deletes it, and deletes the volume and the Grafana
-parameters; the record, the load balancer, and its target group stay. It
-refuses without `--confirm`:
+parameters; the record, the load balancer, and its target group stay. Each
+step finds what an earlier teardown did by the campaign's tags, so one that
+failed partway finishes when run again, taking no second snapshot of the
+volume. It refuses without `--confirm`:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confirm

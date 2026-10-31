@@ -470,7 +470,9 @@ archive read today. It terminates nothing.
 from the load balancer and terminates it, snapshots the volume, and deletes
 the volume and the Grafana parameters; the record and the load balancer stay. The host goes first so the snapshot holds the root as the
 controller last wrote it. Only Dain runs it, and it refuses without
-`--confirm`. The snapshot is the last copy until Dain deletes it.
+`--confirm`. The snapshot is the last copy until Dain deletes it. Each step
+finds what an earlier teardown did by the campaign's tags, so a teardown that
+failed partway finishes when run again, with no second snapshot.
 
 ## Lower stakes before launch
 
