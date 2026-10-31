@@ -2445,7 +2445,8 @@ class UnitWorker:
     terminate_requested: float = 0.0
     leaked: bool = False
     leftover: bool = False
-    # The group it runs, as its lease, the group, and when its latest heartbeat began the group, in epoch seconds.
+    # The group it runs, as its lease, the group, and when its latest heartbeat or group upload began the group, in
+    # epoch seconds.
     group: tuple = None
     # Each work lease's steps so far, each by its name, in epoch seconds, for its trace: when it was leased, the host
     # started its first group, finished its latest, and uploaded it, and the controller accepted it.
@@ -3103,15 +3104,18 @@ class UnitDispatcher:
             if worker.lost or current is None or heartbeat_key(current) not in objects:
                 return
             # The worker heartbeats as a lease starts and as each of its groups completes, so its running instance
-            # has stalled once the lease's unfinished groups outrun their lease timeout from its latest heartbeat.
-            # It is told to stop and terminated, and its cleanup still recovers a completion that lands.
+            # has stalled once the lease's unfinished groups outrun their lease timeout from its latest progress: its
+            # latest heartbeat, or the upload of the latest group this controller saw finish, whose heartbeat may
+            # have been lost. It is told to stop and terminated, and its cleanup still recovers a completion that
+            # lands.
             seconds = dict(self.items[worker.leases[current]].groups)
             finished = worker.finished.get(current, {})
             unfinished = [group for group in worker.lease_groups[current] if group not in finished]
+            progress = max(objects[heartbeat_key(current)], worker.steps.get(current, {}).get("uploaded", 0))
             if unfinished:
-                # Its latest heartbeat began the group it runs.
-                worker.group = (current, unfinished[0], objects[heartbeat_key(current)])
-            if time.time() - objects[heartbeat_key(current)] <= lease_timeout(sum(map(seconds.get, unfinished))):
+                # Its latest progress began the group it runs.
+                worker.group = (current, unfinished[0], progress)
+            if time.time() - progress <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
             if not worker.stopping:
                 self.issue(worker, None)

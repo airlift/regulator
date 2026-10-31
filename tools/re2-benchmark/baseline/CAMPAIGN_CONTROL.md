@@ -191,7 +191,8 @@ rate and setup time is host time.
 - **Heartbeats at group boundaries only.** Today the worker heartbeats every
   30 s through the CLI, a full Python process, on a 2-vCPU host during
   measurement with no CPU pinning. It now uploads a heartbeat when a lease
-  starts, when each group completes, and when it stops. Liveness between
+  starts, when each group completes, and when it stops, retrying a failed one
+  as it does any upload. Liveness between
   boundaries comes from the per-region `DescribeInstances`. The Spot-notice
   check stays: one IMDS request, milliseconds, no process start.
 - **Self-stop claim.** Before an idle stop the worker writes its own next
@@ -247,9 +248,10 @@ One loop, target under 30 s, every action a round trip:
 **Lost and stalled hosts.** A host whose instance is no longer pending or
 running is lost at once: its started lease is requeued and its unstarted one
 released, as today. A running host whose lease has passed its timeout
-(twice its groups' estimate) without a completion is stalled: it gets a stop
-lease and is terminated, and its lease is requeued. The heartbeat ages of
-10 and 30 minutes go.
+(twice its unfinished groups' estimate) since its latest heartbeat or group
+completion, whichever is later, is stalled: it gets a stop lease and is
+terminated, and its lease is requeued. The heartbeat ages of 10 and 30
+minutes go.
 
 **Boot window.** Hosts launched but not yet reporting are capped
 campaign-wide: 10 at first, doubling after each wave whose hosts all

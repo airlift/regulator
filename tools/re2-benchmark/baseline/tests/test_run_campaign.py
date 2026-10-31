@@ -2342,8 +2342,9 @@ class FakeUnitHost:
     failure. A host whose lease is scripted to "claim" claims it the moment its previous lease
     ends, as if its idle time ran out then. A host scripted to "silent-interrupt" does so with none of its heartbeat
     uploads landing, and one scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats
-    also lost. "stall" stops the host once its lease starts; once the controller terminates its instance, the
-    lease's completion lands late, after another host completed the same replica, or never, once no other host runs,
+    also lost; with "silent-groups" the lease completes with only the heartbeat that started it landing. "stall"
+    stops the host once its lease starts; once the controller terminates its instance, the lease's completion lands
+    late, after another host completed the same replica, or never, once no other host runs,
     and with "stall-interrupt" the stopping host reports an interruption of the lease instead. With "stall-semantic"
     the late completion is a semantic failure, and with "stall-semantic-early" it lands as soon as another host
     leased the replica, before that host completes it. A host whose boot the fleet fails exits before its first
@@ -2614,7 +2615,8 @@ class FakeUnitHost:
         if behavior == "partial-marker":
             del marker["result_sha256"]
         self.put(f"{prefix}/completion.json", json.dumps(marker).encode())
-        self.heartbeat(lease["unit_id"])
+        if behavior != "silent-groups":
+            self.heartbeat(lease["unit_id"])
         return status
 
     def exit(self, status):
@@ -3799,6 +3801,19 @@ class TestUnitWorkers(unittest.TestCase):
                               if row["host_session"] == stalled.session])
             self.assertIn((replacement.session, "accepted"),
                           {(row["host_session"], row["outcome"]) for row in self.ledger})
+
+    def test_host_whose_group_heartbeats_are_lost_is_judged_by_its_completions(self):
+        units = {"long": {"unit_id": "long", "shard_id": "long", "unit_index": "1", "estimated_seconds": "2700",
+                          "groups": [{"group_id": str(group), "estimated_seconds": 900} for group in (1, 2, 3)]}}
+        with tempfile.TemporaryDirectory() as temporary:
+            # The first host's lease runs three 15-minute groups, and only the heartbeat that started it lands. Its
+            # third group runs past twice its estimate from that heartbeat, but not from its second group's
+            # completion, so the host is never judged stalled.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+                                  scripts={1: {1: "silent-groups"}})
+            self.run_phase(Path(temporary), fleet, "smoke", ["long"], 4, 2)
+            self.assertEqual([], [row for row in self.ledger if row["outcome"] == "lost"])
+            self.assertEqual(0, fleet.hosts[0].terminations)
 
     def test_tail_stops_spot_workers_and_finishes_on_demand(self):
         with tempfile.TemporaryDirectory() as temporary, \

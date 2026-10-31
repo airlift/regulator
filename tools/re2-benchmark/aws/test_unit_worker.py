@@ -23,8 +23,9 @@ FAR_STOP_BY = 4102444800
 
 # S3 as the aws CLI calls it from a unit worker: exact-key listings, reads, and
 # checksummed conditional writes, with every write logged in order. A call whose
-# key or prefix is under FAKE_FAILED_CALLS fails, logged as its key or prefix, and
-# a Spot notice arrives during the Nth failed call, where FAKE_NOTICE_DURING_FAILED_CALL
+# key or prefix is under FAKE_FAILED_CALLS fails, logged as its key or prefix,
+# until FAKE_FAILED_CALL_LIMIT calls have failed, if it is set, and a Spot
+# notice arrives during the Nth failed call, where FAKE_NOTICE_DURING_FAILED_CALL
 # is N. On a virtual FAKE_CLOCK a failed call hangs until the timeout it runs under
 # ends it, or for an hour without one, and is also logged with its start and end.
 # A call whose key or prefix is under FAKE_STALLED_CALLS stalls on the virtual
@@ -69,9 +70,10 @@ if os.environ.get('FAKE_CLOCK') and any(
         end = start + float(os.environ.get('FAKE_TIMEOUT_SECONDS', 3600)) - 1
         set_clock(clock, end)
         log.write(f'{operation} {target} {start} {end}\n')
-if any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED_CALLS', '[]'))):
-    failures = root / 'failed-calls.log'
-    failure = 1 + (len(failures.read_text().splitlines()) if failures.exists() else 0)
+failures = root / 'failed-calls.log'
+failure = 1 + (len(failures.read_text().splitlines()) if failures.exists() else 0)
+if any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED_CALLS', '[]'))) and \
+        failure <= int(os.environ.get('FAKE_FAILED_CALL_LIMIT', failure)):
     if os.environ.get('FAKE_NOTICE_DURING_FAILED_CALL') == str(failure):
         notice.write_text('{"action": "terminate", "time": "2026-10-24T12:02:00Z"}')
     line = target
@@ -529,6 +531,22 @@ class TestUnitWorker(unittest.TestCase):
                     self.assertLessEqual(attempts[-1][1] - attempts[0][0], 90)
                 elif expected_reason == 'lease-unreadable':
                     self.assertEqual(12, len(attempts))
+
+    def test_failed_heartbeat_is_retried(self):
+        # The heartbeat as the lease starts fails once, hanging until its timeout on a virtual clock, and its retry
+        # lands before the group's result.
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = Worker(Path(temporary), clock=True)
+            worker.write_lease(lease(1, 'first'))
+            worker.write_lease(lease(2, stop=True))
+            worker.environment.update({'FAKE_FAILED_CALLS': json.dumps(['results/heartbeat/']),
+                                       'FAKE_FAILED_CALL_LIMIT': '1'})
+            status, output = worker.run()
+
+            self.assertEqual(0, status, output)
+            self.assertEqual(1, len((worker.s3 / 'failed-calls.log').read_text().splitlines()))
+            self.assertEqual(['results/heartbeat/1.json', 'results/units/1/groups/1/result.tar.gz'],
+                             worker.puts()[:2])
 
     def test_spot_notice_during_lease_acquisition_or_upload_is_bundled_within_two_minutes(self):
         # Every S3 call stalls until just before its timeout. A notice during the lease's listing or download

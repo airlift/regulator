@@ -1213,8 +1213,9 @@ is under one of those.
 | `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the running group's log |
 | `<result_prefix>/host.tar.gz` | host user data | the host evidence, once the worker exits |
 
-Every upload of `run-unit-worker.sh` except a heartbeat is one PUT with its
-SHA-256 checksum and `If-None-Match: *`, so no key is overwritten. Each request
+Every upload of `run-unit-worker.sh` is one PUT with its SHA-256 checksum and,
+but for a heartbeat, which replaces its lease's last one, `If-None-Match: *`,
+so no other key is overwritten. Each request
 gives up after 5 seconds connecting or 30 reading, and a failed upload is
 retried every 5 seconds while the worker keeps watching for an interruption
 notice. An attempt starts only if its worst case of 35 seconds still ends within
@@ -1413,11 +1414,12 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
   lists none of by its boot deadline, is lost. A lease has started if one of
   its groups finished or a heartbeat shows it began; the lost host's started
   lease is requeued, and an unstarted one is released.
-- A running host has stalled once its latest heartbeat is older than the
-  budget of its lease's unfinished groups: twice their estimate, or twice the
-  15-minute unit budget when that is longer. It gets a stop lease and is
-  terminated, its lease is `lost` with detail `stalled`, and the leases behind
-  it are released. Cleanup still recovers a completion that lands from
+- A running host has stalled once its latest heartbeat, or the upload of the
+  latest of its lease's groups the controller saw finish if that is later, is
+  older than the budget of its lease's unfinished groups: twice their estimate,
+  or twice the 15-minute unit budget when that is longer. It gets a stop lease
+  and is terminated, its lease is `lost` with detail `stalled`, and the leases
+  behind it are released. Cleanup still recovers a completion that lands from
   a lost or stalled host, which is accepted if it is first and superseded
   otherwise.
 - A failed group requeues the item's remaining groups. A unit replica gets 3
