@@ -5139,6 +5139,9 @@ def results_lines(phases, tsv=False):
 
 CONTROL_LIMITS = {"max-hosts": "max_hosts", "max-hosts-per-platform": "max_hosts_per_platform",
                   "max-usd": "max_usd", "max-machine-hours": "max_machine_hours"}
+# The commands the monitor runs unattended, as its runbook's authority table grants them; every other command, a
+# stop and a spending stop's clearing among them, is Dain's.
+MONITOR_COMMANDS = ("set-limit", "add-region", "resume")
 
 
 def control_parser():
@@ -5250,8 +5253,6 @@ def control_change(arguments, now):
         stop = {"by": actor, "at": round(now), "reason": arguments.reason or f"stopped by {actor}"}
         return f"campaign stop: {stop['reason']}", lambda settings: settings.update(stop=settings["stop"] or stop)
     envelope = arguments.envelope
-    if actor != "dain":
-        raise SettingsError("only dain changes the authorized envelope")
     if len(envelope) >= 2 and envelope[0] == "regions":
         regions = sorted(set(envelope[1:]))
         return (f"authorized regions to {', '.join(regions)}",
@@ -5317,6 +5318,8 @@ def add_region(arguments, store, aws):
 
 def control(arguments, aws):
     """Change the campaign's live settings as the actor's control command; add-region reaches AWS through aws."""
+    if arguments.actor == "monitor" and arguments.command not in MONITOR_COMMANDS:
+        raise SystemExit(f"only dain runs {arguments.command}; the monitor runs {', '.join(MONITOR_COMMANDS)}")
     try:
         store = CampaignSettings(arguments.root)
         if arguments.command == "add-region":

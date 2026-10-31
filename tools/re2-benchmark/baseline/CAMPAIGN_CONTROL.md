@@ -346,8 +346,11 @@ settings and its frozen-policy check goes. Each settings change is an event
 naming its actor: Dain, the monitor, or the controller (which changes only
 phase states and the boot window). `control` takes `--actor dain|monitor`;
 without it the command refuses, so no change is anonymous. Only Dain sets
-`authorized`: `control` refuses to change it with any other actor, and the
-monitor's runbook never names it.
+`authorized` and `hourly_rates`: the settings refuse a change to either by
+any other actor. The monitor runs only the commands the authority table
+grants it, `set-limit`, `add-region` and `resume`; `control` refuses every
+other command, `stop`, `clear-spending-stop` and `authorize` among them, with
+`--actor monitor`.
 
 ### Campaign roots of the old driver
 

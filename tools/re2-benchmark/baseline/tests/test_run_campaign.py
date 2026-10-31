@@ -653,7 +653,7 @@ class TestRunCampaign(unittest.TestCase):
                      {region: {"bucket": "bucket", "max_vcpus": 640}}),
                     (["set-purchase", "r9g", "on-demand"], "dain", "purchase", {"r9g": "on-demand"}),
                     (["set-share", "a/primary", "40"], "dain", "phases", {"state": "running", "share": 40}),
-                    (["pause", "a/primary", "--reason", "bad AMI"], "monitor", "phases",
+                    (["pause", "a/primary", "--reason", "bad AMI"], "dain", "phases",
                      {"state": "paused", "share": 40, "reason": "bad AMI"}),
                     (["drain", "a/primary"], "dain", "phases", {"state": "draining", "share": 40}),
                     (["resume", "a/primary"], "monitor", "phases", {"state": "running", "share": 40}),
@@ -689,12 +689,14 @@ class TestRunCampaign(unittest.TestCase):
                              (aws.buckets[bucket], aws.lifecycles[bucket], aws.objects[bucket, key][2]))
             with open(root / EVENTS, newline="") as events:
                 rows = list(csv.DictReader(events, delimiter="\t"))
-            self.assertIn(("monitor", "a/primary paused: bad AMI"), [(row["actor"], row["change"]) for row in rows])
+            self.assertIn(("monitor", "a/primary running"), [(row["actor"], row["change"]) for row in rows])
             # A command the settings cannot take, its actor may not make, or the region's quota after its reserve or
-            # its images cannot hold, changes nothing.
+            # its images cannot hold, changes nothing. The monitor runs only the commands its runbook grants.
             for command, actor, refusal in (
                     (["set-limit", "max-hosts", "101"], "monitor", "max_hosts only within the authorized"),
-                    (["authorize", "max-hosts", "500"], "monitor", "only dain"),
+                    *((command, "monitor", f"only dain runs {command[0]}") for command in (
+                        ["authorize", "max-hosts", "500"], ["clear-spending-stop"], ["stop"], ["pause", "a/primary"],
+                        ["set-purchase", "r9g", "spot"])),
                     (["set-limit", "hosts", "5"], "dain", "set-limit takes"),
                     (["pause", "a/confirmation"], "dain", "a/confirmation is pending"),
                     (["resume", "a/primary"], "dain", "a/primary is running"),

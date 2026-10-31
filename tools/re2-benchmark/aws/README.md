@@ -727,7 +727,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   stopped campaign only stops the hosts an earlier controller left.
 - `authorize max-hosts N`, `authorize max-usd N`, and
   `authorize regions <region>...` set the `authorized` envelope, which only
-  `--actor dain` changes. The monitor raises `max_hosts`,
+  `--actor dain` changes, as only Dain changes `hourly_rates`. The monitor
+  runs only `set-limit`, `add-region` and `resume`. It raises `max_hosts`,
   `max_hosts_per_platform`, and `max_usd` only within it, and a region's vCPUs
   only in its regions, where admission still holds the fleet within the
   region's quota after its reserve; it never raises `max_machine_hours`, which

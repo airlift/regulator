@@ -109,13 +109,15 @@ def validate(settings):
 
 
 def check_actor(actor, before, after):
-    """Refuse a change its actor may not make. Only Dain changes the authorized envelope. The monitor raises no
+    """Refuse a change its actor may not make. Only Dain changes the authorized envelope and the hourly rates, which
+    set the Spot price ceilings and what every hour is charged. The monitor raises no
     limit past it: hosts in all and per platform up to its hosts, spending up to its dollars, and a region's vCPUs, or
     a new region, only among its regions, where admission still holds the fleet within the region's quota after its
     reserve. The envelope names no machine hours, so the monitor never raises their limit. Any actor may lower a
     limit."""
-    if after["authorized"] != before["authorized"] and actor != "dain":
-        raise SettingsError("only dain changes the authorized envelope")
+    for name, description in (("authorized", "the authorized envelope"), ("hourly_rates", "the hourly rates")):
+        if after[name] != before[name] and actor != "dain":
+            raise SettingsError(f"only dain changes {description}")
     if actor != "monitor":
         return
     authorized = after["authorized"]

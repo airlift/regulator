@@ -54,7 +54,9 @@ class TestCampaignSettings(unittest.TestCase):
                 (lambda current: current.update(max_usd=101), "max_usd only within"),
                 (lambda current: current.update(max_machine_hours=1501), "max_machine_hours only within"),
                 (lambda current: current["regions"].update({"eu-west-1": east}), "not eu-west-1"),
-                (lambda current: current["authorized"].update(max_usd=1), "only dain")):
+                (lambda current: current["authorized"].update(max_usd=1), "only dain changes the authorized"),
+                (lambda current: current["hourly_rates"]["r8i.large"].update(spot=0.07),
+                 "only dain changes the hourly rates")):
             with self.subTest(refusal=refusal), self.assertRaisesRegex(SettingsError, refusal):
                 settings.change("monitor", refusal, update)
         # Within the envelope the monitor raises hosts, spending, and an authorized region's vCPUs, and adds one;
