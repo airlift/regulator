@@ -1,0 +1,98 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeAndPlaceWorkers",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstances",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSpotInstanceRequests",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "ec2:GetSpotPlacementScores",
+        "servicequotas:GetServiceQuota"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LaunchWorkers",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TagWorkersAtLaunch",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"ec2:CreateAction": "RunInstances"}}
+    },
+    {
+      "Sid": "EndWorkers",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CancelSpotInstanceRequests",
+        "ec2:TerminateInstances"
+      ],
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:ResourceTag/Project": "re2-port-benchmark"}}
+    },
+    {
+      "Sid": "PassWorkerRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetInstanceProfile",
+        "iam:PassRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::938463256137:instance-profile/regulator-benchmark-worker",
+        "arn:aws:iam::938463256137:role/regulator-benchmark-worker"
+      ]
+    },
+    {
+      "Sid": "ManageCampaignBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketTagging",
+        "s3:ListBucket",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketTagging",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::regulator-benchmark-938463256137-*"
+    },
+    {
+      "Sid": "ReadAndWriteCampaignObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:AbortMultipartUpload",
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::regulator-benchmark-938463256137-*/*"
+    },
+    {
+      "Sid": "ReadNetwork",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-west-2:938463256137:parameter/regulator-benchmark/control-host-network"
+    },
+    {
+      "Sid": "KeepGrafanaCredentials",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:PutParameter"
+      ],
+      "Resource": "arn:aws:ssm:us-west-2:938463256137:parameter/regulator-benchmark/campaigns/*"
+    }
+  ]
+}
