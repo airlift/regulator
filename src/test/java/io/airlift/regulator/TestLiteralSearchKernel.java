@@ -95,6 +95,14 @@ public class TestLiteralSearchKernel
         Slice skippedInput = offsetSlice((skipped + periodic + periodicLiteral).getBytes(US_ASCII));
         assertSearch(periodicKernel, skippedInput, 0, skippedInput.length(), 595, skipped.length() + periodic.length());
 
+        // A literal under 64 bytes whose first byte does not recur continues with KMP over the
+        // border-free shift table: each candidate compares four bytes and covers three, so the
+        // 62nd passes the budget
+        String failedCandidates = "abb".repeat(63);
+        Slice borderFreeInput = offsetSlice((failedCandidates + "abbcb").getBytes(US_ASCII));
+        LiteralSearchKernel borderFreeKernel = kernel('a', 'b', 'b', 'c', 'b');
+        assertSearch(borderFreeKernel, borderFreeInput, 0, borderFreeInput.length(), 184, failedCandidates.length());
+
         // Four possible starts, fewer than a word, exercise only the scan's one-start-at-a-time tail
         String tailLiteral = "a".repeat(38) + "ba";
         Slice tailInput = offsetSlice(("aaa" + tailLiteral).getBytes(US_ASCII));

@@ -596,7 +596,7 @@ public sealed class TrinoLikePattern
         private ContainsMatcher(Slice literal, boolean exact)
         {
             this.literal = requireNonNull(literal, "literal is null");
-            this.search = literal.length() > 1 ? new LiteralSearchKernel(literal) : null;
+            this.search = literal.length() > 1 ? LiteralSearchKernel.sharing(literal) : null;
             this.exact = exact;
         }
 

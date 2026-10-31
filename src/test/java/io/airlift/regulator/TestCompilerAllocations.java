@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import com.sun.management.ThreadMXBean;
+import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
@@ -136,6 +137,32 @@ public class TestCompilerAllocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(allocatedBytes / (iterations * (long) expressions.size())).isLessThan(128);
+    }
+
+    @Test
+    public void testSimpleLikePatternsCopyOnlyTheirLiteral()
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        // A simple pattern copies only its literal, and a contains kernel holds that copy and, for
+        // a literal whose first byte does not recur, the shared shift table.
+        List<Slice> patterns = List.of(utf8Slice("https://%"), utf8Slice("%.example.com"), utf8Slice("%coolfunctionname%"));
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            for (Slice pattern : patterns) {
+                assertThat(TrinoLikePattern.compile(pattern).pattern()).isEqualTo(pattern);
+            }
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        int iterations = 10_000;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            for (Slice pattern : patterns) {
+                TrinoLikePattern.compile(pattern);
+            }
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes / (iterations * (long) patterns.size())).isLessThan(232);
     }
 
     @Test
