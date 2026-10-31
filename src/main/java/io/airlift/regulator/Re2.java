@@ -1879,13 +1879,9 @@ public sealed class Re2
                 partialProg.anchorStart() ||
                 partialProg.anchorEnd() ||
                 partialProg.canMatchEmpty() ||
+                partialProg.hasEmptyWidthAssertions() ||
                 MatchLength.fixed(matchLength) >= 0) {
             return null;
-        }
-        for (int instructionId = 0; instructionId < partialProg.size(); instructionId++) {
-            if (partialProg.inst(instructionId).opcode() == InstOp.EMPTY_WIDTH) {
-                return null;
-            }
         }
         return Dfa.createCandidateStartCursor(partialProg);
     }
@@ -1941,6 +1937,11 @@ public sealed class Re2
         }
         else if (fixedMatchLength >= 0) {
             matchStart = matchEnd - fixedMatchLength;
+        }
+        else if (partialProg.canMatchEmpty() && !partialProg.hasEmptyWidthAssertions()) {
+            // The pattern matches empty at every position, so the leftmost match starts where the
+            // search did, and the reverse pass that finds a start would return it.
+            matchStart = start;
         }
         else {
             Prog reverseProgram = reverseProg();
