@@ -24,8 +24,9 @@ Run every command from the repository root with Dain's AWS credentials,
 1. Make sure a T3 scheduled task bound to this thread fires the check every 15
    minutes, and create one if none does. It is the only thing that runs the
    check; a notification arriving is never a reason to skip one.
-2. Read the host's name, `<record>`, from the network parameter. It is the
-   only source of the name; it changes with the network, never with a run:
+2. Read Grafana's name, `<record>`, from the network parameter. It is the
+   only source of the name; it names the load balancer in front of the host
+   and changes with the network, never with a run:
 
    ```bash
    aws ssm get-parameter --profile dev --region us-west-2 \
@@ -33,12 +34,18 @@ Run every command from the repository root with Dain's AWS credentials,
      python3 -c 'import json, sys; print(json.load(sys.stdin)["record"])'
    ```
 
-3. Reach the host through the subnet router with `host`, which offers only
-   your key, so an agent holding many keys does not use up the host's login
+3. Reach the host through the subnet router with `host`: ssh on port 443,
+   the only port the router forwards, to the host's private address, which
+   a replacement changes, so read it again after one. `host` offers only your
+   key, so an agent holding many keys does not use up the host's login
    attempts:
 
    ```bash
-   host() { ssh -i <identity> -o IdentitiesOnly=yes -o ConnectTimeout=15 ec2-user@<record> "$@"; }
+   address=$(aws ec2 describe-instances --profile dev --region us-west-2 \
+     --filters Name=tag:Role,Values=control-host Name=tag:Campaign,Values=<campaign> \
+       Name=instance-state-name,Values=running \
+     --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
+   host() { ssh -p 443 -i <identity> -o IdentitiesOnly=yes -o ConnectTimeout=15 ec2-user@"$address" "$@"; }
    ```
 
 4. Read the Grafana token once for the thread, and keep it in the thread's
@@ -48,7 +55,7 @@ Run every command from the repository root with Dain's AWS credentials,
    token=$(aws ssm get-parameter --profile dev --region us-west-2 --with-decryption \
      --name /regulator-benchmark/campaigns/<campaign>/grafana-monitor-token \
      --query Parameter.Value --output text)
-   grafana_url=http://<record>:3000
+   grafana_url=https://<record>
    ```
 
 5. Run the block in [Reading a panel](#reading-a-panel), which keeps the
@@ -205,20 +212,22 @@ applies each on its next loop and logs it as a `settings-change` event in
 your name; confirm it there on the next check.
 
 Replacing the host runs on the Mac. It terminates the dead host, launches
-another onto the campaign's volume, and points `<record>` at it; the new
-controller adopts the running hosts:
+another onto the campaign's volume, and registers it with the load balancer,
+so `$grafana_url` stays; the new controller adopts the running hosts:
 
 ```bash
 AWS_PROFILE=dev python3 tools/re2-benchmark/baseline/run-campaign.py \
   control-host replace <campaign> --ssh-public-key ~/.ssh/id_ed25519.pub
 ```
 
-Report every replacement in the push notification.
+Then read the new host's `address` again as [Start](#start) step 3 does, and
+report every replacement in the push notification.
 
 ## Access failures
 
 You reach the host and Grafana through the company's Tailscale subnet router,
-on ssh and port 3000, as the network stands. When `host` or Grafana fails,
+which forwards only port 443: Grafana through the load balancer at
+`$grafana_url`, and ssh to the host's address. When `host` or Grafana fails,
 check the host's instance:
 
 ```bash
@@ -234,8 +243,8 @@ instance=$(aws ec2 describe-instances --profile dev --region us-west-2 \
   command and its error, to the coordinating thread and, in this check's push
   notification, to Dain as needing attention. Try the router path again at the
   start of the next check. The fix belongs to the network's owner; leave the
-  security group, the router and Tailscale as they are, with no new inbound
-  rule and no `tailscale funnel`.
+  security groups, the load balancer, the router and Tailscale as they are,
+  with no new inbound rule and no `tailscale funnel`.
 
 The Systems Manager path is Run Command, which needs no Session Manager plugin
 on the Mac. `on_host` runs a script on the host as `ec2-user`, the controller's

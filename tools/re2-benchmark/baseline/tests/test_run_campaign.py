@@ -729,7 +729,7 @@ class TestRunCampaign(unittest.TestCase):
                         "archive_sha256": "0" * 64} for name in ("a", "b")])
             # The control host records where its Grafana serves, and the settings steer each phase and hold a
             # spending stop and a stop.
-            (campaign_root / "grafana-url.txt").write_text("http://control.test:3000\n")
+            (campaign_root / "grafana-url.txt").write_text("https://control.test\n")
             campaign_settings(campaign_root).change("dain", "steer", lambda settings: settings.update(
                 phases={"a/primary": {"state": "paused", "share": "auto", "reason": "bad AMI"},
                         "b/lang/smoke": {"state": "draining", "share": "auto"}},
@@ -831,7 +831,7 @@ class TestRunCampaign(unittest.TestCase):
         # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the three live hosts.
         self.assertEqual([
             f"campaign {campaign_root}: controller running as process {os.getpid()}",
-            "Grafana   http://control.test:3000",
+            "Grafana   https://control.test",
             "spending stop by controller: instance i-1 did not terminate",
             "stopping by dain: smoke over",
             "candidate a at aaaaaaaaaaaa",

@@ -20,7 +20,9 @@ from test_cloud import FakeCloud  # noqa: E402
 
 # A network parameter of made-up identifiers, the CIDR from the documentation range.
 NETWORK = {"vpc": "vpc-router", "subnets": ["subnet-b", "subnet-a"], "ingress_cidr": "192.0.2.0/24",
-           "zone": "Z-test", "record": "control.test"}
+           "zone": "Z-test", "record": "control.test", "security_group": "sg-control",
+           "load_balancer_security_group": "sg-balancer", "target_group": "arn:target-group",
+           "load_balancer": "arn:balancer", "listener": "arn:listener", "certificate": "arn:certificate"}
 SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest dain@mac"
 CONTROL_HOST = Path(control_host.__file__).parents[1] / "aws" / "control-host"
 
@@ -31,7 +33,7 @@ def control_host_cloud():
     aws.parameters[control_host.NETWORK_PARAMETER] = json.dumps(NETWORK)
     aws.subnets.update({"subnet-a": "us-west-2a", "subnet-b": "us-west-2b"})
     aws.security_groups["vpc-router", control_host.SECURITY_GROUP] = (
-        "sg-control", {("tcp", port, port, NETWORK["ingress_cidr"]) for port in (22, 3000)})
+        "sg-control", {("tcp", 443, 443, NETWORK["ingress_cidr"]), ("tcp", 3000, 3000, "sg-balancer")})
     return aws
 
 
@@ -61,25 +63,26 @@ class TestControlHost(unittest.TestCase):
             [volume] = aws.region_volumes["us-west-2"]
             self.assertEqual(("us-west-2b", {**control_host.tags("c"), "LaunchInputs": uri,
                                              "LaunchInputsSha256": sha256}), (volume.zone, volume.tags))
-            # The host runs in that subnet under its own profile and group, with the volume attached, and the
-            # record names it.
+            # The host runs in that subnet under its own profile and group, with the volume attached, and the load
+            # balancer forwards Grafana to it.
             [(first, launched)] = aws.control_hosts.items()
             self.assertEqual({"image": control_host.IMAGE, "subnet": "subnet-b", "security_group": "sg-control",
                               "profile": control_host.PROFILE},
                              {name: value for name, value in launched.items() if name != "user_data"})
             self.assertEqual({"CAMPAIGN": "c", "CAMPAIGN_VOLUME": volume.id, "SSH_PUBLIC_KEY": SSH_PUBLIC_KEY,
                               "LAUNCH_INPUTS_URI": uri, "LAUNCH_INPUTS_SHA256": sha256,
-                              "CONTROL_HOST_REGION": "us-west-2", "GRAFANA_URL": "http://control.test:3000"},
+                              "CONTROL_HOST_REGION": "us-west-2", "GRAFANA_URL": "https://control.test"},
                              user_data_settings(launched["user_data"]))
             self.assertEqual({volume.id: first}, aws.attachments)
-            self.assertEqual({("Z-test", "control.test"): "10.0.0.1"}, aws.records)
-            self.assertIn("Grafana: http://control.test:3000", printed.getvalue())
+            self.assertEqual({"arn:target-group": {(first, 3000)}}, aws.targets)
+            self.assertIn("Grafana: https://control.test", printed.getvalue())
+            self.assertIn("ssh: ssh -p 443 ec2-user@10.0.0.1", printed.getvalue())
             # The volume holds the campaign root, so the campaign launches once.
             with self.assertRaisesRegex(SystemExit, "already has a control host volume"):
                 control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
 
         # A replacement takes the old host's place on the volume, in the volume's zone whatever order the subnets
-        # are listed in, and the record follows it.
+        # are listed in, and in the target group.
         aws.parameters[control_host.NETWORK_PARAMETER] = json.dumps({**NETWORK, "subnets": ["subnet-a", "subnet-b"]})
         with contextlib.redirect_stdout(io.StringIO()):
             control_host.replace(aws, "c", SSH_PUBLIC_KEY)
@@ -87,7 +90,7 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual((first, "terminated", "running"), (old.id, old.state, new.state))
         self.assertEqual("subnet-b", aws.control_hosts[new.id]["subnet"])
         self.assertEqual({volume.id: new.id}, aws.attachments)
-        self.assertEqual({("Z-test", "control.test"): new.address}, aws.records)
+        self.assertEqual({"arn:target-group": {(new.id, 3000)}}, aws.targets)
 
     def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
         aws = control_host_cloud()
@@ -104,7 +107,8 @@ class TestControlHost(unittest.TestCase):
             control_host.teardown(aws, "c", confirm=True)
         self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
         self.assertEqual([(volume.id, control_host.tags("c"))], aws.snapshots)
-        self.assertEqual(({}, []), (aws.records, aws.region_volumes["us-west-2"]))
+        # The load balancer forwards to no host of the campaign, and the account setup's own resources stay.
+        self.assertEqual(({"arn:target-group": set()}, []), (aws.targets, aws.region_volumes["us-west-2"]))
         self.assertEqual([control_host.NETWORK_PARAMETER], list(aws.parameters))
 
     def test_network_and_security_group_are_checked_before_anything_is_created(self):
@@ -114,11 +118,12 @@ class TestControlHost(unittest.TestCase):
                 (lambda aws: aws.parameters.update({control_host.NETWORK_PARAMETER: json.dumps(
                     {**NETWORK, "subnets": []})}), "is not a JSON object of vpc, subnets"),
                 (lambda aws: aws.security_groups.clear(), "no regulator-benchmark-control-host security group"),
-                # A group admitting anything beyond ssh and Grafana from the router is refused.
+                # A group admitting anything beyond ssh from the router and Grafana from the load balancer is
+                # refused.
                 (lambda aws: aws.security_groups.update({("vpc-router", control_host.SECURITY_GROUP): (
-                    "sg-control", {("tcp", 22, 22, cidr), ("tcp", 3000, 3000, cidr),
-                                   ("tcp", 3000, 3000, "0.0.0.0/0")})}),
-                 "admitting only tcp 22 and 3000")):
+                    "sg-control", {("tcp", 443, 443, cidr), ("tcp", 3000, 3000, "sg-balancer"),
+                                   ("tcp", 3000, 3000, cidr)})}),
+                 "admitting only tcp 443 from its ingress CIDR and tcp 3000 from its load balancer's")):
             with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as temporary:
                 aws = control_host_cloud()
                 change(aws)
@@ -145,9 +150,9 @@ class TestControlHost(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 255 if not reachable[0] else
                                                        0 if (host / control_host.MANIFEST).is_file() else 1)
                 # ssh offers only the key the host was launched with.
-                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -o StrictHostKeyChecking=accept-new -i "
-                                  "/keys/control-host -o IdentitiesOnly=yes", "ec2-user@10.0.0.1:/regulator/campaign/",
-                                  f"{local}/"], command)
+                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -p 443 -o StrictHostKeyChecking=accept-new "
+                                  "-i /keys/control-host -o IdentitiesOnly=yes",
+                                  "ec2-user@10.0.0.1:/regulator/campaign/", f"{local}/"], command)
                 shutil.rmtree(local)
                 shutil.copytree(host, local)
                 for name in damaged:
@@ -182,7 +187,7 @@ class TestControlHost(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "user-data.sh"
             path.write_text(control_host.user_data("c", "vol-1", SSH_PUBLIC_KEY, "s3://bucket/inputs", "0" * 64,
-                                                   "http://control.test:3000"))
+                                                   "https://control.test"))
             subprocess.run(["bash", "-n", str(path)], check=True)
         user_data = control_host.USER_DATA.read_text()
         campaign = (CONTROL_HOST / "regulator-campaign@.service").read_text()
@@ -198,15 +203,20 @@ class TestControlHost(unittest.TestCase):
         # The controller exports to the collector's OTLP/HTTP port, which answers only the host itself.
         self.assertIn("\nEnvironment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318\n", campaign)
         self.assertIn('systemctl enable --now "regulator-campaign@${CAMPAIGN}.service"', user_data)
+        # sshd listens on the one port the subnet router forwards, before the slow installs.
+        self.assertLess(user_data.index("Port 443"), user_data.index("dnf install -y docker"))
         # The host keeps Dain's local time, which the controller's events and status over ssh print.
         self.assertIn("\ntimedatectl set-timezone America/Los_Angeles\n", user_data)
         # The campaign root records Grafana's URL for the status command.
         self.assertIn(f'> "${{MOUNT}}/campaign/{control_host.GRAFANA_URL_FILE}"', user_data)
-        # Grafana answers the router on port 3000 with anonymous access off, OTLP answers only the host itself, the
-        # image is pinned, and the dashboards' provider reads where the unit mounts them.
+        # Grafana answers the load balancer on port 3000 with anonymous access off and builds its links from the
+        # load balancer's URL, OTLP answers only the host itself, the image is pinned, and the dashboards' provider
+        # reads where the unit mounts them.
         self.assertEqual(["-p 3000:3000", "-p 127.0.0.1:4317:4317", "-p 127.0.0.1:4318:4318"],
                          re.findall(r"-p \S+", lgtm))
         self.assertIn("-e GF_AUTH_ANONYMOUS_ENABLED=false", lgtm)
+        self.assertIn("-e GF_SERVER_ROOT_URL", lgtm)
+        self.assertIn('GF_SERVER_ROOT_URL=%s\\n\' "${password}" "${GRAFANA_URL}"', user_data)
         self.assertRegex(lgtm, r"grafana/otel-lgtm@sha256:[0-9a-f]{64}\n")
         provider = re.search(r"^      path: (\S+)$", (CONTROL_HOST / "grafana" / "dashboards.yaml").read_text(),
                              re.MULTILINE)[1]

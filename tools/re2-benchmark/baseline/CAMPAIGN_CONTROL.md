@@ -80,12 +80,16 @@ host creates four IAM resources and deletes three):
   service quotas; read and write the campaign buckets and create one for
   `add-region`; read the network parameter and keep the campaign's Grafana
   credentials; Session Manager (`AmazonSSMManagedInstanceCore`); pass the
-  worker role. It has no Route 53 permission: a policy scoped to the zone
-  would name the zone in this public repository, so the Mac-side commands,
-  under Dain's credentials, write the control host's DNS record.
+  worker role. It has no load balancer permission: a policy scoped to the
+  target group would name it in this public repository, so the Mac-side
+  commands, under Dain's credentials, register each control host there.
+- an internal **Network Load Balancer** in the router's subnets, since the
+  router forwards only tcp 443: a TLS listener on 443 with the account's
+  wildcard certificate forwards to a target group on tcp 3000, Grafana, and
+  the private DNS record is a permanent alias of the load balancer.
 - the control host's **security group** in the router's VPC, admitting only
-  tcp 22 and 3000 from the VPC's CIDR, shared by every campaign's control
-  host.
+  tcp 443, ssh, from the VPC's CIDR and tcp 3000 from the load balancer's
+  own security group, shared by every campaign's control host.
 
 Every campaign bucket keeps two trees with their own lifecycle rules, from
 `../aws/bucket-lifecycle.json`. The content-addressed archives every campaign
@@ -100,10 +104,14 @@ because it finds them in place. Old campaign roots stay readable, because
 their ledgers record keys rather than derive them.
 
 The control host is reached through the company's existing Tailscale subnet
-router, which carries the dev VPC's private subnets onto the tailnet: nothing
-for access is installed on the host, and no key or tag is needed. The VPC,
-the subnets the router carries, the ingress CIDR, the private DNS zone and
-the record name are stored as one JSON SSM parameter,
+router, which carries the dev VPC's private subnets onto the tailnet but
+forwards only tcp 443: Grafana through the internal load balancer at
+`https://<record>`, and ssh on port 443 at the host's private address.
+Nothing for access is installed on the host, and no key or tag is needed. The
+VPC, the subnets the router carries, the ingress CIDR, the private DNS zone,
+the record name, and the security groups, load balancer, target group,
+listener and certificate the account setup creates are stored as one JSON SSM
+parameter,
 `/regulator-benchmark/control-host-network` in us-west-2, created during
 account setup. The repository is public and names only the parameter.
 `../aws/README.md` documents the setup with the `dev` profile, as it does
@@ -119,9 +127,9 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    us-west-2 (m7i.large, 8 GB, enough for the controller and `otel-lgtm`) in
    one of the router-carried private subnets, with no public address; its
    outbound traffic goes through the VPC's NAT gateway. Its security group,
-   from the account setup, admits only tcp 22 and 3000 from the VPC's CIDR,
-   where tailnet traffic arrives from the router; nothing is open to the
-   internet. The launch inputs (the controller's command, the candidate
+   from the account setup, admits only ssh on tcp 443 from the VPC's CIDR,
+   where tailnet traffic arrives from the router, and Grafana on tcp 3000
+   from the load balancer; nothing is open to the internet. The launch inputs (the controller's command, the candidate
    commits, the settings and the language plans) travel through the Oregon
    bucket onto the volume. Session Manager
    is the shell fallback when the router is down; the run never depends on
@@ -136,9 +144,9 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    launch's with `--controller` and the host's paths: `--controller` runs
    the controller in the process, and without it `--execute` launches a
    control host.
-3. Upserts the private DNS record at the host's private address, so Grafana
-   keeps one URL across host replacements, and returns with that URL and the
-   ssh line. Everything after this runs in AWS (principle 7).
+3. Registers the host in the load balancer's target group, so Grafana keeps
+   one URL across host replacements, and returns with that URL and the ssh
+   line, port 443 at the host's private address. Everything after this runs in AWS (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket
@@ -339,7 +347,7 @@ in a new root.
 ### Commands
 
 `run-campaign.py control <campaign> <command>` runs on the control host;
-from the Mac it is the same command over ssh through the subnet router. Each takes the
+from the Mac it is the same command over ssh on port 443 through the subnet router. Each takes the
 lock, validates, bumps the version and logs the event with its actor.
 
 - `add-region <region> --max-vcpus N [--on-demand-max-vcpus N] [--platforms ...]`:
@@ -422,13 +430,13 @@ host keeps serving Grafana so Dain can see what happened; idle it costs a few
 dollars a day.
 
 `run-campaign.py finish <campaign>` from the Mac pulls the campaign root over
-ssh with rsync, verifies the file list and SHA-256s against the
+ssh on port 443 with rsync, verifies the file list and SHA-256s against the
 controller's manifest, and writes the results directory the reduction and
 archive read today. It terminates nothing.
 
-`run-campaign.py teardown <campaign> --confirm` terminates the control host,
-snapshots the volume, deletes its DNS record, the volume and the Grafana
-parameters. The host goes first so the snapshot holds the root as the
+`run-campaign.py teardown <campaign> --confirm` deregisters the control host
+from the load balancer and terminates it, snapshots the volume, and deletes
+the volume and the Grafana parameters; the record and the load balancer stay. The host goes first so the snapshot holds the root as the
 controller last wrote it. Only Dain runs it, and it refuses without
 `--confirm`. The snapshot is the last copy until Dain deletes it.
 
@@ -518,8 +526,10 @@ Settled with Dain on 2026-10-30:
 8. No local health files; `status` over ssh on the ledgers is the fallback.
 9. Accepted group objects are deleted from S3 once retained.
 10. Control host: m7i.large in us-west-2 in a private subnet the company's
-    Tailscale subnet router carries, reached at a private DNS record, with no
-    Tailscale or key on the host; network identifiers only in the SSM
+    Tailscale subnet router carries, reached on its one forwarded port, 443:
+    Grafana through an internal load balancer the private DNS record aliases,
+    and ssh at the host's private address, with no Tailscale or key on the
+    host; network identifiers only in the SSM
     parameter `/regulator-benchmark/control-host-network`; 200 GB gp3 volume,
     public repository clone at the candidate commit, files under
     `tools/re2-benchmark/aws/control-host/`.
