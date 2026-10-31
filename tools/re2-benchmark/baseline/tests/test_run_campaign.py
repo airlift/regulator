@@ -3404,8 +3404,12 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(BOOT_WINDOW_FIRST // 2, refused[first])
                 self.assertEqual(BOOT_WINDOW_FIRST // 2, sum(launch.platform == "r9g" and launch.loop == first
                                                              for launch in fleet.launches))
-                # From then on r8i tries one launch a loop until one finds capacity.
+                # From then on r8i tries one launch a loop until one finds capacity, and each refused launch leaves
+                # the boot window in the loop AWS refused it.
                 self.assertEqual({1}, {count for loop, count in refused.items() if loop != first})
+                self.assertEqual(sum(refused.values()), sum(
+                    item["finished_at"] - item["started_at"] < RUN_CAMPAIGN.UNIT_POLL_SECONDS for item in json.loads(
+                        (Path(temporary) / RUN_CAMPAIGN.STATE_FILE).read_text())["completed"].values()))
 
     def test_pool_launches_only_for_work_its_workers_would_start_after_a_boot(self):
         work = sum(float(unit["estimated_seconds"]) for unit in RUN_CAMPAIGN.work_units.load(SCRIPT.parent).values()
@@ -4538,11 +4542,19 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_restart_settles_a_worker_that_exited_before_its_first_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The controller stops before it settles a Spot launch that found no capacity.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", full={("r8i", "spot"): 1}, abort_after=1)
+            # The controller stops as it cleans up a Spot launch that found no capacity, before it settles it.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", full={("r8i", "spot"): 1})
+            listing = fleet.list
+
+            def crash(region, bucket, prefix):
+                if fleet.full["r8i", "spot"] == 0:
+                    raise SystemExit("controller stopped")
+                return listing(region, bucket, prefix)
+
+            fleet.list = crash
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            fleet.abort_after = None
+            fleet.list = listing
             self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             # Its restart finds no instance under the session's tag by the boot deadline, so it settles the attempt
             # as a launch that left no instance, without a lease.

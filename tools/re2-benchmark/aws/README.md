@@ -226,7 +226,9 @@ reclaim, it halves, down to 5. Each resize is the controller's settings change
 of its `size`, so the events record the window's history. A launch it refuses
 waits with reason `boot window`. Each loop, a phase's pools in turn first take
 up to an even part of the room the window has left, and the pools that need
-more then share the rest.
+more then share the rest. A launch that booted nothing, as one AWS refused, is
+settled in the loop that launched it, so it holds none of the window from the
+phases that launch after it.
 
 Multicore workers, the Spot reserve, unrelated Spot use, and spending
 reservations can keep the fleet below `max_hosts`. A phase's derived deadline
