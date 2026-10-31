@@ -926,13 +926,15 @@ final class Prog
 
     PrefixAccelStrategy prefixAccelStrategy(int length)
     {
-        if (prefixFoldCase || prefixSize <= 1 || prefix[0] >= 0) {
+        if (prefixFoldCase || prefixSize <= 1 || prefixProbeOffset != 0) {
             return PrefixAccelStrategy.REPEATED_BYTE;
         }
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
             return PrefixAccelStrategy.FUSED_VECTOR;
         }
-        return PrefixAccelStrategy.FUSED_SWAR;
+        // Short ASCII-led searches, and long ones without the Vector API, keep the repeated
+        // first-byte scan, whose single load per word costs less than the fused SWAR pair's two.
+        return prefix[0] >= 0 ? PrefixAccelStrategy.REPEATED_BYTE : PrefixAccelStrategy.FUSED_SWAR;
     }
 
     /// Returns the offset of the prefix byte that the [PrefixAccelStrategy#REPEATED_BYTE]
@@ -1026,8 +1028,9 @@ final class Prog
     ///
     /// Uses different strategies depending on configuration:
     /// - Parallel front-and-back candidate scanning for folded prefixes
-    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
-    ///   non-ASCII first byte
+    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes that probe their
+    ///   first byte, in Vector lanes for long searches and, for a non-ASCII first byte, in SWAR
+    ///   words when the search is short or the Vector API is unavailable
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix

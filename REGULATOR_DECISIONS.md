@@ -1098,13 +1098,18 @@ independent loads and parallel masks, which fits HotSpot code generation better
 on the supported Intel and Graviton hosts. Randomized equivalence tests compare
 the accelerated result with a scalar folded-prefix search.
 
-## Non-ASCII Literal Vector Scan
+## Literal Prefix Vector Scan
 
-Case-sensitive multi-byte prefixes whose first byte is non-ASCII use fused
-first-byte and last-byte candidate masks. Searches shorter than 1 KiB use SWAR.
-Longer searches use the platform's preferred Vector API species when the
-application resolves `jdk.incubator.vector`; otherwise they retain the SWAR
-route. ASCII and single-byte prefixes retain repeated-byte scanning.
+Case-sensitive multi-byte prefixes that probe their first byte use fused
+first-byte and last-byte candidate masks for searches of at least 1 KiB, in the
+platform's preferred Vector API species when the application resolves
+`jdk.incubator.vector`. A candidate needs both bytes at their offsets, so a
+common first byte no longer restarts the scan at every occurrence: over English
+prose, `aqj` stopped at each of 35,301 `a` bytes in rebar's sherlock text and
+now stops at 12 candidates, each an `a` with a `j` two bytes later. Shorter
+searches, and longer ones without the Vector API, keep repeated first-byte
+scanning for an ASCII first byte and use fused SWAR masks for a non-ASCII one.
+Single-byte prefixes and probes moved by byte frequencies keep their own scans.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
@@ -1124,24 +1129,29 @@ sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,
-and Rust), scan for one probe byte. Every distribution follows one rule: the
-probe is the rarest byte after the first, earliest on ties, used only when its
-estimated probability is less than a quarter of the first byte's; otherwise the
-probe remains offset 0. The factor keeps the first byte when the estimate is
-close, because an estimate is not the searched text. Each probe hit is shifted
-back to its candidate start and confirmed with the complete literal. The RE2
-prefix scan checks the farther literal end before the full comparison. The Trino
-scan returns the same first whole-literal occurrence as the first-byte scan, so
-candidate attempts, failed work, and the work budget are unchanged. Density
-hand-off never applies to literal-led plans.
+and Rust), scan for one probe byte. A prefix whose probe stays at its first byte
+instead takes the [first-and-last pair scan](#literal-prefix-vector-scan) on
+inputs of at least 1 KiB when the Vector API is available. Every distribution
+follows one rule: the probe is the rarest byte after the first, earliest on
+ties, used only when its estimated probability is less than a quarter of the
+first byte's; otherwise the probe remains offset 0. The factor keeps the first
+byte when the estimate is close, because an estimate is not the searched text.
+Each probe hit is shifted back to its candidate start and confirmed with the
+complete literal. The RE2 prefix scan checks the farther literal end before the
+full comparison. The Trino scan returns the same first whole-literal occurrence
+as the first-byte scan, so candidate attempts, failed work, and the work budget
+are unchanged. Density hand-off never applies to literal-led plans.
 
 Probing is opt-in because a distribution that does not match the searched data
 moves probes onto bytes that are common there. A mismatched distribution can
 make literal scans several times slower per byte than the default, because the
 probe byte occurs more often than the first byte; it never changes what matches,
-and the cost stays linear in the input. On r9g, probing `/` for `https://` and
-`http://` ran 6.7-8.5x slower than the first-byte scan over access-log text,
-which carries about twelve slashes and one `h` per line.
+and the cost stays linear in the input. On inputs of at least 1 KiB with the
+Vector API, a moved probe also gives up the pair scan, so a chosen distribution
+can be slower than the default there even when it matches the data. On r9g,
+probing `/` for `https://` and `http://` ran 6.7-8.5x slower than the first-byte
+scan over access-log text, which carries about twelve slashes and one `h` per
+line.
 
 The presets were scored by modeled candidate counts, not timings, over 33
 literals, against the probe each scored corpus's own distribution chooses, on
