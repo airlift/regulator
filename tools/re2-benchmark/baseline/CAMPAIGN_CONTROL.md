@@ -487,7 +487,9 @@ the volume and the Grafana parameters; the record and the load balancer stay. Th
 controller last wrote it. Only Dain runs it, and it refuses without
 `--confirm`. The snapshot is the last copy until Dain deletes it. Each step
 finds what an earlier teardown did by the campaign's tags, so a teardown that
-failed partway finishes when run again, with no second snapshot.
+failed partway finishes when run again, with no second snapshot. Once the
+snapshot exists, `control-host replace` refuses, so no host writes the volume
+after its last copy.
 
 ## Lower stakes before launch
 

@@ -713,6 +713,9 @@ volume. It refuses without `--confirm`:
 python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confirm
 ```
 
+Once the snapshot exists, `control-host replace` refuses, so no host writes the
+volume after its last copy was taken.
+
 ### Steer a campaign
 
 `control` changes a running campaign's settings, which its controller applies

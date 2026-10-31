@@ -144,6 +144,10 @@ class TestControlHost(unittest.TestCase):
                 with self.subTest(step=step), patch.object(aws, step, side_effect=failure), \
                         self.assertRaises(CloudError):
                     control_host.teardown(aws, "c", confirm=True)
+                if step == "wait":
+                    # Its snapshot is the root's last copy, so no host is replaced onto the volume to write it again.
+                    with self.assertRaisesRegex(SystemExit, "finish the teardown"):
+                        control_host.replace(aws, "c", SSH_PUBLIC_KEY)
             control_host.teardown(aws, "c", confirm=True)
         self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
         self.assertEqual([cloud.Snapshot("snap-1", volume.id, "completed", control_host.tags("c"))],
