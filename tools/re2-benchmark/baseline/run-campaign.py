@@ -3046,13 +3046,7 @@ class UnitDispatcher:
         """Process a live worker's uploads and decide whether its host was lost."""
         try:
             keys = set(objects)
-            # Worker evidence shows the worker started, even one whose heartbeats never landed; its first lease
-            # runs from then.
-            if not worker.started and shows_worker_start(keys):
-                worker.started, worker.running_since = True, time.monotonic()
-                if worker.job.market == "spot":
-                    # Spot capacity has returned for the pool.
-                    self.spot_shortages.pop(worker.pool, None)
+            self.note_start(worker, keys)
 
             def fetch(key, path):
                 get_unit_worker_result(self.arguments, worker, key, path)
@@ -3091,6 +3085,20 @@ class UnitDispatcher:
         except (CloudError, OSError, ValueError):
             # S3 may be unavailable for a moment; the next poll, or cleanup's recovered uploads, retries.
             return
+
+    def note_start(self, worker, keys):
+        """Record that the worker started once its uploads, keys, show worker evidence, even where its heartbeats
+        never landed; its first lease runs from then."""
+        if not worker.started and shows_worker_start(keys):
+            worker.started, worker.running_since = True, time.monotonic()
+            if worker.job.market == "spot":
+                # Spot capacity has returned for the pool.
+                self.spot_shortages.pop(worker.pool, None)
+
+    def report_boots(self):
+        """Report the workers that started to the fleet's boot window, and take the room it leaves."""
+        self.boot_room = self.budget.report_boots(
+            self.arguments.campaign_id, [epoch for epoch, worker in self.workers.items() if worker.started])
 
     def instance(self, worker):
         """The worker's instance in this loop's description of its region, by its ID, or by its session's tag while
@@ -3792,15 +3800,30 @@ class UnitDispatcher:
         return worker
 
     def sweep(self, observed):
-        """One loop of a phase paused for a fault, which trusts nothing more its hosts report: prove each ended
-        worker's cleanup, releasing its reservation, and go on stopping the hosts asked to terminate. Its other hosts
-        finish the leases they hold and stop themselves once their idle time runs out. The phase's next dispatch,
-        once it is resumed, settles each worker from its ledgers and recovered uploads, as a restart does."""
+        """One loop of a phase paused for a fault, which trusts nothing more its hosts report but that they booted:
+        report each booting worker that started to the boot window, stop-lease every open worker once the campaign
+        is stopping, prove each ended worker's cleanup, releasing its reservation, and go on stopping the hosts asked
+        to terminate. Its other hosts finish the leases they hold and stop themselves once their idle time runs out.
+        The phase's next dispatch, once it is resumed, settles each worker from its ledgers and recovered uploads, as
+        a restart does."""
         self.observed = observed
+        live, ended = [], []
+        for worker in list(self.workers.values()):
+            (ended if self.ended(worker) else live).append(worker)
+        booting = [worker for worker in live if not worker.started]
+        for worker, objects in zip(booting, self.concurrently(self.listing, booting)):
+            if objects is not None:
+                self.note_start(worker, set(objects))
+        self.report_boots()
+        if self.steering == "stopping":
+            for worker in live:
+                if worker.open():
+                    self.issue(worker, None)
+            self.send(live)
         for epoch, worker in self.workers.items():
             if epoch in self.terminated:
                 self.stop_host(worker)
-        for worker in self.clean_up([worker for worker in self.workers.values() if self.ended(worker)]):
+        for worker in self.clean_up(ended):
             self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
             del self.workers[worker.job.host_epoch]
 
@@ -3859,8 +3882,7 @@ class UnitDispatcher:
         now = time.monotonic()
         deadline_reached = now >= deadline
         self.poll()
-        self.boot_room = self.budget.report_boots(
-            self.arguments.campaign_id, [epoch for epoch, worker in self.workers.items() if worker.started])
+        self.report_boots()
         # Work handed back after the deadline, or to a pool that gave up, is not leased again.
         self.resolve_unlaunchable(deadline_reached)
         self.update_tail()
