@@ -353,9 +353,14 @@ lock, validates, bumps the version and logs the event with its actor.
 - `add-region <region> --max-vcpus N [--on-demand-max-vcpus N] [--platforms ...]`:
   creates the region's bucket if absent with the same lifecycle rule, uploads
   the campaign's shared archives (multipart), then adds the region, so the
-  controller never sees a region without archives.
+  controller never sees a region without archives. It refuses, before creating
+  anything, a platform `platform-regions.tsv` lists no image for in the region.
 - `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`,
   `set-limit region <r> max-vcpus N`
+
+A raised or new region vCPU limit is checked against the region's Standard
+quota after its reserve, the check each phase's setup makes, and refused when
+the quota cannot hold it, so no phase starts under a limit it would refuse.
 - `pause <phase> [--reason]`, `resume <phase>`, `drain <phase>`
 - `set-share <phase> N|auto` (how hosts move between phases)
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand`

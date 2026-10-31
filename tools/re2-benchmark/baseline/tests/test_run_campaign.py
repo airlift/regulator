@@ -690,7 +690,8 @@ class TestRunCampaign(unittest.TestCase):
             with open(root / EVENTS, newline="") as events:
                 rows = list(csv.DictReader(events, delimiter="\t"))
             self.assertIn(("monitor", "a/primary paused: bad AMI"), [(row["actor"], row["change"]) for row in rows])
-            # A command the settings cannot take, or its actor may not make, changes nothing.
+            # A command the settings cannot take, its actor may not make, or the region's quota after its reserve or
+            # its images cannot hold, changes nothing.
             for command, actor, refusal in (
                     (["set-limit", "max-hosts", "101"], "monitor", "max_hosts only within the authorized"),
                     (["authorize", "max-hosts", "500"], "monitor", "only dain"),
@@ -699,7 +700,13 @@ class TestRunCampaign(unittest.TestCase):
                     (["resume", "a/primary"], "dain", "a/primary is running"),
                     (["drain", "b/primary"], "dain", "no phase b/primary"),
                     (["add-region", "eu-central-1", "--max-vcpus", "256"], "dain", "has region eu-central-1"),
-                    (["add-region", "ap-south-1", "--max-vcpus", "256"], "monitor", "only the authorized regions")):
+                    (["add-region", "ap-south-1", "--max-vcpus", "256", "--platforms", "r8i"], "monitor",
+                     "only the authorized regions"),
+                    (["set-limit", "region", region, "max-vcpus", "969"], "dain",
+                     "max_vcpus 969 exceeds the Standard spot quota of 1000 vCPUs after its reserve of 32"),
+                    (["add-region", "us-east-2", "--max-vcpus", "969"], "dain", "max_vcpus 969 exceeds"),
+                    (["add-region", "ap-northeast-2", "--max-vcpus", "256"], "dain",
+                     "no r9g image in ap-northeast-2")):
                 with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
                     control(*command, actor=actor)
             self.assertEqual(len(rows), len((root / EVENTS).read_text().splitlines()) - 1)

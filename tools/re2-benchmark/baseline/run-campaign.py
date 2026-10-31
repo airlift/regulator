@@ -5104,11 +5104,28 @@ def control_change(arguments, now):
     return f"authorized {name} to {value:g}", lambda settings: settings["authorized"].update({name: value})
 
 
+def check_region_limits(root, aws, before, after):
+    """Refuse settings whose raised or new region vCPU limits exceed the region's Standard quota after its reserve, the
+    check each phase's setup makes, so a limit a phase could not run under never reaches the controller. A lowered
+    limit needs no quota."""
+    options = root / CAMPAIGN_OPTIONS
+    spot_reserve = (json.loads(options.read_text())["spot_vcpu_reserve"] if options.is_file() else
+                    SPOT_VCPU_SAFETY_RESERVE)
+    for region, limits in after["regions"].items():
+        for name, market, reserve in (("max_vcpus", "spot", spot_reserve),
+                                      ("on_demand_max_vcpus", "on-demand", ON_DEMAND_VCPU_SAFETY_RESERVE)):
+            if limits.get(name, 0) > before["regions"].get(region, {}).get(name, 0):
+                quota = aws.vcpu_quota(region, market)
+                if limits[name] > quota - reserve:
+                    raise SettingsError(f"{region} {name} {limits[name]:g} exceeds the Standard {market} quota of "
+                                        f"{quota:g} vCPUs after its reserve of {reserve:g}")
+
+
 def add_region(arguments, store, aws):
     """Add a region to the campaign: create its shared bucket unless it has one, put every archive the campaign has
     shared in it, each verified by its SHA-256, and only then add the region to the settings, listed for the platforms
-    --platforms names, or for every platform. A change the settings or the actor's bounds would refuse is refused
-    before anything is created."""
+    --platforms names, or for every platform. A change the settings, the actor's bounds, the region's quotas or its
+    images would refuse is refused before anything is created."""
     region = arguments.region
     bucket = f"regulator-benchmark-{aws.account(region)}-{region}"
     limits = {"bucket": bucket, "max_vcpus": arguments.max_vcpus, **(
@@ -5121,9 +5138,13 @@ def add_region(arguments, store, aws):
         for platform in arguments.platforms or settings["platform_regions"]:
             if platform not in settings["platform_regions"]:
                 raise SettingsError(f"the campaign has no platform {platform}")
+            if (platform, region) not in images:
+                raise SettingsError(f"platform-regions.tsv has no {platform} image in {region}; name the platforms "
+                                    f"that have one with --platforms")
             settings["platform_regions"][platform].append(region)
 
-    changed_settings(store.current, arguments.actor, update)
+    images = read_platform_regions(Path(__file__).resolve().parent)
+    check_region_limits(arguments.root, aws, store.current, changed_settings(store.current, arguments.actor, update))
     try:
         check_bucket(aws, region, bucket)
     except CloudError:
@@ -5140,8 +5161,12 @@ def control(arguments, aws):
     """Change the campaign's live settings as the actor's control command; add-region reaches AWS through aws."""
     try:
         store = CampaignSettings(arguments.root)
-        description, update = (add_region(arguments, store, aws) if arguments.command == "add-region" else
-                               control_change(arguments, time.time()))
+        if arguments.command == "add-region":
+            description, update = add_region(arguments, store, aws)
+        else:
+            description, update = control_change(arguments, time.time())
+            check_region_limits(arguments.root, aws, store.current,
+                                changed_settings(store.current, arguments.actor, update))
         before = store.current["version"]
         settings = store.change(arguments.actor, description, update)
     except SettingsError as error:
