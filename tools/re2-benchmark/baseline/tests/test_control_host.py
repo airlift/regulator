@@ -83,8 +83,10 @@ class TestControlHost(unittest.TestCase):
             self.assertEqual({volume.id: first}, aws.attachments)
             self.assertEqual({"arn:target-group": {(first, 3000)}}, aws.targets)
             self.assertIn("Grafana: https://control.test", printed.getvalue())
-            self.assertIn("ssh, once control-host known-host c records its keys: ssh -p 443 "
-                          "-o StrictHostKeyChecking=yes", printed.getvalue())
+            self.assertRegex(printed.getvalue(), "ssh, once control-host known-host c records its keys: ssh -p 443 "
+                                                 "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=.* "
+                                                 "-o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none "
+                                                 "ec2-user@10.0.0.1\n")
             # The volume holds the campaign root, so the campaign launches once.
             with self.assertRaisesRegex(SystemExit, "already has a control host volume"):
                 control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
@@ -236,7 +238,8 @@ class TestControlHost(unittest.TestCase):
                                                        0 if (host / control_host.MANIFEST).is_file() else 1)
                 # ssh trusts only the host keys its console lists, and offers only the key it was launched with.
                 self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -p 443 -o StrictHostKeyChecking=yes "
-                                  f"-o UserKnownHostsFile={known_hosts} -i /keys/control-host -o IdentitiesOnly=yes",
+                                  f"-o UserKnownHostsFile={known_hosts} -o GlobalKnownHostsFile=/dev/null "
+                                  "-o KnownHostsCommand=none -i /keys/control-host -o IdentitiesOnly=yes",
                                   "ec2-user@10.0.0.1:/regulator/campaign/", f"{local}/"], command)
                 shutil.rmtree(local)
                 shutil.copytree(host, local)

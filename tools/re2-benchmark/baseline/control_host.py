@@ -286,8 +286,8 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
                          f"{campaign}")
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
           f"Grafana: {grafana_url(network)} (admin password in SSM {grafana_parameters(campaign)[0]})\n"
-          f"ssh, once control-host known-host {campaign} records its keys: ssh -p {SSH_PORT} "
-          f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={KNOWN_HOSTS} ec2-user@{address}\n"
+          f"ssh, once control-host known-host {campaign} records its keys: "
+          f"{shlex.join([*trusted_ssh(), f'ec2-user@{address}'])}\n"
           f"without the subnet router: aws ssm start-session --region {REGION} --target {instance}", flush=True)
 
 
@@ -377,6 +377,13 @@ def known_host(aws, campaign):
     return host.address
 
 
+def trusted_ssh():
+    """ssh to a control host on SSH_PORT, trusting only the host keys KNOWN_HOSTS records: none from the system's
+    known-hosts file or a command ssh's configuration names."""
+    return ["ssh", "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
+            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "KnownHostsCommand=none"]
+
+
 def fingerprint(key):
     """The SHA-256 fingerprint ssh-keygen -l prints for a public key, given as its base64 blob."""
     return "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(key)).digest()).decode().rstrip("=")
@@ -392,8 +399,7 @@ def finish(aws, campaign, local_root, identity=None):
                          "--campaign-root")
     remote = f"ec2-user@{known_host(aws, campaign)}"
     # An agent holding many keys would spend the host's authentication attempts before it offered the right one.
-    ssh = ["ssh", "-p", str(SSH_PORT), "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}",
-           *(["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else [])]
+    ssh = [*trusted_ssh(), *(["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else [])]
     try:
         status = subprocess.run([*ssh, remote, "test", "-f", f"{CAMPAIGN_ROOT}/{MANIFEST}"]).returncode
         if status == SSH_FAILED:
