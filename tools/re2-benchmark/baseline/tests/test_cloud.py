@@ -115,7 +115,8 @@ class FakeCloud:
 
     A control host's account also has the SSM parameters, security groups and subnets a test gives it, and the
     volumes, snapshots and load balancer targets the commands create. Waiting for an instance to
-    run starts it, and waiting for a volume to be available finds it so once no running instance holds it.
+    run starts it, and waiting for a volume to be available finds it so once no running instance holds it; only an
+    available volume attaches.
 
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
     monotonic() read it, so a scenario takes the time its calls would. Calls made on a pool's threads, as executor
@@ -347,6 +348,8 @@ class FakeCloud:
 
     def attach_volume(self, region, volume, instance, device):
         self.call("attach_volume", region, volume, instance, device)
+        if any(item.id == volume and item.state != "available" for item in self.region_volumes[region]):
+            raise CloudError(f"VolumeInUse: {volume} is not available")
         self.attachments[volume] = instance
         self.region_volumes[region] = [replace(item, state="in-use") if item.id == volume else item
                                        for item in self.region_volumes[region]]
