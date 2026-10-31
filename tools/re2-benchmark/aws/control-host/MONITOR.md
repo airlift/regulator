@@ -35,8 +35,8 @@ Run every command from the repository root with Dain's AWS credentials,
    ```
 
 3. Reach the host through the subnet router with `host`: ssh on port 443,
-   the only port the router forwards, to the host's private address, which
-   a replacement changes, so run this again after one. `control-host
+   the only port the router forwards, to the host's private address. A
+   replacement changes that address, so run this again after one. `control-host
    known-host` records the host's ssh keys whose fingerprints its console
    lists in `~/.ssh/regulator-control-hosts` and prints the address; `host`
    trusts only the keys recorded there, so a key the console never listed
@@ -90,9 +90,9 @@ Each check runs on one **path**: the subnet router, through `host` and
    down, read `host systemctl status regulator-campaign@<campaign>` and keep
    the last lines of its journal for the report,
    `host journalctl -u regulator-campaign@<campaign> -n 50 --no-pager`:
-   - a unit still restarting is systemd's to finish, and one systemd cannot
-     find while `host cloud-init status` says `running` is the host's user
-     data's, so check again next time;
+   - a unit still restarting is systemd's to finish, and the host's user data
+     is still installing a unit systemd cannot find while
+     `host cloud-init status` says `running`, so check again next time;
    - a unit whose controller exited with status 3 and no
      `campaign-files.sha256` refused to start, and starts no other way on a
      new host, so ask Dain, with the journal's lines, and replace nothing;
@@ -100,9 +100,13 @@ Each check runs on one **path**: the subnet router, through `host` and
      hit), or one it cannot find once cloud-init no longer says `running`,
      since the host's boot then ended before its user data installed it,
      means replacing the host once (see [Commands](#commands)); a reboot runs
-     no user data again. If the new host's unit gives up too, or is missing
-     too, ask Dain with both journals' lines; never replace a host twice for
-     one campaign without his answer.
+     no user data again. A unit systemd cannot find has no journal, so keep
+     the last lines of the boot's log instead,
+     `host tail -n 50 /var/log/regulator-control-host.log`, before replacing
+     the host, since terminating it deletes the log. If the new host's unit
+     gives up too, or is missing too, ask Dain with both hosts' journal lines,
+     or their boot logs' when the unit is missing; never replace a host twice
+     for one campaign without his answer.
 
    When `status` cannot run but `host true` succeeds, since the host has no
    `/opt/regulator/venv` or no checkout, its boot is still installing them or
@@ -189,8 +193,8 @@ there means the controller's telemetry is not arriving, which you report.
 | Workers at zero slack | a running worker has no next lease while work waits | Report with the Fleet Queued items. |
 | Idle stops with work queued | a host stopped idle while its pool had work | Report. |
 | Boot window change | the boot window shrank: hosts reported late or ended before reporting | Report; the window regrows itself. |
-| Longest launch refusal | a reason has refused launches for 10 minutes | By the series' `reason`: `fleet launch limit`, raise `max-hosts` or `max-hosts-per-platform`; `fleet Spot quota`, raise a region's `max-vcpus` or `add-region` from `authorized.regions`; `fleet On-Demand quota`, `add-region` from `authorized.regions` with `--on-demand-max-vcpus`, since no command raises a listed region's On-Demand allowance, or report it; `fleet spending or machine-hour ceiling`, raise `max-usd`; each within `authorized`. `shared capacity query failed` means AWS is not answering the controller's capacity reads: report it with the error its phase's `queued-capacity` job attempt names. `spending_stop` follows the Spending stop row; `boot window` needs nothing. |
-| Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
+| Longest launch refusal | a reason has refused launches for 10 minutes | By the series' `reason`: `fleet launch limit`, raise `max-hosts` or `max-hosts-per-platform`; `fleet Spot quota`, raise a region's `max-vcpus` or `add-region` from `authorized.regions`; `fleet On-Demand quota`, `add-region` from `authorized.regions` with `--on-demand-max-vcpus`, since no command raises a listed region's On-Demand allowance, or report it; `fleet spending or machine-hour ceiling`, raise `max-usd`, and if the refusal still stands, machine hours bind, so ask Dain; every raise stays within `authorized`. `shared capacity query failed` means AWS is not answering the controller's capacity reads: report it with the error its phase's `queued-capacity` job attempt names. `spending_stop` follows the Spending stop row; `boot window` needs nothing. |
+| Finish past deadline | a phase finishes after its launches end, or never, as a pool with work left and no host does | Raise `max-hosts`, `max-hosts-per-platform` or a region's `max-vcpus`, or `add-region`, within `authorized`. |
 | Projected spend over max | the campaign will reach `max_usd` | Raise `max-usd` within `authorized` only while a refusal or a late finish also stands; otherwise report. |
 | Spending stop | no launch or extension is admitted | Ask Dain, with the stop's reason from `status`. |
 | Phases paused | a phase is paused | Read its reason from `status`, and who paused it from the phase's `by` in the settings; a pause spends none of the phase's deadline. Resume a phase the controller paused once its cause has cleared, once per cause; a phase paused twice for one cause, ask. A pause or a drain Dain made is his, and `control` refuses to resume it for you. |
@@ -207,16 +211,20 @@ on the host; read it with `host cat` before each raise.
 |---|---|
 | `control-host replace` once, when the controller or host is dead and systemd has given up after crashes, or never got its unit | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
-| Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
+| Raise `max_hosts`, `max_hosts_per_platform`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
 | Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
 
-`control` enforces the table: with `--actor monitor` it runs only
+`control` enforces part of the table. With `--actor monitor` it runs only
 `set-limit`, `add-region` and `resume`, and refuses every other command,
 `stop`, `clear-spending-stop` and `authorize` among them, as Dain's. The
 settings refuse a monitor change to `authorized` or the hourly rates, any
 raise past `authorized`, and a resume of a phase the controller did not
-pause.
+pause. The rest is yours to keep: one replacement, one resume per cause, a
+raise only while refusals or a late finish stand, and `add-region` only when
+refusals name capacity. A raise refused past `authorized`, or past a region's
+quota after its reserve, is not retried: report it with the refusal `control`
+printed.
 
 To ask, send the push notification with the question and the evidence, and
 wait for Dain's answer in this thread.

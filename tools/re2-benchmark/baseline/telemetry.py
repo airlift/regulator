@@ -31,7 +31,8 @@ GAUGES = {
     "regulator_unresolved_units": "A phase's unit replicas left unresolved",
     "regulator_work_left_seconds": "Estimated seconds of a phase's groups queued or in flight, by pool",
     "regulator_correction": "Measured over estimated seconds of a phase's accepted groups, by pool",
-    "regulator_finish_time": "When a phase's pool finishes at its live hosts, in epoch seconds",
+    "regulator_finish_time": ("When a phase's pool finishes at its live hosts, in epoch seconds, or never (the "
+                              "largest finite value) for a pool with work left and no live host"),
     "regulator_deadline_time": "When a phase's launches end, in epoch seconds",
     "regulator_slack_min": "The fewest leases held beyond the one it runs by a running worker of the pool",
     "regulator_slack_zero_workers": "Running workers with no lease beyond the one they run in a pool with work queued",
@@ -42,7 +43,9 @@ GAUGES = {
     "regulator_spend_rate_usd_per_hour": "A phase's live hosts' spend rate, in USD per hour",
     "regulator_spend_projected_usd": "A phase's spend by its finish at its live hosts, or by its reservations' ends",
     "regulator_worker_group_estimated_seconds": "The estimated seconds of the group a worker runs",
-    "regulator_worker_group_elapsed_seconds": "The seconds since the group a worker runs started",
+    "regulator_worker_group_elapsed_seconds": ("The seconds since the start of the group a worker runs, as the "
+                                               "controller places it at the worker's latest progress (a heartbeat, "
+                                               "a group upload, or the controller's adoption of its lease)"),
 }
 # The gauges whose series each stand for a condition, a launch refusal or a worker's or phase's state: a series an
 # earlier loop observed and the latest does not reads 0, so a panel's current value shows the condition cleared

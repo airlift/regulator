@@ -136,7 +136,8 @@ UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
 TERMINATION_LEAK_SECONDS = 15 * 60
 # A lease's timeout is this multiple of its groups' estimate, or of the unit budget when that is longer.
 UNIT_LEASE_TIMEOUT_FACTOR = 2
-# A running host whose lease outran its lease timeout from its latest heartbeat has stalled, and loses that lease.
+# A running host whose lease outran its lease timeout from its latest progress (a heartbeat, a group upload, or its
+# adoption) has stalled, and loses that lease.
 STALLED = "stalled"
 # An idle host claims its next lease as its own stop before it stops; a lease the controller writes after the claim
 # never runs, so its item is requeued without spending an attempt.
@@ -384,7 +385,8 @@ def parse_args():
     parser.add_argument("--smoke-protocol", choices=("smoke", "qualification"), default="smoke",
                         help="use qualification timing in baseline smoke to validate full shard durations")
     parser.add_argument("--phase-timeout-seconds", type=int,
-                        help="frozen phase wall-clock limit; otherwise derive from topology plus capacity waits")
+                        help="frozen limit on a phase's running time, its pauses excluded; otherwise derive from "
+                             "topology plus capacity waits")
     parser.add_argument("--shard", action="append", dest="selected_shards",
                         help="baseline shard to recollect; repeat to select a subset")
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
@@ -743,9 +745,9 @@ def pool_shards(items):
 
 
 def validate_configuration(arguments, items, frozen_deadline=None):
-    """Check the phase against the campaign's settings and derive its deadline from its work items at the settings'
-    limits, or keep the frozen deadline its first start derived, whatever the limits are now. A phase planned alone,
-    before its campaign has settings, is checked against no limits."""
+    """Check the phase against the campaign's settings and derive the limit on its running time, its pauses
+    excluded, from its work items at the settings' limits, or keep the frozen limit its first start derived, whatever
+    the limits are now. A phase planned alone, before its campaign has settings, is checked against no limits."""
     campaign_heap_size(arguments)
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
@@ -1442,8 +1444,8 @@ def check_bucket(aws, region, bucket):
 def check_regions(arguments, platforms):
     """Check AWS for the phase's workers in every region its settings list, and put what they read in each region
     that may launch one, as its region_offerings then name them. A phase launches in a region only once this passed
-    for it: the controller checks again for a running phase whenever the settings' regions change, on a copy of its
-    namespace, and adopts the regions only once the check passes."""
+    for it: the controller checks again for a running phase every day and whenever the settings' regions change, on a
+    copy of its namespace, and adopts the regions only once the check passes."""
     workers = region_check_workers(arguments)
     validate_aws(arguments, platforms, workers)
     put_archives(arguments, workers)
@@ -1898,10 +1900,10 @@ class LaunchFailed(Exception):
 
 
 def launch_failure(market, rejection, elsewhere):
-    """The classification and detail of a launch AWS refused: a Spot launch found no Spot capacity, quota or price,
-    and an On-Demand one no capacity or vCPU quota. A request AWS will never grant fails as the infrastructure's,
-    with AWS's explanation: as the region's refusal while its pool has another region elsewhere to try, and
-    otherwise so its slot's replacements run out."""
+    """The classification and detail of a launch AWS refused. A shortage is the market's: a Spot launch found no Spot
+    capacity, quota or price, or an On-Demand one no capacity or vCPU quota. A request AWS refused outright fails as
+    the infrastructure's, with AWS's explanation. While elsewhere, its pool having another region it has not cooled,
+    it is the region's refusal; otherwise it spends one of its slot's replacements."""
     if rejection.kind == "request":
         prefix = REGION_REFUSAL if elsewhere else "launch-infrastructure:"
         return "retryable-infrastructure", f"{prefix}{rejection.code}: {rejection.message}"
@@ -1951,8 +1953,9 @@ def launch_requests(arguments, job, metadata):
 
 def launch_worker(aws, job, requests, elsewhere=False):
     """Launch the worker's instance by its requests in turn while AWS reports no capacity in their zone. Returns the
-    instance ID, or "" when AWS's answer never came and only the session's tag can find the instance, and the zone;
-    raises LaunchFailed when AWS launched none, its pool having another region elsewhere to try."""
+    instance ID, or "" when AWS's answer never came and only the session's tag can find the instance, and the zone.
+    Raises LaunchFailed when AWS launched none; elsewhere says whether its pool has another region it has not cooled
+    to try."""
     for offset, (zone, spec) in enumerate(requests):
         try:
             return aws.run_instance(job.region, spec), zone
@@ -2485,7 +2488,8 @@ class UnitWorker:
     # seconds.
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
-    # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
+    # A launch that failed, as its classification and detail: AWS refused it, no subnet offered its type, its first
+    # leases were not all written, or it was never attempted; whether its host never reported by its boot deadline;
     # the instance as its cleanup last saw it; when the controller first stopped it, asking EC2 to terminate it or
     # finding it shutting down, in epoch seconds, which starts its leak clock; whether it leaked; and whether its
     # prefix was found a leftover.
@@ -2495,8 +2499,8 @@ class UnitWorker:
     terminate_requested: float = 0.0
     leaked: bool = False
     leftover: bool = False
-    # The group it runs, as its lease, the group, and when its latest heartbeat or group upload began the group, in
-    # epoch seconds.
+    # The group it runs, as its lease, the group, and when the group started, in epoch seconds, as the controller places
+    # it at the worker's latest progress (a heartbeat, a group upload, or the controller's adoption of its lease).
     group: tuple = None
     # Each work lease's steps so far, each by its name, in epoch seconds, for its trace: when it was leased, the host
     # started its first group, finished its latest, and uploaded it, and the controller accepted it.
@@ -3123,8 +3127,8 @@ class UnitDispatcher:
     def poll(self):
         """Follow every worker: list each live one's uploads and process them, and clean up each ended one, which
         takes no lease from then on, the workers' round trips on the request threads; then delete from S3 what
-        accepted groups and settled leases no longer need. Every live worker is judged as of when its uploads were
-        listed, since following one may wait for its completions to be gathered."""
+        accepted groups and settled leases no longer need. Every live worker is judged as of listed_at, one time
+        taken before the whole listing, since following one may wait for its completions to be gathered."""
         live, ended = self.partition()
         listed_at = time.time()
         for worker, objects in zip(live, self.concurrently(self.listing, live)):
@@ -3166,7 +3170,8 @@ class UnitDispatcher:
         return True
 
     def follow(self, worker, objects, listed_at):
-        """Process a live worker's uploads, listed at listed_at, and decide whether its host was lost as of then."""
+        """Process a live worker's uploads and decide whether its host was lost as of listed_at, the one time poll
+        took for its whole listing."""
         try:
             keys = set(objects)
             self.note_start(worker, keys)
@@ -3187,12 +3192,14 @@ class UnitDispatcher:
                            None)
             if worker.lost or current is None:
                 return
-            # The worker heartbeats as a lease starts and as each of its groups completes, so its running instance
-            # has stalled once the lease's unfinished groups outrun their lease timeout from its latest progress: its
-            # latest heartbeat, the upload of a group S3 lists complete or this controller saw finish, any of whose
-            # heartbeats may have been lost, or once the lease shows progress, when this controller adopted it, as
-            # an accepted group's uploads are gone. A lease with no progress, or none left to run, is not judged. A
-            # stalled worker is told to stop and terminated, and its cleanup still recovers a completion that lands.
+            # A running worker has stalled once its lease's unfinished groups outrun their lease timeout from its
+            # latest progress, the latest of:
+            # - its heartbeat, which it sends as a lease starts and as each of its groups completes;
+            # - the upload of a group S3 lists complete or this controller saw finish, since a heartbeat may be lost;
+            # - this controller's adoption of the lease, once it shows progress, since an accepted group's uploads
+            #   are gone.
+            # A lease with no progress, or none left to run, is not judged. A stalled worker is told to stop and
+            # terminated, and its cleanup still recovers a completion that lands.
             seconds = dict(self.items[worker.leases[current]].groups)
             finished = worker.finished.get(current, {})
             groups = worker.lease_groups[current]
@@ -3203,7 +3210,7 @@ class UnitDispatcher:
             if not (listed or finished) or not unfinished:
                 return
             progress = max(*listed, worker.steps.get(current, {}).get("uploaded", 0), worker.adopted_at)
-            # Its latest progress began the group it runs.
+            # The controller places the start of the group it runs at its latest progress.
             worker.group = (current, unfinished[0], progress)
             if listed_at - progress <= lease_timeout(sum(map(seconds.get, unfinished))):
                 return
@@ -3247,7 +3254,7 @@ class UnitDispatcher:
         return instance
 
     def ended(self, worker):
-        """Whether the worker's host is gone or going: AWS refused its launch, it never reported by its boot deadline,
+        """Whether the worker's host is gone or going: its launch failed, it never reported by its boot deadline,
         its instance is past running, or EC2 still lists none once its boot allowance is over."""
         if worker.launch_failure or worker.missed_boot:
             return True
@@ -3477,7 +3484,7 @@ class UnitDispatcher:
         """Leave unresolved the queued items no worker can take: past the deadline, or in a pool that gave up."""
         for pool in self.pools:
             if deadline_reached:
-                reason = f"{self.arguments.phase} campaign reached its wall-clock launch limit"
+                reason = f"{self.arguments.phase} campaign reached its launch deadline, its pauses excluded"
             elif self.gave_up(pool) and not self.pool_workers(pool):
                 reason = self.exhausted[pool]
             else:
@@ -4818,9 +4825,10 @@ def load_settings(arguments):
 
 
 def check_campaign_options(arguments):
-    """Record the options that decide what the campaign's phases measure, and the AWS account its settings' buckets
-    are in, or refuse a restart that changes them: the restart skips each completed phase, so it would measure
-    nothing under the new options."""
+    """Record the campaign's name, the options that decide what its phases measure, and the AWS account its settings'
+    buckets are in, or refuse a restart that changes them: the restart skips each completed phase, so it would
+    measure nothing under the new options. Control commands check the recorded name, and refuse a root that records
+    none, so none steers another campaign's root."""
     options = json.dumps({
         "campaign": arguments.campaign,
         "account": arguments.cloud.account(next(iter(live_settings(arguments)["regions"]))),
@@ -5390,8 +5398,8 @@ def control_parser():
     command.add_argument("--max-vcpus", type=int, required=True, help="the fleet's Spot vCPUs in the region")
     command.add_argument("--on-demand-max-vcpus", type=int, help="the fleet's On-Demand vCPUs in the region; "
                                                                  "without it, the region launches no On-Demand")
-    command.add_argument("--platforms", nargs="+", help="the platforms whose lists gain the region; every platform's "
-                                                        "by default")
+    command.add_argument("--platforms", nargs="+", help="the platforms whose lists gain the region, refused if any "
+                                                        "lacks an image there; every platform's by default")
     command = commands.add_parser("set-limit", help="set max-hosts, max-hosts-per-platform, max-usd, or "
                                                     "max-machine-hours N, or region REGION max-vcpus N")
     command.add_argument("limit", nargs="+")
@@ -5719,7 +5727,7 @@ def main():
 def plan_phase(arguments, root):
     """Plan a phase of one candidate: its work items, written to work-items.tsv in its result root, its kind, any
     language plans, the platforms, and its result root, kept on arguments with what its dispatch reads. A restarted
-    phase keeps the deadline its execution policy froze."""
+    phase keeps the limit on its running time, its pauses excluded, that its execution policy froze."""
     directory = Path(__file__).resolve().parent
     platforms = read_platforms(directory)
     if len(arguments.candidates) != 1:

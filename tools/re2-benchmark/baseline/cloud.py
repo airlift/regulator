@@ -32,15 +32,16 @@ class LaunchRejected(CloudError):
 
 
 class LaunchUnknown(CloudError):
-    """A launch failed every attempt without AWS refusing it, so an instance may exist; its tags find it."""
+    """A launch that may have launched an instance, which its tags find: AWS refused a resend, which it may do before
+    it looks at the token, or every attempt failed with no answer that proves nothing launched."""
 
 
-# The RunInstances errors that prove AWS launched nothing, by the kind of shortage each reports. Every request of a
-# launch carries its client token, which AWS answers with the instance it launched, so one of these proves it
-# whichever request it answers, though EC2 sends some as server errors, which botocore retries. Any other client
-# error but a throttle is a request AWS refused outright, which proves nothing launched only as the answer to the
-# first request, since AWS may refuse a resend before it looks at the token. Every other failure, a timeout or a
-# server error among them, is retried with the same client token.
+# The RunInstances errors that report a shortage, by its kind. Each proves AWS launched nothing whichever request it
+# answers, since every request of a launch carries its client token, which AWS answers with the instance it launched;
+# EC2 sends some as server errors, which botocore retries.
+# Any other client error but a throttle is AWS refusing the request outright. It proves nothing launched only as the
+# answer to the first request, since AWS may refuse a resend before it looks at the token.
+# Every other failure, a throttle, a timeout or a server error among them, is retried with the same client token.
 LAUNCH_REJECTIONS = {
     "InsufficientInstanceCapacity": "capacity", "UnfulfillableCapacity": "capacity",
     "InsufficientFreeAddressesInSubnet": "capacity",

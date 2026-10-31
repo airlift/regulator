@@ -315,7 +315,7 @@
     {
       "type": "stat",
       "title": "Finish past deadline",
-      "description": "Seconds each phase's finish falls after its launches end; red once past.",
+      "description": "Seconds each phase's finish falls after its launches end, or about the largest finite value while a pool with work left has no live host; red once past.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -507,7 +507,7 @@
     {
       "type": "stat",
       "title": "Phases paused",
-      "description": "Phases paused, by a fault or by Dain or the monitor.",
+      "description": "Phases paused, by the controller for a fault or by Dain.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

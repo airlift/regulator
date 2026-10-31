@@ -112,19 +112,18 @@ their ledgers record keys rather than derive them.
 The control host is reached through the company's existing Tailscale subnet
 router, which carries the dev VPC's private subnets onto the tailnet but
 forwards only tcp 443: Grafana through the internal load balancer at
-`https://<record>`, and ssh on port 443 at the host's private address.
-Nothing for access is installed on the host, and no key or tag is needed.
+`https://<record>`, and ssh on port 443 at the host's private address. Nothing
+for Tailscale is installed on the host, and no Tailscale key or tag is needed.
 ssh trusts a host's keys only once its console lists their fingerprints:
-`control-host known-host`, which `finish` and the monitor's `host` share,
-records those keys alone for the host's address. The
-VPC, the subnets the router carries, the ingress CIDR, the private DNS zone,
-the record name, and the security groups, load balancer, target group,
-listener and certificate the account setup creates are stored as one JSON SSM
-parameter,
+`control-host known-host`, which `finish` and the monitor's `host` both use,
+records only those keys for the host's address. The VPC, the subnets the router
+carries, the ingress CIDR, the private DNS zone, the record name, and the
+security groups, load balancer, target group, listener and certificate the
+account setup creates are stored as one JSON SSM parameter,
 `/regulator-benchmark/control-host-network` in us-west-2, created during
 account setup. The repository is public and names only the parameter.
-`../aws/README.md` documents the setup with the `dev` profile, as it does
-the buckets.
+`../aws/README.md` documents the setup with the `dev` profile, as it does the
+buckets.
 
 ### Launch a campaign
 
@@ -166,8 +165,11 @@ From the Mac, `run-campaign.py campaign <id> --execute --ssh-public-key PATH ...
    at once, as when one starts while a `replace` has deregistered the host it
    replaces, so each looks again once it registers its host, and one that
    finds another campaign's host there, or cannot register or look, deregisters
-   and terminates its own before its controller starts, and refuses. Everything
-   after this runs in AWS (principle 7).
+   and terminates its own before its controller starts, and refuses. Two
+   campaigns launched at the same moment can each find the other's host and
+   both back out, so never start two campaigns at once; if they back out,
+   start each again, one at a time. Everything after this runs in AWS
+   (principle 7).
 
 The campaign's frozen inputs (candidate archive, tables, plan bundles, JDK
 archives) are built on the control host and uploaded to each region's bucket
@@ -211,7 +213,7 @@ worth the AMI state.
 Hosts keep the CLI (`run-unit-worker.sh`, `run-host.sh`); they poll at a low
 rate and setup time is host time.
 
-- **Heartbeats at group boundaries only.** Today the worker heartbeats every
+- **Heartbeats at group boundaries only.** The worker heartbeated every
   30 s through the CLI, a full Python process, on a 2-vCPU host during
   measurement with no CPU pinning. It now uploads a heartbeat when a lease
   starts, when each group completes, and when it stops, retrying a failed one
@@ -228,14 +230,16 @@ rate and setup time is host time.
 - **Teardown without a controller.** A worker needs no controller to end: it
   stops at its idle stop, its lease stop time, or its 6-hour lifetime, powers
   off, and the instance terminates on shutdown. If the controller and the
-  control host die for good, every host finishes the lease it runs and the
-  one of slack, waits out its idle stop, and terminates. Worst case for 200
-  hosts: two 15-minute units at twice their estimate plus 10 idle minutes is
-  about 70 minutes; at the 29th's mix (91 r8i.large and 16 r9g.large at
-  $0.10, 76 r9g.2xlarge at $0.28, about $32 an hour) that is about $37, and
-  about $21 at the 40 minutes a typical lease and slack take. What remains
-  is S3 objects only, swept by the buckets' session lifecycle rule after a
-  day or by the next controller.
+  control host die for good, every host finishes the lease it runs and the one
+  of slack, waits out its idle stop, and terminates; a host whose groups hang
+  powers off at its stop time instead. Worst case for 200 hosts: a host
+  admitted just before the controller died, whose two 15-minute units hang,
+  lasts its 20-minute boot allowance, both leases at twice their estimate, 10
+  idle minutes and 15 minutes of wind-down, about 105 minutes; at the 29th's
+  mix (91 r8i.large and 16 r9g.large at $0.10, 76 r9g.2xlarge at $0.28, about
+  $32 an hour) that is about $56, and about $21 at the 40 minutes a typical
+  lease and slack take. What remains is S3 objects only, swept by the buckets'
+  session lifecycle rule after a day or by the next controller.
 
 ### The scheduler loop
 
@@ -258,9 +262,10 @@ One loop, target under 30 s, every action a round trip:
 4. **Shares.** Each running phase's target = its weight among running phases
    by corrected seconds left, over `max_hosts`, with the per-platform cap
    applied in the same allocation. A pinned share overrides. A phase above
-   its target gives up hosts while another phase waits for them, or while the
-   hosts held pass `max_hosts` or the per-platform cap, as once one is
-   lowered; it stop-leases idle workers first and never interrupts a lease.
+   its target gives up hosts while another phase waits for them, which
+   redistributes them, while its share is pinned, or while the hosts held pass
+   `max_hosts` or the per-platform cap, as once one is lowered. It stop-leases
+   idle workers first and never interrupts a lease.
    While it gives them up it launches no host past its target, so each host
    it gives up goes to the phase waiting for it, by the loop after the host
    ends, rather than back to it. A draining phase gives up the open hosts a
@@ -276,12 +281,11 @@ One loop, target under 30 s, every action a round trip:
 **Lost and stalled hosts.** A host whose instance is no longer pending or
 running is lost at once: its started lease is requeued and its unstarted one
 released, as today. A running host whose lease has passed its timeout
-(twice its unfinished groups' estimate) since its latest heartbeat or group
-completion, whichever is later, is stalled: it gets a stop lease and is
-terminated, and its lease is requeued. A completion S3 lists counts before
-it is accepted, and a restarted controller gives a lease that shows progress
-one timeout from its adoption. The heartbeat ages of 10 and 30
-minutes go.
+(twice its unfinished groups' estimate) since its latest progress (a
+heartbeat, a group upload, or its adoption) is stalled: it gets a stop lease
+and is terminated, and its lease is requeued. A group upload S3 lists counts
+before it is accepted, and a restarted controller's adoption counts only for
+a lease that shows progress. The heartbeat ages of 10 and 30 minutes go.
 
 **Boot window.** Hosts launched but not yet reporting are capped
 campaign-wide: 10 at first, doubling after each wave whose hosts all
@@ -389,15 +393,15 @@ Live, in `campaign-settings.json` at the campaign root, changed only by the
 `FleetBudget` stays as the durable reservation ledger; its limits read the
 settings and its frozen-policy check goes. Each settings change is an event
 naming its actor: Dain, the monitor, or the controller (which changes only
-phase states and the boot window). `control` takes `--actor dain|monitor`;
-without it the command refuses, so no change is anonymous. Only Dain sets
-`authorized` and `hourly_rates`: the settings refuse a change to either by
-any other actor. The monitor runs only the commands the authority table
-grants it, `set-limit`, `add-region` and `resume`, which the settings take
-from the monitor only for a phase the controller paused for a fault, as the
-phase's `by` records; `control` refuses every
-other command, `stop`, `clear-spending-stop` and `authorize` among them, with
-`--actor monitor`.
+phase states, the boot window and the spending stop). `control` takes
+`--actor dain|monitor`; without it the command refuses, so no change is
+anonymous. Only Dain sets `authorized` and `hourly_rates`: the settings refuse
+a change to either by any other actor. The monitor runs only the commands the
+authority table grants it: `set-limit`, `add-region` and `resume`. The
+settings take a `resume` from the monitor only for a phase the controller
+paused for a fault, as the phase's `by` records. With `--actor monitor`,
+`control` refuses every other command, `stop`, `clear-spending-stop` and
+`authorize` among them.
 
 ### Campaign roots of the old driver
 
@@ -417,10 +421,13 @@ in a new root.
 
 `run-campaign.py control <root> --campaign <campaign> <command>` runs on the
 control host; from the Mac it is the same command over ssh on port 443
-through the subnet router. It refuses a root whose controller recorded
-another campaign in `campaign-options.json` as it started. Each takes the
-lock, validates, bumps the version and logs the event with its actor; the
-new version takes effect only once its event is logged.
+through the subnet router. `--campaign <campaign>` is required, and refused
+unless the root's controller recorded that campaign in
+`campaign-options.json` as it started, so a command meant for one campaign
+never steers another's root. Each takes the lock and validates. One that
+changes the settings, and every reopen, bumps the version and logs the event
+with its actor; one that changes nothing says the settings already hold it.
+The new version takes effect only once its event is logged.
 
 - `add-region <region> --max-vcpus N [--on-demand-max-vcpus N] [--platforms ...]`:
   creates the region's bucket if absent with the same lifecycle rule, uploads
@@ -429,15 +436,15 @@ new version takes effect only once its event is logged.
   anything, a platform `platform-regions.tsv` lists no image for in the region.
 - `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`,
   `set-limit region <r> max-vcpus N`
-
-A raised or new region vCPU limit is checked against the region's Standard
-quota after its reserve, the check each phase's setup makes, and refused when
-the quota cannot hold it, so no phase starts under a limit it would refuse.
 - `pause <phase> [--reason]`, `resume <phase>`, `drain <phase>`
 - `set-share <phase> N|auto` (how hosts move between phases)
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand`
 - `clear-spending-stop`, `stop`, `reopen` (an ended campaign)
 - From the Mac: `control-host replace`, `finish`, `teardown` (below).
+
+A raised or new region vCPU limit is checked against the region's Standard
+quota after its reserve, the check each phase's setup makes, and refused when
+the quota cannot hold it, so no phase starts under a limit it would refuse.
 
 ### Telemetry: one health path
 
@@ -499,7 +506,7 @@ the spending stop.
 |---|---|
 | `control-host replace` once, when the controller or host is dead and systemd has given up after crashes, or never got its unit | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
-| Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
+| Raise `max_hosts`, `max_hosts_per_platform`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
 | Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
 
@@ -508,7 +515,7 @@ The runbook is an agent instruction file written with `writing-for-agents`.
 ### Finish and teardown
 
 The control host outlives the campaign. After every chain completes, after a
-spending stop, and after a failure, the controller writes its marker and the
+campaign stop, and after a failure, the controller writes its marker and the
 host keeps serving Grafana so Dain can see what happened; idle it costs a few
 dollars a day. A controller refuses to start on a root with the marker, so a
 reboot or a replaced host never runs an ended campaign again, and `control`

@@ -8,7 +8,9 @@ set -euo pipefail
 # the group it interrupts. Each work lease names the host's new stop time, which
 # the worker records for the host's power-off. The worker heartbeats only as a
 # lease starts, as each of its groups completes, and as it stops or is
-# interrupted; the controller judges a silent host by its instance's state.
+# interrupted. The controller judges a running lease stalled from its latest
+# progress (a heartbeat, a group upload, or its adoption), and a silent host
+# otherwise by its instance's state.
 # aws/README.md "Unit workers" specifies the S3 keys, schemas, and stop rules.
 
 if [[ $# -ne 2 ]]; then
@@ -238,7 +240,8 @@ heartbeat()
           timestamp: $timestamp, stop_reason: (if $stop_reason == "" then null else $stop_reason end)}' \
         > "${file}"
     # A failed heartbeat is retried as an upload is, since the controller
-    # judges a running lease stalled from its latest one.
+    # judges a running lease stalled from its latest progress (a heartbeat, a
+    # group upload, or its adoption).
     if ! put_verified "${file}" "${RESULT_PREFIX}/heartbeat/${sequence}.json" 0 replace; then
         echo "Heartbeat upload failed for lease ${sequence}" >&2
     fi

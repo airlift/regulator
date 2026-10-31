@@ -206,7 +206,7 @@ Reservations remain until verified cleanup, which charges the host's actual
 hours; crashes never expire them, and one past its stop time counts as spent
 to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
-A fault while the controller recovers or dispatches a phase's hosts, through
+A fault while the controller sets up, recovers or dispatches a phase, through
 changed frozen inputs, a completion marker unlike its lease, conflicting
 accepted identities, a ledger error, or any other error, pauses that phase
 alone, as [steering a campaign](#steer-a-campaign) describes, and the other
@@ -539,12 +539,13 @@ runs its semantic verifiers, and CI runs the full suite.
 controller process: build, smoke, primary, the reduction of its primary, and a
 confirmation of the jobs that reduction lists, if any. Each candidate starts a
 phase as soon as its own previous phase completes, and a failed phase stops
-only its own candidate's later phases. A fault while the controller recovers
-or dispatches a phase's hosts pauses only that phase, as
-[steering a campaign](#steer-a-campaign) describes. With `--language-plan`,
-each candidate also runs the plan's smoke and primary on its build; the
-command refuses plans its language phases would refuse, such as two plans of
-one shard, before it freezes anything.
+only its own candidate's later phases. A fault while the controller sets up,
+recovers or dispatches a phase pauses only that phase, as [steering a
+campaign](#steer-a-campaign) describes; an exception in a reduction fails its
+phase instead, so its candidate's later phases never start. With
+`--language-plan`, each candidate also runs the plan's smoke and primary on its
+build; the command refuses plans its language phases would refuse, such as two
+plans of one shard, before it freezes anything.
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
@@ -562,32 +563,35 @@ Every candidate's `tools/re2-benchmark` tree must be the controller's committed
 one, so `before=main` works only while `main` carries the same benchmark
 tooling as the checkout running the controller.
 
-The first execution seeds the campaign's [settings](#shared-fleet-budget)
-from `--settings`, and every candidate's phases share them. The running phases
-share the settings' `max_hosts` and `max_hosts_per_platform`, and their shares
-follow the work left, set again every poll. The hosts are
-split across platforms by the corrected seconds left in each platform's work
-items not yet accepted, as `status` computes them below, and a platform's
-hosts among its phases the same way. No platform takes more than its limit,
-and no phase more hosts on a platform than its work items left there, since a
-host runs one at a time. Every platform, and every phase on it, with work left first takes one host while
-hosts last, so a build, whose items carry no estimate, runs beside the
-others. A phase holding more hosts than its share keeps them, and the others
-grow only into hosts the limits leave free, so a language primary, most of a
-release campaign's work, takes most of the hosts as they free up beside the
-baseline's primary. Once the limits leave no host free for a phase below its
-target, a phase above its own gives up the hosts past it: it stop-leases its
-idle workers first, then those holding the least work, each behind the leases
-it holds, so no lease is interrupted, and launches none past its target
-meanwhile, so each host it gives up goes to the phase waiting for it once the
-host ends. A draining phase's hosts go on taking its work, so once a lowered
-limit leaves more open hosts than it allows, the
-draining phases give up, the same way, those the launching phases' do not
-cover. Hosts move only while a phase waits for them, so the shares' changes as
-the work left is corrected move none on their own. A phase's share is never frozen, and the controller records each phase's
-state, `pending`, `running`, `paused` with its fault, `complete`, or `failed`,
-in the settings' `phases`, where `since` records when each phase took its
-state, at the time the change's event records.
+The first execution seeds the campaign's [settings](#shared-fleet-budget) from
+`--settings`, and every candidate's phases share them. The running phases share
+the settings' `max_hosts` and `max_hosts_per_platform`, and their shares follow
+the work left, set again every poll. The hosts are split across platforms by
+the corrected seconds left in each platform's work items not yet accepted, as
+`status` computes them below, and a platform's hosts among its phases the same
+way. No platform takes more than its limit, and no phase more hosts on a
+platform than its work items left there, since a host runs one at a time. Every
+platform, and every phase on it, with work left first takes one host while
+hosts last, so a build, whose items carry no estimate, runs beside the others.
+A phase holding more hosts than its share keeps them, and the others grow only
+into hosts the limits leave free, so a language primary, most of a release
+campaign's work, takes most of the hosts as they free up beside the baseline's
+primary. Once the limits leave no host free for a phase below its target, a
+phase above its own gives up the hosts past it, which redistributes them: it
+stop-leases its idle workers first, then those holding the least work, each
+behind the leases it holds, so no lease is interrupted, and launches none past
+its target meanwhile, so each host it gives up goes to the phase waiting for it
+once the host ends. A phase gives up hosts the same way whether or not another
+phase waits in two more cases: past its pinned share, and while the hosts held
+pass `max_hosts` or `max_hosts_per_platform`, as once one is lowered. A
+draining phase's hosts go on taking its work, so once a lowered limit leaves
+more open hosts than it allows, the draining phases give up, the same way,
+those the launching phases do not cover. Otherwise hosts move only while a
+phase waits for them, so the shares' changes as the work left is corrected move
+none on their own. A phase's share is never frozen, and the controller records
+each phase's state, `pending`, `running`, `paused` with its fault, `complete`,
+or `failed`, in the settings' `phases`, where `since` records when each phase
+took its state, at the time the change's event records.
 
 ### Control host
 
@@ -608,17 +612,19 @@ terminated, or that EC2 no longer lists, serves none and does not count;
 `replace` and `teardown` deregister it whatever its campaign. Each looks again
 once it registers its host, and backs out, terminating that host, if another
 campaign's launch registered one meanwhile, or if AWS answers the
-registration or the look with an error. The host's user data,
-`control-host/user-data.sh`:
+registration or the look with an error. Two campaigns launched at the same
+moment can each find the other's host and both back out, so never start two
+campaigns at once; if they back out, start each again, one at a time. The
+host's user data, `control-host/user-data.sh`:
 
 - installs the key `--ssh-public-key` names for `ec2-user`, and has sshd
   listen on port 443 beside 22, since the subnet router forwards only 443;
 - mounts the volume, formatting it the first time, and puts the campaign root
   at `/regulator/campaign`;
 - unpacks the launch inputs onto the volume the first time: the controller's
-  command, the candidate commits, the settings, and the language plans,
-  beside their place and then moved into it whole, so a first boot
-  interrupted while unpacking leaves them for the next host to unpack;
+  command, the candidate commits, the settings, and the language plans. They
+  are unpacked beside their place and then moved into it whole, so when a
+  first boot is interrupted while unpacking, the next host unpacks them again;
 - fetches the candidate commits from GitHub and checks out the first, whose
   benchmark tooling every candidate shares, over whatever a boot that ended
   while git ran left: its stale locks and its index, which may be cut short,
@@ -674,14 +680,15 @@ panels by their titles every 15 minutes and steers through
 
 Grafana is then `https://<record>` across replacements, through the subnet
 router and the load balancer. ssh reaches the host on port 443 at its private
-address, which the launch prints and a replacement changes; Session Manager is
-the shell when the router is down. ssh trusts a host's keys only once its
-console lists their fingerprints: `control-host known-host <campaign>` records
-the keys the host serves whose fingerprints its console lists in
-`~/.ssh/regulator-control-hosts`, replacing any an earlier host at the address
-had, under a lock beside it, so commands recording keys at once take turns,
-and prints the address; it refuses a host that serves none of them, and
-one whose console lists none yet, as for a minute or two after its launch.
+address. The launch prints that address, and a replacement changes it. Session
+Manager is the shell when the router is down. ssh trusts a host's keys only
+once its console lists their fingerprints. `control-host known-host <campaign>`
+records in `~/.ssh/regulator-control-hosts` the keys the host serves whose
+fingerprints its console lists, replacing any that an earlier host at the
+address had, and prints the address. It holds a lock beside the file, so
+commands recording keys at the same time take turns. It refuses a host that
+serves none of those keys, and one whose console lists none yet, as for a
+minute or two after its launch.
 `GlobalKnownHostsFile=/dev/null` and `KnownHostsCommand=none` keep ssh from
 trusting a key the system's known-hosts file or a command its configuration
 names would. ssh logs in with the private key of the launch's
@@ -700,10 +707,11 @@ ssh -p 443 -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=y
 
 The host outlives its campaign. To replace it, for instance once it fails,
 terminate it and launch another onto the campaign's volume, in the volume's
-zone, once the volume is free, which unpacks nothing again. A new host the
-volume cannot attach to has its termination requested, and the replacement can
-be run again; one whose termination request also fails is named with both
-errors, its termination unconfirmed, and the next replacement terminates it:
+zone, once the volume is free. The new host unpacks nothing again, unless the
+launch inputs were never installed. A new host the volume cannot attach to
+has its termination requested, and the replacement can be run again; one
+whose termination request also fails is named with both errors, its
+termination unconfirmed, and the next replacement terminates it:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
@@ -775,9 +783,14 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   records, in it, each verified by its SHA-256, and then adds the region,
   listed for the platforms named, or for every platform. The running phases
   launch there once their [check](#launch-regions-and-purchase) passes.
+  Before creating anything it refuses a platform with no image in the region
+  in `platform-regions.tsv` (so the every-platform default fails if any lacks
+  one), and a vCPU limit the region's quota cannot hold after its reserve.
 - `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`
   and `set-limit region <region> max-vcpus N` change a limit, which must be
-  positive and below 2^63 so its gauge exports.
+  positive and below 2^63 so its gauge exports. A raised region limit is
+  refused when the region's Standard quota cannot hold it after its reserve,
+  the check each phase's setup makes.
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand` changes how a
   platform buys hosts.
 - `set-share <phase> N|auto` pins a phase, named by its key in the settings'
@@ -785,16 +798,17 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   phases sharing by work left; above its pin it gives up hosts as above
   whether or not another phase waits. `auto` returns it to its share by work
   left.
-- `pause <phase> [--reason TEXT]` leases and launches nothing for a running
-  or draining phase: its running leases, and the leases its workers already
-  hold, finish, and its workers stop at their idle stop. `drain <phase>`
-  launches nothing for it, while its live workers take its queued work until
-  they stop. `resume <phase>` runs a paused or draining phase again. The
-  settings record who paused or drained a phase as its `by`, a pause's
-  `reason`, and the seconds its ended pauses lasted as its `paused_seconds`.
-  A restart keeps a phase paused or draining. A pause spends none of the
-  phase's deadline, even one made and resumed while no controller ran; time
-  with no controller and no pause spends it.
+- `pause <phase> [--reason TEXT]` leases and launches nothing for a running or
+  draining phase: its running leases, and the leases its workers already hold,
+  finish, and its workers stop at their idle stop. `drain <phase>` launches
+  nothing for it, while its live workers take its queued work until they stop.
+  `resume <phase>` runs a paused or draining phase again; a phase paused for a
+  fault is set up again once the completions its paused dispatch was gathering
+  are gathered. The settings record who paused or drained a phase as its `by`,
+  a pause's `reason`, and the seconds its ended pauses lasted as its
+  `paused_seconds`. A restart keeps a phase paused or draining. A pause spends
+  none of the phase's deadline, even one made and resumed while no controller
+  ran; time with no controller and no pause spends it.
 - `clear-spending-stop` admits launches and lease extensions again after a
   [spending stop](#recovering-uploads-during-cleanup).
 - `stop [--reason TEXT]` stop-leases every worker, each behind the leases it
@@ -802,38 +816,45 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   controller with status 0; the phases keep their queued work. A restart of a
   stopped campaign that has not ended only stops the hosts an earlier
   controller left.
-- `reopen` lets an ended campaign's controller start again: it clears any
-  stop and records its event whether or not there was one, and then, under
-  the settings lock the controller writes the list under, deletes
-  `campaign-files.sha256`, so `finish` waits for the list the next controller
-  writes as it ends, and a second reopen finds the campaign not ended. One
-  interrupted before it deletes the list is run again. Start the controller again with
+- `reopen` lets an ended campaign's controller start again: it clears any stop
+  and records its event whether or not there was one, and then, under the
+  settings lock the controller writes the list under, deletes
+  `campaign-files.sha256`, so `finish` refuses until the next controller
+  writes the list again as it ends, and a second reopen is refused, since the
+  campaign has not ended. One interrupted before it deletes the list is run
+  again. Start the controller again with
   `sudo systemctl restart regulator-campaign@<campaign>` on the host.
 - `authorize max-hosts N`, `authorize max-usd N`, and
   `authorize regions <region>...` set the `authorized` envelope, which only
-  `--actor dain` changes, as only Dain changes `hourly_rates`. The monitor
-  runs only `set-limit`, `add-region` and `resume`, and resumes only a phase
-  the controller paused for a fault, never one Dain paused or drained. It
-  raises `max_hosts`,
-  `max_hosts_per_platform`, and `max_usd` only within it, and a region's vCPUs
-  only in its regions, where admission still holds the fleet within the
-  region's quota after its reserve; it never raises `max_machine_hours`, which
-  the envelope does not name. Any actor may lower a limit.
+  `--actor dain` changes, as only Dain changes `hourly_rates`.
+
+The monitor runs only `set-limit`, `add-region` and `resume`; with
+`--actor monitor`, `control` refuses every other command. The monitor resumes
+only a phase the controller paused for a fault, never one Dain paused or
+drained. It raises `max_hosts`, `max_hosts_per_platform`, and `max_usd` only
+within `authorized`, and a region's vCPUs only in its regions, where admission
+still holds the fleet within the region's quota after its reserve. It never
+raises `max_machine_hours`, which the envelope does not name. Any actor may
+lower a limit.
 
 The controller pauses a phase itself for a fault in its dispatch, logging
-`<phase>: paused: <fault>` and recording the fault as the phase's `reason`
-and itself as its `by`, unless Dain had paused or drained the phase, which
-stays his to resume.
-It trusts nothing more the phase's hosts report and only proves each one's
-cleanup as it stops at its idle stop. `resume` restarts the phase's dispatch
-from its ledgers, as a restarted controller would, and the phase pauses again
-while its fault stands. A check of its setup that fails, as when a region's
-quota no longer holds its limit, pauses it the same way: its hosts, rebuilt
-from its ledgers, count against the limits until each one's cleanup is
-proven. So does a recovery of its dispatch that fails, as on a ledger it
-cannot read: the hosts the fleet reserves for it keep `stop` from ending
-the campaign until a `resume` recovers them and proves their cleanup. The controller keeps running while a phase is paused for a fault;
-`stop` ends the campaign.
+`<phase>: paused: <fault>` and recording the fault as the phase's `reason` and
+itself as its `by`, unless Dain had paused or drained the phase, which stays
+his to resume. It trusts nothing more the phase's hosts report but that they
+booted: it reports each booting host that started to the boot window,
+stop-leases every open host once the campaign is stopping, goes on stopping
+the hosts it asked to terminate, proves each one's cleanup as it stops at its
+idle stop, and releases each reservation an admission that launched nothing
+left. A sweep that fails logs `<phase>: sweep failed: <error>` and is retried.
+`resume` restarts the phase's dispatch from its ledgers, as a restarted
+controller would, and the phase pauses again while its fault stands. A check
+of its setup that fails, as when a region's quota no longer holds its limit,
+pauses it the same way: its hosts, rebuilt from its ledgers, count against the
+limits until each one's cleanup is proven. So does a recovery of its dispatch
+that fails, as on a ledger it cannot read: the hosts the fleet reserves for it
+keep `stop` from ending the campaign until a `resume` recovers them and proves
+their cleanup. The controller keeps running while a phase is paused for a
+fault; `stop` ends the campaign.
 
 Each phase's setup, which plans its work items, checks its prerequisites and
 AWS, and uploads what its hosts read, runs on a setup thread, and a
@@ -905,14 +926,14 @@ reservation its controller has not seen report. Spend is the phase's completed
 hosts' cost plus the cost of its live hosts' hours so far; reserved is what
 their reservations hold beyond now. The finish is when the latest of the
 phase's pools, a platform's workers of one instance type, finishes its work
-left at its live hosts, as a local clock time. A pool's work left is the
-estimated seconds of its groups not yet accepted, of units not left
-unresolved, corrected by the ratio of measured to estimated seconds over its
-groups accepted so far, and the controller weights the phases' shares of the
-hosts by the same corrected seconds. A phase that is not complete runs, is
-paused with its reason, or drains, as the campaign's settings record it, while
-the campaign's controller does. Given a phase's root, the command reports that
-phase alone.
+left at its live hosts, as a local clock time, or unknown while a pool with
+work left has no live host. A pool's work left is the estimated seconds of its
+groups not yet accepted, of units not left unresolved, corrected by the ratio
+of measured to estimated seconds over its groups accepted so far, and the
+controller weights the phases' shares of the hosts by the same corrected
+seconds. A phase that is not complete runs, is paused with its reason, or
+drains, as the campaign's settings record it, while the campaign's controller
+does. Given a phase's root, the command reports that phase alone.
 
 With `--results`, the command reads each primary phase's accepted groups so
 far instead, or the given phase's, from the phase's retained group
@@ -1024,14 +1045,17 @@ not depend on the region.
   On-Demand.
 
 Neither is frozen. The controller reads both every loop. Each phase checks its
-platforms' regions when it starts, and a running phase checks them again
-whenever the settings' regions or a platform's list of them change, as
+platforms' regions when it starts. A running phase checks them again every day,
+and whenever the settings' regions or a platform's list of them change, as
 [`add-region`](#steer-a-campaign) does, so a campaign whose Spot capacity ran
 dry moves to other regions without a restart. A phase launches in a region
 only once its check there passed: the bucket's tag and region, the AMI, the
 worker type's offerings, the quota, and every archive its hosts read. A check
-that fails is logged, and the phase keeps launching where it did until the
-next change. Every result records its host's region and market.
+that fails is logged. It still puts the archives again in each region the
+phase launches in, one region at a time, so one region's failure leaves the
+others' archives fresh. The phase keeps launching where it did, and the check
+runs again at the next change or the next day. Every result records its host's
+region and market.
 
 For each Spot launch, the controller asks AWS for the Spot placement score of
 the worker type in every region of its platform's list that offers it, for the
@@ -1113,12 +1137,12 @@ preflight checks the tag and the bucket's region. A bucket holds two trees:
 
 - `shared/` holds the content-addressed archives described below, which
   every campaign reuses by key. The `ExpireSharedArchives` rule in
-  `bucket-lifecycle.json` expires an object seven days after its upload, and a
-  phase's region check, which a running phase repeats every day, or a region
-  `add-region` adds, puts an archive again once it is five days old, so an
-  archive outlives any phase that uses it. A check that fails still puts them
-  again in each region the phase launches in, each region on its own, so one
-  region's failure leaves the others' fresh.
+  `bucket-lifecycle.json` expires an object seven days after its upload. A
+  phase's region check, which a running phase repeats every day, uploads an
+  archive again once it is five days old, and so does `add-region` for the
+  region it adds, so an archive outlives any phase that uses it. A check that
+  fails still uploads the archives to each region the phase launches in, one
+  region at a time, so one region's failure leaves the others' fresh.
 - `campaigns/<campaign>/<session>/` holds each worker's leases and results.
   Cleanup removes the session's prefix, and the `ExpireCampaignSessions` rule
   expires what a lost controller leaves one day after it was written.
@@ -1217,8 +1241,9 @@ is large, each part checked by S3 against its own SHA-256; a multipart
 object's checksum is not the whole archive's, so the upload keeps the
 archive's SHA-256 in the object's `sha256` metadata, and hosts check the
 whole archive against its pin after download. A failed upload, such as one
-whose part waited 60 seconds for a read, is retried; the campaign stops after
-three failed attempts. The
+whose part waited 60 seconds for a read, is tried again, three attempts in all.
+When all three fail, a starting phase pauses, a running phase's region check
+fails as above, and `add-region` fails without adding the region. The
 [worker profile](#worker-profile) may read those archive keys, in addition to
 each worker's own input prefix. These archives are campaign inputs rather than
 worker resources, so worker cleanup leaves them in place for the lifecycle rule
@@ -1245,28 +1270,27 @@ in the worker's region with:
   time, and pinned identities, after the first line of
   `worker-user-data.sh`.
 
-A launch AWS refuses for capacity, a subnet with no free address among them,
-moves on to the region's next zone. A
-refused Spot launch, for capacity, quota, or price, is `retryable-spot`; an
-On-Demand one, for capacity or quota, is `retryable-capacity`; either has
-detail `launch-capacity:<code>`. Any other client error but a throttle, such
-as `UnauthorizedOperation` or `InvalidAMIID.NotFound`, is a request AWS will
-never grant: it is not sent again, and in either market fails as
-`retryable-infrastructure`. While its pool has a region it has not cooled in
-the market, the refusal is that region's, with detail
-`launch-region-refused:<code>: <message>`: it cools the region, as below, and
-spends none of the slot's replacements. Otherwise its detail is
+A launch AWS refuses for capacity, or for a subnet with no free address, moves
+on to the region's next zone. A refused Spot launch, for capacity, quota, or
+price, is `retryable-spot`; an On-Demand one, for capacity or quota, is
+`retryable-capacity`; either has detail `launch-capacity:<code>`. Any other
+client error but a throttle, such as `UnauthorizedOperation` or
+`InvalidAMIID.NotFound`, is a request AWS will never grant: it is not sent
+again, and in either market fails as `retryable-infrastructure`. While its pool
+has a region it has not cooled in the market, the refusal is that region's,
+with detail `launch-region-refused:<code>: <message>`: it cools the region, as
+below, and spends none of the slot's replacements. Otherwise its detail is
 `launch-infrastructure:<code>: <message>`, so the slot's replacements run out.
-A request whose answer never comes, a throttle or server error among them, is
-sent again with the same client token, so AWS launches at most one instance,
-and the controller then finds the instance by its session's tag. A refusal
-for capacity, quota, or price counts whichever request it answers, since AWS
-answers a request repeating the token of a launch that succeeded with its
-instance; EC2 sends capacity refusals as server errors, which botocore
+A request whose answer never comes, or that AWS throttles or answers with a
+server error, is sent again with the same client token, so AWS launches at most
+one instance, and the controller then finds the instance by its session's tag.
+A refusal for capacity, quota, or price counts whichever request it answers,
+since AWS answers a request repeating the token of a launch that succeeded with
+its instance; EC2 sends capacity refusals as server errors, which botocore
 retries. Any other refusal counts only when it answers the launch's first
-request, before any retry, botocore's own included; after one, the request
-sent before it may have launched the instance, so the controller looks for it
-by its tag too.
+request, before any retry, botocore's own included; after one, the request sent
+before it may have launched the instance, so the controller looks for it by its
+tag too.
 
 `worker-user-data.sh` starts the host's stop-time watchdog and startup
 timeline, waits for the profile's credentials, downloads and checks the frozen
@@ -1469,18 +1493,19 @@ lease of open work and no queued item is one it could take; work requeued later
 launches a worker by the same rule. Its stop lease records it as stopping, so it
 keeps its reservation and takes no work until its cleanup is verified.
 
-A worker whose launch found no capacity in any zone of its region, or no
-quota, cools that region for its pool's launches in that market for 15
-minutes, and the pool's new workers in that market launch in the list's other
-regions meanwhile. Such a refusal spends none of its slot's replacements. A
-region's refusal of the request cools it the same way, though it is no capacity
-shortage. While every region of the list cools, the pool tries every region
-again at once; a `spot-then-on-demand` pool whose Spot shortage has lasted its
-[bounded wait](#launch-regions-and-purchase) launches On-Demand instead, and
-Spot resumes in each region once its cool-down ends. Through a shortage in
-either market the pool tries one launch a loop in that market, until one of its
-workers there starts, so a pool AWS keeps refusing leaves the boot window to the
-others. A restarted controller forgets the cool-downs.
+A worker whose launch found no capacity in any zone of its region, or no quota,
+cools that region for its pool's launches in that market for 15 minutes, and
+the pool's new workers in that market launch in the list's other regions
+meanwhile. Such a refusal spends none of its slot's replacements. A region's
+refusal of the request cools it the same way, though it is no capacity
+shortage. While every region of the list cools, the pool clears its cool-downs
+and may launch in any of them again; a `spot-then-on-demand` pool whose Spot
+shortage has lasted its [bounded wait](#launch-regions-and-purchase) launches
+On-Demand instead, and Spot resumes in each region once its cool-down ends.
+Through a shortage in either market the pool tries one launch a loop in that
+market, until one of its workers there starts, so a pool AWS keeps refusing
+leaves the boot window to the others. A restarted controller forgets the
+cool-downs.
 
 The controller writes a worker's first lease before it launches the host, so
 the host finds its work waiting when its setup ends. It also writes the second

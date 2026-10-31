@@ -320,9 +320,9 @@ def teardown_refusal(aws, campaign, volume_id):
     if any(item.id == volume_id and not TEARDOWN_TAG.items() <= item.tags.items()
            for item in aws.volumes(REGION, tags(campaign))):
         return ""
-    return (f"campaign {campaign}'s teardown has begun on its volume {volume_id}, whose snapshot is its root's last "
-            f"copy, so no host replaces its own; finish the teardown with run-campaign.py teardown {campaign} "
-            "--confirm")
+    return (f"campaign {campaign}'s teardown has begun on its volume {volume_id}, whose snapshot is to be its root's "
+            f"last copy, so control-host replace starts no host on it; finish the teardown with run-campaign.py "
+            f"teardown {campaign} --confirm")
 
 
 def discard(aws, network, instance, registered):
