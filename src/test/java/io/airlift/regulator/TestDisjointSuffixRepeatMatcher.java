@@ -20,12 +20,14 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDisjointSuffixRepeatMatcher
@@ -58,9 +60,18 @@ public class TestDisjointSuffixRepeatMatcher
         values.add(new byte[] {'a', (byte) 0xED, (byte) 0xA0, (byte) 0x80, (byte) 0xC3, (byte) 0xA9, 'b', 'x'});
         values.add(new byte[] {'a', (byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, 'b', 'b', 'x'});
         values.add(new byte[] {'a', (byte) 0xC3, (byte) 0xA9, (byte) 0x80, 'b', 'x'});
-        // Classes of every non-ASCII character, and of some that include or exclude the surrogates.
+        // Classes of every non-ASCII character, and of some that include or exclude the surrogates,
+        // then Latin-1 classes, which read each byte as one character.
+        List<Map.Entry<String, ParseResult>> expressions = new ArrayList<>();
         for (String pattern : List.of("[a-q][^u-z]{3}x", "[ab][^x]{2}x", "[ab][^\\x{100}x]{2}x", "[ab][^\\p{Cs}x]{2}x")) {
-            ParseResult parsed = parse(pattern);
+            expressions.add(entry(pattern, parse(pattern)));
+        }
+        for (String pattern : List.of("[a-q][^u-z]{3}x", "[ab][^\\x{e9}x]{2}x", "[ab][^\\x{80}-\\x{ff}x]{2}x")) {
+            expressions.add(entry("Latin-1 " + pattern, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.LATIN1)));
+        }
+        for (Map.Entry<String, ParseResult> expression : expressions) {
+            String pattern = expression.getKey();
+            ParseResult parsed = expression.getValue();
             Prog program = Compiler.compile(parsed.regexp(), false, Re2.Options.DEFAULT_MAX_MEMORY);
             DisjointSuffixRepeatMatcher scanner = DisjointSuffixRepeatMatcher.analyze(parsed.regexp());
             assertThat(scanner).as(pattern).isNotNull();

@@ -39,9 +39,15 @@ public class TestOutlierSemantics
         Slice expression = utf8Slice("[a-q][^u-z]{80}x");
         int flags = JavaRegexp.Options.defaults().parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(expression, flags);
-        Re2 pattern = Re2.compileParsed(expression, parsed, flags);
-        assertThat(pattern.count(utf8Slice("b".repeat(100_000) + "x"))).isEqualTo(1);
-        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        Slice input = utf8Slice("b".repeat(100_000) + "x");
+        // RE2's Latin-1 mode and Rust's byte mode read [^u-z] one byte per character.
+        for (Re2 pattern : List.of(
+                Re2.compileParsed(expression, parsed, flags),
+                Re2.compile(expression, Re2.Options.latin1()),
+                RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)).re2())) {
+            assertThat(pattern.count(input)).isEqualTo(1);
+            assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        }
     }
 
     @Test

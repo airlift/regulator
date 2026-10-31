@@ -40,6 +40,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDfaFailureAtomicity
 {
+    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
+    // answer it without the DFA.
+    private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
+
     @Test
     public void testFailedExclusiveAdmissionReopensReaders()
             throws Exception
@@ -124,9 +128,7 @@ public class TestDfaFailureAtomicity
     private static void assertStateAllocationFailureIsAtomic(Dfa.DfaInstance.TestingFailurePoint failurePoint)
             throws Exception
     {
-        Re2 pattern = Re2.compile(
-                utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
         Slice input = wrappedBuffer(stateExplosionInput(16 * 1024));
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         dfa.failNextForTesting(failurePoint);
@@ -149,9 +151,7 @@ public class TestDfaFailureAtomicity
     private static void assertWarmCacheInsertionFailureIsAtomic()
             throws Exception
     {
-        Re2 pattern = Re2.compile(
-                utf8Slice("[a-q][^u-z]{80}x"),
-                Re2.Options.latin1().setMaxMemory(4L << 20));
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(4L << 20));
         Slice warmupInput = wrappedBuffer(stateExplosionInput(1_538));
         Slice input = wrappedBuffer(stateExplosionInput(16 * 1024));
         pattern.matcher(warmupInput).find();
