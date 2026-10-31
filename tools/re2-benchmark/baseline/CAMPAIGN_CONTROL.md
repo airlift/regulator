@@ -168,7 +168,11 @@ one bash process per host) is deleted. The controller launches with boto3:
    instance has measured nothing, so no replica-diversity or confirmation
    exclusion can apply to it; those rules only constrain later leases, by the
    instance ID the host reports. The boot deadline releases the leases of a
-   host that never boots, without spending an attempt.
+   host that never boots, without spending an attempt. A worker whose first
+   leases S3 did not all take is not launched: its launch fails as
+   `retryable-infrastructure`, and its slot's replacement tries again.
+   Workers admitted in a loop are launched even when a later admission
+   fails, so none stays recorded as starting without a launch.
 3. Calls `RunInstances` with user data naming the prefixes, the archives and
    the permanent profile, `InstanceInitiatedShutdownBehavior=terminate`, and
    tags the instance with campaign, phase, host epoch and session.

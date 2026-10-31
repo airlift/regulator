@@ -3906,6 +3906,46 @@ class TestUnitWorkers(unittest.TestCase):
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "records no tooling digest"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
 
+    def test_admitted_worker_launches_only_with_its_first_leases(self):
+        shards = ["trino-like-specialized"]
+        with self.subTest(scenario="leases denied"), tempfile.TemporaryDirectory() as temporary:
+            # S3 refuses every lease: no worker launches, each launch fails as infrastructure, and the pools give up.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            put = fleet.put
+
+            def deny_leases(region, bucket, key, body, **options):
+                if "/input/leases/" in key:
+                    raise cloud.CloudError("AccessDenied")
+                return put(region, bucket, key, body, **options)
+
+            fleet.put = deny_leases
+            with self.assertRaisesRegex(SystemExit, "unresolved units: .*exhausted their replacements"):
+                self.run_phase(Path(temporary), fleet, "smoke", shards, 2, 1)
+            self.assertEqual([], fleet.launches)
+            with (Path(temporary) / "results" / "job-attempts.tsv").open(newline="") as attempts:
+                outcomes = {(row["outcome"], row["detail"]) for row in csv.DictReader(attempts, delimiter="\t")
+                            if row["outcome"] != "starting"}
+            self.assertEqual({("retryable-infrastructure", RUN_CAMPAIGN.FIRST_LEASES_UNWRITTEN)}, outcomes)
+        with self.subTest(scenario="admission fails"), tempfile.TemporaryDirectory() as temporary:
+            # The disk refuses the second worker's starting record: the first, admitted before it, still launches
+            # with its leases.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            write_attempt = RUN_CAMPAIGN.write_attempt
+            starts = []
+
+            def full_disk(path, job, outcome, detail="-"):
+                if outcome == "starting":
+                    starts.append(job)
+                    if len(starts) == 2:
+                        raise OSError(28, "No space left on device")
+                write_attempt(path, job, outcome, detail)
+
+            with patch.object(RUN_CAMPAIGN, "write_attempt", side_effect=full_disk), \
+                    self.assertRaisesRegex(OSError, "No space left"):
+                self.run_phase(Path(temporary), fleet, "smoke", shards, 2, 1)
+            [launched] = fleet.hosts
+            self.assertEqual((starts[0].platform.name, [1, 2]), (launched.platform, sorted(launched.leases)))
+
     def test_boot_failures_pass_to_their_slots_replacements(self):
         shards = ["trino-like-specialized"]
         with self.subTest(scenario="half the boots fail"), tempfile.TemporaryDirectory() as temporary:
