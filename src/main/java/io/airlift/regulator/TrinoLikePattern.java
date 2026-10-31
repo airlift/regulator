@@ -52,6 +52,7 @@ public sealed class TrinoLikePattern
     private static final byte SHORT_EQUALS = 8;
     private static final byte SHORT_STARTS_WITH = 9;
     private static final byte SHORT_ENDS_WITH = 10;
+    private static final Slice PERCENT = Slices.utf8Slice("%");
     // Whether this JVM runs on aarch64. Generated LIKE picks how its literal searches hold their
     // constants by architecture, from the AWS measurements recorded in REGULATOR_DECISIONS.md.
     static final boolean AARCH64 = "aarch64".equals(System.getProperty("os.arch"));
@@ -141,6 +142,8 @@ public sealed class TrinoLikePattern
         }
     }
 
+    // The private copy of the source, or null for a simple ASCII pattern, whose source
+    // pattern() rebuilds from its literal and strategy.
     private final Slice pattern;
     private final int minimumSize;
     private final int maximumSize;
@@ -160,7 +163,7 @@ public sealed class TrinoLikePattern
             Matcher matcher,
             byte strategy)
     {
-        this.pattern = requireNonNull(pattern, "pattern is null");
+        this.pattern = pattern;
         this.minimumSize = minimumSize;
         this.maximumSize = maximumSize;
         this.prefix = requireNonNull(prefix, "prefix is null");
@@ -197,14 +200,14 @@ public sealed class TrinoLikePattern
     private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
     {
         requireNonNull(pattern, "pattern is null");
-        Slice patternCopy = pattern.copy();
         if (escapeCodePoint.isEmpty()) {
-            TrinoLikePattern simplePattern = tryCompileSimpleAscii(patternCopy);
+            TrinoLikePattern simplePattern = tryCompileSimpleAscii(pattern);
             if (simplePattern != null) {
                 return simplePattern;
             }
         }
 
+        Slice patternCopy = pattern.copy();
         List<Element> elements = TrinoLikeParser.parse(patternCopy, escapeCodePoint);
         int minimumSize = 0;
         int maximumSize = 0;
@@ -284,8 +287,7 @@ public sealed class TrinoLikePattern
                 encode(plan));
     }
 
-    // A compiled result retains `pattern` and slices of it, so a caller that keeps the result
-    // passes a private copy.
+    // A compiled result retains a copy of the literal alone, as pattern() rebuilds the rest.
     private static TrinoLikePattern tryCompileSimpleAscii(Slice pattern)
     {
         int patternLength = pattern.length();
@@ -310,45 +312,24 @@ public sealed class TrinoLikePattern
             }
         }
 
-        Slice literal = pattern.slice(literalStart, literalEnd - literalStart);
-        if (!leadingWildcard && !trailingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    literal.length(),
-                    literal,
-                    Slices.EMPTY_SLICE,
-                    null,
-                    EQUALS);
-        }
+        Slice literal = pattern.copy(literalStart, literalEnd - literalStart);
+        Slice prefix = Slices.EMPTY_SLICE;
+        Slice suffix = Slices.EMPTY_SLICE;
+        Matcher matcher = null;
+        byte strategy;
         if (!leadingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    -1,
-                    literal,
-                    Slices.EMPTY_SLICE,
-                    null,
-                    STARTS_WITH);
+            prefix = literal;
+            strategy = trailingWildcard ? STARTS_WITH : EQUALS;
         }
-        if (!trailingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    -1,
-                    Slices.EMPTY_SLICE,
-                    literal,
-                    null,
-                    ENDS_WITH);
+        else if (!trailingWildcard) {
+            suffix = literal;
+            strategy = ENDS_WITH;
         }
-        return new TrinoLikePattern(
-                pattern,
-                literal.length(),
-                -1,
-                Slices.EMPTY_SLICE,
-                Slices.EMPTY_SLICE,
-                new ContainsMatcher(literal, false),
-                CONTAINS);
+        else {
+            matcher = new ContainsMatcher(literal, false);
+            strategy = CONTAINS;
+        }
+        return new TrinoLikePattern(null, literal.length(), strategy == EQUALS ? literal.length() : -1, prefix, suffix, matcher, strategy);
     }
 
     // TrinoLikeKernelGenerator emits a copy of this method, with matchesComplex, as the entry of a
@@ -417,7 +398,26 @@ public sealed class TrinoLikePattern
     /// Returns a copy of the compiled pattern bytes.
     public Slice pattern()
     {
-        return pattern.copy();
+        if (pattern != null) {
+            return pattern.copy();
+        }
+        // A simple ASCII pattern is its literal with the wildcards its strategy implies.
+        return switch (strategy) {
+            case EQUALS, SHORT_EQUALS -> prefix.copy();
+            case STARTS_WITH, SHORT_STARTS_WITH -> concat(Slices.EMPTY_SLICE, prefix, PERCENT);
+            case ENDS_WITH, SHORT_ENDS_WITH -> concat(PERCENT, suffix, Slices.EMPTY_SLICE);
+            case CONTAINS -> concat(PERCENT, ((ContainsMatcher) matcher).literal, PERCENT);
+            default -> throw new IllegalStateException("not a simple ASCII strategy: " + strategy);
+        };
+    }
+
+    private static Slice concat(Slice first, Slice second, Slice third)
+    {
+        Slice result = Slices.allocate(first.length() + second.length() + third.length());
+        result.setBytes(0, first);
+        result.setBytes(first.length(), second);
+        result.setBytes(first.length() + second.length(), third);
+        return result;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
