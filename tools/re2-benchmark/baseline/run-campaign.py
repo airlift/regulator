@@ -2986,11 +2986,13 @@ class UnitDispatcher:
 
     def reconcile(self, worker, keys, fetch, classification=None):
         """Settle the worker's leases from its uploads; classification is that of an exited worker, whose leases are
-        settled from its last uploads at once."""
+        settled from its last uploads at once, as is a lease its interruption ended, whose completions are judged
+        before its interruption."""
         for sequence in sorted(worker.leases):
             if sequence in worker.settled or worker.leases[sequence] is None:
                 continue
-            if self.complete_groups(worker, sequence, keys, fetch, wait=classification is not None):
+            ended = classification is not None or interruption_key(sequence) in keys
+            if self.complete_groups(worker, sequence, keys, fetch, wait=ended):
                 continue
             if interruption_key(sequence) in keys:
                 if self.interruption_names_unit(worker, sequence, fetch):
