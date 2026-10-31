@@ -426,9 +426,11 @@ ssh with rsync, verifies the file list and SHA-256s against the
 controller's manifest, and writes the results directory the reduction and
 archive read today. It terminates nothing.
 
-`run-campaign.py teardown <campaign>` snapshots the volume, terminates the
-control host, deletes its DNS record and deletes the volume. Only Dain runs it. The snapshot is the
-last copy until Dain deletes it.
+`run-campaign.py teardown <campaign> --confirm` terminates the control host,
+snapshots the volume, deletes its DNS record, the volume and the Grafana
+parameters. The host goes first so the snapshot holds the root as the
+controller last wrote it. Only Dain runs it, and it refuses without
+`--confirm`. The snapshot is the last copy until Dain deletes it.
 
 ## Lower stakes before launch
 

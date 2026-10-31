@@ -264,3 +264,30 @@ def finish(aws, campaign, local_root, identity=None):
                          f"{f' and {len(problems) - 10} more' if len(problems) > 10 else ''}")
     print(f"pulled campaign {campaign}'s root into {local_root}: {len(root_files(local_root))} files match its "
           f"controller's {MANIFEST}", flush=True)
+
+
+def teardown(aws, campaign, confirm):
+    """Remove the campaign's control host for good, as only Dain does: terminate it, snapshot its volume, which is
+    then the campaign root's last copy, and delete the record where it names the host, the volume, and the Grafana
+    credentials."""
+    if not confirm:
+        raise SystemExit(f"teardown terminates campaign {campaign}'s control host and deletes its volume, keeping a "
+                         "snapshot; only Dain runs it, with --confirm")
+    found = network(aws)
+    volume = campaign_volume(aws, campaign)
+    # The host goes first, so the snapshot holds the root as its controller last wrote it.
+    hosts = live_hosts(aws, campaign)
+    if hosts:
+        aws.terminate(REGION, [host.id for host in hosts])
+        for host in hosts:
+            aws.wait(REGION, "instance_terminated", host.id)
+        aws.wait(REGION, "volume_available", volume.id)
+    snapshot = aws.create_snapshot(REGION, volume.id, tags(campaign))
+    aws.wait(REGION, "snapshot_completed", snapshot)
+    # The record names the host started last; one that names another address belongs to another campaign's host.
+    if not any([aws.change_record(REGION, found["zone"], "DELETE", found["record"], host.address)
+                for host in hosts if host.address]):
+        print(f"left {found['record']}, which names none of campaign {campaign}'s hosts", flush=True)
+    aws.delete_volume(REGION, volume.id)
+    aws.delete_parameters(REGION, grafana_parameters(campaign))
+    print(f"tore down campaign {campaign}'s control host; its root's last copy is snapshot {snapshot}", flush=True)

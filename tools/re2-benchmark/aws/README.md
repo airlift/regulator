@@ -566,6 +566,16 @@ offers alone, as `-i` does above:
 python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-identity ~/.ssh/id_ed25519
 ```
 
+Only Dain tears a control host down, once the campaign's root is pulled and
+nothing more is wanted from its Grafana. `teardown` terminates the host,
+snapshots the volume, which is then the root's last copy until Dain deletes
+it, and deletes the record where it still names the host, the volume, and the
+Grafana parameters. It refuses without `--confirm`:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py teardown <campaign> --confirm
+```
+
 ### Steer a campaign
 
 `control` changes a running campaign's settings, which its controller applies

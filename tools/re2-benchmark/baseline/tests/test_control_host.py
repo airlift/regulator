@@ -87,6 +87,24 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual({volume.id: new.id}, aws.attachments)
         self.assertEqual({("Z-test", "control.test"): new.address}, aws.records)
 
+    def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
+        aws = control_host_cloud()
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            inputs = Path(temporary) / "launch-inputs.tar.gz"
+            inputs.write_bytes(b"inputs")
+            control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
+            aws.parameters.update(dict.fromkeys(control_host.grafana_parameters("c"), "secret"))
+            [volume] = aws.region_volumes["us-west-2"]
+            # Only Dain tears a host down, and says so.
+            with self.assertRaisesRegex(SystemExit, "only Dain runs it, with --confirm"):
+                control_host.teardown(aws, "c", confirm=False)
+            self.assertEqual("running", aws.region_instances["us-west-2"][0].state)
+            control_host.teardown(aws, "c", confirm=True)
+        self.assertEqual("terminated", aws.region_instances["us-west-2"][0].state)
+        self.assertEqual([(volume.id, control_host.tags("c"))], aws.snapshots)
+        self.assertEqual(({}, []), (aws.records, aws.region_volumes["us-west-2"]))
+        self.assertEqual([control_host.NETWORK_PARAMETER], list(aws.parameters))
+
     def test_network_and_security_group_are_checked_before_anything_is_created(self):
         cidr = NETWORK["ingress_cidr"]
         for change, refusal in (
