@@ -368,9 +368,9 @@ class TestControlHost(unittest.TestCase):
             reachable = [False]
 
             def run(command, check=False, **options):
-                """ssh-keyscan of the host, which serves HOST_KEY, ssh to the host, which fails as ssh does until it
-                is reachable, and rsync, which copies the root over the local one and damages any file damaged
-                names."""
+                """Fake the commands finish runs: ssh-keyscan of the host, which serves HOST_KEY; ssh to the host,
+                which fails as ssh does until it is reachable; and rsync, which copies the root over the local one and
+                damages each file that damaged names."""
                 if command[0] == "ssh-keyscan":
                     self.assertEqual(["ssh-keyscan", "-p", "443", "-T", "15", "10.0.0.1"], command)
                     return subprocess.CompletedProcess(command, 0, f"# 10.0.0.1:443 SSH-2.0-OpenSSH_9.8\n"

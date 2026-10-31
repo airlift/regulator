@@ -179,8 +179,9 @@ def live_hosts(aws, campaign):
 
 
 def registered_hosts(aws, network):
-    """The hosts registered in the load balancer's target group, by ID, each with its Campaign tag, "" where it has
-    none, or None where it has terminated, or is gone from EC2's listing, as an hour after, so it serves no campaign."""
+    """The hosts registered in the load balancer's target group, by ID, each with its Campaign tag, or "" when it has
+    none. A host that has terminated, or that EC2 no longer lists, as about an hour after, has None, since it serves
+    no campaign."""
     registered = aws.registered_targets(REGION, network["target_group"])
     instances = {instance.id: instance for instance in aws.instances(REGION)}
     return {host: (instances[host].tags.get("Campaign", "")
@@ -196,7 +197,8 @@ def other_hosts(aws, network, campaign):
 
 
 def check_target_group(aws, network, campaign):
-    """Refuse to put the campaign's host in the load balancer's target group while another host is registered there."""
+    """Refuse to register the campaign's host in the load balancer's target group while another campaign's host is
+    registered there."""
     if others := other_hosts(aws, network, campaign):
         raise SystemExit(f"the load balancer forwards Grafana to {', '.join(others)}; one name serves one "
                          f"campaign, so tear that campaign's host down before starting campaign {campaign}'s")
@@ -255,7 +257,7 @@ def replace(aws, campaign, ssh_public_key):
 
 def start(aws, network, group, campaign, volume, ssh_public_key):
     """Start a control host in the network's subnet in the volume's zone, attach the volume, and register the host in
-    the load balancer's target group, unless another campaign's host is registered there too."""
+    the load balancer's target group. Back the host out if another campaign's host is registered there too."""
     zones = aws.subnet_zones(REGION, network["subnets"])
     subnet = next((subnet for subnet in network["subnets"] if zones[subnet] == volume.zone), None)
     if subnet is None:
@@ -290,10 +292,11 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
     if refusal:
         fate = discard(aws, network, instance, registered=False)
         raise SystemExit(f"{refusal}; its new control host {instance} {fate}")
-    # Another campaign's launch may have passed its check of the target group as this one did, as in the moment a
-    # replace leaves it without the host it replaces, so each looks again, and one that finds the other's host backs
-    # out before its controller starts. One that cannot tell backs out too, deregistering its host, since a
-    # registration whose answer was lost may have taken effect, and deregistering a host never registered is harmless.
+    # Another campaign's launch may have passed its own check of the target group at the same time as this one, as in
+    # the moment a replace leaves its campaign without a host. So each launch looks again once it registers, and one
+    # that finds the other's host backs out before its controller starts. A launch whose look fails backs out too and
+    # deregisters its host: a registration whose answer was lost may have taken effect, and deregistering a host never
+    # registered is harmless.
     try:
         aws.register_target(REGION, network["target_group"], instance, GRAFANA_PORT)
         others = other_hosts(aws, network, campaign)
@@ -304,8 +307,8 @@ def start(aws, network, group, campaign, volume, ssh_public_key):
                          f"run control-host replace {campaign} again") from error
     if others:
         fate = discard(aws, network, instance, registered=True)
-        raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, which was registered as "
-                         f"campaign {campaign}'s new control host {instance} was; one name serves one campaign, so "
+        raise SystemExit(f"the load balancer also forwards Grafana to {', '.join(others)}, registered at the same "
+                         f"time as campaign {campaign}'s new control host {instance}; one name serves one campaign, so "
                          f"that host {fate}; once the other campaign's host is torn down, run control-host replace "
                          f"{campaign}")
     print(f"control host {instance} runs campaign {campaign} at {address}\n"
@@ -359,8 +362,8 @@ def root_files(root):
 
 
 def write_manifest(root):
-    """Write the campaign root's manifest, each file's SHA-256 and path as sha256sum lists them, as its controller
-    ends, durably, as it marks the campaign ended."""
+    """Write the campaign root's manifest durably as its controller ends, which marks the campaign ended. It lists
+    each file's SHA-256 and path as sha256sum does."""
     temporary = root / f"{MANIFEST}.new"
     with temporary.open("w") as output:
         output.write("".join(f"{sha256_file(root / name)}  {name}\n" for name in root_files(root)))
@@ -410,8 +413,8 @@ def known_host(aws, campaign):
         raise SystemExit(f"no ssh host key campaign {campaign}'s control host at {host.address} serves matches a "
                          f"fingerprint its console {host.id} lists, so ssh to it is refused")
     KNOWN_HOSTS.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # Commands recording keys at once, as finish and known-host may, each rewrite the file from the one before, so
-    # each waits for the other, and stages its own copy.
+    # finish and known-host may record keys at the same time. Each rewrites the file from the version before it, so
+    # each waits for the other under the lock and stages its own copy.
     with locked(KNOWN_HOSTS.with_name(f"{KNOWN_HOSTS.name}.lock")):
         kept = [line for line in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.is_file() else [])
                 if line.split()[:1] != [name]]

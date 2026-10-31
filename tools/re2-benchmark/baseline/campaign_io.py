@@ -33,9 +33,9 @@ def locked(lock_path):
 
 
 def append_ledger(path, fields, row):
-    """Append one row to a TSV ledger durably. A new ledger gets its whole header before any row, a line break in a
-    value is written as a space, so each row is one line, and a row a crash tore before its line end is cut off
-    before the next is appended, so each line a ledger ends is a whole row."""
+    """Append one row to a TSV ledger durably. A new ledger gets its whole header before any row. A line break in a
+    value is written as a space, so each row is one line. A row a crash tore before its line end is cut off before
+    the next row is appended, so every complete line of a ledger is a whole row."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         write_ledger(path, (), fields)
@@ -56,8 +56,8 @@ def append_ledger(path, fields, row):
 
 
 def ledger_lines(path):
-    """A TSV ledger's lines, to read with csv: those its appends ended, without a row a crash tore before its line
-    end, which the next append cuts off, even within a character."""
+    """A TSV ledger's complete lines, for csv to read. A row a crash cut short before its line end, even inside a
+    multibyte character, is left out; the next append cuts it off."""
     data = path.read_bytes()
     return io.StringIO(data[:data.rfind(b"\n") + 1].decode(), newline="")
 
