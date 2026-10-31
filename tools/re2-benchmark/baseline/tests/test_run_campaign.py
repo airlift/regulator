@@ -581,7 +581,7 @@ class TestRunCampaign(unittest.TestCase):
             errors = io.StringIO()
             with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as failed:
                 run()
-            self.assertEqual(RUN_CAMPAIGN.control_host.FAILED_PHASES_EXIT, failed.exception.code)
+            self.assertEqual(RUN_CAMPAIGN.control_host.ENDED_EXIT, failed.exception.code)
             self.assertIn("failed phases:\na/smoke: campaign completed with unresolved", errors.getvalue())
             # Having ended, the controller lists every file of the root for finish to check its copy against.
             self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
@@ -611,6 +611,17 @@ class TestRunCampaign(unittest.TestCase):
                 row["actor"] for row in csv.DictReader((campaign_root / EVENTS).read_text().splitlines(),
                                                        delimiter="\t") if row["change"] != "seed"}))
 
+            # The ended campaign never starts again, as on a reboot or a replaced host, until Dain reopens it.
+            with self.assertRaisesRegex(SystemExit, "campaign tournament has ended"):
+                run()
+            self.assertEqual([], events)
+
+            def reopen():
+                with contextlib.redirect_stdout(io.StringIO()):
+                    RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
+                        [str(campaign_root), "--campaign", "tournament", "--actor", "dain", "reopen"]), FakeCloud())
+
+            reopen()
             # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
             # listed on the shards it measured.
             failing.clear()
@@ -623,6 +634,7 @@ class TestRunCampaign(unittest.TestCase):
                              (confirmation.confirmation_jobs, confirmation.selected_shards))
             # A restart measures what the campaign started measuring, of the candidates it started with, with the
             # Spot vCPU reserve it started with, in the AWS account it started in, as the campaign it started as.
+            reopen()
             with self.assertRaisesRegex(SystemExit, "candidates differ"):
                 run(names=("a",))
             for option, value in (("selected_shards", None), ("spot_vcpu_reserve", 16), ("account_id", "1" * 12),
@@ -1578,11 +1590,8 @@ class TestRunCampaign(unittest.TestCase):
                     (["tournament", "--candidate", "a"], "--candidate takes one NAME=COMMITISH"),
                     (["tournament", "--candidate", "a/b=HEAD"], "--candidate takes one NAME=COMMITISH"),
                     (["tour/nament", "--candidate", "a=HEAD"], "candidate a's campaign ID must be"),
-                    # A campaign's first execution seeds its settings from the file it names. Executing it from the
-                    # Mac launches its control host, reached by the key given, and the host's unit runs the
-                    # controller itself.
-                    (["tournament", "--candidate", "a=HEAD", "--execute", "--controller"],
-                     "name them with --settings FILE"),
+                    # Executing a campaign from the Mac launches its control host, reached by the key given, and the
+                    # host's unit runs the controller itself.
                     (["tournament", "--candidate", "a=HEAD", "--execute"], "requires --ssh-public-key PATH"),
                     (["tournament", "--candidate", "a=HEAD", "--controller"], "it requires --execute"),
                     # The driver plans its language phases' units, so it refuses plans they would refuse.
@@ -1598,6 +1607,15 @@ class TestRunCampaign(unittest.TestCase):
                             contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as refused:
                         RUN_CAMPAIGN.main()
                     self.assertIn(refusal, f"{refused.exception}{errors.getvalue()}")
+            # A campaign's first execution seeds its settings from the file it names. A controller's refusal recurs
+            # on every start, so it exits with the status the host's unit does not restart.
+            errors = io.StringIO()
+            with patch.object(sys, "argv", ["run-campaign.py", "campaign", "tournament", "--candidate", "a=HEAD",
+                                            "--execute", "--controller", "--campaign-root", str(root / "refused")]), \
+                    contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as refused:
+                RUN_CAMPAIGN.main()
+            self.assertEqual(RUN_CAMPAIGN.control_host.ENDED_EXIT, refused.exception.code)
+            self.assertIn("name them with --settings FILE", errors.getvalue())
             self.assertFalse((root / "refused").exists())
             # A phase runs only inside its campaign's controller, and a second controller of a campaign stops at
             # once, before it freezes anything, while the first owns the campaign root.
@@ -1607,12 +1625,14 @@ class TestRunCampaign(unittest.TestCase):
                        "--settings", str(given)]
             for command, refusal in ((["smoke", "language", *execute], "a phase runs only inside its campaign's"),
                                      (["campaign", "language", *execute], f"owns campaign root {root}")):
+                errors = io.StringIO()
                 with self.subTest(refusal=refusal), patch.object(sys, "argv", ["run-campaign.py", *command]), \
                         RUN_CAMPAIGN.controller_lock(root), \
                         patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                         patch.object(RUN_CAMPAIGN, "validate_source") as setup, \
-                        self.assertRaisesRegex(SystemExit, refusal):
+                        contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as refused:
                     RUN_CAMPAIGN.main()
+                self.assertIn(refusal, f"{refused.exception}{errors.getvalue()}")
                 freeze.assert_not_called()
                 setup.assert_not_called()
             # A campaign root the earlier per-phase controllers started is refused, naming what shows it, and left

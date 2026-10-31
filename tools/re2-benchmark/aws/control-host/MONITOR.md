@@ -84,13 +84,21 @@ Each check runs on one **path**: the subnet router, through `host` and
    runs. A first line of `no live controller` means the campaign ended, when
    `/regulator/campaign/campaign-files.sha256` exists (go to
    [The end](#the-end)), or the controller is down. For a controller that is
-   down, read
-   `host systemctl status regulator-campaign@<campaign>`: a
-   unit still restarting is systemd's to finish, so check again next time; a
-   unit systemd has given up on (`failed`, or its start limit hit) means
-   replacing the host (see [Commands](#commands)). When `host` fails, go to
-   [Access failures](#access-failures) and run the check from here on the
-   Systems Manager path.
+   down, read `host systemctl status regulator-campaign@<campaign>` and keep
+   the last lines of its journal for the report,
+   `host journalctl -u regulator-campaign@<campaign> -n 50 --no-pager`:
+   - a unit still restarting is systemd's to finish, so check again next
+     time;
+   - a unit whose controller exited with status 3 and no
+     `campaign-files.sha256` refused to start, and starts no other way on a
+     new host, so ask Dain, with the journal's lines, and replace nothing;
+   - a unit systemd has given up on otherwise (`failed`, or its start limit
+     hit) means replacing the host once (see [Commands](#commands)). If the
+     new host's unit gives up too, ask Dain with both journals' lines; never
+     replace a host twice for one campaign without his answer.
+
+   When `host` fails, go to [Access failures](#access-failures) and run the
+   check from here on the Systems Manager path.
 2. **Health.** Read every panel of the Regulator health dashboard (see
    [Reading a panel](#reading-a-panel)) and mark each one red or green.
 3. **Act.** For each red panel, do what [Health panels](#health-panels) names,
@@ -116,7 +124,8 @@ reaches the host.
 ## The end
 
 A controller that ends, with every phase complete, some failed, or the
-campaign stopped, writes `campaign-files.sha256` and systemd leaves it ended.
+campaign stopped, writes `campaign-files.sha256` and systemd leaves it ended;
+a reboot or a replaced host refuses to start it again until Dain reopens it.
 Post the final update to Dain's thread, each phase's state from `status` and
 the Spend dashboard's Spend so far, then delete the scheduled task. Pulling
 the root and tearing the host down are Dain's.
@@ -185,7 +194,7 @@ on the host; read it with `host cat` before each raise.
 
 | The monitor may, unattended | The monitor must ask |
 |---|---|
-| `control-host replace` when the controller or host is dead and systemd has given up | Clear a spending stop |
+| `control-host replace` once, when the controller or host is dead and systemd has given up after crashes | Clear a spending stop; a second replacement; a controller that refused to start (status 3) |
 | Resume a phase paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause |
 | Raise `max_hosts`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
