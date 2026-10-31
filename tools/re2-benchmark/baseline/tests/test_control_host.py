@@ -194,7 +194,11 @@ class TestControlHost(unittest.TestCase):
         self.assertIn(f"\nEnvironmentFile={control_host.INPUTS}/controller.env\n", campaign)
         self.assertIn(f"\nWorkingDirectory={control_host.INPUTS}/checkout\n", campaign)
         self.assertIn(f"\nRestartPreventExitStatus={control_host.FAILED_PHASES_EXIT}\n", campaign)
+        # The controller exports to the collector's OTLP/HTTP port, which answers only the host itself.
+        self.assertIn("\nEnvironment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318\n", campaign)
         self.assertIn('systemctl enable --now "regulator-campaign@${CAMPAIGN}.service"', user_data)
+        # The host keeps Dain's local time, which the controller's events and status over ssh print.
+        self.assertIn("\ntimedatectl set-timezone America/Los_Angeles\n", user_data)
         # The campaign root records Grafana's URL for the status command.
         self.assertIn(f'> "${{MOUNT}}/campaign/{control_host.GRAFANA_URL_FILE}"', user_data)
         # Grafana answers the router on port 3000 with anonymous access off, OTLP answers only the host itself, the
