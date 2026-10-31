@@ -288,8 +288,10 @@ has two parts, instance and prefix, instead of instance, profile, role,
 bucket and wrapper exit. An instance still not terminated 15 minutes after
 the request is a **leak**: spending stop and alert. A prefix that will not
 empty is a **leftover**: alert, retried each loop; the host is dead and the
-controller is the only other writer, so it is never a halt. The budget's
-reservation is released at verified cleanup as today.
+controller is the only other writer, so it is never a halt. A worker whose
+host has ended takes no further lease while its cleanup is proven, so the
+controller writes nothing more into its prefix. The budget's reservation is
+released at verified cleanup as today.
 
 ### Failure scoping
 

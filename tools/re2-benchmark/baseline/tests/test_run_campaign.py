@@ -3738,6 +3738,26 @@ class TestUnitWorkers(unittest.TestCase):
                     self.assert_accepted(dispatcher)
                     self.assertEqual([], budget.reservations(dispatcher.result_root))
 
+    def test_ended_host_takes_no_lease_while_its_cleanup_waits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # Each of the two r8i hosts takes one unit. The first finishes its unit, claims its next lease as its idle
+            # stop and exits; its cleanup deletes its leases, but S3 keeps its results for five minutes. The second
+            # boots a minute later and fails its unit, which no host that held it may take again.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "claim"}, 2: {1: "fail"}},
+                                  setup_seconds=lambda host: 60 if host.number == 2 else 0)
+            delete = fleet.delete
+
+            def keep_results(region, bucket, keys):
+                ended = fleet.hosts[0]
+                delete(region, bucket, [key for key in keys if not (
+                    key.startswith(ended.result_prefix) and fleet.time() < ended.ended_at + 300)])
+
+            fleet.delete = keep_results
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 4, 2)
+            ended = fleet.hosts[0]
+            self.assertEqual([], [entry for entry in fleet.log[fleet.log.index(("exit", ended.session)):]
+                                  if entry[:2] == ("lease", ended.session)])
+
     def test_lease_written_after_the_hosts_idle_claim_requeues_its_unit_without_an_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:
             # Each of the two r8i hosts takes one unit. The second's fails at once. The first boots two polls later
