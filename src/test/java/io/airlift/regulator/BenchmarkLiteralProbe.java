@@ -42,11 +42,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 /// (`re2Find`, `re2Count`) and Trino operations run on these literal-led patterns,
 /// each compiled with the distribution [#backgroundFrequencies()] learns from the background
 /// lines, as a caller learns from its own data. `SERVICE` and `TOKEN` literals probe a
-/// rarer letter than their first byte and are expected wins. The rest keep the first byte and are
-/// protected controls: `USER` and `ERROR` have no later byte more than four times
-/// rarer than the first, `GET`, `URL`, and `HTTPS` begin with their rarest byte,
-/// and `HTTPS` searches access log lines dense with slashes, the byte a punctuation probe
-/// would choose.
+/// rarer letter than their first byte with the repeated-byte probe scan and are expected wins.
+/// The rest keep the first byte as their probe, which inputs of at least 1 KiB pair with the
+/// literal's last byte in the vector scan, and are protected controls: `USER` and `ERROR`
+/// have no later byte more than four times rarer than the first, `GET`, `URL`, and `HTTPS`
+/// begin with their rarest byte, and `HTTPS` searches access log lines dense with slashes,
+/// the byte a punctuation probe would choose.
 @State(Scope.Thread)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -85,8 +86,11 @@ public class BenchmarkLiteralProbe
                 lineCount++;
             }
         }
-        if (!program.canPrefixAccel() || program.prefixAccelStrategy(input.length()) != Prog.PrefixAccelStrategy.REPEATED_BYTE) {
-            throw new IllegalStateException("Benchmark did not select the repeated-byte prefix scan");
+        Prog.PrefixAccelStrategy expectedStrategy = workload.probeOffset() == 0 && program.usesVectorForSingleBytePrefix(input.length())
+                ? Prog.PrefixAccelStrategy.FUSED_VECTOR
+                : Prog.PrefixAccelStrategy.REPEATED_BYTE;
+        if (!program.canPrefixAccel() || program.prefixAccelStrategy(input.length()) != expectedStrategy) {
+            throw new IllegalStateException("Benchmark did not select the expected prefix scan");
         }
         if (!trino.re2().usesScanPlanForDiagnostics()) {
             throw new IllegalStateException("Benchmark did not select the scan plan");
