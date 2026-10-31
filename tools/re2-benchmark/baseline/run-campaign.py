@@ -2322,10 +2322,13 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
                 lambda region=placement[0], market=candidate.market:
                 shared_fleet_snapshot(arguments, region, market, observed),
                 until=candidate.stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
+            detail = reason
         except BudgetError:
             raise
         except (OSError, RuntimeError) as error:
-            admitted, reason = False, f"shared capacity query failed: {error}"
+            # A refusal's reason labels its gauge series, so only the attempt's detail holds the error.
+            admitted, reason = False, "shared capacity query failed"
+            detail = f"{reason}: {error}"
         if admitted:
             candidate = place(candidate, placement)
             break
@@ -2336,7 +2339,7 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
     if not admitted:
         if (candidate.identity, reason) not in capacity_waits:
             capacity_waits.add((candidate.identity, reason))
-            write_attempt(attempts_path, candidate, "queued-capacity", reason)
+            write_attempt(attempts_path, candidate, "queued-capacity", detail)
         if reason != "fleet quota" or candidate.platform.vcpus == 2:
             return candidate, now + CAPACITY_RETRY_SECONDS, reason, False, None
         return candidate, now + CAPACITY_RETRY_SECONDS, reason, True, candidate.platform.vcpus
@@ -3659,18 +3662,20 @@ class UnitDispatcher:
                 for worker, item, sequence, name, started in groups],
         }
 
-    def launch_room(self, pool):
-        """How many more workers the pool may launch this loop beside the hosts the phase holds, within its share of
-        its platform's hosts, or alone, the limits, and the fleet's boot window."""
+    def host_room(self, pool):
+        """How many more workers the pool may launch beside the hosts the phase holds, within its share of its
+        platform's hosts, or alone, the limits."""
         platform = self.platforms[pool].name
         holding = self.holding()
         if self.share is None:
             settings = live_settings(self.arguments)
-            room = min(settings["max_hosts"] - sum(holding.values()),
+            return min(settings["max_hosts"] - sum(holding.values()),
                        settings["max_hosts_per_platform"] - holding[platform])
-        else:
-            room = self.share.get(platform, 0) - holding[platform]
-        return max(0, min(room, self.boot_room))
+        return self.share.get(platform, 0) - holding[platform]
+
+    def launch_room(self, pool):
+        """How many more workers the pool may launch this loop, within its host room and the fleet's boot window."""
+        return max(0, min(self.host_room(pool), self.boot_room))
 
     def unneeded(self, worker):
         """Whether a worker that has not started, nor missed its boot deadline, holds no lease of an open item and
@@ -3874,9 +3879,11 @@ class UnitDispatcher:
             nonlocal blocked_vcpus
             if pool not in late:
                 late[pool] = self.late_items(pool, now)
-            # A pool with no room for another worker is not trying to launch, so no refusal stands for it.
+            # A pool with no room for another worker, or none it needs, is not trying to launch, so no refusal
+            # stands for it. One waiting only on the boot window still is, so its refusal keeps its age.
             if not self.launch_room(pool):
-                self.refused.pop(pool, None)
+                if self.host_room(pool) <= 0 or self.pool_demand(pool, now, late[pool]) is None:
+                    self.refused.pop(pool, None)
                 return False
             # A worker is planned only once its platform has room for it.
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
@@ -3972,11 +3979,11 @@ class UnitDispatcher:
 
     def sweep(self, observed):
         """One loop of a phase paused for a fault, which trusts nothing more its hosts report but that they booted:
-        report each booting worker that started to the boot window, stop-lease every open worker once the campaign
-        is stopping, prove each ended worker's cleanup, releasing its reservation, and go on stopping the hosts asked
-        to terminate. Its other hosts finish the leases they hold and stop themselves once their idle time runs out.
-        The phase's next dispatch, once it is resumed, settles each worker from its ledgers and recovered uploads, as
-        a restart does."""
+        report each booting worker that started to the boot window, hold no launch refusal, as a phase not
+        launching, stop-lease every open worker once the campaign is stopping, prove each ended worker's cleanup,
+        releasing its reservation, and go on stopping the hosts asked to terminate. Its other hosts finish the leases
+        they hold and stop themselves once their idle time runs out. The phase's next dispatch, once it is resumed,
+        settles each worker from its ledgers and recovered uploads, as a restart does."""
         self.observed = observed
         live, ended = self.partition()
         booting = [worker for worker in live if not worker.started]
@@ -3984,6 +3991,7 @@ class UnitDispatcher:
             if objects is not None:
                 self.note_start(worker, set(objects))
         self.report_boots()
+        self.refused = {}
         if self.steering == "stopping":
             for worker in live:
                 if worker.open():

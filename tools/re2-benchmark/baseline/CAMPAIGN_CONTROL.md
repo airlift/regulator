@@ -427,7 +427,10 @@ turns their S3 evidence into:
   pending launches; `spending_stop`, phase state, settings version. A
   refusal, worker state or phase state that has cleared reads 0, so a
   panel's current value never holds a stale one; a pool with no room for
-  another host is not launching, so it holds no refusal.
+  another host, or no need of one, is not launching, so it holds no refusal,
+  nor does a phase paused for a fault. A refusal waiting only on the boot window keeps its
+  age, and its reason is one of a fixed few, a failed capacity query's
+  error going only to the job attempt.
 - **Logs** (Loki): structured events: phase starts and completions, settings
   changes with their actor, pauses, leaks, leftovers, restarts, milestones
   (first host reporting, replica 1 accepted, phase complete), with the local
