@@ -44,6 +44,24 @@ def control_host_cloud():
     return aws
 
 
+def launch_host(aws, campaign, subnet):
+    """Launch a control host of campaign in subnet as another control-host command would, returning its id."""
+    return aws.run_control_host("us-west-2", control_host.IMAGE, control_host.INSTANCE_TYPE, "/dev/xvda", subnet,
+                                "sg-control", control_host.PROFILE, "", control_host.tags(campaign))[0]
+
+
+def attach_and_termination_refused(aws):
+    """The patches under which AWS refuses every attach of a volume, and the termination of i-control-2, the first
+    replacement of campaign c's host."""
+    terminate = aws.terminate
+
+    def refuse(region, ids):
+        if "i-control-2" in ids:
+            raise CloudError("RequestLimitExceeded: slow down")
+        return terminate(region, ids)
+    return {"attach_volume": CloudError("IncorrectState: busy"), "terminate": refuse}
+
+
 def user_data_settings(user_data):
     """The settings a control host's user data exports, by name."""
     body = control_host.USER_DATA.read_text().split("\n", 1)[1]
@@ -113,75 +131,109 @@ class TestControlHost(unittest.TestCase):
         self.assertEqual(["terminated", "terminated", "running"],
                          [host.state for host in aws.region_instances["us-west-2"]])
         self.assertEqual({"arn:target-group": {(aws.region_instances["us-west-2"][2].id, 3000)}}, aws.targets)
-        # A replacement the volume cannot attach to is terminated, leaving the volume to the next.
-        with patch.object(aws, "attach_volume", side_effect=CloudError("IncorrectState: busy")), \
-                contextlib.redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(SystemExit, "cannot attach campaign c's volume vol-1 to its new control host"):
-            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
-        self.assertEqual(["terminated"] * 4, [host.state for host in aws.region_instances["us-west-2"]])
-        self.assertEqual(["available"], [volume.state for volume in aws.region_volumes["us-west-2"]])
-        # One AWS then refuses to terminate is named with both errors and left running for the next replace.
-        with patch.object(aws, "attach_volume", side_effect=CloudError("IncorrectState: busy")), \
-                patch.object(aws, "terminate", side_effect=CloudError("RequestLimitExceeded: slow down")), \
-                contextlib.redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(SystemExit, "control host i-control-5: IncorrectState: busy; that host still "
-                                                   "runs, since AWS refused to terminate it: RequestLimitExceeded: "
-                                                   "slow down; run control-host replace c again"):
-            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
-        self.assertEqual(["terminated"] * 4 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
-        # A replacement whose registration AWS answered with an error, though it took effect, or whose look at the
-        # target group after it failed, cannot tell it serves alone, so it backs out and leaves the target group.
-        register = aws.register_target
-        registered_targets = aws.registered_targets
 
-        def answer_lost(region, target_group, instance, port):
-            register(region, target_group, instance, port)
-            raise CloudError("RequestTimeout: the answer was lost")
+    def test_a_replacement_that_fails_partway_backs_out_and_names_what_is_unconfirmed(self):
+        # Each replacement of campaign c's first host, i-control-1, launches i-control-2, which backs out of the
+        # volume and the load balancer when it cannot attach the volume or tell it serves Grafana alone, and names
+        # each step AWS refused.
+        def refused(step, error):
+            # Every call of the step fails with error.
+            return lambda aws: {step: error}
 
-        def look_failed(region, target_group):
-            if aws.targets["arn:target-group"]:
-                raise CloudError("ThrottlingException: Rate exceeded")
-            return registered_targets(region, target_group)
+        def answer_lost(aws):
+            # AWS answers the registration with an error, though it took effect.
+            register = aws.register_target
 
-        for step, failure, host, error in (
-                ("register_target", answer_lost, "i-control-6", "RequestTimeout: the answer was lost"),
-                ("registered_targets", look_failed, "i-control-7", "ThrottlingException: Rate exceeded")):
-            with self.subTest(step=step), patch.object(aws, step, side_effect=failure), \
-                    contextlib.redirect_stdout(io.StringIO()) as printed, \
-                    self.assertRaisesRegex(SystemExit, f"cannot register campaign c's new control host {host} .*: "
-                                                       f"{error}; that host is deregistered and terminated; run "
-                                                       "control-host replace c again"):
+            def lost(region, target_group, instance, port):
+                register(region, target_group, instance, port)
+                raise CloudError("RequestTimeout: the answer was lost")
+            return {"register_target": lost}
+
+        def look_failed(aws):
+            registered_targets = aws.registered_targets
+
+            def look(region, target_group):
+                if ("i-control-2", 3000) in aws.targets["arn:target-group"]:
+                    raise CloudError("ThrottlingException: Rate exceeded")
+                return registered_targets(region, target_group)
+            return {"registered_targets": look}
+
+        def registered_beside(aws):
+            # Another campaign's launch passes its check of the target group while the replace has deregistered the
+            # host it replaces, and registers its own host, i-control-3, as the replacement registers; AWS then
+            # refuses to deregister the replacement.
+            register, deregister = aws.register_target, aws.deregister_target
+
+            def register_both(region, target_group, instance, port):
+                other = launch_host(aws, "d", "subnet-a")
+                aws.wait(region, "instance_running", other)
+                register(region, target_group, other, port)
+                register(region, target_group, instance, port)
+
+            def deregister_refused(region, target_group, instance, port):
+                if instance == "i-control-2":
+                    raise CloudError("ThrottlingException: Rate exceeded")
+                deregister(region, target_group, instance, port)
+            return {"register_target": register_both, "deregister_target": deregister_refused}
+
+        for name, patches, refusal, states, targets in (
+                ("attach refused", refused("attach_volume", CloudError("IncorrectState: busy")),
+                 "cannot attach campaign c's volume vol-1 to its new control host i-control-2: IncorrectState: busy; "
+                 "that host is terminated; run control-host replace c again",
+                 ["terminated", "terminated"], set()),
+                # One whose termination then fails is left running for the next replace.
+                ("termination refused", attach_and_termination_refused,
+                 "control host i-control-2: IncorrectState: busy; that host still runs, since AWS refused to "
+                 "terminate it: RequestLimitExceeded: slow down; run control-host replace c again",
+                 ["terminated", "running"], set()),
+                ("registration answer lost", answer_lost,
+                 "cannot register campaign c's new control host i-control-2 .*: RequestTimeout: the answer was lost; "
+                 "that host is deregistered and terminated; run control-host replace c again",
+                 ["terminated", "terminated"], set()),
+                ("target group look failed", look_failed,
+                 "cannot register campaign c's new control host i-control-2 .*: ThrottlingException: Rate exceeded; "
+                 "that host is deregistered and terminated; run control-host replace c again",
+                 ["terminated", "terminated"], set()),
+                ("another campaign registered", registered_beside,
+                 "also forwards Grafana to i-control-3 of campaign d, .* so that host is terminated, though AWS "
+                 "refused to deregister it: ThrottlingException: Rate exceeded; once",
+                 ["terminated", "terminated", "running"], {("i-control-2", 3000), ("i-control-3", 3000)})):
+            with self.subTest(name), tempfile.TemporaryDirectory() as temporary:
+                aws = control_host_cloud()
+                inputs = Path(temporary) / "launch-inputs.tar.gz"
+                inputs.write_bytes(b"inputs")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
+                with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()) as printed, \
+                        self.assertRaisesRegex(SystemExit, refusal):
+                    for step, failure in patches(aws).items():
+                        stack.enter_context(patch.object(aws, step, side_effect=failure))
+                    control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+                self.assertEqual("", printed.getvalue())
+                self.assertEqual(states, [host.state for host in aws.region_instances["us-west-2"]])
+                self.assertEqual({"arn:target-group": targets}, aws.targets)
+
+    def test_the_next_replace_terminates_a_replacement_left_running(self):
+        # A replacement the volume cannot attach to, and whose termination AWS refuses, is left running. The next
+        # replace terminates it, though the target group never held it, and its own host i-control-3 alone holds the
+        # volume and serves Grafana.
+        with tempfile.TemporaryDirectory() as temporary:
+            aws = control_host_cloud()
+            inputs = Path(temporary) / "launch-inputs.tar.gz"
+            inputs.write_bytes(b"inputs")
+            with contextlib.redirect_stdout(io.StringIO()):
+                control_host.launch(aws, "c", SSH_PUBLIC_KEY, inputs)
+            with contextlib.ExitStack() as stack, contextlib.redirect_stdout(io.StringIO()), \
+                    self.assertRaisesRegex(SystemExit, "i-control-2: .* still runs, since AWS refused to terminate it"):
+                for step, failure in attach_and_termination_refused(aws).items():
+                    stack.enter_context(patch.object(aws, step, side_effect=failure))
                 control_host.replace(aws, "c", SSH_PUBLIC_KEY)
-            self.assertEqual("", printed.getvalue())
-            self.assertEqual("terminated", aws.region_instances["us-west-2"][-1].state)
-            self.assertEqual({"arn:target-group": set()}, aws.targets)
-        # Another campaign's launch passes its check of the target group while the replace has deregistered the host
-        # it replaces, and registers its own host as the replacement registers. The replacement finds it there and
-        # backs out, terminating its host though AWS refuses to deregister it.
-        deregister = aws.deregister_target
-
-        def deregister_refused(region, target_group, instance, port):
-            if instance == "i-control-8":
-                raise CloudError("ThrottlingException: Rate exceeded")
-            deregister(region, target_group, instance, port)
-
-        def register_both(region, target_group, instance, port):
-            other, _ = aws.run_control_host(region, control_host.IMAGE, "m7i.large", "/dev/xvda", "subnet-a",
-                                            "sg-control", control_host.PROFILE, "", control_host.tags("d"))
-            aws.wait(region, "instance_running", other)
-            register(region, target_group, other, port)
-            register(region, target_group, instance, port)
-
-        with patch.object(aws, "register_target", side_effect=register_both), \
-                patch.object(aws, "deregister_target", side_effect=deregister_refused), \
-                contextlib.redirect_stdout(io.StringIO()) as printed, \
-                self.assertRaisesRegex(SystemExit, "also forwards Grafana to i-control-9 of campaign d, .* so that "
-                                                   "host is terminated, though AWS refused to deregister it: "
-                                                   "ThrottlingException: Rate exceeded; once"):
-            control_host.replace(aws, "c", SSH_PUBLIC_KEY)
-        self.assertEqual("", printed.getvalue())
-        self.assertEqual(["terminated"] * 8 + ["running"], [host.state for host in aws.region_instances["us-west-2"]])
-        self.assertEqual({"arn:target-group": {("i-control-8", 3000), ("i-control-9", 3000)}}, aws.targets)
+            with contextlib.redirect_stdout(io.StringIO()):
+                control_host.replace(aws, "c", SSH_PUBLIC_KEY)
+        self.assertEqual(["terminated", "terminated", "running"],
+                         [host.state for host in aws.region_instances["us-west-2"]])
+        self.assertEqual(["i-control-3"], list(aws.attachments.values()))
+        self.assertEqual({"arn:target-group": {("i-control-3", 3000)}}, aws.targets)
 
     def test_teardown_keeps_only_a_snapshot_of_the_campaign_volume(self):
         aws = control_host_cloud()
