@@ -155,11 +155,13 @@ sha256_of()
 put_once()
 {
     # One PUT with a whole-object SHA-256 that S3 verifies; a key is never
-    # overwritten. An optional stretch, in seconds, lengthens each attempt and
-    # the budget, and raises the budget to at least two whole attempts.
+    # overwritten unless replace is given, as a heartbeat replaces its lease's
+    # last one. An optional stretch, in seconds, lengthens each attempt and the
+    # budget, and raises the budget to at least two whole attempts.
     local file=$1
     local key=$2
     local stretch=${3:-0}
+    local replace=${4:-}
     local attempt_seconds=$((UPLOAD_ATTEMPT_SECONDS + stretch))
     local budget=$((UPLOAD_SECONDS + stretch))
     local encoded
@@ -172,6 +174,10 @@ put_once()
     local upload_deadline=${upload_deadline:-$(($(now) + budget))}
     encoded=$(python3 -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' \
         "$(sha256_of "${file}")")
+    local options=(--checksum-algorithm SHA256 --checksum-sha256 "${encoded}")
+    if [[ -z "${replace}" ]]; then
+        options+=(--if-none-match '*')
+    fi
     put_attempts=0
     while true; do
         if (($(now) + attempt_seconds > upload_deadline)); then
@@ -181,8 +187,7 @@ put_once()
         put_attempts=$((put_attempts + 1))
         # The CLI makes one attempt, so only this loop's earlier attempts can have landed.
         if AWS_MAX_ATTEMPTS=1 aws_cli_within "${attempt_seconds}" s3api put-object --bucket "${BUCKET}" \
-                --key "${key}" --body "${file}" --if-none-match '*' --checksum-algorithm SHA256 \
-                --checksum-sha256 "${encoded}"; then
+                --key "${key}" --body "${file}" "${options[@]}"; then
             return 0
         fi
         errors=$(<"${S3_ERRORS}")
@@ -232,9 +237,10 @@ heartbeat()
           replica_id: (if $replica_id == "" then null else ($replica_id | tonumber) end),
           timestamp: $timestamp, stop_reason: (if $stop_reason == "" then null else $stop_reason end)}' \
         > "${file}"
-    if ! AWS_MAX_ATTEMPTS=1 aws_cli s3api put-object --bucket "${BUCKET}" \
-            --key "${RESULT_PREFIX}/heartbeat/${sequence}.json" --body "${file}"; then
-        echo "Heartbeat upload failed for lease ${sequence}: $(<"${S3_ERRORS}")" >&2
+    # A failed heartbeat is retried as an upload is, since the controller
+    # judges a running lease stalled from its latest one.
+    if ! put_once "${file}" "${RESULT_PREFIX}/heartbeat/${sequence}.json" 0 replace; then
+        echo "Heartbeat upload failed for lease ${sequence}" >&2
     fi
 }
 
