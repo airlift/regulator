@@ -43,9 +43,12 @@ final class TaggedAlternationProgram
             Compiler.Dialect compilerDialect,
             CaseFolding caseFolding)
     {
+        // Keep upstream's 512-instruction rule here rather than asking whether BitState can run.
+        // A larger program runs BitState only on spans its bitmap bound holds, which shrink as
+        // its list count grows, so it keeps this program for every span.
         if (longestMatch ||
                 semanticProgram.isOnePass() ||
-                semanticProgram.canBitState() ||
+                semanticProgram.hasUpstreamListHeads() ||
                 expression.op() != ALTERNATE ||
                 expression.childCount() < 2 ||
                 capturingGroupCount != expression.childCount()) {

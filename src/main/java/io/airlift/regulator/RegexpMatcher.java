@@ -693,6 +693,11 @@ public final class RegexpMatcher
         return candidateStartCursorQuit;
     }
 
+    boolean bitStateWorkspaceInitializedForDiagnostics()
+    {
+        return bitStateWorkspace != null;
+    }
+
     boolean nfaWorkspaceInitializedForDiagnostics()
     {
         return nfaWorkspace != null;
