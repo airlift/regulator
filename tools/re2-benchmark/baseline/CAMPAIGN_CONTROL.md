@@ -510,7 +510,7 @@ the spending stop.
 | Resume a phase the controller paused for a cause since cleared, once per cause | Resume a phase paused twice for one cause, or one Dain paused or drained |
 | Raise `max_hosts`, `max_hosts_per_platform`, a region's vCPUs or `max_usd` within `authorized` while refusals or a late finish stand | Anything outside `authorized`; the monitor never edits `authorized` |
 | `add-region` from `authorized.regions` when refusals name capacity | Stop the campaign |
-| Report | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
+| Report, naming a failed language primary's partial exports and their missing groups | Result anomalies: unresolved units, semantic rejections; anything the runbook does not name |
 
 The runbook is an agent instruction file written with `writing-for-agents`.
 

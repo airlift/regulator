@@ -1940,13 +1940,57 @@ class TestRunCampaign(unittest.TestCase):
         for receipt in receipts:
             RUN_CAMPAIGN.validate_unit_artifacts(accepted, result_root, receipt)
         accepted.validate_ledger(result_root / "accepted-units.tsv", "primary")
-        # The dispatcher, finding every unit accepted, passes the phase gate and exports each plan.
         campaign = RUN_CAMPAIGN.language_fleet.campaign_units({fixture.directory: plan}, "primary")
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, campaign["units"], sorted(campaign["allocations"]),
                                               allocations=campaign["allocations"])
+        # Past its launch deadline with one group never measured, the phase fails, exporting partially the
+        # comparisons it measured completely.
+        arguments.topology_deadline_seconds = 0
+        beside = fixture.root / "beside"
+        shutil.copytree(result_root, beside / result_root.name)
+        ledger = result_root / "accepted-units.tsv"
+        language_fleet = RUN_CAMPAIGN.language_fleet
+        language_fleet.write_tsv(ledger, language_fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts[1:])
+        unmeasured = RUN_CAMPAIGN.unit_attempt_directory(result_root, receipts[0])
+        unmeasured.rename(fixture.root / "unmeasured")
+        partial = (result_root / f"{plan['shard_id']}-partial-results.json",
+                   result_root / f"{plan['shard_id']}-partial-missing.tsv")
+        with FakeUnitFleet(fixture.root / "hosts").stubs(), \
+                self.assertRaisesRegex(SystemExit, "campaign completed with unresolved units") as failed:
+            RUN_CAMPAIGN.UnitDispatcher(arguments, checkout, result_root, items, platforms, accepted).run()
+        self.assertFalse(getattr(failed.exception, "__notes__", None))
+        self.assertEqual("partial", json.loads(partial[0].read_text())["coverage"])
+        self.assertEqual([receipts[0]["unit_id"]],
+                         [row["unit_id"] for row in language_fleet.row_protocol.read_tsv(partial[1])])
+        # An end that cannot export the plan even partially leaves no earlier partial export behind.
+        language_fleet.write_tsv(ledger, language_fleet.unit_session.UNIT_RECEIPT_FIELDS, [])
+        with self.assertRaisesRegex(SystemExit, "even partially"):
+            RUN_CAMPAIGN.aggregate_language_plans(arguments, result_root, allow_partial=True)
+        self.assertFalse(any(path.exists() for path in partial))
+        # Beside a plan that measured no comparison completely and sorts first, so cannot be exported even
+        # partially, the plan measured in full still exports, and the failure names the other.
+        first = fixture.root / "first"
+        plans = {fixture.directory: plan, first: language_fleet.prepare(
+            fixture.source, first, selection=[(plan["partitions"][0]["case"], "java")], shard_id="a-first")}
+        both = language_fleet.campaign_units(plans, "primary")
+        with FakeUnitFleet(fixture.root / "hosts").stubs(), \
+                patch.dict(arguments.language_plans, {"a-first": first}), \
+                patch.object(arguments, "campaign_root", beside), \
+                self.assertRaisesRegex(SystemExit, "campaign completed with unresolved units") as failed:
+            RUN_CAMPAIGN.UnitDispatcher(arguments, checkout, beside / result_root.name, RUN_CAMPAIGN.build_work_items(
+                "primary", platforms, both["units"], sorted(both["allocations"]), allocations=both["allocations"]),
+                platforms, accepted).run()
+        self.assertNotIn("coverage", json.loads(
+            (beside / result_root.name / f"{plan['shard_id']}-results.json").read_text()))
+        self.assertRegex(" ".join(failed.exception.__notes__),
+                         "even partially: a-first: the campaign accepted no comparison completely$")
+        # The dispatcher, finding every unit accepted, passes the phase gate and exports each plan in full.
+        (fixture.root / "unmeasured").rename(unmeasured)
+        language_fleet.write_tsv(ledger, language_fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
         with FakeUnitFleet(fixture.root / "hosts").stubs():
             RUN_CAMPAIGN.UnitDispatcher(arguments, checkout, result_root, items, platforms, accepted).run()
+        self.assertFalse(any(path.exists() for path in partial))
         # A restart reproduces each plan's export, and refuses one that changed.
         export = result_root / f"{plan['shard_id']}-results.json"
         exported = export.read_bytes()

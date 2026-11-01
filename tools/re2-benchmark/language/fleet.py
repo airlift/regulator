@@ -45,6 +45,10 @@ UNIT_ARTIFACTS = ("environment-manifest.txt", "environment.txt", "engine-build.t
                   "unit-session.tsv", "run-metadata.txt", "cpu-affinity.json")
 # The provenance fields that identify the candidate and comparators a language result measured.
 CANDIDATE_FIELDS = ("source_commit", "source_tree", "comparators_sha256", "jdk")
+# A partial export's name ends in this, so it is never taken for a complete one.
+PARTIAL_SUFFIX = "-partial-results.json"
+# The fields of a partial export's missing groups, which it records and lists beside it.
+MISSING_FIELDS = ("case_id", "language", "platform", "replica_id", "unit_id", "group_id")
 
 
 def platform_allocation(suite, platform):
@@ -652,14 +656,21 @@ def campaign_units(plans, phase):
     return campaign
 
 
-def validate_unit_campaign(plans, receipts, campaign_id, phase="primary"):
+def validate_unit_campaign(plans, receipts, campaign_id, phase="primary", campaign=None):
     """Accept a language campaign phase's unit receipts as a whole, by the baseline campaign rule: every unit of
     the phase's validated plans on every platform for each replica, its replicas on distinct instances, and one
-    candidate."""
-    campaign = campaign_units(plans, phase)
+    candidate. campaign, by default the phase's campaign_units, may be restricted to the groups a partial export
+    keeps."""
+    campaign = campaign_units(plans, phase) if campaign is None else campaign
     unit_session.check_unit_campaign(
         receipts, load_platforms(unit_session.DIRECTORY / "platforms.tsv"), campaign["units"], campaign["digests"],
         campaign["allocations"], campaign["manifests"], campaign_id, (1,) if phase == "smoke" else (1, 2, 3))
+
+
+def shard_receipts(plan, result_root):
+    """The receipts a campaign result root accepted for the plan's shard."""
+    return [receipt for receipt in unit_dispatch.read_accepted_units(result_root / "accepted-units.tsv")
+            if receipt["shard_id"] == plan["shard_id"]]
 
 
 def aggregate(directory, result_root, output):
@@ -670,10 +681,64 @@ def aggregate(directory, result_root, output):
     plan = validate(directory)
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
-    receipts = [receipt for receipt in unit_dispatch.read_accepted_units(result_root / "accepted-units.tsv")
-                if receipt["shard_id"] == plan["shard_id"]]
+    receipts = shard_receipts(plan, result_root)
     validate_unit_campaign({directory: plan}, receipts, receipts[0]["campaign_id"] if receipts else "")
     unit_session.check_semantic_rejections(result_root)
+    export(directory, plan, result_root, receipts, output, {})
+
+
+def partial_missing(output):
+    """The list of a partial export's missing groups, <shard>-partial-missing.tsv beside its
+    <shard>-partial-results.json."""
+    return output.with_name(output.name.removesuffix(PARTIAL_SUFFIX) + "-partial-missing.tsv")
+
+
+def aggregate_partial(directory, result_root, output):
+    """Export the comparisons a failed primary measured completely, as aggregate does: those whose every group was
+    accepted on every platform at every replica, leaving out the accepted groups of every other comparison. The
+    export's name ends in PARTIAL_SUFFIX and it records its coverage as partial with its missing groups, which the
+    partial_missing list beside it holds too, so neither is taken for a complete export; a campaign missing nothing
+    is refused. The missing list is written first, so a retry after it failed finds no export to refuse."""
+    directory, result_root, output = directory.resolve(), result_root.resolve(), output.resolve()
+    if not output.name.endswith(PARTIAL_SUFFIX):
+        raise ValueError(f"a partial fleet export's name must end in {PARTIAL_SUFFIX}")
+    if output.exists():
+        raise ValueError("will not overwrite an existing fleet export")
+    plan = validate(directory)
+    receipts = shard_receipts(plan, result_root)
+    unit_session.check_semantic_rejections(result_root)
+    campaign = campaign_units({directory: plan}, "primary")
+    accepted = {(receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"])
+                for receipt in receipts}
+    groups, missing = {}, []
+    for unit_id, unit in campaign["units"].items():
+        for group in unit["groups"]:
+            # A unit's groups are its comparisons, so one row names a group's comparison.
+            case, language = row_atom(group["owned"][0])[:2]
+            groups.setdefault((case, language), []).append((unit_id, group["group_id"]))
+            missing += [dict(zip(MISSING_FIELDS, (case, language, platform, replica, unit_id, group["group_id"])))
+                        for platform in plan["platforms"] for replica in ("1", "2", "3")
+                        if (platform, unit_id, replica, group["group_id"]) not in accepted]
+    if not missing:
+        raise ValueError("the campaign accepted every comparison, so its export is complete, not partial")
+    dropped = {(row["case_id"], row["language"]) for row in missing}
+    kept = {group for comparison, owned in groups.items() if comparison not in dropped for group in owned}
+    if not kept:
+        raise ValueError("the campaign accepted no comparison completely")
+    kept_units = {unit_id for unit_id, _ in kept}
+    restricted = {**campaign, "units": {
+        unit_id: {**unit, "groups": [group for group in unit["groups"] if (unit_id, group["group_id"]) in kept]}
+        for unit_id, unit in campaign["units"].items() if unit_id in kept_units}}
+    receipts = [receipt for receipt in receipts if (receipt["unit_id"], receipt["group_id"]) in kept]
+    validate_unit_campaign({directory: plan}, receipts, receipts[0]["campaign_id"], campaign=restricted)
+    missing.sort(key=lambda row: tuple(row.values()))
+    write_tsv(partial_missing(output), MISSING_FIELDS, missing)
+    export(directory, plan, result_root, receipts, output, {"coverage": "partial", "missing": missing})
+
+
+def export(directory, plan, result_root, receipts, output, coverage):
+    """Write the export of a plan's accepted receipts, once they passed the campaign and semantic checks, with
+    coverage's fields."""
     observations, comparisons, hosts = [], [], []
     candidate = None
     # Each platform runs the classes of its own engine build.
@@ -707,7 +772,7 @@ def aggregate(directory, result_root, output):
             for row in data["comparisons"]:
                 comparisons.append({**row, **attempt_group})
         hosts.append({"receipt": receipt, "partitions": partitions})
-    collection.save(output, {"schema_version": 2, "plan": plan, "candidate": candidate,
+    collection.save(output, {"schema_version": 2, "plan": plan, "candidate": candidate, **coverage,
                              "hosts": hosts, "observations": observations, "comparisons": comparisons})
 
 
@@ -735,12 +800,12 @@ def main():
     unit_parser.add_argument("--region", required=True)
     unit_parser.add_argument("--source-archive", type=Path, required=True)
     unit_parser.add_argument("--candidate-provenance", type=Path, required=True)
-    for name in ("validate", "verify", "aggregate"):
+    for name in ("validate", "verify", "aggregate", "aggregate-partial"):
         command = commands.add_parser(name)
         command.add_argument("--plan-directory", type=Path, required=True)
         if name != "validate":
             command.add_argument("--results", type=Path, required=True)
-        if name == "aggregate":
+        if name.startswith("aggregate"):
             command.add_argument("--output", type=Path, required=True)
         if name == "verify":
             command.add_argument("--java", default="java")
@@ -767,8 +832,13 @@ def main():
         print(f"Validated {len(work_units.load(args.plan_directory))} work units")
     elif args.command == "verify":
         verify(args.plan_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args))
-    else:
+    elif args.command == "aggregate":
         aggregate(args.plan_directory, args.results, args.output)
+    else:
+        # A campaign root's manifest, written when it ends, lists every file it holds, so the export goes elsewhere.
+        if args.output.resolve().is_relative_to(args.results.resolve()):
+            parser.error("a partial export is written outside the campaign result root")
+        aggregate_partial(args.plan_directory, args.results, args.output)
 
 
 if __name__ == "__main__":

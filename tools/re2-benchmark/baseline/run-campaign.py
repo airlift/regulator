@@ -667,22 +667,46 @@ def write_language_bundles(arguments, result_root):
                                   for shard, plan in sorted(arguments.language_plans.items())}
 
 
-def aggregate_language_plans(arguments, result_root):
-    """Export each language plan's accepted primary units as <shard>-results.json; a restart must reproduce it."""
+def aggregate_language_plans(arguments, result_root, allow_partial=False):
+    """Export each language plan's accepted primary units as <shard>-results.json; a restart must reproduce it.
+    With allow_partial, as a failed phase ends, a plan the phase did not complete exports instead the comparisons it
+    measured completely as <shard>-partial-results.json, with <shard>-partial-missing.tsv listing the groups it
+    lacks. Those two are derived, so every end removes them first and only a failed end that exports partially
+    writes them again. Each plan's aggregation errors are collected and raised together after the loop, while a
+    retained export that changed on restart aborts at once."""
+    unexported = []
     for shard, directory in sorted(arguments.language_plans.items()):
         output = result_root / f"{shard}-results.json"
+        partial_output = result_root / f"{shard}{language_fleet.PARTIAL_SUFFIX}"
+        partial = (partial_output, language_fleet.partial_missing(partial_output))
+        for path in partial:
+            path.unlink(missing_ok=True)
         with tempfile.TemporaryDirectory(prefix="language-aggregate-", dir=result_root) as temporary:
             export = Path(temporary) / output.name
             try:
                 language_fleet.aggregate(directory, result_root, export)
             except (OSError, ValueError, KeyError) as error:
-                raise SystemExit(f"language plan {shard} cannot be exported: {error}") from error
+                if not allow_partial:
+                    unexported.append(f"{shard}: {error}")
+                    continue
+                staged = Path(temporary) / partial_output.name
+                try:
+                    language_fleet.aggregate_partial(directory, result_root, staged)
+                except (OSError, ValueError, KeyError) as partial_error:
+                    unexported.append(f"{shard}: {partial_error}")
+                    continue
+                for staged_path, path in zip((staged, language_fleet.partial_missing(staged)), partial):
+                    os.replace(staged_path, path)
+                continue
             if output.exists():
                 if output.read_bytes() != export.read_bytes():
                     raise UnsafeCampaignError(f"language export {output} changed on restart")
             else:
                 os.replace(export, output)
     fsync_directory(result_root)
+    if unexported:
+        raise SystemExit(f"language plans cannot be exported{' even partially' if allow_partial else ''}: "
+                         f"{'; '.join(unexported)}")
 
 
 def unit_worker_job(platform, ordinal, host_epoch, market, cooled_regions=()):
@@ -4197,14 +4221,23 @@ class UnitDispatcher:
         return not self.workers and not self.queued()
 
     def end(self):
-        """Record the phase's unresolved items, and with none, validate it and mark it complete."""
+        """Record the phase's unresolved items, and with none, validate it and mark it complete. A language primary
+        with unresolved units exports what it can of each plan, as aggregate_language_plans describes, before it
+        fails."""
         unresolved = self.unresolved_items(ending=True)
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
+        language_primary = self.validation.kind == "language" and self.arguments.phase == "primary"
         if unresolved:
             details = ", ".join(f"{item.identity} {detail}" for item, detail in unresolved)
-            raise SystemExit(f"campaign completed with unresolved units: {details}")
+            failure = SystemExit(f"campaign completed with unresolved units: {details}")
+            if language_primary:
+                try:
+                    aggregate_language_plans(self.arguments, self.result_root, allow_partial=True)
+                except (Exception, SystemExit) as error:
+                    failure.add_note(f"partial export failed: {error_text(error)}")
+            raise failure
         self.validate_phase()
-        if self.validation.kind == "language" and self.arguments.phase == "primary":
+        if language_primary:
             aggregate_language_plans(self.arguments, self.result_root)
         # Every worker has exited, each settled only once its cleanup was verified.
         write_phase_complete(self.result_root, self.arguments)
