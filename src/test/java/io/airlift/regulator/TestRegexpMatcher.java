@@ -304,9 +304,10 @@ public class TestRegexpMatcher
         assertThat(pattern.isReverseProgramComputed()).isFalse();
 
         // Starts stay relative to a Slice that begins inside its byte array.
+        // Without a capture group, the class counter finds them.
         pattern = Re2.compile(Slices.utf8Slice("\\pL"));
         matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(Slices.utf8Slice("xxé𝐀xx").getBytes(), 2, 6), null);
-        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.characterClassCounterEnabledForDiagnostics()).isTrue();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(0);
         assertThat(matcher.end()).isEqualTo(2);
