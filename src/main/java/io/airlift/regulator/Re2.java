@@ -439,9 +439,10 @@ public sealed class Re2
     // at most MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES. Longer inputs, and calls that report
     // positions, run the plan.
     private final boolean ordinaryShortBooleanMatch;
-    // Off the compact route, the counter of a pattern that is one large Unicode class, whose
-    // matches are its single members. It serves group-zero matchers only.
-    private final BoundedCharacterClassCounter singleClassCounter;
+    // Off the compact route, the counter that finds a class pattern's matches: the single members
+    // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
+    // repeat's counter.
+    private final BoundedCharacterClassCounter matcherClassCounter;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
@@ -502,14 +503,17 @@ public sealed class Re2
                 requiredPrefix)) {
             findStrategy = BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
         }
-        BoundedCharacterClassCounter singleClass = requiredPrefix == null ? BoundedCharacterClassCounter.analyzeSingleClass(suffixRegexp) : null;
-        if (singleClass != null && singleClass.estimatedRetainedSize() <= partialProg.dfaMemory()) {
-            partialProg.setDfaMemory(partialProg.dfaMemory() - singleClass.estimatedRetainedSize());
+        // As on the compact route, a pattern with a capture keeps the engine.
+        BoundedCharacterClassCounter matcherClass = requiredPrefix == null && compactBoundedCharacterClass == null && capturingGroupCount == 0
+                ? BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch)
+                : null;
+        if (matcherClass != null && matcherClass.estimatedRetainedSize() <= partialProg.dfaMemory()) {
+            partialProg.setDfaMemory(partialProg.dfaMemory() - matcherClass.estimatedRetainedSize());
         }
         else {
-            singleClass = null;
+            matcherClass = null;
         }
-        this.singleClassCounter = singleClass;
+        this.matcherClassCounter = matcherClass;
         if (supportsSingleByteMatcher() &&
                 SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory()) {
             // Reserve before any DFA can snapshot its budget. The table itself stays lazy.
@@ -570,7 +574,9 @@ public sealed class Re2
         this.ordinaryShortBooleanMatch = ordinaryShortMatch;
         this.capturingGroupCount = capturingGroupCount;
         this.capturingGroupNames = requireNonNull(capturingGroupNames, "capturingGroupNames is null");
-        this.boundedCharacterClassCounter = compactBoundedCharacterClass;
+        // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
+        // single class's counter serves matchers alone.
+        this.boundedCharacterClassCounter = matcherClass != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS ? matcherClass : compactBoundedCharacterClass;
     }
 
     /// Copies every field of `pattern`, which the caller then discards, except the named
@@ -603,7 +609,7 @@ public sealed class Re2
         this.reverseProg = pattern.reverseProg;
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
-        this.singleClassCounter = pattern.singleClassCounter;
+        this.matcherClassCounter = pattern.matcherClassCounter;
         this.singleByteMatcher = pattern.singleByteMatcher;
     }
 
@@ -1424,6 +1430,11 @@ public sealed class Re2
     boolean isBoundedCharacterClassCounterComputed()
     {
         return boundedCharacterClassCounter != null;
+    }
+
+    BoundedCharacterClassCounter boundedCharacterClassCounterIfComputedForDiagnostics()
+    {
+        return boundedCharacterClassCounter;
     }
 
     boolean usesCompactBoundedCharacterClassForDiagnostics()
@@ -2570,10 +2581,11 @@ public sealed class Re2
     }
 
     /// Returns the counter that finds this pattern's group-zero matches directly: the compact
-    /// counter, or the counter of a pattern that is one large Unicode class. Otherwise `null`.
+    /// counter, or the counter of a pattern that is one large Unicode class or a greedy class
+    /// repeat. Otherwise `null`.
     BoundedCharacterClassCounter classMatchCounter()
     {
-        return usesCompactBoundedCharacterClassForDiagnostics() ? boundedCharacterClassCounter : singleClassCounter;
+        return usesCompactBoundedCharacterClassForDiagnostics() ? boundedCharacterClassCounter : matcherClassCounter;
     }
 
     long findCharacterClassSpan(Slice input, int start)

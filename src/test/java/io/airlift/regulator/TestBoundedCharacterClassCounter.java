@@ -249,18 +249,19 @@ public class TestBoundedCharacterClassCounter
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
         assertThat(Re2.compile(utf8Slice("\\p{L}{256}"), Re2.Options.defaults().setMaxMemory(64 * 1024)).usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
 
-        // A single class's counter takes its bytes from the DFA budget; a budget too small for it
-        // keeps the engine.
+        // A single class's or a class repeat's counter takes its bytes from the DFA budget; a
+        // budget too small for it keeps the engine.
         assertThat(Re2.compile(utf8Slice("\\pL"), Re2.Options.defaults().setMaxMemory(32 * 1024)).classMatchCounter()).isNull();
-        Slice pattern = utf8Slice("\\pL");
         int flags = Re2.Options.defaults().parseFlags();
-        ParseResult parsed = RegexpParser.parse(pattern, flags);
         long maxMemory = 64 * 1024;
-        Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
-        Re2 letters = Re2.compileParsed(pattern, parsed, flags, maxMemory);
-        BoundedCharacterClassCounter counter = letters.classMatchCounter();
-        assertThat(counter.estimatedRetainedSize()).isEqualTo(32_976);
-        assertThat(letters.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - counter.estimatedRetainedSize());
+        for (String source : List.of("\\pL", "[а-яё]+")) {
+            Slice pattern = utf8Slice(source);
+            ParseResult parsed = RegexpParser.parse(pattern, flags);
+            Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
+            Re2 re2 = Re2.compileParsed(pattern, parsed, flags, maxMemory);
+            assertThat(re2.forwardProgramForDiagnostics().dfaMemory()).as(source).isEqualTo(control.dfaMemory() - re2.classMatchCounter().estimatedRetainedSize());
+        }
+        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(32_976);
     }
 
     @Test
@@ -330,6 +331,38 @@ public class TestBoundedCharacterClassCounter
     }
 
     @Test
+    public void testClassRunMatcherMatchesEngineInEveryLanguage()
+    {
+        // The large-class matrix's generated inputs, then runs of eight and fourteen letters.
+        List<Slice> inputs = new ArrayList<>(randomFragmentInputs());
+        inputs.addAll(longGapInputs());
+        inputs.add(Slices.wrappedBuffer(new byte[] {'a', 'b', (byte) 0xC3, 'c', (byte) 0x80, '_', '9', (byte) 0xFF, 'd', (byte) 0xC3, (byte) 0xA9, 'e'}));
+        inputs.add(utf8Slice("abcdefgh ABCDEFGHIJKLMN"));
+
+        // A repeat of an ASCII or small class finds each run on the counter, cut at the maximum.
+        for (String pattern : List.of("\\w+", "[A-Za-z]{8,13}", "[0-9]{2,3}", "[a-z]{2,}", "\\d+", "[а-яё]+")) {
+            assertCounterMatcherAgrees("RE2", Re2::compile, pattern, false, inputs);
+        }
+        // Java and Trino spell an ASCII \w by default.
+        for (String pattern : List.of("\\w+", "[a-z]{2,4}", "\\d+")) {
+            assertCounterMatcherAgrees("Java", source -> JavaRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        for (String pattern : List.of("\\w+", "[0-9]+", "[a-z]{3}")) {
+            assertCounterMatcherAgrees("Trino", source -> TrinoRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        for (String pattern : List.of("(?-u:\\w)+", "[0-9]+", "[a-z]{2,4}")) {
+            assertCounterMatcherAgrees("Rust", source -> RustRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        // Byte classes read bytes, including those at or past 0x80.
+        for (String pattern : List.of("\\w+", "[^,]+", "[\\x80-\\xFF]{1,2}")) {
+            assertCounterMatcherAgrees("Latin-1", source -> Re2.compile(source, Re2.Options.latin1()), pattern, false, inputs);
+        }
+        for (String pattern : List.of("(?-u:\\w)+", "(?-u:[^,])+", "(?-u:[\\x80-\\xFF]){1,2}")) {
+            assertCounterMatcherAgrees("Rust bytes", source -> RustRegexp.compile(source, RustRegexp.Options.bytes()).re2(), pattern, false, inputs);
+        }
+    }
+
+    @Test
     public void testLastPlaneAndNullableClassesKeepEngine()
     {
         // Planes 4 through 13 hold no characters, so a class ending before U+40000 has a counter,
@@ -352,15 +385,23 @@ public class TestBoundedCharacterClassCounter
                 Re2.compile(utf8Slice("\\p{Mn}")),
                 JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)).re2(),
                 RustRegexp.compile(utf8Slice("\\w")).re2(),
-                RustRegexp.compile(utf8Slice("\\D")).re2());
+                RustRegexp.compile(utf8Slice("\\D")).re2(),
+                Re2.compile(utf8Slice("[^a]+")));
         for (Re2 re2 : lastPlaneClasses) {
             assertThat(re2.classMatchCounter()).as(re2.pattern().toStringUtf8()).isNull();
         }
 
         // A pattern that can match empty has no counter; its matcher keeps the engine.
-        for (String pattern : List.of("\\pL*", "\\pL?", "\\pL{0,3}", "(?:\\pL|)")) {
+        for (String pattern : List.of("\\pL*", "\\pL?", "\\pL{0,3}", "(?:\\pL|)", "[a-z]*", "[a-z]{0,3}")) {
             assertThat(Re2.compile(utf8Slice(pattern)).classMatchCounter()).as(pattern).isNull();
             assertThat(RustRegexp.compile(utf8Slice(pattern)).re2().classMatchCounter()).as(pattern).isNull();
+        }
+        // A lazy repeat, a repeat compiled for longest match, and a pattern with a capture build no
+        // counter and keep the engine, as on the compact route.
+        Slice words = utf8Slice("the quiet tea");
+        for (Re2 re2 : List.of(Re2.compile(utf8Slice("\\w+?")), Re2.compile(utf8Slice("\\w+"), Re2.Options.defaults().setLongestMatch(true)), Re2.compile(utf8Slice("(\\w)+")), Re2.compile(utf8Slice("(?<w>\\w)+")))) {
+            assertThat(re2.classMatchCounter()).as(re2.pattern().toStringUtf8()).isNull();
+            assertThat(re2.matcher(words, 0).characterClassCounterEnabledForDiagnostics()).as(re2.pattern().toStringUtf8()).isFalse();
         }
     }
 
@@ -379,6 +420,15 @@ public class TestBoundedCharacterClassCounter
         assertThat(generic.characterClassCounterEnabledForDiagnostics()).isFalse();
         assertThat(spans(generic)).hasSize(6);
         assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+
+        // A class repeat finds its runs the same way, and count shares its counter rather than
+        // build its own.
+        Re2 words = Re2.compile(utf8Slice("\\w+"));
+        assertThat(words.boundedCharacterClassCounterIfComputedForDiagnostics()).isSameAs(words.classMatchCounter());
+        RegexpMatcher wordMatcher = words.matcher(utf8Slice("the quiet tea, and_3 more"), 0);
+        assertThat(wordMatcher.characterClassCounterEnabledForDiagnostics()).isTrue();
+        assertThat(spans(wordMatcher)).hasSize(5);
+        assertThat(words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
 
         // `\pL` has too many start bytes for the vector scan; a sparse class uses it when it can.
         assertThat(letters.classMatchCounter().scansMemberStartsWithVectorsForDiagnostics()).isFalse();
