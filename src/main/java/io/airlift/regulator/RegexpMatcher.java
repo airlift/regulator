@@ -260,7 +260,10 @@ public final class RegexpMatcher
             return true;
         }
 
-        if (candidateStartCursor != null && candidateStartCursor.enabled()) {
+        boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled();
+        // Where the inner literal lies matters only to a cursor the inner literal search would replace.
+        boolean searchesInnerLiteral = (candidateCursorEnabled || enableGroupZeroForwardCursor) && pattern.searchesInnerLiteral(input, regionStart + nextFindStart, regionEnd);
+        if (!searchesInnerLiteral && candidateCursorEnabled) {
             long candidateBoundary = Dfa.searchCandidateBoundary(
                     candidateStartCursor,
                     input,
@@ -278,7 +281,7 @@ public final class RegexpMatcher
             }
         }
 
-        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursor();
+        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = searchesInnerLiteral ? null : groupZeroForwardCursor();
         if (groupZeroForwardCursor != null) {
             long matchBoundary = pattern.findGroupZeroBoundary(
                     groupZeroForwardCursor,

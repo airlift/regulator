@@ -19,6 +19,7 @@ import io.airlift.slice.Slice;
 
 import java.util.Arrays;
 import java.util.Map;
+import java.util.function.IntPredicate;
 
 import static java.util.Objects.requireNonNull;
 
@@ -1084,6 +1085,27 @@ public sealed class Re2
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - disjointSuffixRepeatMatcher.estimatedRetainedSize());
             booleanPlans = booleanPlans.withDisjointSuffixRepeatMatcher(disjointSuffixRepeatMatcher);
         }
+        // A literal every match holds after its first element, searched before the DFA runs. It is
+        // left out where another plan answers the searches it would serve, and for longest-match
+        // patterns, whose matches the leftmost-first search does not report. It takes its memory
+        // from the reverse budget, so the forward DFA keeps its whole budget, but leaves the full
+        // reverse program, compiled on first use, what its DFA needs to initialize. That is
+        // estimated from the forward program, compiled from the same expression: its memory and
+        // the least memory of a longest-match DFA over it, and an eighth more, since reversed
+        // UTF-8 sequences can take a few more instructions. The reverse prefix program takes half
+        // the reverse budget, or less if the search would otherwise not fit beside that estimate,
+        // and the search is left out unless its reverse prefix DFA can initialize.
+        if (requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
+                booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null) {
+            long forwardEstimate = Compiler.estimatedProgramMemory(semanticProgram) + Dfa.DfaInstance.minimumMemory(semanticProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            long fullReverseMemory = forwardEstimate + forwardEstimate / 8;
+            long searchMemory = reverseMemory - fullReverseMemory;
+            long prefixMemory = Math.max(1, reverseMemory / 2);
+            InnerLiteralSearch innerLiteralSearch = InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
+            if (innerLiteralSearch != null) {
+                booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
+            }
+        }
         // A call-free first-and-last-byte search for contains and dot-star spans. Only Trino rows
         // were measured, so other languages' contains keeps Slice.indexOf.
         LiteralSearchKernel literalSearch = compilerDialect == Compiler.Dialect.TRINO ? createLiteralSearch(booleanPlans) : null;
@@ -1180,7 +1202,7 @@ public sealed class Re2
         BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
                 ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
                 : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch());
+        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.innerLiteralSearch());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1497,6 +1519,11 @@ public sealed class Re2
     BooleanPartialMatchStrategy booleanPartialMatchStrategyForDiagnostics()
     {
         return decodeBooleanFindStrategy(booleanFindStrategy);
+    }
+
+    InnerLiteralSearch innerLiteralSearchForDiagnostics()
+    {
+        return booleanPlans.innerLiteralSearch();
     }
 
     BooleanPlanKind findPlanForDiagnostics()
@@ -1870,6 +1897,16 @@ public sealed class Re2
         return matchInternal(partialProg, text, 0, text.length(), resume, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
     }
 
+    /// Whether a search of `[start, end)` tries the inner literal first, so a find loop skips its
+    /// cursors. A search whose literal sits near its start keeps them, as the ordinary engine does.
+    /// This approximates the gate in matchInternal, where a search that tries the literal can
+    /// still fall back.
+    boolean searchesInnerLiteral(Slice text, int start, int end)
+    {
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        return innerLiteralSearch != null && end - start >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES && !innerLiteralSearch.fallsBackNearStart(text, start, end);
+    }
+
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
         if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||
@@ -2146,8 +2183,50 @@ public sealed class Re2
             return characterClassCounter.count(text);
         }
 
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        if (innerLiteralSearch != null && text.length() >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES) {
+            return countInnerLiteralMatches(innerLiteralSearch, text);
+        }
+
         Prog.MatchKind matchKind = longestMatch ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH;
         return Dfa.countMatches(partialProg, text, matchKind);
+    }
+
+    /// Counts the matches found through the inner literal. Where the next literal sits near the
+    /// text start or the previous match end, or a search falls back for another reason, the
+    /// ordinary count takes over from there and hands back at the first match end whose next
+    /// literal is not near. Its start-byte scan selection then holds for the whole dense run,
+    /// instead of being made again for each match, and it records its own failures. Every match
+    /// holds the literal, so none is empty and each step advances.
+    private long countInnerLiteralMatches(InnerLiteralSearch innerLiteralSearch, Slice text)
+    {
+        // As in the ordinary count, a forward DFA that failed a count leaves later counts to the
+        // matcher.
+        if (Dfa.countSearchBailedWhenSlow(partialProg, Prog.MatchKind.FIRST_MATCH)) {
+            return -1;
+        }
+        int length = text.length();
+        IntPredicate continueCounting = next -> innerLiteralSearch.fallsBackNearStart(text, next, length);
+        long count = 0;
+        int position = 0;
+        while (position < length) {
+            long span = innerLiteralSearch.search(text, 0, length, position, length);
+            if (span == Dfa.SEARCH_NO_MATCH) {
+                return count;
+            }
+            if (span >= 0) {
+                count++;
+                position = (int) span;
+                continue;
+            }
+            long counted = Dfa.countMatches(partialProg, text, position, Prog.MatchKind.FIRST_MATCH, continueCounting);
+            if (counted < 0) {
+                return -1;
+            }
+            count += Dfa.countStopCount(counted);
+            position = Dfa.countStopPosition(counted);
+        }
+        return count;
     }
 
     /// Counts the group-zero matches [RegexpMatcher#find()] would return. A plan never
@@ -2801,7 +2880,8 @@ public sealed class Re2
         }
 
         // ===== Phase 1-2: DFA Forward + Reverse Search (Unanchored) =====
-        // Use two-phase DFA to find match boundaries without extracting submatches.
+        // Use two-phase DFA to find match boundaries without extracting submatches. An unanchored
+        // search with an inner literal search runs it first and falls back to the two-phase DFA.
         boolean dfaSearchSkippedOrFailed = prog.hasDfaUnsupportedAssertions() ||
                 (captureCount == 1 && Dfa.countSearchBailedWhenSlow(prog, matchKind));
         int matchStart = -1;
@@ -2830,7 +2910,26 @@ public sealed class Re2
                     setDfaQuitStreak(workspaces, 0);
                 }
             }
-            if (!dfaSearchSkippedOrFailed) {
+            InnerLiteralSearch innerLiteralSearch = prog == partialProg ? booleanPlans.innerLiteralSearch() : null;
+            long innerLiteralSpan = innerLiteralSearch != null && !dfaSearchSkippedOrFailed && searchLength >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES
+                    ? innerLiteralSearch.search(text, contextStart, contextEnd, start, end)
+                    : InnerLiteralSearch.FALLBACK;
+            if (innerLiteralSpan == Dfa.SEARCH_NO_MATCH) {
+                return false;
+            }
+            if (innerLiteralSpan >= 0) {
+                if (captureCount == 0) {
+                    return true;
+                }
+                matchStart = (int) (innerLiteralSpan >>> 32) - start;
+                matchEnd = (int) innerLiteralSpan - start;
+                if (captureCount == 1) {
+                    mutableGroupOffsets[0] = matchStart + start - contextStart;
+                    mutableGroupOffsets[1] = matchEnd + start - contextStart;
+                    return true;
+                }
+            }
+            else if (!dfaSearchSkippedOrFailed) {
                 if (prog.anchorEnd()) {
                     // The match must end with the search window, so only the reverse DFA is needed.
                     Prog reverseProgram = reverseProg();
@@ -3093,7 +3192,7 @@ public sealed class Re2
             case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
         };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null);
+        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null, null);
     }
 
     private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
@@ -3252,37 +3351,43 @@ public sealed class Re2
             // Scans for a literal of two or more bytes by its first and last bytes together, for
             // Trino's boolean contains and dot-star spans; null leaves them on Slice.indexOf.
             // Exact-literal spans never use it.
-            LiteralSearchKernel literalSearch)
+            LiteralSearchKernel literalSearch,
+            InnerLiteralSearch innerLiteralSearch)
     {
         private BooleanPlans withScanPlan(ScanPlan scanPlan)
         {
             ScanPlan scanBooleanPlan = scanPlan == null ? null : scanPlan.booleanPlan();
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
 
         private BooleanPlans withLiteralSearch(LiteralSearchKernel literalSearch)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
+        }
+
+        private BooleanPlans withInnerLiteralSearch(InnerLiteralSearch innerLiteralSearch)
+        {
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, innerLiteralSearch);
         }
     }
 
@@ -3448,7 +3553,8 @@ public sealed class Re2
     ///
     /// **Memory Budget:**
     /// Reverse program gets 1/3 of `maxMemory`, forward gets 2/3.
-    /// This split matches upstream RE2::Init behavior.
+    /// This split matches upstream RE2::Init behavior. An inner literal search shares the reverse
+    /// third.
     ///
     /// @return the reverse program, or null if compilation failed
     private Prog reverseProg()
@@ -3465,11 +3571,13 @@ public sealed class Re2
         return reverseProg;
     }
 
-    /// Compile the reverse program with appropriate memory budget (1/3 of total).
+    /// Compile the reverse program with appropriate memory budget (1/3 of total, less what an inner
+    /// literal search retains).
     ///
     /// Memory allocation strategy (matching upstream):
     /// - Forward program: 2/3 of maxMemory (more common, can have 2 DFAs: first-match and longest-match)
-    /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search)
+    /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search), less
+    ///   what an inner literal search retains
     ///
     /// The `reversed=true` flag causes:
     /// - Right-to-left byte scanning in Dfa.search
@@ -3490,6 +3598,11 @@ public sealed class Re2
             return null;
         }
         long reverseMemory = Math.max(1, maxMemory / 3);
+        // An inner literal search already holds part of the reverse budget.
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        if (innerLiteralSearch != null) {
+            reverseMemory = Math.max(1, reverseMemory - innerLiteralSearch.estimatedRetainedSize());
+        }
         // Compile from the stored normalized suffix instead of re-parsing or re-simplifying.
         Prog prog;
         try {

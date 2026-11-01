@@ -570,7 +570,8 @@ text, so the pair scan rejects little that a first-byte scan would not.
   8 MiB default, this retains representative large Java DFA graphs without
   reset thrashing under both compressed and uncompressed ordinary references.
 - Two thirds of the configured budget is assigned to the forward program and one
-  third to a lazily compiled reverse program.
+  third to reverse search: a lazily compiled reverse program, less what an
+  eagerly compiled inner literal search retains from that third.
 - Compilation accounts for the program and list-head storage before assigning the
   remaining budget to DFA caches. Internal compilation with a non-positive budget
   uses upstream's 1 MiB default DFA allowance.
@@ -1310,7 +1311,9 @@ Eligible reusable matchers use a private candidate-start cursor for repeated
 group-zero searches. The cursor scans the forward DFA's start-byte candidates
 and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
-variable-length matches such as the Date Rebar workload.
+variable-length matches such as the Date Rebar workload. A search the inner
+literal search takes, a window of at least 64 bytes whose first literal hit lies
+at least 64 bytes past its start, skips the cursor.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
@@ -1338,7 +1341,9 @@ the search. Repeated `find()` calls then use the existing count-search traversal
 to return one forward boundary without rediscovering the DFA, match mode, and
 acceleration state for every match. Fixed-length expressions derive the start
 from that boundary; variable-length expressions retain the existing reverse DFA
-boundary recovery.
+boundary recovery. A search the inner literal search takes, a window of at least
+64 bytes whose first literal hit lies at least 64 bytes past its start, skips the
+cursor.
 
 Eligibility is limited to first-match programs without a required prefix,
 anchors, or text-dependent assertions. Empty matches are still handled by the

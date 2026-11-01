@@ -70,7 +70,9 @@ public class TestDfaCandidateStartCursor
     public void testCandidateCursorBulkScansSparseCapturePattern()
     {
         TestingTrinoRegexpBenchmarkInputs.Input input = TestingTrinoRegexpBenchmarkInputs.create("captureSparse", 32_768);
-        Re2 pattern = Re2.compile(input.pattern());
+        // A class rather than the benchmark pattern's literal hyphen keeps the inner literal search
+        // from taking it, with the same matches.
+        Re2 pattern = compile("([a-z]+)[-+]([0-9]+)");
         RegexpMatcher matcher = pattern.groupZeroMatcher(input.source(), null);
 
         assertThat(boundaries(matcher)).containsExactly(
@@ -85,7 +87,8 @@ public class TestDfaCandidateStartCursor
     @Test
     public void testCandidateCursorRejectsDenseStartBytes()
     {
-        Re2 pattern = compile("\\w+@\\w+");
+        // A class rather than a literal @ keeps the inner literal search from taking the pattern.
+        Re2 pattern = compile("\\w+[@#]\\w+");
         Slice input = utf8("identifier ".repeat(8_192) + "a@b");
         RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
 

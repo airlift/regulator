@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.IntPredicate;
 
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
@@ -191,6 +192,146 @@ final class Dfa
                 Prog.MatchKind.LONGEST_MATCH,
                 true,
                 maximumBytes);
+    }
+
+    /// Runs the leftmost-first DFA of the forward `prog` anchored at `start` and returns the Slice
+    /// offset of the match end, [#SEARCH_FAILED], or, when no match starts at `start`, the value
+    /// [#anchoredStopPosition(long)] decodes to the Slice offset where the DFA died or the window
+    /// ended. [InnerLiteralSearch] uses the stop to keep its candidate confirmations linear.
+    @SuppressWarnings("UnusedException")
+    static long searchAnchoredWithStop(Prog prog, Slice context, int contextStart, int contextEnd, int start, int end)
+    {
+        if (prog.reversed() || prog.start() == 0) {
+            throw new IllegalArgumentException("expected a forward program that can match");
+        }
+        DfaInstance dfa = prog.getCachedDfa(DfaInstance.Kind.FIRST_MATCH);
+        if (dfa == null || !dfa.ok()) {
+            return SEARCH_FAILED;
+        }
+        int contextOffset = context.byteArrayOffset();
+        boolean requiresExclusiveSearch = false;
+        long observedCacheVersion = 0;
+        while (true) {
+            boolean exclusiveSearch = requiresExclusiveSearch;
+            if (!exclusiveSearch) {
+                observedCacheVersion = dfa.cacheVersion();
+            }
+            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
+                dfa.cancelExclusiveSearch();
+                requiresExclusiveSearch = false;
+                continue;
+            }
+            try {
+                long result = searchAnchoredWithStop(
+                        dfa,
+                        context.byteArray(),
+                        contextOffset + contextStart,
+                        contextOffset + contextEnd,
+                        contextOffset + start,
+                        contextOffset + end);
+                if (result >= 0) {
+                    return result - contextOffset;
+                }
+                if (result == SEARCH_FAILED) {
+                    return result;
+                }
+                return anchoredStopResult(anchoredStopPosition(result) - contextOffset);
+            }
+            catch (StartStateAllocationException | QuitSearchException ignored) {
+                return SEARCH_FAILED;
+            }
+            catch (RetrySearchException ignored) {
+                if (exclusiveSearch) {
+                    throw new AssertionError("exclusive anchored DFA search requested a retry");
+                }
+                requiresExclusiveSearch = true;
+            }
+            finally {
+                dfa.endSearch(exclusiveSearch, readerSlot);
+            }
+        }
+    }
+
+    // The stop position is never negative, so the encoding stays at or below -2, never
+    // SEARCH_NO_MATCH or SEARCH_FAILED.
+    private static long anchoredStopResult(int stopPosition)
+    {
+        return -2L - stopPosition;
+    }
+
+    static int anchoredStopPosition(long result)
+    {
+        return (int) (-2L - result);
+    }
+
+    // Like searchAnchoredCandidate, with three differences: the window may end before the context,
+    // so the last step reads the byte after the window; a match at the start is accepted; and there
+    // is no work budget, since the caller bounds the work by never confirming a candidate inside a
+    // span an earlier confirmation already read.
+    private static long searchAnchoredWithStop(DfaInstance dfa, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
+    {
+        StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
+        if (startData.offset() == T_DEAD) {
+            return anchoredStopResult(textBegin);
+        }
+        if (startData.offset() == T_FULL_MATCH) {
+            return textEnd;
+        }
+
+        int stateOffset = startData.offset();
+        int[] transitions = dfa.transitions;
+        byte[] byteMap = dfa.bytemap;
+        int nextSize = dfa.nextSize;
+        Object[] stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+        int lastMatchBoundary = (startData.flag() & FLAG_MATCH) != 0 ? textBegin : -1;
+
+        for (int position = textBegin; position < textEnd; position++) {
+            int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
+            Object nextReference = getStateReference(stateReferences, byteClass);
+            if (nextReference != null) {
+                stateReferences = (Object[]) nextReference;
+                continue;
+            }
+
+            stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+            int nextState = getTransition(transitions, stateOffset + byteClass);
+            if (nextState == T_UNCOMPUTED) {
+                nextState = dfa.computeTransition(stateOffset, bytes[position] & 0xFF);
+                transitions = dfa.transitions;
+                if (nextState == Integer.MIN_VALUE) {
+                    return SEARCH_FAILED;
+                }
+            }
+            if (nextState == T_DEAD) {
+                return lastMatchBoundary >= 0 ? lastMatchBoundary : anchoredStopResult(position + 1);
+            }
+            if (nextState == T_FULL_MATCH) {
+                return textEnd;
+            }
+            if ((nextState & T_MATCH_BIT) != 0) {
+                lastMatchBoundary = position;
+                nextState &= ~T_MATCH_BIT;
+            }
+
+            stateOffset = nextState;
+            stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+        }
+
+        // Cached object transitions advance the row reference without updating the offset.
+        stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+        int lastByte = textEnd == contextEnd ? BYTE_END_TEXT : bytes[textEnd] & 0xFF;
+        int finalState = getTransition(transitions, stateOffset + dfa.byteMap(lastByte));
+        if (finalState == T_UNCOMPUTED) {
+            finalState = dfa.computeTransition(stateOffset, lastByte);
+            if (finalState == Integer.MIN_VALUE) {
+                return SEARCH_FAILED;
+            }
+        }
+        if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
+            return textEnd;
+        }
+        return lastMatchBoundary >= 0 ? lastMatchBoundary : anchoredStopResult(textEnd);
     }
 
     @SuppressWarnings("UnusedException")
@@ -457,17 +598,39 @@ final class Dfa
         }
     }
 
-    @SuppressWarnings("UnusedException")
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
+    {
+        long result = countMatches(prog, context, 0, matchKind, Dfa::countEveryMatch);
+        return result < 0 ? result : countStopCount(result);
+    }
+
+    private static boolean countEveryMatch(int position)
+    {
+        return true;
+    }
+
+    /// Counts the matches from `start` to the end of `context` as
+    /// [#countMatches(Prog,Slice,Prog.MatchKind)] counts all of it, with assertions seeing the
+    /// whole context, and asks `continueCounting` at each match end whether to count on from
+    /// there. Returns [#COUNT_UNSUPPORTED], or the count and the Slice offset where counting
+    /// stopped, which is the context end when no match remains, packed for [#countStopCount(long)]
+    /// and [#countStopPosition(long)]. A retried search resumes at the last match end, so the
+    /// predicate sees each match end once.
+    @SuppressWarnings("UnusedException")
+    static long countMatches(Prog prog, Slice context, int start, Prog.MatchKind matchKind, IntPredicate continueCounting)
     {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
         requireNonNull(matchKind, "matchKind is null");
+        requireNonNull(continueCounting, "continueCounting is null");
         if (matchKind != Prog.MatchKind.FIRST_MATCH && matchKind != Prog.MatchKind.LONGEST_MATCH) {
             throw new IllegalArgumentException("unsupported count match kind: " + matchKind);
         }
+        if (start < 0 || start > context.length()) {
+            throw new IllegalArgumentException("start is out of bounds");
+        }
         if (prog.start() == 0) {
-            return 0;
+            return countStopResult(0, context.length());
         }
         if (prog.anchorStart()) {
             return COUNT_UNSUPPORTED;
@@ -494,10 +657,11 @@ final class Dfa
         byte[] bytes = context.byteArray();
         int contextBegin = context.byteArrayOffset();
         int contextEnd = contextBegin + context.length();
-        Prog.FixedDistanceByteCandidates fixedDistanceCandidates = context.length() >= MIN_SELECTIVE_SCAN_SEARCH_BYTES
+        int textBegin = contextBegin + start;
+        Prog.FixedDistanceByteCandidates fixedDistanceCandidates = contextEnd - textBegin >= MIN_SELECTIVE_SCAN_SEARCH_BYTES
                 ? dfa.fixedDistanceByteCandidates()
                 : null;
-        // Sample start-byte density from the context start. A vector choice is kept for the whole
+        // Sample start-byte density from the count start. A vector choice is kept for the whole
         // count: samples taken at match boundaries can land on the literals of later matches and
         // fall back to the scalar scan for the long sparse span that follows. A scalar choice is
         // sampled again when a later search reaches the start-byte scan, until the vector scan is
@@ -512,7 +676,7 @@ final class Dfa
                     dfa.startByteScanSet,
                     dfa.startByteCandidates,
                     bytes,
-                    contextBegin,
+                    textBegin,
                     contextEnd);
             resampleStartByteScanSet = startByteScanSet == 0 && dfa.startByteScanSet != 0;
         }
@@ -521,7 +685,6 @@ final class Dfa
         if (dfa.countSelfLoopNotApplicableCount != 0) {
             dfa.countSelfLoopNotApplicableCount = 0;
         }
-        int textBegin = contextBegin;
         long count = 0;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
@@ -554,7 +717,7 @@ final class Dfa
                         return COUNT_UNSUPPORTED;
                     }
                     if (matchEnd == SEARCH_NO_MATCH) {
-                        return count;
+                        return countStopResult(count, context.length());
                     }
                     if (matchEnd <= 0) {
                         return COUNT_UNSUPPORTED;
@@ -571,8 +734,11 @@ final class Dfa
                     }
                     textBegin += (int) matchEnd;
                     count++;
+                    if (!continueCounting.test(textBegin - contextBegin)) {
+                        return countStopResult(count, textBegin - contextBegin);
+                    }
                 }
-                return count;
+                return countStopResult(count, context.length());
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return COUNT_UNSUPPORTED;
@@ -587,6 +753,22 @@ final class Dfa
                 dfa.endSearch(exclusiveSearch, readerSlot);
             }
         }
+    }
+
+    // Every match is non-empty, so neither the count nor the stop position exceeds the context length.
+    private static long countStopResult(long count, int stopPosition)
+    {
+        return count << Integer.SIZE | stopPosition;
+    }
+
+    static long countStopCount(long result)
+    {
+        return result >>> Integer.SIZE;
+    }
+
+    static int countStopPosition(long result)
+    {
+        return (int) result;
     }
 
     static boolean countSearchBailedWhenSlow(Prog prog, Prog.MatchKind matchKind)
@@ -4355,6 +4537,10 @@ final class Dfa
             justification = "DFA cache mutation is serialized by the cache mutation protocol")
     public static final class DfaInstance
     {
+        // Like upstream, a DFA initializes only when its state budget holds this many of its
+        // largest possible states.
+        private static final int MINIMUM_INITIAL_STATES = 20;
+
         enum TestingFailurePoint
         {
             EXCLUSIVE_ADMISSION,
@@ -4524,11 +4710,7 @@ final class Dfa
                 return;
             }
 
-            long overhead = 64;
-            overhead += CONSERVATIVE_REFERENCE_BYTES + Long.BYTES;
-            overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
-            overhead += (prog.size() + (long) nmark) * 8L * 2;
-            overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            long overhead = fixedOverhead(prog, nmark);
             if (startByteCandidates != null) {
                 overhead += 16L + startByteCandidates.length;
             }
@@ -4556,9 +4738,8 @@ final class Dfa
             // MANY_MATCH states can append one separator plus match IDs, but those IDs are
             // instructions already counted by listCount. Include the separator so the gate
             // retains ample headroom for reset recovery, which needs at most three states.
-            int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;
-            long largestStateSize = estimateStateSize(prog.listCount() + nmark + manyMatchSeparator);
-            if (stateBudget / largestStateSize < 20) {
+            long largestStateSize = largestStateSize(prog, kind, nmark);
+            if (stateBudget / largestStateSize < MINIMUM_INITIAL_STATES) {
                 this.initFailed = true;
                 this.maxTransitionsLength = 0;
                 this.transitions = new int[0];
@@ -4582,6 +4763,34 @@ final class Dfa
             this.availableStateMemory = memoryBudget - retainedStateMemory;
             this.nextFreeOffset = nextSize;
             this.stateCount = 0;
+        }
+
+        /// Returns the least `maxMemory` with which the constructor initializes a DFA of `kind` over
+        /// `prog`. [Prog#getCachedDfa] gives a reversed program's longest-match DFA the whole
+        /// program DFA memory, so compare that against this value. The start-byte tables are left
+        /// out, since only the constructor builds them, so for a forward program this is a lower
+        /// bound. A reversed program builds none, so for it this is exact.
+        static long minimumMemory(Prog prog, Kind kind)
+        {
+            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            return fixedOverhead(prog, nmark) + MINIMUM_INITIAL_STATES * largestStateSize(prog, kind, nmark);
+        }
+
+        // The work queues, the stack, and fixed fields, without the start-byte tables.
+        private static long fixedOverhead(Prog prog, int nmark)
+        {
+            long overhead = 64;
+            overhead += CONSERVATIVE_REFERENCE_BYTES + Long.BYTES;
+            overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
+            overhead += (prog.size() + (long) nmark) * 8L * 2;
+            overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            return overhead;
+        }
+
+        private static long largestStateSize(Prog prog, Kind kind, int nmark)
+        {
+            int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;
+            return estimateStateSize(prog.bytemapRange() + 1, prog.listCount() + nmark + manyMatchSeparator);
         }
 
         boolean canStartByteAcceleration()
@@ -4904,7 +5113,12 @@ final class Dfa
 
         private long estimateStateSize(int instructionCount)
         {
-            return stateObjectMemory(instructionCount) +
+            return estimateStateSize(nextSize, instructionCount);
+        }
+
+        private static long estimateStateSize(int nextSize, int instructionCount)
+        {
+            return stateObjectMemory(nextSize, instructionCount) +
                     ((long) nextSize * Integer.BYTES) +
                     (2 * REFERENCE_BYTES) +
                     (2 * REFERENCE_BYTES);
@@ -6281,6 +6495,11 @@ final class Dfa
         }
 
         private long stateObjectMemory(int instructionCount)
+        {
+            return stateObjectMemory(nextSize, instructionCount);
+        }
+
+        private static long stateObjectMemory(int nextSize, int instructionCount)
         {
             return sizeOfObjectArray(nextSize + 1) +
                     sizeOfIntArray(instructionCount) +
