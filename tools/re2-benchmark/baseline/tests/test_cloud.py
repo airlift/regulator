@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 import cloud  # noqa: E402
@@ -107,8 +107,9 @@ class FakeCloud:
     """AWS as AwsCloud reaches it, simulated: one account whose regions each have a default VPC with a public subnet
     in zone a that offers every instance type, the images, quotas, instances, Spot requests, placement scores and
     buckets a test gives it or the controller creates, each created one's lifecycle configuration, the worker instance
-    profile, and S3 objects by bucket and key. Without scores, placement
-    scores fail, as AWS does for a configuration it cannot score. An image a test does not give is Amazon Linux.
+    profile, and S3 objects by bucket and key, with the metadata and storage class of each one streamed. Without
+    scores, placement scores fail, as AWS does for a configuration it cannot score. An image a test does not give is
+    Amazon Linux.
 
     A launch adds a pending instance, or returns the one its client token already launched, unless a test's
     rejections refuse it: each is a function of the region and launch spec that returns a LaunchRejected to raise,
@@ -127,8 +128,8 @@ class FakeCloud:
 
     # Seconds of a round trip: an S3 object call is short, an EC2 description longer, and a placement query longer
     # still.
-    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "upload": 0.05, "delete": 0.05, "head": 0.05,
-             "instances": 0.5, "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
+    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "upload": 0.05, "upload_stream": 0.05, "delete": 0.05,
+             "head": 0.05, "instances": 0.5, "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
     DEFAULT_COST = 0.2
     # The simulated epoch's start, 2026-10-26 07:33:20 UTC.
     EPOCH = 1_793_000_000
@@ -155,6 +156,8 @@ class FakeCloud:
         self.region_requests = {}
         # By (bucket, key), as (body, modified, the SHA-256 an upload kept in its metadata or None).
         self.objects = Objects()
+        # Each object upload_stream wrote, as (metadata, storage class), by (bucket, key).
+        self.streamed = {}
         self.profiles = {"regulator-benchmark-worker": ("regulator-benchmark-worker",)}
         self.rejections = []
         # Each launch's instance ID, by region and client token.
@@ -277,28 +280,52 @@ class FakeCloud:
             raise CloudError(f"NoSuchKey: s3://{bucket}/{key}")
         path.write_bytes(self.objects[bucket, key][0])
 
+    def digest(self, region, bucket, key):
+        self.call("get", region, bucket, key)
+        if (bucket, key) not in self.objects:
+            raise CloudError(f"NoSuchKey: s3://{bucket}/{key}")
+        body = self.objects[bucket, key][0]
+        return hashlib.sha256(body).hexdigest(), len(body)
+
     def put(self, region, bucket, key, body, *, if_none_match=False):
         self.call("put", region, bucket, key)
         if if_none_match and (bucket, key) in self.objects:
             return False
         self.objects[bucket, key] = (body, self.time(), None)
+        self.streamed.pop((bucket, key), None)
         return True
 
     def upload(self, region, bucket, key, path, sha256):
         self.call("upload", region, bucket, key)
         self.objects[bucket, key] = (path.read_bytes(), self.time(), sha256)
+        self.streamed.pop((bucket, key), None)
+
+    def upload_stream(self, region, bucket, key, stream, metadata, storage_class):
+        self.call("upload_stream", region, bucket, key)
+        body = b"".join(iter(lambda: stream.read(1 << 16), b""))
+        if (bucket, key) in self.objects:
+            return False
+        self.objects[bucket, key] = (body, self.time(), None)
+        self.streamed[bucket, key] = (dict(metadata), storage_class)
+        return True
+
+    def lifecycle_rules(self, region, bucket):
+        self.call("lifecycle_rules", region, bucket)
+        return self.lifecycles.get(bucket, {}).get("Rules", [])
 
     def delete(self, region, bucket, keys):
         self.call("delete", region, bucket, len(keys))
         for key in keys:
             self.objects.pop((bucket, key), None)
+            self.streamed.pop((bucket, key), None)
 
     def head(self, region, bucket, key):
         self.call("head", region, bucket, key)
         if (bucket, key) not in self.objects:
             return None
-        _, modified, sha256 = self.objects[bucket, key]
-        return cloud.ObjectHead(sha256, self.time() - modified)
+        body, modified, sha256 = self.objects[bucket, key]
+        metadata, storage_class = self.streamed.get((bucket, key), ({"sha256": sha256} if sha256 else {}, "STANDARD"))
+        return cloud.ObjectHead(sha256, self.time() - modified, metadata, storage_class, len(body))
 
     def run_control_host(self, region, image, instance_type, root_device, subnet, security_group, profile, user_data,
                          tags):
@@ -537,6 +564,8 @@ class TestAwsCloud(unittest.TestCase):
                         {"Bucket": "bucket", "Prefix": "session/results/"})
         s3.add_response("get_object", {"Body": StreamingBody(io.BytesIO(b"lease body"), 10)},
                         {"Bucket": "bucket", "Key": "lease"})
+        s3.add_response("get_object", {"Body": StreamingBody(io.BytesIO(b"lease body"), 10)},
+                        {"Bucket": "bucket", "Key": "lease"})
         s3.add_response("put_object", {}, {"Bucket": "bucket", "Key": "lease", "Body": b"{}", "IfNoneMatch": "*"})
         # A conditional write that finds the key reports it, and any other failure is a CloudError.
         s3.add_client_error("put_object", "PreconditionFailed", http_status_code=412)
@@ -548,9 +577,33 @@ class TestAwsCloud(unittest.TestCase):
         s3.add_client_error("put_object", "SlowDown", http_status_code=503)
         # Its age is by S3's clock, the response's date, whatever the controller's clock says.
         s3.add_response("head_object", {"Metadata": {"sha256": archive_sha256}, "LastModified": modified,
+                                        "StorageClass": "GLACIER_IR", "ContentLength": 7,
                                         "ResponseMetadata": {"HTTPHeaders": {"date": "Sat, 31 Oct 2026 00:00:30 GMT"}}},
                         {"Bucket": "bucket", "Key": "archive"})
         s3.add_client_error("head_object", "404", http_status_code=404)
+        # A streamed object is written in parts, each with its own SHA-256, and completed only where no object has
+        # its key; one that finds the key, or whose stream is interrupted, is aborted.
+        stream = {"Bucket": "bucket", "Key": "root"}
+        s3.add_response("create_multipart_upload", {"UploadId": "u1"}, {
+            **stream, "Metadata": {"file-count": "2"}, "StorageClass": "GLACIER_IR", "ChecksumAlgorithm": "SHA256"})
+        parts = []
+        for number, block in enumerate((b"root", b"s"), 1):
+            checksum = base64.b64encode(hashlib.sha256(block).digest()).decode()
+            s3.add_response("upload_part", {"ETag": f"e{number}"}, {
+                **stream, "UploadId": "u1", "PartNumber": number, "Body": block, "ChecksumSHA256": checksum})
+            parts.append({"PartNumber": number, "ETag": f"e{number}", "ChecksumSHA256": checksum})
+        s3.add_response("complete_multipart_upload", {}, {
+            **stream, "UploadId": "u1", "MultipartUpload": {"Parts": parts}, "IfNoneMatch": "*"})
+        s3.add_response("create_multipart_upload", {"UploadId": "u2"})
+        s3.add_response("upload_part", {"ETag": "e1"})
+        s3.add_client_error("complete_multipart_upload", "PreconditionFailed", http_status_code=412)
+        s3.add_response("abort_multipart_upload", {}, {**stream, "UploadId": "u2"})
+        s3.add_response("create_multipart_upload", {"UploadId": "u3"})
+        s3.add_response("abort_multipart_upload", {}, {**stream, "UploadId": "u3"})
+        rules = [{"ID": "expire", "Status": "Enabled", "Filter": {"Prefix": ""}, "Expiration": {"Days": 1}}]
+        s3.add_response("get_bucket_lifecycle_configuration", {"Rules": rules}, {"Bucket": "bucket"})
+        s3.add_client_error("get_bucket_lifecycle_configuration", "NoSuchLifecycleConfiguration",
+                            http_status_code=404)
 
         aws = self.cloud
         with tempfile.TemporaryDirectory() as temporary:
@@ -559,6 +612,8 @@ class TestAwsCloud(unittest.TestCase):
                              aws.list("us-west-2", "bucket", "session/results/"))
             aws.get("us-west-2", "bucket", "lease", path)
             self.assertEqual(b"lease body", path.read_bytes())
+            self.assertEqual((hashlib.sha256(b"lease body").hexdigest(), 10),
+                             aws.digest("us-west-2", "bucket", "lease"))
             self.assertTrue(aws.put("us-west-2", "bucket", "lease", b"{}", if_none_match=True))
             self.assertFalse(aws.put("us-west-2", "bucket", "lease", b"{}", if_none_match=True))
             with self.assertRaisesRegex(CloudError, "SlowDown"):
@@ -567,8 +622,18 @@ class TestAwsCloud(unittest.TestCase):
             aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
             with self.assertRaisesRegex(CloudError, "SlowDown"):
                 aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
-            self.assertEqual(cloud.ObjectHead(archive_sha256, 86430), aws.head("us-west-2", "bucket", "archive"))
+            self.assertEqual(cloud.ObjectHead(archive_sha256, 86430, {"sha256": archive_sha256}, "GLACIER_IR", 7),
+                             aws.head("us-west-2", "bucket", "archive"))
             self.assertIsNone(aws.head("us-west-2", "bucket", "absent"))
+        with patch.object(cloud, "STREAM_PART_BYTES", 4):
+            self.assertTrue(aws.upload_stream("us-west-2", "bucket", "root", io.BytesIO(b"roots"),
+                                              {"file-count": "2"}, "GLACIER_IR"))
+            self.assertFalse(aws.upload_stream("us-west-2", "bucket", "root", io.BytesIO(b"root"), {}, "GLACIER_IR"))
+            interrupted = Mock(read=Mock(side_effect=KeyboardInterrupt))
+            with self.assertRaises(KeyboardInterrupt):
+                aws.upload_stream("us-west-2", "bucket", "root", interrupted, {}, "GLACIER_IR")
+        self.assertEqual(rules, aws.lifecycle_rules("us-west-2", "bucket"))
+        self.assertEqual([], aws.lifecycle_rules("us-west-2", "bucket"))
 
     def test_launch_classifies_refusals_and_resubmits_an_unanswered_request(self):
         ec2 = self.stub("ec2")
