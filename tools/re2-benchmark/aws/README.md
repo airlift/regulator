@@ -508,8 +508,11 @@ results under a campaign root, by default
 
 - `candidates.tsv`: each candidate's name, commit, ref, and archive SHA-256
 - `<name>/candidate/`: the candidate's `regulator.tar.gz` and `provenance.tsv`
-- `<name>/build`, `<name>/smoke`, `<name>/primary`, `<name>/reduction`, and
-  `<name>/confirmation`: its phases, run as campaign `<campaign>.<name>`
+- `<name>/build`, `<name>/smoke`, `<name>/primary`, and `<name>/confirmation`:
+  its phases, run as campaign `<campaign>.<name>`
+- `<name>/preliminary-reduction` and `<name>/reduction`: the reduction of its
+  primary that picks the confirmation jobs, and the final reduction of its
+  primary and confirmation
 - `<name>/lang/smoke` and `<name>/lang/primary`: its language plan's phases,
   run as campaign `<campaign>.<name>.lang`
 
@@ -536,13 +539,15 @@ runs its semantic verifiers, and CI runs the full suite.
 ## Run a campaign
 
 `campaign` freezes every candidate and runs each through its phases in one
-controller process: build, smoke, primary, the reduction of its primary, and a
-confirmation of the jobs that reduction lists, if any. Each candidate starts a
-phase as soon as its own previous phase completes, and a failed phase stops
-only its own candidate's later phases. A fault while the controller sets up,
-recovers or dispatches a phase pauses only that phase, as [steering a
-campaign](#steer-a-campaign) describes; an exception in a reduction fails its
-phase instead, so its candidate's later phases never start. With
+controller process: build, smoke, primary, the preliminary reduction of its
+primary, a confirmation of the jobs that reduction lists, if any, and the final
+reduction of its primary and confirmation, which the release report imports.
+With no jobs listed, the final reduction reduces the primary alone again. Each
+candidate starts a phase as soon as its own previous phase completes, and a
+failed phase stops only its own candidate's later phases. A fault while the
+controller sets up, recovers or dispatches a phase pauses only that phase, as
+[steering a campaign](#steer-a-campaign) describes; an exception in a reduction
+fails its phase instead, so its candidate's later phases never start. With
 `--language-plan`, each candidate also runs the plan's smoke and primary on its
 build; the command refuses plans its language phases would refuse, such as two
 plans of one shard, before it freezes anything.
@@ -868,23 +873,26 @@ anything and records its process ID and start time in `controller.txt` there;
 a second controller of the root stops at once. Run the command under
 `nohup` or a terminal multiplexer to keep it running after the shell ends.
 Run the same command again to resume: it skips every completed phase, whose
-root holds `phase-complete.txt`, and every completed reduction, whose root
-holds `output-checksums.tsv`, and resumes the others from their ledgers. The
-controller records the options that decide what its phases measure, the
-selected shards, smoke protocol, release version, and language plans, in
-`campaign-options.json` with the [frozen fleet options](#shared-fleet-budget),
-and refuses a restart that changes them.
+root holds `phase-complete.txt`, and every completed reduction, preliminary or
+final, whose root holds `output-checksums.tsv`, and resumes the others from
+their ledgers. The controller records the options that decide what its phases
+measure, the selected shards, smoke protocol, release version, and language
+plans, in `campaign-options.json` with the [frozen fleet
+options](#shared-fleet-budget), and refuses a restart that changes them.
 
 The command refuses a campaign root the earlier controllers started, which ran
 each phase as its own process: one holding `campaign-driver.txt`, a phase
 holding `driver-child.txt`, or a phase's `execution-policy.json` that froze its
 share of the hosts or named a fleet policy file. It also refuses a root whose
 `fleet-state.json` names a phase by its absolute root on the control host, as
-controllers before phase keys wrote it. It names the file it found, and the
-root is never migrated; start a new campaign root. `status`, `--results`, the
-reduction, and archiving still read such a root's ledgers, and `status` reads
-such a fleet's spend and boots by each phase's root under the host's campaign
-root.
+controllers before phase keys wrote it, and a candidate whose completed
+`reduction` has no `preliminary-reduction` beside it, which controllers that
+reduced only the primary wrote; resuming it would take that reduction as final
+and never reduce the confirmation's receipts. It names the file it found, and
+the root is never migrated; start a new campaign root. `status`, `--results`,
+the reduction, and archiving still read such a root's ledgers, and `status`
+reads such a fleet's spend and boots by each phase's root under the host's
+campaign root.
 
 See a campaign's progress, or one phase's, without disturbing it:
 

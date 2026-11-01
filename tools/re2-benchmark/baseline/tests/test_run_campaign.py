@@ -538,7 +538,8 @@ class TestRunCampaign(unittest.TestCase):
                                                        campaign_root / name / "candidate", "0" * 64, "e" * 40)
                           for name, commit in (("a", "a"), ("b", "b"))]
             frozen = {candidate.name: candidate for candidate in candidates}
-            # Each phase's dispatch runs this many loops; A's smoke is slow and then fails. A's reduction lists a job.
+            # Each phase's dispatch runs this many loops; A's smoke is slow and then fails. A's preliminary reduction
+            # lists a job.
             loops = {"a/smoke": 4}
             failing = {"a/smoke"}
             unit_id = next(unit_id for unit_id, unit in sorted(RUN_CAMPAIGN.work_units.load(SCRIPT.parent).items())
@@ -590,11 +591,11 @@ class TestRunCampaign(unittest.TestCase):
                     (root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
 
             def reduce(options):
-                name = options.output_dir.parent.name
-                events.append(("reduce", name, options))
+                name, reduction = options.output_dir.parent.name, options.output_dir.name
+                events.append(("reduce", f"{name}/{reduction}", options))
                 options.output_dir.mkdir(parents=True)
-                (options.output_dir / "confirmation-jobs.tsv").write_text(
-                    "platform\tshard_id\tunit_id\n" + confirmed.get(name, ""))
+                (options.output_dir / "confirmation-jobs.tsv").write_text("platform\tshard_id\tunit_id\n" + (
+                    confirmed.get(name, "") if reduction == "preliminary-reduction" else ""))
                 (options.output_dir / "output-checksums.tsv").touch()
 
             def run(names=("a", "b")):
@@ -652,9 +653,16 @@ class TestRunCampaign(unittest.TestCase):
             self.assertLess(order.index(("start", "b/primary")), order.index(("end", "a/smoke")))
             [primary] = [event[2] for event in events if event[:2] == ("start", "b/primary")]
             self.assertEqual(([("b", "b" * 40)], ["trino-like"]), (primary.candidates, primary.selected_shards))
-            # B's reduction takes its primary's events, and with no confirmation jobs listed, B completes.
-            [reduction] = [event[2] for event in events if event[:2] == ("reduce", "b")]
-            self.assertEqual([campaign_root / "b" / "primary" / "campaign-events.tsv"], reduction.events)
+            # B's preliminary reduction takes its primary's events, and with no confirmation jobs listed, its final
+            # reduction takes the primary alone again.
+            b = campaign_root / "b"
+            [(_, preliminary, preliminary_options), (_, final, final_options)] = [
+                event for event in events if event[0] == "reduce" and event[1].startswith("b/")]
+            self.assertEqual(("b/preliminary-reduction", "b/reduction"), (preliminary, final))
+            self.assertEqual([([b / "primary" / "accepted-units.tsv"], [], [b / "primary"],
+                               [b / "primary" / "campaign-events.tsv"])] * 2,
+                             [(options.primary_receipts, options.confirmation_receipts, options.artifacts_root,
+                               options.events) for options in (preliminary_options, final_options)])
             self.assertNotIn(("start", "a/primary"), order)
             self.assertNotIn(("start", "b/confirmation"), order)
             self.assertNotIn("b/", errors.getvalue())
@@ -701,16 +709,24 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual([], events)
             self.assertEqual([], RUN_CAMPAIGN.control_host.manifest_problems(campaign_root))
             reopen()
-            # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
-            # listed on the shards it measured.
+            # A restart skips every completed step: A resumes at its smoke, confirms the job its preliminary
+            # reduction listed on the shards it measured, and reduces its primary and confirmation together.
             failing.clear()
             run()
 
-            self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("reduce", "a"),
-                              ("start", "a/confirmation")], [event[:2] for event in events if event[0] != "end"])
-            confirmation = events[-2][2]
-            self.assertEqual((campaign_root / "a" / "reduction" / "confirmation-jobs.tsv", ["trino-like"]),
+            self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("reduce", "a/preliminary-reduction"),
+                              ("start", "a/confirmation"), ("reduce", "a/reduction")],
+                             [event[:2] for event in events if event[0] != "end"])
+            [confirmation] = [event[2] for event in events if event[:2] == ("start", "a/confirmation")]
+            a = campaign_root / "a"
+            self.assertEqual((a / "preliminary-reduction" / "confirmation-jobs.tsv", ["trino-like"]),
                              (confirmation.confirmation_jobs, confirmation.selected_shards))
+            [reduction] = [event[2] for event in events if event[:2] == ("reduce", "a/reduction")]
+            self.assertEqual(([a / "primary" / "accepted-units.tsv"], [a / "confirmation" / "accepted-units.tsv"],
+                              [a / "primary", a / "confirmation"],
+                              [a / "primary" / "campaign-events.tsv", a / "confirmation" / "campaign-events.tsv"]),
+                             (reduction.primary_receipts, reduction.confirmation_receipts, reduction.artifacts_root,
+                              reduction.events))
             # A change that passed its first check as the controller ended is refused once it holds the settings lock,
             # so the root still matches the manifest that controller wrote.
             reopen()
@@ -1834,9 +1850,11 @@ class TestRunCampaign(unittest.TestCase):
                 freeze.assert_not_called()
                 setup.assert_not_called()
             # A campaign root the earlier controllers started is refused, naming what shows it, and left as it was:
-            # the per-phase controllers' records, or a fleet naming its phases by their roots on the control host.
+            # the per-phase controllers' records, a fleet naming its phases by their roots on the control host, or a
+            # reduction of a candidate's primary made before its confirmation.
             owner = f"{RUN_CAMPAIGN.control_host.CAMPAIGN_ROOT}/a/primary"
             for path, content in ((root / "old" / "campaign-driver.txt", "pid=1\n"),
+                                  (root / "old" / "a" / "reduction" / "output-checksums.tsv", ""),
                                   (root / "old" / RUN_CAMPAIGN.STATE_FILE,
                                    json.dumps({"reservations": {}, "completed": {"x/1": {"owner": owner}}})),
                                   (root / "old" / "a" / "lang" / "smoke" / "driver-child.txt", "pid=1\n"),

@@ -4225,8 +4225,8 @@ class UnitDispatcher:
 @dataclass
 class Phase:
     """One step of a candidate's campaign, run by the campaign's controller once every step it comes after is
-    complete: a unit phase, whose options its namespace sets over the campaign's, or with no options, the reduction
-    of the candidate's primary. Its key is its root relative to the campaign root."""
+    complete: a unit phase, whose options its namespace sets over the campaign's, or with no options, a reduction
+    of the candidate's phases. Its key is its root relative to the campaign root."""
     key: str
     root: Path
     after: tuple
@@ -4321,19 +4321,25 @@ def allocate(demands, max_hosts, per_platform, pinned=None):
     return shares
 
 
+def confirmation_jobs(directory):
+    """The confirmation jobs file the preliminary reduction of the candidate in directory writes."""
+    return directory / "preliminary-reduction" / "confirmation-jobs.tsv"
+
+
 def confirmation_jobs_listed(path):
     with path.open(newline="") as input_file:
         return any(True for _ in csv.DictReader(input_file, delimiter="\t"))
 
 
 def candidate_phases(arguments, candidates):
-    """Each candidate's steps in the order they start: build, smoke, primary, the reduction of its primary, and a
-    confirmation when the reduction lists jobs, and with language plans, the plans' smoke and primary on the same
-    build. A phase takes the candidate's frozen commit and the options that decide what it measures."""
+    """Each candidate's steps in the order they start: build, smoke, primary, the preliminary reduction of its
+    primary, a confirmation when that reduction lists jobs, the final reduction, and with language plans, the plans'
+    smoke and primary on the same build. A phase takes the candidate's frozen commit and the options that decide what
+    it measures."""
     phases = []
     for candidate in candidates:
         directory = arguments.campaign_root / candidate.name
-        jobs = directory / "reduction" / "confirmation-jobs.tsv"
+        jobs = confirmation_jobs(directory)
 
         def phase(key, after, candidate=candidate, directory=directory, **options):
             return Phase(f"{candidate.name}/{key}", directory / key,
@@ -4346,29 +4352,37 @@ def candidate_phases(arguments, candidates):
             phase("build", (), selected_shards=None),
             phase("smoke", ("build",), smoke_protocol=arguments.smoke_protocol),
             phase("primary", ("smoke",)),
-            Phase(f"{candidate.name}/reduction", directory / "reduction", (f"{candidate.name}/primary",)),
-            replace(phase("confirmation", ("reduction",), confirmation_jobs=jobs),
-                    needed=lambda jobs=jobs: confirmation_jobs_listed(jobs))]
+            Phase(f"{candidate.name}/preliminary-reduction", directory / "preliminary-reduction",
+                  (f"{candidate.name}/primary",)),
+            replace(phase("confirmation", ("preliminary-reduction",), confirmation_jobs=jobs),
+                    needed=lambda jobs=jobs: confirmation_jobs_listed(jobs)),
+            Phase(f"{candidate.name}/reduction", directory / "reduction", (f"{candidate.name}/confirmation",))]
         if arguments.language_plan:
             plans = {"language_plan": arguments.language_plan, "selected_shards": None}
             phases += [phase("lang/smoke", ("build",), **plans), phase("lang/primary", ("lang/smoke",), **plans)]
     return phases
 
 
-def reduce_primary(arguments, phase):
-    """Reduce the candidate's primary into the reduction's root, as aggregate_results does, with the primary's events,
-    which its first event writes. The reduction writes output-checksums.tsv last, so an interrupted one runs again."""
+def reduce_candidate(arguments, phase):
+    """Reduce the candidate's phases into the reduction's root, as aggregate_results does, with each phase's events,
+    which its first event writes. The preliminary reduction takes the primary alone; the final one takes the
+    confirmation too when the preliminary listed jobs. The reduction writes output-checksums.tsv last, so an
+    interrupted one runs again."""
     primary = phase.root.parent / "primary"
-    events = primary / "campaign-events.tsv"
+    roots = [primary]
+    if phase.root.name == "reduction" and confirmation_jobs_listed(confirmation_jobs(phase.root.parent)):
+        roots.append(phase.root.parent / "confirmation")
+    events = [root / "campaign-events.tsv" for root in roots]
     options = aggregate_results.parser().parse_args([
-        f"--primary-receipts={primary / 'accepted-units.tsv'}", f"--artifacts-root={primary}",
-        *([f"--events={events}"] if events.is_file() else []), f"--output-dir={phase.root}",
-        *(f"--shard={shard}" for shard in arguments.selected_shards or ()),
+        f"--primary-receipts={primary / 'accepted-units.tsv'}",
+        *(f"--confirmation-receipts={root / 'accepted-units.tsv'}" for root in roots[1:]),
+        *(f"--artifacts-root={root}" for root in roots), *(f"--events={path}" for path in events if path.is_file()),
+        f"--output-dir={phase.root}", *(f"--shard={shard}" for shard in arguments.selected_shards or ()),
         *([f"--release-version={arguments.release_version}"] if arguments.release_version else [])])
     try:
         aggregate_results.aggregate(options)
     except aggregate_results.ReductionError as error:
-        raise SystemExit(f"cannot reduce {primary}: {error}") from error
+        raise SystemExit(f"cannot reduce {phase.root.parent} into its {phase.root.name}: {error}") from error
 
 
 def prepare_phase(arguments, root):
@@ -4634,7 +4648,7 @@ class Campaign:
         phase.state = "starting"
         phase.regions, phase.checked_at = self.regions(), time.monotonic()
         if phase.reduction:
-            phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
+            phase.future = self.reductions.submit(reduce_candidate, self.arguments, phase)
         else:
             arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
             phase.future = self.setup.submit(prepare_phase, arguments, self.root)
@@ -4790,8 +4804,10 @@ class Campaign:
 
 def refuse_old_root(campaign_root):
     """Refuse a campaign root the earlier controllers started, which ran each phase as its own process with its
-    share of the hosts frozen in its execution policy, or one whose fleet names its phases by their roots on the
-    control host; a root is never migrated. status, --results, the reduction, and archiving still read its ledgers."""
+    share of the hosts frozen in its execution policy, one whose fleet names its phases by their roots on the
+    control host, or one whose controller reduced a candidate's primary alone into its reduction, whose checksum
+    marker would make this controller take that reduction as final and never reduce the confirmation's receipts; a
+    root is never migrated. status, --results, the reduction, and archiving still read its ledgers."""
     candidates = [campaign_root / OLD_DRIVER_RECORD]
     for pattern in ("*/*/", "*/lang/*/"):
         candidates += sorted(campaign_root.glob(pattern + OLD_PHASE_RECORD))
@@ -4800,6 +4816,11 @@ def refuse_old_root(campaign_root):
     found = next((path for path in candidates if path.is_file()), None)
     if found is not None:
         raise SystemExit(f"{campaign_root} was started by the earlier per-phase controllers, as {found} shows; this "
+                         "controller cannot resume it, so start a new campaign root")
+    found = next((path for path in sorted(campaign_root.glob("*/reduction/output-checksums.tsv"))
+                  if not (path.parent.parent / "preliminary-reduction").is_dir()), None)
+    if found is not None:
+        raise SystemExit(f"{campaign_root} reduced a candidate before its confirmation, as {found} shows; this "
                          "controller cannot resume it, so start a new campaign root")
     fleet = read_fleet_state(campaign_root / STATE_FILE) or {"reservations": {}, "completed": {}}
     if any(earlier_owner(item["owner"]) for items in (fleet["reservations"], fleet["completed"])

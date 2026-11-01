@@ -65,9 +65,10 @@ byte size, encryption, and metadata.
 
 ## Usage
 
-Run this after the accepted raw campaign is complete and before final reduction
-and report generation. Preliminary reduction used to select confirmation jobs
-does not require a campaign archive.
+Run this after the accepted raw campaign is complete. A campaign controller's
+reductions, a candidate's `preliminary-reduction` and `reduction`, name no
+campaign archive. To bind the reduction to the archive, rerun the reducer with
+`--campaign-artifact` as [the reporting commands](REPORTING.md#commands) show.
 
 ```bash
 python3 tools/re2-benchmark/baseline/archive_results.py \
