@@ -28,12 +28,13 @@ import static io.airlift.regulator.ScanPlanRun.SCALAR_CANDIDATE_PREFIX_BYTES;
 
 final class BoundedCharacterClassCounter
 {
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(BoundedCharacterClassCounter.class);
     private static final int COMPACT_ROUTE_MINIMUM_REPETITIONS = 32;
     private static final int COMPACT_ROUTE_MINIMUM_RANGES = 32;
     // Planes 4 through 13 hold no characters, so only a class that reaches the last planes ends
     // here or beyond: a negated class, or one with plane-14 members such as `\p{Mn}` or Unicode
     // `\w`. Its bitset would cost up to 136 KiB per pattern.
-    private static final int SINGLE_CLASS_LAST_MEMBER_LIMIT = 0x40000;
+    private static final int LAST_MEMBER_LIMIT = 0x40000;
     private static final BoundedCharacterClassCounter UNSUPPORTED = new BoundedCharacterClassCounter();
 
     private final long[] matchingCodePoints;
@@ -186,18 +187,41 @@ final class BoundedCharacterClassCounter
                 analysis.latin1());
     }
 
-    /// Returns a counter whose runs are the matches of `regexp` when it is one class of the
-    /// compact route's kind, so each match is a single member, or `null`. Count and boolean find
-    /// keep the program; the counter serves a matcher, which would otherwise restart the engine
-    /// for every member.
-    static BoundedCharacterClassCounter analyzeSingleClass(Regexp regexp)
+    /// Returns a counter whose runs are the matches of `regexp`, or `null`. A matcher would
+    /// otherwise restart the engine for every match. `regexp` qualifies as one class of the compact
+    /// route's kind, so each match is a single member, or as a greedy repeat of one class with a
+    /// minimum of at least one, so each match is a run of members cut at the repeat's maximum. A
+    /// repeat compiled for longest match keeps the engine, as on the compact route, and so does a
+    /// repeat that RE2 or Trino case-folds; Java and Rust fold a class while parsing it. Count
+    /// keeps its counting algorithm and reuses this counter for a class repeat; boolean find keeps
+    /// its separate route.
+    static BoundedCharacterClassCounter analyzeMatcherRoute(Regexp regexp, boolean longestMatch)
     {
-        if ((regexp.parseFlags() & (LATIN1 | Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) != 0 ||
-                !isLargeUnicodeClass(regexp) ||
-                regexp.charClass().range(regexp.charClass().rangeCount() - 1).high() >= SINGLE_CLASS_LAST_MEMBER_LIMIT) {
+        if ((regexp.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) != 0) {
             return null;
         }
-        return new BoundedCharacterClassCounter(regexp.charClass().ranges(), 1, 1, false);
+        if (regexp.op() == CHAR_CLASS) {
+            RuneRange[] ranges = regexp.charClass().ranges();
+            if ((regexp.parseFlags() & LATIN1) != 0 || !isLargeUnicodeClass(regexp) || reachesLastPlanes(ranges)) {
+                return null;
+            }
+            return new BoundedCharacterClassCounter(ranges, 1, 1, false);
+        }
+
+        if (longestMatch) {
+            return null;
+        }
+        Analysis analysis = analyzePattern(regexp);
+        // A byte class retains a 256-bit set whatever its ranges.
+        if (analysis == null || (!analysis.latin1() && reachesLastPlanes(analysis.ranges()))) {
+            return null;
+        }
+        return new BoundedCharacterClassCounter(analysis.ranges(), analysis.minimum(), analysis.maximum(), analysis.latin1());
+    }
+
+    private static boolean reachesLastPlanes(RuneRange[] ranges)
+    {
+        return ranges[ranges.length - 1].high() >= LAST_MEMBER_LIMIT;
     }
 
     private static boolean isLargeUnicodeClass(Regexp atom)
@@ -217,10 +241,7 @@ final class BoundedCharacterClassCounter
 
     long estimatedRetainedSize()
     {
-        return SizeOf.instanceSize(BoundedCharacterClassCounter.class) +
-                SizeOf.sizeOf(matchingCodePoints) +
-                SizeOf.sizeOf(memberStartBytes) +
-                SizeOf.sizeOf(memberStartByteNibbleTables);
+        return INSTANCE_SIZE + SizeOf.sizeOf(matchingCodePoints) + SizeOf.sizeOf(memberStartBytes) + SizeOf.sizeOf(memberStartByteNibbleTables);
     }
 
     static boolean supports(Regexp regexp)

@@ -110,14 +110,19 @@ public class TestDfaStartStateFailure
     @Test
     public void testSecondStartStateFailureUsesGroupZeroFallback()
     {
-        Re2 pattern = Re2.compile(utf8Slice("[a-z]+"));
+        // The optional suffix keeps the pattern off the class counter.
+        Re2 pattern = Re2.compile(utf8Slice("[a-z]+0?"));
         Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         dfa.failStateAllocationsForTesting(2);
 
         assertThat(Dfa.searchGroupZeroForward(cursor, utf8Slice("abc"), 0, 3, 0))
                 .isEqualTo(Dfa.SEARCH_FAILED);
-        assertThat(pattern.matcher(utf8Slice("abc")).find()).isTrue();
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("abc"));
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
+        dfa.failStateAllocationsForTesting(2);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.end()).isEqualTo(3);
     }
 
     @Test

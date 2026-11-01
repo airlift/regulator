@@ -85,11 +85,13 @@ public class TestRegexpMatcher
     @Test
     public void testGroupZeroForwardCursorPreservesRegionAndUtf8Boundaries()
     {
+        // The optional suffix keeps the pattern off the class counter.
         Slice input = Slices.utf8Slice("xαβxαx");
-        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[αβ]+"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[αβ]+γ?"))
                 .groupZeroMatcher(input, null)
                 .reset(input, 1, 8);
 
+        assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(5);
