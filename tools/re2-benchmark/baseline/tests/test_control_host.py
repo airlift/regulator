@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,6 +61,12 @@ def attach_and_termination_refused(aws):
             raise CloudError("RequestLimitExceeded: slow down")
         return terminate(region, ids)
     return {"attach_volume": CloudError("IncorrectState: busy"), "terminate": refuse}
+
+
+def macos_tar_omits_appledouble():
+    """The environment under which macOS's tar, unlike the host's GNU tar, writes no AppleDouble file of each file's
+    extended attributes into an archive."""
+    return patch.dict(os.environ, {"COPYFILE_DISABLE": "1"})
 
 
 def user_data_settings(user_data):
@@ -280,8 +287,8 @@ class TestControlHost(unittest.TestCase):
                         self.assertRaises(CloudError):
                     control_host.teardown(aws, "c", confirm=True)
                 if step == "create_snapshot":
-                    # Its snapshot is to be the root's last copy, so once it has begun no host is replaced onto the
-                    # volume to write it again.
+                    # Its snapshot is to be the root's last copy on EBS, so once it has begun no host is replaced onto
+                    # the volume to write it again.
                     calls = len(aws.calls)
                     with self.assertRaisesRegex(SystemExit, "teardown has begun .* finish the teardown"):
                         control_host.replace(aws, "c", SSH_PUBLIC_KEY)
@@ -354,43 +361,74 @@ class TestControlHost(unittest.TestCase):
                     control_host.launch(aws, "c", SSH_PUBLIC_KEY, Path(temporary) / "launch-inputs.tar.gz")
                 self.assertLessEqual({call[0] for call in aws.calls}, {"parameter", "security_group"})
 
-    def test_finish_pulls_an_ended_campaign_root_and_checks_it_against_its_controllers_manifest(self):
+    def test_finish_archives_the_raw_root_pulls_its_summaries_and_fetch_restores_it(self):
         aws = control_host_cloud()
         aws.region_instances["us-west-2"] = [cloud.Instance("i-host", "m7i.large", "on-demand", "running", "",
                                                             control_host.tags("c"), 0, "10.0.0.1")]
+        bucket = "regulator-benchmark-archive-123456789012-us-west-2"
         with tempfile.TemporaryDirectory() as temporary:
             host, local = Path(temporary) / "host", Path(temporary) / "local"
             known_hosts = Path(temporary) / "ssh" / "regulator-control-hosts"
-            (host / "a" / "primary").mkdir(parents=True)
-            (host / "candidates.tsv").write_text("a\n")
-            (host / "a" / "primary" / "accepted-units.tsv").write_text("unit\n")
+            summaries = ["a/candidate/provenance.tsv", "a/primary/accepted-units.tsv", "candidates.tsv"]
+            raw = ["a/candidate/regulator.tar.gz", "a/lang/primary/units/r8i/u1/unit-receipt.tsv",
+                   "a/primary/unit-results/s1/heartbeat-1.json", "jdks/jdk.tar.gz"]
+            for name in summaries + raw:
+                (host / name).parent.mkdir(parents=True, exist_ok=True)
+                (host / name).write_text(f"{name}\n")
+            # An interrupted write leaves its temporary file linked to the file it wrote.
+            raw.append("a/lang/primary/units/r8i/u1/unit-receipt.tsv.1.new")
+            os.link(host / raw[1], host / raw[-1])
             damaged = []
             reachable = [False]
+            reopened = [False]
+            predates = [False]
+            ssh = ("ssh -p 443 -o StrictHostKeyChecking=yes "
+                   f"-o UserKnownHostsFile={known_hosts} -o GlobalKnownHostsFile=/dev/null "
+                   "-o KnownHostsCommand=none -i /keys/control-host -o IdentitiesOnly=yes").split()
+            rsync = subprocess.run
 
             def run(command, check=False, **options):
                 """Fake the commands finish runs: ssh-keyscan of the host, which serves HOST_KEY; ssh to the host,
-                which fails as ssh does until it is reachable; and rsync, which copies the root over the local one and
+                which fails as ssh does until it is reachable, and runs its archive step, which exits 2 as argparse
+                does while predates says the host's tooling predates it, after which the campaign is reopened while
+                reopened says so; and rsync, which copies the host's root over the local one with its filter and
                 damages each file that damaged names."""
                 if command[0] == "ssh-keyscan":
                     self.assertEqual(["ssh-keyscan", "-p", "443", "-T", "15", "10.0.0.1"], command)
                     return subprocess.CompletedProcess(command, 0, f"# 10.0.0.1:443 SSH-2.0-OpenSSH_9.8\n"
                                                                    f"[10.0.0.1]:443 {HOST_KEY}\n", "")
                 if command[0] == "ssh":
-                    return subprocess.CompletedProcess(command, 255 if not reachable[0] else
-                                                       0 if (host / control_host.MANIFEST).is_file() else 1)
-                # ssh trusts only the host keys its console lists, and offers only the key it was launched with.
-                self.assertEqual(["rsync", "-a", "--delete", "-e", "ssh -p 443 -o StrictHostKeyChecking=yes "
-                                  f"-o UserKnownHostsFile={known_hosts} -o GlobalKnownHostsFile=/dev/null "
-                                  "-o KnownHostsCommand=none -i /keys/control-host -o IdentitiesOnly=yes",
-                                  "ec2-user@10.0.0.1:/regulator/campaign/", f"{local}/"], command)
-                shutil.rmtree(local)
-                shutil.copytree(host, local)
+                    # ssh trusts only the host keys its console lists, and offers only the key it was launched with.
+                    self.assertEqual([*ssh, "ec2-user@10.0.0.1"], command[:len(ssh) + 1])
+                    remote = command[len(ssh) + 1:]
+                    if not reachable[0]:
+                        return subprocess.CompletedProcess(command, 255)
+                    if remote[0] == "cat":
+                        self.assertEqual(["cat", "/regulator/campaign/campaign-files.sha256"], remote)
+                        manifest = host / control_host.MANIFEST
+                        return subprocess.CompletedProcess(command, *((0, manifest.read_bytes()) if manifest.is_file()
+                                                                      else (1, b"")))
+                    # The host archives its root with the controller's own checkout and venv.
+                    self.assertEqual(["/opt/regulator/venv/bin/python", "/regulator/control-host/checkout/tools/"
+                                      "re2-benchmark/baseline/run-campaign.py", "archive-root", "c"], remote)
+                    if predates[0]:
+                        return subprocess.CompletedProcess(command, 2)
+                    with patch.object(control_host, "CAMPAIGN_ROOT", str(host)):
+                        control_host.archive_root(aws, "c")
+                    if reopened[0]:
+                        (host / control_host.MANIFEST).unlink()
+                    return subprocess.CompletedProcess(command, 0)
+                self.assertEqual(["rsync", "-a", "--delete"], command[:3])
+                self.assertEqual(["-e", shlex.join(ssh), "ec2-user@10.0.0.1:/regulator/campaign/", f"{local}/"],
+                                 command[-4:])
+                rsync([*command[:-4], f"{host}/", f"{local}/"], check=True)
                 for name in damaged:
                     (local / name).write_text("damaged\n")
                 return subprocess.CompletedProcess(command, 0)
 
             with patch.object(control_host.subprocess, "run", side_effect=run), \
-                    patch.object(control_host, "KNOWN_HOSTS", known_hosts), contextlib.redirect_stdout(io.StringIO()):
+                    patch.object(control_host, "KNOWN_HOSTS", known_hosts), macos_tar_omits_appledouble(), \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
                 # A host that has not yet listed its keys on its console, or serves a key other than the ones listed,
                 # is not trusted.
                 with self.assertRaisesRegex(SystemExit, "has not yet listed its ssh host keys"):
@@ -411,8 +449,9 @@ class TestControlHost(unittest.TestCase):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
                 self.assertEqual(f"[10.0.0.2]:443 {OTHER_KEY}\n[10.0.0.1]:443 {HOST_KEY}\n", known_hosts.read_text())
                 reachable[0] = True
-                # A root whose controller has not ended has no manifest, and nothing is pulled.
-                with self.assertRaisesRegex(SystemExit, "controller has not ended"):
+                # A root whose controller has not ended has no manifest, and nothing is archived or pulled.
+                with self.assertRaisesRegex(SystemExit, "has no readable campaign-files.sha256; its controller may "
+                                                        "not have ended"):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
                 self.assertFalse(local.exists())
                 # The manifest marks the campaign ended, so it and its name are durable once written.
@@ -421,17 +460,176 @@ class TestControlHost(unittest.TestCase):
                     control_host.write_manifest(host)
                 synced.assert_called_once()
                 directory_synced.assert_called_once_with(host)
+                # A raw root is kept for good, so an archive bucket whose lifecycle would expire it or move it out of
+                # Glacier Instant Retrieval is refused.
+                for action in ({"Expiration": {"Days": 30}},
+                               {"Transitions": [{"Days": 30, "StorageClass": "DEEP_ARCHIVE"}]}):
+                    aws.lifecycles[bucket] = {"Rules": [{"ID": "move", "Status": "Enabled",
+                                                         "Filter": {"Prefix": "campaigns/"}, **action}]}
+                    with self.assertRaisesRegex(SystemExit, "has the lifecycle rule 'move', which would expire or "
+                                                            "move"):
+                        control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual([], list(aws.objects))
+                # A rule that is disabled, keeps the archive's storage class, selects by a tag the archive lacks, or
+                # covers another prefix cannot touch it.
+                expire = {"Expiration": {"Days": 30}}
+                aws.lifecycles[bucket] = {"Rules": [
+                    {"Status": "Disabled", "Filter": {"Prefix": "campaigns/"}, **expire},
+                    {"Status": "Enabled", "Filter": {"Prefix": "campaigns/"},
+                     "Transitions": [{"Days": 0, "StorageClass": "GLACIER_IR"}]},
+                    {"Status": "Enabled", "Filter": {"Tag": {"Key": "scratch", "Value": "yes"}}, **expire},
+                    {"Status": "Enabled", "Filter": {"Prefix": "shared/"}, **expire}]}
+                # A host whose tooling predates archive-root is named as such.
+                predates[0] = True
+                with self.assertRaisesRegex(SystemExit, "could not run archive-root; its tooling may predate "
+                                                        "archive-root"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                predates[0] = False
+                # The raw root stays in the archive, and only the summaries come here, each as the manifest lists it.
                 control_host.finish(aws, "c", local, Path("/keys/control-host"))
-                self.assertEqual("unit\n", (local / "a" / "primary" / "accepted-units.tsv").read_text())
-                # A file that differs from the manifest is named, and a finish again replaces the copy.
+                self.assertEqual(summaries, control_host.root_files(local))
+                key = f"campaigns/c/root-{hashlib.sha256((host / control_host.MANIFEST).read_bytes()).hexdigest()}"
+                archive = aws.objects[bucket, f"{key}.tar.zst"][0]
+                self.assertEqual([control_host.RAW_ARCHIVE_FIELDS, (
+                    bucket, f"{key}.tar.zst", hashlib.sha256(archive).hexdigest(), str(len(archive)),
+                    key.rsplit("-", 1)[1])], [tuple(line.split("\t")) for line in
+                                              (local / control_host.RAW_ARCHIVE).read_text().splitlines()])
+                self.assertIn(f"archived as s3://{bucket}/{key}.tar.zst; its 3 summaries in {local} match",
+                              printed.getvalue())
+                # The campaign was reopened and ended again with another summary, so the host's manifest differs from
+                # the one the earlier finish wrote. A summary that differs from it is named, and a reopen while finish
+                # runs is refused; each leaves the manifest and the archive's record as the earlier finish wrote them.
+                manifest = (local / control_host.MANIFEST).read_bytes()
+                record = (local / control_host.RAW_ARCHIVE).read_text()
+                summaries.append("reopened.tsv")
+                (host / "reopened.tsv").write_text("reopened\n")
+                control_host.write_manifest(host)
                 damaged.append("a/primary/accepted-units.tsv")
                 with self.assertRaisesRegex(SystemExit, "differs from its controller's campaign-files.sha256: "
                                                         "changed a/primary/accepted-units.tsv$"):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
-                # A local root that no finish pulled is left alone.
+                damaged.clear()
+                self.assertEqual((manifest, record), ((local / control_host.MANIFEST).read_bytes(),
+                                                      (local / control_host.RAW_ARCHIVE).read_text()))
+                reopened[0] = True
+                with self.assertRaisesRegex(SystemExit, "campaign-files.sha256 went missing or changed while finish "
+                                                        "ran, as a reopen does; run finish again once its controller "
+                                                        "ends"):
+                    control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual((manifest, record), ((local / control_host.MANIFEST).read_bytes(),
+                                                      (local / control_host.RAW_ARCHIVE).read_text()))
+                # Once the controller ends again, a finish pulls the summaries the new manifest lists, reusing the
+                # root's archive under it.
+                reopened[0] = False
+                control_host.write_manifest(host)
+                control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual(sorted(summaries), control_host.root_files(local))
+                self.assertEqual(4, [call[0] for call in aws.calls].count("upload_stream"))
+                manifest = (local / control_host.MANIFEST).read_bytes()
+                record = (local / control_host.RAW_ARCHIVE).read_text()
+                key = f"campaigns/c/root-{hashlib.sha256(manifest).hexdigest()}"
+                archive = aws.objects[bucket, f"{key}.tar.zst"][0]
+
+                # fetch restores the raw root beside the summaries, and the whole root then matches its manifest, as
+                # it does when run again.
+                for _ in range(2):
+                    control_host.fetch(aws, "c", local)
+                    self.assertEqual(sorted(summaries + raw), control_host.root_files(local))
+                self.assertIn(f"restored campaign c's raw root from s3://{bucket}/{key}.tar.zst into {local}: 9 files",
+                              printed.getvalue())
+                # A finish again leaves the restored files in place.
+                control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                self.assertEqual(sorted(summaries + raw), control_host.root_files(local))
+                # A download that differs from the archive finish recorded is refused, and so is an archive holding
+                # a member that would land outside the root or a manifest other than the one finish recorded, under
+                # any name that reaches it.
+                aws.objects[bucket, f"{key}.tar.zst"] = (archive[:-1], 0.0, None)
+                with self.assertRaisesRegex(SystemExit, "differs from the archive raw-archive.tsv records"):
+                    control_host.fetch(aws, "c", local)
+                other_manifest = "holds a campaign-files.sha256 other than the one raw-archive.tsv records"
+                for names, refusal in ((["../outside"], "cannot unpack .*'../outside' would be extracted"),
+                                       (["./campaign-files.sha256"], other_manifest),
+                                       (["/campaign-files.sha256"], other_manifest),
+                                       ([("alias", control_host.MANIFEST), "alias"], other_manifest)):
+                    crafted = Path(temporary) / "crafted.tar.zst"
+                    with tarfile.open(crafted, "w:zst") as output:
+                        for name in names:
+                            if isinstance(name, tuple):
+                                member = tarfile.TarInfo(name[0])
+                                member.type, member.linkname = tarfile.LNKTYPE, name[1]
+                                output.addfile(member)
+                                continue
+                            # tarfile's add strips a leading slash, so the member is named by hand.
+                            member = output.gettarinfo(host / "candidates.tsv")
+                            member.name = name
+                            with (host / "candidates.tsv").open("rb") as source:
+                                output.addfile(member, source)
+                    aws.objects[bucket, f"{key}.tar.zst"] = (crafted.read_bytes(), 0.0, None)
+                    (local / control_host.RAW_ARCHIVE).write_text(record.replace(hashlib.sha256(archive).hexdigest(),
+                                                                                 control_host.sha256_file(crafted)))
+                    with self.assertRaisesRegex(SystemExit, refusal):
+                        control_host.fetch(aws, "c", local)
+                self.assertFalse((Path(temporary) / "outside").exists())
+                self.assertEqual(manifest, (local / control_host.MANIFEST).read_bytes())
+                # A local root that no finish pulled is left alone, and fetch needs finish's record.
                 (local / control_host.MANIFEST).unlink()
                 with self.assertRaisesRegex(SystemExit, "holds files but no campaign-files.sha256"):
                     control_host.finish(aws, "c", local, Path("/keys/control-host"))
+                with self.assertRaisesRegex(SystemExit, "has no raw-archive.tsv; run finish c into it first"):
+                    control_host.fetch(aws, "c", Path(temporary) / "elsewhere")
+
+    def test_the_host_archives_its_root_once_under_its_manifest(self):
+        aws = FakeCloud()
+        bucket = "regulator-benchmark-archive-123456789012-us-west-2"
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(control_host, "CAMPAIGN_ROOT", f"{temporary}/campaign"), macos_tar_omits_appledouble(), \
+                contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary) / "campaign"
+            (root / "a" / "primary").mkdir(parents=True)
+            (root / "a" / "primary" / "accepted-units.tsv").write_text("unit\n")
+            (root / "candidates.tsv").write_text("a\n")
+            control_host.write_manifest(root)
+            manifest = (root / control_host.MANIFEST).read_bytes()
+            key = f"campaigns/c/root-{hashlib.sha256(manifest).hexdigest()}"
+            # A root that differs from its manifest is never archived, nor is one tar cannot read whole, which the root
+            # user always can.
+            (root / "candidates.tsv").write_text("b\n")
+            with self.assertRaisesRegex(SystemExit, "differs from its controller's campaign-files.sha256: changed "
+                                                    "candidates.tsv$"):
+                control_host.archive_root(aws, "c")
+            (root / "candidates.tsv").write_text("a\n")
+            if os.geteuid() != 0:
+                (root / "unreadable").mkdir(mode=0)
+                with self.assertRaisesRegex(SystemExit, "cannot archive campaign c's root to S3: .*'tar'"):
+                    control_host.archive_root(aws, "c")
+                (root / "unreadable").rmdir()
+            self.assertEqual([], list(aws.objects))
+            aws.calls.clear()
+            control_host.archive_root(aws, "c")
+            # The archive is the root through zstd, kept in Glacier Instant Retrieval with the manifest's SHA-256
+            # and file count, and the manifest beside it records the archive's SHA-256 and size.
+            archive = aws.objects[bucket, f"{key}.tar.zst"][0]
+            self.assertEqual(({"manifest-sha256": key.rsplit("-", 1)[1], "file-count": "2"}, "GLACIER_IR"),
+                             aws.streamed[bucket, f"{key}.tar.zst"])
+            self.assertEqual(manifest, aws.objects[bucket, f"{key}.sha256"][0])
+            recorded = ({"archive-sha256": hashlib.sha256(archive).hexdigest(), "archive-bytes": str(len(archive))},
+                        "GLACIER_IR")
+            self.assertEqual(recorded, aws.streamed[bucket, f"{key}.sha256"])
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:zst") as members:
+                self.assertIn("./a/primary/accepted-units.tsv", members.getnames())
+            # An archive already there is reused, and one whose manifest beside it was lost is read back as a stream
+            # to record it again.
+            control_host.archive_root(aws, "c")
+            aws.delete("us-west-2", bucket, [f"{key}.sha256"])
+            control_host.archive_root(aws, "c")
+            self.assertEqual(recorded, aws.streamed[bucket, f"{key}.sha256"])
+            self.assertEqual([f"{key}.tar.zst", f"{key}.sha256", f"{key}.sha256"],
+                             [call[3] for call in aws.calls if call[0] == "upload_stream"])
+            # An object at the key that is not this root's archive is refused, never overwritten.
+            aws.streamed[bucket, f"{key}.tar.zst"] = ({"manifest-sha256": "0" * 64, "file-count": "2"}, "GLACIER_IR")
+            with self.assertRaisesRegex(SystemExit, f"s3://{bucket}/{key}.tar.zst is not campaign c's root as its "
+                                                    "campaign-files.sha256 lists it: .* is never overwritten"):
+                control_host.archive_root(aws, "c")
 
     def test_user_data_and_units_agree_on_the_host_layout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -458,6 +656,10 @@ class TestControlHost(unittest.TestCase):
                       "$CONTROLLER_ARGUMENTS\n", campaign)
         self.assertIn(f"\nEnvironmentFile={control_host.INPUTS}/controller.env\n", campaign)
         self.assertIn(f"\nWorkingDirectory={control_host.INPUTS}/checkout\n", campaign)
+        # finish runs its step on the host the same way.
+        self.assertEqual((f"{venv}/bin/python", f"{control_host.INPUTS}/checkout/tools/re2-benchmark/baseline/"
+                                                "run-campaign.py"),
+                         (control_host.HOST_PYTHON, control_host.HOST_RUN_CAMPAIGN))
         self.assertIn(f"\nRestartPreventExitStatus={control_host.ENDED_EXIT}\n", campaign)
         # The controller exports to the collector's OTLP/HTTP port, which answers only the host itself.
         self.assertIn("\nEnvironment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318\n", campaign)

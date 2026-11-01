@@ -14,8 +14,8 @@ NATIVE_TEST_ENVIRONMENT = ("LANGUAGE_NATIVE_RUNNER", "LANGUAGE_NATIVE_BULK_RUNNE
 
 
 def main():
-    if sys.version_info < (3, 11):
-        raise SystemExit("offline tooling validation requires Python 3.11 or newer")
+    if sys.version_info < (3, 14):
+        raise SystemExit("offline tooling validation requires Python 3.14 or newer")
     environment = dict(os.environ)
     # Native integration tests are opt-in outside this offline CI gate.
     for name in NATIVE_TEST_ENVIRONMENT:

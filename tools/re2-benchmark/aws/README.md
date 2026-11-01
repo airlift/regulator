@@ -275,9 +275,13 @@ aws iam add-role-to-instance-profile --profile dev --instance-profile-name regul
 
 The [control host](#control-host) profile, which may launch, describe, and end
 workers, pass the worker role, read and write the campaign buckets and create
-one for `add-region`, read the network parameter, and keep the campaign's
-Grafana credentials; `control-host/control-host-policy.json` is its policy,
-and Session Manager's managed policy gives the shell fallback:
+one for `add-region`, write and read campaign root archives under `campaigns/`
+in the archive bucket but never delete them, read the network parameter, and
+keep the campaign's Grafana credentials; `control-host/control-host-policy.json`
+is its policy, and Session Manager's managed policy gives the shell fallback. A
+host can archive its root for `finish` only once the role carries the policy
+with its archive statements, so re-run the `put-role-policy` command below
+after the policy changes:
 
 ```bash
 aws iam create-role --profile dev --role-name regulator-benchmark-control-host \
@@ -443,12 +447,38 @@ aws s3api list-buckets --profile dev --prefix regulator-benchmark-938463256137- 
   --query 'Buckets[].[Name,BucketRegion]' --output text
 ```
 
-Objects outside `shared/` and `campaigns/` never expire, so remove what an
-older layout left in a bucket once:
+Objects outside `shared/` and `campaigns/` of a campaign bucket never expire,
+so remove what an older layout left in a bucket once:
 
 ```bash
 aws s3 rm --profile dev "s3://<bucket>/" --region <region> --recursive \
   --exclude 'shared/*' --exclude 'campaigns/*'
+```
+
+The private archive bucket,
+`regulator-benchmark-archive-938463256137-us-west-2`, keeps each finished
+campaign's raw root, which `finish` writes there, in Glacier Instant
+Retrieval. Create it once at account setup, private and encrypted as the
+campaign buckets are. It is not a campaign bucket, so neither of
+`bucket-lifecycle.json`'s expiry rules reaches it, and `finish` refuses it
+while an enabled lifecycle rule would expire an archive or move it out of
+Glacier Instant Retrieval. Its only rule aborts incomplete multipart uploads
+after 7 days, since an upload whose abort failed leaves parts S3 bills until
+then:
+
+```bash
+archive=regulator-benchmark-archive-938463256137-us-west-2
+aws s3api create-bucket --profile dev --bucket "$archive" --region us-west-2 \
+  --create-bucket-configuration LocationConstraint=us-west-2
+aws s3api put-public-access-block --profile dev --bucket "$archive" --region us-west-2 \
+  --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-encryption --profile dev --bucket "$archive" --region us-west-2 \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}'
+aws s3api put-bucket-lifecycle-configuration --profile dev --bucket "$archive" --region us-west-2 \
+  --lifecycle-configuration '{"Rules":[{"ID":"AbortIncompleteUploads","Status":"Enabled",
+    "Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]}'
 ```
 
 ## Qualification inputs
@@ -730,26 +760,57 @@ controller refuses to start on a root that has the list, so a reboot or a
 replaced host never runs an ended campaign again, and `control` refuses every
 command but reopen on it, so the root stays as listed; `control ... --actor
 dain reopen` deletes the list and clears any stop, and the unit's next start
-runs the campaign again. `finish`
-pulls the root of an ended campaign over ssh on port 443 with rsync into the results
-directory the reduction and archiving read, by default
-`benchmark-results/pre-review-baseline/<campaign>`, and checks every file
-against that list. It records the host's keys as `control-host known-host`
-does and trusts no other, replaces a local root only where an earlier `finish`
-pulled it, and terminates nothing. `--ssh-identity` names the private key ssh
-offers alone, as `-i` does above:
+runs the campaign again. `finish` keeps the raw root of an ended campaign in S3
+and brings only its summaries to the Mac. Over ssh on port 443 it has the host
+run `run-campaign.py archive-root <campaign>`, which checks the root against the
+controller's list before writing a new archive, refusing one that differs, and
+streams the root through `tar` and `zstd` into the archive bucket from inside
+the region as `campaigns/<campaign>/root-<manifest SHA-256>.tar.zst`, with the
+manifest beside it as `root-<manifest SHA-256>.sha256`; only `finish` runs it.
+Neither object is ever overwritten: a `finish` run again reuses the archive, and
+a reopened campaign that ends again gets a new manifest and so a new key.
+`finish` refuses the bucket while an enabled lifecycle rule would expire this
+archive or move it out of Glacier Instant Retrieval, confirms the archive's
+metadata and storage class, and then pulls with rsync, into the results
+directory, by default `benchmark-results/pre-review-baseline/<campaign>`, every
+file but the raw trees: `jdks/`, each candidate's `candidate/regulator.tar.gz`,
+and each phase's `units/`, `unit-results/`, `jobs/` and `language-plans/`. It
+checks every pulled file, and that every summary the list names is there,
+against that list, and records the archive's bucket, key, SHA-256, size and
+manifest SHA-256 in the local root's `raw-archive.tsv`. A first `finish` writes
+the list before it pulls, so it may run again if it fails; a later `finish`
+replaces the local list and record only once the summaries match the list the
+host still holds, so one that fails, as one during a reopen does, keeps the
+earlier `finish`'s. A campaign launched with tooling from before `archive-root`
+is finished with the tooling it launched with. It records the host's keys as
+`control-host known-host` does and trusts no other, replaces a local root only
+where an earlier `finish` pulled it, and terminates nothing. `--ssh-identity`
+names the private key ssh offers alone, as `-i` does above:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py finish <campaign> --ssh-identity ~/.ssh/id_ed25519
 ```
 
-Only Dain tears a control host down, once the campaign's root is pulled and
-nothing more is wanted from its Grafana. `teardown` tags the campaign's
-volume as torn down, terminates every host of the campaign, including one a
-concurrent `control-host replace` launched, deregisters them from the load
-balancer and waits for it to drain them, snapshots the volume, which is then
-the root's last copy until Dain deletes it, and deletes the volume and the
-Grafana parameters; the record, the load balancer, and its target group stay.
+`fetch` restores the raw root into a root `finish` pulled, from the archive
+its `raw-archive.tsv` names: it checks the download's SHA-256, unpacks only
+directories, regular files and hard links that land inside the root, refuses
+an archive whose list differs from the one `finish` recorded, and checks the
+whole root against that list. Running it again is safe, and a later `finish`
+leaves the restored files in place. `status --results` and reducing a phase
+again read the raw units, so run it first:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py fetch <campaign>
+```
+
+Only Dain tears a control host down, once `finish` has run and nothing more is
+wanted from its Grafana. `teardown` tags the campaign's volume as torn down,
+terminates every host of the campaign, including one a concurrent
+`control-host replace` launched, deregisters them from the load balancer and
+waits for it to drain them, snapshots the volume, which is then the root's last
+copy on EBS until Dain deletes it, beside the archive `finish` wrote, which
+teardown neither needs nor touches, and deletes the volume and the Grafana
+parameters; the record, the load balancer, and its target group stay.
 Each step finds what an earlier teardown did by the campaign's tags, so one
 that failed partway finishes when run again, taking no second snapshot of the
 volume. It refuses without `--confirm`:
@@ -946,7 +1007,8 @@ does. Given a phase's root, the command reports that phase alone.
 With `--results`, the command reads each primary phase's accepted groups so
 far instead, or the given phase's, from the phase's retained group
 directories, and reports every row's Regulator time divided by its
-comparator's, so a ratio above 1 means Regulator is slower:
+comparator's, so a ratio above 1 means Regulator is slower. Those directories
+are raw units, which a root `finish` pulled holds only after `fetch`:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campaign> --results
