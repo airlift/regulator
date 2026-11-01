@@ -1897,11 +1897,14 @@ public sealed class Re2
         return matchInternal(partialProg, text, 0, text.length(), resume, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
     }
 
-    /// Whether a search over this many bytes goes through the inner literal, so a find loop
-    /// leaves its cursors for the search the inner literal serves.
-    boolean searchesInnerLiteral(int searchLength)
+    /// Whether a search of `[start, end)` tries the inner literal first, so a find loop skips its
+    /// cursors. A search whose literal sits near its start keeps them, as the ordinary engine does.
+    /// This approximates the gate in matchInternal, where a search that tries the literal can
+    /// still fall back.
+    boolean searchesInnerLiteral(Slice text, int start, int end)
     {
-        return booleanPlans.innerLiteralSearch() != null && searchLength >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES;
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        return innerLiteralSearch != null && end - start >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES && !innerLiteralSearch.fallsBackNearStart(text, start, end);
     }
 
     Dfa.CandidateStartCursor createCandidateStartCursor()
@@ -2189,8 +2192,11 @@ public sealed class Re2
         return Dfa.countMatches(partialProg, text, matchKind);
     }
 
-    /// Counts the matches found through the inner literal. Where a search falls back, the ordinary
-    /// count takes over from there for one match, and it records its own failures. Every match
+    /// Counts the matches found through the inner literal. Where the next literal sits near the
+    /// text start or the previous match end, or a search falls back for another reason, the
+    /// ordinary count takes over from there and hands back at the first match end whose next
+    /// literal is not near. Its start-byte scan selection then holds for the whole dense run,
+    /// instead of being made again for each match, and it records its own failures. Every match
     /// holds the literal, so none is empty and each step advances.
     private long countInnerLiteralMatches(InnerLiteralSearch innerLiteralSearch, Slice text)
     {
@@ -2200,7 +2206,7 @@ public sealed class Re2
             return -1;
         }
         int length = text.length();
-        IntPredicate continueCounting = _ -> false;
+        IntPredicate continueCounting = next -> innerLiteralSearch.fallsBackNearStart(text, next, length);
         long count = 0;
         int position = 0;
         while (position < length) {

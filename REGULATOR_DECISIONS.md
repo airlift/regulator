@@ -1312,7 +1312,8 @@ group-zero searches. The cursor scans the forward DFA's start-byte candidates
 and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
-literal search takes, a window of at least 64 bytes, skips the cursor.
+literal search takes, a window of at least 64 bytes whose first literal hit lies
+at least 64 bytes past its start, skips the cursor.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
@@ -1341,7 +1342,8 @@ to return one forward boundary without rediscovering the DFA, match mode, and
 acceleration state for every match. Fixed-length expressions derive the start
 from that boundary; variable-length expressions retain the existing reverse DFA
 boundary recovery. A search the inner literal search takes, a window of at least
-64 bytes, skips the cursor.
+64 bytes whose first literal hit lies at least 64 bytes past its start, skips the
+cursor.
 
 Eligibility is limited to first-match programs without a required prefix,
 anchors, or text-dependent assertions. Empty matches are still handled by the
