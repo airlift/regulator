@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "lib": ["DOM", "ES2022"],
+    "lib": ["DOM", "ES2022", "ES2023.Intl"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "resolveJsonModule": true,

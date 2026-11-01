@@ -409,7 +409,9 @@ ranges separately from intervals around a mean. An interval crossing parity
 means that this sample does not establish a winner; it is not a failed job or
 proof of equivalence. Never count individual iterations as independent hosts.
 A precise one-percent difference can establish a direction; there is no blanket
-five-percent tolerance for declaring a winner. Coefficients of variation describe
+five-percent tolerance for declaring a winner. Whether an established difference
+matters is a separate question, which the public report answers with its
+[significance tiers](#report-significance). Coefficients of variation describe
 execution variability and are not error bars on the estimated mean.
 A native control can identify shared changes, but different algorithms can
 respond differently to the same hardware. Native brackets do not measure the
@@ -431,6 +433,36 @@ Investigate when:
 - the ratio changes materially with input size
 - coefficient of variation exceeds 5%, a review screen rather than an acceptance cutoff
 - allocation appears in an allocation-free contract
+
+### Report significance
+
+The public report judges each comparison by two measures: Regulator's absolute
+time gap and the time ratio. The gap is per input byte for text-processing,
+literal-probe, and stress rows, and per call for all other rows. Everyday gaps
+are mostly a fixed cost per call, so a per-byte gap would depend on input
+length. The per-call thresholds are the per-byte thresholds at a typical
+everyday input of about 18 bytes, rounded.
+
+Each comparison falls in one of five symmetric tiers. Each tier has a symbol,
+so color is never the only cue:
+
+| Tier | Symbol and color | Rule |
+|---|---|---|
+| Tie | ≈, gray text | Any one of: a gap under 0.1 ns per byte or 2 ns per call; a ratio from 0.95 to 1.05; a range of per-host ratios that includes 1; a 95% ratio interval that includes 1 |
+| Clear win or loss | ▲ or ▼, full green or red | Not a tie, with a gap of at least 0.3 ns per byte or 5 ns per call and a ratio of at most 0.8 or at least 1.25 |
+| Modest win or loss | △ or ▽, pale green or red | Every other win or loss |
+
+Below the tie gap, a difference is under 1 instruction per byte or 20 per call,
+too little for its ratio to say much about cost. Gains between Regulator
+variants, such as tuned over default or compiled over the regular engine, have
+no gap or host range, so their ratio and interval decide.
+
+Each comparison where Regulator is slower also shows its gap in instructions,
+at a nominal 10 instructions per ns on every CPU. Per byte, a gap under 0.1 ns
+reads "under one instruction per byte" and one under 0.3 ns "under three
+instructions per byte". Per call, a gap under 2 ns reads "under 20 instructions
+per call" and one under 5 ns "under 50 instructions per call". Lifecycle tables
+give the gap for multi-use only, because single-use times include compilation.
 
 ### Host check
 

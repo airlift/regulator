@@ -87,6 +87,26 @@ export function languageOrder(data: Pick<ReportData, "languages">): string[] {
 }
 const numberFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const percentFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+// Gap magnitudes truncate, so a gap under a cut-off never displays at or above it.
+const gapFormat = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2, roundingMode: "trunc" });
+
+// One nominal rate converts a time gap to instructions on every CPU.
+export const INSTRUCTIONS_PER_NS = 10;
+// Every significance threshold. Gaps are ns per input byte or per call; below the tie gap a
+// difference is under 1 instruction per byte or 20 per call, and its ratio says little about cost.
+const tieGap = { byte: .1, call: 2 }, clearGap = { byte: .3, call: 5 };
+export const significance = {
+  tieGap, clearGap, tieRatio: [.95, 1.05], clearRatio: [.8, 1.25],
+  // Labels for gaps under the tie gap and under the clear gap.
+  gapLabels: { byte: ["under one instruction per byte", "under three instructions per byte"],
+    call: [tieGap.call, clearGap.call].map(ns => `under ${ns * INSTRUCTIONS_PER_NS} instructions per call`) },
+} as const;
+type Significance = "clear-win" | "modest-win" | "tie" | "modest-loss" | "clear-loss";
+type Tier = Significance | "na" | "timeout";
+const significanceSymbols: Record<Significance, [string, string]> = {
+  "clear-win": ["▲", "Clear win"], "modest-win": ["△", "Modest win"], tie: ["≈", "Tie"],
+  "modest-loss": ["▽", "Modest loss"], "clear-loss": ["▼", "Clear loss"],
+};
 
 type ComparisonIssue = { label: string; reason: string };
 
@@ -216,10 +236,7 @@ export function duration(ns: number | null | undefined, signed = false): string 
 export function comparisonText(result: Result): string {
   if (result.state === "not-compatible") return "not compatible";
   if (result.state === "did-not-finish") return "did not finish";
-  if (result.uncertainty) {
-    const [low, high] = result.uncertainty.ratioInterval;
-    if (low <= 1 && high >= 1) return "no clear difference";
-  }
+  if (intervalIncludesOne(result)) return "no clear difference";
   if (!result.uncertainty && result.warnings?.some(warning => warning.includes("disagree"))) return "no consistent winner";
   if (!result.uncertainty && result.warnings?.length) return "timing variable";
   const ratio = result.ratio!;
@@ -230,33 +247,107 @@ export function comparisonText(result: Result): string {
     : `${numberFormat.format(factor)}× ${change}`;
 }
 
-export function tone(result: Result): string {
-  if (result.state !== "compared") return result.state === "not-compatible" ? "na" : "timeout";
-  if (result.uncertainty) {
-    const [low, high] = result.uncertainty.ratioInterval;
-    return low <= 1 && high >= 1 ? "tie" : result.ratio! < 1 ? "win" : "loss";
-  }
-  if (result.warnings.length > 0) return "na";
-  if (result.ratio! > .98 && result.ratio! < 1.02) return "tie";
-  return result.ratio! < 1 ? "win" : "loss";
+// The site's test for no clear difference.
+function intervalIncludesOne(result: Result): boolean {
+  const interval = result.uncertainty?.ratioInterval;
+  return !!interval && interval[0] <= 1 && 1 <= interval[1];
 }
 
-function evidence(result: Result): string {
-  if (result.state !== "compared") return result.reason || result.state;
+const bytesBasisSections = ["bulk-text", "literal-probe", "synthetic-stress", "diagnostics-and-stress"];
+type Gap = { basis: "byte" | "call"; ns: number };
+
+// Regulator's signed time difference: per input byte in the text-processing, literal-probe and
+// stress sections, otherwise per call, as also when a row has no per-byte delta.
+function comparisonGap(row: Row): Gap | null {
+  const { state, deltaNs, deltaNsPerByte } = row.result;
+  if (state !== "compared" || deltaNs == null) return null;
+  return bytesBasisSections.includes(workloadSection(row)) && deltaNsPerByte != null ? { basis: "byte", ns: deltaNsPerByte } : { basis: "call", ns: deltaNs };
+}
+
+function gapSize(gap: Gap): string {
+  return `${gapFormat.format(Math.abs(gap.ns))} ns/${gap.basis}`;
+}
+
+// Single-use timings include compilation, so only steady-state losses get a gap.
+export function lossGap(row: Row): (Gap & { instructions: number; label: string | null }) | null {
+  const gap = comparisonGap(row);
+  if (!gap || !(row.result.ratio! > 1) || comparisonIssue(row) || row.operation.startsWith("singleUse")) return null;
+  const [tieLabel, modestLabel] = significance.gapLabels[gap.basis];
+  return { ...gap, instructions: gap.ns * INSTRUCTIONS_PER_NS,
+    label: gap.ns < significance.tieGap[gap.basis] ? tieLabel : gap.ns < significance.clearGap[gap.basis] ? modestLabel : null };
+}
+
+// Each tie condition that holds, in words: the ratio interval or the host range includes 1.0, the
+// ratio is near 1, or the gap is small.
+function tieConditions(result: Result, gap: Gap | null): string[] {
+  const { tieGap, tieRatio: [low, high] } = significance;
+  const range = ([from, to]: [number, number]) => `${from.toFixed(3)}–${to.toFixed(3)}×`;
+  const { minimumRatio, maximumRatio } = result;
   return [
+    intervalIncludesOne(result) && `ratio interval ${range(result.uncertainty!.ratioInterval)} includes 1.0`,
+    minimumRatio != null && maximumRatio != null && minimumRatio <= 1 && 1 <= maximumRatio && `host ratio range ${range([minimumRatio, maximumRatio])} includes 1.0`,
+    low <= result.ratio! && result.ratio! <= high && `ratio ${result.ratio!.toFixed(3)}× is within ${low}–${high}×`,
+    gap && Math.abs(gap.ns) < tieGap[gap.basis] && `gap ${gapSize(gap)} is under ${tieGap[gap.basis]} ns/${gap.basis}`,
+  ].filter((condition): condition is string => typeof condition === "string");
+}
+
+// Any one tie condition makes a tie. Clear needs both a large gap and a large ratio. Without a gap,
+// as for gains between Regulator variants, the ratio and its interval decide. Results that were not
+// compared, and timing warnings without an interval, get no tier.
+export function significanceTier(result: Result, gap: Gap | null): Tier {
+  if (result.state !== "compared") return result.state === "not-compatible" ? "na" : "timeout";
+  if (!result.uncertainty && result.warnings.length > 0) return "na";
+  if (tieConditions(result, gap).length > 0) return "tie";
+  const ratio = result.ratio!;
+  const [clearLow, clearHigh] = significance.clearRatio;
+  const clear = (!gap || Math.abs(gap.ns) >= significance.clearGap[gap.basis]) && (ratio <= clearLow || ratio >= clearHigh);
+  return `${clear ? "clear" : "modest"}-${ratio < 1 ? "win" : "loss"}`;
+}
+
+export function rowSignificance(row: Row): Tier {
+  return significanceTier(row.result, comparisonGap(row));
+}
+
+function TierSymbol({ tier }: { tier: Tier }) {
+  if (tier === "na" || tier === "timeout") return null;
+  const [symbol, name] = significanceSymbols[tier];
+  return <span className="tier-symbol" role="img" aria-label={name}>{symbol}</span>;
+}
+
+// A tie names the conditions that made it one.
+function tierSentence(result: Result, gap: Gap | null, tier: Tier): string[] {
+  if (tier === "na" || tier === "timeout") return [];
+  if (tier === "tie") return [`Tie: ${tieConditions(result, gap).join("; ")}.`];
+  return [`${significanceSymbols[tier][1]}.`];
+}
+
+function evidence(row: Row, tier: Tier): string {
+  const { result } = row;
+  if (result.state !== "compared") return result.reason || result.state;
+  const gap = lossGap(row);
+  return [
+    ...tierSentence(result, comparisonGap(row), tier),
     `Regulator ${duration(result.candidateNs)}; comparator ${duration(result.comparatorNs)}.`,
     `${result.estimator === "mean" ? "Ratio of mean costs" : "Same-host ratio median"} ${result.ratio!.toFixed(4)}×; host ratio range ${result.minimumRatio!.toFixed(4)}–${result.maximumRatio!.toFixed(4)}×.`,
     ...(result.uncertainty ? [`Approximate 95% ratio interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.`] : []),
     `${result.hosts.length} independent hosts; the observed range is not a confidence interval.`,
+    ...(gap ? [`Gap +${gapSize(gap)} ≈ ${gapFormat.format(gap.instructions)} instructions per ${gap.basis} at ${INSTRUCTIONS_PER_NS} instructions/ns.`] : []),
     ...result.warnings,
   ].join(" ");
 }
 
-function Ratio({ result, comparator, children }: { result?: Result; comparator: string; children?: React.ReactNode }) {
-  if (!result) return null;
-  return <span className={`scan-result ${tone(result)}`} title={evidence(result)}>
-    {result.state === "compared" ? comparisonText(result) : outcomeLabel(result, comparator)}{children}
+function Ratio({ row, comparator, children }: { row?: Row; comparator: string; children?: React.ReactNode }) {
+  if (!row) return null;
+  const tier = rowSignificance(row);
+  return <span className={`scan-result ${tier}`} title={evidence(row, tier)}>
+    <TierSymbol tier={tier} />{row.result.state === "compared" ? comparisonText(row.result) : outcomeLabel(row.result, comparator)}{children}
   </span>;
+}
+
+function GapCell({ row }: { row?: Row }) {
+  const gap = row && lossGap(row);
+  return <td className="measurement gap">{gap && <>{gapFormat.format(gap.instructions)} instr/{gap.basis === "byte" ? "B" : "call"}
+    {gap.label && <small className="gap-label">{gap.label}</small>}</>}</td>;
 }
 
 type TimingSide = "candidate" | "comparator";
@@ -354,11 +445,20 @@ function PlatformMeasurements({ cpu }: { cpu: string }) {
 }
 
 function MeasurementNotes({ rows }: { rows: Row[] }) {
-  if (!rows.some(row => row.result.uncertainty)) return null;
   const high = rows.some(row => (["candidate", "comparator"] as const).some(side => (timingUncertainty(row.result, side) ?? 0) > .05));
-  if (!high) return null;
+  const compared = rows.some(row => row.result.state === "compared");
+  if (!high && !compared) return null;
+  const { tieGap, clearGap, tieRatio, clearRatio, gapLabels } = significance;
+  const symbol = (tier: Significance) => <TierSymbol tier={tier} />;
   return <section className="measurement-notes" aria-label="Measurement notes"><h2>Measurement notes</h2>
     {high && <p id="quality-high" tabIndex={-1}><strong>* Higher uncertainty.</strong> The approximate 95% interval half-width exceeds 5% of that engine’s mean time. In lifecycle tables, the marker applies to either engine; expand the row to see which. This is an uncertainty annotation, not a failed measurement.</p>}
+    {compared && <><p><strong>Reading a comparison.</strong> Each comparison is judged by its ratio and by Regulator’s absolute gap: per input byte for text processing, literal-probe and stress rows, and per call for all others.
+      It is a tie ({symbol("tie")}, gray) when any one of these holds: the gap is under {tieGap.byte} ns per byte or {tieGap.call} ns per call; the ratio is between {tieRatio[0]}× and {tieRatio[1]}×; the range of per-host ratios includes 1.0; or the 95% ratio interval includes 1.0.
+      A clear win or loss ({symbol("clear-win")} or {symbol("clear-loss")}, full green or red) needs both a gap of at least {clearGap.byte} ns per byte or {clearGap.call} ns per call and a ratio of at most {clearRatio[0]}× or at least {clearRatio[1]}×.
+      Every other win or loss is modest ({symbol("modest-win")} or {symbol("modest-loss")}, pale green or red). Gains between Regulator variants have no gap or host range, so their ratio and interval decide. A result’s tooltip names the tie conditions that held.
+      <span className="significance-legend">{(Object.keys(significanceSymbols) as Significance[]).map(tier => <span key={tier} className={`scan-result ${tier}`}>{symbol(tier)}{significanceSymbols[tier][1].toLowerCase()}</span>)}</span></p>
+    <p><strong>Gap (instructions).</strong> Each comparison where Regulator is slower also gives its extra time in instructions, at a nominal {INSTRUCTIONS_PER_NS} instructions per ns on every CPU. Lifecycle tables give it for multi-use only, because single-use times include compilation.
+      Per byte, a gap under {tieGap.byte} ns reads “{gapLabels.byte[0]}” and one under {clearGap.byte} ns “{gapLabels.byte[1]}”; per call, a gap under {tieGap.call} ns reads “{gapLabels.call[0]}” and one under {clearGap.call} ns “{gapLabels.call[1]}”.</p></>}
   </section>;
 }
 
@@ -459,12 +559,14 @@ function operationName(operation: string): string {
   return ({ reusedContains: "contains", reusedCount: "count", singleUseContains: "single-use contains", singleUseCount: "single-use count", compile: "construction", singleUse: "single use", matches: "reused match" } as Record<string, string>)[operation] || operation;
 }
 
+const gapTitle = `Regulator's extra time where it is slower, in instructions at a nominal ${INSTRUCTIONS_PER_NS} instructions/ns`;
+
 function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string }) {
   const [sort, setSort] = useState<Sort>(null);
   const bytes = rows.some(row => !comparisonIssue(row) && row.result.deltaNsPerByte != null);
   const numeric = rows.some(row => row.result.candidateNs != null || row.result.comparatorNs != null);
   const comparable = rows.some(row => !comparisonIssue(row));
-  const ordered = sorted(rows, sort, (row, key) => key === "name" ? row.name : comparisonIssue(row) && ["ratio", "deltaNs", "deltaNsPerByte"].includes(key) ? null : (row.result as unknown as Record<string, SortValue>)[key]);
+  const ordered = sorted(rows, sort, (row, key) => key === "name" ? row.name : key === "gap" ? lossGap(row)?.instructions : comparisonIssue(row) && ["ratio", "deltaNs", "deltaNsPerByte"].includes(key) ? null : (row.result as unknown as Record<string, SortValue>)[key]);
   return <div className="table-scroll"><table className="measurement-table">
     <thead><tr>
       <Header label="Pattern / workload" column="name" sort={sort} setSort={setSort} />
@@ -473,15 +575,17 @@ function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string })
       <Header label={`vs ${comparator}`} column="ratio" sort={sort} setSort={setSort} />
       {numeric && comparable && <Header label="Δ / operation" column="deltaNs" sort={sort} setSort={setSort} />}
       {bytes && <Header label="Δ ns / byte" column="deltaNsPerByte" sort={sort} setSort={setSort} />}
+      {numeric && comparable && <Header label="Gap (instructions)" column="gap" sort={sort} setSort={setSort} title={gapTitle} />}
     </tr></thead>
-    <tbody>{ordered.map(row => <tr key={row.id} className={`comparison-row ${comparisonIssue(row) ? "na" : tone(row.result)}`}>
+    <tbody>{ordered.map(row => <tr key={row.id} className={`comparison-row ${comparisonIssue(row) ? "na" : rowSignificance(row)}`}>
       <td><Name row={row} comparator={comparator} /></td>
       {numeric && <><td className="measurement">{duration(row.result.candidateNs)}<TimingFlags row={row} side="candidate" comparator={comparator} /></td><td className="measurement">{duration(row.result.comparatorNs)}<TimingFlags row={row} side="comparator" comparator={comparator} /></td></>}
-      <td className="measurement">{comparisonIssue(row) ? <span>{comparisonIssue(row)!.label}</span> : <Ratio result={row.result} comparator={comparator} />}</td>
+      <td className="measurement">{comparisonIssue(row) ? <span>{comparisonIssue(row)!.label}</span> : <Ratio row={row} comparator={comparator} />}</td>
       {numeric && comparable && <td className="measurement delta">{!comparisonIssue(row) && duration(row.result.deltaNs, true)}</td>}
       {bytes && <td className="measurement delta" title={row.result.deltaNsPerByte != null ? `${row.result.deltaNsPerByte} ns per input byte` : ""}>
         {!comparisonIssue(row) && row.result.deltaNsPerByte != null && `${row.result.deltaNsPerByte < 0 ? "−" : row.result.deltaNsPerByte > 0 ? "+" : ""}${numberFormat.format(Math.abs(row.result.deltaNsPerByte))}`}
       </td>}
+      {numeric && comparable && <GapCell row={row} />}
     </tr>)}</tbody>
   </table></div>;
 }
@@ -508,8 +612,8 @@ export function lifecycleRows(rows: Row[]): Lifecycle[] {
     if (!reused) throw new Error(`Missing reused lifecycle partner for ${single.id}`);
     const bothCompared = single.result.state === "compared" && reused.result.state === "compared";
     const unresolved = comparisonIssue(single) || comparisonIssue(reused)
-      || (single.result.uncertainty ? tone(single.result) === "tie" : single.result.warnings.length > 0)
-      || (reused.result.uncertainty ? tone(reused.result) === "tie" : reused.result.warnings.length > 0);
+      || (single.result.uncertainty ? intervalIncludesOne(single.result) : single.result.warnings.length > 0)
+      || (reused.result.uncertainty ? intervalIncludesOne(reused.result) : reused.result.warnings.length > 0);
     const deficit = single.result.deltaNs!;
     const saving = -reused.result.deltaNs!;
     // One single-use operation already includes the first execution. Each
@@ -555,20 +659,22 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
     if (key === "name") return row.name;
     if (key === "breakEven") return row.breakEven;
     if (key === "reusedBytes") return row.reused.result.deltaNsPerByte;
+    if (key === "reusedGap") return lossGap(row.reused)?.instructions;
     return key === "single" ? row.single?.result.ratio : key === "singleDelta" ? row.single?.result.deltaNs
       : key === "reused" ? row.reused.result.ratio : row.reused.result.deltaNs;
   });
   return <div className="table-scroll"><table className="measurement-table lifecycle-table"><thead><tr>
-    {[[like ? "Pattern" : "Pattern / operation", "name"], ["Single use", "single"], ["Single-use Δ", "singleDelta"], ["Multi-use", "reused"], ["Per-use Δ", "reusedDelta"], ...(bytes ? [["Δ ns / byte", "reusedBytes"]] : []), ...(!like ? [["Break-even uses", "breakEven"]] : [])].map(([label, column]) => <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "reusedBytes" ? "Multi-use time difference per input byte" : undefined} />)}
+    {[[like ? "Pattern" : "Pattern / operation", "name"], ["Single use", "single"], ["Single-use Δ", "singleDelta"], ["Multi-use", "reused"], ["Per-use Δ", "reusedDelta"], ...(bytes ? [["Δ ns / byte", "reusedBytes"]] : []), ["Gap (instructions)", "reusedGap"], ...(!like ? [["Break-even uses", "breakEven"]] : [])].map(([label, column]) => <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "reusedBytes" ? "Multi-use time difference per input byte" : column === "reusedGap" ? `Multi-use: ${gapTitle}` : undefined} />)}
   </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
     <td><Name row={{ ...(row.single ?? row.reused), name: row.name }} reused={row.single ? row.reused : undefined} comparator={comparator} hideOperation={like} missingSingle={!row.single} /></td>
-    <td className="measurement"><Ratio result={row.single?.result} comparator={comparator}><LifecycleFlags row={row.single} comparator={comparator} /></Ratio></td>
-    <td className={`measurement delta ${row.single ? tone(row.single.result) : ""}`}>{duration(row.single?.result.deltaNs, true)}</td>
-    <td className="measurement"><Ratio result={row.reused.result} comparator={comparator}><LifecycleFlags row={row.reused} comparator={comparator} /></Ratio></td>
-    <td className={`measurement delta ${tone(row.reused.result)}`}>{duration(row.reused.result.deltaNs, true)}</td>
-    {bytes && <td className={`measurement delta ${tone(row.reused.result)}`} title={row.reused.result.deltaNsPerByte != null ? `${row.reused.result.deltaNsPerByte} ns per input byte` : ""}>
+    <td className="measurement"><Ratio row={row.single} comparator={comparator}><LifecycleFlags row={row.single} comparator={comparator} /></Ratio></td>
+    <td className={`measurement delta ${row.single ? rowSignificance(row.single) : ""}`}>{duration(row.single?.result.deltaNs, true)}</td>
+    <td className="measurement"><Ratio row={row.reused} comparator={comparator}><LifecycleFlags row={row.reused} comparator={comparator} /></Ratio></td>
+    <td className={`measurement delta ${rowSignificance(row.reused)}`}>{duration(row.reused.result.deltaNs, true)}</td>
+    {bytes && <td className={`measurement delta ${rowSignificance(row.reused)}`} title={row.reused.result.deltaNsPerByte != null ? `${row.reused.result.deltaNsPerByte} ns per input byte` : ""}>
       {row.reused.result.deltaNsPerByte != null && `${row.reused.result.deltaNsPerByte < 0 ? "−" : row.reused.result.deltaNsPerByte > 0 ? "+" : ""}${numberFormat.format(Math.abs(row.reused.result.deltaNsPerByte))}`}
     </td>}
+    <GapCell row={row.reused} />
     {!like && <td className="measurement" title={row.reason}>{!row.single ? "" : row.breakEven === 1 ? "first use" : row.breakEven != null ? row.breakEven.toLocaleString() : "not determined"}</td>}
   </tr>)}</tbody></table></div>;
 }
@@ -612,8 +718,9 @@ export function variantGain(variant: Result, baseline: Result, pairedWarnings?: 
 
 function Gain({ result, label }: { result?: Result; label: string }) {
   if (!result) return null;
-  return <span className={`scan-result ${tone(result)}`}
-    title={result.state === "compared" ? `${label}: ${result.ratio!.toFixed(4)}×.${result.uncertainty ? ` Conservative interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.` : ""}` : result.reason}>{comparisonText(result)}</span>;
+  const tier = significanceTier(result, null);
+  return <span className={`scan-result ${tier}`}
+    title={result.state === "compared" ? [...tierSentence(result, null, tier), `${label}: ${result.ratio!.toFixed(4)}×.${result.uncertainty ? ` Conservative interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.` : ""}`].join(" ") : result.reason}><TierSymbol tier={tier} />{comparisonText(result)}</span>;
 }
 
 export function literalProbeRows(rows: Row[]): LiteralProbe[] {
@@ -636,19 +743,22 @@ function LiteralProbeTable({ rows, comparator }: { rows: Row[]; comparator: stri
     name: row.name, distribution: row.distribution, comparatorNs: row.standard.result.comparatorNs,
     standardNs: row.standard.result.candidateNs, tunedNs: row.tuned.result.candidateNs,
     standard: row.standard.result.ratio, tuned: row.tuned.result.ratio, gain: row.gain.ratio,
+    standardGap: lossGap(row.standard)?.instructions, tunedGap: lossGap(row.tuned)?.instructions,
   } as Record<string, SortValue>)[key]);
   return <div className="table-scroll"><table className="measurement-table literal-probe-table"><thead><tr>
     {[["Pattern · corpus", "name"], ["Tuned distribution", "distribution"], [`${comparator} (default run)`, "comparatorNs"], ["Regulator default", "standardNs"], ["Regulator tuned", "tunedNs"],
-      [`Default vs ${comparator}`, "standard"], [`Tuned vs ${comparator}`, "tuned"], ["Tuned vs default", "gain"]].map(([label, column]) =>
-      <Header key={column} label={label} column={column} sort={sort} setSort={setSort} />)}
+      [`Default vs ${comparator}`, "standard"], ["Default gap", "standardGap"], [`Tuned vs ${comparator}`, "tuned"], ["Tuned gap", "tunedGap"], ["Tuned vs default", "gain"]].map(([label, column]) =>
+      <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "standardGap" || column === "tunedGap" ? gapTitle : undefined} />)}
   </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
     <td><Name row={{ ...row.standard, name: row.name, workload: { ...row.standard.workload, description: literalProbeWorkloads[row.standard.caseId]?.description } }} comparator={comparator} hideOperation /></td>
     <td>{row.distribution}</td>
     <td className="measurement">{duration(row.standard.result.comparatorNs)}</td>
     <td className="measurement">{duration(row.standard.result.candidateNs)}</td>
     <td className="measurement">{duration(row.tuned.result.candidateNs)}</td>
-    <td className="measurement"><Ratio result={row.standard.result} comparator={comparator}><LifecycleFlags row={row.standard} comparator={comparator} /></Ratio></td>
-    <td className="measurement"><Ratio result={row.tuned.result} comparator={comparator}><LifecycleFlags row={row.tuned} comparator={comparator} /></Ratio></td>
+    <td className="measurement"><Ratio row={row.standard} comparator={comparator}><LifecycleFlags row={row.standard} comparator={comparator} /></Ratio></td>
+    <GapCell row={row.standard} />
+    <td className="measurement"><Ratio row={row.tuned} comparator={comparator}><LifecycleFlags row={row.tuned} comparator={comparator} /></Ratio></td>
+    <GapCell row={row.tuned} />
     <td className="measurement"><Gain result={row.gain} label="Tuned ratio divided by default ratio" /></td>
   </tr>)}</tbody></table></div>;
 }
@@ -708,6 +818,7 @@ function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like
   const last = present[present.length - 1];
   const ordered = sorted(patterns, sort, (pattern, key) => ({
     name: `${pattern.anchor.name} ${pattern.anchor.operation}`, comparatorNs: pattern.anchor.result.comparatorNs, ratio: pattern.variants[last.key]?.result.ratio,
+    gap: pattern.variants[last.key] && lossGap(pattern.variants[last.key]!)?.instructions,
     ...Object.fromEntries(present.map(variant => [`${variant.key}Ns`, pattern.variants[variant.key]?.result.candidateNs])),
     ...Object.fromEntries(later.map(variant => [`${variant.key}Gain`, pattern.gains[variant.key]?.ratio])),
   } as Record<string, SortValue>)[key]);
@@ -717,6 +828,7 @@ function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like
     {present.map(variant => <Header key={variant.key} label={variant.label} column={`${variant.key}Ns`} sort={sort} setSort={setSort} />)}
     {later.map(variant => <Header key={variant.key} label={`${variant.short} vs ${baseline.short.toLowerCase()}`} column={`${variant.key}Gain`} sort={sort} setSort={setSort} />)}
     <Header label={`${last.short} vs ${comparator}`} column="ratio" sort={sort} setSort={setSort} />
+    <Header label="Gap (instructions)" column="gap" sort={sort} setSort={setSort} title={`${last.label}: ${gapTitle}`} />
   </tr></thead><tbody>{ordered.map(pattern => <tr key={pattern.id}>
     <td><Name row={pattern.anchor} variants={pattern.evidence} comparator={comparator} hideOperation={like} /></td>
     <td className="measurement">{duration(pattern.anchor.result.comparatorNs)}<TimingFlags row={pattern.anchor} side="comparator" comparator={comparator} /></td>
@@ -725,7 +837,8 @@ function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like
       return <td key={variant.key} className="measurement">{row && <>{duration(row.result.candidateNs)}<TimingFlags row={row} side="candidate" comparator={comparator} /></>}</td>;
     })}
     {later.map(variant => <td key={variant.key} className="measurement"><Gain result={pattern.gains[variant.key]} label={`${variant.label} ratio divided by ${baseline.label.toLowerCase()} ratio`} /></td>)}
-    <td className="measurement"><Ratio result={pattern.variants[last.key]?.result} comparator={comparator} /></td>
+    <td className="measurement"><Ratio row={pattern.variants[last.key]} comparator={comparator} /></td>
+    <GapCell row={pattern.variants[last.key]} />
   </tr>)}</tbody></table></div>;
 }
 
