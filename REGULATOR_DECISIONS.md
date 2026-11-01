@@ -1191,7 +1191,8 @@ Forward DFA start-byte and fixed-distance candidate sets containing exactly two
 or three bytes use a packed, allocation-free Vector scanner for searches of at
 least 1 KiB when `jdk.incubator.vector` is resolved. Other candidate counts,
 short searches, and applications without the optional module retain the
-branch-free scalar membership-table scanner.
+branch-free scalar membership-table scanner. A start set that gets a start
+literal filter scans with the filter instead.
 
 Preferred species wider than 128 bits sample four 16-byte windows before using
 Vector scanning on inputs of at least 4 KiB. Four sampled candidates demote
@@ -1204,6 +1205,34 @@ loop.
 This is a performance-only deviation. Every candidate is still processed in
 input order by the existing DFA, and randomized tests compare the scanner with
 the scalar first-position result.
+
+## Start Literal Filter
+
+When a forward DFA's start bytes are common in text, such as the few lead bytes
+shared by many Cyrillic or Chinese characters or the cases of an English letter,
+scanning for them stops often. If every match begins with one of at most eight
+literals of at least three bytes, read six bytes deep with case pairs that
+differ in one bit kept as one literal, the DFA instead checks three byte
+positions of those literals together. It picks the three positions with the
+lowest estimated acceptance, from English ASCII frequencies and fixed estimates
+for UTF-8 lead and continuation bytes, and it is used only when that is
+estimated to stop at least four times less often than the start bytes. Vector
+code compares a vector of positions at a time on searches of at least 1 KiB;
+shorter searches use the same check one position at a time.
+
+The filter is built only when the Vector API is available, and only for start
+sets of at most 16 bytes that are at least 5% probable in English text; rarer
+sets keep their single-byte scanners. It uses English frequencies even when
+the pattern was compiled with other byte frequencies. Fixed estimates are
+enough because these gates admit only start sets that stop often, and the
+start-scan productivity check still samples the filter's own stops on long
+inputs and falls back when they are dense.
+
+This follows the Rust regex crate's packed Teddy prefilter, which the crate
+treats as fast only when every literal has at least three bytes. It is a
+performance-only deviation. The filter accepts every position where a match
+can start, the DFA still decides each one, and randomized tests compare the
+results with the NFA.
 
 ## Bounded Character-Class Counting
 
@@ -1314,8 +1343,8 @@ external scanner; mixed UTF-8 and Latin-1 patterns are rejected by the builder.
 ## Bounded Candidate-Start Cursor
 
 Eligible reusable matchers use a private candidate-start cursor for repeated
-group-zero searches. The cursor scans the forward DFA's start-byte candidates
-and verifies each candidate with an anchored first-match traversal. This avoids
+group-zero searches. The cursor scans the forward DFA's start-byte candidates,
+or its start literal filter's candidates, and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload.
 

@@ -72,6 +72,17 @@ public final class VectorPrefixScannerProbe
                 "mixed byte set scan failed");
         check((mixedSetDfa.mixedByteSetScanCount() > 0) == expectedVectorApiAvailable, "unexpected mixed byte set strategy");
 
+        ParseResult literalFilterParsed = RegexpParser.parse(Slices.utf8Slice("(?i)Sherlock|Holmes|Watson"), Regexp.LIKE_PERL);
+        Prog literalFilterProgram = Compiler.compile(literalFilterParsed.regexp(), false, 0);
+        Dfa.DfaInstance literalFilterDfa = literalFilterProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        byte[] literalFilterData = new byte[4_096];
+        Arrays.fill(literalFilterData, (byte) 's');
+        byte[] literalFilterMatch = "watson".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(literalFilterMatch, 0, literalFilterData, literalFilterData.length - literalFilterMatch.length, literalFilterMatch.length);
+        check(Dfa.search(literalFilterProgram, Slices.wrappedBuffer(literalFilterData), false, Prog.MatchKind.FIRST_MATCH, true) == literalFilterData.length,
+                "start literal filter scan failed");
+        check((literalFilterDfa.startLiteralFilter() != null) == expectedVectorApiAvailable, "unexpected start literal filter strategy");
+
         String suffix = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(20);
         ParseResult selfLoopParsed = RegexpParser.parse(Slices.utf8Slice("\\C*x" + suffix + "$"), Regexp.LIKE_PERL);
         Prog selfLoopProgram = Compiler.compile(selfLoopParsed.regexp(), false, 0);
