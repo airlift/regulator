@@ -86,6 +86,43 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testRetainedSearchUsesReverseBudget()
+    {
+        Slice pattern = utf8Slice("\\w+\\s+Holmes");
+        int flags = JavaRegexp.Options.defaults().parseFlags();
+        ParseResult parsed = JavaRegexpParser.parse(pattern, flags);
+        long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
+        Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
+        Re2 compiled = Re2.compileParsed(pattern, parsed, flags, maxMemory);
+        InnerLiteralSearch search = compiled.innerLiteralSearchForDiagnostics();
+        assertThat(search).isNotNull();
+        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory());
+
+        // The full reverse program takes what the inner literal search leaves of the reverse third.
+        assertThat(compiled.reverseProgramSize()).isPositive();
+        Prog reverse = compiled.reverseProgramIfComputedForDiagnostics();
+        assertThat(search.estimatedRetainedSize() + Compiler.estimatedProgramMemory(reverse) + reverse.dfaMemory()).isLessThanOrEqualTo(maxMemory / 3);
+
+        // At small budgets the search leaves the full reverse DFA enough to initialize, as it does
+        // without the search, and a search that is kept can run its reverse prefix DFA.
+        for (SmallBudget budget : List.of(
+                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 1L << 20, "ab@cd1", true),
+                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 896L << 10, "ab@cd1", true),
+                new SmallBudget("[a-z]+-[0-9]+", 24L << 10, "ab-12", false))) {
+            String description = budget.pattern() + " " + budget.maxMemory();
+            Re2 small = Re2.compile(utf8Slice(budget.pattern()), Re2.Options.defaults().setMaxMemory(budget.maxMemory()));
+            assertThat(small.reverseProgramSize()).as(description).isPositive();
+            assertThat(small.reverseProgramIfComputedForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(description).isNotNull();
+            InnerLiteralSearch smallSearch = small.innerLiteralSearchForDiagnostics();
+            assertThat(smallSearch != null).as(description).isEqualTo(budget.keepsSearch());
+            if (budget.keepsSearch()) {
+                Slice text = utf8Slice(".".repeat(100) + budget.match());
+                assertThat(smallSearch.search(text, 0, text.length(), 0, text.length())).as(description).isEqualTo((100L << 32) | text.length());
+            }
+        }
+    }
+
+    @Test
     public void testAgreesWithOrdinaryEngine()
     {
         List<Slice> texts = texts();
@@ -190,6 +227,8 @@ public class TestInnerLiteralSearch
     {
         return RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).re2().innerLiteralSearchForDiagnostics();
     }
+
+    private record SmallBudget(String pattern, long maxMemory, String match, boolean keepsSearch) {}
 
     private enum Language
     {

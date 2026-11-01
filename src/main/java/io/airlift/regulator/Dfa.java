@@ -4537,6 +4537,10 @@ final class Dfa
             justification = "DFA cache mutation is serialized by the cache mutation protocol")
     public static final class DfaInstance
     {
+        // Like upstream, a DFA initializes only when its state budget holds this many of its
+        // largest possible states.
+        private static final int MINIMUM_INITIAL_STATES = 20;
+
         enum TestingFailurePoint
         {
             EXCLUSIVE_ADMISSION,
@@ -4706,11 +4710,7 @@ final class Dfa
                 return;
             }
 
-            long overhead = 64;
-            overhead += CONSERVATIVE_REFERENCE_BYTES + Long.BYTES;
-            overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
-            overhead += (prog.size() + (long) nmark) * 8L * 2;
-            overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            long overhead = fixedOverhead(prog, nmark);
             if (startByteCandidates != null) {
                 overhead += 16L + startByteCandidates.length;
             }
@@ -4738,9 +4738,8 @@ final class Dfa
             // MANY_MATCH states can append one separator plus match IDs, but those IDs are
             // instructions already counted by listCount. Include the separator so the gate
             // retains ample headroom for reset recovery, which needs at most three states.
-            int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;
-            long largestStateSize = estimateStateSize(prog.listCount() + nmark + manyMatchSeparator);
-            if (stateBudget / largestStateSize < 20) {
+            long largestStateSize = largestStateSize(prog, kind, nmark);
+            if (stateBudget / largestStateSize < MINIMUM_INITIAL_STATES) {
                 this.initFailed = true;
                 this.maxTransitionsLength = 0;
                 this.transitions = new int[0];
@@ -4764,6 +4763,34 @@ final class Dfa
             this.availableStateMemory = memoryBudget - retainedStateMemory;
             this.nextFreeOffset = nextSize;
             this.stateCount = 0;
+        }
+
+        /// Returns the least `maxMemory` with which the constructor initializes a DFA of `kind` over
+        /// `prog`. [Prog#getCachedDfa] gives a reversed program's longest-match DFA the whole
+        /// program DFA memory, so compare that against this value. The start-byte tables are left
+        /// out, since only the constructor builds them, so for a forward program this is a lower
+        /// bound. A reversed program builds none, so for it this is exact.
+        static long minimumMemory(Prog prog, Kind kind)
+        {
+            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            return fixedOverhead(prog, nmark) + MINIMUM_INITIAL_STATES * largestStateSize(prog, kind, nmark);
+        }
+
+        // The work queues, the stack, and fixed fields, without the start-byte tables.
+        private static long fixedOverhead(Prog prog, int nmark)
+        {
+            long overhead = 64;
+            overhead += CONSERVATIVE_REFERENCE_BYTES + Long.BYTES;
+            overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
+            overhead += (prog.size() + (long) nmark) * 8L * 2;
+            overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            return overhead;
+        }
+
+        private static long largestStateSize(Prog prog, Kind kind, int nmark)
+        {
+            int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;
+            return estimateStateSize(prog.bytemapRange() + 1, prog.listCount() + nmark + manyMatchSeparator);
         }
 
         boolean canStartByteAcceleration()
@@ -5086,7 +5113,12 @@ final class Dfa
 
         private long estimateStateSize(int instructionCount)
         {
-            return stateObjectMemory(instructionCount) +
+            return estimateStateSize(nextSize, instructionCount);
+        }
+
+        private static long estimateStateSize(int nextSize, int instructionCount)
+        {
+            return stateObjectMemory(nextSize, instructionCount) +
                     ((long) nextSize * Integer.BYTES) +
                     (2 * REFERENCE_BYTES) +
                     (2 * REFERENCE_BYTES);
@@ -6463,6 +6495,11 @@ final class Dfa
         }
 
         private long stateObjectMemory(int instructionCount)
+        {
+            return stateObjectMemory(nextSize, instructionCount);
+        }
+
+        private static long stateObjectMemory(int nextSize, int instructionCount)
         {
             return sizeOfObjectArray(nextSize + 1) +
                     sizeOfIntArray(instructionCount) +

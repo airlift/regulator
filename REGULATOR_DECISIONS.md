@@ -570,7 +570,8 @@ text, so the pair scan rejects little that a first-byte scan would not.
   8 MiB default, this retains representative large Java DFA graphs without
   reset thrashing under both compressed and uncompressed ordinary references.
 - Two thirds of the configured budget is assigned to the forward program and one
-  third to a lazily compiled reverse program.
+  third to reverse search: a lazily compiled reverse program, less what an
+  eagerly compiled inner literal search retains from that third.
 - Compilation accounts for the program and list-head storage before assigning the
   remaining budget to DFA caches. Internal compilation with a non-positive budget
   uses upstream's 1 MiB default DFA allowance.

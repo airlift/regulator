@@ -1087,14 +1087,24 @@ public sealed class Re2
         }
         // A literal every match holds after its first element, searched before the DFA runs. It is
         // left out where another plan answers the searches it would serve, and for longest-match
-        // patterns, whose matches the leftmost-first search does not report.
-        InnerLiteralSearch innerLiteralSearch = requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
-                booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null
-                ? InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, semanticProgram.dfaMemory() / 4, compilerDialect, caseFolding)
-                : null;
-        if (innerLiteralSearch != null && innerLiteralSearch.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
-            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - innerLiteralSearch.estimatedRetainedSize());
-            booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
+        // patterns, whose matches the leftmost-first search does not report. It takes its memory
+        // from the reverse budget, so the forward DFA keeps its whole budget, but leaves the full
+        // reverse program, compiled on first use, what its DFA needs to initialize. That is
+        // estimated from the forward program, compiled from the same expression: its memory and
+        // the least memory of a longest-match DFA over it, and an eighth more, since reversed
+        // UTF-8 sequences can take a few more instructions. The reverse prefix program takes half
+        // the reverse budget, or less if the search would otherwise not fit beside that estimate,
+        // and the search is left out unless its reverse prefix DFA can initialize.
+        if (requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
+                booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null) {
+            long forwardEstimate = Compiler.estimatedProgramMemory(semanticProgram) + Dfa.DfaInstance.minimumMemory(semanticProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            long fullReverseMemory = forwardEstimate + forwardEstimate / 8;
+            long searchMemory = reverseMemory - fullReverseMemory;
+            long prefixMemory = Math.max(1, reverseMemory / 2);
+            InnerLiteralSearch innerLiteralSearch = InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
+            if (innerLiteralSearch != null) {
+                booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
+            }
         }
         // A call-free first-and-last-byte search for contains and dot-star spans. Only Trino rows
         // were measured, so other languages' contains keeps Slice.indexOf.
@@ -3537,7 +3547,8 @@ public sealed class Re2
     ///
     /// **Memory Budget:**
     /// Reverse program gets 1/3 of `maxMemory`, forward gets 2/3.
-    /// This split matches upstream RE2::Init behavior.
+    /// This split matches upstream RE2::Init behavior. An inner literal search shares the reverse
+    /// third.
     ///
     /// @return the reverse program, or null if compilation failed
     private Prog reverseProg()
@@ -3554,11 +3565,13 @@ public sealed class Re2
         return reverseProg;
     }
 
-    /// Compile the reverse program with appropriate memory budget (1/3 of total).
+    /// Compile the reverse program with appropriate memory budget (1/3 of total, less what an inner
+    /// literal search retains).
     ///
     /// Memory allocation strategy (matching upstream):
     /// - Forward program: 2/3 of maxMemory (more common, can have 2 DFAs: first-match and longest-match)
-    /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search)
+    /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search), less
+    ///   what an inner literal search retains
     ///
     /// The `reversed=true` flag causes:
     /// - Right-to-left byte scanning in Dfa.search
@@ -3579,6 +3592,11 @@ public sealed class Re2
             return null;
         }
         long reverseMemory = Math.max(1, maxMemory / 3);
+        // An inner literal search already holds part of the reverse budget.
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        if (innerLiteralSearch != null) {
+            reverseMemory = Math.max(1, reverseMemory - innerLiteralSearch.estimatedRetainedSize());
+        }
         // Compile from the stored normalized suffix instead of re-parsing or re-simplifying.
         Prog prog;
         try {

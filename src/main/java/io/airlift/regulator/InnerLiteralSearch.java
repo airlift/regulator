@@ -59,18 +59,19 @@ final class InnerLiteralSearch
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
 
-    private InnerLiteralSearch(byte[] literal, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, Prog reversePrefixProgram, Prog forwardProgram)
     {
-        this.literalSearch = new LiteralSearchKernel(Slices.wrappedBuffer(literal));
-        this.literalLength = literal.length;
+        this.literalSearch = requireNonNull(literalSearch, "literalSearch is null");
+        this.literalLength = literalSearch.literalLength();
         this.reversePrefixProgram = requireNonNull(reversePrefixProgram, "reversePrefixProgram is null");
         this.forwardProgram = requireNonNull(forwardProgram, "forwardProgram is null");
     }
 
     /// Returns the search for the normalized `regexp`, compiled into `forwardProgram`, or null when
-    /// it has no usable inner literal or the safety proofs fail. The reverse prefix program gets at
-    /// most `memory` bytes.
-    static InnerLiteralSearch analyze(Regexp regexp, Prog forwardProgram, long memory, Compiler.Dialect dialect, CaseFolding caseFolding)
+    /// it has no usable inner literal, the safety proofs fail, or its reverse prefix DFA could not
+    /// initialize. The reverse prefix program gets at most `prefixMemory` bytes, and the whole
+    /// search, as [#estimatedRetainedSize] reports it, retains at most `retainedMemory`.
+    static InnerLiteralSearch analyze(Regexp regexp, Prog forwardProgram, long prefixMemory, long retainedMemory, Compiler.Dialect dialect, CaseFolding caseFolding)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
             regexp = regexp.child(0);
@@ -94,6 +95,12 @@ final class InnerLiteralSearch
             if (!hasNoEarlierMatch(prefix, literal, caseFolding)) {
                 return null;
             }
+            LiteralSearchKernel literalSearch = new LiteralSearchKernel(Slices.wrappedBuffer(literal));
+            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalSearch.estimatedRetainedSize());
+            if (memory <= 0) {
+                // The compiler reads a budget of zero or less as no limit.
+                return null;
+            }
             Prog reversePrefixProgram;
             try {
                 reversePrefixProgram = Compiler.compileNormalized(prefix, true, memory, dialect, caseFolding);
@@ -102,10 +109,12 @@ final class InnerLiteralSearch
                 // An optional search must not reject a valid semantic program.
                 return null;
             }
-            if (reversePrefixProgram.hasDfaUnsupportedAssertions()) {
+            // Without its reverse prefix DFA, every search would fall back.
+            if (reversePrefixProgram.hasDfaUnsupportedAssertions() ||
+                    reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
                 return null;
             }
-            return new InnerLiteralSearch(literal, reversePrefixProgram, forwardProgram);
+            return new InnerLiteralSearch(literalSearch, reversePrefixProgram, forwardProgram);
         }
         return null;
     }
