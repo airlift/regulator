@@ -65,12 +65,14 @@ not change.
 
 The reverse program is compiled lazily because boolean and capture-engine paths
 do not always need it. `Re2` stores the parsed required-prefix suffix so lazy
-compilation does not parse the pattern again.
+compilation does not parse the pattern again. An inner literal search's reverse
+prefix program is compiled eagerly with the pattern.
 
 Following upstream RE2:
 
 - the forward program receives two thirds of `Options.maxMemory`
-- the reverse program receives one third
+- the reverse program receives one third, less what an inner literal search
+  retains from it
 - a reverse longest-match DFA receives its program's complete remaining DFA
   allowance because a reverse program has only one DFA kind
 
