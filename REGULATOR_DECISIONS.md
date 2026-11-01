@@ -1383,7 +1383,8 @@ group-zero searches. The cursor scans the forward DFA's start-byte candidates,
 or its start literal filter's candidates, and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
-literal search takes, a window of at least 64 bytes, skips the cursor.
+literal search takes, a window of at least 64 bytes whose first literal hit lies
+at least 64 bytes past its start, skips the cursor.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
@@ -1415,7 +1416,8 @@ assertion that could refuse one, start where the search did. One-character
 expressions such as `\pL` start at the lead byte of a valid UTF-8 character
 that ends at the boundary. Other matches retain the existing reverse DFA
 boundary recovery. A search the inner literal search takes, a window of at least
-64 bytes, skips the cursor.
+64 bytes whose first literal hit lies at least 64 bytes past its start, skips the
+cursor.
 
 The one-character rule takes 0.55x to 0.61x the base's time on the dense letter
 rows. Its first shape, measured on 97dd595b with 2 hosts a side, made r8i

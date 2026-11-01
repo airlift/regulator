@@ -29,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestInnerLiteralSearch
 {
     private static final RustRegexp.Options RUST_BYTES_OPTIONS = RustRegexp.Options.defaults().setBytes(true);
+    private static final String FILLER = "-".repeat(InnerLiteralSearch.MINIMUM_SKIPPED_BYTES);
 
     private static final List<String> PATTERNS = List.of(
             "[\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+",
@@ -149,16 +150,15 @@ public class TestInnerLiteralSearch
     {
         // A ranged find keeps the whole Slice as assertion context, so its closing \b sees the
         // byte past the window, while a matcher region is its own context. The Slice starts inside
-        // its backing array.
+        // its backing array, and the literal lies past the near-start window.
         String regex = "\\b\\w+\\s+Holmes\\s+\\w+\\b";
         Re2 pattern = Re2.compile(utf8Slice(regex));
         InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
         Re2 ordinary = Re2.compile(utf8Slice("(?:" + regex + ")|\\b\\B"));
-        String filler = "-".repeat(InnerLiteralSearch.MINIMUM_SEARCH_BYTES);
-        String window = filler + "Sherlock Holmes sa";
+        String window = FILLER + "Sherlock Holmes sa";
         int start = 2;
         int end = start + window.length();
-        long span = ((long) (start + filler.length()) << 32) | end;
+        long span = ((long) (start + FILLER.length()) << 32) | end;
         for (String after : List.of("id", " x")) {
             byte[] backing = ("abcx " + window + after).getBytes(UTF_8);
             Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
@@ -178,6 +178,53 @@ public class TestInnerLiteralSearch
             assertThat(expectedMatcher.find()).as(after).isTrue();
             assertThat(List.of(matcher.start(), matcher.end())).as(after).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
         }
+    }
+
+    @Test
+    public void testFallsBackWhenLiteralIsNearStart()
+    {
+        String filler = ".".repeat(200);
+        // A search skips at most the bytes before its first literal, as in a uuid whose hyphen
+        // sits 8 bytes in, so a first hit closer than the minimum falls back to the ordinary
+        // engine. Once a first hit fails to confirm, a later hit takes the search wherever it lies.
+        assertNearStart(
+                "[a-z]+-[0-9]+",
+                List.of("abcdefgh-1234" + filler, ".".repeat(61) + "ab-12" + filler, ".".repeat(62) + "--ab-12" + filler),
+                List.of(".".repeat(62) + "ab-12" + filler, filler + "ab-12", filler + "ab-....cd-12" + filler));
+        // A longer literal is near at 63 bytes in, and not at 64 or 68, where the near check's read
+        // ends inside it.
+        assertNearStart(
+                "\\w+\\s+Holmes",
+                List.of(".".repeat(61) + "a Holmes" + filler),
+                List.of(".".repeat(62) + "a Holmes" + filler, ".".repeat(66) + "a Holmes" + filler));
+    }
+
+    private static void assertNearStart(String regex, List<String> nearTexts, List<String> farTexts)
+    {
+        Re2 pattern = Re2.compile(utf8Slice(regex));
+        InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
+        assertThat(search).as(regex).isNotNull();
+        Engine expected = regexpEngine(Re2.compile(utf8Slice("(?:" + regex + ")|\\b\\B")));
+        for (String text : nearTexts) {
+            assertSearchRoute(pattern, search, expected, utf8Slice(text), true);
+        }
+        for (String text : farTexts) {
+            assertSearchRoute(pattern, search, expected, utf8Slice(text), false);
+        }
+    }
+
+    private static void assertSearchRoute(Re2 pattern, InnerLiteralSearch search, Engine expected, Slice text, boolean nearStart)
+    {
+        String description = text.toStringUtf8();
+        long span = search.search(text, 0, text.length(), 0, text.length());
+        assertThat(span == InnerLiteralSearch.FALLBACK).as(description).isEqualTo(nearStart);
+        assertThat(pattern.searchesInnerLiteral(text, 0, text.length())).as(description).isEqualTo(!nearStart);
+        // A matcher keeps its candidate cursor, the ordinary engine's route, only for a near hit.
+        RegexpMatcher matcher = pattern.groupZeroMatcher(text, null);
+        assertThat(matcher.find()).as(description).isTrue();
+        assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(nearStart ? 1 : 0);
+        assertThat(regexpEngine(pattern).spans(text)).as(description).isEqualTo(expected.spans(text));
+        assertThat(pattern.count(text)).as(description).isEqualTo(expected.count(text));
     }
 
     private static String literal(String pattern)
@@ -201,14 +248,25 @@ public class TestInnerLiteralSearch
                 "key: value\nother:\tx\n: none\nk:v\n".repeat(4),
                 "http://example.com/a ftp://x mailto:y https:// x://y".repeat(2),
                 "a@c@b@ a@c@b@ c@ a@b@ a@@b@".repeat(4),
-                "-".repeat(64) + "ac@d@ ac@d@ c@ ac@@d@")) {
+                "ac@d@ ac@d@ c@ ac@@d@",
+                // A run of near literals the ordinary count takes over: the next literal lies 63
+                // bytes past a match end, which stays near, then 64, which hands back to the inner
+                // literal, and the last match ends with the text.
+                "ashing" + ".".repeat(62) + "bshing" + ".".repeat(63) + "cshing" + ".".repeat(63) + "dshingeshing",
+                "a Holmes" + ".".repeat(61) + "b Holmes" + ".".repeat(62) + "c Holmes")) {
             texts.add(utf8Slice(text));
+            // A search whose first hit is near its start falls back, so filler keeps the search
+            // and its later candidates in play.
+            texts.add(utf8Slice(FILLER + text));
         }
         String[] tokens = {"Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
-            int length = random.nextInt(240);
+            if (textIndex % 2 == 1) {
+                output.writeBytes(FILLER.getBytes(UTF_8));
+            }
+            int length = output.size() + random.nextInt(240);
             while (output.size() < length) {
                 if (random.nextInt(40) == 0) {
                     // Malformed UTF-8: a bare continuation byte or a truncated lead byte.

@@ -38,12 +38,17 @@ import static java.util.Objects.requireNonNull;
 /// As in the crate, a search reports [#FALLBACK], for its caller to run the ordinary engine, when
 /// the reverse search would read back past the previous candidate, or a candidate lies in text the
 /// previous anchored confirmation already read, which keeps the work linear, or when a DFA fails.
+/// It also falls back when its first candidate lies fewer than [#MINIMUM_SKIPPED_BYTES] past the
+/// search start. The prefix lies before the literal, so the search could skip no more than that,
+/// which cannot repay the reverse search and the anchored confirmation.
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
-    // Searches of shorter windows stay on the ordinary engine, where the literal scan and the two
-    // DFA entries per candidate cannot repay their setup.
+    // Searches of shorter windows stay on the ordinary engine and skip the literal scan setup. A
+    // literal in such a window lies near its start, where the search would fall back anyway.
     static final int MINIMUM_SEARCH_BYTES = 64;
+    // A first candidate closer than this to the search start leaves too few bytes to skip.
+    static final int MINIMUM_SKIPPED_BYTES = 64;
 
     // The safety proofs recurse over the prefix. Past this depth each one stops with its
     // conservative answer, which keeps the proofs stack safe, as MatchLength bounds its own
@@ -129,6 +134,14 @@ final class InnerLiteralSearch
         return INSTANCE_SIZE + literalSearch.estimatedRetainedSize() + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
     }
 
+    /// Whether a search of `[start, end)` of `text` falls back because its first candidate lies
+    /// near the start. It reads at most `MINIMUM_SKIPPED_BYTES - 1` bytes plus the literal's length.
+    boolean fallsBackNearStart(Slice text, int start, int end)
+    {
+        int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + literalLength);
+        return findLiteral(text, start, length) >= 0;
+    }
+
     /// Searches `[start, end)` of `text` with assertions seeing `[contextStart, contextEnd)`, and
     /// returns the match's Slice offsets packed as `start << 32 | end`, [Dfa#SEARCH_NO_MATCH], or
     /// [#FALLBACK].
@@ -140,11 +153,12 @@ final class InnerLiteralSearch
         int minimumLiteralStart = start;
         int scanStart = start;
         while (end - scanStart >= literalLength) {
-            int literalStart = literalLength == 1
-                    ? literalSearch.findSingleByte(text, scanStart, end - scanStart)
-                    : literalSearch.findContains(text, scanStart, end - scanStart);
+            int literalStart = findLiteral(text, scanStart, end - scanStart);
             if (literalStart < 0) {
                 return Dfa.SEARCH_NO_MATCH;
+            }
+            if (scanStart == start && literalStart - start < MINIMUM_SKIPPED_BYTES) {
+                return FALLBACK;
             }
             if (literalStart < minimumLiteralStart) {
                 return FALLBACK;
@@ -169,6 +183,11 @@ final class InnerLiteralSearch
             minimumMatchStart = literalStart + literalLength;
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    private int findLiteral(Slice text, int offset, int length)
+    {
+        return literalLength == 1 ? literalSearch.findSingleByte(text, offset, length) : literalSearch.findContains(text, offset, length);
     }
 
     // A single letter, digit, or whitespace occurs too often for its scan to beat the DFA.
