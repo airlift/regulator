@@ -33,6 +33,7 @@ import cloud
 import control_host
 import engine_build
 import telemetry
+import unit_cost
 import unit_session
 import work_units
 from acceptance import normalize_heap_size
@@ -134,8 +135,6 @@ UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
 # An instance EC2 has still not terminated this long after the controller asked it to has leaked, which stops the
 # fleet's spending until the stop is cleared.
 TERMINATION_LEAK_SECONDS = 15 * 60
-# A lease's timeout is this multiple of its groups' estimate, or of the unit budget when that is longer.
-UNIT_LEASE_TIMEOUT_FACTOR = 2
 # A running host whose lease outran its lease timeout from its latest progress (a heartbeat, a group upload, or its
 # adoption) has stalled, and loses that lease.
 STALLED = "stalled"
@@ -748,8 +747,9 @@ def unit_worker_timeout(longest_unit_seconds):
 
 
 def lease_timeout(estimated_seconds):
-    """The time a host's stop time allots a lease of groups estimated at this many seconds."""
-    return UNIT_LEASE_TIMEOUT_FACTOR * max(work_units.UNIT_SECONDS, math.ceil(estimated_seconds))
+    """The time a host's stop time allots a lease of groups estimated at this many seconds: the unit cost's timeout
+    factor times the estimate, or times the unit budget when that is longer."""
+    return unit_cost.TIMEOUT_FACTOR * max(work_units.UNIT_SECONDS, math.ceil(estimated_seconds))
 
 
 def longest_units(items):

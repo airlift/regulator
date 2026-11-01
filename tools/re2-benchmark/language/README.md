@@ -245,27 +245,23 @@ The fleet plan records the instance type and allocated vCPU count for every
 suite and platform. Dispatch, the unit's host check and acceptance all use that
 saved allocation.
 
-`steady-slow-bulk-v2` preserves the bulk timing settings and changes only the
-aggregate measurement-process deadline to 12,600 seconds. A corpus pass can
-take longer than a nominal one-second JMH iteration. Five forks with sixty
-warmups and twenty measured iterations can therefore exceed the ordinary
-3,600-second process limit even when every operation passes its 30-second
-verification limit. Do not shorten or discard iterations to fit that deadline.
-Under the slow profile a comparison's unit estimate covers every measurement
-process running to that deadline: each observation and operation receives its
-full 12,600-second budget, and each JVM observation another for its allocation
-process. A Java or Trino comparison is therefore estimated at 75,600 seconds
-per operation and a native RE2 or Rust comparison at 63,000, each operation a
-unit alone on On-Demand capacity whose worker timeout covers it.
+A JMH iteration ends only once the operation in progress does, so an operation
+slower than the one-second iteration stretches every iteration to whole
+operations. A plan prepared with [duration evidence](#plan-preparation)
+estimates each observation at its own system's operation time, and each
+measurement process, the JMH run, its allocation pass, or a native comparator,
+may run for twice its estimate when that is longer than the protocol's
+3,600-second floor. Do not shorten or discard iterations to fit a deadline.
 
 The original profile remains supported for reproducing earlier campaigns.
 JMH uses five forks, ten one-second warmups, ten one-second measurement
 iterations, an 8 GiB heap, G1, and the GC profiler. Native RE2 and Rust use
 five Google Benchmark repetitions with a ten-second warmup and at least one
 second of measurement. Native results use elapsed time. Both protocols and
-timeout limits are saved in the manifest. An aggregate measurement-process
-timeout is a collection failure, not evidence that a single regex call timed
-out.
+timeout limits are saved in the manifest; its 3,600-second measurement-process
+limit is the floor of each process's limit, which its estimate derives. An
+aggregate measurement-process timeout is a collection failure, not evidence
+that a single regex call timed out.
 
 The result directory keeps:
 
@@ -310,14 +306,30 @@ The plan packs its comparisons into work units, written as `units.tsv`
 and `unit-rows.tsv` beside `plan.json` in the baseline unit format. An atom is
 one comparison under one operation: its comparator and both memory modes,
 which stay on one host. Atoms pack into units estimated at no more than 15
-minutes. An atom longer than that, which runs on On-Demand capacity, or any atom
-of a comparison the duration policy isolates, is a unit alone. A unit's identity
-digests the partition manifests and operations it measures. The units belong to
-one shard, which defaults to the suite; `--shard-id` names another, so a
-separate manifest of the same suite, such as the literal probe, keeps distinct
-unit IDs. Each comparison a unit holds is one of its measured groups, which
-every replica runs in case-ID and language order. Validation rebuilds the units
-from the plan and rejects any table that differs.
+minutes. An atom longer than that, which runs on On-Demand capacity, is a unit
+alone. A unit's identity digests the partition manifests and operations it
+measures. The units belong to one shard, which defaults to the suite;
+`--shard-id` names another, so a separate manifest of the same suite, such as
+the literal probe, keeps distinct unit IDs. Each comparison a unit holds is one
+of its measured groups, which every replica runs in case-ID and language order.
+Validation rebuilds the units from the plan and rejects any table that differs.
+
+For the complete bulk corpus, prepare the plan with `--duration-evidence
+REPORT.json.gz`, an earlier release's report data for the plan's platforms,
+such as the 1.0 report's `benchmark-report/data/regulator-*.json.gz` with R9g
+and R8i rows. Each plan observation the report measured slower than a tenth of
+an iteration takes its slowest time across the plan's platforms as its
+operation time: the candidate's from its row, and the comparator's from its
+comparator time. The plan freezes those times with the report's SHA-256 as its
+duration policy, so its digest and bundle cover them. Each observation's
+estimate charges whole operations to every iteration, and an operation slower
+than a native comparator's warmup or minimum time to each repetition. Its
+units' leases and its measurement processes' limits follow those estimates, and
+an observation without evidence keeps the protocol's unadjusted estimate.
+Evidence that gives none of the plan's observations an operation time is
+refused. Beside its unit summary, `prepare` prints how many of each language's
+rows the evidence gives an operation time; the 1.0 report, for one, has no Rust
+rows.
 
 ### Work units
 
@@ -339,7 +351,7 @@ both read their inputs from the plan's store.
 A semantic verdict ends the unit with status 44, which its controller never
 retries: engines or a result that disagree with the expected trace or result,
 or a timeout that does not reproduce or changes phase. A measurement process
-that outruns the protocol's budget ends it with status 42, which is not
+that outruns its budget ends it with status 42, which is not
 retried either. A runner that never starts or exits with a failure, and any
 other failure, is retried.
 
@@ -584,8 +596,8 @@ it. Execution also freezes the candidate and requires the candidate's accepted b
 runners. Each plan must name a distinct shard.
 
 - **Smoke** measures each plan's smoke units on replica 1. They cover the first
-  comparison of each language and model, every isolated or required pair, and
-  the longest packed unit.
+  comparison of each language and model, every required pair, and the longest
+  packed unit.
 - **Primary** runs with the same plans and candidate once that smoke is
   accepted.
   It measures every unit on three replicas, and no instance measures two
@@ -660,11 +672,10 @@ baseline.
 Select `--release-version 2.0` to measure the published 2.0 artifact. See the
 [AWS guide](../aws/README.md#shared-fleet-budget) for the settings, the fleet
 budget, release manifests and remeasuring 1.0. For the
-complete bulk corpus, prepare the plan with `--duration-policy PATH`: its
-frozen per-comparison estimates raise unit estimates, and each operation of
-an isolated pair runs as a unit alone. Local controller tests use synthetic
-timing samples; they do not qualify performance or replace the AWS smoke and
-primary phases.
+complete bulk corpus, prepare the plan with [duration
+evidence](#plan-preparation). Local controller tests use synthetic timing
+samples; they do not qualify performance or replace the AWS smoke and primary
+phases.
 
 A targeted language plan selects its coverage when it is prepared: pass
 `fleet.py prepare --selection PATH`, a JSON array of `[case ID, language]`

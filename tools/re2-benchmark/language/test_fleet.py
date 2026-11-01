@@ -1,7 +1,9 @@
 import contextlib
 import copy
+import gzip
 import io
 import itertools
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -171,36 +173,59 @@ class TestFleet(unittest.TestCase):
                 fleet.prepare(self.source, self.directory, selection=selection)
             self.assertFalse(self.directory.exists())
 
-    def test_duration_plan_isolates_slow_comparisons(self):
-        manifest = collection.load(self.source / "manifest.json")
-        operations = len(collection.OPERATIONS)
-        estimates = {case["id"] + "/" + language: 300 for case in manifest["cases"] for language in collection.ENGINES}
-        # A comparison estimated past fifteen minutes per operation is a unit alone, as is an isolated one.
-        estimates[manifest["cases"][1]["id"] + "/trino"] = operations * 950
-        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
-                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]]}
-        plan = fleet.prepare(self.source, self.directory, duration_policy=policy)
+    def test_duration_evidence_charges_each_observation_at_its_operation_seconds(self):
+        case = collection.load(self.source / "manifest.json")["cases"][0]["id"]
+        row = f"{case}/java/jdk/safe/reusedCount"
+
+        def report(comparator_ns, platforms=("r9g", "r8i", "r8g")):
+            # A release report's language rows: the JDK's slowest plan platform, a slower platform the plan does
+            # not measure, and a candidate faster than a tenth of an iteration.
+            path = self.root / "report.json.gz"
+            path.write_bytes(gzip.compress(json.dumps({"rows": [
+                {"source": "language", "caseId": case, "language": "java", "platform": platform,
+                 "memoryMode": "native", "operation": "reusedCount",
+                 "result": {"candidateNs": 1000, "comparatorNs": comparator_ns * scale}}
+                for platform, scale in (("r9g", 0.8), ("r8i", 1), ("r8g", 2)) if platform in platforms]}).encode()))
+            return path
+
+        evidence = report(17.1e9)
+        plan = fleet.prepare(self.source, self.directory, duration_evidence=evidence)
+        self.assertEqual({"schema_version": 2, "source_sha256": collection.digest(evidence.read_bytes()),
+                          "operation_seconds": {row: 17.1}}, plan["duration_policy"])
         units = self.assert_units_keep_comparisons_whole(52)
-        for case, language in ((manifest["cases"][0]["id"], "java"), (manifest["cases"][1]["id"], "trino")):
-            alone = [unit for unit in units.values() if fleet.row_atom(unit["owned"][0])[:2] == (case, language)]
-            self.assertEqual([3] * operations, [len(unit["owned"]) for unit in alone])
-        self.assertEqual(operations, sum(float(unit["estimated_seconds"]) == 950 for unit in units.values()))
+        # Each JMH iteration of the slow comparator lasts one operation, its processes verifying the case and each
+        # operation first; the candidate's observations keep their one-second iterations.
+        verification = (1 + len(collection.OPERATIONS)) * fleet.unit_cost.JMH_STARTUP_SECONDS
+        jmh = (1 + 5) * fleet.unit_cost.JMH_STARTUP_SECONDS
+        slow, ordinary = verification + jmh + 5 * 20 * 17.1, verification + jmh + 5 * 20
+        [alone] = [unit for unit in units.values() if row in unit["owned"]]
+        self.assertEqual(3, len(alone["owned"]))
+        self.assertAlmostEqual(2 * ordinary + slow, float(alone["estimated_seconds"]))
+        unchanged = self.root / "unchanged"
+        fleet.prepare(self.source, unchanged)
+        self.assertAlmostEqual(
+            slow - ordinary, sum(float(unit["estimated_seconds"]) for unit in units.values()) -
+            sum(float(unit["estimated_seconds"]) for unit in fleet.work_units.load(unchanged).values()))
+        # The unit's measurement takes the plan's frozen operation seconds, which set its process budgets.
+        self.run_unit(alone["unit_id"], self.root / "attempt")
+        self.assertEqual({"case-0000-java": {row: 17.1}}, self.operation_seconds)
         self.assertEqual(fleet.validate(self.directory), plan)
-        first = manifest["cases"][0]["id"] + "/java"
-        for change in ("missing", "unknown", "nan"):
-            changed = {**policy, "partition_seconds": dict(estimates), "isolated_pairs": list(policy["isolated_pairs"])}
-            if change == "missing":
-                changed["partition_seconds"].pop(first)
-            elif change == "unknown":
-                changed["isolated_pairs"].append(["missing", "java"])
-            else:
-                changed["partition_seconds"][first] = float("nan")
-            with self.subTest(change=change), self.assertRaises(ValueError):
-                fleet.prepare(self.source, self.root / change, duration_policy=changed)
-        plan["duration_policy"]["partition_seconds"].pop(first)
-        collection.save(self.directory / "plan.json", plan)
-        with self.assertRaisesRegex(ValueError, "duration policy"):
-            fleet.validate(self.directory)
+        # Beside its units, prepare prints how many of each language's observations the evidence covers.
+        self.assertEqual("duration evidence covers java 1 of 195 rows, re2 0 of 195 rows, rust 0 of 195 rows, "
+                         "trino 0 of 195 rows", fleet.duration_coverage(plan, units.values()))
+        with self.assertRaisesRegex(ValueError, "invalid operation duration"):
+            fleet.prepare(self.source, self.root / "nan", duration_evidence=report(float("nan")))
+        # Evidence that gives none of the plan's observations an operation time, here a report of only a platform
+        # the plan does not measure, is refused.
+        with self.assertRaisesRegex(ValueError, "gives none of the plan's observations an operation time"):
+            fleet.prepare(self.source, self.root / "other", duration_evidence=report(17.1e9, platforms=("r8g",)))
+        self.assertFalse((self.root / "other").exists())
+        for edit, refusal in (({row: 1.0}, "work units differ"), ({"missing/java/jdk/safe/compile": 17.1}, "duration")):
+            with self.subTest(edit=edit):
+                collection.save(self.directory / "plan.json", {**plan, "duration_policy": {
+                    **plan["duration_policy"], "operation_seconds": edit}})
+                with self.assertRaisesRegex(ValueError, refusal):
+                    fleet.validate(self.directory)
 
     def test_reject_changed_partition_even_with_updated_checksum(self):
         plan = self.prepare_small_plan()
@@ -312,8 +337,10 @@ class TestFleet(unittest.TestCase):
                              (directory, source, archive, candidate))
             return "installed classpath", receipt
 
-        def measure(path, results, java, classpath, native_runners, platform, build_receipt, inputs):
+        def measure(path, results, java, classpath, native_runners, platform, build_receipt, inputs,
+                    operation_seconds):
             self.assertEqual(("installed classpath", receipt), (classpath, build_receipt))
+            self.operation_seconds[results.name] = operation_seconds
             self.assertEqual(shared / "language-native", Path(native_runners["native-re2"]).parent)
             # Even a copy of the partition selecting some operations reads its inputs from the plan's store.
             self.assertEqual(directory or self.directory, inputs)
@@ -323,6 +350,8 @@ class TestFleet(unittest.TestCase):
                 **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
                    "classes_archive_sha256": build_receipt["classes_archive_sha256"], **measured(results.name)})
 
+        # The operation seconds each partition's measurement was given, by partition.
+        self.operation_seconds = {}
         reads = itertools.count()
 
         def cpu_ticks():

@@ -9,7 +9,9 @@ and native runners of its platform's engine build.
 import argparse
 import copy
 import csv
+import gzip
 import hashlib
+import json
 import math
 import os
 import re
@@ -62,20 +64,43 @@ def platform_allocations(suite, platforms=PLATFORMS):
     return {platform: platform_allocation(suite, platform) for platform in platforms}
 
 
-def validate_duration_policy(policy, selected):
-    """A frozen duration policy names its evidence and estimates every selected comparison."""
-    keys = {f"{case}/{language}" for case, language in selected}
-    if (policy.get("schema_version") != 1 or
+def validate_duration_policy(policy, rows):
+    """A frozen duration policy names its evidence and gives, for some of the plan's observation rows, the measured
+    seconds of one operation."""
+    seconds = policy.get("operation_seconds")
+    if (policy.get("schema_version") != 2 or
             not re.fullmatch(r"[0-9a-f]{64}", policy.get("source_sha256", "")) or
-            set(policy.get("partition_seconds", {})) != keys):
-        raise ValueError("duration policy must identify evidence and every selected partition")
-    for value in policy["partition_seconds"].values():
+            not isinstance(seconds, dict) or not set(seconds) <= set(rows)):
+        raise ValueError("duration policy must identify its evidence and only the plan's observation rows")
+    for value in seconds.values():
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
-            raise ValueError("invalid partition duration estimate")
-    isolated = policy.get("isolated_pairs", [])
-    if (not all(is_pair(pair) for pair in isolated) or len({tuple(pair) for pair in isolated}) != len(isolated) or
-            not {"/".join(pair) for pair in isolated} <= keys):
-        raise ValueError("invalid isolated comparison selection")
+            raise ValueError("invalid operation duration")
+
+
+def policy_from_evidence(report, rows, protocol):
+    """The duration policy a release report's language rows give a plan's observation rows: each candidate row its
+    report row's candidate time, each comparator row its comparator time, the slowest over the plan's platforms. A row
+    the plan does not measure is ignored, and so is one faster than a tenth of an iteration, which a JMH iteration
+    absorbs."""
+    with gzip.open(report, "rt", encoding="utf-8") as file:
+        data = json.load(file)
+    seconds = {}
+    for row in data["rows"]:
+        if row.get("source") != "language" or row["platform"] not in PLATFORMS:
+            continue
+        candidate, comparator = collection.ENGINES[row["language"]]
+        # The IDs of collection.observations, case/language/engine/mode, with the row's operation.
+        prefix = f"{row['caseId']}/{row['language']}"
+        for row_id, nanoseconds in ((f"{prefix}/{candidate}/{row['memoryMode']}/{row['operation']}",
+                                     row["result"].get("candidateNs")),
+                                    (f"{prefix}/{comparator}/safe/{row['operation']}",
+                                     row["result"].get("comparatorNs"))):
+            if row_id in rows and nanoseconds is not None:
+                if type(nanoseconds) not in (int, float) or not math.isfinite(nanoseconds) or nanoseconds <= 0:
+                    raise ValueError(f"invalid operation duration in {report} for {row_id}")
+                seconds[row_id] = max(seconds.get(row_id, 0), nanoseconds / 1e9)
+    return {"schema_version": 2, "source_sha256": sha256_file(report), "operation_seconds": {
+        row_id: value for row_id, value in sorted(seconds.items()) if value > protocol["iteration_seconds"] / 10}}
 
 
 def row_atom(row_id):
@@ -112,28 +137,32 @@ def is_shard_id(value):
     return isinstance(value, str) and re.fullmatch(SHARD_ID, value) is not None
 
 
-def comparison_seconds(manifest, case, language, duration_policy=None):
-    """Seconds to verify and measure one comparison under one operation.
+def plan_atoms(manifest, partitions):
+    """The plan's observation rows, case/language/engine/mode/operation, as one list of a comparison's three
+    observations per (case, language, operation), in collection order."""
+    cases = {case["id"]: case for case in manifest["cases"]}
+    atoms = []
+    for partition in partitions:
+        case = cases[partition["case"]]
+        subset = {**manifest, "cases": [case], "selected_languages": [partition["language"]]}
+        for operation in collection.case_operations(manifest, case):
+            atoms.append([f"{identity}/{operation}" for identity, *_ in collection.observations(subset)])
+    return atoms
 
-    A frozen duration estimate for the whole comparison, shared by its operations, raises the estimate.
-    Under the slow bulk protocol the estimate covers every measurement process running to its deadline,
-    so the worker outlives a comparison that does not finish.
-    """
-    _, comparator = collection.ENGINES[language]
-    native = comparator in collection.NATIVE_RUNNERS
-    measured = case["mappings"][language]["status"] != "not-compatible"
-    protocol = collection.protocol_for(manifest)
-    jvm_observations = (3 - native) if measured else 0
-    operations = len(collection.case_operations(manifest, case))
-    seconds = unit_cost.language_seconds(protocol, jvm_observations, int(native and measured),
-                                         collection.verification_processes(manifest))
-    if protocol == collection.SLOW_BULK_PROTOCOL:
-        separate = protocol["measurement_profile"] in collection.SEPARATE_ALLOCATION_PROFILES
-        processes = jvm_observations * (1 + separate) + int(native and measured)
-        seconds = max(seconds, processes * protocol["measurement_timeout_seconds"])
-    if duration_policy is not None:
-        seconds = max(seconds, duration_policy["partition_seconds"][f"{case['id']}/{language}"] / operations)
-    return seconds
+
+def plan_rows(manifest, partitions):
+    """The plan's observation row IDs."""
+    return {row_id for atom in plan_atoms(manifest, partitions) for row_id in atom}
+
+
+def row_seconds(manifest, case, row_id, duration_policy=None):
+    """Seconds to verify and measure one observation row, a per-observation estimate of its processes, at its
+    system's frozen operation seconds, when the duration policy gives them."""
+    _, language, engine, _, _ = row_id.rsplit("/", 4)
+    operation_seconds = (duration_policy or {}).get("operation_seconds", {}).get(row_id)
+    return unit_cost.language_seconds(collection.protocol_for(manifest), engine in collection.NATIVE_RUNNERS,
+                                      case["mappings"][language]["status"] != "not-compatible",
+                                      collection.verification_processes(manifest), operation_seconds)
 
 
 def comparison_rows(rows):
@@ -148,24 +177,17 @@ def plan_units(manifest, partitions, shard_id, duration_policy=None):
     """Pack the plan's comparisons, one atom per (case, language, operation), into work units.
 
     An atom keeps a comparison's three observations on one host. Atoms pack into units of at most 15
-    minutes; an atom longer than that, or any atom of a comparison the duration policy isolates, is a unit alone.
+    minutes; an atom longer than that is a unit alone.
     """
     cases = {case["id"]: case for case in manifest["cases"]}
-    seconds = {(partition["case"], partition["language"]): comparison_seconds(
-        manifest, cases[partition["case"]], partition["language"], duration_policy) for partition in partitions}
-    isolated = {tuple(pair) for pair in (duration_policy or {}).get("isolated_pairs", [])}
+    atoms = [work_units.Atom(rows) for rows in plan_atoms(manifest, partitions)]
+    seconds = {row_id: row_seconds(manifest, cases[row_atom(row_id)[0]], row_id, duration_policy)
+               for atom in atoms for row_id in atom.owned}
 
     def cost(atom):
-        return sum(seconds[key] * len(operations) for key, operations in unit_slices(atom.owned).items())
+        return sum(seconds[row_id] for row_id in atom.owned)
 
-    atoms = []
-    for partition in partitions:
-        case = cases[partition["case"]]
-        subset = {**manifest, "cases": [case], "selected_languages": [partition["language"]]}
-        for operation in collection.case_operations(manifest, case):
-            atoms.append(work_units.Atom([f"{identity}/{operation}" for identity, *_ in collection.observations(subset)]))
-    lone = [atom for atom in atoms
-            if cost(atom) > work_units.UNIT_SECONDS or row_atom(atom.owned[0])[:2] in isolated]
+    lone = [atom for atom in atoms if cost(atom) > work_units.UNIT_SECONDS]
     lone_ids = {id(atom) for atom in lone}
     packable = [atom for atom in atoms if id(atom) not in lone_ids]
     packed = work_units.pack(packable, cost, work_units.UNIT_SECONDS)
@@ -192,7 +214,7 @@ def write_units(directory, units):
 
 def smoke_units(directory, plan, units):
     """A validated plan's smoke units: those measuring the first comparison of each language and model, each
-    isolated or required comparison, and the longest unit that packs several atoms."""
+    required comparison, and the longest unit that packs several atoms."""
     manifest = collection.load(directory / "source/manifest.json")
     cases = {case["id"]: case for case in manifest["cases"]}
     representatives = {}
@@ -200,7 +222,6 @@ def smoke_units(directory, plan, units):
         model = cases[partition["case"]].get("model", "lifecycle")
         representatives.setdefault((partition["language"], model), (partition["case"], partition["language"]))
     selected = set(representatives.values())
-    selected.update(tuple(pair) for pair in plan.get("duration_policy", {}).get("isolated_pairs", []))
     comparisons = {(partition["case"], partition["language"]) for partition in plan["partitions"]}
     for pair in manifest.get("smoke_required_pairs", []):
         if not is_pair(pair):
@@ -361,7 +382,8 @@ def run_unit(directory, unit_id, replica, group_id, root, shared, unit_attempt, 
                 steal_before, total_before = cpu_ticks()
                 try:
                     collection.measure(path, results, java, classpath, native_runners, environment["platform"],
-                                       receipt, inputs=directory)
+                                       receipt, inputs=directory,
+                                       operation_seconds=plan.get("duration_policy", {}).get("operation_seconds"))
                 except collection.BudgetOverrun as error:
                     raise UnitRejection(PROTOCOL_REJECTION_STATUS, str(error)) from error
                 steal_after, total_after = cpu_ticks()
@@ -492,7 +514,9 @@ def copy_inputs(manifest, source, destination):
         shutil.copyfile(source / name, target)
 
 
-def prepare(manifest_directory, destination, selection=None, duration_policy=None, shard_id=None):
+def prepare(manifest_directory, destination, selection=None, duration_evidence=None, shard_id=None):
+    """Plan the manifest's selected comparisons as work units under destination. duration_evidence, a release
+    report's data, gives the operation seconds the plan freezes as its duration policy."""
     manifest_directory, destination = manifest_directory.resolve(), destination.resolve()
     manifest = collection.load(manifest_directory / "manifest.json")
     collection.validate_manifest(manifest, manifest_directory)
@@ -506,8 +530,15 @@ def prepare(manifest_directory, destination, selection=None, duration_policy=Non
     selected = set(map(tuple, selection)) if selection is not None else complete
     if not selected or not selected <= complete or (selection is not None and len(selected) != len(selection)):
         raise ValueError('invalid or duplicate fleet selection')
-    if duration_policy is not None:
-        validate_duration_policy(duration_policy, selected)
+    duration = None
+    if duration_evidence is not None:
+        comparisons = [{"case": case["id"], "language": language} for case in manifest["cases"]
+                       for language in collection.ENGINES if (case["id"], language) in selected]
+        duration = policy_from_evidence(duration_evidence, plan_rows(manifest, comparisons),
+                                        collection.protocol_for(manifest))
+        if not duration["operation_seconds"]:
+            raise ValueError(f"duration evidence {duration_evidence} gives none of the plan's observations an "
+                             "operation time")
     destination.mkdir(parents=True, exist_ok=False)
     source = destination / "source"
     source.mkdir()
@@ -532,14 +563,26 @@ def prepare(manifest_directory, destination, selection=None, duration_policy=Non
     plan = {"schema_version": 4, "shard_id": shard_id, "parent_manifest_sha256": parent_hash,
             "platforms": list(PLATFORMS), "platform_allocations": platform_allocations(manifest["suite"], PLATFORMS),
             "partitions": partitions}
-    if duration_policy is not None:
-        plan["duration_policy"] = duration_policy
+    if duration is not None:
+        plan["duration_policy"] = duration
     if selection is not None:
         plan['selection'] = [list(identity) for identity in sorted(selected)]
-    write_units(destination, plan_units(manifest, partitions, shard_id, duration_policy))
+    write_units(destination, plan_units(manifest, partitions, shard_id, duration))
     collection.save(destination / "plan.json", plan)
     validate(destination)
     return plan
+
+
+def duration_coverage(plan, units):
+    """How many of the plan's observation rows of each language its duration policy gives an operation time."""
+    timed = plan["duration_policy"]["operation_seconds"]
+    counts = {}
+    for row_id in (row_id for unit in units for row_id in unit["owned"]):
+        count = counts.setdefault(row_atom(row_id)[1], [0, 0])
+        count[0] += row_id in timed
+        count[1] += 1
+    return "duration evidence covers " + ", ".join(
+        f"{language} {covered} of {total} rows" for language, (covered, total) in sorted(counts.items()))
 
 
 def validate(directory):
@@ -586,7 +629,7 @@ def validate(directory):
     if found != expected:
         raise ValueError("incomplete fleet coverage")
     if "duration_policy" in plan:
-        validate_duration_policy(plan["duration_policy"], expected)
+        validate_duration_policy(plan["duration_policy"], plan_rows(manifest, plan["partitions"]))
     units = plan_units(manifest, plan["partitions"], plan["shard_id"], plan.get("duration_policy"))
     if tuple((directory / name).read_text() for name in ("units.tsv", "unit-rows.tsv")) != work_units.render(units):
         raise ValueError("work units differ from the plan's comparisons")
@@ -783,7 +826,9 @@ def main():
     prepare_parser.add_argument("--manifest-directory", type=Path, required=True)
     prepare_parser.add_argument("--output-directory", type=Path, required=True)
     prepare_parser.add_argument("--selection", type=Path, help="JSON array of [case ID, language] pairs")
-    prepare_parser.add_argument("--duration-policy", type=Path, help="frozen partition duration estimates and isolated slow comparisons")
+    prepare_parser.add_argument("--duration-evidence", type=Path,
+                                help="a release report's data, whose language rows give the operation seconds the "
+                                     "plan's estimates freeze")
     prepare_parser.add_argument("--shard-id", help="the plan's shard of work units; defaults to the suite")
     bundle_parser = commands.add_parser("bundle", help="write a plan's bundle for unit workers and print its SHA-256")
     bundle_parser.add_argument("--plan-directory", type=Path, required=True)
@@ -814,10 +859,12 @@ def main():
     args = parser.parse_args()
     if args.command == "prepare":
         selection = collection.load(args.selection) if args.selection else None
-        prepare(args.manifest_directory, args.output_directory, selection,
-                collection.load(args.duration_policy) if args.duration_policy else None, shard_id=args.shard_id)
-        print(work_units.summary([{**unit, "estimated_seconds": float(unit["estimated_seconds"])}
-                                  for unit in work_units.load(args.output_directory).values()]))
+        plan = prepare(args.manifest_directory, args.output_directory, selection, args.duration_evidence,
+                       shard_id=args.shard_id)
+        units = work_units.load(args.output_directory).values()
+        print(work_units.summary([{**unit, "estimated_seconds": float(unit["estimated_seconds"])} for unit in units]))
+        if "duration_policy" in plan:
+            print(duration_coverage(plan, units))
     elif args.command == "bundle":
         print(write_bundle(args.plan_directory, args.output))
     elif args.command == "run-unit":

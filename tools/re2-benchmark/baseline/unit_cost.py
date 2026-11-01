@@ -1,16 +1,21 @@
 """Static measurement seconds of manifest rows under their frozen protocols.
 
 These are the per-row, per-selector, and representative costs of a unit's JMH
-runs, and the cost of a language comparison's runs. Engines are prebuilt, so
+runs, and the cost of a language observation's runs. Engines are prebuilt, so
 building, pinned Trino preparation, and host bootstrap are not charged; they do
 not scale with the rows a host measures.
 """
+import math
+
 from shard_results import jmh_runtime_seconds
 
 import row_protocol
 
 
 JMH_STARTUP_SECONDS = 2
+# A lease's timeout is this multiple of its groups' estimate, and a language measurement process's limit this
+# multiple of its own, so a slow host outruns neither by its estimate's error alone.
+TIMEOUT_FACTOR = 2
 # A full five-fork reference and five bounded host-JVM processes for one representative.
 PROTOCOL_REPRESENTATIVE_SECONDS = 132
 
@@ -82,28 +87,49 @@ def selectors(rows, protocols):
     return result
 
 
-def language_jmh_seconds(protocol):
-    """One language observation's JMH run: its launcher, its timed forks, and the separate allocation pass
-    of a protocol that has one."""
-    seconds = (JMH_STARTUP_SECONDS + protocol["forks"] * JMH_STARTUP_SECONDS + jmh_runtime_seconds(
-        1, protocol["forks"], protocol["warmup_iterations"], protocol["measurement_iterations"],
-        protocol["iteration_seconds"]))
-    if "allocation_forks" in protocol:
-        seconds += (JMH_STARTUP_SECONDS + protocol["allocation_forks"] * JMH_STARTUP_SECONDS + jmh_runtime_seconds(
-            1, protocol["allocation_forks"], protocol["allocation_warmup_iterations"],
-            protocol["allocation_measurement_iterations"], protocol["iteration_seconds"]))
+def iteration_seconds(protocol, operation_seconds=None):
+    """A JMH iteration's length: the protocol's, unless operation_seconds, an operation's measured time, stretches it.
+    An iteration ends only with the operation in progress, so it lasts whole operations."""
+    iteration = protocol["iteration_seconds"]
+    if operation_seconds is None:
+        return iteration
+    return math.ceil(iteration / operation_seconds) * operation_seconds
+
+
+def language_process_seconds(protocol, native, operation_seconds=None, allocation=False):
+    """One measurement process of a language observation whose operation takes operation_seconds, when known: a
+    native comparator's repetitions, each a warmup and a timed run that last at least one operation, or a JMH
+    launcher and its timed forks, or with allocation, the forks of the protocol's separate allocation pass."""
+    if native:
+        operation = operation_seconds or 0
+        return protocol["native_repetitions"] * (max(protocol["native_warmup_seconds"], operation) +
+                                                 max(protocol["native_min_time_seconds"], operation))
+    prefix = "allocation_" if allocation else ""
+    forks = protocol[f"{prefix}forks"]
+    return JMH_STARTUP_SECONDS + forks * JMH_STARTUP_SECONDS + jmh_runtime_seconds(
+        1, forks, protocol[f"{prefix}warmup_iterations"], protocol[f"{prefix}measurement_iterations"],
+        iteration_seconds(protocol, operation_seconds))
+
+
+def language_seconds(protocol, native, measured, verification_processes, operation_seconds=None):
+    """Seconds to verify and measure one language observation under one of its case's operations.
+
+    Verification starts verification_processes processes, each charged a startup, a conservative allowance even
+    for a not-compatible observation, which only verifies. A measured observation then runs its native comparator,
+    or JMH and the separate allocation pass of a protocol that has one."""
+    seconds = verification_processes * JMH_STARTUP_SECONDS
+    if measured:
+        seconds += language_process_seconds(protocol, native, operation_seconds)
+        if not native and "allocation_forks" in protocol:
+            seconds += language_process_seconds(protocol, False, operation_seconds, allocation=True)
     return seconds
 
 
-def language_seconds(protocol, jvm_observations, native_observations, verification_processes):
-    """Seconds to verify and measure one language comparison under one of its case's operations.
-
-    JVM observations run JMH; a native comparator warms up and measures each repetition. Verification
-    starts verification_processes processes for each of the comparison's three observations.
-    """
-    native = protocol["native_repetitions"] * (protocol["native_warmup_seconds"] + protocol["native_min_time_seconds"])
-    return (jvm_observations * language_jmh_seconds(protocol) + native_observations * native +
-            3 * verification_processes * JMH_STARTUP_SECONDS)
+def measurement_budget(protocol, native, operation_seconds=None, allocation=False):
+    """The whole seconds a language measurement process may run before it is killed: the protocol's limit, or
+    TIMEOUT_FACTOR times the process's estimate when that is longer, as a lease allows its groups' estimate."""
+    return max(protocol["measurement_timeout_seconds"], math.ceil(
+        TIMEOUT_FACTOR * language_process_seconds(protocol, native, operation_seconds, allocation)))
 
 
 def measurement_seconds(rows, protocols):

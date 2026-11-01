@@ -1,5 +1,6 @@
 import copy
 import gzip
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -206,34 +207,24 @@ class TestBulkEvidence(unittest.TestCase):
                          {"native-re2": "native", "native-rust": "native-rust"})
         self.assertEqual(str(destination / case["source_file"]), command.call_args.args[0][-1])
 
-    def test_smoke_covers_each_language_and_model_and_each_isolated_comparison(self):
+    def test_smoke_covers_each_language_and_model(self):
         source = self.root / "models"
         manifest = prepare_manifest("smoke", b"a", source, models=("count", "count", "grep"))
-        first_count, second_count, grep = (case["id"] for case in manifest["cases"])
-        # Each comparison fills a unit, so the smoke units measure exactly the selected comparisons.
-        estimates = {case["id"] + "/" + language: fleet.work_units.UNIT_SECONDS
-                     for case in manifest["cases"] for language in collection.ENGINES}
-        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
-                  "isolated_pairs": [[second_count, "java"]]}
+        first_count, _, grep = (case["id"] for case in manifest["cases"])
+        # Ten-second operations make each comparison a unit alone, so the smoke units measure exactly the selected
+        # comparisons.
+        evidence = self.root / "report.json.gz"
+        evidence.write_bytes(gzip.compress(json.dumps({"rows": [
+            {"source": "language", "caseId": case["id"], "language": language, "platform": "r8i", "memoryMode": mode,
+             "operation": "execute", "result": {"candidateNs": 10e9, "comparatorNs": 10e9}}
+            for case in manifest["cases"] for language in collection.ENGINES for mode in collection.MODES]}).encode()))
         directory = self.root / "models-fleet"
-        plan = fleet.prepare(source, directory, duration_policy=policy)
+        plan = fleet.prepare(source, directory, duration_evidence=evidence)
         units = fleet.work_units.load(directory)
         measured = {fleet.row_atom(row)[:2] for unit_id in fleet.smoke_units(directory, plan, units)
                     for row in units[unit_id]["owned"]}
-        self.assertEqual(measured, {(case, language) for case in (first_count, grep) for language in collection.ENGINES}
-                         | {(second_count, "java")})
-
-    def test_slow_bulk_units_outlast_every_measurement_deadline(self):
-        manifest = collection.load(self.directory / "manifest.json")
-        manifest["protocol"] = collection.SLOW_BULK_PROTOCOL
-        collection.save(self.directory / "manifest.json", manifest)
-        directory = self.root / "slow-fleet"
-        fleet.prepare(self.directory, directory)
-
-        # Each JVM observation measures in two processes and the native comparator in one, all to the deadline.
-        seconds = {fleet.row_atom(unit["owned"][0])[1]: float(unit["estimated_seconds"])
-                   for unit in fleet.work_units.load(directory).values()}
-        self.assertEqual(seconds, {"java": 75600, "trino": 75600, "re2": 63000, "rust": 63000})
+        self.assertEqual(measured, {(case, language) for case in (first_count, grep)
+                                    for language in collection.ENGINES})
 
     def test_bulk_worker_imports_do_not_require_controller_toml_parser(self):
         script = (
