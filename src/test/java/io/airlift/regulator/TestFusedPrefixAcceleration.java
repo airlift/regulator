@@ -107,8 +107,6 @@ public class TestFusedPrefixAcceleration
                 .isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
         assertThat(configuredProgram(new byte[] {(byte) 0xD0}, false).prefixAccelStrategy(4_096))
                 .isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
-        assertThat(configuredProgram("Sherlock Holmes".getBytes(StandardCharsets.UTF_8), false).prefixAccelStrategy(4_096))
-                .isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
     }
 
     private static void assertMatchAt(Prog program, byte[] prefix, int length, int backingOffset, int matchPosition)

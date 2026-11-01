@@ -38,6 +38,7 @@ public final class RegexpMatcher
     private final Map<String, Integer> namedCapturingGroups;
     private final boolean latin1;
     private final SingleByteMatcher singleByteMatcher;
+    private final BoundedCharacterClassCounter characterClassCounter;
     private final Dfa.CandidateStartCursor candidateStartCursor;
     private final boolean enableGroupZeroForwardCursor;
     private final boolean hasLoweredCandidateSearch;
@@ -87,7 +88,7 @@ public final class RegexpMatcher
         this(pattern, input, singleByteMatcher, capturingGroupCount, true);
     }
 
-    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableGroupZeroForwardCursor)
+    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableCounterAndForwardCursor)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
@@ -97,11 +98,11 @@ public final class RegexpMatcher
         this.namedCapturingGroups = retainedNamedCapturingGroups(pattern, capturingGroupCount);
         this.latin1 = (pattern.flags() & Regexp.LATIN1) != 0;
         this.singleByteMatcher = groups.length == 2 ? singleByteMatcher : null;
-        this.candidateStartCursor = groups.length == 2 && this.singleByteMatcher == null
-                ? pattern.createCandidateStartCursor()
-                : null;
-        this.enableGroupZeroForwardCursor = enableGroupZeroForwardCursor &&
+        this.characterClassCounter = groups.length == 2 && enableCounterAndForwardCursor ? pattern.classMatchCounter() : null;
+        this.candidateStartCursor = groups.length == 2 && this.singleByteMatcher == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
+        this.enableGroupZeroForwardCursor = enableCounterAndForwardCursor &&
                 this.singleByteMatcher == null &&
+                characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
         this.hasDirectLoweredGroupZeroSearch =
@@ -250,6 +251,19 @@ public final class RegexpMatcher
             nextFindStart = matchStart + 1;
             retryStart = matchStart + 1;
             hasMatch = true;
+            return true;
+        }
+
+        // The counter finds a class pattern's next match directly: one member, or a run of members
+        // cut at the repeat's maximum when it has one.
+        if (characterClassCounter != null) {
+            long span = characterClassCounter.findSpan(input, regionStart, regionEnd, regionStart + nextFindStart);
+            if (span < 0) {
+                return failFind();
+            }
+            groups[0] = (int) (span >>> 32);
+            groups[1] = (int) span;
+            setMatchAndAdvance(groups[0], groups[1]);
             return true;
         }
 
@@ -650,9 +664,24 @@ public final class RegexpMatcher
         this.dfaQuitStreak = dfaQuitStreak;
     }
 
+    boolean onePassWorkspaceInitializedForDiagnostics()
+    {
+        return onePassWorkspace != null;
+    }
+
+    boolean bitStateWorkspaceInitializedForDiagnostics()
+    {
+        return bitStateWorkspace != null;
+    }
+
     boolean nfaWorkspaceInitializedForDiagnostics()
     {
         return nfaWorkspace != null;
+    }
+
+    boolean characterClassCounterEnabledForDiagnostics()
+    {
+        return characterClassCounter != null;
     }
 
     boolean candidateStartCursorEnabledForDiagnostics()

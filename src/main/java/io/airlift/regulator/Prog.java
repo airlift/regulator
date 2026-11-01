@@ -34,6 +34,7 @@ import static java.util.Objects.requireNonNull;
 final class Prog
 {
     private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
     private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
     public enum MatchKind
@@ -662,6 +663,14 @@ final class Prog
         return listHeads != null;
     }
 
+    /// Returns whether upstream RE2 would give this program list heads, which it charges to the
+    /// compile memory budget. It reads the final instruction count, so it is only valid after
+    /// [#flatten()] has been called.
+    boolean hasUpstreamListHeads()
+    {
+        return instructionCount <= UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS;
+    }
+
     public int listCount()
     {
         return listCount;
@@ -917,13 +926,15 @@ final class Prog
 
     PrefixAccelStrategy prefixAccelStrategy(int length)
     {
-        if (prefixFoldCase || prefixSize <= 1 || prefix[0] >= 0) {
+        if (prefixFoldCase || prefixSize <= 1 || prefixProbeOffset != 0) {
             return PrefixAccelStrategy.REPEATED_BYTE;
         }
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
             return PrefixAccelStrategy.FUSED_VECTOR;
         }
-        return PrefixAccelStrategy.FUSED_SWAR;
+        // Short ASCII-led searches, and long ones without the Vector API, keep the repeated
+        // first-byte scan, whose single load per word costs less than the fused SWAR pair's two.
+        return prefix[0] >= 0 ? PrefixAccelStrategy.REPEATED_BYTE : PrefixAccelStrategy.FUSED_SWAR;
     }
 
     /// Returns the offset of the prefix byte that the [PrefixAccelStrategy#REPEATED_BYTE]
@@ -1017,8 +1028,9 @@ final class Prog
     ///
     /// Uses different strategies depending on configuration:
     /// - Parallel front-and-back candidate scanning for folded prefixes
-    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
-    ///   non-ASCII first byte
+    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes that probe their
+    ///   first byte, in Vector lanes for long searches and, for a non-ASCII first byte, in SWAR
+    ///   words when the search is short or the Vector API is unavailable
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
@@ -2647,12 +2659,15 @@ final class Prog
         insts = flattenedInstructions.instructions;
         instructionCount = flattenedInstructions.size();
 
-        // Populate the list-head mapping used by the BitState engine.
-        // Upstream limits this to <= 512 instructions to keep the bitmap small.
+        // Populate the list-head mapping used by the BitState engine. Upstream gives list heads
+        // only to programs of at most 512 instructions, which sends a large program's captures to
+        // the NFA even for a short match. The visited bitmap grows with the list count, not the
+        // instruction count, so the bitmap bound below alone limits the text, as the Rust crate
+        // bounds its backtracker.
         listCount = rootIdsByInstruction.size();
         listHeads = null;
         bitStateTextMaxSize = 0;
-        if (instructionCount <= 512) {
+        if (listCount <= Short.MAX_VALUE) {
             short[] heads = new short[instructionCount];
             Arrays.fill(heads, (short) -1);
             for (int i = 0; i < listCount; i++) {

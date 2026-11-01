@@ -54,6 +54,16 @@ final class SingleByteMatcher
         return new SingleByteMatcher(analysis);
     }
 
+    /// Returns a matcher for `x` when `regexp` is `x+` or `x{1,}` and `x` matches exactly one
+    /// byte, or null.
+    static SingleByteMatcher analyzeRun(Regexp regexp, CaseFolding caseFolding)
+    {
+        if (regexp.op() != RegexpOp.PLUS && !(regexp.op() == RegexpOp.REPEAT && regexp.min() == 1 && regexp.max() == -1)) {
+            return null;
+        }
+        return analyze(regexp.child(0), caseFolding);
+    }
+
     static boolean supports(Regexp regexp, CaseFolding caseFolding)
     {
         return supports(regexp, caseFolding, 0);

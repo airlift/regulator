@@ -116,7 +116,7 @@ final class Compiler
     static long estimatedProgramMemory(Prog program)
     {
         long memory = CPP_PROG_OVERHEAD_BYTES + ((long) program.size() * CPP_INSTRUCTION_BYTES);
-        if (program.canBitState()) {
+        if (program.hasUpstreamListHeads()) {
             memory += (long) program.size() * CPP_LIST_HEAD_BYTES;
         }
         return memory + program.onePassMemory();
@@ -847,7 +847,7 @@ final class Compiler
                 long dfaMemory = DEFAULT_DFA_MEMORY;
                 if (maxMemory > 0) {
                     dfaMemory = maxMemory - CPP_PROG_OVERHEAD_BYTES - ((long) program.size() * CPP_INSTRUCTION_BYTES);
-                    if (program.canBitState()) {
+                    if (program.hasUpstreamListHeads()) {
                         dfaMemory -= (long) program.size() * CPP_LIST_HEAD_BYTES;
                     }
                     dfaMemory = Math.max(0, dfaMemory);

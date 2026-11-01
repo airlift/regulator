@@ -37,7 +37,7 @@ public class TestRe2BooleanPlans
     {
         Field strategy = Re2.class.getDeclaredField("booleanFindStrategy");
         assertThat(strategy.getType()).isEqualTo(byte.class);
-        assertThat(instanceSize(Re2.class)).isEqualTo(96);
+        assertThat(instanceSize(Re2.class)).isEqualTo(104);
     }
 
     @Test

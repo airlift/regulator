@@ -344,11 +344,14 @@ original pattern, including when quoting rewrites it before parsing.
   `RustRegexp.Options` rather than a separate compiled type, following the
   encoding option on `Re2.Options`. It is named after the crate's bytes API
   rather than Latin-1, because only constructs without Unicode mode match
-  single bytes; Unicode-mode constructs still match UTF-8. The parser marks
-  each byte construct as a Latin-1 node, and the compiler and expression
-  analyses read the encoding from each node. Separately, byte mode sets the
-  pattern-level Latin-1 flag, so empty matches advance one byte, as in Latin-1
-  mode, and the matcher lets an empty match split a character.
+  single bytes; Unicode-mode constructs still match UTF-8. The parser marks the
+  byte classes and literals that can match a byte above 0x7F as Latin-1 nodes,
+  and the compiler and expression analyses read the encoding from each node; an
+  ASCII byte construct reads alike in both encodings, and the any-byte dot
+  (`ANY_BYTE`) carries no such flag and is recognized by its kind. Separately,
+  byte mode sets the pattern-level Latin-1 flag, so empty matches advance one
+  byte, as in Latin-1 mode, and the matcher lets an empty match split a
+  character.
 - Outside byte mode, inputs are not validated. The crate's `Regex` only
   accepts valid UTF-8, so results on malformed input are unspecified rather
   than an error, and valid input pays no validation scan. A pattern that runs
@@ -572,8 +575,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to a lazily compiled reverse program.
 - Compilation accounts for the program and list-head storage before assigning the
-  remaining budget to DFA caches. Internal compilation with a non-positive budget
-  uses upstream's 1 MiB default DFA allowance.
+  remaining budget to DFA caches. List heads are charged under upstream's rule,
+  only for a program of at most 512 instructions. The 2-byte-per-instruction
+  list-head array a larger program keeps is not charged. Internal compilation
+  with a non-positive budget uses upstream's 1 MiB default DFA allowance.
 - A forward program divides its DFA allowance between first-match and
   longest-match caches. A reverse longest-match DFA and a set's many-match DFA use
   their program's complete allowance.
@@ -814,9 +819,10 @@ Full-Slice boolean `find`, `lookingAt`, and `matches` calls may use
 compile-time plans for exact literal, nullable-start, contains, equality,
 prefix, and suffix expressions. `Re2.find` caches its strategy in a primitive
 field to avoid a dependent metadata load in tiny direct calls. The direct
-strategy uses one byte. The shared single-byte matcher cache adds one reference,
-bringing the `Re2` layout to 96 bytes with compressed references. A scan plan
-dispatches on a second strategy byte that fits in the same 96-byte layout.
+strategy uses one byte. The shared single-byte matcher cache and the
+single-class counter add one reference each, bringing the `Re2` layout to 104
+bytes with compressed references. A scan plan dispatches on a second strategy
+byte that fits in the same 104-byte layout.
 When a pattern also has a scan plan, full-Slice `find` keeps the literal
 contains, prefix, equality, and final-line equality kernels, which answer
 without reading past the literal; other boolean strategies yield to the plan.
@@ -833,16 +839,27 @@ other unproven forms retain the ordinary path. The single-byte table is
 initialized lazily; subsequent direct boolean calls allocate no matching
 storage.
 
+When the general engine would otherwise answer, full-Slice boolean `find` and
+count in RE2, Java, and Rust use the literal-alternation and fixed-width span
+matchers Trino uses. Trino's subtypes call these matchers directly because
+routing through the compiled pattern's dispatch measured about 9% more per
+call on Graviton. The literal-alternation matcher restarts its trie at every
+input byte, so it takes only alternatives of at most 64 bytes; a longer
+literal keeps the general engine, whose DFA scans each byte once. The longest
+literal among the measured rows is 35 bytes, in rebar's Russian Sherlock names.
+
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
 Empty-pattern advancement is unchanged. The new core single-byte boolean/count
 route applies only to inputs of at most 64 bytes; larger inputs retain the DFA
-and its ordinary failure fallback. Trino's existing byte count and explicit
-matcher routes share the same table without changing their input-size policy.
-Capture-retaining iteration remains generic.
-The table's retained size is reserved before a DFA can snapshot its memory
-budget. If it does not fit, the pattern keeps its generic execution route.
-Trino delegates to this cache instead of retaining a second table.
+and its ordinary failure fallback. Full-Slice boolean `find` of a capture-free
+one-byte member run (`x+`) tests bytes with the single-byte table under the same
+64-byte limit, and `find` of a compact class run stops at the first run reaching
+its minimum. Trino's existing byte count and explicit matcher routes share the
+same table without changing their input-size policy. Capture-retaining iteration
+remains generic. The table's retained size is reserved before a DFA can snapshot
+its memory budget. If it does not fit, the pattern keeps its generic execution
+route. Trino delegates to this cache instead of retaining a second table.
 
 Targeted Java 25 measurements on C9g, C8g, and C8i retain this bounded sharing.
 Unconditional scalar literal and byte-table counting were rejected because
@@ -857,8 +874,9 @@ Instruction-level attribution has not been established.
 
 The focused C8i native whitespace-contains control changes from 27.49 to
 36.29 ns, +8.80 ns or 32%, with effectively zero allocation. Safe mode adds
-0.44 ns, and neither Graviton CPU regresses. This pattern still selects the
-general DFA route and bypasses the new byte scanner. Dispatch code size and
+0.44 ns, and neither Graviton CPU regresses. At that time this pattern selected
+the general DFA route and bypassed the new byte scanner; a one-byte member run
+now takes the byte scanner on inputs of at most 64 bytes. Dispatch code size and
 compiled layout change, making JIT/inlining sensitivity plausible without
 establishing a specific instruction-level cause. Generic iteration stays
 within one percent on all three CPUs, and key/value contains adds at most
@@ -1081,13 +1099,18 @@ independent loads and parallel masks, which fits HotSpot code generation better
 on the supported Intel and Graviton hosts. Randomized equivalence tests compare
 the accelerated result with a scalar folded-prefix search.
 
-## Non-ASCII Literal Vector Scan
+## Literal Prefix Vector Scan
 
-Case-sensitive multi-byte prefixes whose first byte is non-ASCII use fused
-first-byte and last-byte candidate masks. Searches shorter than 1 KiB use SWAR.
-Longer searches use the platform's preferred Vector API species when the
-application resolves `jdk.incubator.vector`; otherwise they retain the SWAR
-route. ASCII and single-byte prefixes retain repeated-byte scanning.
+Case-sensitive multi-byte prefixes that probe their first byte use fused
+first-byte and last-byte candidate masks for searches of at least 1 KiB, in the
+platform's preferred Vector API species when the application resolves
+`jdk.incubator.vector`. A candidate needs both bytes at their offsets, so a
+common first byte no longer restarts the scan at every occurrence: over English
+prose, `aqj` stopped at each of 35,301 `a` bytes in rebar's sherlock text and
+now stops at 12 candidates, each an `a` with a `j` two bytes later. Shorter
+searches, and longer ones without the Vector API, keep repeated first-byte
+scanning for an ASCII first byte and use fused SWAR masks for a non-ASCII one.
+Single-byte prefixes and probes moved by byte frequencies keep their own scans.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
@@ -1107,24 +1130,29 @@ sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,
-and Rust), scan for one probe byte. Every distribution follows one rule: the
-probe is the rarest byte after the first, earliest on ties, used only when its
-estimated probability is less than a quarter of the first byte's; otherwise the
-probe remains offset 0. The factor keeps the first byte when the estimate is
-close, because an estimate is not the searched text. Each probe hit is shifted
-back to its candidate start and confirmed with the complete literal. The RE2
-prefix scan checks the farther literal end before the full comparison. The Trino
-scan returns the same first whole-literal occurrence as the first-byte scan, so
-candidate attempts, failed work, and the work budget are unchanged. Density
-hand-off never applies to literal-led plans.
+and Rust), scan for one probe byte. A prefix whose probe stays at its first byte
+instead takes the [first-and-last pair scan](#literal-prefix-vector-scan) on
+inputs of at least 1 KiB when the Vector API is available. Every distribution
+follows one rule: the probe is the rarest byte after the first, earliest on
+ties, used only when its estimated probability is less than a quarter of the
+first byte's; otherwise the probe remains offset 0. The factor keeps the first
+byte when the estimate is close, because an estimate is not the searched text.
+Each probe hit is shifted back to its candidate start and confirmed with the
+complete literal. The RE2 prefix scan checks the farther literal end before the
+full comparison. The Trino scan returns the same first whole-literal occurrence
+as the first-byte scan, so candidate attempts, failed work, and the work budget
+are unchanged. Density hand-off never applies to literal-led plans.
 
 Probing is opt-in because a distribution that does not match the searched data
 moves probes onto bytes that are common there. A mismatched distribution can
 make literal scans several times slower per byte than the default, because the
 probe byte occurs more often than the first byte; it never changes what matches,
-and the cost stays linear in the input. On r9g, probing `/` for `https://` and
-`http://` ran 6.7-8.5x slower than the first-byte scan over access-log text,
-which carries about twelve slashes and one `h` per line.
+and the cost stays linear in the input. On inputs of at least 1 KiB with the
+Vector API, a moved probe also gives up the pair scan, so a chosen distribution
+can be slower than the default there even when it matches the data. On r9g,
+probing `/` for `https://` and `http://` ran 6.7-8.5x slower than the first-byte
+scan over access-log text, which carries about twelve slashes and one `h` per
+line.
 
 The presets were scored by modeled candidate counts, not timings, over 33
 literals, against the probe each scored corpus's own distribution chooses, on
@@ -1205,19 +1233,45 @@ class scans decoded input once instead of running a complete matcher for every
 result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
-An eligible Unicode class lazily builds an exact Unicode membership bitset of
-136 KiB; a Latin-1 or Rust byte-mode class uses 32 bytes. Construction is
-single-writer and the table is retained by the compiled pattern. This fixed
-bound is independent of `maxMemory`, which remains the upstream-compatible
-program and DFA planning budget, and it does not scale with the expression or
-configured budget. Unsupported shapes continue through the ordinary DFA or
-matcher path. A Unicode class reads malformed UTF-8 as the ordinary engine's
-byte ranges for that class do, under the rule in
-[RE2 Scan Plans](#re2-scan-plans). A class of every non-ASCII character reads
-leniently. Any other class accepts only the encodings of its members, including
-any encoded surrogates it holds. Any other invalid byte matches nothing.
-A valid encoded U+FFFD remains an ordinary code point; a byte class reads bytes
-undecoded, so it counts malformed bytes like any others.
+A Unicode class's exact membership bitset ends at its last member, up to 136 KiB
+for a class that reaches U+10FFFF; an ASCII-only class in any language, or a
+Latin-1 or Rust byte-mode class, uses 32 bytes. The general counter is built
+lazily by a single writer and retained by the compiled pattern. Its size is
+independent of `maxMemory`, which remains the upstream-compatible program and
+DFA planning budget, and it does not scale with the expression or configured
+budget. Unsupported shapes continue through the ordinary DFA or matcher path. A
+Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
+that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
+every non-ASCII character reads leniently. Any other class accepts only the
+encodings of its members, including any encoded surrogates it holds. Any other
+invalid byte matches nothing. A valid encoded U+FFFD remains an ordinary code
+point; a byte class reads bytes undecoded, so it counts malformed bytes like any
+others. An ASCII-only class also reads bytes undecoded, since every byte of a
+non-ASCII character, malformed or not, is at least 0x80 and matches none of its
+members.
+
+Two counters are instead built at compile time and charged against the pattern's
+memory budget. The compact counter serves a large Unicode class repeated many
+times, or repeated without a fixed count; it is charged against the forward
+budget, and a budget too small for it fails compilation. Compact count and
+boolean find can use it. The single-class counter serves a pattern that is one
+large Unicode class, such as `\pL` or `\p{Greek}`; it is charged against the DFA
+budget before any DFA can snapshot it, and a budget too small for it keeps the
+DFA. Both counters find group-zero matches for a matcher, which would otherwise
+restart the DFA at every match; single-class count and boolean find keep the
+DFA. Planes 4 through 13 hold no characters, so only a class with members at or
+past U+40000, such as a negated class, `\p{Mn}`, or Unicode `\w`, needs a bitset
+past them; such a single class keeps the DFA rather than retain up to 136 KiB. A
+counter's span search skips bytes that cannot begin a member before decoding,
+with one table load per byte or, for a sparse class, a vector scan after a short
+scalar prefix.
+
+The single-class counter is built eagerly by design, even for a pattern used
+only for count or boolean find, such as Trino `regexp_like`. Setup work is never
+deferred to the first match: Trino pays compile cost up front so the match path
+stays lean. Each such pattern retains about 33 KB for `\pL`, and about 16 KB
+each for `\p{Lu}` and `\p{Greek}`. A possible follow-up is one table shared per
+class.
 
 `Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter
 and the existing DFA counting path. Unsupported shapes use a fresh zero-capture
@@ -1256,6 +1310,15 @@ Upstream caps this bitmap at 256 Kibit (32 KiB). The Java port deliberately uses
 more temporary memory because it targets server workloads where a bounded
 256 KiB workspace is small compared with input pages and can replace multiple
 boundary and capture passes.
+
+Upstream gives list heads, and so BitState, only to programs of at most 512
+instructions. Regulator gives list heads to every program with at most 32,767
+lists, so BitState also runs on a larger program whenever the visited bitmap
+bound fits the span. A large program, such as a Unicode letter class with a
+dozen captures, otherwise extracted every short match's groups with the NFA,
+where the Rust crate runs its bounded backtracker. The bitmap grows with the
+list count, not the instruction count, so its bound alone limits the span, as
+the crate bounds its backtracker.
 
 ## Matcher-Owned Capture Workspaces
 
@@ -1314,11 +1377,12 @@ variable-length matches such as the Date Rebar workload.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
-and an available start-byte accelerator. The route has a linear reset-scoped
-work budget and a 128-transition limit per candidate. Exhausting either limit,
-encountering an unsupported match shape, or failing DFA cache mutation falls
-back to the existing forward-plus-reverse matcher path for the rest of that
-matcher reset. The cursor is re-enabled by the next reset.
+an available start-byte accelerator, and no class counter that finds the
+matches. The route has a linear reset-scoped work budget and a 128-transition
+limit per candidate. Exhausting either limit, encountering an unsupported match
+shape, or failing DFA cache mutation falls back to the existing
+forward-plus-reverse matcher path for the rest of that matcher reset. The cursor
+is re-enabled by the next reset.
 
 The implementation uses the existing DFA reader and exclusive-cache mutation
 protocol. Cached object transitions still require recovering the authoritative
@@ -1341,12 +1405,12 @@ from that boundary; variable-length expressions retain the existing reverse DFA
 boundary recovery.
 
 Eligibility is limited to first-match programs without a required prefix,
-anchors, or text-dependent assertions. Empty matches are still handled by the
-existing empty-at-start check before the cursor runs. DFA allocation failure or
-cache-search failure falls back to the ordinary matcher path, and the cursor
-uses the same reader and exclusive-cache mutation protocol as other DFA
-searches. It adds no public API and does not change capturing or longest-match
-execution.
+anchors, text-dependent assertions, or a class counter that finds the matches.
+Empty matches are still handled by the existing empty-at-start check before the
+cursor runs. DFA allocation failure or cache-search failure falls back to the
+ordinary matcher path, and the cursor uses the same reader and exclusive-cache
+mutation protocol as other DFA searches. It adds no public API and does not
+change capturing or longest-match execution.
 
 ## Extended OnePass Captures
 
@@ -1445,11 +1509,11 @@ shapes may retain their pre-existing direct complete-match plan.
 Count, group-zero extraction, position, split, and replacement without capture
 references use the direct boundary route when eligible. The eligibility value
 shares the existing boolean-strategy byte. Ordinary boolean `find` retains its
-direct strategy load; the separate single-byte matcher cache accounts for the
-current 96-byte `Re2` layout. The two forward programs and the lowered
-program's DFA share the original forward memory budget. No warm DFA search loop
-contains a frontend-specific branch; the Trino check runs only while an
-uncached transition is constructed.
+direct strategy load; the separate single-byte matcher cache and single-class
+counter account for the current 104-byte `Re2` layout. The two forward programs
+and the lowered program's DFA share the original forward memory budget. No warm
+DFA search loop contains a frontend-specific branch; the Trino check runs only
+while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call
@@ -1929,15 +1993,18 @@ measurements specific to each language.
 - Rust patterns select the same plans, with the same routing and memory charge.
   The Rust frontend compiles to the same byte ranges as RE2, so a Rust plan
   reads input by the RE2 rule and reports what the ordinary engine reports on
-  every input, which on valid UTF-8 is the pinned crate's result. Without
-  multi-line mode Rust's `$` is the strict end, and Rust's dot and `(?i)` match
-  as RE2's do, so those reach a plan unchanged. Byte mode compiles as Latin-1
-  and builds no plan, as RE2's Latin-1 patterns do. The frontend declines it
-  explicitly, because only byte constructs carry the Latin-1 node flag that the
-  analysis rejects. Multiline anchors, CRLF ones included, word boundaries,
-  including Rust's start, end, and half word boundaries, and reluctant runs keep
-  the ordinary engine. Unicode Perl classes and folds with a non-ASCII member,
-  such as `\w` and `(?i)k`, reach a plan as sets of some non-ASCII characters.
+  every input, which on valid UTF-8 is the pinned crate's result, as it is on
+  any input in byte mode. Without multi-line mode Rust's `$` is the strict end,
+  and Rust's dot and `(?i)` match as RE2's do, so those reach a plan unchanged.
+  Byte mode keeps its plans, unlike RE2's Latin-1 patterns: a plan never matches
+  empty, so byte mode's one-byte advance past an empty match never applies, and
+  the analysis rejects every byte construct that can match a byte above 0x7F,
+  byte classes and literals by their Latin-1 node flag and the any-byte dot by
+  its kind, so a plan reads only constructs that byte mode reads as UTF-8 does.
+  Multiline anchors, CRLF ones included, word boundaries, including Rust's
+  start, end, and half word boundaries, and reluctant runs keep the ordinary
+  engine. Unicode Perl classes and folds with a non-ASCII member, such as `\w`
+  and `(?i)k`, reach a plan as sets of some non-ASCII characters.
 - A Rust range or matcher region keeps the whole input as assertion context, as
   the crate's `Input::range` does, while a matcher's start-anchored plan reads
   its region as the whole input. A Rust matcher therefore runs that plan
@@ -2171,8 +2238,8 @@ plans; the last bullets record the rules and measurements specific to each.
 - `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same executor
   classes under the same rules. A Rust plan is an RE2 plan, so the emitter,
   eligibility, and routes are RE2's, and `RustRegexp` holds the generated `Re2`
-  subclass. Byte-mode patterns build no plan, so the option leaves them
-  unchanged. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
+  subclass. Byte-mode patterns build plans and generated classes under the
+  same rules. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
   with `generateBytecode=true`, on the `URL`, `ANCHORED_HOST`,
   `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
   `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED` workloads, take
