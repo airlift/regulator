@@ -1395,13 +1395,15 @@ finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
 A Unicode class's exact membership bitset ends at its last member, up to 136 KiB
 for a class that reaches U+10FFFF; an ASCII-only class in any language, or a
-Latin-1 or Rust byte-mode class, uses 32 bytes. The general counter is built
-lazily by a single writer and retained by the compiled pattern; a class repeat
-instead reuses its matcher counter, described below, when one was retained. The
-lazily built counter's size is independent of `maxMemory`, which remains the
-upstream-compatible program and DFA planning budget, and it does not scale with
-the expression or configured budget. Unsupported shapes continue through the
-ordinary DFA or matcher path. A
+Latin-1 or Rust byte-mode class, uses 32 bytes. A class of every non-ASCII
+character, such as a negated ASCII class or a dot that matches newline, keeps
+16 bytes for its ASCII members and holds everything past them. The general
+counter is built lazily by a single writer and retained by the compiled
+pattern; a class repeat instead reuses its matcher counter, described below,
+when one was retained. The lazily built counter's size is independent of
+`maxMemory`, which remains the upstream-compatible program and DFA planning
+budget, and it does not scale with the expression or configured budget.
+Unsupported shapes continue through the ordinary DFA or matcher path. A
 Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
 that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
 every non-ASCII character reads leniently. Any other class accepts only the
@@ -1429,11 +1431,17 @@ the leftmost-first matches, and a repeat compiled for longest match keeps the
 DFA. Count keeps its counting algorithm and reuses the matcher counter when one
 is retained for a class repeat; boolean find keeps its separate route. Planes 4
 through 13 hold no characters, so only a Unicode class with members at or past
-U+40000, such as a negated class, `\p{Mn}`, or Unicode `\w`, needs a bitset
-past them; such a class keeps the DFA on the matcher route rather than retain
-up to 136 KiB. A counter's span search skips bytes that cannot begin a member
-before decoding, with one table load per byte or, for a sparse class, a vector
-scan after a short scalar prefix.
+U+40000, such as `\PL`, `\p{Mn}`, or Unicode `\w`, needs a bitset past them;
+such a class keeps the DFA on the matcher route rather than retain up to
+136 KiB, unless it holds every non-ASCII character, as a negated ASCII class
+does. A counter's span search skips bytes that cannot begin a member before
+decoding, with one table load per byte or, for a sparse class, a vector scan
+after a short scalar prefix. In an unbounded repeat of a UTF-8 class of every
+character, such as `(?s:.)+`, only a byte that begins no character under the
+lenient read ends a run, so once the run reaches the minimum the search skips
+to that byte without decoding. A dot that matches newline counts as a class of
+every character, so count and Trino's class-span functions also take its
+repeats.
 
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred
