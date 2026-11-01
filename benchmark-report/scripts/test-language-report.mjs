@@ -8,7 +8,7 @@ import { loadReportModule } from "./load-report-module.mjs";
 import { compactReport } from "./page-data.mjs";
 
 const { report: exports, context } = await loadReportModule();
-const { sorted, duration, comparisonText, tone, comparisonIssue, downloadData, displayResult, outcomeLabel, lifecycleRows, workloadSection, workloadCommentary, LanguageReport, RowEvidence } = exports;
+const { sorted, duration, comparisonText, comparisonIssue, downloadData, displayResult, outcomeLabel, lifecycleRows, workloadSection, workloadCommentary, LanguageReport, RowEvidence } = exports;
 const detailsHtml = (row, reused, extra = {}) => renderToStaticMarkup(React.createElement(RowEvidence, {
   row: { ...row, measurementWarnings: row.result.warnings }, reused, comparator: 'native RE2', ...extra,
 }));
@@ -26,14 +26,6 @@ assert.equal(comparisonText({ state: "compared", ratio: .98 }), "2.0% faster");
 assert.equal(comparisonText({ state: "compared", ratio: 1.07 }), "7.0% slower");
 assert.equal(comparisonText({ state: "compared", ratio: 1.8, deltaNs: 1.5 }), "1.80× slower");
 assert.equal(comparisonText({ state: "did-not-finish" }), "did not finish");
-for (const [ratio, expected] of [[.5, 'win'], [.98, 'win'], [.99, 'tie'], [1, 'tie'], [1.01, 'tie'], [1.02, 'loss'], [2, 'loss']]) {
-  for (const deltaNs of [-100, -1, 0, 1, 100]) {
-    assert.equal(tone({ state: 'compared', ratio, deltaNs, warnings: [] }), expected);
-  }
-}
-assert.equal(tone({ state: 'compared', ratio: 2, warnings: ['timing variable'] }), 'na');
-assert.equal(tone({ state: 'not-compatible' }), 'na');
-assert.equal(tone({ state: 'did-not-finish' }), 'timeout');
 
 const result = { state: "compared", candidateNs: 100, comparatorNs: 20, ratio: 5,
   minimumRatio: 4.9, maximumRatio: 5.1, deltaNs: 80, deltaNsPerByte: null, hosts: [], warnings: [] };
@@ -51,6 +43,74 @@ const data = { schemaVersion: 2, sources: { currentLabel: "Test capture", curren
   platforms: { c9g: "C9g", c8g: "C8g", c8i: "Intel" }, memoryModes: { native: "Native", safe: "Pure Java" },
   languages: { re2: { label: "RE2", comparator: "native RE2" }, java: { label: "Java regex", comparator: "JDK Pattern" }, trino: { label: "Trino regex", comparator: "Joni" }, like: { label: "LIKE", comparator: "Trino SQL LIKE" } },
   rows: [row, reused, { ...row, id: "compile", operation: "compile" }], methodology: ["Test method"], provenance: { candidate: "test" } };
+
+// Each comparison is judged by its ratio and by Regulator's absolute gap: per input byte in the
+// text-processing, literal-probe and stress sections, otherwise per call, as also when a row has no
+// per-byte delta. Each comparison where Regulator is slower also gives its gap in instructions,
+// labeled under the tie gap and under the clear gap.
+const { significance, INSTRUCTIONS_PER_NS, lossGap, rowSignificance, significanceTier, variantGain } = exports;
+const { tieGap, clearGap, tieRatio, clearRatio, gapLabels } = significance;
+const below = value => value * .999;
+// Timings and host range follow from the ratio and the gap, as import derives them.
+const loss = (changes, deltaNs, deltaNsPerByte, ratio = 1.5) => ({ ...reused, ...changes, result: { ...result, candidateNs: deltaNs * ratio / (ratio - 1),
+  comparatorNs: deltaNs / (ratio - 1), ratio, minimumRatio: ratio, maximumRatio: ratio, deltaNs, deltaNsPerByte } });
+const bulkLoss = (ns, ratio) => loss({ population: 'bulk-text', operation: 'execute', inputBytes: 1000 }, 1000 * ns, ns, ratio);
+const everydayLoss = (ns, ratio) => loss({}, ns, ns / reused.inputBytes, ratio);
+for (const [basis, lossOf] of [['byte', bulkLoss], ['call', everydayLoss]]) {
+  for (const [ns, label] of [[below(tieGap[basis]), gapLabels[basis][0]], [tieGap[basis], gapLabels[basis][1]],
+    [below(clearGap[basis]), gapLabels[basis][1]], [clearGap[basis], null]]) {
+    assert.deepEqual({ ...lossGap(lossOf(ns)) }, { basis, ns, instructions: ns * INSTRUCTIONS_PER_NS, label });
+  }
+}
+for (const [changes, basis] of [
+  [{ population: 'bulk-text' }, 'byte'], [{ population: 'literal-probe' }, 'byte'],
+  [{ population: 'diagnostics-and-stress' }, 'byte'], [{ population: 'bulk-text', caseId: 'unicode/codepoints/any-one' }, 'byte'],
+  [{ population: 'ordinary-scalar' }, 'call'], [{ population: 'like', language: 'like' }, 'call'],
+  [{ population: 'trino-operations', language: 'trino' }, 'call'], [{ population: 'specialized-patterns' }, 'call'],
+]) {
+  assert.equal(lossGap(loss({ operation: 'execute', ...changes }, 10, 10 / reused.inputBytes)).basis, basis, JSON.stringify(changes));
+}
+assert.equal(lossGap(loss({ population: 'bulk-text', operation: 'execute', inputBytes: null }, 10, null)).basis, 'call');
+// Wins have no gap, and single-use gaps would include compilation.
+assert.equal(lossGap(reused), null);
+assert.equal(lossGap(loss({ operation: 'singleUseContains' }, 10, null)), null);
+// Any one tie condition makes a tie: a small gap, a ratio near 1, a host range or a ratio interval
+// including 1. Clear needs both a large gap and a large ratio; every other win or loss is modest.
+const tier = (lossOf, ratio, ns, changes = {}) => { const entry = lossOf(ns, ratio); return rowSignificance({ ...entry, result: { ...entry.result, ...changes } }); };
+const interval = { method: 'hierarchical-bootstrap-v1', level: .95, ratioInterval: [1, 2.5], candidateIntervalNs: [99, 101],
+  comparatorIntervalNs: [49, 51], forkMeanRangeNs: { candidate: null, comparator: null } };
+for (const [actual, expected] of [
+  [tier(bulkLoss, 2, 1), 'clear-loss'], [tier(bulkLoss, .5, -1), 'clear-win'],
+  [tier(bulkLoss, 2, below(tieGap.byte)), 'tie'], [tier(bulkLoss, 2, tieGap.byte), 'modest-loss'],
+  [tier(everydayLoss, 2, below(tieGap.call)), 'tie'], [tier(everydayLoss, .5, -below(tieGap.call)), 'tie'],
+  [tier(bulkLoss, tieRatio[0], -1), 'tie'], [tier(bulkLoss, tieRatio[1], 1), 'tie'], [tier(bulkLoss, tieRatio[1] / below(1), 1), 'modest-loss'],
+  [tier(bulkLoss, 2, 1, { minimumRatio: 1, maximumRatio: 2.5 }), 'tie'], [tier(bulkLoss, .5, -1, { minimumRatio: .4, maximumRatio: 1 }), 'tie'],
+  [tier(bulkLoss, 2, 1, { uncertainty: interval }), 'tie'], [tier(bulkLoss, .5, -1, { uncertainty: { ...interval, ratioInterval: [.4, 1] } }), 'tie'],
+  [tier(bulkLoss, clearRatio[0], -clearGap.byte), 'clear-win'], [tier(bulkLoss, clearRatio[1], clearGap.byte), 'clear-loss'],
+  [tier(everydayLoss, clearRatio[1], clearGap.call), 'clear-loss'],
+  [tier(bulkLoss, below(clearRatio[1]), 1), 'modest-loss'], [tier(bulkLoss, 2, below(clearGap.byte)), 'modest-loss'],
+  [tier(everydayLoss, .5, -below(clearGap.call)), 'modest-win'], [tier(bulkLoss, .85, -1), 'modest-win'], [tier(everydayLoss, .85, -clearGap.call), 'modest-win'],
+  // Timing warnings without an interval get no tier; with one, the interval decides.
+  [tier(bulkLoss, 2, 1, { warnings: ['timing variable'] }), 'na'],
+  [tier(bulkLoss, 2, 1, { warnings: ['timing variable'], uncertainty: { ...interval, ratioInterval: [1.5, 2.5] } }), 'clear-loss'],
+  [significanceTier({ state: 'not-compatible' }, null), 'na'], [significanceTier({ state: 'did-not-finish' }, null), 'timeout'],
+  // Gains between Regulator variants have no gap or host range; the ratio and its interval decide.
+  [significanceTier(variantGain({ ...result, ratio: .5 }, { ...result, ratio: 1 }), null), 'clear-win'],
+]) assert.equal(actual, expected);
+// A comparison where Regulator is slower shows its gap; a tie names the conditions that held.
+const tiedGap = tieGap.byte / 2;
+const tiedRow = bulkLoss(tiedGap);
+// Gaps round toward zero, so one just under the tie gap never reads as reaching it.
+const nearTie = { ...bulkLoss(.0997), id: 'near-tie', caseId: 'near-tie', name: 'near-tie', model: 'count', workContract: 'public-find-count-v2' };
+const gapHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [{ ...tiedRow, id: 'bulk-loss',
+  model: 'count', workContract: 'public-find-count-v2', result: { ...tiedRow.result, minimumRatio: .997, maximumRatio: 1.6 } }, nearTie] } }));
+assert.match(gapHtml, />Gap \(instructions\)<span/);
+assert.match(gapHtml, /class="comparison-row tie"/);
+assert.ok(gapHtml.includes(`${tiedGap * INSTRUCTIONS_PER_NS} instr/B<small class="gap-label">${gapLabels.byte[0]}</small>`));
+assert.ok(gapHtml.includes(`title="Tie: host ratio range 0.997–1.600× includes 1.0; gap ${tiedGap} ns/byte is under ${tieGap.byte} ns/byte. Regulator`));
+assert.ok(gapHtml.includes(`0.99 instr/B<small class="gap-label">${gapLabels.byte[0]}</small>`));
+assert.ok(gapHtml.includes(`gap 0.099 ns/byte is under ${tieGap.byte} ns/byte.`));
+assert.ok(gapHtml.includes(`Gap +${tiedGap} ns/byte ≈ ${tiedGap * INSTRUCTIONS_PER_NS} instructions per byte at ${INSTRUCTIONS_PER_NS} instructions/ns.`));
 
 const releaseData = { ...data, platforms: { r9g: "R9g", r8g: "R8g", r8i: "R8i" },
   rows: data.rows.map(row => ({ ...row, platform: "r9g" })) };
@@ -190,7 +250,7 @@ const groupedData = { ...data, rows: [...data.rows, ...groupingRows,
 const groupedHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: groupedData }));
 const headings = [...groupedHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]);
 assert.deepEqual(headings, ['Everyday regex operations', 'Regex pattern lifecycle', 'Trino regex operations',
-  'Text processing workloads', 'Adversarial and stress workloads']);
+  'Text processing workloads', 'Adversarial and stress workloads', 'Measurement notes']);
 const textSection = groupedHtml.split('<h2>Text processing workloads</h2>')[1].split('</section>')[0];
 const stressSection = groupedHtml.split('<h2>Adversarial and stress workloads</h2>')[1].split('</section>')[0];
 for (const [caseId, , expected] of groupingCases) {
@@ -210,7 +270,7 @@ assert.ok(groupedDownload.rows.every((entry, index) => entry.result === groupedD
 const probe = (caseId, family, candidateNs, ratio) => ({ ...reused, id: `language-bulk/${caseId}/execute`, caseId, name: caseId,
   operation: 'execute', model: 'count', population: 'literal-probe', family, inputBytes: 1000, workContract: 'public-find-count-v2',
   result: { ...result, candidateNs, comparatorNs: candidateNs / ratio, ratio, minimumRatio: ratio, maximumRatio: ratio,
-    deltaNs: candidateNs - candidateNs / ratio, deltaNsPerByte: null } });
+    deltaNs: candidateNs - candidateNs / ratio, deltaNsPerByte: (candidateNs - candidateNs / ratio) / 1000 } });
 const probeRows = [probe('literal-probe/nginx-mozilla', 'uniform', 300, 1.5), probe('literal-probe/nginx-mozilla/tuned', 'sampled-log-lines', 100, .5)];
 const [probePair] = exports.literalProbeRows(probeRows);
 assert.equal(probePair.distribution, 'Learned from sample logs');
@@ -223,7 +283,7 @@ const probeHeadings = [...probeHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => m
 assert.equal(probeHeadings.indexOf('Literal probe distributions'), probeHeadings.indexOf('Text processing workloads') + 1);
 const probeSection = probeHtml.split('<h2>Literal probe distributions</h2>')[1].split('</section>')[0];
 assert.match(probeSection, /Mozilla\/5.0 · nginx access log/);
-assert.match(probeSection, /1.50× slower.*2.00× faster.*3.00× faster/s);
+assert.match(probeSection, new RegExp(`1.50× slower.*${100 / 1000 * INSTRUCTIONS_PER_NS} instr/B<small class="gap-label">${gapLabels.byte[1]}</small>.*2.00× faster</span></td><td class="measurement gap"></td>.*3.00× faster`, 's'));
 assert.doesNotMatch(probeHtml.split('<h2>Text processing workloads</h2>')[1].split('</section>')[0], /literal-probe/);
 assert.deepEqual(exports.summaryRatios({ ...data, rows: [...summaryRows, ...probeRows] }), exports.summaryRatios({ ...data, rows: summaryRows }));
 assert.equal(exports.displayedMeasurements(probeRows).length, 2);
@@ -234,7 +294,7 @@ const uncertainProbe = (row, ratioInterval) => ({ ...row, result: { ...row.resul
 const uncertainProbeRows = [uncertainProbe(probe('literal-probe/nginx-mozilla', 'uniform', 100, 1), [.5, 1.5]),
   uncertainProbe(probe('literal-probe/nginx-mozilla/tuned', 'sampled-log-lines', 50, .5), [.2, 1.2])];
 const uncertainProbeHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...groupedData, rows: [...groupedData.rows, ...uncertainProbeRows] } }));
-assert.match(uncertainProbeHtml, /divided by default ratio: 0.5000×. Conservative interval 0.1333 to 2.4000×.">no clear difference</);
+assert.match(uncertainProbeHtml, /divided by default ratio: 0.5000×. Conservative interval 0.1333 to 2.4000×."><span class="tier-symbol" role="img" aria-label="Tie">≈<\/span>no clear difference</);
 
 const partial = { state: 'did-not-finish', reason: 'comparator: execution exceeded 30 s on 2 attempts', warnings: [],
   hosts: [80, 100, 120].map((ns, index) => ({ instanceId: `host-${index}`, replica: index + 1,
@@ -267,11 +327,18 @@ assert.match(likeHtml, /LIKE pattern lifecycle/);
 assert.doesNotMatch(likeHtml, /<h2>Pattern construction/);
 assert.doesNotMatch(likeHtml, /reused match|<small>single use/);
 const likeColorHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: likeRows.map(entry => ({
-  ...entry, result: { ...entry.result, ratio: 1.8, deltaNs: 1.5, warnings: [] },
+  ...entry, result: { ...entry.result, ratio: 1.8, minimumRatio: 1.8, maximumRatio: 1.8, deltaNs: 15, warnings: [] },
 })) } }));
-assert.match(likeColorHtml, /class="scan-result loss"[^>]*>1.80× slower/);
-assert.match(likeColorHtml, /class="measurement delta loss">\+1.50 ns/);
-assert.doesNotMatch(likeColorHtml, /class="scan-result tie"|class="measurement delta tie"/);
+assert.match(likeColorHtml, /class="scan-result clear-loss"[^>]*><span class="tier-symbol"[^>]*>▼<\/span>1.80× slower/);
+assert.match(likeColorHtml, /class="measurement delta clear-loss">\+15.00 ns/);
+assert.doesNotMatch(likeColorHtml.split('<h2>Measurement notes</h2>')[0], /class="scan-result tie"|class="measurement delta tie"/);
+// Only the multi-use phase gets a gap.
+assert.deepEqual(likeColorHtml.match(/class="measurement gap">[^<]+/g), [`class="measurement gap">${15 * INSTRUCTIONS_PER_NS} instr/call`]);
+// A gap under the tie gap makes both lifecycle deltas ties, whatever the ratio.
+const likeTieHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: likeRows.map(entry => ({
+  ...entry, result: { ...entry.result, ratio: 1.8, minimumRatio: 1.8, maximumRatio: 1.8, deltaNs: 1.5, warnings: [] },
+})) } }));
+assert.equal(likeTieHtml.match(/class="measurement delta tie"/g).length, 2);
 const dfaRows = likeRows.map(entry => ({ ...entry, caseId: 'trino-like/ANY_ASCII', name: 'ANY_ASCII' }));
 const enabled = { ...dfaRows[1], id: 'optimized', caseId: 'trino-like/ANY_ASCII/optimized', population: 'diagnostics-and-stress', comparator: 'Trino DFA', result: { ...result, ratio: 0.125 } };
 const dfaLifecycle = lifecycleRows([...dfaRows, enabled]);
@@ -359,13 +426,14 @@ const specializedPage = (language, rows, pageData = data) => {
 const regularClause = /the regular engine runs the same patterns without one/;
 // A second operation on one workload keeps its own row.
 const replaceSpecialized = specializedVariants('trino', 'url-host', 'replace',
-  [['/regular-engine', 300, 1, [.9, 1.1]], ['', 300, 1, [.9, 1.1]], ['/generated', 300, 1, [.9, 1.1]]]);
+  [['/regular-engine', 300, 1, [.9, 1.1]], ['', 300, 1, [.9, 1.1]], ['/generated', 450, 1.5, [1.4, 1.6]]]);
 const trinoPage = specializedPage('trino', [...data.rows, ...data.rows.map(entry => ({ ...entry, id: `trino-${entry.id}`, language: 'trino' })), ...trinoSpecialized, ...replaceSpecialized]);
 assert.deepEqual(trinoPage.headings, ['Everyday regex operations', 'Specialized engine and compiler', 'Regex pattern lifecycle', 'Measurement notes']);
 assert.deepEqual(trinoPage.columns, ['Pattern / operation', 'Joni', 'Regular engine', 'Specialized engine', 'Compiled',
-  'Specialized vs regular', 'Compiled vs regular', 'Compiled vs Joni']);
+  'Specialized vs regular', 'Compiled vs regular', 'Compiled vs Joni', 'Gap (instructions)']);
 assert.match(trinoPage.section, /url-host<small>extract<\/small>.*200.00 ns.*400.00 ns.*200.00 ns.*50.00 ns.*2.00× faster.*10.00× faster.*5.00× faster/s);
-assert.match(trinoPage.section, /url-host<small>replace<\/small>/);
+// The gap belongs to the variant shown against the comparator.
+assert.match(trinoPage.section, new RegExp(`url-host<small>replace</small>.*1.50× slower.*${(150 * INSTRUCTIONS_PER_NS).toLocaleString('en-US')} instr/call`, 's'));
 assert.equal(trinoPage.section.split('<tbody>')[1].match(/<tr>/g).length, 2);
 assert.match(trinoPage.section, /Compiled ratio divided by regular engine ratio: 0.1000×. Conservative interval 0.0682 to 0.1389×./);
 assert.match(trinoPage.section, regularClause);
@@ -375,8 +443,8 @@ assert.match(trinoPage.section, /50.00 ns<sup><button[^>]*title="Regulator timin
 assert.equal(trinoPage.section.match(/quality-marker/g).length, 2);
 assert.equal(specializedPage('re2', [...data.rows, ...trinoSpecialized]).section, undefined);
 const likePage = specializedPage('like', compactReport({ ...data, rows: [...likeRows, ...likeSpecialized] }, exports).rows);
-assert.deepEqual(likePage.headings, ['Specialized engine and compiler', 'LIKE pattern lifecycle']);
-assert.deepEqual(likePage.columns, ['Pattern', 'Trino SQL LIKE', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs Trino SQL LIKE']);
+assert.deepEqual(likePage.headings, ['Specialized engine and compiler', 'LIKE pattern lifecycle', 'Measurement notes']);
+assert.deepEqual(likePage.columns, ['Pattern', 'Trino SQL LIKE', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs Trino SQL LIKE', 'Gap (instructions)']);
 assert.match(likePage.section, /Compiled ratio divided by specialized engine ratio: 0.5000×. Conservative interval 0.3333 to 0.7500×./);
 assert.doesNotMatch(likePage.section, /reused match/);
 assert.doesNotMatch(likePage.section, regularClause);
@@ -395,7 +463,7 @@ for (const [language, comparator] of [['re2', 'native RE2'], ['java', 'JDK Patte
   const page = specializedPage(language, [...data.rows.map(entry => ({ ...entry, language })),
     ...specializedVariants(language, 'query-parameter-names', 'extractAll', [['/regular-engine', 200, 1, [.9, 1.1]], ['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])], withRust);
   assert.deepEqual(page.columns, ['Pattern / operation', comparator, 'Regular engine', 'Specialized engine', 'Compiled',
-    'Specialized vs regular', 'Compiled vs regular', `Compiled vs ${comparator}`], language);
+    'Specialized vs regular', 'Compiled vs regular', `Compiled vs ${comparator}`, 'Gap (instructions)'], language);
   assert.match(page.section, /query-parameter-names<small>extractAll<\/small>/);
   assert.match(page.section, regularClause);
   const details = extractAllDetails(language, comparator);
@@ -469,7 +537,7 @@ const annotated = downloadData({ ...data, rows: [mismatched] });
 assert.equal(annotated.rows[0].comparisonAssessment.label, 'Different API work');
 assert.equal(annotated.rows[0].result, mismatched.result);
 assert.ok(!('comparisonAssessment' in mismatched));
-assert.doesNotMatch(mismatchedHtml, /5.00× slower|\+80.00 ns|scan-result loss|scan-result win/);
+assert.doesNotMatch(mismatchedHtml, /5.00× slower|\+80.00 ns|scan-result (clear|modest)-(loss|win)/);
 assert.equal(comparisonIssue({ ...mismatched, operation: 'programPossibleMatchRangePrefix' }), null);
 for (const operation of ['dotMatch', 'asciiMatch', 'searchPhoneRe2', 'searchEasy0Dfa', 'searchAltMatchRe2']) {
   assert.equal(comparisonIssue({ ...mismatched, operation }).label, 'Needs remeasurement');
@@ -677,12 +745,9 @@ const meanEstimate = { ...result, estimator: "mean", ratio: .999, candidateNs: 9
     forkMeanRangeNs: { candidate: [97, 103], comparator: [98, 102] },
   } };
 assert.equal(comparisonText(meanEstimate), "no clear difference");
-assert.equal(tone(meanEstimate), "tie");
 const preciseMean = { ...meanEstimate, ratio: .99,
   uncertainty: { ...meanEstimate.uncertainty, ratioInterval: [.985, .995] } };
-assert.equal(tone(preciseMean), "win");
 assert.match(comparisonText(preciseMean), /faster/);
-assert.equal(tone({ ...preciseMean, warnings: ["historical warning"] }), "win");
 const meanRow = { id: "mean-test", caseId: "mean-test", name: "mean-test", operation: "execute",
   model: "count", population: "bulk-text", family: "test", language: "java", platform: "r9g",
   memoryMode: "native", inputBytes: 100, source: "language", result: meanEstimate };
@@ -720,7 +785,7 @@ assert.match(qualityHtml, /native RE2 timing uncertainty: 10.0%/);
 assert.doesNotMatch(qualityHtml, /Regulator timing uncertainty: 5.0%/);
 assert.doesNotMatch(qualityHtml, /ratio-interval/);
 assert.match(qualityHtml, /No clear difference/i);
-assert.match(qualityHtml, /<span class="scan-result tie"[^>]*>no clear difference<sup><button[^>]*>\*<\/button><\/sup><\/span>/);
+assert.match(qualityHtml, /<span class="scan-result tie"[^>]*><span class="tier-symbol" role="img" aria-label="Tie">≈<\/span>no clear difference<sup><button[^>]*>\*<\/button><\/sup><\/span>/);
 assert.match(qualityHtml, /id="quality-high"/);
 // The native-control figures and the measurement follow-up belong to the 1.0 release only.
 const controlsHtml = (base, sources) => renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...base, sources,

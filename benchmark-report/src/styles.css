@@ -11,6 +11,11 @@
   --blue: #dcebf4;
   --blue-ink: #36596c;
   --dark: #1b2a22;
+  /* Modest wins and losses: the same hues, mixed toward the panel. */
+  --green-pale: color-mix(in srgb, var(--green) 45%, var(--panel));
+  --red-pale: color-mix(in srgb, var(--red) 45%, var(--panel));
+  --green-pale-cell: color-mix(in srgb, var(--green) 20%, var(--panel));
+  --red-pale-cell: color-mix(in srgb, var(--red) 20%, var(--panel));
 }
 
 .scan-page.language-page { max-width: 1440px; }
@@ -35,10 +40,13 @@
 .measurement-table .measurement { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; vertical-align: middle; }
 .measurement-table .scan-result { width: 100%; text-align: right; white-space: nowrap; }
 .measurement-table .delta { font-weight: 650; }
-.measurement-table .comparison-row.win .delta, .measurement-table .delta.win { background: #edf6e9; color: var(--green-ink); }
-.measurement-table .comparison-row.loss .delta, .measurement-table .delta.loss { background: #fcedea; color: var(--red-ink); }
-.measurement-table .comparison-row.tie .delta, .measurement-table .delta.tie { background: var(--blue); color: var(--blue-ink); }
+.measurement-table .comparison-row.clear-win .delta, .measurement-table .delta.clear-win { background: #edf6e9; color: var(--green-ink); }
+.measurement-table .comparison-row.clear-loss .delta, .measurement-table .delta.clear-loss { background: #fcedea; color: var(--red-ink); }
+.measurement-table .comparison-row.modest-win .delta, .measurement-table .delta.modest-win { background: var(--green-pale-cell); color: var(--green-ink); }
+.measurement-table .comparison-row.modest-loss .delta, .measurement-table .delta.modest-loss { background: var(--red-pale-cell); color: var(--red-ink); }
+.measurement-table .comparison-row.tie .delta, .measurement-table .delta.tie { color: var(--muted); font-weight: 400; }
 .measurement-table .comparison-row.na { background: #efeee9; color: var(--muted); }
+.measurement-table .gap-label { display: block; width: fit-content; margin: 4px 0 0 auto; padding: 2px 5px; border-radius: 4px; background: var(--blue); color: var(--blue-ink); font-size: 9px; font-weight: 700; }
 .scan-result.timeout { background: #f7edcd; color: #715b14; }
 .outcome-reason { display: block; max-width: 380px; white-space: normal; color: var(--muted); margin-top: 5px; line-height: 1.4; font-size: 10px; }
 .row-evidence { max-width: 550px; }
@@ -232,9 +240,11 @@ code { font-family: var(--font-geist-mono, monospace); }
   text-align: right;
   white-space: nowrap;
 }
-.scan-result.win { background: var(--green); color: var(--green-ink); }
-.scan-result.loss { background: var(--red); color: var(--red-ink); }
-.scan-result.even, .scan-result.tie { background: var(--blue); color: var(--blue-ink); }
+.scan-result.clear-win { background: var(--green); color: var(--green-ink); }
+.scan-result.clear-loss { background: var(--red); color: var(--red-ink); }
+.scan-result.modest-win { background: var(--green-pale); color: var(--green-ink); font-weight: 650; }
+.scan-result.modest-loss { background: var(--red-pale); color: var(--red-ink); font-weight: 650; }
+.scan-result.tie { background: transparent; box-shadow: inset 0 0 0 1px var(--line); color: var(--muted); font-weight: 650; }
 .scan-result.na {
   background: #dfe2e0;
   box-shadow: inset 0 0 0 1px #c9cecb;
@@ -242,6 +252,8 @@ code { font-family: var(--font-geist-mono, monospace); }
   font-weight: 650;
 }
 .scan-result.provisional { outline: 1px dashed currentColor; outline-offset: 2px; }
+.tier-symbol { margin-right: 4px; }
+.significance-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .delta-result {
   width: fit-content;
   min-width: 118px;

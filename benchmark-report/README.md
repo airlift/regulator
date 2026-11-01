@@ -215,6 +215,14 @@ Historical C-family datasets retain their labels.
 It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 
+Each comparison's color and symbol follow the
+[significance tiers](../docs/benchmarks/METHODOLOGY.md#report-significance), and
+each comparison where Regulator is slower shows its gap in instructions. Every
+threshold and gap label lives in the `significance` table at the top of
+`src/language-report.tsx`, beside `INSTRUCTIONS_PER_NS`. The page's measurement
+notes and the rendering tests read their numbers from that table; the
+methodology states them for readers.
+
 The report preserves host ranges and timing-precision warnings. A range is not
 a confidence interval. Single-use and multi-use results remain separate, and
 crossover estimates are suppressed when either phase has unresolved timing
@@ -244,11 +252,12 @@ precision. Baseline import rejects variants with a different host cohort or
 comparator measurement, an unknown variant system, a suite or comparator the
 specialized-pattern catalog does not name, and any unit other than ns/op on
 either the variant or the comparator. Report validation rejects a variant
-without its specialized-engine row. The last column compares the last variant
-with the comparator. Times are warmed steady-state operations without
-compilation; each LIKE time scans the leading rows of a TPC-H column, whose row
-count comes from the TPC-H corpus manifest. Any page with `specialized-patterns`
-rows shows the section; these rows never enter the README summary.
+without its specialized-engine row. The last two columns compare the last
+variant with the comparator and give its gap in instructions. Times are warmed
+steady-state operations without compilation; each LIKE time scans the leading
+rows of a TPC-H column, whose row count comes from the TPC-H corpus manifest.
+Any page with `specialized-patterns` rows shows the section; these rows never
+enter the README summary.
 
 LIKE's default row order starts with prefix, suffix, exact and contains checks,
 then ordered literals and fixed-character gaps, then one-character wildcards.

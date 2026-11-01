@@ -78,6 +78,10 @@ An interval containing 1 means the data do not establish which engine is
 faster. It does not establish equivalence. A well-measured one-percent difference
 can have a clear direction; a large uncertain point estimate does not receive
 an automatic winner label. No universal five-percent tolerance determines a win.
+The report's significance tiers ask a separate question: whether an established
+difference is large enough to matter. They show a ratio from 0.95 to 1.05, or a
+gap under 0.1 ns per byte or 2 ns per call, as a tie even when its direction is
+established.
 
 Three or four hosts provide limited coverage of possible machine and compiler
 states. The intervals describe observed sampling variation, not a guarantee

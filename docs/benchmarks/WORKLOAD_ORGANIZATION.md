@@ -238,17 +238,17 @@ shapes first and dense-false stress last, keeping DFA variants adjacent.
 Compile-only rows remain in the public download rather than a separate table.
 
 Each literal-probe row pairs the default and tuned measurements of one
-workload. It shows both ratios against the comparator and the
-tuned-versus-default ratio, computed by dividing those two comparator-relative
-ratios so that differences between the hosts that measured them cancel. Its
-interval divides the far ends of the two ratio intervals, so a gain that
-neither interval clearly supports reads as no clear difference.
+workload. It shows both ratios against the comparator, each with its gap in
+instructions, and the tuned-versus-default ratio, computed by dividing those two
+comparator-relative ratios so that differences between the hosts that measured
+them cancel. Its interval divides the far ends of the two ratio intervals, so a
+gain that neither interval clearly supports reads as no clear difference.
 
 Each specialized-pattern row pairs the variants of one pattern and operation.
 It shows each variant's time and each later variant's gain over the variant
 first in column order, computed and bounded like a literal-probe gain, then the
-last variant against the comparator. The page's measured variants, not its
-language, decide the variant columns.
+last variant against the comparator and its gap in instructions. The page's
+measured variants, not its language, decide the variant columns.
 
 Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or
