@@ -81,9 +81,10 @@ host creates four IAM resources and deletes three):
 - the **control host role**: run, describe and tag instances, and terminate
   workers and cancel their Spot requests; placement scores, offerings, images,
   service quotas; read and write the campaign buckets and create one for
-  `add-region`; read the network parameter and keep the campaign's Grafana
-  credentials; Session Manager (`AmazonSSMManagedInstanceCore`); pass the
-  worker role. It has no load balancer permission: a policy scoped to the
+  `add-region`; write and read campaign root archives in the archive bucket
+  but never delete them; read the network parameter and keep the campaign's
+  Grafana credentials; Session Manager (`AmazonSSMManagedInstanceCore`); pass
+  the worker role. It has no load balancer permission: a policy scoped to the
   target group would name it in this public repository, so the Mac-side
   commands, under Dain's credentials, register each control host there.
 - an internal **Network Load Balancer** in the router's subnets, since the
@@ -93,6 +94,11 @@ host creates four IAM resources and deletes three):
 - the control host's **security group** in the router's VPC, admitting only
   tcp 443, ssh, from the VPC's CIDR and tcp 3000 from the load balancer's
   own security group, shared by every campaign's control host.
+- the private **archive bucket**,
+  `regulator-benchmark-archive-938463256137-us-west-2`, which keeps each
+  finished campaign's raw root for good. Its only lifecycle rule aborts
+  incomplete multipart uploads, and finish refuses an enabled rule that would
+  expire an archive or move it out of Glacier Instant Retrieval.
 
 Every campaign bucket keeps two trees with their own lifecycle rules, from
 `../aws/bucket-lifecycle.json`. The content-addressed archives every campaign
@@ -440,7 +446,7 @@ The new version takes effect only once its event is logged.
 - `set-share <phase> N|auto` (how hosts move between phases)
 - `set-purchase <platform> spot|spot-then-on-demand|on-demand`
 - `clear-spending-stop`, `stop`, `reopen` (an ended campaign)
-- From the Mac: `control-host replace`, `finish`, `teardown` (below).
+- From the Mac: `control-host replace`, `finish`, `fetch`, `teardown` (below).
 
 A raised or new region vCPU limit is checked against the region's Standard
 quota after its reserve, the check each phase's setup makes, and refused when
@@ -525,10 +531,42 @@ stays as the manifest lists it. A controller's refusal, of an
 ended root or any other a restart would repeat, exits 3, which systemd does
 not restart.
 
-`run-campaign.py finish <campaign>` from the Mac pulls the campaign root over
-ssh on port 443 with rsync, verifies the file list and SHA-256s against the
-controller's manifest, and writes the results directory the reduction and
-archive read today. It terminates nothing.
+Raw benchmark output is rarely read, and a root runs to tens of gigabytes
+(r20's was 70 GB in 830k files), so it lives in S3 and only the summaries come
+to the Mac. `run-campaign.py finish <campaign>` from the Mac first has the
+control host archive its root, over ssh on port 443: the host's
+`run-campaign.py archive-root <campaign>`, which only finish runs, checks the
+root against its manifest before writing a new archive, refusing one that
+differs, and streams `tar` through `zstd` into the private archive bucket
+`regulator-benchmark-archive-938463256137-us-west-2` in Glacier Instant
+Retrieval, so the bulk never leaves the region. The bucket is not a campaign
+bucket, so no campaign bucket's expiry reaches it. The archive's key,
+`campaigns/<campaign>/root-<manifest SHA-256>.tar.zst`, is written once and
+never overwritten, with metadata naming the manifest's SHA-256 and file count;
+S3 takes metadata before the bytes, so the manifest written beside it once the
+archive is complete, `root-<manifest SHA-256>.sha256`, records the archive's
+SHA-256 and size. A finish run again reuses the archive, and a reopened
+campaign that ends again writes a new manifest and so a new archive. Finish
+refuses an archive bucket with an enabled lifecycle rule that would expire
+this archive or move it out of Glacier Instant Retrieval, confirms the
+archive's metadata and storage class from the Mac, and then pulls with rsync
+every file but the raw trees: the JDKs, each candidate's archive, and each
+phase's units, unit results, jobs and language plan bundles. It checks every
+pulled file and every summary the manifest lists against the manifest, and
+records the archive in the local root's `raw-archive.tsv`. A first finish
+writes the manifest before it pulls, so it may run again if it fails; a later
+finish replaces the local manifest and record only once the summaries match
+the manifest the host still holds, so one that fails, as during a reopen,
+keeps the earlier finish's. A campaign whose host tooling predates
+`archive-root` is finished with the tooling it launched with. It terminates
+nothing.
+
+`run-campaign.py fetch <campaign>` restores the raw root from the archive
+beside the summaries, checking the archive's SHA-256, unpacking only
+directories, regular files and hard links inside the root, refusing an archive
+whose manifest differs from the recorded one, and checking the whole root
+against the manifest. `status --results` and reducing a phase again read the
+raw units, so they need it first.
 
 `run-campaign.py teardown <campaign> --confirm` first tags the campaign's
 volume as torn down, then terminates every host of the campaign, again until
@@ -538,7 +576,8 @@ drained and forgotten them, snapshots the volume, and deletes the volume and
 the Grafana parameters; the record and the load balancer stay. The hosts go
 first so the snapshot holds the root as the controller last wrote it. Only
 Dain runs it, and it refuses without `--confirm`. The snapshot is the last copy
-until Dain deletes it. Each step finds what an earlier teardown did by the
+on EBS until Dain deletes it; the archive, if finish ran, is the other copy,
+which teardown leaves alone. Each step finds what an earlier teardown did by the
 campaign's tags, so a teardown that failed partway finishes when run again,
 with no second snapshot. Once the volume carries the tag, `control-host
 replace` refuses, and a replace that checked the volume before the tag looks
@@ -588,7 +627,7 @@ reach Dain's thread. Budget: $25 including the control host.
 
 boto3 and the OpenTelemetry SDK, pinned in
 `tools/re2-benchmark/requirements.txt`, are the tooling's first Python
-dependencies. The Mac needs boto3 for the launch, replace, finish and
+dependencies. The Mac needs boto3 for the launch, replace, finish, fetch and
 teardown commands; the tests stub the client interface, so
 `validate-tooling.py` still needs no credentials but does need the packages
 installed. CI installs them.
@@ -648,5 +687,6 @@ Settled with Dain on 2026-10-30:
 13. Heartbeats at group boundaries only; liveness from instance state.
 14. Workers tear down without a controller; the abandoned-run cost is bounded
     as above and leaves S3 objects only.
-15. The control host outlives the campaign; `finish` pulls results and
+15. The control host outlives the campaign; `finish` archives the raw root to
+    S3 and pulls the summaries, `fetch` restores the raw root, and
     `teardown`, run only by Dain, removes the host and volume.

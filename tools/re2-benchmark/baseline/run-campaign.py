@@ -5633,6 +5633,12 @@ def control(arguments, aws):
         print(f"campaign {arguments.campaign} reopened; start its controller again")
 
 
+def campaign_root(arguments):
+    """The campaign root the arguments name, by default benchmark-results/pre-review-baseline/<campaign>."""
+    return (arguments.campaign_root or REPOSITORY / "benchmark-results" / "pre-review-baseline" /
+            arguments.campaign).absolute()
+
+
 def main():
     if sys.argv[1:2] == ["control"]:
         control(control_parser().parse_args(sys.argv[2:]), cloud.AwsCloud())
@@ -5688,18 +5694,37 @@ def main():
         return
     if sys.argv[1:2] == ["finish"]:
         parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} finish",
-                                         description="pull an ended campaign's root from its control host and check "
-                                                     "it against its controller's manifest")
+                                         description="archive an ended campaign's raw root to S3 from its control "
+                                                     "host, pull its summaries, and check them against its "
+                                                     "controller's manifest")
         parser.add_argument("campaign")
         parser.add_argument("--campaign-root", type=Path,
-                            help="where the root goes (default: benchmark-results/pre-review-baseline/<campaign>)")
+                            help="where the summaries go, beside the manifest and the archive's record "
+                                 "(default: benchmark-results/pre-review-baseline/<campaign>)")
         parser.add_argument("--ssh-identity", type=Path,
                             help="the private key of the --ssh-public-key the host was launched with, which ssh "
                                  "then offers alone (default: ssh's own keys and agent)")
         arguments = parser.parse_args(sys.argv[2:])
-        control_host.finish(cloud.AwsCloud(), arguments.campaign, (
-            arguments.campaign_root or REPOSITORY / "benchmark-results" / "pre-review-baseline" /
-            arguments.campaign).absolute(), arguments.ssh_identity)
+        control_host.finish(cloud.AwsCloud(), arguments.campaign, campaign_root(arguments), arguments.ssh_identity)
+        return
+    if sys.argv[1:2] == ["fetch"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} fetch",
+                                         description="restore a finished campaign's raw root from its archive beside "
+                                                     "the summaries finish pulled, and check the whole root against "
+                                                     "its controller's manifest")
+        parser.add_argument("campaign")
+        parser.add_argument("--campaign-root", type=Path,
+                            help="the root finish pulled (default: benchmark-results/pre-review-baseline/<campaign>)")
+        arguments = parser.parse_args(sys.argv[2:])
+        control_host.fetch(cloud.AwsCloud(), arguments.campaign, campaign_root(arguments))
+        return
+    if sys.argv[1:2] == ["archive-root"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} archive-root",
+                                         description="archive an ended campaign's root to S3 from its control host, "
+                                                     "as finish runs it there")
+        parser.add_argument("campaign")
+        arguments = parser.parse_args(sys.argv[2:])
+        control_host.archive_root(cloud.AwsCloud(), arguments.campaign)
         return
     arguments = parse_args()
     if arguments.controller and not arguments.execute:
@@ -5707,8 +5732,7 @@ def main():
     arguments.cloud = cloud.AwsCloud()
     root = REPOSITORY
     arguments.candidates = parse_candidates(arguments.candidate_values)
-    arguments.campaign_root = (arguments.campaign_root or
-                               root / "benchmark-results" / "pre-review-baseline" / arguments.campaign).absolute()
+    arguments.campaign_root = campaign_root(arguments)
     if arguments.phase == "campaign":
         try:
             run_campaign(arguments, root)

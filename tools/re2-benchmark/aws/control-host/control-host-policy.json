@@ -80,6 +80,22 @@
       "Resource": "arn:aws:s3:::regulator-benchmark-938463256137-*/*"
     },
     {
+      "Sid": "ListArchiveBucket",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::regulator-benchmark-archive-938463256137-us-west-2"
+    },
+    {
+      "Sid": "WriteCampaignRootArchives",
+      "Effect": "Allow",
+      "Action": [
+        "s3:AbortMultipartUpload",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::regulator-benchmark-archive-938463256137-us-west-2/campaigns/*"
+    },
+    {
       "Sid": "ReadNetwork",
       "Effect": "Allow",
       "Action": "ssm:GetParameter",
