@@ -115,7 +115,7 @@ does not fit, compilation retains the ordinary route. The semantic program is
 kept for range-limited calls outside the scan plan's supported context.
 
 Plan execution uses its own strategy byte, `scanPlanStrategy`, separate from
-the boolean `find` strategy; both fit in the 96-byte `Re2` layout.
+the boolean `find` strategy; both fit in the 104-byte `Re2` layout.
 Shared capture matching checks the plan strategy byte before loading the plan,
 avoiding an extra dependent plan lookup for unrelated patterns. It invokes the
 plan before required-prefix stripping. Full-Slice boolean `find` keeps the

@@ -431,6 +431,9 @@ public sealed class Re2
     // at most MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES. Longer inputs, and calls that report
     // positions, run the plan.
     private final boolean ordinaryShortBooleanMatch;
+    // Off the compact route, the counter of a pattern that is one large Unicode class, whose
+    // matches are its single members. It serves group-zero matchers only.
+    private final BoundedCharacterClassCounter singleClassCounter;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
@@ -490,6 +493,14 @@ public sealed class Re2
                 requiredPrefix)) {
             findStrategy = BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
         }
+        BoundedCharacterClassCounter singleClass = requiredPrefix == null ? BoundedCharacterClassCounter.analyzeSingleClass(suffixRegexp) : null;
+        if (singleClass != null && singleClass.estimatedRetainedSize() <= partialProg.dfaMemory()) {
+            partialProg.setDfaMemory(partialProg.dfaMemory() - singleClass.estimatedRetainedSize());
+        }
+        else {
+            singleClass = null;
+        }
+        this.singleClassCounter = singleClass;
         if (supportsSingleByteMatcher() &&
                 SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory()) {
             // Reserve before any DFA can snapshot its budget. The table itself stays lazy.
@@ -580,6 +591,7 @@ public sealed class Re2
         this.reverseProg = pattern.reverseProg;
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
+        this.singleClassCounter = pattern.singleClassCounter;
         this.singleByteMatcher = pattern.singleByteMatcher;
     }
 
@@ -1840,6 +1852,9 @@ public sealed class Re2
         return new RegexpMatcher(this, input, singleByteMatcher, 0);
     }
 
+    /// Creates a group-zero matcher without the class counter or the group-zero forward cursor.
+    /// The candidate-start cursor, lowered search, and scan plans stay, and a compact pattern
+    /// still reaches its counter through [#matchRegionInto].
     RegexpMatcher genericGroupZeroMatcherForDiagnostics(Slice input)
     {
         return new RegexpMatcher(this, input, null, 0, false);
@@ -2311,6 +2326,13 @@ public sealed class Re2
                         !partialProg.anchorEnd() &&
                         !partialProg.hasTextDependentAssertions() &&
                         BoundedCharacterClassCounter.supports(suffixRegexp));
+    }
+
+    /// Returns the counter that finds this pattern's group-zero matches directly: the compact
+    /// counter, or the counter of a pattern that is one large Unicode class. Otherwise `null`.
+    BoundedCharacterClassCounter classMatchCounter()
+    {
+        return usesCompactBoundedCharacterClassForDiagnostics() ? boundedCharacterClassCounter : singleClassCounter;
     }
 
     long findCharacterClassSpan(Slice input, int start)

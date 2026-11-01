@@ -819,9 +819,10 @@ Full-Slice boolean `find`, `lookingAt`, and `matches` calls may use
 compile-time plans for exact literal, nullable-start, contains, equality,
 prefix, and suffix expressions. `Re2.find` caches its strategy in a primitive
 field to avoid a dependent metadata load in tiny direct calls. The direct
-strategy uses one byte. The shared single-byte matcher cache adds one reference,
-bringing the `Re2` layout to 96 bytes with compressed references. A scan plan
-dispatches on a second strategy byte that fits in the same 96-byte layout.
+strategy uses one byte. The shared single-byte matcher cache and the
+single-class counter add one reference each, bringing the `Re2` layout to 104
+bytes with compressed references. A scan plan dispatches on a second strategy
+byte that fits in the same 104-byte layout.
 When a pattern also has a scan plan, full-Slice `find` keeps the literal
 contains, prefix, equality, and final-line equality kernels, which answer
 without reading past the literal; other boolean strategies yield to the plan.
@@ -1232,21 +1233,45 @@ class scans decoded input once instead of running a complete matcher for every
 result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
-An eligible Unicode class lazily builds an exact Unicode membership bitset of
-136 KiB; an ASCII-only class in any language, or a Latin-1 or Rust byte-mode
-class, uses 32 bytes. Construction is single-writer and the table is retained by
-the compiled pattern. This fixed bound is independent of `maxMemory`, which
-remains the upstream-compatible program and DFA planning budget, and it does not
-scale with the expression or configured budget. Unsupported shapes continue
-through the ordinary DFA or matcher path. A Unicode class reads malformed UTF-8
-as the ordinary engine's byte ranges for that class do, under the rule in
-[RE2 Scan Plans](#re2-scan-plans). A class of every non-ASCII character reads
-leniently. Any other class accepts only the encodings of its members, including
-any encoded surrogates it holds. Any other invalid byte matches nothing.
-A valid encoded U+FFFD remains an ordinary code point; a byte class reads bytes
-undecoded, so it counts malformed bytes like any others. An ASCII-only class
-also reads bytes undecoded, since every byte of a non-ASCII character, malformed
-or not, is at least 0x80 and matches none of its members.
+A Unicode class's exact membership bitset ends at its last member, up to 136 KiB
+for a class that reaches U+10FFFF; an ASCII-only class in any language, or a
+Latin-1 or Rust byte-mode class, uses 32 bytes. The general counter is built
+lazily by a single writer and retained by the compiled pattern. Its size is
+independent of `maxMemory`, which remains the upstream-compatible program and
+DFA planning budget, and it does not scale with the expression or configured
+budget. Unsupported shapes continue through the ordinary DFA or matcher path. A
+Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
+that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
+every non-ASCII character reads leniently. Any other class accepts only the
+encodings of its members, including any encoded surrogates it holds. Any other
+invalid byte matches nothing. A valid encoded U+FFFD remains an ordinary code
+point; a byte class reads bytes undecoded, so it counts malformed bytes like any
+others. An ASCII-only class also reads bytes undecoded, since every byte of a
+non-ASCII character, malformed or not, is at least 0x80 and matches none of its
+members.
+
+Two counters are instead built at compile time and charged against the pattern's
+memory budget. The compact counter serves a large Unicode class repeated many
+times, or repeated without a fixed count; it is charged against the forward
+budget, and a budget too small for it fails compilation. Compact count and
+boolean find can use it. The single-class counter serves a pattern that is one
+large Unicode class, such as `\pL` or `\p{Greek}`; it is charged against the DFA
+budget before any DFA can snapshot it, and a budget too small for it keeps the
+DFA. Both counters find group-zero matches for a matcher, which would otherwise
+restart the DFA at every match; single-class count and boolean find keep the
+DFA. Planes 4 through 13 hold no characters, so only a class with members at or
+past U+40000, such as a negated class, `\p{Mn}`, or Unicode `\w`, needs a bitset
+past them; such a single class keeps the DFA rather than retain up to 136 KiB. A
+counter's span search skips bytes that cannot begin a member before decoding,
+with one table load per byte or, for a sparse class, a vector scan after a short
+scalar prefix.
+
+The single-class counter is built eagerly by design, even for a pattern used
+only for count or boolean find, such as Trino `regexp_like`. Setup work is never
+deferred to the first match: Trino pays compile cost up front so the match path
+stays lean. Each such pattern retains about 33 KB for `\pL`, and about 16 KB
+each for `\p{Lu}` and `\p{Greek}`. A possible follow-up is one table shared per
+class.
 
 `Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter
 and the existing DFA counting path. Unsupported shapes use a fresh zero-capture
@@ -1352,11 +1377,12 @@ variable-length matches such as the Date Rebar workload.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
-and an available start-byte accelerator. The route has a linear reset-scoped
-work budget and a 128-transition limit per candidate. Exhausting either limit,
-encountering an unsupported match shape, or failing DFA cache mutation falls
-back to the existing forward-plus-reverse matcher path for the rest of that
-matcher reset. The cursor is re-enabled by the next reset.
+an available start-byte accelerator, and no class counter that finds the
+matches. The route has a linear reset-scoped work budget and a 128-transition
+limit per candidate. Exhausting either limit, encountering an unsupported match
+shape, or failing DFA cache mutation falls back to the existing
+forward-plus-reverse matcher path for the rest of that matcher reset. The cursor
+is re-enabled by the next reset.
 
 The implementation uses the existing DFA reader and exclusive-cache mutation
 protocol. Cached object transitions still require recovering the authoritative
@@ -1379,12 +1405,12 @@ from that boundary; variable-length expressions retain the existing reverse DFA
 boundary recovery.
 
 Eligibility is limited to first-match programs without a required prefix,
-anchors, or text-dependent assertions. Empty matches are still handled by the
-existing empty-at-start check before the cursor runs. DFA allocation failure or
-cache-search failure falls back to the ordinary matcher path, and the cursor
-uses the same reader and exclusive-cache mutation protocol as other DFA
-searches. It adds no public API and does not change capturing or longest-match
-execution.
+anchors, text-dependent assertions, or a class counter that finds the matches.
+Empty matches are still handled by the existing empty-at-start check before the
+cursor runs. DFA allocation failure or cache-search failure falls back to the
+ordinary matcher path, and the cursor uses the same reader and exclusive-cache
+mutation protocol as other DFA searches. It adds no public API and does not
+change capturing or longest-match execution.
 
 ## Extended OnePass Captures
 
@@ -1483,11 +1509,11 @@ shapes may retain their pre-existing direct complete-match plan.
 Count, group-zero extraction, position, split, and replacement without capture
 references use the direct boundary route when eligible. The eligibility value
 shares the existing boolean-strategy byte. Ordinary boolean `find` retains its
-direct strategy load; the separate single-byte matcher cache accounts for the
-current 96-byte `Re2` layout. The two forward programs and the lowered
-program's DFA share the original forward memory budget. No warm DFA search loop
-contains a frontend-specific branch; the Trino check runs only while an
-uncached transition is constructed.
+direct strategy load; the separate single-byte matcher cache and single-class
+counter account for the current 104-byte `Re2` layout. The two forward programs
+and the lowered program's DFA share the original forward memory budget. No warm
+DFA search loop contains a frontend-specific branch; the Trino check runs only
+while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call
