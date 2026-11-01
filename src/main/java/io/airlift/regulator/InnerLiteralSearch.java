@@ -17,6 +17,7 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -85,7 +86,8 @@ final class InnerLiteralSearch
                 forwardProgram.canPrefixAccel() || forwardProgram.hasDfaUnsupportedAssertions()) {
             return null;
         }
-        List<Regexp> children = regexp.children();
+        List<Regexp> children = new ArrayList<>();
+        addConcatenationElements(regexp, children, 0);
         // As in the crate, the first element is skipped, since a literal there would have given a
         // prefix acceleration, and the first literal found decides.
         for (int index = 1; index < children.size(); index++) {
@@ -122,6 +124,29 @@ final class InnerLiteralSearch
             return new InnerLiteralSearch(literalSearch, reversePrefixProgram, forwardProgram);
         }
         return null;
+    }
+
+    // As the crate's top_concat does, a capturing group in the top-level concatenation is looked
+    // through, and a concatenation inside it joins the top level, so `(\s*)(# x)` has the inner
+    // literal `# `. The search finds only the match span; the ordinary engine fills in the groups.
+    // Any other concatenation stays one element: simplification already flattens groups that do
+    // not capture, so the rest are the copies it makes of a counted repetition, which the crate
+    // keeps whole. Past the depth limit a group stays one element too, which only hides
+    // literals inside it.
+    private static void addConcatenationElements(Regexp concatenation, List<Regexp> elements, int depth)
+    {
+        for (Regexp child : concatenation.children()) {
+            Regexp element = child;
+            while (element.op() == RegexpOp.CAPTURE) {
+                element = element.child(0);
+            }
+            if (element != child && element.op() == RegexpOp.CONCAT && depth < MAX_RECURSIVE_DEPTH) {
+                addConcatenationElements(element, elements, depth + 1);
+            }
+            else {
+                elements.add(element);
+            }
+        }
     }
 
     byte[] literal()
