@@ -15,11 +15,15 @@ from pathlib import Path
 import platform
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 
 import jvm_build
 import native_build
+
+sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import unit_cost  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -40,7 +44,8 @@ PROTOCOL = {
     "forks": 5, "warmup_iterations": 10, "measurement_iterations": 10,
     "iteration_seconds": 1, "heap": "8g", "startup_timeout_seconds": 60,
     "compile_timeout_seconds": 30, "execution_timeout_seconds": 30,
-    # Whole-process budget includes all forks, setup, and slow verified corpus passes.
+    # Whole-process budget includes all forks, setup, and slow verified corpus passes; it is the floor of each
+    # measurement process's derived limit.
     "measurement_timeout_seconds": 3600, "timeout_confirmation_attempts": 2,
     "native_repetitions": 5, "native_min_time_seconds": 1,
     "native_warmup_seconds": 10,
@@ -54,11 +59,7 @@ STEADY_PROTOCOLS = {
 EXTENDED_LIFECYCLE_PROTOCOL = {
     **STEADY_PROTOCOLS["language-lifecycle"], "measurement_profile": "steady-lifecycle-v2", "warmup_iterations": 60,
 }
-SLOW_BULK_PROTOCOL = {
-    **STEADY_PROTOCOLS["language-bulk"], "measurement_profile": "steady-slow-bulk-v2",
-    "measurement_timeout_seconds": 12600,
-}
-SEPARATE_ALLOCATION_PROFILES = {"steady-state-v1", "steady-lifecycle-v2", "steady-slow-bulk-v2"}
+SEPARATE_ALLOCATION_PROFILES = {"steady-state-v1", "steady-lifecycle-v2"}
 CLASS = "io.airlift.regulator.BenchmarkLanguageComparison"
 
 
@@ -69,7 +70,8 @@ class SemanticFailure(ValueError):
 
 
 class BudgetOverrun(ValueError):
-    """A measurement or allocation process outran the protocol's budget; the controller rejects the attempt."""
+    """A measurement or allocation process outran its measurement process budget; the controller rejects the
+    attempt."""
 
 
 def protocol_for(manifest):
@@ -79,8 +81,6 @@ def protocol_for(manifest):
         accepted.append(STEADY_PROTOCOLS[manifest["suite"]])
     if manifest.get("suite") == "language-lifecycle":
         accepted.append(EXTENDED_LIFECYCLE_PROTOCOL)
-    if manifest.get("suite") == "language-bulk":
-        accepted.append(SLOW_BULK_PROTOCOL)
     if protocol not in accepted:
         raise ValueError("unrecognized measurement protocol")
     return protocol
@@ -258,11 +258,11 @@ def validate_manifest(manifest, directory, archived=False):
 
 
 def run_process(command, prefix, *, measuring=False, measurement_timeout_seconds=None):
-    """Kill the whole process group, including JMH forks, on a frozen deadline."""
-    if measurement_timeout_seconds is not None and (
-            not measuring or type(measurement_timeout_seconds) is not int or
-            measurement_timeout_seconds not in (3600, 12600)):
-        raise ValueError("unrecognized measurement process budget")
+    """Kill the whole process group, including JMH forks, on a frozen deadline: a measuring process's whole-process
+    budget, or the protocol's limit on the phase a verification process reports."""
+    if measuring != (measurement_timeout_seconds is not None) or measuring and (
+            type(measurement_timeout_seconds) is not int or measurement_timeout_seconds <= 0):
+        raise ValueError("a measurement process, and only one, takes a whole-process budget in whole seconds")
     started = time.monotonic()
     phase = "measurement" if measuring else "startup"
     phase_started = started
@@ -279,7 +279,7 @@ def run_process(command, prefix, *, measuring=False, measurement_timeout_seconds
                     if markers and markers[-1] != phase:
                         phase = markers[-1]
                         phase_started = time.monotonic()
-                limit = measurement_timeout_seconds if measuring and measurement_timeout_seconds is not None else PROTOCOL[f"{phase}_timeout_seconds"]
+                limit = measurement_timeout_seconds if measuring else PROTOCOL[f"{phase}_timeout_seconds"]
                 if time.monotonic() - phase_started > limit:
                     terminate_process_group(process)
                     return {"outcome": "did-not-finish", "phase": phase, "limit_seconds": limit,
@@ -634,9 +634,12 @@ def validate_native_build(manifest, engine, build, binary_sha256):
         raise ValueError(f"{engine}: native comparator requires a release build")
 
 
-def measure(directory, results, java, classpath, native_runners, platform_id, build_receipt, inputs=None):
+def measure(directory, results, java, classpath, native_runners, platform_id, build_receipt, inputs=None,
+            operation_seconds=None):
     """Measure verified comparisons with the classpath that build_receipt, from jvm_build.prepare, identifies; the
-    manifest's input files resolve against inputs, by default its directory."""
+    manifest's input files resolve against inputs, by default its directory. Each process may run for the budget its
+    estimate gives it at the operation seconds its plan froze for its row, by row ID."""
+    operation_seconds = operation_seconds or {}
     directory, results = directory.resolve(), results.resolve()
     inputs = directory if inputs is None else inputs.resolve()
     if (results / "provenance.json").exists() or (results / "observations.json").exists():
@@ -699,7 +702,8 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                 raise ValueError(f"will not overwrite existing measurements: {raw}")
             raw.parent.mkdir(parents=True, exist_ok=True)
             workload = str((inputs / case["mappings"][language]["input_file"]).resolve())
-            if engine in NATIVE_RUNNERS:
+            native = engine in NATIVE_RUNNERS
+            if native:
                 command = [native_runners[engine], workload, operation, "--benchmark_repetitions=5", "--benchmark_min_time=1s",
                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
                            "--benchmark_out_format=json", f"--benchmark_out={raw}"]
@@ -713,24 +717,26 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                     command += ["-prof", "gc"]
                 if manifest.get("suite") == "language-bulk":
                     command += ["-p", f"expectedResult={case['expected_result']}"]
-            budget = ({"measurement_timeout_seconds": protocol["measurement_timeout_seconds"]}
-                      if protocol == SLOW_BULK_PROTOCOL else {})
-            receipt = run_process(command, raw.parent / "measurement", measuring=True, **budget)
+            receipt = run_process(command, raw.parent / "measurement", measuring=True,
+                                  measurement_timeout_seconds=unit_cost.measurement_budget(
+                                      protocol, native, operation_seconds.get(row_id)))
             if receipt["outcome"] != "completed":
                 # Aggregate fork timeout is a collection failure, not proof that one regex call timed out.
-                raise BudgetOverrun(f"measurement process exceeded protocol budget: {row_id}")
+                raise BudgetOverrun(f"measurement process exceeded the measurement process budget: {row_id}")
             allocation_raw = None
             allocation_evidence = {}
-            if engine not in NATIVE_RUNNERS and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
+            if not native and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
                 allocation_raw = raw.with_name("allocation.json")
                 allocation_command = list(command)
                 for flag, value in (("-f", protocol["allocation_forks"]), ("-wi", protocol["allocation_warmup_iterations"]),
                                     ("-i", protocol["allocation_measurement_iterations"]), ("-rff", allocation_raw)):
                     allocation_command[allocation_command.index(flag) + 1] = str(value)
                 allocation_command += ["-prof", "gc"]
-                allocated = run_process(allocation_command, raw.parent / "allocation", measuring=True, **budget)
+                allocated = run_process(allocation_command, raw.parent / "allocation", measuring=True,
+                                        measurement_timeout_seconds=unit_cost.measurement_budget(
+                                            protocol, False, operation_seconds.get(row_id), allocation=True))
                 if allocated["outcome"] != "completed":
-                    raise BudgetOverrun(f"allocation process exceeded protocol budget: {row_id}")
+                    raise BudgetOverrun(f"allocation process exceeded the measurement process budget: {row_id}")
                 allocation_evidence = {"allocation_raw_file": str(allocation_raw.relative_to(results)),
                                        "allocation_command": allocation_command}
             observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload,

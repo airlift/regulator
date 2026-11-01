@@ -190,29 +190,6 @@ class TestCollection(unittest.TestCase):
                            protocol["execution_timeout_seconds"])
         self.assertGreaterEqual(protocol["measurement_timeout_seconds"], protocol["forks"] * per_fork_budget)
 
-    def test_measurement_is_not_killed_at_the_old_aggregate_deadline(self):
-        with patch.object(collection.subprocess, "Popen") as launch, \
-                patch.object(collection.time, "monotonic", side_effect=[0, 200, 500]), \
-                patch.object(collection.time, "sleep"), \
-                patch.object(collection, "terminate_process_group") as terminate:
-            launch.return_value.poll.side_effect = [None, None, 0, 0]
-            launch.return_value.returncode = 0
-            receipt = collection.run_process(["java", "jmh"], self.root / "slow-measurement", measuring=True)
-        self.assertEqual(receipt["outcome"], "completed")
-        terminate.assert_not_called()
-
-    def test_measurement_still_kills_the_process_group_at_its_frozen_limit(self):
-        limit = collection.PROTOCOL["measurement_timeout_seconds"]
-        with patch.object(collection.subprocess, "Popen") as launch, \
-                patch.object(collection.time, "monotonic", side_effect=[0, limit + 1]), \
-                patch.object(collection, "terminate_process_group") as terminate:
-            launch.return_value.poll.side_effect = [None, 0]
-            receipt = collection.run_process(["java", "jmh"], self.root / "measurement-timeout", measuring=True)
-        self.assertEqual(receipt["outcome"], "did-not-finish")
-        self.assertEqual(receipt["phase"], "measurement")
-        self.assertEqual(receipt["limit_seconds"], limit)
-        terminate.assert_called_once_with(launch.return_value)
-
     def test_steady_protocols_preserve_the_original_and_bind_suite(self):
         original = {"suite": "language-lifecycle", "protocol": collection.PROTOCOL}
         self.assertEqual(collection.protocol_for(original)["warmup_iterations"], 10)
@@ -452,9 +429,9 @@ class TestCollection(unittest.TestCase):
                 return b"25.0.4+7"
             return b"fixture"
 
-        measured = []
+        measured, budgets = [], {}
 
-        def measurement_process(command, prefix, **kwargs):
+        def measurement_process(command, prefix, measurement_timeout_seconds, **kwargs):
             measured.append(command)
             if "org.openjdk.jmh.Main" in command:
                 operation = next(value for value in command if value.startswith("^")).split(r"\.")[-1].removesuffix("$")
@@ -473,6 +450,7 @@ class TestCollection(unittest.TestCase):
                 path = Path(next(value.split("=", 1)[1] for value in command if value.startswith("--benchmark_out=")))
                 raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 100}
                                       for _ in range(5)]}
+            budgets[str(path.parent.relative_to(results.resolve()))] = measurement_timeout_seconds
             collection.save(path, raw)
             return {"outcome": "completed", "command": command}
 
@@ -482,10 +460,12 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection.subprocess, "check_output", side_effect=host_command), \
                 patch.object(collection, "host_identity", return_value={"instanceType": "r9g.xlarge"}), \
                 patch.object(collection, "run_process", side_effect=measurement_process):
+            slow = first + "/compile"
+
             def measure():
                 collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
                                    {"native-re2": str(native), "native-rust": str(native_rust)}, "r9g", jvm_receipt,
-                                   Path(os.path.relpath(store)))
+                                   Path(os.path.relpath(store)), operation_seconds={slow: 20})
             # Each native runner's receipt must describe a release build of the current sources.
             rust_receipt = native_rust.with_suffix(".build.json")
             valid = collection.load(rust_receipt)
@@ -497,12 +477,19 @@ class TestCollection(unittest.TestCase):
             collection.save(rust_receipt, valid)
             # A measurement process that outruns its budget refuses the input rather than judging its semantics.
             with patch.object(collection, "run_process", return_value={"outcome": "did-not-finish"}), \
-                    self.assertRaisesRegex(collection.BudgetOverrun, "measurement process exceeded protocol budget"):
+                    self.assertRaisesRegex(collection.BudgetOverrun,
+                                           "measurement process exceeded the measurement process budget"):
                 measure()
             (results / "provenance.json").unlink()
             measure()
         exported = collection.load(results / "language-results.json")
         self.assertEqual(len(measured), 780 - 2)
+        # Each measurement process may run for the budget its row's frozen operation seconds give it, and a row
+        # without them for the protocol's limit.
+        protocol = collection.protocol_for(self.manifest)
+        native = slow.split("/")[2] in collection.NATIVE_RUNNERS
+        self.assertEqual(collection.unit_cost.measurement_budget(protocol, native, 20), budgets.pop(slow))
+        self.assertEqual({protocol["measurement_timeout_seconds"]}, set(budgets.values()))
         for operation in ("compile", "singleUseContains", "reusedContains"):
             row = exported["observations"][first + "/" + operation]
             self.assertEqual(row["outcome"], "compared")
