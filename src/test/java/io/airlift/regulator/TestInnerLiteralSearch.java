@@ -48,7 +48,9 @@ public class TestInnerLiteralSearch
             "[xz]+zx",
             "(?:az|z)xx",
             "(?:a@.*b|c)@",
-            "(?:a[^@]*@[^@]*d|c)@");
+            "(?:a[^@]*@[^@]*d|c)@",
+            "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)",
+            "(\\w+)(@(\\w+))");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -65,6 +67,13 @@ public class TestInnerLiteralSearch
         assertThat(literal("\\b\\w+\\s+Holmes\\s+\\w+\\b")).isEqualTo("Holmes");
         assertThat(literal("\\s[a-zA-Z]{0,12}ing\\s")).isEqualTo("ing");
         assertThat(literal("\\w+(?:ab)?\\s+ing")).isEqualTo("ing");
+        // Capturing groups in the top-level concatenation are looked through, as the crate's
+        // top_concat does, so an inner literal may sit inside a group.
+        assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# ");
+        assertThat(literal("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# ");
+        // A group that does not capture joins the top level too.
+        assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
+        assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -76,6 +85,10 @@ public class TestInnerLiteralSearch
                 "\\w+\\w+Holmes",
                 // The bytes C3 A9 encode é, so neither byte class is disjoint from [a-zé].
                 "(?-u:[\\xC3\\xC4])+[a-z\u00E9]*(?-u:[\\xA9\\xAA])ab",
+                // A group inside a repetition is not part of the top-level concatenation.
+                "\\w+(?:@\\w+)+",
+                // Nor are the copies of a counted repetition, which the crate keeps as one element.
+                "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])",
                 // Anchored, prefix-accelerated, folded, common single-byte, and overlong literals.
                 "^\\w+@\\w+",
                 "Holmes\\w+@",
@@ -300,7 +313,7 @@ public class TestInnerLiteralSearch
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF"};
+        String[] tokens = {"# noqa", "# NoQA:", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
