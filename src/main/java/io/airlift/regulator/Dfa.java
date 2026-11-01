@@ -76,6 +76,16 @@ final class Dfa
     private static final int CANDIDATE_FALLBACK = -2;
     private static final int PREFIX_SCAN = -1;
     private static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
+    private static final int START_LITERAL_FILTER_MARKER = Integer.MIN_VALUE + 1;
+    // A start byte set this common in English text stops often enough that checking three
+    // bytes of each literal pays; rarer sets stay on their single-byte scanners, which are
+    // cheaper per byte. UTF-8 lead bytes rate as common as the most common ASCII byte.
+    private static final double MINIMUM_START_LITERAL_FILTER_START_PROBABILITY = 0.05;
+    // Room for the folded first letters of eight literals.
+    private static final int MAXIMUM_START_LITERAL_FILTER_START_BYTES = 16;
+    // The filter reads three bytes per position, so it replaces the start byte scan only when
+    // it is estimated to stop this many times less often.
+    private static final int START_LITERAL_FILTER_NARROWING_FACTOR = 4;
     private static final int MINIMUM_PRODUCTIVE_FIXED_DISTANCE_SKIP = 16;
     private static final long REFERENCE_BYTES = (sizeOfObjectArray(8) - sizeOfObjectArray(0)) / 8;
     private static final long STATE_DATA_BYTES = instanceSize(StateData.class);
@@ -405,7 +415,7 @@ final class Dfa
                 }
                 if (canUseStartByteAcceleration(dfa, anchoredEffective, true, startData.flag())) {
                     if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                            !isByteCandidateScanProductive(dfa.startByteCandidates, bytes, textBegin, textEnd)) {
+                            !dfa.isStartByteScanProductive(bytes, textBegin, textEnd)) {
                         dfa.byteScanFallbackCount++;
                     }
                     else {
@@ -504,7 +514,8 @@ final class Dfa
         // selected; searches served by another scan do not sample. Resampling requires at least
         // 4 KiB remaining; below that the check reports the span as productive without sampling,
         // which would promote the vector scan for dense input. Prefix acceleration returns before
-        // the start-byte scan, so the selection is made only when it can be read.
+        // the start-byte scan, so the selection is made only when it can be read. A start literal
+        // filter is kept without sampling.
         int startByteScanSet = 0;
         boolean resampleStartByteScanSet = false;
         if (dfa.canStartByteAcceleration() && !prog.canPrefixAccel()) {
@@ -966,7 +977,7 @@ final class Dfa
         }
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
             if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !isByteCandidateScanProductive(dfa.startByteCandidates, bytes, textBegin, contextEnd)) {
+                    !dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)) {
                 byteScanRejected = true;
                 dfa.byteScanFallbackCount++;
             }
@@ -1330,8 +1341,8 @@ final class Dfa
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
             if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
                     !(cursor == null
-                            ? isByteCandidateScanProductive(dfa.startByteCandidates, bytes, textBegin, contextEnd)
-                            : cursor.isStartByteScanProductive(dfa.startByteCandidates, bytes, textBegin, contextEnd))) {
+                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
+                            : cursor.isStartByteScanProductive(bytes, textBegin, contextEnd))) {
                 dfa.byteScanFallbackCount++;
             }
             else {
@@ -1390,11 +1401,17 @@ final class Dfa
 
     private static int selectByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
     {
+        // On long inputs the start-scan productivity check samples the filter's own candidates,
+        // and a single-byte scan would stop at every start byte the filter skips.
+        if (byteScanSet == START_LITERAL_FILTER_MARKER) {
+            return byteScanSet;
+        }
         if (byteScanSet != 0 &&
                 VectorSupport.isAvailable() &&
                 ((byteScanSet >>> 24) > 3 || VectorByteSetScanner.shouldSampleCandidateDensity()) &&
                 !isByteCandidateScanProductive(
                         candidates,
+                        null,
                         bytes,
                         position,
                         textEnd,
@@ -1409,6 +1426,7 @@ final class Dfa
     {
         return isByteCandidateScanProductive(
                 candidates,
+                null,
                 bytes,
                 position,
                 textEnd,
@@ -1416,8 +1434,11 @@ final class Dfa
                 BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
     }
 
+    // With a start literal filter, a sampled position counts when the filter accepts it, not
+    // when its byte is in the candidate set.
     private static boolean isByteCandidateScanProductive(
             byte[] candidates,
+            StartLiteralFilter literalFilter,
             byte[] bytes,
             int position,
             int textEnd,
@@ -1436,8 +1457,10 @@ final class Dfa
             int windowStart = position + (int) (((long) windowRange * window) / (BYTE_SCAN_SAMPLE_WINDOWS - 1));
             int windowEnd = windowStart + windowSize;
             for (int samplePosition = windowStart; samplePosition < windowEnd; samplePosition++) {
-                if (candidates[bytes[samplePosition] & 0xFF] != 0 &&
-                        ++candidateCount >= candidateLimit) {
+                boolean candidate = literalFilter == null
+                        ? candidates[bytes[samplePosition] & 0xFF] != 0
+                        : literalFilter.accepts(bytes, samplePosition, textEnd);
+                if (candidate && ++candidateCount >= candidateLimit) {
                     return false;
                 }
             }
@@ -2763,8 +2786,8 @@ final class Dfa
         Object[] stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
         Object[] startRefs = stateRefs;
 
-        // Generic scan acceleration for sparse start bytes and literal prefixes other than
-        // the single-byte fast path. Keep scanner control local so later searches can still
+        // Generic scan acceleration for sparse start bytes, start literal filters and literal
+        // prefixes other than the single-byte fast path. Keep scanner control local so later searches can still
         // use the unchanged compact transition rows when sampling rejects acceleration.
 
         if (startIsMatch) {
@@ -2990,6 +3013,14 @@ final class Dfa
 
     private static int findByteSetCandidate(DfaInstance dfa, byte[] candidates, int byteScanSet, byte[] data, int offset, int length)
     {
+        // A filter is built only when the Vector API is available.
+        if (byteScanSet == START_LITERAL_FILTER_MARKER) {
+            dfa.startLiteralFilterScanCount++;
+            if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
+                return VectorByteSetScanner.findLiteralSet(data, offset, length, dfa.startLiteralFilter);
+            }
+            return dfa.startLiteralFilter.find(data, offset, length);
+        }
         if (VectorSupport.isAvailable() && length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
             if (byteScanSet == MIXED_BYTE_SET_MARKER) {
                 dfa.mixedByteSetScanCount++;
@@ -3075,6 +3106,39 @@ final class Dfa
         }
         // The high byte is the candidate count; the low bytes are inclusive unsigned bounds.
         return (candidateCount << 24) | (upperBound << 8) | lowerBound;
+    }
+
+    // Patterns whose literals begin with common bytes, such as the folded letters of
+    // (?i)Sherlock|Watson or the few UTF-8 lead bytes shared by many Cyrillic or Chinese
+    // characters, stop often on their start byte set; three bytes of each literal stop far less
+    // often. The estimates use English frequencies whatever the pattern's byte frequencies.
+    private static StartLiteralFilter buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates)
+    {
+        if (startByteCandidates == null) {
+            return null;
+        }
+        ByteFrequencies byteFrequencies = ByteFrequencies.englishText();
+        int startByteCount = 0;
+        double startByteProbability = 0;
+        for (int value = 0; value < startByteCandidates.length; value++) {
+            if (startByteCandidates[value] != 0) {
+                startByteCount++;
+                startByteProbability += byteFrequencies.probability((byte) value);
+            }
+        }
+        if (startByteCount > MAXIMUM_START_LITERAL_FILTER_START_BYTES || startByteProbability < MINIMUM_START_LITERAL_FILTER_START_PROBABILITY) {
+            return null;
+        }
+
+        long[][] paths = prog.buildStartPositionByteSets(stack, StartLiteralFilter.PATH_POSITIONS);
+        if (paths == null) {
+            return null;
+        }
+        StartLiteralFilter filter = StartLiteralFilter.build(paths, byteFrequencies);
+        if (filter == null || filter.density() * START_LITERAL_FILTER_NARROWING_FACTOR > startByteProbability) {
+            return null;
+        }
+        return filter;
     }
 
     private static long searchForwardAnchoredLongPrefixInt(
@@ -4270,7 +4334,7 @@ final class Dfa
             return productive;
         }
 
-        private boolean isStartByteScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
+        private boolean isStartByteScanProductive(byte[] bytes, int position, int textEnd)
         {
             if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
                 startByteScanProductivityRejectedUntil = 0;
@@ -4281,7 +4345,7 @@ final class Dfa
             }
 
             startByteScanProductivityCheckCount++;
-            boolean productive = isByteCandidateScanProductive(candidates, bytes, position, textEnd);
+            boolean productive = dfa.isStartByteScanProductive(bytes, position, textEnd);
             startByteScanProductivityRejectedUntil = productive ? 0 : nextProductivityCheckPosition(position, textEnd);
             return productive;
         }
@@ -4342,7 +4406,7 @@ final class Dfa
                 return true;
             }
             productivityChecked = true;
-            if (isByteCandidateScanProductive(dfa.startByteCandidates, bytes, position, textEnd)) {
+            if (dfa.isStartByteScanProductive(bytes, position, textEnd)) {
                 return true;
             }
             productivityRejectionCount++;
@@ -4399,6 +4463,7 @@ final class Dfa
         private final byte[] startByteCandidates;
         private final int startByteScanSet;
         private final byte[] startByteNibbleTables;
+        private final StartLiteralFilter startLiteralFilter;
         private final boolean nullableStartByteCandidates;
         private final int trinoLineFlag;
         // Rust CRLF anchors read a CR LF pair in the direction of the search: its first byte is CR
@@ -4492,6 +4557,7 @@ final class Dfa
         private int smallByteSetScanCount;
         private int contiguousRangeScanCount;
         private int mixedByteSetScanCount;
+        private int startLiteralFilterScanCount;
         private int selfLoopExitByteScanCount;
         private int countSelfLoopScanCount;
         private int countSelfLoopMatchHandOffCount;
@@ -4528,10 +4594,18 @@ final class Dfa
             this.startByteCandidates = prog.buildStartByteCandidates(stack);
             this.nullableStartByteCandidates = startByteCandidates != null && prog.canMatchEmpty();
             int startByteScanSet = buildStartByteScanSet(startByteCandidates);
-            this.startByteNibbleTables = startByteScanSet == 0 && !nullableStartByteCandidates && VectorSupport.isAvailable()
+            this.startLiteralFilter = !nullableStartByteCandidates && VectorSupport.isAvailable()
+                    ? buildStartLiteralFilter(prog, stack, startByteCandidates)
+                    : null;
+            this.startByteNibbleTables = startLiteralFilter == null && startByteScanSet == 0 && !nullableStartByteCandidates && VectorSupport.isAvailable()
                     ? VectorByteSetScanner.buildNibbleTables(startByteCandidates)
                     : null;
-            this.startByteScanSet = startByteNibbleTables == null ? startByteScanSet : MIXED_BYTE_SET_MARKER;
+            if (startLiteralFilter != null) {
+                this.startByteScanSet = START_LITERAL_FILTER_MARKER;
+            }
+            else {
+                this.startByteScanSet = startByteNibbleTables == null ? startByteScanSet : MIXED_BYTE_SET_MARKER;
+            }
 
             if (maxMemory == 0) {
                 this.stateBudget = Long.MAX_VALUE;
@@ -4560,6 +4634,9 @@ final class Dfa
             }
             if (startByteNibbleTables != null) {
                 overhead += 16L + startByteNibbleTables.length;
+            }
+            if (startLiteralFilter != null) {
+                overhead += startLiteralFilter.estimatedRetainedSize();
             }
 
             long memoryBudget = maxMemory - overhead;
@@ -4613,6 +4690,18 @@ final class Dfa
         boolean canStartByteAcceleration()
         {
             return startByteCandidates != null && !nullableStartByteCandidates;
+        }
+
+        private boolean isStartByteScanProductive(byte[] bytes, int position, int textEnd)
+        {
+            return isByteCandidateScanProductive(
+                    startByteCandidates,
+                    startLiteralFilter,
+                    bytes,
+                    position,
+                    textEnd,
+                    MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES,
+                    BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
         }
 
         boolean canUseNullableStartByteCheck()
@@ -4747,6 +4836,16 @@ final class Dfa
         int mixedByteSetScanCount()
         {
             return mixedByteSetScanCount;
+        }
+
+        int startLiteralFilterScanCount()
+        {
+            return startLiteralFilterScanCount;
+        }
+
+        StartLiteralFilter startLiteralFilter()
+        {
+            return startLiteralFilter;
         }
 
         int fixedDistanceShortSkipFallbackCount()

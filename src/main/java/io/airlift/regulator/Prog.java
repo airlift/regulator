@@ -20,6 +20,7 @@ import io.airlift.slice.Slices;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -54,6 +55,8 @@ final class Prog
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
     private static final int MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET = 16;
+    // Bounds the work of the start literal filter's path walk, before paths merge into groups.
+    private static final int MAXIMUM_START_POSITION_PATHS = 128;
 
     private static final int[] WORD_RANGES = {48, 57, 65, 90, 95, 95, 97, 122};
     private static final int[] NON_WORD_RANGES = {0, 47, 58, 64, 91, 94, 96, 96, 123, 255};
@@ -780,6 +783,126 @@ final class Prog
         }
         return null;
     }
+
+    /// Builds the byte sets at the first `positionCount` positions of every match path, for the
+    /// start literal filter a search scans instead of the start byte set. Each path is
+    /// `positionCount` 256-bit sets of four longs. A path that matches before its last position
+    /// accepts every byte at the remaining positions, and paths that share their earlier sets
+    /// and their continuation are merged, so the sets stay a superset of the bytes that begin
+    /// every match. Returns null for nullable programs, for the other programs
+    /// [#buildStartByteCandidates] rejects before its walk, for any assertion the walk reaches,
+    /// and past [#MAXIMUM_START_POSITION_PATHS] paths.
+    long[][] buildStartPositionByteSets(int[] stack, int positionCount)
+    {
+        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0) {
+            return null;
+        }
+
+        List<StartPositionPath> paths = List.of(new StartPositionPath(new long[positionCount * 4], start()));
+        List<long[]> completedPaths = new ArrayList<>();
+        boolean[] visited = new boolean[size()];
+        for (int position = 0; position < positionCount; position++) {
+            List<StartPositionPath> nextPaths = new ArrayList<>();
+            for (StartPositionPath path : paths) {
+                Arrays.fill(visited, false);
+                int stackPointer = 0;
+                stack[stackPointer++] = path.instructionId();
+                while (stackPointer > 0) {
+                    int instructionId = stack[--stackPointer];
+                    if (instructionId <= 0 || instructionId >= size() || visited[instructionId]) {
+                        continue;
+                    }
+                    visited[instructionId] = true;
+
+                    Inst instruction = inst(instructionId);
+                    switch (instruction.opcode()) {
+                        case BYTE_RANGE -> {
+                            addStartPositionRange(nextPaths, path.byteSets(), position, instruction);
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                        case CAPTURE, NOP -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case EMPTY_WIDTH -> {
+                            // The walk does not evaluate assertions, so it keeps no filter rather
+                            // than drop a path an assertion would allow.
+                            return null;
+                        }
+                        case ALT, ALT_MATCH -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out1();
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case MATCH -> {
+                            if (position == 0) {
+                                return null;
+                            }
+                            long[] byteSets = path.byteSets().clone();
+                            Arrays.fill(byteSets, position * 4, byteSets.length, -1L);
+                            completedPaths.add(byteSets);
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                        case FAIL -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                    }
+                    if (nextPaths.size() + completedPaths.size() > MAXIMUM_START_POSITION_PATHS) {
+                        return null;
+                    }
+                }
+            }
+            paths = nextPaths;
+        }
+        for (StartPositionPath path : paths) {
+            completedPaths.add(path.byteSets());
+        }
+        return completedPaths.toArray(long[][]::new);
+    }
+
+    // Paths that share their earlier sets and continue at the same instruction accept the same
+    // suffixes, so their sets at this position merge without widening the filter.
+    private static void addStartPositionRange(List<StartPositionPath> paths, long[] previousByteSets, int position, Inst instruction)
+    {
+        long[] byteSets = null;
+        for (StartPositionPath path : paths) {
+            if (path.instructionId() == instruction.out() &&
+                    Arrays.equals(path.byteSets(), 0, position * 4, previousByteSets, 0, position * 4)) {
+                byteSets = path.byteSets();
+                break;
+            }
+        }
+        if (byteSets == null) {
+            byteSets = previousByteSets.clone();
+            paths.add(new StartPositionPath(byteSets, instruction.out()));
+        }
+        // Like addStartByteRange: a folding range reads an upper-case byte as its lower case.
+        for (int value = instruction.lo(); value <= instruction.hi(); value++) {
+            if (!instruction.foldCase() || value < 'A' || value > 'Z') {
+                addStartPositionByte(byteSets, position, value);
+            }
+            if (instruction.foldCase() && 'a' <= value && value <= 'z') {
+                addStartPositionByte(byteSets, position, value - ('a' - 'A'));
+            }
+        }
+    }
+
+    private static void addStartPositionByte(long[] byteSets, int position, int value)
+    {
+        byteSets[position * 4 + (value >>> 6)] |= 1L << value;
+    }
+
+    private record StartPositionPath(long[] byteSets, int instructionId) {}
 
     /// Finds a selective byte set at one fixed offset from every possible match start.
     /// The bounded walk deliberately rejects assertions and variable-distance candidates.

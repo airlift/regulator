@@ -86,6 +86,159 @@ final class VectorByteSetScanner
         return -1;
     }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Finds the first position where one of the filter's literals
+    // matches at all three of its positions. Each vector step loads three vectors, ORs each
+    // once with its position's mask, and compares every group against those three.
+    static int findLiteralSet(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        return switch (filter.values().length / 3) {
+            case 2 -> findTwoLiterals(data, offset, length, filter);
+            case 4 -> findFourLiterals(data, offset, length, filter);
+            case 8 -> findEightLiterals(data, offset, length, filter);
+            default -> throw new IllegalArgumentException("literal filter width must be two, four, or eight");
+        };
+    }
+
+    private static int findTwoLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        ByteVector firstMask = ByteVector.broadcast(SPECIES, filter.firstMask());
+        ByteVector secondMask = ByteVector.broadcast(SPECIES, filter.secondMask());
+        ByteVector thirdMask = ByteVector.broadcast(SPECIES, filter.thirdMask());
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
+            VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
+                    .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    private static int findFourLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        ByteVector firstValue2 = ByteVector.broadcast(SPECIES, values[6]);
+        ByteVector secondValue2 = ByteVector.broadcast(SPECIES, values[7]);
+        ByteVector thirdValue2 = ByteVector.broadcast(SPECIES, values[8]);
+        ByteVector firstValue3 = ByteVector.broadcast(SPECIES, values[9]);
+        ByteVector secondValue3 = ByteVector.broadcast(SPECIES, values[10]);
+        ByteVector thirdValue3 = ByteVector.broadcast(SPECIES, values[11]);
+        ByteVector firstMask = ByteVector.broadcast(SPECIES, filter.firstMask());
+        ByteVector secondMask = ByteVector.broadcast(SPECIES, filter.secondMask());
+        ByteVector thirdMask = ByteVector.broadcast(SPECIES, filter.thirdMask());
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
+            VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
+                    .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1))
+                    .or(literalMatches(first, second, third, firstValue2, secondValue2, thirdValue2))
+                    .or(literalMatches(first, second, third, firstValue3, secondValue3, thirdValue3));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    private static int findEightLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        ByteVector firstValue2 = ByteVector.broadcast(SPECIES, values[6]);
+        ByteVector secondValue2 = ByteVector.broadcast(SPECIES, values[7]);
+        ByteVector thirdValue2 = ByteVector.broadcast(SPECIES, values[8]);
+        ByteVector firstValue3 = ByteVector.broadcast(SPECIES, values[9]);
+        ByteVector secondValue3 = ByteVector.broadcast(SPECIES, values[10]);
+        ByteVector thirdValue3 = ByteVector.broadcast(SPECIES, values[11]);
+        ByteVector firstValue4 = ByteVector.broadcast(SPECIES, values[12]);
+        ByteVector secondValue4 = ByteVector.broadcast(SPECIES, values[13]);
+        ByteVector thirdValue4 = ByteVector.broadcast(SPECIES, values[14]);
+        ByteVector firstValue5 = ByteVector.broadcast(SPECIES, values[15]);
+        ByteVector secondValue5 = ByteVector.broadcast(SPECIES, values[16]);
+        ByteVector thirdValue5 = ByteVector.broadcast(SPECIES, values[17]);
+        ByteVector firstValue6 = ByteVector.broadcast(SPECIES, values[18]);
+        ByteVector secondValue6 = ByteVector.broadcast(SPECIES, values[19]);
+        ByteVector thirdValue6 = ByteVector.broadcast(SPECIES, values[20]);
+        ByteVector firstValue7 = ByteVector.broadcast(SPECIES, values[21]);
+        ByteVector secondValue7 = ByteVector.broadcast(SPECIES, values[22]);
+        ByteVector thirdValue7 = ByteVector.broadcast(SPECIES, values[23]);
+        ByteVector firstMask = ByteVector.broadcast(SPECIES, filter.firstMask());
+        ByteVector secondMask = ByteVector.broadcast(SPECIES, filter.secondMask());
+        ByteVector thirdMask = ByteVector.broadcast(SPECIES, filter.thirdMask());
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
+            VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
+                    .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1))
+                    .or(literalMatches(first, second, third, firstValue2, secondValue2, thirdValue2))
+                    .or(literalMatches(first, second, third, firstValue3, secondValue3, thirdValue3))
+                    .or(literalMatches(first, second, third, firstValue4, secondValue4, thirdValue4))
+                    .or(literalMatches(first, second, third, firstValue5, secondValue5, thirdValue5))
+                    .or(literalMatches(first, second, third, firstValue6, secondValue6, thirdValue6))
+                    .or(literalMatches(first, second, third, firstValue7, secondValue7, thirdValue7));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    private static VectorMask<Byte> literalMatches(
+            ByteVector first,
+            ByteVector second,
+            ByteVector third,
+            ByteVector firstValue,
+            ByteVector secondValue,
+            ByteVector thirdValue)
+    {
+        return first.eq(firstValue).and(second.eq(secondValue)).and(third.eq(thirdValue));
+    }
+
     static byte[] buildNibbleTables(byte[] candidates)
     {
         if (candidates == null) {

@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -402,13 +403,16 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testDenseUtf8CandidatesFallBackToCompactSearch()
     {
-        String pattern = "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти";
+        // A one-letter literal followed by a broad class leaves too few narrow positions for a
+        // start literal filter.
+        String pattern = "[ШДИип][а-я]+[0-9]";
         Prog program = compile(pattern);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         Slice shortInput = Slices.utf8Slice("а".repeat(16 * 1024));
         Slice longInput = Slices.utf8Slice("а".repeat(64 * 1024));
 
         assertThat(dfa.canStartByteAcceleration()).isTrue();
+        assertThat(dfa.startLiteralFilter()).isNull();
         assertThat(dfa.canFixedDistanceByteAcceleration()).isFalse();
         assertThat(Dfa.search(program, shortInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
         assertThat(dfa.byteScanFallbackCount()).isZero();
@@ -438,6 +442,113 @@ public class TestDfaStartByteAcceleration
         assertThat(firstMatchDfa("^[a-z]+").canStartByteAcceleration()).isFalse();
         assertThat(firstMatchDfa("\\b[a-z]+").canStartByteAcceleration()).isFalse();
         assertThat(firstMatchDfa("[^a]b").canStartByteAcceleration()).isFalse();
+    }
+
+    @Test
+    public void testDenseLiteralStartsUseStartLiteralFilter()
+    {
+        // Text dense in the literals' lead byte passes the start set at every character but never
+        // passes the filter, so the scan stays productive.
+        Prog program = compile("Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти");
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(Dfa.search(program, Slices.utf8Slice("а".repeat(64 * 1024)), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
+        assertThat(dfa.startLiteralFilterScanCount()).isPositive();
+        assertThat(dfa.byteScanFallbackCount()).isZero();
+        // Rare start bytes already skip cheaply, two-byte literals leave no third position, and a
+        // one-byte literal followed by a broad class leaves too few narrow positions.
+        assertThat(firstMatchDfa("Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty").startLiteralFilter()).isNull();
+        assertThat(firstMatchDfa("(?i)ab|cd").startLiteralFilter()).isNull();
+        assertThat(firstMatchDfa("(?i)a[a-z]+|b[a-z]+").startLiteralFilter()).isNull();
+    }
+
+    @Test
+    public void testStartLiteralFilterVectorScannerMatchesScalarReference()
+    {
+        Random random = new Random(96);
+        for (String pattern : startLiteralFilterPatterns()) {
+            StartLiteralFilter filter = firstMatchDfa(pattern).startLiteralFilter();
+            for (int iteration = 0; iteration < 200; iteration++) {
+                byte[] text = literalText(random, pattern, 1 + random.nextInt(4_096));
+                int offset = random.nextInt(Math.min(8, text.length));
+                int length = random.nextInt(text.length - offset + 1);
+
+                int expected = -1;
+                for (int position = offset; position < offset + length; position++) {
+                    if (filter.accepts(text, position, offset + length)) {
+                        expected = position;
+                        break;
+                    }
+                }
+                assertThat(filter.find(text, offset, length))
+                        .as("pattern %s offset=%s length=%s", pattern, offset, length)
+                        .isEqualTo(expected);
+                assertThat(VectorByteSetScanner.findLiteralSet(text, offset, length, filter))
+                        .as("pattern %s offset=%s length=%s", pattern, offset, length)
+                        .isEqualTo(expected);
+            }
+
+            // The first bytes of one literal end a zero-filled window that ends the array: the only
+            // accepted position lands in the last lane of a full vector or at each offset of the
+            // scalar tail, and a scan that reads past the window fails.
+            byte[] literal = literals(pattern)[0].getBytes(StandardCharsets.UTF_8);
+            int span = filter.thirdOffset() + 1;
+            for (int end = span; end <= 200; end++) {
+                byte[] text = new byte[end];
+                System.arraycopy(literal, 0, text, end - span, span);
+                assertThat(filter.find(text, 0, end)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
+                assertThat(VectorByteSetScanner.findLiteralSet(text, 0, end, filter)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
+            }
+        }
+    }
+
+    @Test
+    public void testStartLiteralFilterSearchMatchesNfa()
+    {
+        Random random = new Random(97);
+        for (String pattern : startLiteralFilterPatterns()) {
+            Re2 re2 = Re2.compileWithoutScanPlanForTesting(Slices.utf8Slice(pattern), Re2.Options.defaults());
+            Prog program = re2.forwardProgramForDiagnostics();
+            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter()).as("pattern %s", pattern).isNotNull();
+
+            for (int trial = 0; trial < 20; trial++) {
+                byte[] body = literalText(random, pattern, 1_024 + random.nextInt(8 * 1_024));
+                int backingOffset = random.nextInt(8);
+                byte[] backing = new byte[backingOffset + body.length + random.nextInt(8)];
+                System.arraycopy(body, 0, backing, backingOffset, body.length);
+                Slice text = Slices.wrappedBuffer(backing, backingOffset, body.length);
+
+                List<Boundary> expected = nfaBoundaries(program, text);
+                assertThat(Dfa.countMatches(program, text, Prog.MatchKind.FIRST_MATCH))
+                        .as("count for pattern %s", pattern)
+                        .isEqualTo(expected.size());
+                assertThat(matcherBoundaries(re2.groupZeroMatcher(text, null)))
+                        .as("matches for pattern %s", pattern)
+                        .isEqualTo(expected);
+
+                int start = random.nextInt(128);
+                int end = text.length() - random.nextInt(128);
+                assertDfaMatchesNfa(program, text, start, end, Prog.MatchKind.FIRST_MATCH, pattern);
+                assertDfaMatchesNfa(program, text, start, end, Prog.MatchKind.LONGEST_MATCH, pattern);
+            }
+        }
+
+        // Trino folds the ligature ﬆ to "st", so its program reaches the filter with more paths,
+        // and the filter still stops at a match that begins with the ligature.
+        String pattern = "(?i)straße|strasse|masse";
+        Prog program = TrinoRegexp.compileWithoutScanPlanForTesting(Slices.utf8Slice(pattern)).re2().forwardProgramForDiagnostics();
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.startLiteralFilter()).isNotNull();
+        Slice text = Slices.utf8Slice(".".repeat(1_024) + "ﬆraße");
+        assertDfaMatchesNfa(program, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, pattern);
+        assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(text.length());
+        assertThat(dfa.startLiteralFilterScanCount()).isPositive();
+
+        // The path walk does not evaluate assertions, so a literal with one in its first bytes
+        // must not lose its matches to a filter built from the other literals.
+        pattern = "(?i)abc\\b def|ghi";
+        program = compile(pattern);
+        text = Slices.utf8Slice(".".repeat(4_096) + "abcdef abc def GHI");
+        assertDfaMatchesNfa(program, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, pattern);
     }
 
     @Test
@@ -860,6 +971,82 @@ public class TestDfaStartByteAcceleration
                 new FixedDistanceCase("(?:ab|cd){2}:[0-9]", "abcd:7"));
     }
 
+    // The 02-literal-alternate and name-alt rows, folds that add a multibyte path (Kelvin sign
+    // for k and long s for s), and two literals for the narrowest scanner.
+    private static List<String> startLiteralFilterPatterns()
+    {
+        return List.of(
+                "(?i)Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty",
+                "(?i)Sherlock|Holmes|Watson",
+                "(?i)Sher[a-z]+|Hol[a-z]+",
+                "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+                "(?i)Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+                "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
+                "(?i)kelvin|sky|kiss",
+                "(?i)Holmes|Watson");
+    }
+
+    // Text made of the pattern's literals in random case, prefixes of them of every length, some
+    // of which pass the filter but fail the match, and filler that shares their letters.
+    private static byte[] literalText(Random random, String pattern, int length)
+    {
+        String[] literals = literals(pattern);
+        StringBuilder text = new StringBuilder();
+        while (text.length() < length) {
+            String literal = literals[random.nextInt(literals.length)];
+            switch (random.nextInt(16)) {
+                case 0 -> text.append(randomCase(random, literal));
+                case 1, 2, 3 -> text.append(randomCase(random, literal.substring(0, 1 + random.nextInt(literal.length()))));
+                case 4, 5 -> text.append(" ");
+                default -> text.append(literal.charAt(random.nextInt(literal.length())));
+            }
+        }
+        return text.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    // The literals of a pattern from startLiteralFilterPatterns(), with each class read as "ock".
+    private static String[] literals(String pattern)
+    {
+        return pattern.replace("(?i)", "").replace("[a-z]+", "ock").split("\\|");
+    }
+
+    private static String randomCase(Random random, String literal)
+    {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < literal.length(); index++) {
+            char value = literal.charAt(index);
+            char lower = Character.toLowerCase(value);
+            result.append(switch (random.nextInt(4)) {
+                case 0 -> Character.toUpperCase(value);
+                case 1 -> lower == 'k' ? '\u212A' : lower == 's' ? '\u017F' : lower;
+                default -> lower;
+            });
+        }
+        return result.toString();
+    }
+
+    private static List<Boundary> nfaBoundaries(Prog program, Slice text)
+    {
+        List<Boundary> boundaries = new ArrayList<>();
+        int[] groups = new int[2];
+        int position = 0;
+        while (Nfa.search(program, text, position, text.length(), false, Prog.MatchKind.FIRST_MATCH, groups)) {
+            // The NFA reports offsets from the search start.
+            boundaries.add(new Boundary(position + groups[0], position + groups[1]));
+            position += groups[1];
+        }
+        return boundaries;
+    }
+
+    private static List<Boundary> matcherBoundaries(RegexpMatcher matcher)
+    {
+        List<Boundary> boundaries = new ArrayList<>();
+        while (matcher.find()) {
+            boundaries.add(new Boundary(matcher.start(), matcher.end()));
+        }
+        return boundaries;
+    }
+
     private static void await(CountDownLatch latch)
     {
         try {
@@ -874,4 +1061,6 @@ public class TestDfaStartByteAcceleration
     private record FixedDistanceCase(String pattern, String match) {}
 
     private record MixedSetCase(String pattern, String match) {}
+
+    private record Boundary(int start, int end) {}
 }
