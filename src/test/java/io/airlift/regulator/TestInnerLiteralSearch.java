@@ -146,6 +146,46 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testTransparentStartLiteralAgreesWithOrdinaryEngine()
+    {
+        // Each language's engines agree on a literal behind a leading assertion, which feeds the
+        // candidate cursor, or the group-zero NFA's skip where the DFA cannot run the assertion.
+        // Every language judges its own line terminators and word characters at each candidate.
+        List<String> patterns = List.of(
+                "(?m)^Sherlock Holmes|Sherlock Holmes$",
+                "(?m)^ab|ab$",
+                "(?m)^ab",
+                "\\bab",
+                "\\Bab",
+                "(?m)^Sherlock \\w+",
+                "\\bHolmes[a-z]*");
+        List<Slice> texts = transparentStartLiteralTexts();
+        for (Language language : Language.values()) {
+            List<String> languagePatterns = new ArrayList<>(patterns);
+            switch (language) {
+                case JAVA -> languagePatterns.add("(?dm)^ab|ab$");
+                case RUST, RUST_BYTES, RUST_BYTES_ASCII -> languagePatterns.add("(?mR)^ab|ab$");
+                default -> {}
+            }
+            for (String pattern : languagePatterns) {
+                // An alternative that never matches, but that the literal walk reads as empty, leaves
+                // the literal out of the expected engine.
+                String ordinary = "(?:" + pattern + ")|\\b\\B";
+                assertThat(language.re2(pattern).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, pattern).isNotNull();
+                assertThat(language.re2(ordinary).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, ordinary).isNull();
+                Engine actual = language.compile(pattern);
+                Engine expected = language.compile(ordinary);
+                for (Slice text : texts) {
+                    String description = "%s %s %s".formatted(language, pattern, text.toStringUtf8());
+                    assertThat(actual.spans(text)).as(description).isEqualTo(expected.spans(text));
+                    assertThat(actual.count(text)).as(description).isEqualTo(expected.count(text));
+                    assertThat(actual.find(text)).as(description).isEqualTo(expected.find(text));
+                }
+            }
+        }
+    }
+
+    @Test
     public void testAgreesWithOrdinaryEngineInWindows()
     {
         // A ranged find keeps the whole Slice as assertion context, so its closing \b sees the
@@ -281,6 +321,37 @@ public class TestInnerLiteralSearch
         return texts;
     }
 
+    private static List<Slice> transparentStartLiteralTexts()
+    {
+        List<Slice> texts = new ArrayList<>();
+        // Each line terminator before and after the literals, which also start and end the text,
+        // and a final terminator.
+        for (String terminator : List.of("\n", "\r\n", "\r", "\u0085", "\u2028", "\u2029")) {
+            for (String literal : List.of("ab", "Sherlock Holmes")) {
+                String line = literal + " x" + literal + terminator + literal + terminator + "Holmes" + literal + "s " + literal;
+                texts.add(utf8Slice(line + FILLER + terminator + line));
+                texts.add(utf8Slice(line + terminator + FILLER + line + terminator));
+            }
+        }
+        String[] tokens = {"ab", "Sherlock Holmes", "Sherlock", "Holmes", " ", "\n", "\r\n", "\r", "\u0085", "\u2028", "\u2029", "a", "b", "x", "_", "é"};
+        Random random = new Random(20261101);
+        for (int textIndex = 0; textIndex < 200; textIndex++) {
+            DynamicSliceOutput output = new DynamicSliceOutput(256);
+            int length = random.nextInt(240);
+            while (output.size() < length) {
+                if (random.nextInt(30) == 0) {
+                    // Malformed UTF-8: a bare continuation byte or a truncated sequence.
+                    output.writeBytes(random.nextBoolean() ? new byte[] {(byte) 0x80} : new byte[] {(byte) 0xE2, (byte) 0x80});
+                }
+                else {
+                    output.writeBytes(tokens[random.nextInt(tokens.length)].getBytes(UTF_8));
+                }
+            }
+            texts.add(output.slice());
+        }
+        return texts;
+    }
+
     private static InnerLiteralSearch innerLiteralSearch(String pattern)
     {
         return RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).re2().innerLiteralSearchForDiagnostics();
@@ -294,14 +365,19 @@ public class TestInnerLiteralSearch
 
         Engine compile(String pattern)
         {
+            return this == TRINO ? trinoEngine(TrinoRegexp.compile(utf8Slice(pattern))) : regexpEngine(re2(pattern));
+        }
+
+        Re2 re2(String pattern)
+        {
             Slice slice = utf8Slice(pattern);
             return switch (this) {
-                case RE2 -> regexpEngine(Re2.compile(slice));
-                case JAVA -> regexpEngine(JavaRegexp.compile(slice).re2());
-                case TRINO -> trinoEngine(TrinoRegexp.compile(slice));
-                case RUST -> regexpEngine(RustRegexp.compile(slice).re2());
-                case RUST_BYTES -> regexpEngine(RustRegexp.compile(slice, RUST_BYTES_OPTIONS).re2());
-                case RUST_BYTES_ASCII -> regexpEngine(RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false)).re2());
+                case RE2 -> Re2.compile(slice);
+                case JAVA -> JavaRegexp.compile(slice).re2();
+                case TRINO -> TrinoRegexp.compile(slice).re2();
+                case RUST -> RustRegexp.compile(slice).re2();
+                case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS).re2();
+                case RUST_BYTES_ASCII -> RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false)).re2();
             };
         }
     }

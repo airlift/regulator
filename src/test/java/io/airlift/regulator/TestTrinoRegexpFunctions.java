@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 import io.airlift.slice.Slices;
@@ -380,6 +381,32 @@ public class TestTrinoRegexpFunctions
         assertThat(fallback.contains(utf8("xxlitera lyy"))).isFalse();
         assertThat(fallback.count(source)).isEqualTo(2);
         assertThat(fallback.extract(source)).isEqualTo(utf8("xxliteralyy"));
+    }
+
+    @Test
+    public void testTransparentStartLiteralMemoryIsReservedFromLoweredDfa()
+    {
+        // Trino's final-line $ keeps the semantic program off the DFA, so the lowered boolean
+        // program holds the forward DFA budget and the literal reserves its memory from it. The
+        // baseline's lowered program has the same size and no common literal, so the two DFA
+        // allowances differ only by the literal's charge. The literal is kept only where that
+        // charge leaves both lowered DFAs their minimum, and there the lowered DFA still runs.
+        Prog program = TrinoRegexp.compile(utf8("^ab|ab$")).re2().forwardProgramForDiagnostics();
+        Slice text = utf8("x".repeat(100) + "ab");
+        long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
+        List<Boolean> outcomes = new ArrayList<>();
+        for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
+            TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
+            Prog baseline = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2().booleanProgramForDiagnostics();
+            Re2 regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();
+            Prog lowered = regexp.booleanProgramForDiagnostics();
+            boolean keeps = (baseline.dfaMemory() - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(lowered, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            assertThat(regexp.forwardProgramForDiagnostics().transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
+            assertThat(baseline.dfaMemory() - lowered.dfaMemory()).as("reservation at %s", maxMemory).isEqualTo(keeps ? reservation : 0);
+            assertThat(keeps ? Dfa.search(lowered, text, false, Prog.MatchKind.FIRST_MATCH, false) : text.length()).as("lowered DFA at %s", maxMemory).isEqualTo(text.length());
+            outcomes.add(keeps);
+        }
+        assertThat(outcomes).contains(false, true);
     }
 
     @Test

@@ -22,8 +22,9 @@ import static java.util.Objects.requireNonNull;
 /// [JavaRegexp.Options#setByteFrequencies], and [RustRegexp.Options#setByteFrequencies]
 /// select the distribution used during compilation; a compiled pattern keeps only the chosen probe
 /// offsets. The options default to [#uniform()], which gives every byte the same
-/// probability, so every literal scan probes its first byte. The start literal filter of a
-/// pattern that begins with a few literals ignores the option and always uses [#englishText()].
+/// probability, so every literal scan that chooses a probe probes its first byte. The start
+/// literal filter of a pattern that begins with a few literals ignores the option and always
+/// uses [#englishText()].
 ///
 /// A scan for a literal stops at every occurrence of its probe byte, so probing a rare byte
 /// hands fewer candidates to verification. The probe leaves the first byte only for a later
@@ -149,8 +150,9 @@ public final class ByteFrequencies
         this.probabilities = probabilities;
     }
 
-    /// Returns a distribution in which every byte is equally common, so every literal scan probes
-    /// its first byte. Compile options use it unless the caller chooses another.
+    /// Returns a distribution in which every byte is equally common, so every literal scan that
+    /// chooses a probe probes its first byte. Compile options use it unless the caller chooses
+    /// another.
     public static ByteFrequencies uniform()
     {
         return UNIFORM;

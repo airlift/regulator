@@ -73,6 +73,9 @@ public final class RegexpMatcher
     // The consecutive searches of the current input whose DFA failed, in a program whose DFA can
     // quit on a byte outside ASCII. See Re2.DFA_QUIT_STREAK_LIMIT.
     private int dfaQuitStreak;
+    // Set when the current find's candidate cursor quit, so its fallback skips the DFA: the quit
+    // already counted toward the streak.
+    private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
     RegexpMatcher(Re2 pattern, Slice input)
@@ -172,6 +175,7 @@ public final class RegexpMatcher
         retryStart = 0;
         previousMatchEnd = -1;
         dfaQuitStreak = 0;
+        candidateStartCursorQuit = false;
         invalidateMatch();
     }
 
@@ -245,6 +249,7 @@ public final class RegexpMatcher
 
     private boolean findGeneral()
     {
+        candidateStartCursorQuit = false;
         int regionLength = regionLength();
         if (nextFindStart > regionLength) {
             invalidateMatch();
@@ -280,7 +285,10 @@ public final class RegexpMatcher
             return true;
         }
 
-        boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled();
+        // After the quit streak reaches its limit, a cursor whose DFA can quit is skipped with the
+        // DFA until the next reset.
+        boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled() &&
+                !(dfaQuitStreak >= Re2.DFA_QUIT_STREAK_LIMIT && candidateStartCursor.quitsOnNonAscii());
         // Where the inner literal lies matters only to a cursor the inner literal search would replace.
         boolean searchesInnerLiteral = (candidateCursorEnabled || enableGroupZeroForwardCursor) && pattern.searchesInnerLiteral(input, regionStart + nextFindStart, regionEnd);
         if (!searchesInnerLiteral && candidateCursorEnabled) {
@@ -291,13 +299,20 @@ public final class RegexpMatcher
                     regionEnd,
                     regionStart + nextFindStart);
             if (candidateBoundary >= 0) {
+                // A completed DFA search ends the streak, as in Re2.
+                dfaQuitStreak = 0;
                 groups[0] = (int) (candidateBoundary >>> 32);
                 groups[1] = (int) candidateBoundary;
                 setMatchAndAdvance(groups[0], groups[1]);
                 return true;
             }
             if (candidateBoundary == Dfa.SEARCH_NO_MATCH) {
+                dfaQuitStreak = 0;
                 return failFind();
+            }
+            if (candidateBoundary == Dfa.CANDIDATE_SEARCH_QUIT) {
+                dfaQuitStreak++;
+                candidateStartCursorQuit = true;
             }
         }
 
@@ -673,6 +688,11 @@ public final class RegexpMatcher
         this.dfaQuitStreak = dfaQuitStreak;
     }
 
+    boolean candidateStartCursorQuit()
+    {
+        return candidateStartCursorQuit;
+    }
+
     boolean nfaWorkspaceInitializedForDiagnostics()
     {
         return nfaWorkspace != null;
@@ -681,6 +701,11 @@ public final class RegexpMatcher
     boolean candidateStartCursorEnabledForDiagnostics()
     {
         return candidateStartCursor != null && candidateStartCursor.enabled();
+    }
+
+    boolean candidateStartCursorSearchesLiteralForDiagnostics()
+    {
+        return candidateStartCursor != null && candidateStartCursor.searchesLiteral();
     }
 
     boolean groupZeroForwardCursorEnabledForDiagnostics()

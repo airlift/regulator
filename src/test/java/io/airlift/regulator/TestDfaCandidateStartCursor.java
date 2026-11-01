@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
@@ -25,10 +27,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDfaCandidateStartCursor
 {
+    // Longer than the literal cursor's minimum window, with words, spaces, and punctuation.
+    private static final String FILLER_UNIT = "filler text, ";
+    private static final String FILLER = FILLER_UNIT.repeat(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES / FILLER_UNIT.length() + 1);
+
     @Test
     public void testCandidateCursorReturnsBoundariesWithoutReverseProgram()
     {
@@ -117,13 +124,32 @@ public class TestDfaCandidateStartCursor
         RegexpMatcher control = pattern.matcher(input.slice(9, 9));
 
         assertThat(candidate.candidateStartCursorEnabledForDiagnostics()).isTrue();
-        assertThat(boundaries(candidate)).isEqualTo(
-                boundaries(control).stream()
-                        .map(boundary -> new Boundary(boundary.start() + 9, boundary.end() + 9))
-                        .toList());
+        assertThat(boundaries(candidate)).isEqualTo(shifted(boundaries(control), 9));
 
         byte[] malformed = {'x', 'a', (byte) 0xFF, 'b', 'y'};
         assertCandidateAgrees("a+|b+", Slices.wrappedBuffer(malformed));
+
+        // A region is its own context, so a line start or word boundary at its first byte holds
+        // whether the region starts after LF or mid-line.
+        Slice lines = utf8(FILLER + "\nab x\nab" + FILLER + "xab\nab");
+        for (String expression : List.of("(?m)^ab", "\\bab", "\\Bab", "(?m)^ab|ab$")) {
+            Re2 linePattern = compile(expression);
+            for (int regionStart : List.of(FILLER.length() + 1, FILLER.length() + 2)) {
+                RegexpMatcher lineCandidate = linePattern.groupZeroMatcher(lines, null).reset(lines, regionStart, lines.length());
+                List<Boundary> expected = ordinaryBoundaries(expression, lines.slice(regionStart, lines.length() - regionStart));
+                assertThat(lineCandidate.candidateStartCursorSearchesLiteralForDiagnostics()).as(expression).isTrue();
+                assertThat(boundaries(lineCandidate)).as("%s at %s", expression, regionStart).isEqualTo(shifted(expected, regionStart));
+            }
+        }
+
+        // Truncated UTF-8 sequences before the literal are non-word bytes that start no line.
+        byte[] filler = FILLER.getBytes(UTF_8);
+        for (byte[] truncated : List.of(new byte[] {(byte) 0xC3}, new byte[] {(byte) 0xE2, (byte) 0x80})) {
+            Slice text = new DynamicSliceOutput(filler.length + 4).appendBytes(filler).appendBytes(truncated).appendBytes("ab".getBytes(UTF_8)).slice();
+            for (String expression : List.of("(?m)^ab|ab$", "\\bab|ab\\b", "\\Bab|ab\\B")) {
+                assertLiteralCandidateAgrees(expression, text);
+            }
+        }
 
         Slice multibyteStart = utf8("x💰a");
         Re2 insideCodePoint = compile("(a+|💰+)");
@@ -188,6 +214,80 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
+    public void testLiteralCandidateCursorVerifiesAnchorsAtCandidates()
+    {
+        // Each candidate's start state comes from the byte before it, so a leading line or word
+        // assertion is judged at a line start, mid-line, after LF and CR LF, before them, and at
+        // the end of the text. The tails of the last two patterns follow the literal. Each
+        // alternation keeps the inner literal search out.
+        for (LiteralCase literalCase : List.of(
+                new LiteralCase("(?m)^Sherlock Holmes|Sherlock Holmes$", "Sherlock Holmes"),
+                new LiteralCase("(?m)^ab|ab\\b", "ab"),
+                new LiteralCase("\\bab|ab\\b", "ab"),
+                new LiteralCase("\\Bab|ab\\B", "ab"),
+                new LiteralCase("(?m)^ab|ab$", "ab"),
+                new LiteralCase("(?m)^Sherlock \\w+|Sherlock Holmes$", "Sherlock Holmes"),
+                new LiteralCase("\\bHolmes[a-z]*|Holmes$", "Holmes"))) {
+            String literal = literalCase.literal();
+            List<String> texts = List.of(
+                    literal + FILLER,
+                    FILLER + "x" + literal + "x " + literal + "s" + FILLER,
+                    FILLER + "\n" + literal + FILLER,
+                    FILLER + "\r\n" + literal + FILLER,
+                    FILLER + literal + "\n" + FILLER,
+                    FILLER + literal + "\r\n" + FILLER,
+                    FILLER + literal,
+                    literal + "\n" + FILLER + "x" + literal + "\r\n" + literal + " " + literal + "\n" + FILLER + literal);
+            for (String text : texts) {
+                assertLiteralCandidateAgrees(literalCase.expression(), utf8(text));
+            }
+        }
+        // The literal occurs mid-line, right after a failed line-start candidate.
+        assertLiteralCandidateAgrees("(?m)^aab", utf8(FILLER + "\naaab"));
+    }
+
+    @Test
+    public void testLiteralCandidateCursorKeepsProseAndFallsBackOnDenseCandidates()
+    {
+        // A mid-line candidate of a line start fails in its start state, so prose such as this
+        // costs one unit of work per candidate beyond the bytes scanned and stays within the
+        // budget, without the reverse program. The literal is near every search start, so the
+        // inner literal search leaves the searches to the cursor.
+        Re2 prosePattern = compile("(?m)^the");
+        Slice prose = utf8("the theme of the other thesis then, the theory there; ".repeat(40) + "\nthe end");
+        RegexpMatcher proseMatcher = prosePattern.groupZeroMatcher(prose, null);
+
+        assertThat(boundaries(proseMatcher)).isEqualTo(ordinaryBoundaries("(?m)^the", prose));
+        assertThat(proseMatcher.candidateStartRouteCountForDiagnostics()).isEqualTo(2);
+        assertThat(proseMatcher.candidateStartFallbackCountForDiagnostics()).isZero();
+        assertThat(prosePattern.isReverseProgramComputed()).isFalse();
+
+        // A candidate whose verification reads past the next one exhausts the budget, and the
+        // fallback finds the same matches. An alternation keeps the inner literal search out.
+        Re2 densePattern = compile("\\Bab[a-z]*X|ab$");
+        Slice dense = utf8(("ab".repeat(30) + " ").repeat(20) + "xabX");
+        RegexpMatcher denseMatcher = densePattern.groupZeroMatcher(dense, null);
+
+        assertThat(boundaries(denseMatcher)).isEqualTo(ordinaryBoundaries("\\Bab[a-z]*X|ab$", dense));
+        assertThat(denseMatcher.candidateStartRouteCountForDiagnostics()).isZero();
+        assertThat(denseMatcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
+        assertThat(denseMatcher.candidateStartCursorEnabledForDiagnostics()).isFalse();
+    }
+
+    @Test
+    public void testLiteralCandidateCursorLeavesShortWindowsToExistingMatcher()
+    {
+        Re2 pattern = compile("(?m)^ab");
+        Slice input = utf8("x\nab\nab ab");
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+
+        assertThat(boundaries(matcher)).containsExactly(new Boundary(2, 4), new Boundary(5, 7));
+        assertThat(matcher.candidateStartRouteCountForDiagnostics()).isZero();
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isZero();
+        assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
+    }
+
+    @Test
     public void testIneligiblePatternsUseExistingMatcher()
     {
         assertThat(compile("a*").groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).isFalse();
@@ -195,6 +295,62 @@ public class TestDfaCandidateStartCursor
         assertThat(compile("a+$").groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).isFalse();
         assertThat(compile("a{2}").groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).isFalse();
         assertThat(compile("\\ba+").groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).isFalse();
+        // A one-byte literal, a folded literal, no common literal, a possibly empty match, a plain
+        // literal, and an end anchor leave the literal cursor out. The DFA runs RE2's assertions,
+        // so no group-zero NFA skips to the literal either, and compile keeps none.
+        for (String expression : List.of("(?m)^a", "(?i)\\bfoo", "(?m)^foo|bar", "\\bfoo|", "foo", "\\bfoo$")) {
+            Re2 pattern = compile(expression);
+            assertThat(pattern.forwardProgramForDiagnostics().transparentStartLiteral()).as(expression).isNull();
+            assertThat(pattern.groupZeroMatcher(utf8("aaa"), null).candidateStartCursorEnabledForDiagnostics()).as(expression).isFalse();
+        }
+    }
+
+    @Test
+    public void testLiteralMemoryIsReservedFromForwardDfa()
+    {
+        // The cursor serves only first-match searches, so a longest-match compile keeps no literal,
+        // and its forward DFA allowance is the first-match compile's before the literal's charge.
+        // The literal is kept only where that charge leaves both forward DFAs their minimum.
+        Slice expression = utf8("(?m)^ab|ab$");
+        Re2 pattern = Re2.compile(expression);
+        Prog program = pattern.forwardProgramForDiagnostics();
+        long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
+        assertThat(pattern.booleanProgramForDiagnostics()).isNull();
+        List<Boolean> outcomes = new ArrayList<>();
+        for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
+            Prog longest = Re2.compile(expression, Re2.Options.defaults().setLongestMatch(true).setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+            Prog firstMatch = Re2.compile(expression, Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+            boolean keeps = (longest.dfaMemory() - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(longest, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            assertThat(firstMatch.transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
+            assertThat(longest.dfaMemory() - firstMatch.dfaMemory()).as("reservation at %s", maxMemory).isEqualTo(keeps ? reservation : 0);
+            outcomes.add(keeps);
+        }
+        assertThat(outcomes).contains(false, true);
+    }
+
+    private static void assertLiteralCandidateAgrees(String expression, Slice input)
+    {
+        RegexpMatcher candidate = compile("(" + expression + ")").groupZeroMatcher(input, null);
+        List<Boundary> expected = ordinaryBoundaries(expression, input);
+
+        String description = expression + " on " + input.toStringUtf8();
+        assertThat(candidate.candidateStartCursorSearchesLiteralForDiagnostics()).as(description).isTrue();
+        assertThat(boundaries(candidate)).as(description).isEqualTo(expected);
+        assertThat(candidate.candidateStartFallbackCountForDiagnostics()).as(description).isZero();
+        assertThat(candidate.candidateStartRouteCountForDiagnostics() > 0).as(description).isEqualTo(!expected.isEmpty());
+    }
+
+    // A capturing matcher takes the ordinary path rather than the candidate cursor.
+    private static List<Boundary> ordinaryBoundaries(String expression, Slice input)
+    {
+        RegexpMatcher control = compile("(" + expression + ")").matcher(input);
+        assertThat(control.candidateStartCursorEnabledForDiagnostics()).isFalse();
+        return boundaries(control);
+    }
+
+    private static List<Boundary> shifted(List<Boundary> boundaries, int offset)
+    {
+        return boundaries.stream().map(boundary -> new Boundary(boundary.start() + offset, boundary.end() + offset)).toList();
     }
 
     private static void assertCandidateAgrees(String expression, String input)
@@ -243,4 +399,6 @@ public class TestDfaCandidateStartCursor
     }
 
     private record Boundary(int start, int end) {}
+
+    private record LiteralCase(String expression, String literal) {}
 }

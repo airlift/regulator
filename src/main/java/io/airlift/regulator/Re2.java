@@ -15,7 +15,9 @@ package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 
 import java.util.Arrays;
 import java.util.Map;
@@ -128,7 +130,7 @@ public sealed class Re2
     // a program whose DFA can quit on a byte outside ASCII, the matcher's later searches of that
     // input skip the DFA. Text that makes such a DFA quit in one search usually does so in the
     // next, and each quit costs a DFA start before the fallback engines run.
-    private static final int DFA_QUIT_STREAK_LIMIT = 4;
+    static final int DFA_QUIT_STREAK_LIMIT = 4;
 
     // The first-byte prefix scan restarts its word scan after each false candidate, which on rows
     // shorter than this many bytes costs more than the substring search.
@@ -1125,6 +1127,25 @@ public sealed class Re2
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSearch.estimatedRetainedSize());
             booleanPlans = booleanPlans.withLiteralSearch(literalSearch);
         }
+        // The literal every match begins with behind a leading assertion. The candidate cursor
+        // searches for it before verifying each occurrence, and when the DFA cannot run the
+        // assertions, the group-zero NFA skips to it instead. Its search is built here, never on
+        // first match, and reserves its memory from the program that holds the forward DFA
+        // budget: the lowered program, when there is one. A pattern neither can serve keeps no
+        // literal, and its DFA keeps the memory. A pattern whose reservation would leave that
+        // program's DFAs too little to initialize also keeps no literal.
+        byte[] transparentStartLiteral = searchesTransparentStartLiteral(booleanPlans, longestMatch, requiredPrefix, semanticProgram)
+                ? semanticProgram.buildTransparentStartLiteral()
+                : null;
+        if (transparentStartLiteral != null) {
+            LiteralSearchKernel transparentStartLiteralSearch = new LiteralSearchKernel(Slices.wrappedBuffer(transparentStartLiteral));
+            long transparentStartLiteralSize = transparentStartLiteralSearch.estimatedRetainedSize() + SizeOf.sizeOf(transparentStartLiteral);
+            Prog budgetProgram = loweredBooleanProgram == null ? semanticProgram : loweredBooleanProgram.program();
+            if (budgetProgram.leavesDfaMinimum(transparentStartLiteralSize)) {
+                budgetProgram.setDfaMemory(budgetProgram.dfaMemory() - transparentStartLiteralSize);
+                semanticProgram.configureTransparentStartLiteral(transparentStartLiteral, transparentStartLiteralSearch);
+            }
+        }
         // The regex crate's Aho-Corasick route for large literal alternations, which the forward
         // DFA's candidate starts and the reverse DFA do not scale to. Trino routes every literal
         // alternation itself, and the automaton reports leftmost-first matches only.
@@ -1941,18 +1962,43 @@ public sealed class Re2
 
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
-        if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||
-                booleanPlans.scanPlan() != null ||
-                longestMatch ||
-                requiredPrefix != null ||
-                partialProg.anchorStart() ||
-                partialProg.anchorEnd() ||
-                partialProg.canMatchEmpty() ||
-                partialProg.hasEmptyWidthAssertions() ||
-                MatchLength.fixed(matchLength) >= 0) {
+        if (excludesCandidateStartCursor(booleanPlans, usesCompactBoundedCharacterClassForDiagnostics(), longestMatch, requiredPrefix, partialProg)) {
+            return null;
+        }
+        // Every match of a program with a transparent start literal starts at an occurrence of it,
+        // so the cursor needs neither a variable length nor a program free of assertions. The DFA
+        // must run the assertions; otherwise the group-zero NFA skips to the literal instead.
+        if (partialProg.transparentStartLiteral() != null) {
+            return partialProg.hasDfaUnsupportedAssertions() ? null : Dfa.createLiteralCandidateStartCursor(partialProg);
+        }
+        if (MatchLength.fixed(matchLength) >= 0 || partialProg.hasEmptyWidthAssertions()) {
             return null;
         }
         return Dfa.createCandidateStartCursor(partialProg);
+    }
+
+    /// Whether the pattern's plans or options rule out every candidate cursor for `program`.
+    private static boolean excludesCandidateStartCursor(BooleanPlans booleanPlans, boolean compactBoundedCharacterClass, boolean longestMatch, byte[] requiredPrefix, Prog program)
+    {
+        return booleanPlans.disjointSuffixRepeatMatcher() != null || compactBoundedCharacterClass ||
+                booleanPlans.scanPlan() != null ||
+                longestMatch ||
+                requiredPrefix != null ||
+                program.anchorStart() ||
+                program.anchorEnd() ||
+                program.canMatchEmpty();
+    }
+
+    /// Whether a search can use the program's transparent start literal: the candidate cursor,
+    /// when the DFA runs the program's assertions, or else the group-zero NFA's skip. Only an
+    /// unanchored search takes that skip, and a required prefix anchors every search. [#build],
+    /// its only caller, returns before this for a pattern the compact class counter answers.
+    private static boolean searchesTransparentStartLiteral(BooleanPlans booleanPlans, boolean longestMatch, byte[] requiredPrefix, Prog program)
+    {
+        if (program.hasDfaUnsupportedAssertions()) {
+            return requiredPrefix == null;
+        }
+        return !excludesCandidateStartCursor(booleanPlans, false, longestMatch, requiredPrefix, program);
     }
 
     Dfa.GroupZeroForwardCursor createGroupZeroForwardCursor()
@@ -2951,12 +2997,13 @@ public sealed class Re2
         if (anchorMode == Anchor.UNANCHORED) {
             // A matcher counts the searches whose DFA failed in a program whose DFA can quit. The
             // count is cleared before the DFA runs, so a search that completes ends the streak,
-            // and a failure below sets it from the count read here.
+            // and a failure below sets it from the count read here. A search whose candidate
+            // cursor quit has already counted, so it skips the DFA.
             boolean dfaCanQuit = prog.dfaQuitsOnNonAscii();
             int previousDfaQuits = 0;
             if (dfaCanQuit && !dfaSearchSkippedOrFailed) {
                 previousDfaQuits = dfaQuitStreak(workspaces);
-                if (previousDfaQuits >= DFA_QUIT_STREAK_LIMIT) {
+                if (previousDfaQuits >= DFA_QUIT_STREAK_LIMIT || candidateStartCursorQuit(workspaces)) {
                     dfaSearchSkippedOrFailed = true;
                 }
                 else {
@@ -3561,6 +3608,11 @@ public sealed class Re2
         if (workspaces instanceof RegexpMatcher matcher) {
             matcher.setDfaQuitStreak(dfaQuitStreak);
         }
+    }
+
+    private static boolean candidateStartCursorQuit(MatchWorkspaces workspaces)
+    {
+        return workspaces instanceof RegexpMatcher matcher && matcher.candidateStartCursorQuit();
     }
 
     private static void shiftGroupOffsets(int[] groupOffsets, int delta)

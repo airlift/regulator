@@ -57,6 +57,10 @@ final class Prog
     private static final int MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET = 16;
     // Bounds the work of the start literal filter's path walk, before paths merge into groups.
     private static final int MAXIMUM_START_POSITION_PATHS = 128;
+    // The literal search needs at least two bytes; a one-byte literal keeps ordinary matching.
+    private static final int MINIMUM_TRANSPARENT_START_LITERAL_BYTES = 2;
+    // Each overlapping occurrence of a longer literal re-reads it, as in InnerLiteralSearch.
+    private static final int MAXIMUM_TRANSPARENT_START_LITERAL_BYTES = 64;
 
     private static final int[] WORD_RANGES = {48, 57, 65, 90, 95, 95, 97, 122};
     private static final int[] NON_WORD_RANGES = {0, 47, 58, 64, 91, 94, 96, 96, 123, 255};
@@ -383,6 +387,16 @@ final class Prog
     private int prefixCheckOffset;
     private long prefixProbeBroadcastMask;
     private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
+
+    // The literal every match begins with behind a leading assertion, and its search; see
+    // buildTransparentStartLiteral. Both are null unless Re2 compilation configures them.
+    private byte[] transparentStartLiteral;
+    private LiteralSearchKernel transparentStartLiteralSearch;
+    // Whether an unanchored group-zero NFA search with no live thread skips to the next possible
+    // match start: with the prefix acceleration, or with the transparent start literal of a
+    // program whose assertions the DFA cannot run. One field keeps the NFA's test to a single
+    // load. The capture NFA and BitState still skip only with the prefix acceleration.
+    private boolean skipsToStartCandidate;
 
     // Required prefix for instant rejection (extracted via requiredPrefix()).
     // If pattern is "^literal..." and text doesn't contain the literal, reject immediately.
@@ -755,6 +769,8 @@ final class Prog
                 }
                 case EMPTY_WIDTH -> {
                     // Skipping input would lose the previous-byte context needed by the assertion.
+                    // A search for the buildTransparentStartLiteral literal instead verifies each
+                    // occurrence from the byte before it.
                     return null;
                 }
                 case ALT, ALT_MATCH -> {
@@ -903,6 +919,163 @@ final class Prog
     }
 
     private record StartPositionPath(long[] byteSets, int instructionId) {}
+
+    /// Returns the literal of [#MINIMUM_TRANSPARENT_START_LITERAL_BYTES] to
+    /// [#MAXIMUM_TRANSPARENT_START_LITERAL_BYTES] bytes that begins every match of a program with
+    /// an assertion before its first byte, or `null`. The walk reads
+    /// assertions, captures, and no-ops as matching the empty string, as the Rust crate's literal
+    /// extraction reads its look-arounds. Every path must consume the same unfolded byte at each
+    /// step before it can match; the literal ends where the paths disagree, where one can match,
+    /// or at the maximum. Assertions take no width, so every match starts at an occurrence of the
+    /// literal, and a search that verifies each occurrence from a start state computed from the
+    /// byte before it loses none of the context [#buildStartByteCandidates] keeps by refusing to
+    /// skip input. The early return adds a check for any assertion to the guard of
+    /// [#buildStartPositionByteSets], and a program without an assertion before its first byte is
+    /// rejected after the first step, so it keeps the start byte machinery.
+    byte[] buildTransparentStartLiteral()
+    {
+        // A program without assertions returns before the walk allocates its program-sized arrays.
+        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0 || getInstCount(InstOp.EMPTY_WIDTH) == 0) {
+            return null;
+        }
+
+        byte[] literal = new byte[MAXIMUM_TRANSPARENT_START_LITERAL_BYTES];
+        int literalLength = 0;
+        int[] currentInstructions = new int[size()];
+        int currentInstructionCount = 1;
+        currentInstructions[0] = start();
+        int[] nextInstructions = new int[size()];
+        boolean[] visited = new boolean[size()];
+        int[] stack = new int[size() * 3 + 1];
+        while (literalLength < MAXIMUM_TRANSPARENT_START_LITERAL_BYTES) {
+            Arrays.fill(visited, false);
+            int literalByte = -1;
+            int nextInstructionCount = 0;
+            boolean assertionBeforeByte = false;
+            boolean pathsEnd = false;
+            for (int currentInstructionIndex = 0; currentInstructionIndex < currentInstructionCount && !pathsEnd; currentInstructionIndex++) {
+                int stackPointer = 0;
+                stack[stackPointer++] = currentInstructions[currentInstructionIndex];
+                while (stackPointer > 0 && !pathsEnd) {
+                    int instructionId = stack[--stackPointer];
+                    if (instructionId <= 0 || instructionId >= size() || visited[instructionId]) {
+                        continue;
+                    }
+                    visited[instructionId] = true;
+
+                    Inst instruction = inst(instructionId);
+                    switch (instruction.opcode()) {
+                        case BYTE_RANGE -> {
+                            // A folded range matches the upper case of a lower-case letter too.
+                            boolean singleByte = instruction.lo() == instruction.hi() && (!instruction.foldCase() || instruction.lo() < 'a' || instruction.lo() > 'z');
+                            if (!singleByte || (literalByte >= 0 && literalByte != instruction.lo())) {
+                                pathsEnd = true;
+                                break;
+                            }
+                            literalByte = instruction.lo();
+                            nextInstructions[nextInstructionCount++] = instruction.out();
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                        case EMPTY_WIDTH -> {
+                            assertionBeforeByte = true;
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case CAPTURE, NOP -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case ALT, ALT_MATCH -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out1();
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case MATCH -> pathsEnd = true;
+                        case FAIL -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if (literalLength == 0 && !assertionBeforeByte) {
+                return null;
+            }
+            if (pathsEnd || literalByte < 0) {
+                break;
+            }
+            literal[literalLength++] = (byte) literalByte;
+            int[] instructions = currentInstructions;
+            currentInstructions = nextInstructions;
+            nextInstructions = instructions;
+            currentInstructionCount = nextInstructionCount;
+        }
+        return literalLength < MINIMUM_TRANSPARENT_START_LITERAL_BYTES ? null : Arrays.copyOf(literal, literalLength);
+    }
+
+    /// Retains the literal [#buildTransparentStartLiteral] returned and its search, for the
+    /// candidate cursor of a DFA search and, when the DFA cannot run this program's assertions,
+    /// the group-zero NFA's skip to the next possible match start.
+    void configureTransparentStartLiteral(byte[] literal, LiteralSearchKernel literalSearch)
+    {
+        this.transparentStartLiteral = requireNonNull(literal, "literal is null");
+        this.transparentStartLiteralSearch = requireNonNull(literalSearch, "literalSearch is null");
+        updateStartCandidateSkip();
+    }
+
+    byte[] transparentStartLiteral()
+    {
+        return transparentStartLiteral;
+    }
+
+    LiteralSearchKernel transparentStartLiteralSearch()
+    {
+        return transparentStartLiteralSearch;
+    }
+
+    /// Returns whether [#skipToStartCandidate] may skip the input an unanchored search with no
+    /// live thread would otherwise step over.
+    boolean canSkipToStartCandidate()
+    {
+        return skipsToStartCandidate;
+    }
+
+    /// Returns the absolute index in `data` of the first possible match start in the range, or
+    /// `-1`: the next prefix acceleration candidate, or the next occurrence of the transparent
+    /// start literal. Requires [#canSkipToStartCandidate].
+    int skipToStartCandidate(byte[] data, int offset, int length)
+    {
+        if (canPrefixAccel()) {
+            return prefixAccel(data, offset, length);
+        }
+        return findLiteral(data, offset, length, transparentStartLiteral, transparentStartLiteralSearch);
+    }
+
+    /// Returns the absolute index in `data` of the first occurrence of `literal`, of at least two
+    /// bytes, in the range, or `-1`. Ranges of at least the fused vector scan's minimum take the
+    /// vector scan of [PrefixAccelStrategy#FUSED_VECTOR], and shorter ones take `literalSearch`,
+    /// the literal's call-free search.
+    static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
+    {
+        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+            return VectorPrefixScanner.find(data, offset, length, literal, 0, literal.length - 1);
+        }
+        return literalSearch.findContains(data, offset, length);
+    }
+
+    private void updateStartCandidateSkip()
+    {
+        skipsToStartCandidate = canPrefixAccel() || (transparentStartLiteral != null && hasDfaUnsupportedAssertions());
+    }
 
     /// Finds a selective byte set at one fixed offset from every possible match start.
     /// The bounded walk deliberately rejects assertions and variable-distance candidates.
@@ -1131,6 +1304,7 @@ final class Prog
             this.prefixSize = 0;
             this.prefixFoldCase = false;
             this.prefixFrontBroadcastMask = 0;
+            updateStartCandidateSkip();
             return;
         }
         this.prefix = bytes;
@@ -1156,6 +1330,7 @@ final class Prog
             this.prefixSize = 1;
             this.prefixFrontBroadcastMask = (bytes[0] & 0xFFL) * 0x0101010101010101L;
         }
+        updateStartCandidateSkip();
     }
 
     /// Returns the absolute index in `data` of the first possible prefix match,
@@ -1627,11 +1802,7 @@ final class Prog
         }
 
         // Lazy initialization with memory budget
-        long budget = switch (kind) {
-            case MANY_MATCH -> dfaMemory;
-            case FIRST_MATCH -> dfaMemory / 2;
-            case LONGEST_MATCH -> reversed ? dfaMemory : dfaMemory / 2;
-        };
+        long budget = dfaBudget(dfaMemory, kind);
         if (budget <= 0) {
             return null;
         }
@@ -1648,6 +1819,31 @@ final class Prog
         }
         // Lost race - use winner's DFA
         return ref.get();
+    }
+
+    /// Whether taking `reservation` bytes from the DFA memory budget leaves the first-match and
+    /// longest-match DFAs, which this program's searches build, each the memory it needs to
+    /// initialize. A program whose assertions the DFA cannot run builds neither.
+    boolean leavesDfaMinimum(long reservation)
+    {
+        if (reservation > dfaMemory) {
+            return false;
+        }
+        if (hasDfaUnsupportedAssertions()) {
+            return true;
+        }
+        long remaining = dfaMemory - reservation;
+        return dfaBudget(remaining, Dfa.DfaInstance.Kind.FIRST_MATCH) >= Dfa.DfaInstance.minimumMemory(this, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
+                dfaBudget(remaining, Dfa.DfaInstance.Kind.LONGEST_MATCH) >= Dfa.DfaInstance.minimumMemory(this, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+    }
+
+    private long dfaBudget(long memory, Dfa.DfaInstance.Kind kind)
+    {
+        return switch (kind) {
+            case MANY_MATCH -> memory;
+            case FIRST_MATCH -> memory / 2;
+            case LONGEST_MATCH -> reversed ? memory : memory / 2;
+        };
     }
 
     Dfa.DfaInstance cachedDfaIfPresent(Dfa.DfaInstance.Kind kind)

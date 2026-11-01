@@ -115,10 +115,14 @@ public class TestJavaRegexpDifferential
                 "(?dm)(?:^b?)+",
                 // The empty intersection drops a fragment whose open exits hold patch-list
                 // entries, and the run of a's makes them land past the last instruction.
-                "(?dm)aaaaaaaa(?:^|$)([a&&b])|^b")) {
+                "(?dm)aaaaaaaa(?:^|$)([a&&b])|^b",
+                // The engines agree on the literal behind the leading line assertion.
+                "(?m)^Sherlock Holmes|Sherlock Holmes$",
+                "(?dm)^Sherlock Holmes|Sherlock Holmes$")) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
-            for (String input : List.of("", "\n", "a\n", "a\nb", "\rb", "a\r\nb", "\u0085b", "é\nb", "\u2028b")) {
+            String lines = "Sherlock Holmes x Sherlock Holmes\r\nSherlock Holmes\nSherlock Holmes\rSherlock Holmes\u0085Sherlock Holmes\u2028Sherlock Holmes\u2029Sherlock Holmes";
+            for (String input : List.of("", "\n", "a\n", "a\nb", "\rb", "a\r\nb", "\u0085b", "é\nb", "\u2028b", lines, "Sherlock Holmes\r\n", "xSherlock Holmes\n")) {
                 Matcher expected = jdk.matcher(input);
                 Slice text = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
                 RegexpMatcher actual = regexp.matcher(text);
@@ -128,6 +132,34 @@ public class TestJavaRegexpDifferential
                     assertThat(actual.end()).isEqualTo(utf8Slice(input.substring(0, expected.end())).length());
                 }
                 assertThat(actual.find()).as("extra match: %s input=%s", pattern, input).isFalse();
+            }
+        }
+    }
+
+    @Test
+    public void testLongTextSkipsToLiteralBehindLineAssertion()
+    {
+        // The DFA cannot run these Java line assertions, and text past BitState's limit takes the
+        // Pike VM, which skips to the literal behind the leading assertion when no thread is live.
+        for (String pattern : List.of("(?d)^ab|ab$", "(?d)^ab|ab\\Z", "(?m)^Sherlock Holmes|Sherlock Holmes$")) {
+            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+            Pattern jdk = Pattern.compile(pattern);
+            Prog prog = regexp.re2().forwardProgramForDiagnostics();
+            assertThat(prog.canSkipToStartCandidate()).as(pattern).isTrue();
+            String literal = pattern.contains("Sherlock") ? "Sherlock Holmes" : "ab";
+            String fillerUnit = "filler text, ";
+            String filler = fillerUnit.repeat(prog.bitStateTextMaxSize() / fillerUnit.length() + 1);
+            for (String end : List.of("", "\n", "\r\n")) {
+                String input = literal + " x" + literal + "\r\n" + literal + "\n" + filler + literal + "\r\nx" + literal + end;
+                Matcher expected = jdk.matcher(input);
+                RegexpMatcher actual = regexp.matcher(utf8Slice(input));
+                String description = "%s ending %s".formatted(pattern, end.replace("\r", "\\r").replace("\n", "\\n"));
+                while (expected.find()) {
+                    assertThat(actual.find()).as(description).isTrue();
+                    assertThat(actual.start()).as(description).isEqualTo(expected.start());
+                    assertThat(actual.end()).as(description).isEqualTo(expected.end());
+                }
+                assertThat(actual.find()).as("extra match: %s", description).isFalse();
             }
         }
     }
@@ -165,6 +197,8 @@ public class TestJavaRegexpDifferential
                 "a\\b",
                 "\\B",
                 "(?m)^a",
+                "(?m)^ab|ab$",
+                "(?dm)^ab|ab$",
                 "(?m)$",
                 "(?d)a$",
                 "(?d)$",

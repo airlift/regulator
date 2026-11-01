@@ -73,6 +73,8 @@ final class Dfa
     private static final long ABSOLUTE_POINTER_FULL_MATCH_TAG = 3;
     private static final long ABSOLUTE_POINTER_RETRY_OBJECT = Long.MIN_VALUE + 2;
     private static final int MAX_CANDIDATE_START_TRANSITIONS = 128;
+    // A shorter window costs the literal cursor more to set up than the matcher's other routes.
+    static final int MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES = 64;
     private static final int CANDIDATE_NO_MATCH = -1;
     private static final int CANDIDATE_FALLBACK = -2;
     private static final int PREFIX_SCAN = -1;
@@ -126,6 +128,10 @@ final class Dfa
     public static final long SEARCH_NO_MATCH = -1;
     static final long COUNT_UNSUPPORTED = -1;
     static final long CANDIDATE_SEARCH_FALLBACK = Long.MIN_VALUE + 1;
+    // A candidate search the text stopped: the DFA quit on a byte outside ASCII. The search falls
+    // back as for CANDIDATE_SEARCH_FALLBACK, but the cursor always stays enabled, and the quit
+    // counts toward the matcher's quit streak.
+    static final long CANDIDATE_SEARCH_QUIT = Long.MIN_VALUE + 2;
     private static final long COUNT_SCAN_REJECTED_MATCH_FLAG = 1L << Integer.SIZE;
     private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
@@ -875,6 +881,24 @@ final class Dfa
         return new CandidateStartCursor(dfa);
     }
 
+    /// Returns a candidate cursor whose candidates are the occurrences of the program's
+    /// transparent start literal (see [Prog#buildTransparentStartLiteral]), or `null` when the
+    /// program has none or its DFA is unavailable. Unlike [#createCandidateStartCursor], it needs
+    /// no start byte set, which a leading assertion leaves the program without.
+    static CandidateStartCursor createLiteralCandidateStartCursor(Prog prog)
+    {
+        requireNonNull(prog, "prog is null");
+        byte[] literal = prog.transparentStartLiteral();
+        if (literal == null) {
+            return null;
+        }
+        DfaInstance dfa = prog.getCachedDfa(DfaInstance.Kind.FIRST_MATCH);
+        if (dfa == null || !dfa.ok()) {
+            return null;
+        }
+        return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch());
+    }
+
     // PERFORMANCE-SENSITIVE HOT LOOP: this cursor amortizes reader registration and
     // boundary discovery across dense repeated matches. Keep candidate scanning and
     // anchored verification in this concrete loop, and preserve the linear work budget.
@@ -897,7 +921,15 @@ final class Dfa
         int contextBegin = context.byteArrayOffset() + contextStart;
         int contextLimit = context.byteArrayOffset() + contextEnd;
         int searchBegin = context.byteArrayOffset() + start;
-        if (!cursor.isProductive(bytes, searchBegin, contextLimit)) {
+        boolean searchesLiteral = cursor.literal != null;
+        if (searchesLiteral) {
+            // A shorter window takes the matcher's other routes and leaves the cursor enabled for
+            // longer ones.
+            if (contextEnd - start < MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+        }
+        else if (!cursor.isProductive(bytes, searchBegin, contextLimit)) {
             cursor.disabled = true;
             cursor.fallbackCount++;
             return CANDIDATE_SEARCH_FALLBACK;
@@ -917,7 +949,9 @@ final class Dfa
                 continue;
             }
             try {
-                long result = searchCandidateBoundary(cursor, bytes, contextBegin, contextLimit, searchBegin);
+                long result = searchesLiteral
+                        ? searchLiteralCandidateBoundary(cursor, bytes, contextBegin, contextLimit, searchBegin)
+                        : searchCandidateBoundary(cursor, bytes, contextBegin, contextLimit, searchBegin);
                 if (result == CANDIDATE_SEARCH_FALLBACK) {
                     cursor.disabled = true;
                     cursor.fallbackCount++;
@@ -935,7 +969,7 @@ final class Dfa
             catch (QuitSearchException ignored) {
                 // The text, not the cache, stopped the DFA, so the cursor stays enabled.
                 cursor.fallbackCount++;
-                return CANDIDATE_SEARCH_FALLBACK;
+                return CANDIDATE_SEARCH_QUIT;
             }
             catch (RetrySearchException ignored) {
                 if (exclusiveSearch) {
@@ -965,6 +999,50 @@ final class Dfa
                 return CANDIDATE_SEARCH_FALLBACK;
             }
             int candidate = cursor.dfa.findStartByteCandidate(bytes, scanBegin, scanLength);
+            int scanEnd = candidate < 0 ? scanBegin + scanLength : candidate + 1;
+            if (!cursor.consumeWork(scanEnd - scanBegin)) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (candidate < 0) {
+                return scanEnd == contextEnd ? SEARCH_NO_MATCH : CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (!cursor.consumeWork()) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+
+            int matchEnd = searchAnchoredCandidate(cursor, bytes, contextBegin, contextEnd, candidate);
+            if (matchEnd == CANDIDATE_FALLBACK) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (matchEnd >= 0) {
+                int relativeStart = candidate - contextBegin;
+                int relativeEnd = matchEnd - contextBegin;
+                return ((long) relativeStart << 32) | (relativeEnd & 0xFFFF_FFFFL);
+            }
+            scanBegin = candidate + 1;
+        }
+        return SEARCH_NO_MATCH;
+    }
+
+    // The sibling of the start byte loop above for a cursor fed by the transparent start literal,
+    // kept apart so that loop gains no branch. Every match begins with the literal, so the first
+    // occurrence that verifies is the leftmost match, and it starts at the occurrence. The anchored
+    // verification computes its start state from the byte before the occurrence, which judges a
+    // leading assertion as a search that read every byte would. Work is charged as above.
+    private static long searchLiteralCandidateBoundary(
+            CandidateStartCursor cursor,
+            byte[] bytes,
+            int contextBegin,
+            int contextEnd,
+            int searchBegin)
+    {
+        int scanBegin = searchBegin;
+        while (scanBegin < contextEnd) {
+            int scanLength = cursor.workBoundedScanLength(contextEnd - scanBegin);
+            if (scanLength == 0) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            int candidate = Prog.findLiteral(bytes, scanBegin, scanLength, cursor.literal, cursor.literalSearch);
             int scanEnd = candidate < 0 ? scanBegin + scanLength : candidate + 1;
             if (!cursor.consumeWork(scanEnd - scanBegin)) {
                 return CANDIDATE_SEARCH_FALLBACK;
@@ -4542,6 +4620,10 @@ final class Dfa
     static final class CandidateStartCursor
     {
         private final DfaInstance dfa;
+        // Set for a cursor whose candidates are occurrences of the program's transparent start
+        // literal; null for one that scans the DFA's start byte set.
+        private final byte[] literal;
+        private final LiteralSearchKernel literalSearch;
 
         private long remainingWork;
         private boolean disabled;
@@ -4553,6 +4635,15 @@ final class Dfa
         private CandidateStartCursor(DfaInstance dfa)
         {
             this.dfa = dfa;
+            this.literal = null;
+            this.literalSearch = null;
+        }
+
+        private CandidateStartCursor(DfaInstance dfa, byte[] literal, LiteralSearchKernel literalSearch)
+        {
+            this.dfa = requireNonNull(dfa, "dfa is null");
+            this.literal = requireNonNull(literal, "literal is null");
+            this.literalSearch = requireNonNull(literalSearch, "literalSearch is null");
         }
 
         void reset(int inputLength)
@@ -4565,6 +4656,18 @@ final class Dfa
         boolean enabled()
         {
             return !disabled;
+        }
+
+        boolean searchesLiteral()
+        {
+            return literal != null;
+        }
+
+        /// Whether the cursor's DFA can quit on a byte outside ASCII, so its quits count toward a
+        /// matcher's quit streak.
+        boolean quitsOnNonAscii()
+        {
+            return dfa.quitsOnNonAscii;
         }
 
         long routeCount()
