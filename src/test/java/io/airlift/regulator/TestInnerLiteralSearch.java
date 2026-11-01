@@ -235,6 +235,41 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testShortWindowWithoutLiteralSkipsOrdinaryEngine()
+    {
+        // Under the minimum skip, a window that holds the literal runs the ordinary engine, and
+        // one without it has no match, so the forward DFA never starts.
+        for (String regex : List.of("[\\w.+-]+@[\\w.-]+\\.\\w+", "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?([A-Z]+[0-9]+))?)")) {
+            for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.RUST_BYTES)) {
+                String description = language + " " + regex;
+                Re2 pattern = language.compileRe2(regex);
+                assertThat(pattern.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
+                Slice absent = utf8Slice("    return contact.support(value)");
+                assertThat(pattern.find(absent)).as(description).isFalse();
+                assertThat(pattern.matcher(absent).find()).as(description).isFalse();
+                assertThat(pattern.matcher(absent, 0).find()).as(description).isFalse();
+                assertThat(forwardStateCount(pattern)).as(description).isZero();
+
+                Slice present = utf8Slice("x = 1  # noqa: E501 user@example.com");
+                assertThat(pattern.find(present)).as(description).isTrue();
+                assertThat(forwardStateCount(pattern)).as(description).isPositive();
+            }
+        }
+    }
+
+    private static long forwardStateCount(Re2 pattern)
+    {
+        long states = 0;
+        for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(kind);
+            if (dfa != null) {
+                states += dfa.cacheSnapshot().stateCount();
+            }
+        }
+        return states;
+    }
+
+    @Test
     public void testFallsBackWhenLiteralIsNearStart()
     {
         String filler = ".".repeat(200);
@@ -379,6 +414,19 @@ public class TestInnerLiteralSearch
     private enum Language
     {
         RE2, JAVA, TRINO, RUST, RUST_BYTES, RUST_BYTES_ASCII;
+
+        Re2 compileRe2(String pattern)
+        {
+            Slice slice = utf8Slice(pattern);
+            return switch (this) {
+                case RE2 -> Re2.compile(slice);
+                case JAVA -> JavaRegexp.compile(slice).re2();
+                case RUST -> RustRegexp.compile(slice).re2();
+                case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS).re2();
+                case RUST_BYTES_ASCII -> RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false)).re2();
+                case TRINO -> throw new IllegalArgumentException("Trino has no Re2 handle");
+            };
+        }
 
         Engine compile(String pattern)
         {

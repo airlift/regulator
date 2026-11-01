@@ -41,13 +41,15 @@ import static java.util.Objects.requireNonNull;
 /// previous anchored confirmation already read, which keeps the work linear, or when a DFA fails.
 /// It also falls back when its first candidate lies fewer than [#MINIMUM_SKIPPED_BYTES] past the
 /// search start. The prefix lies before the literal, so the search could skip no more than that,
-/// which cannot repay the reverse search and the anchored confirmation.
+/// which cannot repay the reverse search and the anchored confirmation. In a window shorter than
+/// that, the search is therefore only a check for the literal: a window without it has no match,
+/// as for the many short lines of a line-by-line search, and any other runs the ordinary engine.
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
-    // Searches of shorter windows stay on the ordinary engine and skip the literal scan setup. A
-    // literal in such a window lies near its start, where the search would fall back anyway.
-    static final int MINIMUM_SEARCH_BYTES = 64;
+    // A whole-text count of a shorter text skips the search. On such a text the search could
+    // only check for the literal, which the count gains little from.
+    static final int MINIMUM_TEXT_BYTES = 64;
     // A first candidate closer than this to the search start leaves too few bytes to skip.
     static final int MINIMUM_SKIPPED_BYTES = 64;
 

@@ -887,8 +887,11 @@ positions the filter accepts, unless the filter's stops are dense.
 The fixed-width matcher checks every occurrence of one byte, such as the `s` of
 `[a-z]shing`, which English text holds far more often than `shing`. RE2, Java,
 and Rust therefore keep the DFA's inner literal search when its literal has two
-or more bytes. The DFA searches for that literal on inputs of 64 bytes or more;
-shorter inputs run the plain DFA. Trino's fixed-width subtype keeps the matcher.
+or more bytes. A find whose input lacks the literal reports no match without
+running the DFA, and one whose literal first appears within the input's first 64
+bytes runs the plain DFA. A count searches for the literal only in inputs of 64
+bytes or more and runs the plain DFA on shorter ones. Trino's fixed-width
+subtype keeps the matcher.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -946,6 +949,33 @@ RE2, Java, and Rust contains of a literal longer than the budget uses the
 contains search when it fits the forward-DFA allowance; shorter literals keep
 `Slice.indexOf`. Scan-plan leading and required literals, capped at 256 bytes,
 still check every candidate; bounding them is a separate change.
+
+## Short-Window Inner Literal Check
+
+A line-by-line search calls the matcher once per line, and most lines are
+shorter than 64 bytes, too short for the inner literal search to skip enough
+text to repay its reverse search and anchored confirmation. The search still
+checks each such window for its literal: a window without it has no match, and
+one whose first occurrence lies within 64 bytes of its start runs the ordinary
+engine. Short windows use the same literal scan as long ones. Whole-text counts
+keep their 64-byte minimum.
+
+The accepted costs were measured before RE2, Java, and Rust shared the
+fixed-width matchers, 3 hosts a side. The Rust `reallyreallyhard0-32` row checks
+a 32-byte window per call and takes 1.067x the base's time native and 1.062x
+safe on r9g, and 1.095x and 1.107x on r8i; it stays ahead of the Rust crate, at
+0.70x of its time on r9g and 0.77x on r8i. Everyday email reused contains takes
+1.049x on r8i native, because every email holds `@` and the check never rules
+one out; r9g and r8i safe tie. Holmes, `around-holmes-english` in Rust, takes
+1.216x native and 1.126x safe on r8i, a row that already lost to the crate.
+
+A separate scan for short windows cost more on short lines. Email reused
+contains took 1.9 ns more than the base on r9g native and 4.0 ns more on r8i
+native, against 0.4 ns and 1.9 ns with the shared scan, and lh3lh3's short date
+lines gave back 6 to 7 points on r9g safe. Holmes ties the base on Graviton,
+1.012x native, only because of how C2 currently compiles the shared scan: the
+same check on an earlier base ran it 1.66x slower. A later change to the shared
+scan or its callers must therefore measure Holmes on r9g again.
 
 ## Trino LIKE Frontend
 

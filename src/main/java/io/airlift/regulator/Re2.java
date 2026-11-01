@@ -2067,13 +2067,13 @@ public sealed class Re2
     }
 
     /// Whether a search of `[start, end)` tries the inner literal first, so a find loop skips its
-    /// cursors. A search whose literal sits near its start keeps them, as the ordinary engine does.
-    /// This approximates the gate in matchInternal, where a search that tries the literal can
-    /// still fall back.
+    /// cursors. A search whose literal sits near its start keeps them, as the ordinary engine does,
+    /// and a short window without the literal has no match. This approximates the gate in
+    /// matchInternal, where a search that tries the literal can still fall back.
     boolean searchesInnerLiteral(Slice text, int start, int end)
     {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        return innerLiteralSearch != null && end - start >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES && !innerLiteralSearch.fallsBackNearStart(text, start, end);
+        return innerLiteralSearch != null && !innerLiteralSearch.fallsBackNearStart(text, start, end);
     }
 
     Dfa.CandidateStartCursor createCandidateStartCursor()
@@ -2413,7 +2413,7 @@ public sealed class Re2
     private long countDfaMatches(Slice text)
     {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        if (innerLiteralSearch != null && text.length() >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES) {
+        if (innerLiteralSearch != null && text.length() >= InnerLiteralSearch.MINIMUM_TEXT_BYTES) {
             return countInnerLiteralMatches(innerLiteralSearch, text);
         }
 
@@ -3149,7 +3149,7 @@ public sealed class Re2
                 }
             }
             InnerLiteralSearch innerLiteralSearch = prog == partialProg ? booleanPlans.innerLiteralSearch() : null;
-            long innerLiteralSpan = innerLiteralSearch != null && !dfaSearchSkippedOrFailed && searchLength >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES
+            long innerLiteralSpan = innerLiteralSearch != null && !dfaSearchSkippedOrFailed
                     ? innerLiteralSearch.search(text, contextStart, contextEnd, start, end)
                     : InnerLiteralSearch.FALLBACK;
             if (innerLiteralSpan == Dfa.SEARCH_NO_MATCH) {
