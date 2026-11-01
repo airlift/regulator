@@ -13,23 +13,32 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.Function;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestBoundedCharacterClassCounter
 {
+    // Holds every non-ASCII character and 47 single ASCII ones, so it has enough ranges for the counter.
+    private static final String ALL_NON_ASCII_CLASS = "[\\x{80}-\\x{10FFFF}!#%')+\\-/13579;=?ACEGIKMOQSUWY\\[\\]_acegikmoqsuwy{}]";
+
     @Test
     public void testSelectiveUnicodeClassUsesRetainedDfaOnlyForLargeCounts()
     {
@@ -84,7 +93,7 @@ public class TestBoundedCharacterClassCounter
         }
         assertThat(greek.countMatches(largeSparseGreekInput())).isEqualTo(2);
 
-        Re2 compactOnly = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(256L << 10));
+        Re2 compactOnly = Re2.compile(utf8Slice("\\p{Greek}+"), Re2.Options.defaults().setMaxMemory(128L << 10));
         assertThat(compactOnly.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
         assertThat(compactOnly.forwardProgramForDiagnostics().dfaMemory()).isZero();
         assertThat(compactOnly.countMatches(largeSparseGreekInput())).isEqualTo(2);
@@ -233,16 +242,25 @@ public class TestBoundedCharacterClassCounter
     }
 
     @Test
-    public void testCompactRouteHonorsMemoryLimit()
+    public void testClassCountersHonorMemoryLimit()
     {
-        assertThatThrownBy(() -> Re2.compile(
-                utf8Slice("\\p{L}{256}"),
-                Re2.Options.defaults().setMaxMemory(128 * 1024)))
+        // The bitset ends at the last letter: about 32 KB.
+        assertThatThrownBy(() -> Re2.compile(utf8Slice("\\p{L}{256}"), Re2.Options.defaults().setMaxMemory(32 * 1024)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
-        assertThat(Re2.compile(
-                        utf8Slice("\\p{L}{256}"),
-                        Re2.Options.defaults().setMaxMemory(256 * 1024))
-                .usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+        assertThat(Re2.compile(utf8Slice("\\p{L}{256}"), Re2.Options.defaults().setMaxMemory(64 * 1024)).usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+
+        // A single class's counter takes its bytes from the DFA budget; a budget too small for it
+        // keeps the engine.
+        assertThat(Re2.compile(utf8Slice("\\pL"), Re2.Options.defaults().setMaxMemory(32 * 1024)).classMatchCounter()).isNull();
+        Slice pattern = utf8Slice("\\pL");
+        int flags = Re2.Options.defaults().parseFlags();
+        ParseResult parsed = RegexpParser.parse(pattern, flags);
+        long maxMemory = 64 * 1024;
+        Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
+        Re2 letters = Re2.compileParsed(pattern, parsed, flags, maxMemory);
+        BoundedCharacterClassCounter counter = letters.classMatchCounter();
+        assertThat(counter.estimatedRetainedSize()).isEqualTo(32_976);
+        assertThat(letters.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - counter.estimatedRetainedSize());
     }
 
     @Test
@@ -260,6 +278,115 @@ public class TestBoundedCharacterClassCounter
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice("[a-z]{256}"), Re2.Options.latin1())
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
+    }
+
+    @Test
+    public void testClassCounterMatcherMatchesEngineInEveryLanguage()
+    {
+        // ASCII, two-, three- and four-byte letters and non-letters, adjacent and three-byte Greek
+        // letters, Arabic and Devanagari digits, three-byte capitals, gaps of lowercase text around
+        // capitals whose lead bytes also start lowercase letters, then overlong C0 80 and C1 BF, a
+        // lead cut short by ASCII, a bare continuation byte, a valid ж, a truncated three-byte
+        // letter, and a two-byte lead at the end.
+        byte[] text = "ab1 éж€中𝐀😀-Zя αβἀ ٣३ ＡḀ the Éclair, Жук and quiet tea ".getBytes(UTF_8);
+        byte[] malformed = {
+                (byte) 0xC0, (byte) 0x80, 'q', (byte) 0xC1, (byte) 0xBF, (byte) 0xC3, 'r', (byte) 0x80,
+                (byte) 0xD0, (byte) 0xB6, (byte) 0xE4, (byte) 0xB8, 's', (byte) 0xC3,
+        };
+        byte[] bytes = Arrays.copyOf(text, text.length + malformed.length);
+        System.arraycopy(malformed, 0, bytes, text.length, malformed.length);
+        Slice input = Slices.wrappedBuffer(bytes);
+        List<Slice> inputs = new ArrayList<>(randomFragmentInputs());
+        inputs.addAll(longGapInputs());
+        inputs.add(input);
+
+        // Each language spells its own classes.
+        for (String pattern : List.of("\\pL", "\\p{Ll}", "\\p{Lu}", "(?i)\\p{Lu}", "\\p{Greek}", "[\\pL\\x{3FFFF}]")) {
+            assertCounterMatcherAgrees("RE2", Re2::compile, pattern, false, inputs);
+        }
+        for (String pattern : List.of("\\p{L}", "\\p{Lu}", "(?i)\\p{Lu}", "[\\p{L}\\x{3FFFF}]")) {
+            assertCounterMatcherAgrees("Java", source -> JavaRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        for (String pattern : List.of("\\p{L}", "(?i)\\p{Lu}", "[\\p{L}\\x{3FFFF}]")) {
+            assertCounterMatcherAgrees("Trino", source -> TrinoRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        for (String pattern : List.of("\\pL", "\\p{Lu}", "(?i)\\p{Lu}", "\\d", "[\\pL\\x{3FFFF}]")) {
+            assertCounterMatcherAgrees("Rust", source -> RustRegexp.compile(source).re2(), pattern, false, inputs);
+        }
+        // Compact patterns find through the same counter.
+        for (String pattern : List.of("\\p{Lu}+", "\\p{L}{2,3}", ALL_NON_ASCII_CLASS + "+")) {
+            assertCounterMatcherAgrees("RE2", Re2::compile, pattern, true, inputs);
+        }
+
+        // The matrix above calls Re2 directly, which bypasses the Trino matcher wrapper.
+        TrinoRegexpMatcher trino = TrinoRegexp.compile(utf8Slice("\\p{L}")).matcher(input, 0);
+        TrinoRegexpMatcher trinoOrdinary = TrinoRegexp.compile(utf8Slice("(\\p{L})")).matcher(input, 0);
+        while (trinoOrdinary.find()) {
+            assertThat(trino.find()).isTrue();
+            assertThat(trino.start()).isEqualTo(trinoOrdinary.start());
+            assertThat(trino.end()).isEqualTo(trinoOrdinary.end());
+        }
+        assertThat(trino.find()).isFalse();
+    }
+
+    @Test
+    public void testLastPlaneAndNullableClassesKeepEngine()
+    {
+        // Planes 4 through 13 hold no characters, so a class ending before U+40000 has a counter,
+        // and one that reaches the last planes, as a negated class or one with plane-14 members
+        // does, has none; its bitset would retain up to 136 KiB.
+        List<Function<Slice, Re2>> compilers = List.of(
+                Re2::compile,
+                source -> JavaRegexp.compile(source).re2(),
+                source -> TrinoRegexp.compile(source).re2(),
+                source -> RustRegexp.compile(source).re2());
+        for (Function<Slice, Re2> compiler : compilers) {
+            Re2 belowLimit = compiler.apply(utf8Slice("[\\p{L}\\x{3FFFF}]"));
+            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_096);
+            Re2 atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
+            assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
+        }
+        List<Re2> lastPlaneClasses = List.of(
+                Re2.compile(utf8Slice("\\PL")),
+                Re2.compile(utf8Slice(ALL_NON_ASCII_CLASS)),
+                Re2.compile(utf8Slice("\\p{Mn}")),
+                JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)).re2(),
+                RustRegexp.compile(utf8Slice("\\w")).re2(),
+                RustRegexp.compile(utf8Slice("\\D")).re2());
+        for (Re2 re2 : lastPlaneClasses) {
+            assertThat(re2.classMatchCounter()).as(re2.pattern().toStringUtf8()).isNull();
+        }
+
+        // A pattern that can match empty has no counter; its matcher keeps the engine.
+        for (String pattern : List.of("\\pL*", "\\pL?", "\\pL{0,3}", "(?:\\pL|)")) {
+            assertThat(Re2.compile(utf8Slice(pattern)).classMatchCounter()).as(pattern).isNull();
+            assertThat(RustRegexp.compile(utf8Slice(pattern)).re2().classMatchCounter()).as(pattern).isNull();
+        }
+    }
+
+    @Test
+    public void testOrdinaryMatcherFindsOnClassCounter()
+    {
+        Re2 letters = Re2.compile(utf8Slice("\\pL"));
+        Slice input = utf8Slice("ab1 éж€中𝐀");
+        RegexpMatcher matcher = letters.matcher(input, 0);
+        assertThat(matcher.characterClassCounterEnabledForDiagnostics()).isTrue();
+        Prog program = letters.forwardProgramForDiagnostics();
+        assertThat(spans(matcher)).hasSize(6);
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+
+        RegexpMatcher generic = letters.genericGroupZeroMatcherForDiagnostics(input);
+        assertThat(generic.characterClassCounterEnabledForDiagnostics()).isFalse();
+        assertThat(spans(generic)).hasSize(6);
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+
+        // `\pL` has too many start bytes for the vector scan; a sparse class uses it when it can.
+        assertThat(letters.classMatchCounter().scansMemberStartsWithVectorsForDiagnostics()).isFalse();
+        for (Re2 sparse : List.of(Re2.compile(utf8Slice("\\p{Greek}")), RustRegexp.compile(utf8Slice("\\d")).re2())) {
+            assertThat(sparse.classMatchCounter().scansMemberStartsWithVectorsForDiagnostics())
+                    .as(sparse.pattern().toStringUtf8())
+                    .isEqualTo(VectorSupport.isAvailable());
+        }
     }
 
     @Test
@@ -287,12 +414,13 @@ public class TestBoundedCharacterClassCounter
     {
         for (String pattern : List.of("[a-z]{2,4}", "[0-9]{1,3}", "\\p{L}{2,5}", "[^x]{3,7}", "\\p{L}+", "[a-z]{2,}")) {
             Re2 re2 = Re2.compile(utf8Slice(pattern));
+            Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
             BoundedCharacterClassCounter matcher = re2.createBoundedCharacterClassCounter();
             assertThat(matcher).as(pattern).isNotNull();
             for (String input : List.of("", "a", "abc12defgh", "абв гдеёж 123", "xxxxxxxx")) {
                 assertThat(matcher.count(utf8Slice(input)))
                         .as("pattern %s input %s", pattern, input)
-                        .isEqualTo(countWithGeneralMatcher(re2, utf8Slice(input)));
+                        .isEqualTo(countWithGeneralMatcher(reference, utf8Slice(input)));
             }
         }
     }
@@ -434,6 +562,86 @@ public class TestBoundedCharacterClassCounter
         assertThat(latin1Matcher.findSpan(latin1, 0, latin1.length(), 2)).isEqualTo(packSpan(3, 4));
     }
 
+    // A capture keeps the reference matcher on the engine.
+    private static void assertCounterMatcherAgrees(String language, Function<Slice, Re2> compiler, String pattern, boolean compact, List<Slice> inputs)
+    {
+        String description = language + " " + pattern;
+        Re2 counted = compiler.apply(utf8Slice(pattern));
+        Re2 reference = compiler.apply(utf8Slice("(" + pattern + ")"));
+        assertThat(counted.classMatchCounter()).as(description).isNotNull();
+        assertThat(counted.usesCompactBoundedCharacterClassForDiagnostics()).as(description).isEqualTo(compact);
+        assertThat(reference.classMatchCounter()).as(description).isNull();
+        for (Slice input : inputs) {
+            String hex = HexFormat.of().formatHex(input.getBytes());
+            assertThat(spans(counted.matcher(input, 0)))
+                    .as("%s on %s", description, hex)
+                    .isEqualTo(spans(reference.matcher(input, 0)));
+            if (input.length() >= 5) {
+                assertThat(spans(counted.matcher(input, 0).reset(input, 3, input.length() - 2)))
+                        .as("%s on a region of %s", description, hex)
+                        .isEqualTo(spans(reference.matcher(input, 0).reset(input, 3, input.length() - 2)));
+            }
+        }
+    }
+
+    // Seeded strings of ASCII gaps, letters of each width, encoded surrogates, and malformed bytes:
+    // overlong leads, bare continuations, truncated sequences, and bytes past U+10FFFF.
+    private static List<Slice> randomFragmentInputs()
+    {
+        List<byte[]> fragments = new ArrayList<>();
+        for (String text : List.of("a", "Z", " ", "1", "the ", "é", "É", "ж", "Ж", "α", "ἀ", "٣", "३", "Ａ", "Ḁ", "€", "中", "𝐀", "😀")) {
+            fragments.add(text.getBytes(UTF_8));
+        }
+        int[][] malformed = {{0xC0, 0x80}, {0xC1}, {0x80}, {0xBF}, {0xC3}, {0xD0}, {0xE4, 0xB8}, {0xED, 0xA0, 0x80}, {0xF4, 0x90, 0x80, 0x80}, {0xF5}, {0xFF}};
+        for (int[] values : malformed) {
+            byte[] bytes = new byte[values.length];
+            for (int i = 0; i < values.length; i++) {
+                bytes[i] = (byte) values[i];
+            }
+            fragments.add(bytes);
+        }
+        Random random = new Random(14);
+        List<Slice> inputs = new ArrayList<>();
+        for (int inputIndex = 0; inputIndex < 300; inputIndex++) {
+            DynamicSliceOutput output = new DynamicSliceOutput(64);
+            int count = random.nextInt(12);
+            for (int i = 0; i < count; i++) {
+                output.writeBytes(fragments.get(random.nextInt(fragments.size())));
+            }
+            inputs.add(output.slice());
+        }
+        return inputs;
+    }
+
+    // Lowercase gaps of every length up to 160 bytes, past the counter's scalar prefix and two vector
+    // steps of up to 64 bytes, with malformed bytes inside, ending at the input's end or at a Greek capital, a
+    // Cyrillic letter, and a digit that fall anywhere in the last vector step.
+    private static List<Slice> longGapInputs()
+    {
+        byte[] gap = "the quiet tea and clear air over the long road home, then back down to the sea again ".repeat(2).getBytes(UTF_8);
+        gap[9] = (byte) 0xC3;
+        gap[13] = (byte) 0x80;
+        gap[17] = (byte) 0xFF;
+        byte[] members = "Ωж7".getBytes(UTF_8);
+        List<Slice> inputs = new ArrayList<>();
+        for (int length = 0; length <= 160; length++) {
+            byte[] bytes = Arrays.copyOf(gap, length + members.length);
+            System.arraycopy(members, 0, bytes, length, members.length);
+            inputs.add(Slices.wrappedBuffer(bytes));
+            inputs.add(Slices.wrappedBuffer(Arrays.copyOf(gap, length)));
+        }
+        return inputs;
+    }
+
+    private static List<Long> spans(RegexpMatcher matcher)
+    {
+        List<Long> spans = new ArrayList<>();
+        while (matcher.find()) {
+            spans.add(packSpan(matcher.start(), matcher.end()));
+        }
+        return spans;
+    }
+
     private static long packSpan(int start, int end)
     {
         return ((long) start << 32) | (end & 0xFFFF_FFFFL);
@@ -448,7 +656,7 @@ public class TestBoundedCharacterClassCounter
 
     private static long countWithGeneralMatcher(Re2 re2, Slice input)
     {
-        RegexpMatcher matcher = re2.groupZeroMatcher(input, null);
+        RegexpMatcher matcher = re2.genericGroupZeroMatcherForDiagnostics(input);
         long count = 0;
         while (matcher.find()) {
             count++;
