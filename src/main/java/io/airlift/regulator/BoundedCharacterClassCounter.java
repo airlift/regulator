@@ -20,6 +20,8 @@ import java.util.Arrays;
 
 import static io.airlift.regulator.Regexp.LATIN1;
 import static io.airlift.regulator.Regexp.NON_GREEDY;
+import static io.airlift.regulator.RegexpOp.ANY_BYTE;
+import static io.airlift.regulator.RegexpOp.ANY_CHAR;
 import static io.airlift.regulator.RegexpOp.CAPTURE;
 import static io.airlift.regulator.RegexpOp.CHAR_CLASS;
 import static io.airlift.regulator.RegexpOp.PLUS;
@@ -32,16 +34,23 @@ final class BoundedCharacterClassCounter
     private static final int COMPACT_ROUTE_MINIMUM_REPETITIONS = 32;
     private static final int COMPACT_ROUTE_MINIMUM_RANGES = 32;
     // Planes 4 through 13 hold no characters, so only a class that reaches the last planes ends
-    // here or beyond: a negated class, or one with plane-14 members such as `\p{Mn}` or Unicode
-    // `\w`. Its bitset would cost up to 136 KiB per pattern.
+    // here or beyond, such as `\PL`, `\p{Mn}`, or Unicode `\w`. Its bitset would cost up to
+    // 136 KiB per pattern, unless the class holds every non-ASCII character, as a negated ASCII
+    // class does; its bitset then ends at ASCII.
     private static final int LAST_MEMBER_LIMIT = 0x40000;
     private static final BoundedCharacterClassCounter UNSUPPORTED = new BoundedCharacterClassCounter();
+    private static final RuneRange[] ALL_CHARACTERS = {new RuneRange(0, CharClass.RUNEMAX)};
+    private static final RuneRange[] ALL_BYTES = {new RuneRange(0, 0xFF)};
 
     private final long[] matchingCodePoints;
     private final boolean[] memberStartBytes;
     private final byte[] memberStartByteNibbleTables;
     private final int minimum;
     private final int maximum;
+    // The run length at which `findSpan` stops testing membership: the maximum, or, for an
+    // unbounded repeat of a UTF-8 class holding every character, the minimum, after which it skips
+    // the rest of the run.
+    private final int decidedRunLength;
     private final boolean readsBytes;
     private final boolean matchesAllNonAscii;
 
@@ -52,6 +61,7 @@ final class BoundedCharacterClassCounter
         memberStartByteNibbleTables = null;
         minimum = 0;
         maximum = 0;
+        decidedRunLength = 0;
         readsBytes = false;
         matchesAllNonAscii = false;
     }
@@ -62,22 +72,25 @@ final class BoundedCharacterClassCounter
         // only ASCII characters reads alike byte by byte, as a Latin-1 class does.
         int lastHigh = ranges[ranges.length - 1].high();
         boolean readsBytes = latin1 || lastHigh <= 0x7F;
-        // The bitset ends at the class's last member; `matches` rejects every code point beyond.
-        int lastMember = Math.min(CharClass.RUNEMAX, lastHigh);
+        boolean matchesAllNonAscii = !latin1 && holdsAllNonAscii(ranges);
+        // The bitset ends at the class's last member, or at ASCII for a class holding every
+        // non-ASCII character. `matches` rejects every code point beyond, except that such a class
+        // accepts them.
+        int lastMember = matchesAllNonAscii ? 0x7F : Math.min(CharClass.RUNEMAX, lastHigh);
         matchingCodePoints = new long[readsBytes ? 4 : (lastMember >>> 6) + 1];
-        boolean matchesAllNonAscii = false;
         for (RuneRange range : ranges) {
-            matchesAllNonAscii |= !latin1 && Compiler.holdsAllNonAscii(range);
             int low = Math.max(0, range.low());
-            int high = Math.min(latin1 ? 0xFF : CharClass.RUNEMAX, range.high());
+            int high = Math.min(latin1 ? 0xFF : lastMember, range.high());
             if (low <= high) {
                 setRange(matchingCodePoints, low, high);
             }
         }
+        boolean matchesEveryCharacter = matchesAllNonAscii && matchingCodePoints[0] == -1L && matchingCodePoints[1] == -1L;
         memberStartBytes = buildMemberStartBytes(ranges, readsBytes);
         memberStartByteNibbleTables = VectorSupport.isAvailable() ? buildMemberStartByteNibbleTables(memberStartBytes) : null;
         this.minimum = minimum;
         this.maximum = maximum;
+        this.decidedRunLength = maximum == -1 && matchesEveryCharacter ? minimum : maximum;
         this.readsBytes = readsBytes;
         this.matchesAllNonAscii = matchesAllNonAscii;
     }
@@ -202,7 +215,7 @@ final class BoundedCharacterClassCounter
         }
         if (regexp.op() == CHAR_CLASS) {
             RuneRange[] ranges = regexp.charClass().ranges();
-            if ((regexp.parseFlags() & LATIN1) != 0 || !isLargeUnicodeClass(regexp) || reachesLastPlanes(ranges)) {
+            if ((regexp.parseFlags() & LATIN1) != 0 || !isLargeUnicodeClass(regexp) || needsLastPlaneBitset(ranges)) {
                 return null;
             }
             return new BoundedCharacterClassCounter(ranges, 1, 1, false);
@@ -213,15 +226,21 @@ final class BoundedCharacterClassCounter
         }
         Analysis analysis = analyzePattern(regexp);
         // A byte class retains a 256-bit set whatever its ranges.
-        if (analysis == null || (!analysis.latin1() && reachesLastPlanes(analysis.ranges()))) {
+        if (analysis == null || (!analysis.latin1() && needsLastPlaneBitset(analysis.ranges()))) {
             return null;
         }
         return new BoundedCharacterClassCounter(analysis.ranges(), analysis.minimum(), analysis.maximum(), analysis.latin1());
     }
 
-    private static boolean reachesLastPlanes(RuneRange[] ranges)
+    private static boolean needsLastPlaneBitset(RuneRange[] ranges)
     {
-        return ranges[ranges.length - 1].high() >= LAST_MEMBER_LIMIT;
+        return ranges[ranges.length - 1].high() >= LAST_MEMBER_LIMIT && !holdsAllNonAscii(ranges);
+    }
+
+    // The ranges are sorted, so only the last can hold every non-ASCII character.
+    private static boolean holdsAllNonAscii(RuneRange[] ranges)
+    {
+        return Compiler.holdsAllNonAscii(ranges[ranges.length - 1]);
     }
 
     private static boolean isLargeUnicodeClass(Regexp atom)
@@ -237,6 +256,11 @@ final class BoundedCharacterClassCounter
     boolean scansMemberStartsWithVectorsForDiagnostics()
     {
         return memberStartByteNibbleTables != null;
+    }
+
+    boolean skipsEveryCharacterRunsForDiagnostics()
+    {
+        return decidedRunLength != maximum;
     }
 
     long estimatedRetainedSize()
@@ -277,6 +301,14 @@ final class BoundedCharacterClassCounter
         Regexp atom = regexp.child(0);
         while (atom.op() == CAPTURE) {
             atom = atom.child(0);
+        }
+        // A parser keeps a dot that matches newline, or a full class, as ANY_CHAR, and a Rust bytes
+        // dot as ANY_BYTE.
+        if (atom.op() == ANY_CHAR) {
+            return new Analysis(ALL_CHARACTERS, minimum, maximum, (atom.parseFlags() & LATIN1) != 0);
+        }
+        if (atom.op() == ANY_BYTE) {
+            return new Analysis(ALL_BYTES, minimum, maximum, true);
         }
         if (atom.op() != CHAR_CLASS || atom.charClass().isEmpty()) {
             return null;
@@ -435,7 +467,10 @@ final class BoundedCharacterClassCounter
 
                 position += width;
                 runLength++;
-                if (runLength == maximum) {
+                if (runLength == decidedRunLength) {
+                    if (maximum == -1) {
+                        position = skipCharacters(bytes, position, end);
+                    }
                     return packSpan(inputOffset, contextStart, runStart, position);
                 }
             }
@@ -460,6 +495,21 @@ final class BoundedCharacterClassCounter
             return -1;
         }
         return VectorByteSetScanner.findNibbleTable(bytes, position, end - position, memberStartByteNibbleTables);
+    }
+
+    // Returns the end of the characters from `position` on, read as `decodeUtf8` reads them for a
+    // class holding every non-ASCII character: an ASCII byte, or a lead byte and its continuation
+    // bytes, valid or not. Only a byte that begins no such character ends them.
+    private static int skipCharacters(byte[] bytes, int position, int end)
+    {
+        while (position < end) {
+            int width = bytes[position] >= 0 ? 1 : Utf8.re2CharacterWidth(bytes, position, end);
+            if (width == 0) {
+                return position;
+            }
+            position += width;
+        }
+        return position;
     }
 
     private long decode(byte[] bytes, int position, int end)
@@ -503,8 +553,7 @@ final class BoundedCharacterClassCounter
 
     private boolean matches(int codePoint)
     {
-        return codePoint >= 0 &&
-                codePoint < matchingCodePoints.length * Long.SIZE &&
-                (matchingCodePoints[codePoint >>> 6] & (1L << codePoint)) != 0;
+        // The bitset alone decides a member; only a code point it rejects reads the flag.
+        return (codePoint >= 0 && codePoint < matchingCodePoints.length * Long.SIZE && (matchingCodePoints[codePoint >>> 6] & (1L << codePoint)) != 0) || (matchesAllNonAscii && codePoint > 0x7F);
     }
 }
