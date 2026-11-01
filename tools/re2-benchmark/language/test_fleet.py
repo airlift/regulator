@@ -599,14 +599,48 @@ class TestFleet(unittest.TestCase):
         self.assertEqual(before, evidence())
         with self.assertRaisesRegex(ValueError, "overwrite"):
             fleet.aggregate(self.directory, result_root, output)
+        partial, missing = (self.root / "language-lifecycle-partial-results.json",
+                            self.root / "language-lifecycle-partial-missing.tsv")
+        # A complete campaign has no partial export, and a partial export never takes a complete export's name.
+        with self.assertRaisesRegex(ValueError, "export is complete, not partial"):
+            fleet.aggregate_partial(self.directory, result_root, partial)
+        with self.assertRaisesRegex(ValueError, "must end in -partial-results.json"):
+            fleet.aggregate_partial(self.directory, result_root, self.root / "partial.json")
         fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts[1:])
         with self.assertRaisesRegex(ValueError, "unit coverage failed"):
             fleet.aggregate(self.directory, result_root, self.root / "partial.json")
-        # A semantic rejection fails the phase, though another attempt of its unit was accepted.
-        fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
+        # Missing one group, the campaign exports partially only the comparison it accepted completely, and lists
+        # what the other lacks. A missing list that cannot be written leaves no export, so a retry succeeds.
+        missing.mkdir()
+        with self.assertRaises(IsADirectoryError):
+            fleet.aggregate_partial(self.directory, result_root, partial)
+        self.assertFalse(partial.exists())
+        missing.rmdir()
+        fleet.aggregate_partial(self.directory, result_root, partial)
+        units = fleet.work_units.load(self.directory)
+
+        def comparison(receipt):
+            return fleet.row_atom(fleet.work_units.unit_group(
+                units[receipt["unit_id"]], receipt["group_id"])["owned"][0])[:2]
+
+        data = collection.load(partial)
+        dropped = comparison(receipts[0])
+        self.assertEqual(len(data["observations"]), 5 * 3 * 6)
+        self.assertEqual([host["receipt"] for host in data["hosts"]],
+                         [receipt for receipt in receipts if comparison(receipt) != dropped])
+        row = {"case_id": dropped[0], "language": dropped[1], "platform": receipts[0]["platform"],
+               "replica_id": receipts[0]["replica_id"], "unit_id": receipts[0]["unit_id"],
+               "group_id": receipts[0]["group_id"]}
+        self.assertEqual(("partial", [row], [row]),
+                         (data["coverage"], data["missing"], fleet.row_protocol.read_tsv(missing)))
+        # A semantic rejection fails the phase, though another attempt of its unit was accepted, and exports
+        # nothing, completely or partially.
         fleet.write_tsv(result_root / fleet.unit_session.SEMANTIC_REJECTIONS,
                         fleet.unit_session.SEMANTIC_REJECTION_FIELDS,
                         [{key: receipts[0][key] for key in fleet.unit_session.SEMANTIC_REJECTION_FIELDS}])
+        with self.assertRaisesRegex(ValueError, "semantic failure"):
+            fleet.aggregate_partial(self.directory, result_root, self.root / "rejected-partial-results.json")
+        fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
         with self.assertRaisesRegex(ValueError, "semantic failure"):
             fleet.aggregate(self.directory, result_root, self.root / "rejected.json")
 

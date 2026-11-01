@@ -633,6 +633,28 @@ A restart must reproduce each export byte for byte. The release importer reads
 `accepted-units.tsv` beside the exports and accepts them only as one complete
 campaign of the imported plans, with no semantic rejection.
 
+A primary that ends with unresolved units still fails, but first exports what
+it can. A plan it completed gets its `<shard>-results.json`; any other plan
+gets `<shard>-partial-results.json`, which keeps only the comparisons whose
+every group was accepted on both platforms at every replica, and leaves out
+the accepted groups of the rest. Its receipts pass the export's checks above,
+restricted to the kept groups. It records `"coverage": "partial"` and its
+`"missing"` groups, which `<shard>-partial-missing.tsv` lists by case,
+language, platform, replica, unit, and group. A semantic rejection still
+exports nothing, and a campaign missing nothing has no partial export. A plan
+that exports neither does not stop the others; the failure names it with its
+reason. The partial pair is derived, so every end removes it and only a failed
+end that exports the plan partially writes it again. The release importer refuses it, since its
+hosts are not one complete campaign. For a root that already failed, write the
+pair outside the root, whose manifest lists every file it holds; the missing
+list is written beside the export:
+
+```bash
+python3 tools/re2-benchmark/language/fleet.py aggregate-partial \
+  --plan-directory <plan> --results <result root> \
+  --output <shard>-partial-results.json
+```
+
 The campaign settings and `--release-version` work as they do for the
 baseline.
 Select `--release-version 2.0` to measure the published 2.0 artifact. See the
