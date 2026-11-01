@@ -1380,7 +1380,8 @@ external scanner; mixed UTF-8 and Latin-1 patterns are rejected by the builder.
 
 Eligible reusable matchers use a private candidate-start cursor for repeated
 group-zero searches. The cursor scans the forward DFA's start-byte candidates,
-or its start literal filter's candidates, and verifies each candidate with an anchored first-match traversal. This avoids
+its start literal filter's candidates, or the occurrences of a literal behind a
+leading assertion, and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
 literal search takes, a window of at least 64 bytes whose first literal hit lies
@@ -1394,11 +1395,32 @@ encountering an unsupported match shape, or failing DFA cache mutation falls
 back to the existing forward-plus-reverse matcher path for the rest of that
 matcher reset. The cursor is re-enabled by the next reset.
 
+The cursor can also search for a literal behind a leading assertion, as the Rust
+crate does with its prefilter. A program whose assertions the DFA runs, with an
+assertion before its first byte and a case-sensitive literal of 2 to 64 bytes
+that every path consumes first, qualifies whatever its length. Assertions take
+no width, so every match starts at an occurrence of that transparent start
+literal. The cursor verifies each occurrence with the same anchored traversal,
+whose start state comes from the byte before the occurrence, so a leading line
+or word assertion is judged as a search that read every byte would judge it.
+This route skips the start-scan productivity check, leaves windows shorter than
+64 bytes to the matcher's other routes, and falls back to the ordinary matcher
+when its work budget runs out. It follows the matcher's DFA quit streak for
+word assertions that quit outside ASCII: a quit counts once and falls back
+without starting the DFA again, a verified match or a proven no-match ends the
+streak, and a matcher at the limit skips the cursor too. Assertions the DFA does
+not run, such as Java's multiline `^` outside `UNIX_LINES` mode and Trino's
+final-line `$`, use the same literal in the group-zero NFA's skip when no
+thread is live. Compilation reserves the literal's retained memory from the
+forward DFA budget and drops the literal if the reservation would prevent DFA
+initialization.
+
 The implementation uses the existing DFA reader and exclusive-cache mutation
 protocol. Cached object transitions still require recovering the authoritative
 state offset before the end-of-text transition; tests cover this warm-cache
 case directly. The cursor adds no public API and does not change stateless,
-capturing, longest-match, anchored, nullable, or fixed-length searches.
+capturing, longest-match, anchored, or nullable searches, or fixed-length
+searches without a transparent start literal.
 
 The final campaign must compare this route with the ordinary
 forward-plus-reverse path and native RE2, including dense candidates and

@@ -541,8 +541,8 @@ final class Nfa
                 }
 
                 if (!matched && (!anchored || position == textBegin)) {
-                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canPrefixAccel()) {
-                        int found = prog.prefixAccel(bytes, position, textEnd - position);
+                    if (!anchored && runQueue.isEmpty() && position < textEnd && prog.canSkipToStartCandidate()) {
+                        int found = prog.skipToStartCandidate(bytes, position, textEnd - position);
                         if (found < 0) {
                             position = textEnd;
                         }

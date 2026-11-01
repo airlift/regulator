@@ -422,6 +422,65 @@ public class TestRustRegexp
     }
 
     @Test
+    public void testLiteralCandidateCursorFollowsDfaQuitStreak()
+    {
+        // Each search over the Cyrillic words quits the literal cursor's DFA, which counts once
+        // toward the streak. At the limit, later searches skip the cursor until a reset.
+        RustRegexp cyrillic = RustRegexp.compile(utf8Slice("\\bжж\\b"));
+        Slice text = utf8Slice("жж ".repeat(2 * Re2.DFA_QUIT_STREAK_LIMIT) + "x".repeat(200));
+        RegexpMatcher matcher = cyrillic.matcher(text, 0);
+        assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
+        for (int word = 0; word < 2 * Re2.DFA_QUIT_STREAK_LIMIT; word++) {
+            assertThat(matcher.find()).isTrue();
+            assertThat(matcher.start()).isEqualTo(5 * word);
+            assertThat(matcher.end()).isEqualTo(5 * word + 4);
+            assertThat(matcher.dfaQuitStreak()).isEqualTo(Math.min(word + 1, Re2.DFA_QUIT_STREAK_LIMIT));
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(Math.min(word + 1, Re2.DFA_QUIT_STREAK_LIMIT));
+        }
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(Re2.DFA_QUIT_STREAK_LIMIT);
+        matcher.reset(text);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.dfaQuitStreak()).isEqualTo(1);
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(Re2.DFA_QUIT_STREAK_LIMIT + 1);
+
+        // The next find forgets a quit: its DFA runs over the ASCII tail and ends the streak.
+        RegexpMatcher tail = RustRegexp.compile(utf8Slice("\\bжж\\b ")).matcher(utf8Slice("x ".repeat(35) + "жж x y z"), 0);
+        assertThat(tail.find()).isTrue();
+        assertThat(tail.dfaQuitStreak()).isEqualTo(1);
+        assertThat(tail.find()).isFalse();
+        assertThat(tail.dfaQuitStreak()).isZero();
+
+        // A failed find that quits retries from the same start, so repeated quits near the end of
+        // the input also reach the limit.
+        RegexpMatcher retrying = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}")).matcher(utf8Slice("fooж " + "x".repeat(70)), 0);
+        assertThat(retrying.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
+        for (int quit = 0; quit < 6; quit++) {
+            assertThat(retrying.find()).isFalse();
+            assertThat(retrying.dfaQuitStreak()).isEqualTo(Math.min(quit + 1, Re2.DFA_QUIT_STREAK_LIMIT));
+            assertThat(retrying.candidateStartFallbackCountForDiagnostics()).isEqualTo(Math.min(quit + 1, Re2.DFA_QUIT_STREAK_LIMIT));
+        }
+
+        // A match the cursor verifies ends the streak, so quits that alternate with matches never
+        // reach the limit.
+        RegexpMatcher alternating = RustRegexp.compile(utf8Slice("\\bfoo\\b")).matcher(utf8Slice("fooж foo foo ".repeat(5) + "x".repeat(200)), 0);
+        assertThat(alternating.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
+        for (int search = 0; search < 10; search++) {
+            assertThat(alternating.find()).isTrue();
+            assertThat(alternating.group().toStringUtf8()).isEqualTo("foo");
+            assertThat(alternating.dfaQuitStreak()).isEqualTo(search % 2 == 0 ? 1 : 0);
+        }
+        assertThat(alternating.candidateStartRouteCountForDiagnostics()).isEqualTo(5);
+
+        // So does a no-match the cursor proves.
+        RegexpMatcher exhausted = cyrillic.matcher(utf8Slice("жж " + "x".repeat(200)), 0);
+        assertThat(exhausted.find()).isTrue();
+        assertThat(exhausted.dfaQuitStreak()).isEqualTo(1);
+        assertThat(exhausted.find()).isFalse();
+        assertThat(exhausted.dfaQuitStreak()).isZero();
+    }
+
+    @Test
     public void testRustAssertionsRunOnOnePass()
     {
         // Anchored capture patterns with CRLF anchors, Unicode and ASCII word boundaries, and

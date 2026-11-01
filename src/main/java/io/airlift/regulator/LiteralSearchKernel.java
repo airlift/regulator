@@ -100,8 +100,8 @@ final class LiteralSearchKernel
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher and LiteralGapMatcher call it for such
-    /// literals and [#findContains] for longer ones. TrinoLikeKernelGenerator emits a copy of
-    /// its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
+    /// literals and [#findContains(Slice,int,int)] for longer ones. TrinoLikeKernelGenerator emits a
+    /// copy of its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
     int findSingleByte(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
@@ -156,9 +156,26 @@ final class LiteralSearchKernel
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
     }
 
-    /// Returns the Slice-relative offset where [#findContains] continues with KMP; only tests
-    /// call it. Returns -1 when the search ends, with or without a match, before it switches to
-    /// KMP, when the range is invalid, and when the literal is a single byte.
+    /// Returns the array-absolute index in `input` of the first occurrence of the literal in the
+    /// range, or `-1`, for a literal of at least two bytes. It searches as
+    /// [#findContains(Slice,int,int)] does; [Prog#findLiteral] calls it for the transparent start
+    /// literal, whose searches work on absolute indexes.
+    int findContains(byte[] input, int offset, int length)
+    {
+        if (literal.length > length) {
+            return -1;
+        }
+        int searchEnd = offset + length;
+        int matchOffset = skipToContainsCandidate(input, offset, searchEnd);
+        if (matchOffset < -1) {
+            matchOffset = findKmp(input, -2 - matchOffset, searchEnd);
+        }
+        return matchOffset;
+    }
+
+    /// Returns the Slice-relative offset where [#findContains(Slice,int,int)] continues with KMP;
+    /// only tests call it. Returns -1 when the search ends, with or without a match, before it
+    /// switches to KMP, when the range is invalid, and when the literal is a single byte.
     int kmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");

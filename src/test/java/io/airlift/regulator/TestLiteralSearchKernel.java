@@ -189,12 +189,15 @@ public class TestLiteralSearchKernel
         }
     }
 
-    /// Requires [LiteralSearchKernel#findContains] to switch to KMP at `kmpHandoff`, or
-    /// not at all when it is -1, and to find the literal at `match`, or nowhere when it is -1.
+    /// Requires [LiteralSearchKernel#findContains(Slice,int,int)] to switch to KMP at `kmpHandoff`,
+    /// or not at all when it is -1, and both overloads to find the literal at `match`, or nowhere
+    /// when it is -1. The byte-array overload takes and returns absolute array indexes.
     private static void assertSearch(LiteralSearchKernel kernel, Slice input, int offset, int length, int kmpHandoff, int match)
     {
         assertThat(kernel.kmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
         assertThat(kernel.findContains(input, offset, length)).isEqualTo(match);
+        int arrayOffset = input.byteArrayOffset();
+        assertThat(kernel.findContains(input.byteArray(), arrayOffset + offset, length)).isEqualTo(match < 0 ? -1 : arrayOffset + match);
     }
 
     /// Returns where a contains search switches to KMP when every candidate, one per byte from

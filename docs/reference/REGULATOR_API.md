@@ -148,7 +148,8 @@ its dot-star literal spans, or its ordered literals such as `a(?s:.*)b`, which
 scan for the first and last bytes of a multi-byte literal together, nor the
 other languages' contains of a contained literal, which uses `Slice.indexOf`,
 nor the start literal filter of a pattern that begins with a few literals,
-which always estimates with English text frequencies. A
+which always estimates with English text frequencies, nor the literal behind a
+leading assertion, which scans for its first and last bytes. A
 distribution that does not match the data can make literal scans several times
 slower per byte than first-byte scanning, because it moves the scan onto bytes
 that are common in the searched text; it never changes what matches, and the

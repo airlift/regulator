@@ -363,6 +363,35 @@ public class TestTrinoRegexpDifferential
         }
     }
 
+    @Test
+    public void testLeadingAssertionLiteralMatchesJoni()
+    {
+        // The candidate cursor verifies each occurrence of the literal behind a multiline ^ from
+        // the byte before it. Trino's final-line $ keeps the other patterns off the DFA, and text
+        // past BitState's limit takes the Pike VM, which skips to the literal behind ^ or \A when
+        // no thread is live.
+        String fillerUnit = "filler text, ";
+        for (String pattern : List.of("(?m)^Sherlock Holmes|Sherlock Holmes$", "(?m)^ab|ab$", "^ab|ab$", "\\Aab|ab$")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            Prog prog = regexp.re2().forwardProgramForDiagnostics();
+            String filler = fillerUnit.repeat(Math.max(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES, prog.bitStateTextMaxSize()) / fillerUnit.length() + 1);
+            String literal = pattern.contains("Sherlock") ? "Sherlock Holmes" : "ab";
+            List<Slice> sources = new ArrayList<>();
+            for (String terminator : List.of("\n", "\r\n", "\r")) {
+                String lines = literal + " x" + literal + terminator + literal + terminator + filler + literal + terminator + "x" + literal;
+                sources.add(utf8Slice(lines));
+                sources.add(utf8Slice(lines + terminator));
+                sources.add(utf8Slice(filler + terminator + lines + filler + literal));
+            }
+            Regex oracle = joniPattern(pattern);
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+            RegexpMatcher matcher = regexp.re2().matcher(sources.getLast(), 0);
+            assertThat(matcher.find()).as(pattern).isTrue();
+            assertThat(matcher.candidateStartRouteCountForDiagnostics() > 0).as(pattern).isEqualTo(pattern.startsWith("(?m)"));
+            assertThat(prog.canSkipToStartCandidate()).as(pattern).isEqualTo(!pattern.startsWith("(?m)"));
+        }
+    }
+
     private static Map<String, Integer> joniNamedGroups(String description, Regex joni)
     {
         Map<String, Integer> namedGroups = new HashMap<>();
