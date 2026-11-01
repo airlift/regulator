@@ -322,6 +322,13 @@ python3 tools/re2-benchmark/baseline/render_report.py \
 
 Each phase root keeps `semantic-rejections.tsv` beside its ledger, and the
 reducer reads the attempts retained under it as [inputs](#inputs) describes.
+A campaign's controller runs the reducer twice per candidate: its
+`preliminary-reduction` reduces the primary alone to list the confirmation jobs,
+and its `reduction`, after the confirmation, reduces both phases' ledgers,
+roots, and events, or the primary alone when no jobs were listed. The release
+report imports the `reduction`. Neither names a campaign archive; to bind the
+reduction to the archive, rerun the reducer with `--campaign-artifact`, as
+above.
 
 The isolated tests use synthetic campaigns:
 
