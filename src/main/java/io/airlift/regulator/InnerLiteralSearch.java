@@ -18,23 +18,26 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
 /// Finds the leftmost-first match of a pattern `P L S`, whose top-level concatenation holds a
 /// literal `L` after its first element, by searching for `L` instead of running the DFA over every
-/// byte. This is the Rust crate's reverse inner strategy, which also covers its reverse suffix
-/// strategy (regex-automata 0.4.18 `meta/strategy.rs` and `meta/reverse_inner.rs`). For each
-/// occurrence of `L`, a reverse DFA of `P` anchored at the occurrence finds the earliest start, and
-/// the forward DFA of the whole pattern anchored at that start finds the end.
+/// byte. `L` may also be a literal set, an alternation of literals, where an occurrence of any
+/// member is an occurrence of `L`. This is the Rust crate's reverse inner strategy, which also
+/// covers its reverse suffix strategy (regex-automata 0.4.18 `meta/strategy.rs` and
+/// `meta/reverse_inner.rs`). For each occurrence of `L`, a reverse DFA of `P` anchored at the
+/// occurrence finds the earliest start, and the forward DFA of the whole pattern anchored at that
+/// start finds the end.
 ///
 /// The first confirmed candidate is the leftmost-first match only when no earlier match can span
 /// a later occurrence of `L`. [#analyze] accepts a pattern only when one of the crate's proofs
-/// holds (`meta/reverse_inner.rs` `has_no_earlier_match`): `P` cannot consume every byte of `L`,
-/// `P` has a fixed length, or the first or last element of `P`, skipping elements such as
-/// assertions that match only the empty string, is a required class disjoint from the rest of `P`
-/// and from `L`.
+/// holds (`meta/reverse_inner.rs` `has_no_earlier_match`): `P` cannot consume every byte of a
+/// single literal `L`, `P` has a fixed length, or the first or last element of `P`, skipping
+/// elements such as assertions that match only the empty string, is a required class disjoint
+/// from the rest of `P` and from every byte of `L`.
 ///
 /// As in the crate, a search reports [#FALLBACK], for its caller to run the ordinary engine, when
 /// the reverse search would read back past the previous candidate, or a candidate lies in text the
@@ -59,18 +62,43 @@ final class InnerLiteralSearch
     private static final int MAX_RECURSIVE_DEPTH = 256;
     // Each overlapping hit of a longer literal re-reads the whole literal.
     private static final int MAXIMUM_LITERAL_LENGTH = 64;
+    // The set filter tests three positions of every member and holds at most eight members. The
+    // crate treats its Teddy prefilter as fast only when every literal has at least three bytes.
+    private static final int MINIMUM_SET_MEMBER_LENGTH = 3;
+    private static final int MAXIMUM_SET_MEMBERS = 8;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(InnerLiteralSearch.class);
 
+    // A single literal has its search kernel; a set has its members, in alternation order, and
+    // their filter.
     private final LiteralSearchKernel literalSearch;
-    private final int literalLength;
+    private final byte[][] literalSet;
+    private final StartLiteralFilter literalSetFilter;
+    private final int minimumLiteralLength;
+    private final int maximumLiteralLength;
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[][] literalSet, StartLiteralFilter literalSetFilter, Prog reversePrefixProgram, Prog forwardProgram)
     {
-        this.literalSearch = requireNonNull(literalSearch, "literalSearch is null");
-        this.literalLength = literalSearch.literalLength();
+        this.literalSearch = literalSearch;
+        this.literalSet = literalSet;
+        this.literalSetFilter = literalSetFilter;
+        if (literalSearch != null) {
+            this.minimumLiteralLength = literalSearch.literalLength();
+            this.maximumLiteralLength = literalSearch.literalLength();
+        }
+        else {
+            requireNonNull(literalSetFilter, "literalSetFilter is null");
+            int minimum = Integer.MAX_VALUE;
+            int maximum = 0;
+            for (byte[] literal : literalSet) {
+                minimum = Math.min(minimum, literal.length);
+                maximum = Math.max(maximum, literal.length);
+            }
+            this.minimumLiteralLength = minimum;
+            this.maximumLiteralLength = maximum;
+        }
         this.reversePrefixProgram = requireNonNull(reversePrefixProgram, "reversePrefixProgram is null");
         this.forwardProgram = requireNonNull(forwardProgram, "forwardProgram is null");
     }
@@ -91,21 +119,32 @@ final class InnerLiteralSearch
         List<Regexp> children = new ArrayList<>();
         addConcatenationElements(regexp, children, 0);
         // As in the crate, the first element is skipped, since a literal there would have given a
-        // prefix acceleration, and the first literal found decides.
+        // prefix acceleration, and the first literal or literal set found decides. A set the
+        // filter cannot search is skipped, as the crate skips a prefilter that is not fast.
         for (int index = 1; index < children.size(); index++) {
             byte[] literal = asciiLiteral(children.get(index));
-            if (literal == null) {
-                continue;
+            byte[][] literals;
+            StartLiteralFilter literalSetFilter = null;
+            if (literal != null) {
+                if ((literal.length == 1 && isCommonByte(literal[0])) || literal.length > MAXIMUM_LITERAL_LENGTH) {
+                    return null;
+                }
+                literals = new byte[][] {literal};
             }
-            if ((literal.length == 1 && isCommonByte(literal[0])) || literal.length > MAXIMUM_LITERAL_LENGTH) {
-                return null;
+            else {
+                literals = asciiLiteralSet(children.get(index));
+                literalSetFilter = literals == null ? null : buildLiteralSetFilter(literals);
+                if (literalSetFilter == null) {
+                    continue;
+                }
             }
             Regexp prefix = index == 1 ? children.get(0) : Regexp.concat(regexp.parseFlags(), children.subList(0, index));
-            if (!hasNoEarlierMatch(prefix, literal, caseFolding)) {
+            if (!hasNoEarlierMatch(prefix, literals, caseFolding)) {
                 return null;
             }
-            LiteralSearchKernel literalSearch = new LiteralSearchKernel(Slices.wrappedBuffer(literal));
-            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalSearch.estimatedRetainedSize());
+            LiteralSearchKernel literalSearch = literal == null ? null : new LiteralSearchKernel(Slices.wrappedBuffer(literal));
+            byte[][] literalSet = literal == null ? literals : null;
+            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, literalSet, literalSetFilter));
             if (memory <= 0) {
                 // The compiler reads a budget of zero or less as no limit.
                 return null;
@@ -123,7 +162,7 @@ final class InnerLiteralSearch
                     reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
                 return null;
             }
-            return new InnerLiteralSearch(literalSearch, reversePrefixProgram, forwardProgram);
+            return new InnerLiteralSearch(literalSearch, literalSet, literalSetFilter, reversePrefixProgram, forwardProgram);
         }
         return null;
     }
@@ -151,22 +190,47 @@ final class InnerLiteralSearch
         }
     }
 
-    byte[] literal()
+    /// The literal, or the members of the literal set in alternation order.
+    byte[][] literals()
     {
-        return literalSearch.literal();
+        if (literalSearch != null) {
+            return new byte[][] {literalSearch.literal()};
+        }
+        return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
+    }
+
+    /// The literal's length, or the length of the shortest member of the literal set.
+    int minimumLiteralLength()
+    {
+        return minimumLiteralLength;
     }
 
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + literalSearch.estimatedRetainedSize() + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
+        return INSTANCE_SIZE + literalRetainedSize(literalSearch, literalSet, literalSetFilter) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
+    }
+
+    private static long literalRetainedSize(LiteralSearchKernel literalSearch, byte[][] literalSet, StartLiteralFilter literalSetFilter)
+    {
+        if (literalSearch != null) {
+            return literalSearch.estimatedRetainedSize();
+        }
+        long size = literalSetFilter.estimatedRetainedSize() + SizeOf.sizeOfObjectArray(literalSet.length);
+        for (byte[] literal : literalSet) {
+            size += SizeOf.sizeOf(literal);
+        }
+        return size;
     }
 
     /// Whether a search of `[start, end)` of `text` falls back because its first candidate lies
-    /// near the start. It reads at most `MINIMUM_SKIPPED_BYTES - 1` bytes plus the literal's length.
+    /// near the start. It reads at most `MINIMUM_SKIPPED_BYTES - 1` bytes plus the longest
+    /// literal's length. Within that read a shorter member of a set can start past the near bytes,
+    /// where the search does not fall back.
     boolean fallsBackNearStart(Slice text, int start, int end)
     {
-        int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + literalLength);
-        return findLiteral(text, start, length) >= 0;
+        int length = Math.min(end - start, MINIMUM_SKIPPED_BYTES - 1 + maximumLiteralLength);
+        int literalStart = findLiteral(text, start, length);
+        return literalStart >= 0 && literalStart - start < MINIMUM_SKIPPED_BYTES;
     }
 
     /// Searches `[start, end)` of `text` with assertions seeing `[contextStart, contextEnd)`, and
@@ -179,7 +243,7 @@ final class InnerLiteralSearch
         int minimumMatchStart = start;
         int minimumLiteralStart = start;
         int scanStart = start;
-        while (end - scanStart >= literalLength) {
+        while (end - scanStart >= minimumLiteralLength) {
             int literalStart = findLiteral(text, scanStart, end - scanStart);
             if (literalStart < 0) {
                 return Dfa.SEARCH_NO_MATCH;
@@ -207,20 +271,111 @@ final class InnerLiteralSearch
                 minimumLiteralStart = Dfa.anchoredStopPosition(forward);
             }
             scanStart = literalStart + 1;
-            minimumMatchStart = literalStart + literalLength;
+            minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
         }
         return Dfa.SEARCH_NO_MATCH;
     }
 
     private int findLiteral(Slice text, int offset, int length)
     {
-        return literalLength == 1 ? literalSearch.findSingleByte(text, offset, length) : literalSearch.findContains(text, offset, length);
+        if (literalSearch == null) {
+            return findLiteralSetMember(text, offset, length);
+        }
+        return minimumLiteralLength == 1 ? literalSearch.findSingleByte(text, offset, length) : literalSearch.findContains(text, offset, length);
+    }
+
+    // The filter accepts a superset of the positions where a member starts, so each hit is
+    // checked for a member, and a false hit continues the scan past it. As for the DFA's start
+    // literal filter, a short range skips the vector setup.
+    private int findLiteralSetMember(Slice text, int offset, int length)
+    {
+        byte[] data = text.byteArray();
+        int dataOffset = text.byteArrayOffset();
+        int position = dataOffset + offset;
+        int end = position + length;
+        while (position < end) {
+            int remaining = end - position;
+            int hit = VectorSupport.isAvailable() && remaining >= Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES
+                    ? VectorByteSetScanner.findLiteralSet(data, position, remaining, literalSetFilter)
+                    : literalSetFilter.find(data, position, remaining);
+            if (hit < 0) {
+                return -1;
+            }
+            if (setMemberLength(data, hit, end) > 0) {
+                return hit - dataOffset;
+            }
+            position = hit + 1;
+        }
+        return -1;
+    }
+
+    // The length of the literal found at `literalStart` in `[literalStart, end)`. For a set this
+    // is the first member in alternation order, as the crate's Teddy reports the leftmost-first
+    // literal.
+    private int matchedLength(Slice text, int literalStart, int end)
+    {
+        if (literalSearch != null) {
+            return minimumLiteralLength;
+        }
+        int dataOffset = text.byteArrayOffset();
+        return setMemberLength(text.byteArray(), dataOffset + literalStart, dataOffset + end);
+    }
+
+    // The length of the first member, in alternation order, at `position` and ending by `end`, or
+    // zero when none is.
+    private int setMemberLength(byte[] data, int position, int end)
+    {
+        for (byte[] literal : literalSet) {
+            if (literal.length <= end - position && Arrays.equals(data, position, position + literal.length, literal, 0, literal.length)) {
+                return literal.length;
+            }
+        }
+        return 0;
     }
 
     // A single letter, digit, or whitespace occurs too often for its scan to beat the DFA.
     private static boolean isCommonByte(byte value)
     {
         return Character.isLetterOrDigit(value) || Character.isWhitespace(value);
+    }
+
+    // An alternation of two to eight literals, each ASCII, not folded, and three to
+    // MAXIMUM_LITERAL_LENGTH bytes long, as its members in alternation order.
+    private static byte[][] asciiLiteralSet(Regexp regexp)
+    {
+        while (regexp.op() == RegexpOp.CAPTURE) {
+            regexp = regexp.child(0);
+        }
+        if (regexp.op() != RegexpOp.ALTERNATE || regexp.childCount() > MAXIMUM_SET_MEMBERS) {
+            return null;
+        }
+        byte[][] literals = new byte[regexp.childCount()][];
+        for (int index = 0; index < literals.length; index++) {
+            byte[] literal = asciiLiteral(regexp.child(index));
+            if (literal == null || literal.length < MINIMUM_SET_MEMBER_LENGTH || literal.length > MAXIMUM_LITERAL_LENGTH) {
+                return null;
+            }
+            literals[index] = literal;
+        }
+        return literals;
+    }
+
+    // Each member is one path of byte sets, in the format Prog#buildStartPositionByteSets returns:
+    // the member's byte at each position it covers, and every byte past its end.
+    private static StartLiteralFilter buildLiteralSetFilter(byte[][] literals)
+    {
+        long[][] paths = new long[literals.length][StartLiteralFilter.PATH_POSITIONS * 4];
+        for (int index = 0; index < literals.length; index++) {
+            byte[] literal = literals[index];
+            long[] path = paths[index];
+            int positions = Math.min(literal.length, StartLiteralFilter.PATH_POSITIONS);
+            for (int position = 0; position < positions; position++) {
+                int value = literal[position] & 0xFF;
+                path[position * 4 + (value >>> 6)] |= 1L << value;
+            }
+            Arrays.fill(path, positions * 4, path.length, -1L);
+        }
+        return StartLiteralFilter.build(paths, ByteFrequencies.englishText());
     }
 
     private static byte[] asciiLiteral(Regexp regexp)
@@ -250,19 +405,21 @@ final class InnerLiteralSearch
     }
 
     // meta/reverse_inner.rs has_no_earlier_match, with the helpers of meta/prefix.rs.
-    private static boolean hasNoEarlierMatch(Regexp prefix, byte[] literal, CaseFolding caseFolding)
+    private static boolean hasNoEarlierMatch(Regexp prefix, byte[][] literals, CaseFolding caseFolding)
     {
-        if (!canConsumeEveryLiteralByte(prefix, literal)) {
+        if (literals.length == 1 && !canConsumeEveryLiteralByte(prefix, literals[0])) {
             return true;
         }
         if (MatchLength.analyze(prefix, caseFolding).fixed() >= 0) {
             return true;
         }
-        return hasDisjointClassSeparator(prefix, literal);
+        return hasDisjointClassSeparator(prefix, literals);
     }
 
     // An occurrence that crosses the end of the prefix must overlap the match's own occurrence, and
-    // that overlap requires the prefix to consume every distinct byte of the literal.
+    // that overlap requires the prefix to consume every distinct byte of the literal. With a set,
+    // an occurrence of one member can cross into another member, so the crate uses this proof
+    // only for a single literal.
     private static boolean canConsumeEveryLiteralByte(Regexp regexp, byte[] literal)
     {
         for (byte value : literal) {
@@ -310,10 +467,10 @@ final class InnerLiteralSearch
     }
 
     // A required class at either end of the prefix, disjoint from the rest of the prefix and from
-    // the literal, separates the match start from each candidate: a reverse search cannot slide it
-    // across either one. The ends skip elements, such as assertions, that match only the empty
+    // every literal, separates the match start from each candidate: a reverse search cannot slide
+    // it across either one. The ends skip elements, such as assertions, that match only the empty
     // string.
-    private static boolean hasDisjointClassSeparator(Regexp prefix, byte[] literal)
+    private static boolean hasDisjointClassSeparator(Regexp prefix, byte[][] literals)
     {
         while (prefix.op() == RegexpOp.CAPTURE) {
             prefix = prefix.child(0);
@@ -335,18 +492,20 @@ final class InnerLiteralSearch
         if (first < 0) {
             return false;
         }
-        return hasDisjointClassSeparatorAt(children, last, literal) || (first != last && hasDisjointClassSeparatorAt(children, first, literal));
+        return hasDisjointClassSeparatorAt(children, last, literals) || (first != last && hasDisjointClassSeparatorAt(children, first, literals));
     }
 
-    private static boolean hasDisjointClassSeparatorAt(List<Regexp> children, int separatorIndex, byte[] literal)
+    private static boolean hasDisjointClassSeparatorAt(List<Regexp> children, int separatorIndex, byte[][] literals)
     {
         Regexp separator = requiredClass(children.get(separatorIndex));
         if (separator == null) {
             return false;
         }
-        for (byte value : literal) {
-            if (separator.charClass().contains(value)) {
-                return false;
+        for (byte[] literal : literals) {
+            for (byte value : literal) {
+                if (separator.charClass().contains(value)) {
+                    return false;
+                }
             }
         }
         for (int index = 0; index < children.size(); index++) {

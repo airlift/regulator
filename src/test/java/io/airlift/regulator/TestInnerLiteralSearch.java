@@ -20,10 +20,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.stream.Stream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestInnerLiteralSearch
@@ -50,7 +53,12 @@ public class TestInnerLiteralSearch
             "(?:a@.*b|c)@",
             "(?:a[^@]*@[^@]*d|c)@",
             "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)",
-            "(\\w+)(@(\\w+))");
+            "(\\w+)(@(\\w+))",
+            "([A-Za-z]awyer|[A-Za-z]inn)\\s",
+            "[a-z](?:inn|innk)\\s",
+            "[a-z](?:aba|bab)\\s",
+            "\\s(?:foo|barbaz)\\d",
+            "\\s[a-z]{0,12}(?:ing|ment)\\s");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -74,6 +82,26 @@ public class TestInnerLiteralSearch
         // A group that does not capture joins the top level too.
         assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
         assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
+        // An alternation of literals is searched as a set. Every language's parser factors the
+        // class out of this one's alternatives.
+        Slice target = utf8Slice("([A-Za-z]awyer|[A-Za-z]inn)\\s");
+        for (Map.Entry<String, Re2> compiled : List.of(
+                Map.entry("RE2", Re2.compile(target)),
+                Map.entry("Java", JavaRegexp.compile(target).re2()),
+                Map.entry("Trino", TrinoRegexp.compile(target).re2()),
+                Map.entry("Rust", RustRegexp.compile(target).re2()),
+                Map.entry("Rust bytes", RustRegexp.compile(target, RUST_BYTES_OPTIONS).re2()))) {
+            InnerLiteralSearch search = compiled.getValue().innerLiteralSearchForDiagnostics();
+            assertThat(search).as(compiled.getKey()).isNotNull();
+            assertThat(literal(search)).as(compiled.getKey()).isEqualTo("awyer|inn");
+        }
+        // Rust's Unicode \w has no fixed length in bytes, so the fixed-length proof needs RE2's.
+        InnerLiteralSearch wordSearch = Re2.compile(utf8Slice("\\w(?:foo|barbaz)\\s")).innerLiteralSearchForDiagnostics();
+        assertThat(wordSearch).isNotNull();
+        assertThat(literal(wordSearch)).isEqualTo("foo|barbaz");
+        assertThat(literal("\\s[a-z]{0,12}(?:ing|ment)\\s")).isEqualTo("ing|ment");
+        // A set that cannot be searched leaves a later literal to decide.
+        assertThat(literal("[a-z](?:ab|cd)@x")).isEqualTo("@x");
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -83,6 +111,12 @@ public class TestInnerLiteralSearch
                 "[xz]+zx",
                 "[a-z]+ing",
                 "\\w+\\w+Holmes",
+                // As in the crate, a set never uses the proof that the prefix cannot consume the
+                // literal, since one member can cross the prefix boundary into another.
+                "\\w+(?:foo|bar)\\s",
+                "[0-9]+(?:foo|bar)\\s",
+                // The separator must exclude every member's bytes.
+                "\\s[a-z]{0,12}(?:ing|a b)\\s",
                 // The bytes C3 A9 encode é, so neither byte class is disjoint from [a-zé].
                 "(?-u:[\\xC3\\xC4])+[a-z\u00E9]*(?-u:[\\xA9\\xAA])ab",
                 // A group inside a repetition is not part of the top-level concatenation.
@@ -94,7 +128,14 @@ public class TestInnerLiteralSearch
                 "Holmes\\w+@",
                 "\\w+(?i:holmes)",
                 "\\w+ \\w+",
-                "[a-z]" + "xy".repeat(32) + "z")) {
+                "[a-z]" + "xy".repeat(32) + "z",
+                // Sets with a member under three bytes, more than eight members, or a folded,
+                // non-ASCII, or non-literal member.
+                "[a-z](?:ab|cde)\\s",
+                "[a-z](?:aaa|bbb|ccc|ddd|eee|fff|ggg|hhh|iii)\\s",
+                "[a-z](?i:foo|bar)\\s",
+                "[a-z](?:foo|b\u00E4r)\\s",
+                "[a-z](?:foo|b[ae]r)\\s")) {
             assertThat(innerLiteralSearch(pattern)).as(pattern).isNull();
         }
     }
@@ -286,6 +327,24 @@ public class TestInnerLiteralSearch
                 "\\w+\\s+Holmes",
                 List.of(".".repeat(61) + "a Holmes" + filler),
                 List.of(".".repeat(62) + "a Holmes" + filler, ".".repeat(66) + "a Holmes" + filler));
+        // A set is near when any of its members starts fewer than the minimum bytes in.
+        assertNearStart(
+                "([A-Za-z]awyer|[A-Za-z]inn)\\s",
+                List.of(".".repeat(62) + "xinn " + filler, ".".repeat(62) + "Sawyer " + filler),
+                List.of(".".repeat(63) + "xinn " + filler, ".".repeat(63) + "Sawyer " + filler));
+    }
+
+    @Test
+    public void testNearStartCheckAgreesWithSearchPastShorterMember()
+    {
+        // The near-start check reads far enough to find the longest member starting before the
+        // minimum, so a shorter member can start past the minimum inside that read. There the
+        // search does not fall back, so the check must not report a near hit. Here a partial awyer
+        // straddles the minimum, and inn starts two bytes past it.
+        assertNearStart(
+                "([A-Za-z]awyer|[A-Za-z]inn)\\s",
+                List.of(),
+                List.of(".".repeat(61) + "awyxinn " + ".".repeat(200)));
     }
 
     private static void assertNearStart(String regex, List<String> nearTexts, List<String> farTexts)
@@ -320,7 +379,15 @@ public class TestInnerLiteralSearch
     {
         InnerLiteralSearch search = innerLiteralSearch(pattern);
         assertThat(search).as(pattern).isNotNull();
-        return new String(search.literal(), UTF_8);
+        return literal(search);
+    }
+
+    // A set's members, in alternation order, joined with a bar.
+    private static String literal(InnerLiteralSearch search)
+    {
+        return Stream.of(search.literals())
+                .map(literal -> new String(literal, UTF_8))
+                .collect(joining("|"));
     }
 
     private static List<Slice> texts()
@@ -342,13 +409,17 @@ public class TestInnerLiteralSearch
                 // bytes past a match end, which stays near, then 64, which hands back to the inner
                 // literal, and the last match ends with the text.
                 "ashing" + ".".repeat(62) + "bshing" + ".".repeat(63) + "cshing" + ".".repeat(63) + "dshingeshing",
-                "a Holmes" + ".".repeat(61) + "b Holmes" + ".".repeat(62) + "c Holmes")) {
+                "a Holmes" + ".".repeat(61) + "b Holmes" + ".".repeat(62) + "c Holmes",
+                // Literal sets: adjacent and overlapping members, one member inside another, and
+                // a false filter hit, barb, in texts long enough for the vector scan.
+                "Sawyer inn tinn sawyerinn Xawyer\tbinnk\nainnk Jawyerinn abab babab ababa bab\n".repeat(16),
+                " foo1 barbaz2 foobarbaz3\tfoo barbell4 barbaz\n ring1 moment2 king ing ment\n".repeat(16))) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, so filler keeps the search
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"# noqa", "# NoQA:", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF"};
+        String[] tokens = {"# noqa", "# NoQA:", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);

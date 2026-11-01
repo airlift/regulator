@@ -1589,7 +1589,7 @@ public sealed class Re2
     private static boolean searchesMultiByteInnerLiteral(BooleanPlans booleanPlans)
     {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        return innerLiteralSearch != null && innerLiteralSearch.literal().length >= 2;
+        return innerLiteralSearch != null && innerLiteralSearch.minimumLiteralLength() >= 2;
     }
 
     long findExactLiteralSpan(Slice input, int start)

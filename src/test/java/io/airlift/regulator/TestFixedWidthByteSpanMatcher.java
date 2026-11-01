@@ -222,7 +222,7 @@ public class TestFixedWidthByteSpanMatcher
             Re2 pattern = entry.getValue();
             assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(label).isFalse();
             assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
-            assertThat(pattern.innerLiteralSearchForDiagnostics().literal()).as(label).isEqualTo("shing".getBytes(ISO_8859_1));
+            assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 
         // Trino's fixed-width subtype keeps its matcher.

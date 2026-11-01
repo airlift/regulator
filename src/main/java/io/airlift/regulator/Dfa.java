@@ -51,7 +51,7 @@ final class Dfa
     private static final int CONSERVATIVE_REFERENCE_BYTES = Long.BYTES;
     private static final int MIN_PAIRED_SEARCH_BYTES = 256;
     private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
-    private static final int MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES = 1024;
+    static final int MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES = 1024;
     private static final int MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES = 4 * 1024;
     static final int MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES = 64 * 1024;
     static final int BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES = MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES;
