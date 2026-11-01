@@ -5,8 +5,10 @@ method takes and returns plain values, and every SDK failure arrives as CloudErr
 use, so the commands that never reach AWS, such as status, run without it.
 """
 
+import base64
 import contextlib
 import email.utils
+import hashlib
 import shutil
 import threading
 from dataclasses import dataclass
@@ -50,6 +52,8 @@ LAUNCH_REJECTIONS = {
 }
 THROTTLES = {"RequestLimitExceeded", "Throttling", "ThrottlingException", "EC2ThrottledException"}
 LAUNCH_ATTEMPTS = 3
+# The bytes of each part of a streamed upload but its last; S3's 10,000 parts of 128 MiB then hold about 1.22 TiB.
+STREAM_PART_BYTES = 128 << 20
 
 
 @dataclass(frozen=True)
@@ -78,10 +82,13 @@ class BucketInfo:
 
 @dataclass(frozen=True)
 class ObjectHead:
-    """An S3 object's SHA-256, in hex, as upload kept it in the object's metadata, or None, and its age in seconds by
-    S3's own clock."""
+    """An S3 object's SHA-256, in hex, as upload kept it in the object's metadata, or None, its age in seconds by S3's
+    own clock, all of its metadata, its storage class, and its size in bytes."""
     sha256: str
     age: float
+    metadata: dict
+    storage_class: str
+    size: int
 
 
 @dataclass(frozen=True)
@@ -452,6 +459,17 @@ class AwsCloud:
         with translated(), contextlib.closing(body), path.open("wb") as output:
             shutil.copyfileobj(body, output)
 
+    def digest(self, region, bucket, key):
+        """The SHA-256, in hex, and the size in bytes of the object, read as a stream, so no copy is written."""
+        body = self.call("s3", region, "get_object", Bucket=bucket, Key=key)["Body"]
+        digest = hashlib.sha256()
+        size = 0
+        with translated(), contextlib.closing(body):
+            for block in iter(lambda: body.read(1 << 20), b""):
+                digest.update(block)
+                size += len(block)
+        return digest.hexdigest(), size
+
     def put(self, region, bucket, key, body, *, if_none_match=False):
         """Write the object's bytes in one request. With if_none_match it is written only where no object has the
         key, and returns False where one does."""
@@ -474,6 +492,43 @@ class AwsCloud:
             self.client("s3", region).upload_file(str(path), bucket, key, ExtraArgs={
                 "Metadata": {"sha256": sha256}, "ChecksumAlgorithm": "SHA256"})
 
+    def upload_stream(self, region, bucket, key, stream, metadata, storage_class):
+        """Write the stream's bytes as a new object with the metadata and storage class, in parts of
+        STREAM_PART_BYTES read one at a time, each checked by S3 against its own SHA-256. The object is written only
+        where no object has the key, and returns False where one does. It is completed only once the stream ends,
+        so a stream that fails, as by raising from its read, leaves no object."""
+        with translated():
+            client = self.client("s3", region)
+            upload = client.create_multipart_upload(Bucket=bucket, Key=key, Metadata=metadata,
+                                                    StorageClass=storage_class, ChecksumAlgorithm="SHA256")["UploadId"]
+            try:
+                parts = []
+                while (block := stream.read(STREAM_PART_BYTES)) or not parts:
+                    checksum = base64.b64encode(hashlib.sha256(block).digest()).decode()
+                    part = client.upload_part(Bucket=bucket, Key=key, UploadId=upload, PartNumber=len(parts) + 1,
+                                              Body=block, ChecksumSHA256=checksum)
+                    parts.append({"PartNumber": len(parts) + 1, "ETag": part["ETag"], "ChecksumSHA256": checksum})
+                client.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload,
+                                                 MultipartUpload={"Parts": parts}, IfNoneMatch="*")
+                return True
+            except BaseException as error:
+                # S3 bills the parts of an upload left incomplete, interrupted ones too; one whose abort fails is
+                # left to the bucket's lifecycle rule, if it has one.
+                with contextlib.suppress(Exception):
+                    client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload)
+                if error_code(error) == "PreconditionFailed":
+                    return False
+                raise
+
+    def lifecycle_rules(self, region, bucket):
+        """The bucket's lifecycle rules, or none where it has no lifecycle configuration."""
+        try:
+            return self.call("s3", region, "get_bucket_lifecycle_configuration", Bucket=bucket)["Rules"]
+        except CloudError as error:
+            if error_code(error.__cause__) == "NoSuchLifecycleConfiguration":
+                return []
+            raise
+
     def delete(self, region, bucket, keys):
         """Delete the objects, a thousand to a request, as S3 allows."""
         keys = sorted(keys)
@@ -493,7 +548,9 @@ class AwsCloud:
                 return None
             raise
         now = email.utils.parsedate_to_datetime(head["ResponseMetadata"]["HTTPHeaders"]["date"])
-        return ObjectHead(head.get("Metadata", {}).get("sha256"), (now - head["LastModified"]).total_seconds())
+        # S3 names no storage class for a STANDARD object.
+        return ObjectHead(head.get("Metadata", {}).get("sha256"), (now - head["LastModified"]).total_seconds(),
+                          head.get("Metadata", {}), head.get("StorageClass", "STANDARD"), head["ContentLength"])
 
 
 def error_code(error):
