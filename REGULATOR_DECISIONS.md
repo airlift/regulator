@@ -876,9 +876,12 @@ count in RE2, Java, and Rust use the literal-alternation and fixed-width span
 matchers Trino uses. Trino's subtypes call these matchers directly because
 routing through the compiled pattern's dispatch measured about 9% more per
 call on Graviton. The literal-alternation matcher restarts its trie at every
-input byte, so it takes only alternatives of at most 64 bytes; a longer
-literal keeps the general engine, whose DFA scans each byte once. The longest
-literal among the measured rows is 35 bytes, in rebar's Russian Sherlock names.
+input byte it does not skip, so it takes only alternatives of at most 64 bytes;
+a longer literal keeps the general engine, whose DFA scans each byte once. The
+longest literal among the measured rows is 35 bytes, in rebar's Russian
+Sherlock names. When its literals admit a [start literal
+filter](#start-literal-filter), inputs of at least 64 bytes may skip to the
+positions the filter accepts, unless the filter's stops are dense.
 
 The fixed-width matcher checks every occurrence of one byte, such as the `s` of
 `[a-z]shing`, which English text holds far more often than `shing`. RE2, Java,
@@ -1318,11 +1321,27 @@ enough because these gates admit only start sets that stop often, and the
 start-scan productivity check still samples the filter's own stops on long
 inputs and falls back when they are dense.
 
+The literal-alternation matcher builds the same filter from its own literals,
+reading each literal's bytes and treating positions past its end as accepting
+every byte, so they are never chosen. It keeps the filter only when the Vector
+API is available and the estimated density is at most 1/64. Searches with at
+least 64 bytes left skip to the filter's next candidate and walk the trie
+there; shorter searches, such as short everyday values, keep reading every
+byte through the trie's root table. A search with at least 64 KiB left first
+samples the filter's stops with the DFA's start-scan productivity check. When
+they are dense, as on a log of near misses such as `ERxO` under
+`ERROR|WARN|FATAL`, which the filter passes and the trie rejects, the search
+reads the root table for the next 64 KiB and then samples again; otherwise it
+keeps the filter for those 64 KiB. A count, a Trino matcher's repeated finds,
+and each call of Trino's position, extract-all, split, and replace carry that
+choice from one match to the next, so they sample at most once per 64 KiB
+rather than once per match.
+
 This follows the Rust regex crate's packed Teddy prefilter, which the crate
 treats as fast only when every literal has at least three bytes. It is a
 performance-only deviation. The filter accepts every position where a match
-can start, the DFA still decides each one, and randomized tests compare the
-results with the NFA.
+can start, the DFA or the trie still decides each one, and randomized tests
+compare the results with the NFA or the general engine.
 
 ## Bounded Character-Class Counting
 

@@ -1256,9 +1256,12 @@ public sealed class TrinoRegexp
                 return -1;
             }
 
-            long span = spanMatcher.findSpan(source, byteStart);
+            // One cursor carries the filter route from match to match, so the density check
+            // samples once per 64 KiB rather than once per match.
+            LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
+            long span = spanMatcher.findSpan(source, byteStart, cursor);
             for (long match = 1; match < occurrence && span >= 0; match++) {
-                span = spanMatcher.findSpan(source, spanEnd(span));
+                span = spanMatcher.findSpan(source, spanEnd(span), cursor);
             }
             if (span < 0) {
                 return -1;
@@ -1281,9 +1284,10 @@ public sealed class TrinoRegexp
             validateCaptureFreeGroup(group);
             requireNonNull(source, "source is null");
             List<Slice> matches = new ArrayList<>();
+            LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
+                long span = spanMatcher.findSpan(source, searchStart, cursor);
                 if (span < 0) {
                     break;
                 }
@@ -1298,10 +1302,11 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             List<Slice> parts = new ArrayList<>();
+            LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
             int previousEnd = 0;
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
+                long span = spanMatcher.findSpan(source, searchStart, cursor);
                 if (span < 0) {
                     break;
                 }
@@ -1320,9 +1325,10 @@ public sealed class TrinoRegexp
             requireNonNull(replacement, "replacement is null");
 
             TrinoReplacementPlan.GroupFreeReplacer replacer = newReplacementPlan(source, replacement).groupFreeReplacer();
+            LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
+                long span = spanMatcher.findSpan(source, searchStart, cursor);
                 if (span < 0) {
                     break;
                 }
@@ -1340,12 +1346,13 @@ public sealed class TrinoRegexp
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
             DynamicSliceOutput output = new DynamicSliceOutput(source.length());
+            LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
             int previousEnd = 0;
             int searchStart = 0;
             boolean matched = false;
             List<Slice> groups = List.of();
             while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
+                long span = spanMatcher.findSpan(source, searchStart, cursor);
                 if (span < 0) {
                     break;
                 }
