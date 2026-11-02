@@ -9,10 +9,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import bulk
-import collection
-import fleet
-import mappings
+sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import test_offline  # noqa: E402
+import bulk  # noqa: E402
+import collection  # noqa: E402
+import fleet  # noqa: E402
+import mappings  # noqa: E402
 
 
 class TestBulkSummary(unittest.TestCase):

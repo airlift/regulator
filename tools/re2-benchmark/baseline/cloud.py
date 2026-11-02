@@ -9,8 +9,8 @@ import base64
 import contextlib
 import email.utils
 import hashlib
-import shutil
 import threading
+import time
 from dataclasses import dataclass
 
 SPOT_QUOTA_CODE = "L-34B43A08"
@@ -54,6 +54,20 @@ THROTTLES = {"RequestLimitExceeded", "Throttling", "ThrottlingException", "EC2Th
 LAUNCH_ATTEMPTS = 3
 # The bytes of each part of a streamed upload but its last; S3's 10,000 parts of 128 MiB then hold about 1.22 TiB.
 STREAM_PART_BYTES = 128 << 20
+# An object read that receives fewer bytes than this in a minute, about 70 KB/s, has stalled, as a 228 MB archive
+# from us-west-2 that trickled in at 33-40 KB/s did on 2026-11-01; the SDK's read timeout trips only on silence.
+GET_STALL_BYTES = 4 << 20
+GET_STALL_SECONDS = 60
+# A stalled read is resumed on a new request, until this many in a row stall having received fewer than
+# GET_STALL_BYTES; a read that received more starts the count again.
+GET_STALLS = 3
+# A fetch, resumed or not, is abandoned once it takes longer than its object's size at this rate, or than the floor if
+# that is longer. The controller's loop waits on some fetches, and this holds the 228 MB archive to about 7 minutes,
+# short of the 10 minutes a host waits idle for its next lease; a healthy read of it took 25 seconds.
+GET_DEADLINE_RATE = 512 << 10
+GET_DEADLINE_FLOOR_SECONDS = 2 * 60
+# A watchdog looks this often for a read the SDK has waited in for GET_STALL_SECONDS, or past the deadline.
+GET_WATCHDOG_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -165,6 +179,15 @@ class AwsCloud:
     def client(self, service, region):
         with self.lock:
             if self.session is None:
+                # ReadWatchdog cuts off a read by shutting down the urllib3 response behind botocore's private
+                # StreamingBody._raw_stream. An older urllib3 has no shutdown and a trickle would hold a fetch again, so
+                # an SDK lacking either is refused here, before its first request; an empty body is built only to probe
+                # the attribute. Commands that never reach AWS make no client, whatever urllib3 is installed.
+                from botocore.response import StreamingBody
+                from urllib3.response import HTTPResponse
+                if not (callable(getattr(HTTPResponse, "shutdown", None))
+                        and hasattr(StreamingBody(None, 0), "_raw_stream")):
+                    raise SystemExit("the SDK cannot cut off a read; install tools/re2-benchmark/requirements.txt")
                 import boto3
                 self.session = boto3.Session()
             key = (service, region)
@@ -455,9 +478,56 @@ class AwsCloud:
         return {item["Key"]: (item["Size"], item["LastModified"].timestamp()) for item in objects}
 
     def get(self, region, bucket, key, path):
-        body = self.call("s3", region, "get_object", Bucket=bucket, Key=key)["Body"]
-        with translated(), contextlib.closing(body), path.open("wb") as output:
-            shutil.copyfileobj(body, output)
+        """Write the object to the path. A read that stalls is resumed where it stopped on a new request for the same
+        object, until GET_STALLS reads in a row stall having received fewer than GET_STALL_BYTES, or the fetch
+        outruns its deadline. A read that received every byte goes on to the end of the stream, where the SDK checks
+        the object's checksum, and a failure there is raised."""
+        name, started, size, stalls, parameters = f"s3://{bucket}/{key}", time.monotonic(), None, 0, {}
+        deadline = started + GET_DEADLINE_FLOOR_SECONDS
+        with translated(), path.open("wb") as output:
+            while True:
+                offset = output.tell()
+                if offset:
+                    parameters["Range"] = f"bytes={offset}-"
+                response = self.call("s3", region, "get_object", Bucket=bucket, Key=key, **parameters)
+                if size is None:
+                    size = response["ContentLength"]
+                    deadline = max(deadline, started + size / GET_DEADLINE_RATE)
+                    parameters["IfMatch"] = response["ETag"]
+                window, received = time.monotonic(), 0
+                try:
+                    with translated(), contextlib.closing(response["Body"]) as body, \
+                            ReadWatchdog(body, deadline, name) as watchdog:
+                        if response["ContentLength"] != size - offset:
+                            raise CloudError(f"{name} did not resume at byte {offset}")
+                        # A watched read never asks for the last byte: the read that receives it returns the
+                        # connection to the client's pool, where another request may take it before the watchdog
+                        # could shut it down.
+                        while (wanted := size - 1 - output.tell()) > 0:
+                            if not (block := watchdog.read(min(wanted, 1 << 16))):
+                                break
+                            output.write(block)
+                            received += len(block)
+                            now = time.monotonic()
+                            if now > deadline:
+                                raise CloudError(f"{name} outran its deadline")
+                            if now - window >= GET_STALL_SECONDS:
+                                if received < GET_STALL_BYTES:
+                                    raise CloudError(f"{name} stalled")
+                                window, received = now, 0
+                        watchdog.stop()
+                        # One byte cannot trickle, so the SDK's read timeout bounds its read, and no stall or deadline
+                        # keeps the SDK from checking the object's checksum at the end of the stream.
+                        while block := body.read(1 << 16):
+                            output.write(block)
+                    return
+                except CloudError:
+                    # Once every byte has arrived, only the SDK's check of the whole object fails a read.
+                    if output.tell() == size:
+                        raise
+                    stalls = stalls + 1 if output.tell() - offset < GET_STALL_BYTES else 0
+                    if stalls == GET_STALLS or time.monotonic() > deadline:
+                        raise
 
     def digest(self, region, bucket, key):
         """The SHA-256, in hex, and the size in bytes of the object, read as a stream, so no copy is written."""
@@ -567,3 +637,59 @@ def translated():
         yield
     except (Boto3Error, BotoCoreError, ClientError, OSError) as error:
         raise CloudError(str(error)) from error
+
+
+class ReadWatchdog:
+    """Watches an object read from a thread of its own. The SDK's read waits for every byte it asks for, and its read
+    timeout trips only on silence, so a trickle holds one read for as long as it lasts, about 18 hours for 64 KiB at a
+    byte a second. The watchdog shuts the connection down under a read that has waited GET_STALL_SECONDS, which has
+    then received fewer than GET_STALL_BYTES, or past the deadline; the read fails, and raises CloudError saying why."""
+
+    def __init__(self, body, deadline, name):
+        self.body, self.deadline, self.name = body, deadline, name
+        self.lock = threading.Lock()
+        self.since = self.verdict = None
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self.watch, name="object read watchdog", daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exception):
+        self.stop()
+
+    def read(self, amount):
+        with self.lock:
+            self.since = time.monotonic()
+        try:
+            return self.body.read(amount)
+        except Exception as error:
+            if self.verdict:
+                raise CloudError(f"{self.name} {self.verdict}") from error
+            raise
+        finally:
+            with self.lock:
+                self.since = None
+
+    def stop(self):
+        self.stopped.set()
+        self.thread.join()
+
+    def watch(self):
+        while not self.stopped.wait(GET_WATCHDOG_SECONDS):
+            with self.lock:
+                if self.since is None:
+                    continue
+                now = time.monotonic()
+                if now > self.deadline:
+                    self.verdict = "outran its deadline"
+                elif now - self.since >= GET_STALL_SECONDS:
+                    self.verdict = "stalled"
+                else:
+                    continue
+                # botocore keeps urllib3's response, whose shutdown wakes a read blocked on its socket; closing it
+                # instead would wait for the read. A read that has just failed may have closed its connection first.
+                with contextlib.suppress(RuntimeError, OSError):
+                    self.body._raw_stream.shutdown()
+                return

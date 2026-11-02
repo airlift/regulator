@@ -35,6 +35,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 sys.path.insert(0, str(SCRIPT.parent))
+import test_offline  # noqa: E402
 import cloud  # noqa: E402
 import telemetry  # noqa: E402
 from campaign_settings import (  # noqa: E402
@@ -4657,6 +4658,27 @@ class TestUnitWorkers(unittest.TestCase):
             digest.unlink()
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "records no tooling digest"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+
+    def test_archive_downloads_that_fail_are_retried_by_later_polls(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # Each result and host archive fails its first three downloads, as one that keeps stalling does: the
+            # controller accepts every group and proves every cleanup once S3 serves them.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            get = fleet.get
+            failures = collections.Counter()
+
+            def fail_archives(region, bucket, key, path):
+                if key.endswith(".tar.gz") and failures[key] < 3:
+                    failures[key] += 1
+                    raise cloud.CloudError(f"s3://{bucket}/{key} stalled")
+                return get(region, bucket, key, path)
+
+            fleet.get = fail_archives
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            self.assertEqual({"result.tar.gz", "host.tar.gz"}, {key.rsplit("/", 1)[-1] for key in failures})
+            outcomes = {row["outcome"]
+                        for row in RUN_CAMPAIGN.read_attempts(Path(temporary) / "results" / "job-attempts.tsv")}
+            self.assertEqual({"starting", "started", "stopped"}, outcomes)
 
     def test_admitted_worker_launches_only_with_its_first_leases_and_strands_no_reservation(self):
         shards = ["trino-like-specialized"]

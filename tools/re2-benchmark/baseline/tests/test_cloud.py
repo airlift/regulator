@@ -1,11 +1,16 @@
 import base64
 import bisect
+import contextlib
 import hashlib
 import io
 import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import Future
 from dataclasses import replace
@@ -14,6 +19,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+import test_offline  # noqa: E402
 import cloud  # noqa: E402
 from cloud import CloudError, LaunchRejected  # noqa: E402
 
@@ -562,7 +568,8 @@ class TestAwsCloud(unittest.TestCase):
         s3.add_response("list_objects_v2", {"Contents": [{"Key": "session/results/heartbeat/1.json", "Size": 12,
                                                           "LastModified": modified}]},
                         {"Bucket": "bucket", "Prefix": "session/results/"})
-        s3.add_response("get_object", {"Body": StreamingBody(io.BytesIO(b"lease body"), 10)},
+        s3.add_response("get_object", {"Body": StreamingBody(io.BytesIO(b"lease body"), 10), "ContentLength": 10,
+                                       "ETag": '"lease"'},
                         {"Bucket": "bucket", "Key": "lease"})
         s3.add_response("get_object", {"Body": StreamingBody(io.BytesIO(b"lease body"), 10)},
                         {"Bucket": "bucket", "Key": "lease"})
@@ -634,6 +641,165 @@ class TestAwsCloud(unittest.TestCase):
                 aws.upload_stream("us-west-2", "bucket", "root", interrupted, {}, "GLACIER_IR")
         self.assertEqual(rules, aws.lifecycle_rules("us-west-2", "bucket"))
         self.assertEqual([], aws.lifecycle_rules("us-west-2", "bucket"))
+
+    def test_object_read_that_stalls_is_resumed_until_it_keeps_stalling_or_outruns_its_deadline(self):
+        # On 2026-11-01 a 228 MB archive in us-west-2 trickled in at 33-40 KB/s, which no read timeout trips, and held
+        # its controller until it was killed. A read that stalls is resumed where it stopped on a new request for the
+        # same object, so a long read survives a dip; one that keeps stalling, or that never quite stalls but outruns
+        # its deadline, is abandoned. A smaller archive at a slower deadline rate takes as long.
+        from botocore.exceptions import FlexibleChecksumError
+        clock = 0.0
+        archive = memoryview(os.urandom(48 << 20))
+        deadline_rate = 128 << 10
+        requests, bodies = [], []
+
+        class Trickle:
+            """Serves the archive from offset on, its first fast bytes at 10 MiB/s and the rest at rate bytes a second,
+            on the simulated clock; the read that finds the end fails the SDK's checksum when the case is corrupt."""
+
+            def __init__(self, offset, fast, rate):
+                self.offset, self.fast, self.rate, self.opened, self.closed = offset, offset + fast, rate, clock, False
+
+            def read(self, amount):
+                nonlocal clock
+                if clock - self.opened > 30 * 60:
+                    raise AssertionError("an object read past every deadline")
+                block = archive[self.offset:self.offset + amount]
+                if not block and corrupt:
+                    raise FlexibleChecksumError(error_msg="checksum mismatch")
+                clock += len(block) / (10 << 20 if self.offset < self.fast else self.rate)
+                self.offset += len(block)
+                return bytes(block)
+
+            def close(self):
+                self.closed = True
+
+        def get_object(service, region, operation, Bucket, Key, Range="bytes=0-", IfMatch=None):
+            offset = int(Range.removeprefix("bytes=").removesuffix("-"))
+            requests.append((offset, IfMatch))
+            bodies.append(Trickle(offset, *reads.pop(0)))
+            return {"Body": bodies[-1], "ContentLength": len(archive) - offset, "ETag": '"archive"'}
+
+        trickle = (0, 35_000)
+        whole = len(archive) / (10 << 20)
+        for reads, corrupt, failure, elapsed in (
+                # The trickle stalls each read in its first minute.
+                ([trickle] * cloud.GET_STALLS, False, "s3://bucket/host.tar.gz stalled",
+                 cloud.GET_STALLS * cloud.GET_STALL_SECONDS),
+                # The deadline runs from the first request, across every resumed read.
+                ([(8 << 20, 35_000), (0, 100_000)], False, "s3://bucket/host.tar.gz outran its deadline",
+                 len(archive) / deadline_rate),
+                # A read that made progress before it stalled starts the count again.
+                ([trickle, (8 << 20, 35_000)] + [trickle] * (cloud.GET_STALLS - 1) + [(len(archive), 0)], False, None,
+                 None),
+                # A read that delivered every byte goes on to the end of the stream, where the SDK checks the
+                # object's checksum, and a failure there is raised, not resumed, even when the last byte arrived past
+                # the deadline.
+                ([(len(archive), 0)], True, "checksum mismatch", whole),
+                ([(len(archive) - 1, 1 / 1000)], True, "checksum mismatch", whole + 1000)):
+            with self.subTest(failure=failure, corrupt=corrupt), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(cloud, "GET_DEADLINE_RATE", deadline_rate), \
+                    patch.object(cloud, "GET_WATCHDOG_SECONDS", 3600), \
+                    patch.object(self.cloud, "call", side_effect=get_object), \
+                    patch.object(cloud.time, "monotonic", side_effect=lambda: clock):
+                # The watchdog, which waits on the real clock, has its own test.
+                clock = 0.0
+                requests.clear()
+                bodies.clear()
+                path = Path(temporary) / "host.tar.gz"
+                if failure:
+                    with self.assertRaisesRegex(CloudError, re.escape(failure)):
+                        self.cloud.get("us-west-2", "bucket", "host.tar.gz", path)
+                    # Each read is abandoned up to one 64 KiB block, about 2 seconds of trickle, after its check trips.
+                    self.assertAlmostEqual(elapsed, clock, delta=len(requests) * 2)
+                else:
+                    self.cloud.get("us-west-2", "bucket", "host.tar.gz", path)
+                    self.assertEqual(hashlib.sha256(archive).digest(), hashlib.sha256(path.read_bytes()).digest())
+                # Each resumed read asks for the same object from the first byte the last one did not deliver, on a
+                # new request once the last one's response is closed.
+                self.assertEqual([(0, None)] + [(body.offset, '"archive"') for body in bodies[:-1]], requests)
+                self.assertTrue(all(body.closed for body in bodies))
+                self.assertFalse([thread for thread in threading.enumerate() if thread.name == "object read watchdog"])
+
+    def test_object_read_that_a_trickle_holds_is_cut_off_as_a_stall(self):
+        # The SDK's read of 64 KiB waits for all of it, and its read timeout trips only on silence, so a trickle of a
+        # byte a second holds one read about 18 hours, where no check between reads runs. A watchdog shuts the
+        # connection down under a read that waits a whole stall window, and the read counts as a stall. It never
+        # watches the read that returns an open connection to the client's pool, where another request may take it.
+        import urllib3
+        from botocore.response import StreamingBody
+        from urllib3.response import HTTPResponse
+        archive = os.urandom(1 << 20)
+        server = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(server.close)
+        # The SDK's read timeout, which a trickle never trips, ends a read that waits on a fake no longer answering.
+        pool = urllib3.PoolManager(retries=False, timeout=urllib3.Timeout(connect=5, read=10))
+        self.addCleanup(pool.clear)
+        connections, requests, failures, pooled = [], [], [], []
+        self.addCleanup(lambda: [connection.close() for connection in connections])
+
+        def serve():
+            with contextlib.suppress(OSError):
+                while True:
+                    connection, _ = server.accept()
+                    connections.append(connection)
+                    threading.Thread(target=answer, args=(connection,), daemon=True).start()
+
+        def answer(connection):
+            with contextlib.suppress(OSError):
+                # Each request names its number, since other programs on this machine may probe the port too, and
+                # those after the first fetch's are answered at once.
+                if not (number := re.match(rb"GET /(\d+) ", connection.recv(1 << 16))):
+                    return
+                step = len(archive) if int(number[1]) > cloud.GET_STALLS else 1
+                connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(archive))
+                for offset in range(0, len(archive), step):
+                    connection.sendall(archive[offset:offset + step])
+                    time.sleep(0.01)
+
+        def get_object(service, region, operation, Bucket, Key, IfMatch=None):
+            requests.append(IfMatch)
+            response = pool.request("GET", f"http://127.0.0.1:{server.getsockname()[1]}/{len(requests)}",
+                                    preload_content=False)
+            return {"Body": StreamingBody(response, len(archive)), "ContentLength": len(archive), "ETag": '"a"'}
+
+        def fetch(path):
+            try:
+                self.cloud.get("us-west-2", "bucket", "host.tar.gz", path)
+            except Exception as error:
+                failures.append(error)
+
+        release_conn = HTTPResponse.release_conn
+
+        def release(response):
+            watched = any(thread.name == "object read watchdog" for thread in threading.enumerate())
+            pooled.append((response.connection is not None and response.connection.sock is not None, watched))
+            release_conn(response)
+
+        threading.Thread(target=serve, daemon=True).start()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(cloud, "GET_STALL_SECONDS", 0.5), \
+                patch.object(cloud, "GET_WATCHDOG_SECONDS", 0.05), patch.object(HTTPResponse, "release_conn", release), \
+                patch.object(self.cloud, "call", side_effect=get_object):
+            path = Path(temporary) / "host.tar.gz"
+            reader = threading.Thread(target=fetch, args=(path,), daemon=True)
+            reader.start()
+            reader.join(30)
+            held = reader.is_alive()
+            if held:
+                # A read still held ends once the trickle does, and its next request is refused, while the fake
+                # answers.
+                server.close()
+                for connection in connections:
+                    connection.close()
+                reader.join()
+            self.assertFalse(held, "a read the trickle held was not cut off")
+            fetch(path)
+            self.assertEqual(archive, path.read_bytes())
+        self.assertEqual(["s3://bucket/host.tar.gz stalled"], [str(failure) for failure in failures])
+        self.assertEqual([None] + ['"a"'] * (cloud.GET_STALLS - 1) + [None], requests)
+        self.assertIn((True, False), pooled)
+        self.assertNotIn((True, True), pooled)
+        self.assertFalse([thread for thread in threading.enumerate() if thread.name == "object read watchdog"])
 
     def test_launch_classifies_refusals_and_resubmits_an_unanswered_request(self):
         ec2 = self.stub("ec2")
@@ -815,10 +981,22 @@ class TestAwsCloud(unittest.TestCase):
             aws.delete("us-west-2", "bucket", keys[:1])
 
     def test_commands_that_never_reach_aws_run_without_the_sdk(self):
-        result = subprocess.run([sys.executable, "-c", "import sys; import cloud; cloud.AwsCloud(); "
-                                 "sys.exit('boto3' in sys.modules or 'botocore' in sys.modules)"],
-                                cwd=Path(cloud.__file__).parent)
-        self.assertEqual(0, result.returncode)
+        # Another package may install an older urllib3, which lacks the shutdown the SDK's reads need, with no SDK.
+        result = subprocess.run([sys.executable, "-c", "import sys; from urllib3.response import HTTPResponse; "
+                                 "HTTPResponse.shutdown = None; sys.modules['boto3'] = sys.modules['botocore'] = None; "
+                                 "import cloud; cloud.AwsCloud()"],
+                                cwd=Path(cloud.__file__).parent, capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_an_sdk_that_cannot_cut_off_a_read_is_refused_before_any_request(self):
+        from botocore.response import StreamingBody
+        from urllib3.response import HTTPResponse
+        # The watchdog shuts down the urllib3 response botocore keeps in its body.
+        for missing, lacking in (("urllib3's shutdown", patch.object(HTTPResponse, "shutdown", None)),
+                                 ("botocore's response", patch.object(StreamingBody, "__init__",
+                                                                      lambda body, raw_stream, content_length: None))):
+            with self.subTest(missing=missing), lacking, self.assertRaisesRegex(SystemExit, "requirements.txt"):
+                cloud.AwsCloud().client("s3", "us-west-2")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+import test_offline  # noqa: E402
 import cloud  # noqa: E402
 import control_host  # noqa: E402
 import telemetry  # noqa: E402

@@ -19,6 +19,7 @@ from pathlib import Path
 
 BASELINE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASELINE))
+import test_offline  # noqa: E402
 from acceptance import PROTOCOL_QUALIFICATION_FIELDS, SESSION_FIELDS  # noqa: E402
 import row_protocol  # noqa: E402
 import unit_dispatch  # noqa: E402

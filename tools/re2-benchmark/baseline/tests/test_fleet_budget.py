@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+import test_offline  # noqa: E402
 from campaign_settings import CampaignSettings
 import fleet_budget
 
