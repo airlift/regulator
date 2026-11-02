@@ -2271,6 +2271,14 @@ public sealed class Re2
             return characterClassCounter.count(text);
         }
 
+        return countDfaMatches(text);
+    }
+
+    /// Counts the matches of an unanchored pattern on the DFA, starting from the inner literal
+    /// where one is required and the text is long enough. It is out of line so that [#countMatches]
+    /// stays small enough for C2 to inline into its callers.
+    private long countDfaMatches(Slice text)
+    {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
         if (innerLiteralSearch != null && text.length() >= InnerLiteralSearch.MINIMUM_SEARCH_BYTES) {
             return countInnerLiteralMatches(innerLiteralSearch, text);
