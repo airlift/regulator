@@ -42,9 +42,12 @@ public class TestOptionalScanKernel
         Path classLoadLog = Files.createTempFile("scan-kernel-class-load-", ".log");
         try {
             runProbe(List.of("-Xlog:class+load=info:file=" + classLoadLog));
-            assertThat(Files.readString(classLoadLog))
+            String loadedClasses = Files.readString(classLoadLog);
+            // The probe loads the vector scanner unless its preferred vector is outside the supported
+            // 16-to-64-lane range.
+            assertThat(loadedClasses.contains("io.airlift.regulator.VectorScanner source:")).isEqualTo(PreferredVectorLengthProbe.expectVectorScans());
+            assertThat(loadedClasses)
                     .contains("io.airlift.regulator.ScanPlan source:")
-                    .contains("io.airlift.regulator.VectorScanner source:")
                     .contains("io.airlift.regulator.TrinoLikePattern source:")
                     .contains("io.airlift.regulator.TrinoLikeWildcardMatcher source:")
                     .doesNotContain("io.airlift.regulator.TrinoRegexp$CompiledScanTrinoRegexp ")

@@ -34,7 +34,7 @@ public class TestFusedPrefixEngineIntegration
 
         assertThat(program.canPrefixAccel()).isTrue();
         assertThat(program.prefixAccelStrategy(searchCase.text().length()))
-                .isEqualTo(Prog.PrefixAccelStrategy.FUSED_VECTOR);
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.FUSED_SWAR);
         assertThat(Dfa.search(program, searchCase.text(), false, Prog.MatchKind.FIRST_MATCH, true))
                 .isEqualTo(searchCase.matchEnd());
         assertThat(Dfa.search(program, searchCase.text(), false, Prog.MatchKind.LONGEST_MATCH, true))

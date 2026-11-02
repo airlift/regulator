@@ -709,12 +709,12 @@ alternatives are recorded in
 
 ## Execution width and safeguards
 
-The plan's own scanners use 128-bit vectors on all hosts. This matches the
-Graviton vector width and uses the same scan width on Intel. Candidate scans
-that reuse the DFA's start-byte scanners use those scanners' preferred species.
-Wider Intel vectors may help long scans, but have not been selected or shown to
-improve these integrated workloads. Treat preferred-width selection as a
-separate measured change.
+When vector scanning is available, the plan's own scanners use 128-bit vectors
+on all hosts. This matches the Graviton vector width and uses the same scan
+width on Intel. Candidate scans that reuse the DFA's start-byte scanners use
+those scanners' preferred species. Wider Intel vectors may help long scans, but
+have not been selected or shown to improve these integrated workloads. Treat
+preferred-width selection as a separate measured change.
 
 Named operation factories define each operation's step layout. Retry-stack
 limits are checked at class initialization against the two position longs and

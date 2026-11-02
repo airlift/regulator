@@ -28,6 +28,7 @@ final class VectorScanKernelSupport
     // the preferred species, as in the originals.
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_128;
     private static final VectorSpecies<Byte> BYTE_SET_SPECIES = ByteVector.SPECIES_PREFERRED;
+    // The nibble tables are replicated to 64 bytes, one reason VectorSupport allows at most 64 lanes.
     private static final int HIGH_NIBBLE_TABLE_OFFSET = 64;
 
     private VectorScanKernelSupport() {}

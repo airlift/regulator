@@ -245,7 +245,7 @@ public class TestDfaCountMatches
                     // One scan covers the whole input.
                     assertThat(countSelfLoopScanCount(pattern) - scanCount)
                             .as("%s length=%s", expression, length)
-                            .isEqualTo(1);
+                            .isEqualTo(VectorSupport.isAvailable() ? 1 : 0);
                 }
 
                 assertSelfLoopScanCount(expression, utf8Slice("a".repeat(length - 1) + "x"), 1);
@@ -336,8 +336,8 @@ public class TestDfaCountMatches
             assertThat(pattern.count(utf8Slice(input))).isEqualTo(input.contains("x") || input.contains("y") ? 1 : 0);
             assertThat(pattern.forwardProgramForDiagnostics()
                     .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH)
-                    .countSelfLoopScanCount())
-                    .isPositive();
+                    .countSelfLoopScanCount() > 0)
+                    .isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -375,19 +375,21 @@ public class TestDfaCountMatches
         Slice input = utf8Slice(("a".repeat(50) + "1\n").repeat(20) + "a".repeat(300));
         Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        // Without the vector scanners, the count never tries the route.
+        int notApplicableLimit = VectorSupport.isAvailable() ? 8 : 0;
 
         assertThat(pattern.count(input)).isEqualTo(20);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(8);
+        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
         for (int iteration = 0; iteration < 4; iteration++) {
             assertThat(pattern.count(input)).isEqualTo(20);
-            assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(8);
+            assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
         }
         assertThat(dfa.countSelfLoopScanCount()).isZero();
 
         dfa.resetCacheExternal();
         assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
         assertThat(pattern.count(input)).isEqualTo(20);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(8);
+        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
     }
 
     @Test
@@ -401,7 +403,7 @@ public class TestDfaCountMatches
         for (int iteration = 0; iteration < 50; iteration++) {
             int scanCount = dfa.countSelfLoopScanCount();
             assertThat(pattern.count(input.source())).isEqualTo(input.matchingLines());
-            assertThat(dfa.countSelfLoopScanCount()).isGreaterThan(scanCount);
+            assertThat(dfa.countSelfLoopScanCount() > scanCount).isEqualTo(VectorSupport.isAvailable());
             assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
         }
     }
@@ -417,7 +419,7 @@ public class TestDfaCountMatches
         long cacheVersion = dfa.cacheVersion();
         assertThat(Dfa.countMatches(program, utf8Slice(input), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
         assertThat(dfa.cacheVersion()).isGreaterThan(cacheVersion);
-        assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+        assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -425,21 +427,24 @@ public class TestDfaCountMatches
     {
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        // Without the vector scanners, the count never tries the route.
+        int notApplicableLimit = VectorSupport.isAvailable() ? 8 : 0;
+        int longLoopScanCount = VectorSupport.isAvailable() ? 1 : 0;
 
         // Every search over short lines dies after its match before reaching a loop.
         assertThat(Dfa.countMatches(program, utf8Slice("x\n".repeat(512)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(512);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(8);
+        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
         assertThat(dfa.countSelfLoopScanCount()).isZero();
 
         // The cutoff reached by the previous count does not stop this one.
         assertThat(Dfa.countMatches(program, utf8Slice("a".repeat(32_768)), Prog.MatchKind.FIRST_MATCH)).isZero();
-        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
+        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(longLoopScanCount);
 
         // Within one count, the route stops after eight searches, even before a long loop.
         assertThat(Dfa.countMatches(program, utf8Slice("x\n".repeat(512) + "a".repeat(32_768)), Prog.MatchKind.FIRST_MATCH))
                 .isEqualTo(512);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(8);
-        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
+        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(longLoopScanCount);
     }
 
     @Test
@@ -449,17 +454,22 @@ public class TestDfaCountMatches
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
         // The scan and the walk after the x record exit sets without requesting paired transitions.
+        // Without the vector scanners, both counts take the ordinary routes.
         assertThat(Dfa.countMatches(program, utf8Slice("a".repeat(300) + "x\n" + "a".repeat(10)), Prog.MatchKind.FIRST_MATCH))
                 .isEqualTo(1);
-        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
-        assertThat(dfa.pairedTransitionMemory()).isZero();
+        if (VectorSupport.isAvailable()) {
+            assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
+            assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
+            assertThat(dfa.pairedTransitionMemory()).isZero();
+        }
 
         // The walk now dies after the match without a mutation, and requesting paired transitions
         // retries the same search exclusively.
         assertThat(Dfa.countMatches(program, utf8Slice("x\n" + "\n".repeat(254)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(1);
-        assertThat(dfa.pairedTransitionMemory()).isPositive();
+        if (VectorSupport.isAvailable()) {
+            assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(1);
+            assertThat(dfa.pairedTransitionMemory()).isPositive();
+        }
     }
 
     @Test
@@ -470,7 +480,7 @@ public class TestDfaCountMatches
         Slice input = utf8Slice("x\n".repeat(5) + "a".repeat(1_000));
 
         assertThat(Dfa.countMatches(program, input, Prog.MatchKind.FIRST_MATCH)).isEqualTo(5);
-        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
+        assertThat(dfa.countSelfLoopScanCount()).isEqualTo(VectorSupport.isAvailable() ? 1 : 0);
         assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
     }
 
@@ -493,7 +503,7 @@ public class TestDfaCountMatches
                     .isEqualTo(1);
             assertThat(dfa.countSelfLoopScanCount())
                     .as(inputs[index])
-                    .isEqualTo(expectedScanCounts[index]);
+                    .isEqualTo(VectorSupport.isAvailable() ? expectedScanCounts[index] : 0);
         }
     }
 
@@ -514,13 +524,16 @@ public class TestDfaCountMatches
         for (int iteration = 0; iteration < 2; iteration++) {
             assertThat(Dfa.countMatches(program, input, Prog.MatchKind.FIRST_MATCH)).isEqualTo(200);
         }
-        assertThat(dfa.countSelfLoopScanCount()).isPositive();
-        assertThat(dfa.absolutePointerTransitionsAvailable()).isEqualTo(Dfa.nativeAccessEnabled());
-        if (Dfa.nativeAccessEnabled()) {
-            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).isPositive();
-        }
-        else {
-            assertThat(dfa.pairedTransitionMemory()).isPositive();
+        assertThat(dfa.countSelfLoopScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
+        // Without the vector scanners, the count takes the ordinary routes and never hands off.
+        if (VectorSupport.isAvailable()) {
+            assertThat(dfa.absolutePointerTransitionsAvailable()).isEqualTo(Dfa.nativeAccessEnabled());
+            if (Dfa.nativeAccessEnabled()) {
+                assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).isPositive();
+            }
+            else {
+                assertThat(dfa.pairedTransitionMemory()).isPositive();
+            }
         }
     }
 
@@ -537,7 +550,7 @@ public class TestDfaCountMatches
         for (int iteration = 0; iteration < 8; iteration++) {
             int scanCount = dfa.countSelfLoopScanCount();
             assertThat(Dfa.countMatches(program, input, Prog.MatchKind.FIRST_MATCH)).isEqualTo(8);
-            assertThat(dfa.countSelfLoopScanCount() - scanCount).isEqualTo(40);
+            assertThat(dfa.countSelfLoopScanCount() - scanCount).isEqualTo(VectorSupport.isAvailable() ? 40 : 0);
             assertThat(dfa.pairedTransitionsDisabled())
                     .as("iteration %s", iteration)
                     .isFalse();
@@ -581,9 +594,13 @@ public class TestDfaCountMatches
         assertThat(Dfa.countMatches(afterMatch, utf8Slice("\u00e9," + "\u00e9".repeat(130)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
 
         // Here the paired search follows an ordinary transition into a state past the end of the table.
+        // The vector self-loop exit scan computes the transitions that fill the table, so without
+        // the vector scanners the second count checks only its result.
         Prog afterOrdinaryTransition = compile(".*(abcdef|a)");
         assertThat(Dfa.countMatches(afterOrdinaryTransition, utf8Slice("a".repeat(300)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
-        assertThat(afterOrdinaryTransition.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).pairedTransitionMemory()).isPositive();
+        if (VectorSupport.isAvailable()) {
+            assertThat(afterOrdinaryTransition.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).pairedTransitionMemory()).isPositive();
+        }
         assertThat(Dfa.countMatches(afterOrdinaryTransition, utf8Slice("a,abcdefq" + "\u00e9".repeat(150)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
     }
 
@@ -609,11 +626,14 @@ public class TestDfaCountMatches
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         int matchingScanCount = dfa.matchingSelfLoopScanCount();
         assertThat(Dfa.countMatches(program, tail, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
-        if (dfa.absolutePointerTransitionsAvailable()) {
-            assertThat(dfa.pairedTransitionMemory()).isZero();
-        }
-        else {
-            assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingScanCount);
+        // Without the vector scanners, the count takes the ordinary routes and never hands off.
+        if (VectorSupport.isAvailable()) {
+            if (dfa.absolutePointerTransitionsAvailable()) {
+                assertThat(dfa.pairedTransitionMemory()).isZero();
+            }
+            else {
+                assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingScanCount);
+            }
         }
         // The newline ends the first match, and the second search hands off the same way.
         String line = "aaaaaaaa" + "\u00e9a".repeat(1_000);
@@ -637,12 +657,15 @@ public class TestDfaCountMatches
         for (int iteration = 0; iteration < 2; iteration++) {
             assertThat(Dfa.countMatches(program, source, Prog.MatchKind.LONGEST_MATCH)).isEqualTo(1);
         }
-        assertThat(dfa.countSelfLoopScanCount()).isPositive();
-        if (Dfa.nativeAccessEnabled()) {
-            assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
-        }
-        else {
-            assertThat(dfa.pairedTransitionMemory()).isPositive();
+        assertThat(dfa.countSelfLoopScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
+        // Without the vector scanners, the count takes the ordinary routes and never hands off.
+        if (VectorSupport.isAvailable()) {
+            if (Dfa.nativeAccessEnabled()) {
+                assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
+            }
+            else {
+                assertThat(dfa.pairedTransitionMemory()).isPositive();
+            }
         }
         assertThat(dfa.countSelfLoopMatchHandOffCount()).isZero();
 
@@ -651,7 +674,7 @@ public class TestDfaCountMatches
         assertThat(Dfa.countMatches(program, noMatch, Prog.MatchKind.LONGEST_MATCH)).isZero();
         assertThat(Nfa.search(program, noMatch, false, Prog.MatchKind.LONGEST_MATCH, null)).isFalse();
         if (Dfa.nativeAccessEnabled()) {
-            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).isPositive();
+            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount() > 0).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -664,11 +687,11 @@ public class TestDfaCountMatches
             Slice source = Slices.wrappedBuffer(input.getBytes(ISO_8859_1));
             long expected = input.lines().filter(line -> line.contains("x") || line.contains("y")).count();
             assertThat(pattern.count(source)).isEqualTo(expected);
-            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
 
             Prog program = Re2.compile(utf8Slice(".*(x|y).*"), Re2.Options.latin1()).forwardProgramForDiagnostics();
             assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(expected);
-            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -685,11 +708,11 @@ public class TestDfaCountMatches
             long expected = input.contains("x") || input.contains("y") ? 1 : 0;
             Re2 pattern = Re2.compile(utf8Slice(expression), Re2.Options.latin1());
             assertThat(pattern.count(source)).isEqualTo(expected);
-            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
 
             Prog program = Re2.compile(utf8Slice(expression), Re2.Options.latin1()).forwardProgramForDiagnostics();
             assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(expected);
-            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -703,11 +726,11 @@ public class TestDfaCountMatches
         for (int index = 0; index < inputs.length; index++) {
             Re2 pattern = Re2.compile(utf8Slice(".*(x|y).*"), Re2.Options.defaults().setLongestMatch(true));
             assertThat(pattern.count(inputs[index])).isEqualTo(expected[index]);
-            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.LONGEST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(pattern, Dfa.DfaInstance.Kind.LONGEST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
 
             Prog program = compile(".*(x|y).*");
             assertThat(Dfa.countMatches(program, inputs[index], Prog.MatchKind.LONGEST_MATCH)).isEqualTo(expected[index]);
-            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.LONGEST_MATCH)).isPositive();
+            assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.LONGEST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -733,7 +756,7 @@ public class TestDfaCountMatches
                 for (Future<Long> count : counts) {
                     assertThat(count.get(10, TimeUnit.SECONDS)).isEqualTo(lines.matchingLines());
                 }
-                assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).isPositive();
+                assertThat(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH) > 0).isEqualTo(VectorSupport.isAvailable());
             }
         }
     }
@@ -753,7 +776,7 @@ public class TestDfaCountMatches
         for (int iteration = 0; iteration < 3; iteration++) {
             int rangeScanCount = dfa.contiguousRangeScanCount();
             assertThat(Dfa.countMatches(program, input.source(), Prog.MatchKind.FIRST_MATCH)).isEqualTo(expected);
-            assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(4);
+            assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 4 : 0);
         }
     }
 
@@ -795,7 +818,7 @@ public class TestDfaCountMatches
                 assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
                         .isEqualTo(trinoMatcherCount(expression, source))
                         .isEqualTo(1);
-                assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(1);
+                assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 1 : 0);
             }
         }
     }
@@ -818,7 +841,7 @@ public class TestDfaCountMatches
                         .isEqualTo(1);
                 assertThat(dfa.contiguousRangeScanCount() - rangeScanCount)
                         .as("fillerLength=%s", fillerLength)
-                        .isEqualTo(fillerLength < 4_096 ? 0 : 1);
+                        .isEqualTo(fillerLength < 4_096 || !VectorSupport.isAvailable() ? 0 : 1);
             }
         }
     }
@@ -842,7 +865,7 @@ public class TestDfaCountMatches
                 assertThat(dfa.contiguousRangeScanCount()).isZero();
             }
             else {
-                assertThat(dfa.contiguousRangeScanCount()).isPositive();
+                assertThat(dfa.contiguousRangeScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
             }
         }
     }
@@ -881,7 +904,7 @@ public class TestDfaCountMatches
         // final span keeps the promoted range scanner.
         Slice source = utf8Slice("abcd-1" + ".".repeat(16_000) + "ab-12" + ".".repeat(16_000));
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
-        assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(3);
+        assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 3 : 0);
     }
 
     private static void assertSelfLoopScanCount(String expression, Slice source, long expected, int expectedScanCount)
@@ -901,18 +924,22 @@ public class TestDfaCountMatches
     private static void assertSelfLoopScanCount(String expression, Slice source, long expected, IntConsumer scanCountAssertion)
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+        // Without the vector scanners, the count takes the ordinary routes and never scans.
+        IntConsumer routeAssertion = VectorSupport.isAvailable()
+                ? scanCountAssertion
+                : scanCount -> assertThat(scanCount).as(expression).isZero();
         assertThat(pattern.count(source))
                 .as(expression)
                 .isEqualTo(trinoMatcherCount(expression, source))
                 .isEqualTo(expected);
-        scanCountAssertion.accept(countSelfLoopScanCount(pattern));
+        routeAssertion.accept(countSelfLoopScanCount(pattern));
 
         // Re2.count falls back to the matcher loop for a negative result, so also check the DFA directly.
         Prog program = TrinoRegexp.compile(utf8Slice(expression)).re2().forwardProgramForDiagnostics();
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
                 .as(expression)
                 .isEqualTo(expected);
-        scanCountAssertion.accept(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
+        routeAssertion.accept(countSelfLoopScanCount(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
     }
 
     // The first count builds the pointer table or paired transitions when its exclusive search
@@ -928,15 +955,16 @@ public class TestDfaCountMatches
                 .isEqualTo(expected);
         int handOffCount = patternDfa.countSelfLoopMatchHandOffCount();
         assertThat(pattern.count(source)).isEqualTo(expected);
-        assertThat(patternDfa.countSelfLoopMatchHandOffCount() - handOffCount).isEqualTo(expectedHandOffCount);
+        // Without the vector scanners, the count takes the ordinary routes and never hands off.
+        assertThat(patternDfa.countSelfLoopMatchHandOffCount() - handOffCount).isEqualTo(VectorSupport.isAvailable() ? expectedHandOffCount : 0);
 
         Prog program = compile(expression);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(expected);
         handOffCount = dfa.countSelfLoopMatchHandOffCount();
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(expected);
-        assertThat(dfa.countSelfLoopMatchHandOffCount() - handOffCount).isEqualTo(expectedHandOffCount);
-        assertThat(dfa.countSelfLoopScanCount()).isPositive();
+        assertThat(dfa.countSelfLoopMatchHandOffCount() - handOffCount).isEqualTo(VectorSupport.isAvailable() ? expectedHandOffCount : 0);
+        assertThat(dfa.countSelfLoopScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         return program;
     }
 

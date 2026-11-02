@@ -21,6 +21,7 @@ import jdk.incubator.vector.VectorSpecies;
 final class VectorByteSetScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_PREFERRED;
+    // The nibble tables are replicated to 64 bytes, one reason VectorSupport allows at most 64 lanes.
     private static final int NIBBLE_TABLE_BYTES = 64;
     private static final int HIGH_NIBBLE_TABLE_OFFSET = NIBBLE_TABLE_BYTES;
 

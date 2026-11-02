@@ -1127,12 +1127,12 @@ surviving both folded boundary-byte masks run the complete folded-prefix
 comparison; the few starts left after the last word or vector are compared
 directly. Multi-byte prefix searches of at least 1 KiB use the platform's
 preferred Vector API species when the application resolves
-`jdk.incubator.vector`. There, when a boundary byte is an ASCII letter, each
-input byte is ORed with `0x20` before it is compared with the lowercase letter;
-other boundary bytes compare exactly. Shorter searches, and longer ones without
-the Vector API, use eight-byte SWAR words, so short scans pay no vector setup.
-A single folded byte keeps its SWAR byte search. Vector linkage stays in
-`VectorPrefixScanner`.
+`jdk.incubator.vector` and that species holds 16 to 64 bytes. There, when a
+boundary byte is an ASCII letter, each input byte is ORed with `0x20` before it
+is compared with the lowercase letter; other boundary bytes compare exactly.
+Shorter searches, and longer ones without vector scanning, use eight-byte SWAR
+words, so short scans pay no vector setup. A single folded byte keeps its SWAR
+byte search. Vector linkage stays in `VectorPrefixScanner`.
 
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
@@ -1145,8 +1145,9 @@ the accelerated result with a scalar folded-prefix search.
 Case-sensitive multi-byte prefixes whose first byte is non-ASCII use fused
 first-byte and last-byte candidate masks. Searches shorter than 1 KiB use SWAR.
 Longer searches use the platform's preferred Vector API species when the
-application resolves `jdk.incubator.vector`; otherwise they retain the SWAR
-route. ASCII and single-byte prefixes retain repeated-byte scanning.
+application resolves `jdk.incubator.vector` and that species holds 16 to 64
+bytes; otherwise they retain the SWAR route. ASCII and single-byte prefixes
+retain repeated-byte scanning.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
@@ -1243,10 +1244,10 @@ options cover first-byte scanning.
 
 Forward DFA start-byte and fixed-distance candidate sets containing exactly two
 or three bytes use a packed, allocation-free Vector scanner for searches of at
-least 1 KiB when `jdk.incubator.vector` is resolved. Other candidate counts,
-short searches, and applications without the optional module retain the
-branch-free scalar membership-table scanner. A start set that gets a start
-literal filter scans with the filter instead.
+least 1 KiB when `jdk.incubator.vector` is resolved and the preferred byte
+vector holds 16 to 64 bytes. Other candidate counts, short searches, and JVMs
+without vector scanning retain the branch-free scalar membership-table scanner.
+A start set that gets a start literal filter scans with the filter instead.
 
 Preferred species wider than 128 bits sample four 16-byte windows before using
 Vector scanning on inputs of at least 4 KiB. Four sampled candidates demote

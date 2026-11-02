@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Dfa.SEARCH_NO_MATCH;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestDfaStartByteAcceleration
 {
@@ -84,7 +85,7 @@ public class TestDfaStartByteAcceleration
 
             assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                     .isEqualTo(text.length);
-            assertThat(dfa.smallByteSetScanCount()).as(pattern).isPositive();
+            assertThat(dfa.smallByteSetScanCount() > 0).as(pattern).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -120,7 +121,7 @@ public class TestDfaStartByteAcceleration
 
         assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                 .isEqualTo(text.length);
-        assertThat(dfa.contiguousRangeScanCount()).isPositive();
+        assertThat(dfa.contiguousRangeScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -150,7 +151,7 @@ public class TestDfaStartByteAcceleration
 
         assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                 .isEqualTo(text.length);
-        assertThat(dfa.mixedByteSetScanCount()).isPositive();
+        assertThat(dfa.mixedByteSetScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -172,9 +173,9 @@ public class TestDfaStartByteAcceleration
             assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                     .as(testCase.pattern())
                     .isEqualTo(text.length);
-            assertThat(dfa.mixedByteSetScanCount())
+            assertThat(dfa.mixedByteSetScanCount() > 0)
                     .as(testCase.pattern())
-                    .isPositive();
+                    .isEqualTo(VectorSupport.isAvailable());
         }
     }
 
@@ -209,6 +210,7 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testMixedSetVectorScannerMatchesScalarReference()
     {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
         Random random = new Random(94);
         for (int iteration = 0; iteration < 1_000; iteration++) {
             byte[] candidates = new byte[256];
@@ -391,7 +393,7 @@ public class TestDfaStartByteAcceleration
         }
 
         assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(-1);
-        if (VectorByteSetScanner.shouldSampleCandidateDensity()) {
+        if (!VectorSupport.isAvailable() || VectorByteSetScanner.shouldSampleCandidateDensity()) {
             assertThat(dfa.smallByteSetScanCount()).isZero();
         }
         else {
@@ -447,6 +449,7 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testDenseLiteralStartsUseStartLiteralFilter()
     {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
         // Text dense in the literals' lead byte passes the start set at every character but never
         // passes the filter, so the scan stays productive.
         Prog program = compile("Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти");
@@ -464,6 +467,7 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testStartLiteralFilterVectorScannerMatchesScalarReference()
     {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
         Random random = new Random(96);
         for (String pattern : startLiteralFilterPatterns()) {
             StartLiteralFilter filter = firstMatchDfa(pattern).startLiteralFilter();
@@ -508,7 +512,7 @@ public class TestDfaStartByteAcceleration
         for (String pattern : startLiteralFilterPatterns()) {
             Re2 re2 = Re2.compileWithoutScanPlanForTesting(Slices.utf8Slice(pattern), Re2.Options.defaults());
             Prog program = re2.forwardProgramForDiagnostics();
-            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter()).as("pattern %s", pattern).isNotNull();
+            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter() != null).as("pattern %s", pattern).isEqualTo(VectorSupport.isAvailable());
 
             for (int trial = 0; trial < 20; trial++) {
                 byte[] body = literalText(random, pattern, 1_024 + random.nextInt(8 * 1_024));
@@ -537,11 +541,11 @@ public class TestDfaStartByteAcceleration
         String pattern = "(?i)straße|strasse|masse";
         Prog program = TrinoRegexp.compileWithoutScanPlanForTesting(Slices.utf8Slice(pattern)).re2().forwardProgramForDiagnostics();
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        assertThat(dfa.startLiteralFilter()).isNotNull();
+        assertThat(dfa.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
         Slice text = Slices.utf8Slice(".".repeat(1_024) + "ﬆraße");
         assertDfaMatchesNfa(program, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, pattern);
         assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(text.length());
-        assertThat(dfa.startLiteralFilterScanCount()).isPositive();
+        assertThat(dfa.startLiteralFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
 
         // The path walk does not evaluate assertions, so a literal with one in its first bytes
         // must not lose its matches to a filter built from the other literals.
@@ -695,7 +699,7 @@ public class TestDfaStartByteAcceleration
 
             assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
                     .isEqualTo(text.length);
-            assertThat(dfa.smallByteSetScanCount()).as(pattern).isPositive();
+            assertThat(dfa.smallByteSetScanCount() > 0).as(pattern).isEqualTo(VectorSupport.isAvailable());
         }
     }
 
