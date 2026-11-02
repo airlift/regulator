@@ -22,9 +22,11 @@ import java.util.List;
 /// Three byte positions of every literal a match can begin with, checked together to find the
 /// positions where a match can start. Each literal is a group: at each of the three positions its
 /// literal has one byte, or two bytes that differ in one bit, such as the two cases of an ASCII
-/// letter or of a Cyrillic letter's UTF-8 bytes. Each position ORs every group's differing bits
-/// into the input byte before comparing, so one OR per position serves every group, and a group
-/// may accept up to four bytes there.
+/// letter or of a Cyrillic letter's UTF-8 bytes. The scalar, two-group, and four-group scans OR
+/// every group's differing bits into the input byte before comparing, so one OR per position
+/// serves every group, and a group may accept up to four bytes there. A filter of more than four
+/// groups also holds nibble tables of one bit per group, looked up by a byte's low and high
+/// nibbles; a group's bit is set in both entries exactly when the group accepts the byte.
 ///
 /// The filter is a superset of the match starts: a group's position may accept more bytes than
 /// its literal, but never fewer. Matches that begin with up to eight such groups, each at least
@@ -46,6 +48,9 @@ final class StartLiteralFilter
     // many letters of a script, and a continuation byte by about one letter in 64.
     private static final double LEAD_BYTE_PROBABILITY = 0.25;
     private static final double CONTINUATION_BYTE_PROBABILITY = 1.0 / 64;
+    // Each nibble table's 16 entries are repeated to the widest vector's 64 bytes, so one load of
+    // the preferred species reads a table.
+    static final int NIBBLE_TABLE_BYTES = 64;
 
     private final int firstOffset;
     private final int secondOffset;
@@ -56,9 +61,11 @@ final class StartLiteralFilter
     // Three bytes per group, padded to the scanner's width with copies of the first group.
     private final byte[] values;
     private final int groupCount;
+    // Null unless the scanner width is eight.
+    private final byte[] nibbleTables;
     private final double density;
 
-    private StartLiteralFilter(int[] offsets, byte[] masks, byte[] values, int groupCount, double density)
+    private StartLiteralFilter(int[] offsets, byte[] masks, byte[] values, int groupCount, byte[] nibbleTables, double density)
     {
         this.firstOffset = offsets[0];
         this.secondOffset = offsets[1];
@@ -68,6 +75,7 @@ final class StartLiteralFilter
         this.thirdMask = masks[2];
         this.values = values;
         this.groupCount = groupCount;
+        this.nibbleTables = nibbleTables;
         this.density = density;
     }
 
@@ -167,10 +175,43 @@ final class StartLiteralFilter
             byte[] groupValues = distinct.get(group < distinct.size() ? group : 0);
             System.arraycopy(groupValues, 0, values, group * FILTER_POSITIONS, FILTER_POSITIONS);
         }
-        return new StartLiteralFilter(offsets, masks, values, distinct.size(), density);
+        byte[] nibbleTables = width == MAXIMUM_GROUPS ? buildNibbleTables(distinct, masks) : null;
+        return new StartLiteralFilter(offsets, masks, values, distinct.size(), nibbleTables, density);
     }
 
-    // The scanner compares a fixed number of groups; spare slots repeat the first group.
+    // For each position, a low-nibble table then a high-nibble table. Group g sets bit g at the
+    // nibbles of every byte it accepts there, so a byte passes when its two entries share a bit.
+    // The table is exact: a group accepts every byte that keeps its value's bits outside the mask
+    // and has any combination of the mask's bits, so its accepted low and high nibbles combine
+    // independently and every pairing of the two is itself accepted.
+    private static byte[] buildNibbleTables(List<byte[]> groups, byte[] masks)
+    {
+        byte[] tables = new byte[FILTER_POSITIONS * 2 * NIBBLE_TABLE_BYTES];
+        for (int group = 0; group < groups.size(); group++) {
+            byte bit = (byte) (1 << group);
+            for (int index = 0; index < FILTER_POSITIONS; index++) {
+                int mask = masks[index] & 0xFF;
+                int value = groups.get(group)[index] & ~mask & 0xFF;
+                int lowTable = index * 2 * NIBBLE_TABLE_BYTES;
+                int highTable = lowTable + NIBBLE_TABLE_BYTES;
+                for (int bits = mask; ; bits = (bits - 1) & mask) {
+                    int member = value | bits;
+                    for (int copy = 0; copy < NIBBLE_TABLE_BYTES; copy += 16) {
+                        tables[lowTable + copy + (member & 0xF)] |= bit;
+                        tables[highTable + copy + (member >>> 4)] |= bit;
+                    }
+                    if (bits == 0) {
+                        break;
+                    }
+                }
+            }
+        }
+        return tables;
+    }
+
+    // The values are padded to this width with copies of the first group, and the vector scan
+    // picks its kernel from it: two and four groups run compare kernels, which read the spare
+    // slots, and eight groups run the nibble kernel.
     private static int scannerWidth(int groupCount)
     {
         if (groupCount <= 2) {
@@ -294,9 +335,16 @@ final class StartLiteralFilter
         return values;
     }
 
+    /// The low- and high-nibble tables of the first, second, and third positions, each
+    /// [#NIBBLE_TABLE_BYTES] long, or null unless the scanner width is eight.
+    byte[] nibbleTables()
+    {
+        return nibbleTables;
+    }
+
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + SizeOf.sizeOf(values);
+        return INSTANCE_SIZE + SizeOf.sizeOf(values) + SizeOf.sizeOf(nibbleTables);
     }
 
     /// True when a match can start at `position`: every filter byte lies before `end` and one
