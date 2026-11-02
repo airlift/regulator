@@ -1272,8 +1272,10 @@ positions of those literals together. It picks the three positions with the
 lowest estimated acceptance, from English ASCII frequencies and fixed estimates
 for UTF-8 lead and continuation bytes, and it is used only when that is
 estimated to stop at least four times less often than the start bytes. Vector
-code compares a vector of positions at a time on searches of at least 1 KiB;
-shorter searches use the same check one position at a time.
+code checks a vector of positions at a time on searches of at least 1 KiB,
+comparing the bytes of up to four literal groups directly and, for more,
+looking up one bit per group from the low and high nibbles of each of the three
+bytes; shorter searches use the same check one position at a time.
 
 The filter is built only when the Vector API is available, and only for start
 sets of at most 16 bytes that are at least 5% probable in English text; rarer

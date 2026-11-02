@@ -21,8 +21,10 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -469,8 +471,10 @@ public class TestDfaStartByteAcceleration
     {
         assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
         Random random = new Random(96);
+        Set<Integer> scannerWidths = new HashSet<>();
         for (String pattern : startLiteralFilterPatterns()) {
             StartLiteralFilter filter = firstMatchDfa(pattern).startLiteralFilter();
+            scannerWidths.add(filter.values().length / 3);
             for (int iteration = 0; iteration < 200; iteration++) {
                 byte[] text = literalText(random, pattern, 1 + random.nextInt(4_096));
                 int offset = random.nextInt(Math.min(8, text.length));
@@ -503,6 +507,8 @@ public class TestDfaStartByteAcceleration
                 assertThat(VectorByteSetScanner.findLiteralSet(text, 0, end, filter)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
             }
         }
+        // Each scanner width runs its own kernel.
+        assertThat(scannerWidths).containsExactlyInAnyOrder(2, 4, 8);
     }
 
     @Test
@@ -976,7 +982,9 @@ public class TestDfaStartByteAcceleration
     }
 
     // The 02-literal-alternate and name-alt rows, folds that add a multibyte path (Kelvin sign
-    // for k and long s for s), and two literals for the narrowest scanner.
+    // for k and long s for s), a Cyrillic literal whose cases differ in a lead-byte bit the
+    // ASCII cases do not, so one position's mask has two bits, and two literals for the narrowest
+    // scanner.
     private static List<String> startLiteralFilterPatterns()
     {
         return List.of(
@@ -987,6 +995,7 @@ public class TestDfaStartByteAcceleration
                 "(?i)Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
                 "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
                 "(?i)kelvin|sky|kiss",
+                "(?i)Holmes|Watson|рст",
                 "(?i)Holmes|Watson");
     }
 
