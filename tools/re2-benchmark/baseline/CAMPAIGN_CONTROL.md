@@ -263,8 +263,21 @@ One loop, target under 30 s, every action a round trip:
 3. **Accept.** Completion markers go to an acceptance pool (4 threads):
    download, verify SHA-256, extract, validate, retain, delete from S3. The
    loop thread applies each finished acceptance to the ledgers, so ledger
-   writes stay single-writer and the loop never blocks on a download. Steady
-   state at 200 hosts is about one group every few seconds.
+   writes stay single-writer. The loop still waits on some downloads, such
+   as a worker's uploads at its cleanup, but an S3 read that keeps stalling,
+   or outruns a deadline scaled to its size, is abandoned, so each wait is
+   bounded. A trickle never trips the SDK's read timeout, so a watchdog shuts
+   the connection down under a read the SDK has waited in for a minute or
+   past the deadline. It never watches the read of the last byte, which hands
+   the connection back to the SDK's pool for other requests; one byte cannot
+   trickle, so the read timeout bounds that read. A read that received every
+   byte is not abandoned: it goes on to the end of the stream, where botocore
+   checks the object's checksum, and a failure there fails the fetch. The
+   deadline bounds reads, not requests: no resumed request starts past it, but
+   a request's wait for its response headers, with the SDK's retries, is
+   bounded only by the client's timeouts, three attempts of up to 10 s to
+   connect and 60 s of silence, under 4 minutes. Steady state at 200 hosts is
+   about one group every few seconds.
 4. **Shares.** Each running phase's target = its weight among running phases
    by corrected seconds left, over `max_hosts`, with the per-platform cap
    applied in the same allocation. A pinned share overrides. A phase above
@@ -632,7 +645,12 @@ boto3 and the OpenTelemetry SDK, pinned in
 dependencies. The Mac needs boto3 for the launch, replace, finish, fetch and
 teardown commands; the tests stub the client interface, so
 `validate-tooling.py` still needs no credentials but does need the packages
-installed. CI installs them.
+installed. CI installs them. urllib3 is pinned with boto3: the read watchdog
+interrupts a blocked read with its `HTTPResponse.shutdown()`, and the client
+refuses its first AWS request on an SDK that lacks it; commands that never
+reach AWS run on any urllib3, or none. Every test module that loads
+the cloud first imports `test_offline.py`, which holds the process to
+loopback, so no test can reach AWS.
 
 ## Build plan
 

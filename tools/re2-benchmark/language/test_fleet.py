@@ -13,6 +13,8 @@ from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import test_offline  # noqa: E402
 import collection
 import fleet
 

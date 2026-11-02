@@ -1,12 +1,16 @@
 """Exercise bulk verification ordering without JVM or wall-clock dependencies."""
 
+from pathlib import Path
+import sys
 import threading
 import unittest
 from unittest.mock import patch
 
-import bulk
-import collection
-import test_bulk
+sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import test_offline  # noqa: E402
+import bulk  # noqa: E402
+import collection  # noqa: E402
+import test_bulk  # noqa: E402
 
 
 class TestBulkIsolation(unittest.TestCase):

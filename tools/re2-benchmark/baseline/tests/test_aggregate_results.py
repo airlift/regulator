@@ -13,6 +13,7 @@ from pathlib import Path
 
 BASELINE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASELINE))
+import test_offline  # noqa: E402
 
 
 def load_module(name, path):

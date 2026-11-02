@@ -15,6 +15,7 @@ from pathlib import Path
 
 DIRECTORY = Path(__file__).resolve().parent
 sys.path.insert(0, str(DIRECTORY.parent / 'baseline'))
+import test_offline  # noqa: E402
 import engine_build
 from unit_dispatch import UNIT_COMPLETION_FIELDS
 UNIT = {name: hashlib.sha256(name.encode()).hexdigest() for name in ('first', 'second', 'third')}
