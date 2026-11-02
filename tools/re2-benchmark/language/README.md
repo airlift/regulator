@@ -571,6 +571,29 @@ so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
 Its six cases produce 24 partitions. Smoke adds the learned-sample workload to
 the usual first workload for each language.
 
+## Synthetic log workloads
+
+`synthetic_log.py` prepares a separate bulk manifest of three
+`ERROR|WARN|FATAL` count workloads: a realistic log, a log whose lines mostly
+carry those levels, and near misses such as `ERxO` that pass a start literal
+filter for those literals but never match. The preparer generates each
+haystack, about 1 MiB, from a fixed seed and checks it against its pinned
+checksum and count; none is committed. Prepare the manifest and its fleet
+selection:
+
+```sh
+python3 tools/re2-benchmark/language/synthetic_log.py prepare \
+  --manifest-directory /path/to/synthetic-log-manifest \
+  --languages rust,trino
+```
+
+`--languages` names the measured languages, comma-separated, Rust and Trino by
+default; the preparer checks them before writing anything and writes their
+pairs to `selection.json`. The manifest uses the `language-bulk` suite, so
+prepare its plan with `fleet.py prepare --shard-id synthetic-log --selection
+/path/to/synthetic-log-manifest/selection.json`. Smoke adds the near-miss
+workload in each selected language.
+
 ## AWS dispatch and recovery
 
 A language campaign runs its plans' work units on the baseline's unit
