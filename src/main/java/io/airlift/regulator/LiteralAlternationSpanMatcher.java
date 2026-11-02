@@ -16,8 +16,10 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
 
 import static io.airlift.regulator.Regexp.FOLD_CASE;
@@ -77,7 +79,7 @@ final class LiteralAlternationSpanMatcher
             return null;
         }
 
-        List<byte[]> literalAlternatives = extractLiteralAlternatives(expression, false, false, new long[1], 0);
+        List<byte[]> literalAlternatives = extractLiteralAlternatives(expression, false, false);
         if (literalAlternatives == null || literalAlternatives.size() < 2) {
             return null;
         }
@@ -155,29 +157,42 @@ final class LiteralAlternationSpanMatcher
     {
         // The compiler reads a class as bytes when the whole program is Latin-1, so this does too.
         boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
-        return extractLiteralAlternatives(expression, true, latin1Program, new long[1], 0);
+        return extractLiteralAlternatives(expression, true, latin1Program);
     }
 
     /// Expands `expression` into its literals in leftmost-first priority order: a concatenation
     /// lists each prefix choice's literals before the next prefix choice's. The trie takes literal
     /// strings only, at most [#MAXIMUM_ALTERNATIVES]; a large set also takes empty matches and
     /// small classes, and concatenations whose only choice of several literals ends them, up to
-    /// [#MAXIMUM_LITERAL_BYTES]. `work` holds the work charged so far, up to
-    /// [#MAXIMUM_EXTRACTION_WORK].
-    private static List<byte[]> extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
+    /// [#MAXIMUM_LITERAL_BYTES], and the whole extraction stops past [#MAXIMUM_EXTRACTION_WORK]
+    /// or nesting more than [#MAXIMUM_ANALYSIS_DEPTH] levels deep. The walk keeps its nesting on
+    /// an explicit stack, so a deeply nested pattern cannot overflow the thread's stack.
+    private static List<byte[]> extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program)
     {
-        if (depth >= MAXIMUM_ANALYSIS_DEPTH) {
-            return null;
+        long[] work = new long[1];
+        Deque<Frame> stack = new ArrayDeque<>();
+        stack.addLast(new Frame(expression, largeSet, latin1Program));
+        while (true) {
+            Frame frame = stack.getLast();
+            if (frame.literals == null) {
+                return null;
+            }
+            Regexp child = frame.nextChild();
+            if (child != null) {
+                // The new frame's depth is the number of frames enclosing it.
+                if (stack.size() >= MAXIMUM_ANALYSIS_DEPTH) {
+                    return null;
+                }
+                stack.addLast(new Frame(child, largeSet, latin1Program));
+                continue;
+            }
+
+            stack.removeLast();
+            if (stack.isEmpty()) {
+                return frame.literals;
+            }
+            stack.getLast().acceptChild(frame.literals, largeSet, work);
         }
-        return switch (expression.op()) {
-            case LITERAL -> literal(expression, new int[] {expression.rune()});
-            case LITERAL_STRING -> literal(expression, expression.runes());
-            case ALTERNATE -> alternate(expression, largeSet, latin1Program, work, depth);
-            case CONCAT -> concatenate(expression, largeSet, latin1Program, work, depth);
-            case EMPTY_MATCH -> largeSet ? List.of(new byte[0]) : null;
-            case CHAR_CLASS -> largeSet ? characterClass(expression, latin1Program) : null;
-            default -> null;
-        };
     }
 
     private static List<byte[]> literal(Regexp expression, int[] runes)
@@ -209,75 +224,43 @@ final class LiteralAlternationSpanMatcher
         return members;
     }
 
-    private static List<byte[]> alternate(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
+    /// Appends each literal of a concatenation's next child to every prefix the concatenation's
+    /// earlier children spell, or returns `null`.
+    private static List<byte[]> concatenate(List<byte[]> prefixes, List<byte[]> suffixes, boolean largeSet, long[] work)
     {
-        List<byte[]> alternatives = new ArrayList<>();
-        long alternativeBytes = 0;
-        for (Regexp child : expression.children()) {
-            List<byte[]> childAlternatives = extractLiteralAlternatives(child, largeSet, latin1Program, work, depth + 1);
-            if (childAlternatives == null) {
+        long suffixBytes = totalLength(suffixes);
+        if (largeSet) {
+            // A large set takes the factored prefixes of a dictionary, such as
+            // word(?:s|ing|ed), whose choice of several literals ends the concatenation, so
+            // the literals share the pattern's prefixes and the automaton stays within the
+            // pattern's size. A choice before more text, as in (?:a|b)c or [ab][cd],
+            // expands to every combination. A child of empty literals only, such as the
+            // (?:|) of a duplicate word, adds nothing in either position.
+            if (suffixBytes == 0) {
+                return prefixes;
+            }
+            if (prefixes.size() > 1) {
                 return null;
             }
-            if (largeSet) {
-                alternativeBytes += totalLength(childAlternatives);
-                if (alternatives.size() + childAlternatives.size() > MAXIMUM_LITERAL_BYTES || alternativeBytes > MAXIMUM_LITERAL_BYTES) {
-                    return null;
-                }
-            }
-            else if (alternatives.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
-                return null;
-            }
-            if (!charge(work, childAlternatives.size())) {
-                return null;
-            }
-            alternatives.addAll(childAlternatives);
         }
-        return alternatives;
-    }
-
-    private static List<byte[]> concatenate(Regexp expression, boolean largeSet, boolean latin1Program, long[] work, int depth)
-    {
-        List<byte[]> prefixes = List.of(new byte[0]);
-        for (Regexp child : expression.children()) {
-            List<byte[]> suffixes = extractLiteralAlternatives(child, largeSet, latin1Program, work, depth + 1);
-            if (suffixes == null) {
-                return null;
-            }
-            long suffixBytes = totalLength(suffixes);
-            if (largeSet) {
-                // A large set takes the factored prefixes of a dictionary, such as
-                // word(?:s|ing|ed), whose choice of several literals ends the concatenation, so
-                // the literals share the pattern's prefixes and the automaton stays within the
-                // pattern's size. A choice before more text, as in (?:a|b)c or [ab][cd],
-                // expands to every combination. A child of empty literals only, such as the
-                // (?:|) of a duplicate word, adds nothing in either position.
-                if (suffixBytes == 0) {
-                    continue;
-                }
-                if (prefixes.size() > 1) {
-                    return null;
-                }
-            }
-            else if ((long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
-                return null;
-            }
-            // Measured only now, so a skipped child does not rescan the prefixes.
-            long combinedBytes = totalLength(prefixes) * suffixes.size() + suffixBytes * prefixes.size();
-            if ((largeSet && combinedBytes > MAXIMUM_LITERAL_BYTES) || !charge(work, combinedBytes)) {
-                return null;
-            }
-
-            List<byte[]> combined = new ArrayList<>(prefixes.size() * suffixes.size());
-            for (byte[] prefix : prefixes) {
-                for (byte[] suffix : suffixes) {
-                    byte[] literal = Arrays.copyOf(prefix, prefix.length + suffix.length);
-                    System.arraycopy(suffix, 0, literal, prefix.length, suffix.length);
-                    combined.add(literal);
-                }
-            }
-            prefixes = combined;
+        else if ((long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
+            return null;
         }
-        return prefixes;
+        // Measured only now, so a skipped child does not rescan the prefixes.
+        long combinedBytes = totalLength(prefixes) * suffixes.size() + suffixBytes * prefixes.size();
+        if ((largeSet && combinedBytes > MAXIMUM_LITERAL_BYTES) || !charge(work, combinedBytes)) {
+            return null;
+        }
+
+        List<byte[]> combined = new ArrayList<>(prefixes.size() * suffixes.size());
+        for (byte[] prefix : prefixes) {
+            for (byte[] suffix : suffixes) {
+                byte[] literal = Arrays.copyOf(prefix, prefix.length + suffix.length);
+                System.arraycopy(suffix, 0, literal, prefix.length, suffix.length);
+                combined.add(literal);
+            }
+        }
+        return combined;
     }
 
     private static boolean charge(long[] work, long amount)
@@ -358,5 +341,70 @@ final class LiteralAlternationSpanMatcher
             edge = nextEdge[edgeIndex];
         }
         return 0;
+    }
+
+    /// An expression the extraction is expanding, with the literals it spells so far: a leaf's
+    /// own, or those its walked children combine to.
+    private static final class Frame
+    {
+        private final Regexp expression;
+        private int nextChildIndex;
+        // Null once the expression has no literal expansion within the bounds.
+        private List<byte[]> literals;
+        // The bytes of an alternation's literals so far.
+        private long literalBytes;
+
+        private Frame(Regexp expression, boolean largeSet, boolean latin1Program)
+        {
+            this.expression = expression;
+            literals = switch (expression.op()) {
+                case LITERAL -> literal(expression, new int[] {expression.rune()});
+                case LITERAL_STRING -> literal(expression, expression.runes());
+                // An alternation starts with no literals, and a concatenation with the empty one.
+                case ALTERNATE -> new ArrayList<>();
+                case CONCAT -> List.of(new byte[0]);
+                case EMPTY_MATCH -> largeSet ? List.of(new byte[0]) : null;
+                case CHAR_CLASS -> largeSet ? characterClass(expression, latin1Program) : null;
+                default -> null;
+            };
+        }
+
+        private Regexp nextChild()
+        {
+            if (nextChildIndex >= expression.childCount()) {
+                return null;
+            }
+            return expression.child(nextChildIndex++);
+        }
+
+        // Only alternations and concatenations start with literals and have children.
+        private void acceptChild(List<byte[]> childLiterals, boolean largeSet, long[] work)
+        {
+            literals = switch (expression.op()) {
+                case ALTERNATE -> alternate(childLiterals, largeSet, work);
+                case CONCAT -> concatenate(literals, childLiterals, largeSet, work);
+                default -> throw new IllegalStateException("unexpected literal parent: " + expression.op());
+            };
+        }
+
+        /// Adds an alternation child's literals after those of the children before it, or returns
+        /// `null`.
+        private List<byte[]> alternate(List<byte[]> childAlternatives, boolean largeSet, long[] work)
+        {
+            if (largeSet) {
+                literalBytes += totalLength(childAlternatives);
+                if (literals.size() + childAlternatives.size() > MAXIMUM_LITERAL_BYTES || literalBytes > MAXIMUM_LITERAL_BYTES) {
+                    return null;
+                }
+            }
+            else if (literals.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
+                return null;
+            }
+            if (!charge(work, childAlternatives.size())) {
+                return null;
+            }
+            literals.addAll(childAlternatives);
+            return literals;
+        }
     }
 }
