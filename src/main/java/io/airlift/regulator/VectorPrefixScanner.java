@@ -26,6 +26,8 @@ final class VectorPrefixScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // Returns the first occurrence of prefix, -1, or -2 - resume when the failed candidates pass
+    // LiteralSearchKernel's comparison budget and the search must continue with KMP at resume.
     static int find(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset)
     {
         int prefixSize = prefix.length;
@@ -37,6 +39,7 @@ final class VectorPrefixScanner
         int vectorEnd = offset + SPECIES.loopBound(candidateCount);
         ByteVector primaryVector = ByteVector.broadcast(SPECIES, prefix[primaryOffset]);
         ByteVector secondaryVector = ByteVector.broadcast(SPECIES, prefix[secondaryOffset]);
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
         int position = offset;
 
         for (; position < vectorEnd; position += SPECIES.length()) {
@@ -56,10 +59,14 @@ final class VectorPrefixScanner
                 if (prefixIndex == prefix.length) {
                     return candidate;
                 }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, prefixIndex);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, candidate)) {
+                    return -2 - (candidate + 1);
+                }
                 candidateBits &= candidateBits - 1;
             }
         }
-        return findScalar(data, position, offset + candidateCount - position, prefix, primaryOffset, secondaryOffset);
+        return findScalar(data, position, offset + candidateCount - position, prefix, primaryOffset, secondaryOffset, comparisonEnd);
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
@@ -111,27 +118,33 @@ final class VectorPrefixScanner
         return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
     }
 
-    private static int findScalar(byte[] data, int offset, int candidateCount, byte[] prefix, int primaryOffset, int secondaryOffset)
+    private static int findScalar(byte[] data, int offset, int candidateCount, byte[] prefix, int primaryOffset, int secondaryOffset, int comparisonEnd)
     {
         int end = offset + candidateCount;
         for (int position = offset; position < end; position++) {
             if (data[position + primaryOffset] == prefix[primaryOffset] &&
-                    data[position + secondaryOffset] == prefix[secondaryOffset] &&
-                    prefixMatchesAt(data, position, prefix)) {
-                return position;
+                    data[position + secondaryOffset] == prefix[secondaryOffset]) {
+                int matchedLength = matchingPrefixLength(data, position, prefix);
+                if (matchedLength == prefix.length) {
+                    return position;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, position)) {
+                    return -2 - (position + 1);
+                }
             }
         }
         return -1;
     }
 
-    private static boolean prefixMatchesAt(byte[] data, int position, byte[] prefix)
+    private static int matchingPrefixLength(byte[] data, int position, byte[] prefix)
     {
         for (int index = 0; index < prefix.length; index++) {
             if (data[position + index] != prefix[index]) {
-                return false;
+                return index;
             }
         }
-        return true;
+        return prefix.length;
     }
 
     private static int findFoldCaseScalar(byte[] data, int offset, int candidateCount, byte[] prefix, int prefixSize)

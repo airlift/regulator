@@ -346,8 +346,9 @@ public class TestTrinoRegexpFunctions
     public void testLiteralSearchMemoryIsReservedFromForwardDfa()
     {
         Slice pattern = utf8(".*literal.*");
-        // The RE2 dialect builds no literal search, and neither compile builds a scan plan for this
-        // pattern, so the baseline's program and DFA allowance differ only by the search's charge.
+        // The RE2 dialect builds no literal search for this short literal, and neither compile
+        // builds a scan plan for this pattern, so the baseline's program and DFA allowance differ
+        // only by the search's charge.
         Re2 baseline = Re2.compileParsed(pattern, TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL), Regexp.LIKE_PERL, 96L << 20);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 

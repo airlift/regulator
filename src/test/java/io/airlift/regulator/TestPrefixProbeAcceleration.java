@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
@@ -227,6 +228,40 @@ public class TestPrefixProbeAcceleration
     }
 
     @Test
+    public void testCandidateWorkBound()
+    {
+        // In a run of the prefix's first byte every position is a candidate that matches half the
+        // prefix before it fails, so the first candidate passes LiteralSearchKernel's comparison
+        // budget, and KMP finds the match after a mebibyte of candidates.
+        String half = "a".repeat(500);
+        assertCandidateWorkBound(half + "b" + half, "a", ByteFrequencies.uniform(), 0);
+        // A probe moved to the rare '=' meets a candidate at every other position, in text that
+        // alternates 'a' with '='.
+        String alternating = "a=".repeat(250);
+        assertCandidateWorkBound(alternating + "b=" + alternating, "a=", RARE_NON_LETTERS, 1);
+    }
+
+    @Test
+    @Timeout(30)
+    public void testFirstByteScanStaysLinear()
+    {
+        // In 16 MiB of the prefix's first byte every position is a candidate that matches half of
+        // a long prefix, so a first-byte scan that never hands off to KMP compares about 10^12
+        // bytes. The handoff diagnostics start in the budgeted continuation, so only the timeout
+        // guards the handoff from the first-byte loop of prefixAccel.
+        String half = "a".repeat(50_000);
+        byte[] prefix = (half + "b" + half).getBytes(UTF_8);
+        byte[] data = new byte[(16 << 20) + prefix.length];
+        Arrays.fill(data, (byte) 'a');
+        System.arraycopy(prefix, 0, data, data.length - prefix.length, prefix.length);
+        Prog program = configuredProgram(prefix, false, ByteFrequencies.uniform());
+
+        assertThat(program.prefixAccelStrategy(data.length)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(program.prefixAccelProbeOffset()).isZero();
+        assertThat(program.prefixAccel(data, 0, data.length)).isEqualTo(data.length - prefix.length);
+    }
+
+    @Test
     public void testPublicFindMatchesReference()
     {
         Random random = new Random(29);
@@ -341,6 +376,18 @@ public class TestPrefixProbeAcceleration
             }
         }
         return -1;
+    }
+
+    private static void assertCandidateWorkBound(String literal, String fill, ByteFrequencies frequencies, int probeOffset)
+    {
+        byte[] prefix = literal.getBytes(UTF_8);
+        byte[] data = (fill.repeat((1 << 20) / fill.length()) + literal).getBytes(UTF_8);
+        Prog program = configuredProgram(prefix, false, frequencies);
+
+        assertThat(program.prefixAccelStrategy(data.length)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(program.prefixAccelProbeOffset()).isEqualTo(probeOffset);
+        assertThat(program.prefixAccelKmpHandoffForDiagnostics(data, 0, data.length)).isEqualTo(1);
+        assertThat(program.prefixAccel(data, 0, data.length)).isEqualTo(data.length - prefix.length);
     }
 
     private static void assertMatchAt(Prog program, byte[] prefix, int length, int backingOffset, int matchPosition)

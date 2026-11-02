@@ -119,7 +119,7 @@ final class Compiler
         if (program.canBitState()) {
             memory += (long) program.size() * CPP_LIST_HEAD_BYTES;
         }
-        return memory + program.onePassMemory();
+        return memory + program.onePassMemory() + program.prefixShiftsMemory();
     }
 
     private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
