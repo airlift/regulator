@@ -28,9 +28,9 @@ import static io.airlift.regulator.Regexp.LATIN1;
 import static java.util.Objects.requireNonNull;
 
 /// Finds the leftmost-first match of an alternation of at most [#MAXIMUM_ALTERNATIVES] literal
-/// strings, such as `ERROR|WARN|FATAL`, by walking a trie from each position, which serves short
-/// Trino patterns. [LiteralSetSpanMatcher] searches a larger alternation, whose literals this
-/// class's analysis also extracts.
+/// strings, such as `ERROR|WARN|FATAL`, by walking a trie at each position it does not skip,
+/// which serves short Trino patterns. [LiteralSetSpanMatcher] searches a larger alternation,
+/// whose literals this class's analysis also extracts.
 final class LiteralAlternationSpanMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.class);
@@ -48,10 +48,17 @@ final class LiteralAlternationSpanMatcher
     // A class the parsers merge from a dictionary's single-character alternatives holds a few
     // members, such as [ds] from word(?:d|s); a wider one, such as [!-~], is not a literal set.
     private static final int MAXIMUM_CLASS_RUNES = 16;
-    // The search restarts the trie at every input byte, so a long literal costs its length per
-    // byte on a dense near-miss input; such a pattern keeps the general engine's linear scan.
+    // The search restarts the trie at every input byte it does not skip, so a long literal costs
+    // its length per byte on a dense near-miss input; such a pattern keeps the general engine's
+    // linear scan.
     // At most 64 alternatives of this length also keep every trie index within a short.
     private static final int MAXIMUM_TRIE_LITERAL_BYTES = 64;
+    // A denser filter would stop the vector scan so often that restarting it would cost more
+    // than the root table's one lookup per byte.
+    private static final double MAXIMUM_START_LITERAL_FILTER_DENSITY = 1.0 / 64;
+    // Shorter inputs keep the root-table loop: a call's vector setup costs more than it saves,
+    // and short everyday values keep the route they had before the filter.
+    private static final int MINIMUM_START_LITERAL_FILTER_BYTES = 64;
 
     private final short[] rootStateByLeadingByte;
     private final short[] firstEdgeByState;
@@ -59,6 +66,12 @@ final class LiteralAlternationSpanMatcher
     private final short[] targetState;
     private final byte[] edgeByte;
     private final short[] alternativeByState;
+    // Null without the Vector API, or when the literals admit no selective filter.
+    private final StartLiteralFilter startLiteralFilter;
+    // Observability, updated without synchronization as the DFA's scan counters are.
+    private long filterStopCount;
+    private long rootTablePositionCount;
+    private long sampledPositionCount;
 
     private LiteralAlternationSpanMatcher(
             short[] rootStateByLeadingByte,
@@ -66,7 +79,8 @@ final class LiteralAlternationSpanMatcher
             short[] nextEdge,
             short[] targetState,
             byte[] edgeByte,
-            short[] alternativeByState)
+            short[] alternativeByState,
+            StartLiteralFilter startLiteralFilter)
     {
         this.rootStateByLeadingByte = rootStateByLeadingByte;
         this.firstEdgeByState = firstEdgeByState;
@@ -74,6 +88,7 @@ final class LiteralAlternationSpanMatcher
         this.targetState = targetState;
         this.edgeByte = edgeByte;
         this.alternativeByState = alternativeByState;
+        this.startLiteralFilter = startLiteralFilter;
     }
 
     static LiteralAlternationSpanMatcher analyze(Regexp expression, int capturingGroupCount)
@@ -141,7 +156,34 @@ final class LiteralAlternationSpanMatcher
                 nextEdge,
                 targetState,
                 edgeByte,
-                alternativeByState);
+                alternativeByState,
+                VectorSupport.isAvailable() ? buildStartLiteralFilter(literalAlternatives) : null);
+    }
+
+    // Each literal is one path of the byte sets Prog.buildStartPositionByteSets returns: its byte
+    // at each position below its length, and every byte at the positions past it, so the filter
+    // never tests a position some literal does not reach. The filter therefore accepts every
+    // position where a literal starts.
+    private static StartLiteralFilter buildStartLiteralFilter(List<byte[]> literals)
+    {
+        long[][] paths = new long[literals.size()][];
+        for (int index = 0; index < paths.length; index++) {
+            byte[] literal = literals.get(index);
+            long[] path = new long[StartLiteralFilter.PATH_POSITIONS * 4];
+            for (int position = 0; position < StartLiteralFilter.PATH_POSITIONS; position++) {
+                if (position < literal.length) {
+                    int value = literal[position] & 0xFF;
+                    path[position * 4 + (value >>> 6)] |= 1L << value;
+                }
+                else {
+                    Arrays.fill(path, position * 4, path.length, -1L);
+                    break;
+                }
+            }
+            paths[index] = path;
+        }
+        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText());
+        return filter != null && filter.density() <= MAXIMUM_START_LITERAL_FILTER_DENSITY ? filter : null;
     }
 
     long estimatedRetainedSize()
@@ -152,7 +194,43 @@ final class LiteralAlternationSpanMatcher
                 SizeOf.sizeOf(nextEdge) +
                 SizeOf.sizeOf(targetState) +
                 SizeOf.sizeOf(edgeByte) +
-                SizeOf.sizeOf(alternativeByState);
+                SizeOf.sizeOf(alternativeByState) +
+                (startLiteralFilter == null ? 0 : startLiteralFilter.estimatedRetainedSize());
+    }
+
+    /// True when a search with `length` bytes left may skip to the start literal filter's
+    /// candidates rather than look up every byte in the root table. A search with at least 64 KiB
+    /// left still reads the root table when its sample finds the filter's stops dense.
+    boolean usesStartLiteralFilter(int length)
+    {
+        return startLiteralFilter != null && length >= MINIMUM_START_LITERAL_FILTER_BYTES;
+    }
+
+    /// The start literal filter built from the literals, or `null` when the matcher has none.
+    StartLiteralFilter startLiteralFilterForDiagnostics()
+    {
+        return startLiteralFilter;
+    }
+
+    /// The positions where the start literal filter's scan stopped for the trie.
+    long filterStopCountForDiagnostics()
+    {
+        return filterStopCount;
+    }
+
+    /// The positions the scalar root-table loop read in searches and counts that began with at
+    /// least 64 bytes left. Shorter ones always read the root table, and count nothing. Filter
+    /// stops also look up the root table, but [#filterStopCountForDiagnostics()] counts them.
+    long rootTablePositionCountForDiagnostics()
+    {
+        return rootTablePositionCount;
+    }
+
+    /// The positions the start-scan productivity checks could read, at most
+    /// [Dfa#BYTE_SCAN_SAMPLE_SIZE] for each check.
+    long sampledPositionCountForDiagnostics()
+    {
+        return sampledPositionCount;
     }
 
     /// Expands `expression` into the literals of a large set for [LiteralSetSpanMatcher], in
@@ -283,23 +361,53 @@ final class LiteralAlternationSpanMatcher
     }
 
     /// Returns the number of non-overlapping matches in `input`. Matches are never empty, so
-    /// each search resumes where the previous match ended.
+    /// each search resumes where the previous match ended, on the route the previous one chose.
     long count(Slice input)
     {
+        requireNonNull(input, "input is null");
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int inputEnd = inputOffset + input.length();
         long count = 0;
-        int searchStart = 0;
-        while (searchStart < input.length()) {
-            long span = findSpan(input, searchStart);
+        int position = inputOffset;
+        if (input.length() < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            // As in findSpan, a short input reads the root table to its end.
+            while (position < inputEnd) {
+                long span = findSpanInRootTable(bytes, position, inputEnd, inputOffset, inputEnd);
+                if (span < 0) {
+                    break;
+                }
+                count++;
+                position = inputOffset + (int) span;
+            }
+            return count;
+        }
+        int routeEnd = position;
+        boolean readsRootTable = false;
+        while (position < inputEnd) {
+            if (position >= routeEnd) {
+                readsRootTable = readsRootTable(bytes, position, inputEnd);
+                routeEnd = routeEnd(position, inputEnd);
+            }
+            long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
             if (span < 0) {
-                break;
+                position = routeEnd;
+                continue;
             }
             count++;
-            searchStart = (int) span;
+            position = inputOffset + (int) span;
         }
         return count;
     }
 
     long findSpan(Slice input, int start)
+    {
+        return findSpan(input, start, null);
+    }
+
+    /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH]. A
+    /// `cursor`, which may be null, carries the route from one search of `input` to the next.
+    long findSpan(Slice input, int start, Cursor cursor)
     {
         requireNonNull(input, "input is null");
         if (start < 0 || start > input.length()) {
@@ -309,17 +417,127 @@ final class LiteralAlternationSpanMatcher
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
         int inputEnd = inputOffset + input.length();
-        for (int position = inputOffset + start; position < inputEnd; position++) {
+        int firstPosition = inputOffset + start;
+        // With fewer than MINIMUM_START_LITERAL_FILTER_BYTES left, every route reads the root table
+        // to the input end: the filter loop needs that many bytes left, the productivity sample
+        // needs 64 KiB, and a route chosen with less than 64 KiB left holds to the end. Going
+        // straight to the root-table loop skips choosing the route. Such a search neither reads
+        // nor updates the cursor, whose route stays within the input.
+        if (inputEnd - firstPosition < MINIMUM_START_LITERAL_FILTER_BYTES) {
+            return findSpanInRootTable(bytes, firstPosition, inputEnd, inputOffset, inputEnd);
+        }
+        int position = firstPosition;
+        int routeEnd = cursor == null ? position : inputOffset + cursor.routeEnd;
+        boolean readsRootTable = cursor != null && cursor.readsRootTable;
+        long span = Dfa.SEARCH_NO_MATCH;
+        while (position < inputEnd) {
+            if (position >= routeEnd) {
+                readsRootTable = readsRootTable(bytes, position, inputEnd);
+                routeEnd = routeEnd(position, inputEnd);
+            }
+            span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
+            if (span >= 0) {
+                break;
+            }
+            position = routeEnd;
+        }
+        if (cursor != null) {
+            cursor.routeEnd = routeEnd - inputOffset;
+            cursor.readsRootTable = readsRootTable;
+        }
+        return span;
+    }
+
+    // True when the route from `position` reads every byte through the root table rather than
+    // skipping to the filter's stops: there is no filter, or at least 64 KiB remain and the DFA's
+    // start-scan productivity check finds the stops too dense in its sample. Near misses that
+    // the filter passes and the trie rejects, such as ERxO under ERROR|WARN|FATAL every fifth
+    // byte, make frequent filter stops, and restarting the vector scan at each costs more than
+    // one root-table lookup per byte.
+    private boolean readsRootTable(byte[] bytes, int position, int inputEnd)
+    {
+        if (startLiteralFilter == null) {
+            return true;
+        }
+        if (inputEnd - position < Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+            return false;
+        }
+        // Each check reads at most this many positions.
+        sampledPositionCount += Dfa.BYTE_SCAN_SAMPLE_SIZE;
+        return !Dfa.isByteCandidateScanProductive(
+                null,
+                startLiteralFilter,
+                bytes,
+                position,
+                inputEnd,
+                Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES,
+                Dfa.BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
+    }
+
+    // A route chosen with at least 64 KiB left holds for the DFA's recheck distance, and one
+    // chosen with less holds to the end. Without a filter nothing is sampled, and the root-table
+    // route is simply chosen again every 64 KiB.
+    private static int routeEnd(int position, int inputEnd)
+    {
+        if (inputEnd - position < Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+            return inputEnd;
+        }
+        return position + Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
+    }
+
+    // Returns the span of the first match that starts in `[position, routeEnd)`, whose trie walk
+    // may read to the input end, or Dfa.SEARCH_NO_MATCH. Each pass searches either one filter stop
+    // or the rest of the route, so the trie walk has one call site: C2 inlined a copy at each of
+    // two sites, which grew this method past its inline size limit, and its callers then called
+    // it rather than inlining it.
+    private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd)
+    {
+        // The filter accepts every position where a literal starts, so the positions it skips
+        // hold no match, and the trie decides each one it stops at. Every literal reaches the
+        // filter's last position, so a scan that reads that far past the route end finds every
+        // stop before the route end.
+        int scanEnd = readsRootTable ? routeEnd : Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset());
+        while (true) {
+            boolean filterStop = !readsRootTable && position < routeEnd && usesStartLiteralFilter(inputEnd - position);
+            if (filterStop) {
+                position = VectorByteSetScanner.findLiteralSet(bytes, position, scanEnd - position, startLiteralFilter);
+                if (position < 0) {
+                    return Dfa.SEARCH_NO_MATCH;
+                }
+                filterStopCount++;
+            }
+            long span = findSpanInRootTable(bytes, position, filterStop ? position + 1 : routeEnd, inputOffset, inputEnd);
+            if (!filterStop) {
+                // The filter's scan can stop past the route end, leaving the root table nothing to read.
+                int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
+                rootTablePositionCount += readEnd - position;
+                return span;
+            }
+            if (span >= 0) {
+                return span;
+            }
+            position++;
+        }
+    }
+
+    // Returns the span of the first match that starts in `[position, routeEnd)`, or
+    // Dfa.SEARCH_NO_MATCH. Each position's byte is looked up in the root table, and the trie is
+    // walked from each one the table admits for the earliest alternative in pattern order. A
+    // filter stop searches its one position here too. Walking in this loop keeps the child
+    // lookup inlined: C2 compiled a separate walk method into its callers before that method's
+    // own profile matured, and without call counts it left the child lookup a call.
+    private long findSpanInRootTable(byte[] bytes, int position, int routeEnd, int inputOffset, int inputEnd)
+    {
+        for (; position < routeEnd; position++) {
             int state = rootStateByLeadingByte[bytes[position] & 0xFF];
             if (state == 0) {
                 continue;
             }
-
             int bestAlternative = alternativeByState[state];
             int bestEnd = bestAlternative < 0 ? -1 : position + 1;
             int inputIndex = position + 1;
             while (inputIndex < inputEnd) {
-                int nextState = findChild(state, bytes[inputIndex]);
+                int nextState = findChild(state, bytes[inputIndex], firstEdgeByState, nextEdge, targetState, edgeByte);
                 if (nextState == 0) {
                     break;
                 }
@@ -338,11 +556,6 @@ final class LiteralAlternationSpanMatcher
             }
         }
         return Dfa.SEARCH_NO_MATCH;
-    }
-
-    private int findChild(int state, byte value)
-    {
-        return findChild(state, value, firstEdgeByState, nextEdge, targetState, edgeByte);
     }
 
     private static int findChild(
@@ -426,6 +639,24 @@ final class LiteralAlternationSpanMatcher
             }
             literals.addAll(childAlternatives);
             return literals;
+        }
+    }
+
+    /// The route one search of an input chose and the position it holds to, which a matcher's
+    /// next search of the same input continues instead of sampling the filter again, as the
+    /// DFA's group-zero cursor keeps its scan rejection. Positions are relative to the input.
+    /// A new cursor is reset; a caller must [#reset()] it before searching a different input,
+    /// since a route end carried past that input's end would read outside it.
+    static final class Cursor
+    {
+        private int routeEnd;
+        private boolean readsRootTable;
+
+        /// Forgets the route, so the next search chooses one from its start position.
+        void reset()
+        {
+            routeEnd = 0;
+            readsRootTable = false;
         }
     }
 }

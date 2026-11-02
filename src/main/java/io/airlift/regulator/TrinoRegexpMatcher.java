@@ -29,6 +29,7 @@ public sealed class TrinoRegexpMatcher
 {
     private final RegexpMatcher matcher;
     private final LiteralAlternationSpanMatcher literalAlternation;
+    private final LiteralAlternationSpanMatcher.Cursor literalAlternationCursor;
     private final FixedWidthByteSpanMatcher fixedWidth;
     private Slice input;
     private long span = -1;
@@ -40,6 +41,7 @@ public sealed class TrinoRegexpMatcher
     {
         matcher = null;
         literalAlternation = null;
+        literalAlternationCursor = null;
         fixedWidth = null;
     }
 
@@ -48,6 +50,7 @@ public sealed class TrinoRegexpMatcher
     {
         this.matcher = requireNonNull(matcher, "matcher is null");
         literalAlternation = null;
+        literalAlternationCursor = null;
         fixedWidth = null;
     }
 
@@ -56,6 +59,7 @@ public sealed class TrinoRegexpMatcher
     {
         matcher = null;
         this.literalAlternation = requireNonNull(literalAlternation, "literalAlternation is null");
+        literalAlternationCursor = new LiteralAlternationSpanMatcher.Cursor();
         fixedWidth = null;
         reset(input);
     }
@@ -65,6 +69,7 @@ public sealed class TrinoRegexpMatcher
     {
         matcher = null;
         literalAlternation = null;
+        literalAlternationCursor = null;
         this.fixedWidth = requireNonNull(fixedWidth, "fixedWidth is null");
         reset(input);
     }
@@ -82,6 +87,9 @@ public sealed class TrinoRegexpMatcher
             span = -1;
             nextStart = 0;
             exhausted = false;
+            if (literalAlternationCursor != null) {
+                literalAlternationCursor.reset();
+            }
         }
         return this;
     }
@@ -98,7 +106,7 @@ public sealed class TrinoRegexpMatcher
             return false;
         }
         // Both retained span kernels exclude captures and empty matches.
-        span = fixedWidth != null ? fixedWidth.findSpan(input, nextStart) : literalAlternation.findSpan(input, nextStart);
+        span = fixedWidth != null ? fixedWidth.findSpan(input, nextStart) : literalAlternation.findSpan(input, nextStart, literalAlternationCursor);
         if (span < 0) {
             // These spans never match empty and the search position is unchanged, so a retry from
             // the last match end would repeat this failed search.

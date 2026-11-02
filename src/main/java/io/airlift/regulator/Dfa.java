@@ -53,11 +53,11 @@ final class Dfa
     private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
     private static final int MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES = 1024;
     private static final int MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES = 4 * 1024;
-    private static final int MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES = 64 * 1024;
-    private static final int BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES = MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES;
-    private static final int BYTE_SCAN_SAMPLE_SIZE = 64;
+    static final int MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES = 64 * 1024;
+    static final int BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES = MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES;
+    static final int BYTE_SCAN_SAMPLE_SIZE = 64;
     private static final int BYTE_SCAN_SAMPLE_WINDOWS = 4;
-    private static final int BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT = 8;
+    static final int BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT = 8;
     private static final int SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT = 4;
     private static final boolean BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED = true;
     private static final int MIN_SELF_LOOP_SAMPLE_SEARCH_BYTES = 64 * 1024;
@@ -1695,8 +1695,9 @@ final class Dfa
     }
 
     // With a start literal filter, a sampled position counts when the filter accepts it, not
-    // when its byte is in the candidate set.
-    private static boolean isByteCandidateScanProductive(
+    // when its byte is in the candidate set. The literal-alternation matcher samples its own
+    // filter's stops with this check.
+    static boolean isByteCandidateScanProductive(
             byte[] candidates,
             StartLiteralFilter literalFilter,
             byte[] bytes,

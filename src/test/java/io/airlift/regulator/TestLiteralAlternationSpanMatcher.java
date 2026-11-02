@@ -17,6 +17,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,14 +30,22 @@ import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOfByteArray;
+import static io.airlift.slice.SizeOf.sizeOfShortArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.lang.Math.toIntExact;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestLiteralAlternationSpanMatcher
 {
+    // The DFA's start-scan recheck distance, for which a search keeps the route its sample chose.
+    private static final int RECHECK_BYTES = 64 * 1024;
+
     @Test
     public void testPinnedNativeBoundaries()
     {
@@ -258,15 +267,27 @@ public class TestLiteralAlternationSpanMatcher
         long maxMemory = TrinoRegexp.Options.defaults().maxMemory();
         long forwardMemory = maxMemory - Math.max(1, maxMemory / 3);
         assertThat(matcher.estimatedRetainedSize()).isLessThan(forwardMemory);
+        // The 14 literal bytes size the trie's arrays, and the filter, built only with the Vector
+        // API, adds its own tables.
+        StartLiteralFilter filter = matcher.startLiteralFilterForDiagnostics();
+        assertThat(filter != null).isEqualTo(VectorSupport.isAvailable());
+        long trieSize = instanceSize(LiteralAlternationSpanMatcher.class) +
+                sizeOfShortArray(256) +
+                2 * sizeOfShortArray(15) +
+                2 * sizeOfShortArray(14) +
+                sizeOfByteArray(14);
+        assertThat(matcher.estimatedRetainedSize()).isEqualTo(trieSize + (filter == null ? 0 : filter.estimatedRetainedSize()));
 
         assertThat(TrinoRegexp.compile(utf8Slice("foo|(bar)")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:foo)|bar")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("foo|")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("a".repeat(64) + "b|x")).literalAlternationSpanMatcher()).isNull();
 
+        // With the Vector API, the filter's nibble tables make the matcher retain more than the
+        // general engine needs, so only a budget well under its size is too small for both.
         assertThatThrownBy(() -> TrinoRegexp.compile(
                 utf8Slice("ERROR|WARN|FATAL"),
-                TrinoRegexp.Options.defaults().setMaxMemory(matcher.estimatedRetainedSize())))
+                TrinoRegexp.Options.defaults().setMaxMemory(matcher.estimatedRetainedSize() / 2)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
 
         // A shared prefix expands to megabytes of literals but few states, and an automaton over
@@ -317,6 +338,219 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalScanner(chinese)).isNotNull();
         assertThat(optionalScanner("(?i:" + english + ")")).isNull();
         assertThat(optionalScanner("(?i:" + russian + ")")).isNull();
+
+        // Long text skips to the start literal filter's candidates where the Vector API is
+        // available; shorter inputs keep the root-table loop.
+        for (String pattern : List.of(english, russian, chinese, "Tom|Sawyer|Huckleberry|Finn")) {
+            LiteralAlternationSpanMatcher scanner = scanner(pattern);
+            assertThat(scanner.usesStartLiteralFilter(63)).as(pattern).isFalse();
+            assertThat(scanner.usesStartLiteralFilter(64)).as(pattern).isEqualTo(VectorSupport.isAvailable());
+        }
+    }
+
+    @Test
+    public void testLongInputAgreement()
+    {
+        Random random = new Random(42);
+        List<String> patterns = List.of(
+                "Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty",
+                "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+                "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
+                "Tom|Sawyer|Huckleberry|Finn",
+                "ERROR|WARN|FATAL",
+                // In abcde, the near miss of abcx hides the start of bcde one byte later.
+                "abcx|bcde");
+        for (String expression : patterns) {
+            LiteralAlternationSpanMatcher scanner = scanner(expression);
+            Re2 pattern = Re2.compile(utf8Slice(expression));
+            TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice(expression));
+            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(expression).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+            assertThat(trinoPattern.literalAlternationSpanMatcher()).as(expression).isNotNull();
+            for (int trial = 0; trial < 4; trial++) {
+                // A literal ends the text, so a match lands in its last bytes.
+                byte[] body = literalText(random, expression.split("\\|"), 2_048 + random.nextInt(4_096));
+                int backingOffset = random.nextInt(64);
+                byte[] backing = new byte[backingOffset + body.length + random.nextInt(64)];
+                random.nextBytes(backing);
+                System.arraycopy(body, 0, backing, backingOffset, body.length);
+                Slice input = wrappedBuffer(backing, backingOffset, body.length);
+
+                RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                for (int start = 0; start <= input.length(); start++) {
+                    long expected = matcher.find(start)
+                            ? ((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL)
+                            : Dfa.SEARCH_NO_MATCH;
+                    assertThat(scanner.findSpan(input, start)).as("pattern %s trial %s start %s", expression, trial, start).isEqualTo(expected);
+                }
+                long expectedCount = generalEngineCount(pattern, input);
+                assertThat(scanner.count(input)).as("pattern %s trial %s", expression, trial).isEqualTo(expectedCount);
+                assertThat(pattern.count(input)).as("pattern %s trial %s", expression, trial).isEqualTo(expectedCount);
+                assertThat(trinoPattern.count(input)).as("pattern %s trial %s", expression, trial).isEqualTo(expectedCount);
+            }
+        }
+
+        // Sparse log lines, then near misses with a literal at random places, so searches sample
+        // sparse stops in the log and dense ones in the near misses, and switch between the
+        // filter and the root table at the 64 KiB rechecks. Spans from random starts, every match
+        // in turn, and the counts agree with the general engine.
+        StringBuilder mixed = new StringBuilder(logLines(RECHECK_BYTES));
+        String[] literals = {"ERROR", "WARN", "FATAL"};
+        while (mixed.length() < 5 * RECHECK_BYTES / 2) {
+            mixed.append(random.nextInt(64) == 0 ? literals[random.nextInt(literals.length)] : "ERxO WAxN FAxA ");
+        }
+        Slice input = utf8Slice(mixed.toString());
+        LiteralAlternationSpanMatcher scanner = scanner("ERROR|WARN|FATAL");
+        Re2 pattern = Re2.compile(utf8Slice("ERROR|WARN|FATAL"));
+        RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        for (int trial = 0; trial < 4_096; trial++) {
+            int start = random.nextInt(input.length() + 1);
+            long expected = matcher.find(start)
+                    ? ((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL)
+                    : Dfa.SEARCH_NO_MATCH;
+            assertThat(scanner.findSpan(input, start)).as("start %s", start).isEqualTo(expected);
+        }
+        LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
+        matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        long span = scanner.findSpan(input, 0, cursor);
+        long expectedCount = 0;
+        while (matcher.find()) {
+            assertThat(span).isEqualTo(((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL));
+            expectedCount++;
+            span = scanner.findSpan(input, (int) span, cursor);
+        }
+        assertThat(span).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(scanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
+        assertThat(scanner.rootTablePositionCountForDiagnostics()).isGreaterThan(RECHECK_BYTES / 2);
+        assertThat(scanner.count(input)).isEqualTo(expectedCount);
+        assertThat(pattern.count(input)).isEqualTo(expectedCount);
+        assertThat(TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL")).count(input)).isEqualTo(expectedCount);
+    }
+
+    @Test
+    public void testDenseNearMissesReadTheRootTable()
+    {
+        // The filter checks the first, second, and fourth bytes of ERROR, WARN, and FATAL, so it
+        // passes ERxO, WAxN, and FAxA, and the trie rejects each at its third byte. Every fifth
+        // byte starts such a near miss, and nothing matches.
+        int length = 4 * RECHECK_BYTES;
+        byte[] nearMisses = "ERxO WAxN FAxA ".repeat(length / 15 + 1).substring(0, length).getBytes(UTF_8);
+        Slice input = wrappedBuffer(nearMisses);
+        LiteralAlternationSpanMatcher scanner = scanner("ERROR|WARN|FATAL");
+        StartLiteralFilter filter = scanner.startLiteralFilterForDiagnostics();
+        assertThat(filter != null).isEqualTo(VectorSupport.isAvailable());
+        if (filter != null) {
+            assertThat(List.of(filter.firstOffset(), filter.secondOffset(), filter.thirdOffset())).containsExactly(0, 1, 3);
+            for (int position = 0; position + 4 <= length; position += 5) {
+                assertThat(filter.accepts(nearMisses, position, length)).as("position %s", position).isTrue();
+            }
+        }
+
+        // Each of the four 64 KiB routes samples the filter's stops once, finds them dense, and
+        // reads the root table, so the vector scan makes no stop. The root table alone reads each
+        // position once. Without the Vector API there is no filter to sample.
+        assertThat(scanner.count(input)).isZero();
+        assertThat(scanner.filterStopCountForDiagnostics()).isZero();
+        assertThat(scanner.rootTablePositionCountForDiagnostics()).isEqualTo(length);
+        assertThat(scanner.sampledPositionCountForDiagnostics()).isEqualTo(VectorSupport.isAvailable() ? 4L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
+        assertThat(scanner.findSpan(input, 0)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(scanner.filterStopCountForDiagnostics()).isZero();
+        assertThat(scanner.rootTablePositionCountForDiagnostics()).isEqualTo(2L * length);
+    }
+
+    @Test
+    public void testMatcherResetForgetsTheRoute()
+    {
+        // A Trino matcher reset onto a short input forgets the long input's root-table route.
+        Slice input = wrappedBuffer("ERxO WAxN FAxA ".repeat(4 * RECHECK_BYTES / 15).getBytes(UTF_8));
+        TrinoRegexpMatcher matcher = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL")).matcher(input);
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.reset(utf8Slice("xxxx")).find()).isFalse();
+        assertThat(matcher.reset(utf8Slice("xxWARN")).find()).isTrue();
+        assertThat(List.of(matcher.start(), matcher.end())).containsExactly(2, 6);
+    }
+
+    @Test
+    public void testLogSamplesOncePerRecheck()
+    {
+        // Log lines with an occasional WARN or ERROR keep the filter. A count and a Trino
+        // matcher's finds sample once per 64 KiB route that has 64 KiB left, not once per match.
+        Slice logInput = utf8Slice(logLines(2 * RECHECK_BYTES + 1024));
+        long expectedCount = generalEngineCount(Re2.compile(utf8Slice("ERROR|WARN|FATAL")), logInput);
+        assertThat(expectedCount).isGreaterThan(100);
+        long sampledPositions = VectorSupport.isAvailable() ? (logInput.length() / RECHECK_BYTES) * (long) Dfa.BYTE_SCAN_SAMPLE_SIZE : 0;
+        LiteralAlternationSpanMatcher logScanner = scanner("ERROR|WARN|FATAL");
+        assertThat(logScanner.count(logInput)).isEqualTo(expectedCount);
+        assertThat(logScanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
+        assertThat(logScanner.rootTablePositionCountForDiagnostics() < 64).isEqualTo(VectorSupport.isAvailable());
+        assertThat(logScanner.sampledPositionCountForDiagnostics()).isEqualTo(sampledPositions);
+
+        TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL"));
+        TrinoRegexpMatcher matcher = trinoPattern.matcher(logInput);
+        long matches = 0;
+        while (matcher.find()) {
+            matches++;
+        }
+        assertThat(matches).isEqualTo(expectedCount);
+        LiteralAlternationSpanMatcher trinoScanner = trinoPattern.literalAlternationSpanMatcher();
+        assertThat(trinoScanner.sampledPositionCountForDiagnostics()).isEqualTo(sampledPositions);
+
+        // Trino's other multi-match operations carry the route the same way within each call.
+        assertThat(trinoPattern.extractAll(logInput, 0)).hasSize(toIntExact(expectedCount));
+        assertThat(trinoScanner.sampledPositionCountForDiagnostics()).isEqualTo(2 * sampledPositions);
+    }
+
+    @Test
+    public void testMatchAcrossTheRecheck()
+    {
+        // Spaces keep the filter for the first 64 KiB route, and WARN starts two bytes before its
+        // end, so the filter reads past the route end to reach WARN's fourth byte.
+        String text = " ".repeat(RECHECK_BYTES - 2) + "WARN" + " ".repeat(RECHECK_BYTES);
+        byte[] backing = ("!" + text + "!").getBytes(UTF_8);
+        TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL"));
+        for (Slice input : List.of(utf8Slice(text), wrappedBuffer(backing, 1, text.length()))) {
+            LiteralAlternationSpanMatcher scanner = scanner("ERROR|WARN|FATAL");
+            assertSpan(scanner, input, 0, RECHECK_BYTES - 2, RECHECK_BYTES + 2);
+            assertThat(scanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
+            assertThat(scanner.count(input)).isOne();
+
+            TrinoRegexpMatcher matcher = trinoPattern.matcher(input);
+            assertThat(matcher.find()).isTrue();
+            assertThat(List.of(matcher.start(), matcher.end())).containsExactly(RECHECK_BYTES - 2, RECHECK_BYTES + 2);
+            assertThat(matcher.find()).isFalse();
+        }
+    }
+
+    // Whole log lines of at least `length` bytes, one in 50 at ERROR and one in 20 at WARN.
+    private static String logLines(int length)
+    {
+        StringBuilder log = new StringBuilder();
+        for (int line = 0; log.length() < length; line++) {
+            String level = line % 50 == 7 ? "ERROR" : line % 20 == 3 ? "WARN" : "INFO";
+            log.append("2026-11-01T12:00:00 ").append(level).append(" request served for user ").append(line).append('\n');
+        }
+        return log.toString();
+    }
+
+    // The literals, prefixes of them that the trie walks and abandons, single bytes and two-byte
+    // runs of them that a filter may accept, spaces, and malformed UTF-8, ending with a literal.
+    private static byte[] literalText(Random random, String[] literals, int length)
+    {
+        ByteArrayOutputStream text = new ByteArrayOutputStream();
+        while (text.size() < length) {
+            byte[] literal = literals[random.nextInt(literals.length)].getBytes(UTF_8);
+            switch (random.nextInt(12)) {
+                case 0 -> text.writeBytes(literal);
+                case 1, 2, 3 -> text.write(literal, 0, 1 + random.nextInt(literal.length));
+                case 4 -> text.write(' ');
+                case 5 -> text.write(new byte[] {(byte) 0xFF, (byte) 0x80, (byte) 0xE5}[random.nextInt(3)]);
+                default -> {
+                    int index = random.nextInt(literal.length);
+                    text.write(literal, index, Math.min(2, literal.length - index));
+                }
+            }
+        }
+        text.writeBytes(literals[random.nextInt(literals.length)].getBytes(UTF_8));
+        return text.toByteArray();
     }
 
     private static String words(int count)
