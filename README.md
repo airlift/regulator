@@ -121,13 +121,15 @@ paths without changing matching behavior:
 ```
 
 The Vector API lets Regulator scan multiple input bytes at a time when looking
-for candidate matches. Native access lets eligible DFA searches use a small
-native memory allocation for the DFA transition table.
+for candidate matches. It is used when the JVM's preferred byte vector holds 16
+to 64 bytes; other JVMs use the scalar or SWAR scanners. Native access lets
+eligible DFA searches use a small native memory allocation for the DFA
+transition table.
 
 This is native memory, not native code or a JNI library. It is entirely internal;
 the API never exposes native pointers. Patterns, inputs, captures, and results
-remain Java and Slice data. Without these flags, Regulator uses scalar scanners
-and the pure-Java DFA.
+remain Java and Slice data. Without these flags, Regulator uses scalar or SWAR
+scanners and the pure-Java DFA.
 
 Native memory avoids following Java object references for DFA table rows and
 decoding compressed references, also known as compressed oops. Its effect depends

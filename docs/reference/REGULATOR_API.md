@@ -201,8 +201,10 @@ paths without changing results:
 ```
 
 Resolving `jdk.incubator.vector` enables vectorized candidate scanning for
-eligible long searches. Without it, the same searches use scalar or SWAR
-scanners.
+eligible long searches when the JVM's preferred byte vector holds 16 to 64
+bytes. Without the module, or on a JVM whose vectors fall outside the supported
+16-to-64-lane range, such as one run with `-XX:MaxVectorSize=8`, the same
+searches use scalar or SWAR scanners.
 
 Native access lets eligible forward DFA searches use a small internal
 native-memory allocation containing DFA transition entries. Each entry is eight

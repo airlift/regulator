@@ -31,9 +31,10 @@ public class TestFusedPrefixAcceleration
     {
         Prog program = configuredProgram(PREFIX, false);
 
+        Prog.PrefixAccelStrategy expectedStrategy = VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.FUSED_SWAR;
         assertThat(program.prefixAccelStrategy(1_023)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_SWAR);
-        assertThat(program.prefixAccelStrategy(1_024)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_VECTOR);
-        assertThat(program.prefixAccelStrategy(1_025)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_VECTOR);
+        assertThat(program.prefixAccelStrategy(1_024)).isEqualTo(expectedStrategy);
+        assertThat(program.prefixAccelStrategy(1_025)).isEqualTo(expectedStrategy);
 
         for (int length : new int[] {1_023, 1_024, 1_025}) {
             assertMatchAt(program, PREFIX, length, 7, 0);
@@ -118,7 +119,8 @@ public class TestFusedPrefixAcceleration
         // In a run of the prefix's first byte every position is a candidate that matches half the
         // prefix before it fails, so the first candidate passes LiteralSearchKernel's comparison
         // budget, and KMP finds the match after the lead's candidates.
-        assertCandidateWorkBound(500, "a".repeat(1 << 20), 0, Prog.PrefixAccelStrategy.FUSED_VECTOR, 1);
+        Prog.PrefixAccelStrategy vectorStrategy = VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.FUSED_SWAR;
+        assertCandidateWorkBound(500, "a".repeat(1 << 20), 0, vectorStrategy, 1);
         assertCandidateWorkBound(100, "a".repeat(822), 0, Prog.PrefixAccelStrategy.FUSED_SWAR, 1);
         // From a window inside the array, KMP searches to the window's end, where the match ends.
         assertCandidateWorkBound(100, "a".repeat(822), 3, Prog.PrefixAccelStrategy.FUSED_SWAR, 1);
@@ -127,7 +129,7 @@ public class TestFusedPrefixAcceleration
         // The vector row's 1,039 candidates leave a tail of at least 15 at every vector width, and
         // its run of 13 sits 200 bytes before the tail's run, which supplies their last bytes.
         assertCandidateWorkBound(50, "a".repeat(7) + "x".repeat(9) + "a".repeat(6), 0, Prog.PrefixAccelStrategy.FUSED_SWAR, 17);
-        assertCandidateWorkBound(100, "x".repeat(824) + "a".repeat(13) + "x".repeat(187) + "a".repeat(14), 0, Prog.PrefixAccelStrategy.FUSED_VECTOR, 1_034);
+        assertCandidateWorkBound(100, "x".repeat(824) + "a".repeat(13) + "x".repeat(187) + "a".repeat(14), 0, vectorStrategy, 1_034);
     }
 
     @Test

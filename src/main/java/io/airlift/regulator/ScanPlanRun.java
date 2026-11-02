@@ -30,7 +30,7 @@ final class ScanPlanRun
 {
     static final int MATCHES_EVERY_BYTE = 256;
 
-    private static final int CANDIDATE_SCAN_TABLE = 0;
+    static final int CANDIDATE_SCAN_TABLE = 0;
     static final int CANDIDATE_SCAN_SMALL_SET = 1;
     static final int CANDIDATE_SCAN_RANGE = 2;
     static final int CANDIDATE_SCAN_NIBBLE_TABLE = 3;

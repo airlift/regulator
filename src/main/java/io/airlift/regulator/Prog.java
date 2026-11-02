@@ -1601,7 +1601,8 @@ final class Prog
         return prefixAccelFoldCaseFrontAndBackSWAR(data, offset, length);
     }
 
-    // Short windows, and JVMs that do not resolve jdk.incubator.vector.
+    // Short windows, and JVMs that do not resolve jdk.incubator.vector or whose preferred byte
+    // vector holds fewer than 16 or more than 64 bytes.
     private int prefixAccelFoldCaseFrontAndBackSWAR(byte[] data, int offset, int length)
     {
         int candidateCount = length - prefixSize + 1;

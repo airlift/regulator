@@ -24,7 +24,7 @@ public final class VectorPrefixScannerProbe
 
     public static void main(String[] arguments)
     {
-        boolean expectedVectorApiAvailable = Boolean.parseBoolean(arguments[0]);
+        boolean expectedVectorScans = Boolean.parseBoolean(arguments[0]);
         int iterations = arguments.length > 1 ? Integer.parseInt(arguments[1]) : 1;
         byte[] prefix = "Шерлок Холмс".getBytes(StandardCharsets.UTF_8);
         byte[] data = new byte[4_096 + prefix.length];
@@ -33,7 +33,7 @@ public final class VectorPrefixScannerProbe
         Prog program = new Prog();
         program.configurePrefixAccel(Slices.wrappedBuffer(prefix), false);
 
-        Prog.PrefixAccelStrategy expectedStrategy = expectedVectorApiAvailable
+        Prog.PrefixAccelStrategy expectedStrategy = expectedVectorScans
                 ? Prog.PrefixAccelStrategy.FUSED_VECTOR
                 : Prog.PrefixAccelStrategy.FUSED_SWAR;
         check(program.prefixAccelStrategy(data.length) == expectedStrategy, "unexpected prefix strategy");
@@ -49,7 +49,7 @@ public final class VectorPrefixScannerProbe
         byte[] foldCaseData = new byte[4_096];
         Arrays.fill(foldCaseData, (byte) 'x');
         System.arraycopy(foldCaseMatch, 0, foldCaseData, foldCaseData.length - foldCaseMatch.length, foldCaseMatch.length);
-        check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorApiAvailable, "unexpected folded prefix strategy");
+        check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorScans, "unexpected folded prefix strategy");
         check(foldCaseProgram.prefixAccel(foldCaseData, 0, foldCaseData.length) == foldCaseData.length - foldCaseMatch.length, "folded prefix scan failed");
 
         ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[xy][0-9]{4}"), Regexp.LIKE_PERL);
@@ -59,7 +59,7 @@ public final class VectorPrefixScannerProbe
         Arrays.fill(smallSetData, (byte) 'a');
         smallSetData[smallSetData.length - 1] = 'y';
         check(dfa.findStartByteCandidate(smallSetData, 0, smallSetData.length) == smallSetData.length - 1, "small byte set scan failed");
-        check((dfa.smallByteSetScanCount() > 0) == expectedVectorApiAvailable, "unexpected small byte set strategy");
+        check((dfa.smallByteSetScanCount() > 0) == expectedVectorScans, "unexpected small byte set strategy");
 
         ParseResult mixedSetParsed = RegexpParser.parse(Slices.utf8Slice("(?:[A-Z_a-z]+)-([0-9]+)"), Regexp.LIKE_PERL);
         Prog mixedSetProgram = Compiler.compile(mixedSetParsed.regexp(), false, 0);
@@ -70,7 +70,7 @@ public final class VectorPrefixScannerProbe
         System.arraycopy(mixedSetMatch, 0, mixedSetData, mixedSetData.length - mixedSetMatch.length, mixedSetMatch.length);
         check(Dfa.search(mixedSetProgram, Slices.wrappedBuffer(mixedSetData), false, Prog.MatchKind.FIRST_MATCH, true) == mixedSetData.length,
                 "mixed byte set scan failed");
-        check((mixedSetDfa.mixedByteSetScanCount() > 0) == expectedVectorApiAvailable, "unexpected mixed byte set strategy");
+        check((mixedSetDfa.mixedByteSetScanCount() > 0) == expectedVectorScans, "unexpected mixed byte set strategy");
 
         ParseResult literalFilterParsed = RegexpParser.parse(Slices.utf8Slice("(?i)Sherlock|Holmes|Watson"), Regexp.LIKE_PERL);
         Prog literalFilterProgram = Compiler.compile(literalFilterParsed.regexp(), false, 0);
@@ -81,7 +81,7 @@ public final class VectorPrefixScannerProbe
         System.arraycopy(literalFilterMatch, 0, literalFilterData, literalFilterData.length - literalFilterMatch.length, literalFilterMatch.length);
         check(Dfa.search(literalFilterProgram, Slices.wrappedBuffer(literalFilterData), false, Prog.MatchKind.FIRST_MATCH, true) == literalFilterData.length,
                 "start literal filter scan failed");
-        check((literalFilterDfa.startLiteralFilter() != null) == expectedVectorApiAvailable, "unexpected start literal filter strategy");
+        check((literalFilterDfa.startLiteralFilter() != null) == expectedVectorScans, "unexpected start literal filter strategy");
 
         String suffix = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(20);
         ParseResult selfLoopParsed = RegexpParser.parse(Slices.utf8Slice("\\C*x" + suffix + "$"), Regexp.LIKE_PERL);
@@ -97,9 +97,9 @@ public final class VectorPrefixScannerProbe
         check(Dfa.search(selfLoopProgram, Slices.wrappedBuffer(selfLoopData), false, Prog.MatchKind.FIRST_MATCH, true) == Dfa.SEARCH_NO_MATCH,
                 "self-loop exit scan changed the match result");
         Dfa.DfaInstance selfLoopDfa = selfLoopProgram.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
-        check((selfLoopDfa.selfLoopExitByteScanCount() > 0) == expectedVectorApiAvailable, "unexpected self-loop exit strategy");
+        check((selfLoopDfa.selfLoopExitByteScanCount() > 0) == expectedVectorScans, "unexpected self-loop exit strategy");
 
-        System.out.printf("OK %s%n", expectedVectorApiAvailable ? "vector" : "swar");
+        System.out.printf("OK %s%n", expectedVectorScans ? "vector" : "swar");
     }
 
     private static void check(boolean condition, String message)

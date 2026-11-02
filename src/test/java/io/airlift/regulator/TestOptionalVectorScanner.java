@@ -30,7 +30,7 @@ public class TestOptionalVectorScanner
     public void testWithAndWithoutVectorModule()
             throws Exception
     {
-        ProbeResult disabled = runProbe(false);
+        ProbeResult disabled = runProbe(List.of(), false);
         assertThat(disabled.exitCode()).as(disabled.output()).isZero();
         assertThat(disabled.output()).contains("OK scalar");
         assertThat(disabled.classLoadLog())
@@ -40,16 +40,32 @@ public class TestOptionalVectorScanner
                 .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
                 .doesNotContain("jdk.incubator.vector.");
 
-        ProbeResult enabled = runProbe(true);
+        // With the module, the probe still takes the scalar scans if its preferred vector is too
+        // small, such as under a limit in `JAVA_TOOL_OPTIONS`.
+        boolean vectorScans = PreferredVectorLengthProbe.expectVectorScans();
+        ProbeResult enabled = runProbe(List.of("--add-modules", "jdk.incubator.vector"), vectorScans);
         assertThat(enabled.exitCode()).as(enabled.output()).isZero();
-        assertThat(enabled.output()).contains("OK vector");
-        assertThat(enabled.classLoadLog())
-                .contains("io.airlift.regulator.VectorScanner source:")
-                .contains("io.airlift.regulator.VectorByteSetScanner source:")
-                .contains("jdk.incubator.vector.ByteVector");
+        assertThat(enabled.output()).contains(vectorScans ? "OK vector" : "OK scalar");
+        assertThat(enabled.classLoadLog()).contains("jdk.incubator.vector.ByteVector");
+        assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorScanner source:")).isEqualTo(vectorScans);
+        assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorByteSetScanner source:")).isEqualTo(vectorScans);
     }
 
-    private static ProbeResult runProbe(boolean enableVectorModule)
+    @Test
+    public void testEightByteVectorsUseScalarScanners()
+            throws Exception
+    {
+        // The nibble-table scans need at least 16 lanes, so an 8-byte preferred vector
+        // keeps every scan scalar even with the module resolved.
+        ProbeResult smallVectors = runProbe(List.of("--add-modules", "jdk.incubator.vector", "-XX:MaxVectorSize=8"), false);
+        assertThat(smallVectors.exitCode()).as(smallVectors.output()).isZero();
+        assertThat(smallVectors.output()).contains("OK scalar");
+        assertThat(smallVectors.classLoadLog())
+                .doesNotContain("io.airlift.regulator.VectorScanner source:")
+                .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:");
+    }
+
+    private static ProbeResult runProbe(List<String> jvmArguments, boolean expectedVectorScans)
             throws IOException, InterruptedException
     {
         Path classLoadLog = Files.createTempFile("vector-trino-class-load-", ".log");
@@ -57,14 +73,11 @@ public class TestOptionalVectorScanner
             List<String> command = new ArrayList<>();
             command.add(System.getProperty("java.home") + "/bin/java");
             command.add("-Xlog:class+load=info:file=" + classLoadLog);
-            if (enableVectorModule) {
-                command.add("--add-modules");
-                command.add("jdk.incubator.vector");
-            }
+            command.addAll(jvmArguments);
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));
             command.add(VectorScannerProbe.class.getName());
-            command.add(Boolean.toString(enableVectorModule));
+            command.add(Boolean.toString(expectedVectorScans));
 
             ProcessBuilder processBuilder = new ProcessBuilder(command)
                     .redirectErrorStream(true);

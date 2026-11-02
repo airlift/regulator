@@ -32,7 +32,7 @@ public class TestUpstreamPrefixAccel
         nonAsciiProgram.configurePrefixAccel(Slices.utf8Slice("Шерлок Холмс"), false);
         assertThat(nonAsciiProgram.prefixAccelStrategy(64)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_SWAR);
         assertThat(nonAsciiProgram.prefixAccelStrategy(1023)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_SWAR);
-        assertThat(nonAsciiProgram.prefixAccelStrategy(1024)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_VECTOR);
+        assertThat(nonAsciiProgram.prefixAccelStrategy(1024)).isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.FUSED_SWAR);
 
         Prog asciiProgram = compile("x");
         asciiProgram.configurePrefixAccel(Slices.utf8Slice("Sherlock Holmes"), false);

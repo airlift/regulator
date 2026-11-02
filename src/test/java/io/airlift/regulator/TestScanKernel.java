@@ -301,11 +301,12 @@ public class TestScanKernel
         assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
         boolean javaEndHandoff = javaEnd.usesScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
         invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveScanPlan(), javaEndHandoff)));
-        assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_RANGE);
+        // Without the vector scans, every run reads its candidates from the member table.
+        assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(VectorSupport.isAvailable() ? ScanPlanRun.CANDIDATE_SCAN_RANGE : ScanPlanRun.CANDIDATE_SCAN_TABLE);
         ScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
-        assertThat(threeBytes.candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_SMALL_SET);
+        assertThat(threeBytes.candidateScan()).isEqualTo(VectorSupport.isAvailable() ? ScanPlanRun.CANDIDATE_SCAN_SMALL_SET : ScanPlanRun.CANDIDATE_SCAN_TABLE);
         assertThat(threeBytes.needles()).hasSize(3);
-        assertThat(leadingRun("\\w([0-9]*)!").candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_NIBBLE_TABLE);
+        assertThat(leadingRun("\\w([0-9]*)!").candidateScan()).isEqualTo(VectorSupport.isAvailable() ? ScanPlanRun.CANDIDATE_SCAN_NIBBLE_TABLE : ScanPlanRun.CANDIDATE_SCAN_TABLE);
         assertThat(invoked.stream().filter(method -> !method.startsWith("java.") && !method.startsWith("jdk.") && !method.startsWith("io.airlift.slice.")))
                 .containsExactlyInAnyOrderElementsOf(GENERATED_CODE_CALLS);
     }

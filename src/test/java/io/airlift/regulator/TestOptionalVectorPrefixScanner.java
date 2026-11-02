@@ -30,7 +30,7 @@ public class TestOptionalVectorPrefixScanner
     public void testWithAndWithoutVectorModule()
             throws Exception
     {
-        ProbeResult disabled = runProbe(false);
+        ProbeResult disabled = runProbe(List.of(), false);
         assertThat(disabled.exitCode()).as(disabled.output()).isZero();
         assertThat(disabled.output()).contains("OK swar");
         assertThat(disabled.classLoadLog())
@@ -38,16 +38,32 @@ public class TestOptionalVectorPrefixScanner
                 .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
                 .doesNotContain("jdk.incubator.vector.");
 
-        ProbeResult enabled = runProbe(true);
+        // With the module, the probe still takes the SWAR scans if its preferred vector is too
+        // small, such as under a limit in `JAVA_TOOL_OPTIONS`.
+        boolean vectorScans = PreferredVectorLengthProbe.expectVectorScans();
+        ProbeResult enabled = runProbe(List.of("--add-modules", "jdk.incubator.vector"), vectorScans);
         assertThat(enabled.exitCode()).as(enabled.output()).isZero();
-        assertThat(enabled.output()).contains("OK vector");
-        assertThat(enabled.classLoadLog())
-                .contains("io.airlift.regulator.VectorPrefixScanner source:")
-                .contains("io.airlift.regulator.VectorByteSetScanner source:")
-                .contains("jdk.incubator.vector.ByteVector");
+        assertThat(enabled.output()).contains(vectorScans ? "OK vector" : "OK swar");
+        assertThat(enabled.classLoadLog()).contains("jdk.incubator.vector.ByteVector");
+        assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorPrefixScanner source:")).isEqualTo(vectorScans);
+        assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorByteSetScanner source:")).isEqualTo(vectorScans);
     }
 
-    private static ProbeResult runProbe(boolean enableVectorModule)
+    @Test
+    public void testEightByteVectorsUseSwarPrefixScanner()
+            throws Exception
+    {
+        // The vector scans need at least 16 lanes, so an 8-byte preferred vector keeps every
+        // scan in the probe off the Vector API even with the module resolved.
+        ProbeResult smallVectors = runProbe(List.of("--add-modules", "jdk.incubator.vector", "-XX:MaxVectorSize=8"), false);
+        assertThat(smallVectors.exitCode()).as(smallVectors.output()).isZero();
+        assertThat(smallVectors.output()).contains("OK swar");
+        assertThat(smallVectors.classLoadLog())
+                .doesNotContain("io.airlift.regulator.VectorPrefixScanner source:")
+                .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:");
+    }
+
+    private static ProbeResult runProbe(List<String> jvmArguments, boolean expectedVectorScans)
             throws IOException, InterruptedException
     {
         Path classLoadLog = Files.createTempFile("vector-prefix-class-load-", ".log");
@@ -55,14 +71,11 @@ public class TestOptionalVectorPrefixScanner
             List<String> command = new ArrayList<>();
             command.add(System.getProperty("java.home") + "/bin/java");
             command.add("-Xlog:class+load=info:file=" + classLoadLog);
-            if (enableVectorModule) {
-                command.add("--add-modules");
-                command.add("jdk.incubator.vector");
-            }
+            command.addAll(jvmArguments);
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));
             command.add(VectorPrefixScannerProbe.class.getName());
-            command.add(Boolean.toString(enableVectorModule));
+            command.add(Boolean.toString(expectedVectorScans));
 
             ProcessBuilder processBuilder = new ProcessBuilder(command)
                     .redirectErrorStream(true);
