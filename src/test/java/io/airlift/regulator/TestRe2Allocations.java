@@ -19,6 +19,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -31,6 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2Allocations
 {
+    private static final int MAXIMUM_ALLOCATION_RUNS = 1_000;
+
     @Test
     public void testBooleanPlansDoNotAllocate()
     {
@@ -248,10 +251,10 @@ public class TestRe2Allocations
         // Geometric output growth allocates under four times the result plus the bounded records.
         // Recording every match would allocate at least eight bytes per match on top of the output.
         long recordBytes = 64 * 1024;
-        assertThat(allocatedBytesPerReplace("a", source, "b")).isLessThan(sourceLength * 4 + recordBytes);
-        assertThat(allocatedBytesPerReplace("a", source, "")).isLessThan(recordBytes);
-        assertThat(allocatedBytesPerReplace("(a)", source, "$1$1")).isLessThan(sourceLength * 2 * 4 + recordBytes);
-        assertThat(allocatedBytesPerReplace("", source, "-")).isLessThan((sourceLength * 2 + 1) * 4 + recordBytes);
+        assertReplaceAllocatesLessThan("a", source, "b", sourceLength * 4 + recordBytes);
+        assertReplaceAllocatesLessThan("a", source, "", recordBytes);
+        assertReplaceAllocatesLessThan("(a)", source, "$1$1", sourceLength * 2 * 4 + recordBytes);
+        assertReplaceAllocatesLessThan("", source, "-", (sourceLength * 2 + 1) * 4 + recordBytes);
     }
 
     @Test
@@ -269,7 +272,7 @@ public class TestRe2Allocations
         assertThat(resultLength).isEqualTo(2049);
 
         // Projecting the result from the source consumed so far would allocate about half the tail.
-        assertThat(allocatedBytesPerReplace("a|b+", source, "")).isLessThan(resultLength * 4 + 64 * 1024);
+        assertReplaceAllocatesLessThan("a|b+", source, "", resultLength * 4 + 64 * 1024);
     }
 
     @Test
@@ -298,10 +301,9 @@ public class TestRe2Allocations
             assertThat(runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups)).isEqualTo(120_000);
         }
 
-        long allocatedBytes = minimumAllocatedBytes(120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
+        assertAllocatesNothingOnceCompiled("testTrinoScanPlansDoNotAllocate", 120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
 
         assertThat(groups).containsExactly(4, 23, 11, 22);
-        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -342,15 +344,13 @@ public class TestRe2Allocations
                 assertThat(counts.getAsLong()).isEqualTo(13);
             }
 
-            long allocatedBytes = minimumAllocatedBytes(130_000, () -> {
+            assertAllocatesNothingOnceCompiled("testScanPlanCountDoesNotAllocate, generateBytecode=" + generateBytecode, 130_000, () -> {
                 long matchCount = 0;
                 for (int iteration = 0; iteration < 10_000; iteration++) {
                     matchCount += counts.getAsLong();
                 }
                 return matchCount;
             });
-
-            assertThat(allocatedBytes / 10_000).as("generateBytecode=%s", generateBytecode).isZero();
         }
     }
 
@@ -414,7 +414,7 @@ public class TestRe2Allocations
         return matchCount;
     }
 
-    private static long allocatedBytesPerReplace(String expression, Slice source, String replacementText)
+    private static void assertReplaceAllocatesLessThan(String expression, Slice source, String replacementText, long bytesPerReplace)
     {
         TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice(expression));
         Slice replacement = Slices.utf8Slice(replacementText);
@@ -423,15 +423,13 @@ public class TestRe2Allocations
             assertThat(pattern.replace(source, replacement).length()).isEqualTo(outputLength);
         }
 
-        long allocatedBytes = minimumAllocatedBytes(outputLength * 10, () -> {
+        assertAllocatesAtMostOnceCompiled("replace '" + expression + "' with '" + replacementText + "'", outputLength * 10, bytesPerReplace * 10 - 1, () -> {
             long totalLength = 0;
             for (int iteration = 0; iteration < 10; iteration++) {
                 totalLength += pattern.replace(source, replacement).length();
             }
             return totalLength;
         });
-
-        return allocatedBytes / 10;
     }
 
     /// Runs `operations` three times, checks each result, and returns the fewest bytes the
@@ -452,6 +450,52 @@ public class TestRe2Allocations
             minimumAllocatedBytes = Math.min(minimumAllocatedBytes, allocatedBytes);
         }
         return minimumAllocatedBytes;
+    }
+
+    private static void assertAllocatesNothingOnceCompiled(String name, long expectedResult, LongSupplier operations)
+    {
+        assertAllocatesAtMostOnceCompiled(name, expectedResult, 0, operations);
+    }
+
+    /// Runs `operations` until one run allocates at most `maximumBytes` on the current thread,
+    /// checking each result, and fails if no run does within [#MAXIMUM_ALLOCATION_RUNS]. A fixed
+    /// warm-up can end before C2 compiles the measured code. Until it does, the code runs in C1 or
+    /// the interpreter, where every Vector API value is an object, so the first runs can allocate
+    /// more. An allocation on every call recurs in every run and still fails. Prints the bytes of
+    /// every run, so a build log shows how long the compiled code took to arrive.
+    private static void assertAllocatesAtMostOnceCompiled(String name, long expectedResult, long maximumBytes, LongSupplier operations)
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long threadId = Thread.currentThread().threadId();
+        List<Long> runBytes = new ArrayList<>();
+        while (runBytes.size() < MAXIMUM_ALLOCATION_RUNS && (runBytes.isEmpty() || runBytes.getLast() > maximumBytes)) {
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            long result = operations.getAsLong();
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            assertThat(result).isEqualTo(expectedResult);
+            runBytes.add(allocatedBytes);
+        }
+
+        // Consecutive equal counts print once with their count, as in "[768 x3, 0]".
+        StringBuilder report = new StringBuilder(name).append(": bytes allocated per run [");
+        int start = 0;
+        while (start < runBytes.size()) {
+            int end = start + 1;
+            while (end < runBytes.size() && runBytes.get(end).equals(runBytes.get(start))) {
+                end++;
+            }
+            if (start > 0) {
+                report.append(", ");
+            }
+            report.append(runBytes.get(start));
+            if (end - start > 1) {
+                report.append(" x").append(end - start);
+            }
+            start = end;
+        }
+        report.append(']');
+        System.out.println(report);
+        assertThat(runBytes.getLast()).as(report.toString()).isLessThanOrEqualTo(maximumBytes);
     }
 
     private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
