@@ -52,6 +52,7 @@ public sealed class TrinoLikePattern
     private static final byte SHORT_EQUALS = 8;
     private static final byte SHORT_STARTS_WITH = 9;
     private static final byte SHORT_ENDS_WITH = 10;
+    private static final Slice PERCENT = Slices.utf8Slice("%");
     // Whether this JVM runs on aarch64. Generated LIKE picks how its literal searches hold their
     // constants by architecture, from the AWS measurements recorded in REGULATOR_DECISIONS.md.
     static final boolean AARCH64 = "aarch64".equals(System.getProperty("os.arch"));
@@ -141,6 +142,8 @@ public sealed class TrinoLikePattern
         }
     }
 
+    // The private copy of the source, or null for a simple ASCII pattern, whose source
+    // pattern() rebuilds from its literal and strategy.
     private final Slice pattern;
     private final int minimumSize;
     private final int maximumSize;
@@ -148,7 +151,13 @@ public sealed class TrinoLikePattern
     private final Slice suffix;
     private final Matcher matcher;
     private final byte strategy;
-    private final LiteralMatchKernel.ShortLiteral shortLiteral;
+    // For a literal strategy's literal of at most 16 bytes, shortLiteralWidth is its word width,
+    // and 0 otherwise, shortLiteralLastOffset is where its last word starts, and shortLiteralFirst
+    // and shortLiteralLast are its first and last words; see LiteralMatchKernel.matchesShortLiteralAt.
+    private final int shortLiteralWidth;
+    private final int shortLiteralLastOffset;
+    private final long shortLiteralFirst;
+    private final long shortLiteralLast;
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     private TrinoLikePattern(
@@ -160,7 +169,7 @@ public sealed class TrinoLikePattern
             Matcher matcher,
             byte strategy)
     {
-        this.pattern = requireNonNull(pattern, "pattern is null");
+        this.pattern = pattern;
         this.minimumSize = minimumSize;
         this.maximumSize = maximumSize;
         this.prefix = requireNonNull(prefix, "prefix is null");
@@ -168,7 +177,11 @@ public sealed class TrinoLikePattern
         this.matcher = matcher;
         Slice literal = strategy == ENDS_WITH ? suffix : prefix;
         if ((strategy == EQUALS || strategy == STARTS_WITH || strategy == ENDS_WITH) && literal.length() > 0 && literal.length() <= 16) {
-            shortLiteral = new LiteralMatchKernel.ShortLiteral(literal);
+            int width = LiteralMatchKernel.shortLiteralWidth(literal.length());
+            shortLiteralWidth = width;
+            shortLiteralLastOffset = literal.length() - width;
+            shortLiteralFirst = LiteralMatchKernel.readShortLiteralWord(literal, 0, width);
+            shortLiteralLast = LiteralMatchKernel.readShortLiteralWord(literal, shortLiteralLastOffset, width);
             this.strategy = switch (strategy) {
                 case EQUALS -> SHORT_EQUALS;
                 case STARTS_WITH -> SHORT_STARTS_WITH;
@@ -177,7 +190,10 @@ public sealed class TrinoLikePattern
             };
         }
         else {
-            shortLiteral = null;
+            shortLiteralWidth = 0;
+            shortLiteralLastOffset = 0;
+            shortLiteralFirst = 0;
+            shortLiteralLast = 0;
             this.strategy = strategy;
         }
     }
@@ -197,14 +213,14 @@ public sealed class TrinoLikePattern
     private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
     {
         requireNonNull(pattern, "pattern is null");
-        Slice patternCopy = pattern.copy();
         if (escapeCodePoint.isEmpty()) {
-            TrinoLikePattern simplePattern = tryCompileSimpleAscii(patternCopy);
+            TrinoLikePattern simplePattern = tryCompileSimpleAscii(pattern);
             if (simplePattern != null) {
                 return simplePattern;
             }
         }
 
+        Slice patternCopy = pattern.copy();
         List<Element> elements = TrinoLikeParser.parse(patternCopy, escapeCodePoint);
         int minimumSize = 0;
         int maximumSize = 0;
@@ -284,8 +300,7 @@ public sealed class TrinoLikePattern
                 encode(plan));
     }
 
-    // A compiled result retains `pattern` and slices of it, so a caller that keeps the result
-    // passes a private copy.
+    // A compiled result retains a copy of the literal alone, as pattern() rebuilds the rest.
     private static TrinoLikePattern tryCompileSimpleAscii(Slice pattern)
     {
         int patternLength = pattern.length();
@@ -310,45 +325,24 @@ public sealed class TrinoLikePattern
             }
         }
 
-        Slice literal = pattern.slice(literalStart, literalEnd - literalStart);
-        if (!leadingWildcard && !trailingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    literal.length(),
-                    literal,
-                    Slices.EMPTY_SLICE,
-                    null,
-                    EQUALS);
-        }
+        Slice literal = pattern.copy(literalStart, literalEnd - literalStart);
+        Slice prefix = Slices.EMPTY_SLICE;
+        Slice suffix = Slices.EMPTY_SLICE;
+        Matcher matcher = null;
+        byte strategy;
         if (!leadingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    -1,
-                    literal,
-                    Slices.EMPTY_SLICE,
-                    null,
-                    STARTS_WITH);
+            prefix = literal;
+            strategy = trailingWildcard ? STARTS_WITH : EQUALS;
         }
-        if (!trailingWildcard) {
-            return new TrinoLikePattern(
-                    pattern,
-                    literal.length(),
-                    -1,
-                    Slices.EMPTY_SLICE,
-                    literal,
-                    null,
-                    ENDS_WITH);
+        else if (!trailingWildcard) {
+            suffix = literal;
+            strategy = ENDS_WITH;
         }
-        return new TrinoLikePattern(
-                pattern,
-                literal.length(),
-                -1,
-                Slices.EMPTY_SLICE,
-                Slices.EMPTY_SLICE,
-                new ContainsMatcher(literal, false),
-                CONTAINS);
+        else {
+            matcher = new ContainsMatcher(literal, false);
+            strategy = CONTAINS;
+        }
+        return new TrinoLikePattern(null, literal.length(), strategy == EQUALS ? literal.length() : -1, prefix, suffix, matcher, strategy);
     }
 
     // TrinoLikeKernelGenerator emits a copy of this method, with matchesComplex, as the entry of a
@@ -360,8 +354,14 @@ public sealed class TrinoLikePattern
         if (length < minimumSize || (maximumSize >= 0 && length > maximumSize)) {
             return false;
         }
-        if (shortLiteral != null) {
-            return shortLiteral.matchesAt(input, strategy == SHORT_ENDS_WITH ? length - suffix.length() : 0);
+        if (shortLiteralWidth != 0) {
+            return LiteralMatchKernel.matchesShortLiteralAt(
+                    input,
+                    strategy == SHORT_ENDS_WITH ? length - suffix.length() : 0,
+                    shortLiteralWidth,
+                    shortLiteralLastOffset,
+                    shortLiteralFirst,
+                    shortLiteralLast);
         }
         return switch (strategy) {
             case EMPTY -> true;
@@ -411,13 +411,35 @@ public sealed class TrinoLikePattern
         this.suffix = pattern.suffix;
         this.matcher = pattern.matcher;
         this.strategy = pattern.strategy;
-        this.shortLiteral = pattern.shortLiteral;
+        this.shortLiteralWidth = pattern.shortLiteralWidth;
+        this.shortLiteralLastOffset = pattern.shortLiteralLastOffset;
+        this.shortLiteralFirst = pattern.shortLiteralFirst;
+        this.shortLiteralLast = pattern.shortLiteralLast;
     }
 
     /// Returns a copy of the compiled pattern bytes.
     public Slice pattern()
     {
-        return pattern.copy();
+        if (pattern != null) {
+            return pattern.copy();
+        }
+        // A simple ASCII pattern is its literal with the wildcards its strategy implies.
+        return switch (strategy) {
+            case EQUALS, SHORT_EQUALS -> prefix.copy();
+            case STARTS_WITH, SHORT_STARTS_WITH -> concat(Slices.EMPTY_SLICE, prefix, PERCENT);
+            case ENDS_WITH, SHORT_ENDS_WITH -> concat(PERCENT, suffix, Slices.EMPTY_SLICE);
+            case CONTAINS -> concat(PERCENT, ((ContainsMatcher) matcher).literal, PERCENT);
+            default -> throw new IllegalStateException("not a simple ASCII strategy: " + strategy);
+        };
+    }
+
+    private static Slice concat(Slice first, Slice second, Slice third)
+    {
+        Slice result = Slices.allocate(first.length() + second.length() + third.length());
+        result.setBytes(0, first);
+        result.setBytes(first.length(), second);
+        result.setBytes(first.length() + second.length(), third);
+        return result;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
@@ -449,7 +471,7 @@ public sealed class TrinoLikePattern
 
     boolean usesShortLiteralForDiagnostics()
     {
-        return shortLiteral != null;
+        return shortLiteralWidth != 0;
     }
 
     boolean usesSharedOrderedLiteralSearchForDiagnostics()
@@ -574,7 +596,7 @@ public sealed class TrinoLikePattern
         private ContainsMatcher(Slice literal, boolean exact)
         {
             this.literal = requireNonNull(literal, "literal is null");
-            this.search = literal.length() > 1 ? new LiteralSearchKernel(literal) : null;
+            this.search = literal.length() > 1 ? LiteralSearchKernel.sharing(literal) : null;
             this.exact = exact;
         }
 

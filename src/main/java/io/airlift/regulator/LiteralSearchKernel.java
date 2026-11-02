@@ -36,6 +36,12 @@ final class LiteralSearchKernel
     // while closely spaced candidates with long partial matches switch within a few candidates.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
 
+    // The prefix shifts of every literal shorter than this table's 64 entries whose first byte
+    // does not recur: no prefix of such a literal has a border, so every shift after the first is
+    // zero. Kernels share it and never write it; KMP reads only the shifts below the literal's
+    // length.
+    private static final int[] BORDER_FREE_PREFIX_SHIFTS = borderFreePrefixShifts(64);
+
     private final byte[] literal;
     private final int[] prefixShifts;
     private final long frontBroadcast;
@@ -48,9 +54,13 @@ final class LiteralSearchKernel
 
     LiteralSearchKernel(Slice literal)
     {
-        requireNonNull(literal, "literal is null");
-        this.literal = literal.getBytes();
-        this.prefixShifts = computePrefixShifts(this.literal);
+        this(requireNonNull(literal, "literal is null").getBytes());
+    }
+
+    private LiteralSearchKernel(byte[] literal)
+    {
+        this.literal = requireNonNull(literal, "literal is null");
+        this.prefixShifts = computePrefixShifts(literal);
         this.frontBroadcast = broadcast(this.literal[0]);
         this.backBroadcast = broadcast(this.literal[this.literal.length - 1]);
         this.lowBits = LOW_BITS;
@@ -61,9 +71,21 @@ final class LiteralSearchKernel
         return literal.length;
     }
 
+    /// Returns a kernel for `literal` that holds its bytes rather than a copy when it spans its
+    /// whole backing array. The caller must never change those bytes.
+    static LiteralSearchKernel sharing(Slice literal)
+    {
+        requireNonNull(literal, "literal is null");
+        byte[] bytes = literal.byteArray();
+        if (literal.byteArrayOffset() == 0 && literal.length() == bytes.length) {
+            return new LiteralSearchKernel(bytes);
+        }
+        return new LiteralSearchKernel(literal.getBytes());
+    }
+
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + SizeOf.sizeOf(prefixShifts);
+        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + (prefixShifts == BORDER_FREE_PREFIX_SHIFTS ? 0 : SizeOf.sizeOf(prefixShifts));
     }
 
     byte[] literal()
@@ -73,7 +95,7 @@ final class LiteralSearchKernel
 
     int[] prefixShifts()
     {
-        return prefixShifts.clone();
+        return Arrays.copyOf(prefixShifts, literal.length + 1);
     }
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
@@ -302,6 +324,9 @@ final class LiteralSearchKernel
 
     private static int[] computePrefixShifts(byte[] literal)
     {
+        if (literal.length < BORDER_FREE_PREFIX_SHIFTS.length && !firstByteRecurs(literal)) {
+            return BORDER_FREE_PREFIX_SHIFTS;
+        }
         int[] shifts = new int[literal.length + 1];
         shifts[0] = -1;
         int prefixLength = -1;
@@ -312,6 +337,23 @@ final class LiteralSearchKernel
             prefixLength++;
             shifts[position] = prefixLength;
         }
+        return shifts;
+    }
+
+    private static boolean firstByteRecurs(byte[] literal)
+    {
+        for (int index = 1; index < literal.length; index++) {
+            if (literal[index] == literal[0]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int[] borderFreePrefixShifts(int length)
+    {
+        int[] shifts = new int[length];
+        shifts[0] = -1;
         return shifts;
     }
 
