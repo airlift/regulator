@@ -59,6 +59,12 @@ final class LiteralAlternationSpanMatcher
     // Shorter inputs keep the root-table loop: a call's vector setup costs more than it saves,
     // and short everyday values keep the route they had before the filter.
     private static final int MINIMUM_START_LITERAL_FILTER_BYTES = 64;
+    /// What [#findSpanOrDecline] and [#countOrDecline] return when the start-scan productivity
+    /// check at the start of the input finds the filter's stops dense, for a caller that holds the
+    /// general engine to run in their place. It only needs to differ from every span, count, and
+    /// [Dfa#SEARCH_NO_MATCH], so it reuses the DFA's sentinel for a candidate search that falls
+    /// back.
+    static final long DECLINED = Dfa.CANDIDATE_SEARCH_FALLBACK;
 
     private final short[] rootStateByLeadingByte;
     private final short[] firstEdgeByState;
@@ -364,6 +370,17 @@ final class LiteralAlternationSpanMatcher
     /// each search resumes where the previous match ended, on the route the previous one chose.
     long count(Slice input)
     {
+        return count(input, false);
+    }
+
+    /// Returns [#count(Slice)], or [#DECLINED] when the filter's stops are dense at the start.
+    long countOrDecline(Slice input)
+    {
+        return count(input, true);
+    }
+
+    private long count(Slice input, boolean declinesDenseStart)
+    {
         requireNonNull(input, "input is null");
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
@@ -387,6 +404,9 @@ final class LiteralAlternationSpanMatcher
         while (position < inputEnd) {
             if (position >= routeEnd) {
                 readsRootTable = readsRootTable(bytes, position, inputEnd);
+                if (declinesDenseStart && position == inputOffset && readsRootTable && startLiteralFilter != null) {
+                    return DECLINED;
+                }
                 routeEnd = routeEnd(position, inputEnd);
             }
             long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
@@ -402,12 +422,24 @@ final class LiteralAlternationSpanMatcher
 
     long findSpan(Slice input, int start)
     {
-        return findSpan(input, start, null);
+        return findSpan(input, start, null, false);
     }
 
     /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH]. A
     /// `cursor`, which may be null, carries the route from one search of `input` to the next.
     long findSpan(Slice input, int start, Cursor cursor)
+    {
+        return findSpan(input, start, cursor, false);
+    }
+
+    /// Returns [#findSpan(Slice,int,Cursor)] from the start of `input` without a cursor, or
+    /// [#DECLINED] when the filter's stops are dense at the start.
+    long findSpanOrDecline(Slice input)
+    {
+        return findSpan(input, 0, null, true);
+    }
+
+    private long findSpan(Slice input, int start, Cursor cursor, boolean declinesDenseStart)
     {
         requireNonNull(input, "input is null");
         if (start < 0 || start > input.length()) {
@@ -419,10 +451,10 @@ final class LiteralAlternationSpanMatcher
         int inputEnd = inputOffset + input.length();
         int firstPosition = inputOffset + start;
         // With fewer than MINIMUM_START_LITERAL_FILTER_BYTES left, every route reads the root table
-        // to the input end: the filter loop needs that many bytes left, the productivity sample
-        // needs 64 KiB, and a route chosen with less than 64 KiB left holds to the end. Going
-        // straight to the root-table loop skips choosing the route. Such a search neither reads
-        // nor updates the cursor, whose route stays within the input.
+        // to the input end: the filter loop needs that many bytes left, the productivity sample and
+        // the decline need 64 KiB, and a route chosen with less than 64 KiB left holds to the end.
+        // Going straight to the root-table loop skips choosing the route. Such a search neither
+        // reads nor updates the cursor, whose route stays within the input.
         if (inputEnd - firstPosition < MINIMUM_START_LITERAL_FILTER_BYTES) {
             return findSpanInRootTable(bytes, firstPosition, inputEnd, inputOffset, inputEnd);
         }
@@ -433,6 +465,9 @@ final class LiteralAlternationSpanMatcher
         while (position < inputEnd) {
             if (position >= routeEnd) {
                 readsRootTable = readsRootTable(bytes, position, inputEnd);
+                if (declinesDenseStart && position == firstPosition && readsRootTable && startLiteralFilter != null) {
+                    return DECLINED;
+                }
                 routeEnd = routeEnd(position, inputEnd);
             }
             span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
