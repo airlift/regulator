@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 
+import static io.airlift.slice.SizeOf.sizeOf;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -93,18 +94,19 @@ public class TestUpstreamCompileMemoryBudget
     @Test
     public void testRemainingMemoryAssignedToDfa()
     {
-        ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer("a".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
-        int maxMemory = 4096;
-        Prog program = Compiler.compile(parsed.regexp(), false, maxMemory);
+        assertRemainingMemoryAssignedToDfa("a", 0);
+        // A prefix whose first byte recurs retains a private KMP table, one entry per byte plus one.
+        assertRemainingMemoryAssignedToDfa("abcabd", sizeOf(new int[7]));
+        // A short prefix whose first byte does not recur shares one table and is charged nothing.
+        assertRemainingMemoryAssignedToDfa("abcdef", 0);
 
-        long programMemory = 512L + ((long) program.size() * 8);
-        if (program.canBitState()) {
-            programMemory += (long) program.size() * 2;
-        }
-        long onePassMemory = (long) program.onePassStateCount() *
-                (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
-        assertThat(program.isOnePass()).isTrue();
-        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - onePassMemory);
+        // Compiling an exact literal configures its prefix again, which returns the first shift
+        // table's charge before charging the second. A third of the budget goes to the reverse
+        // program.
+        long forwardMemory = 4096;
+        Prog forwardProgram = Re2.compile(Slices.utf8Slice("abcabd"), Re2.Options.defaults().setMaxMemory(forwardMemory * 3 / 2))
+                .forwardProgramForDiagnostics();
+        assertThat(Compiler.estimatedProgramMemory(forwardProgram) + forwardProgram.dfaMemory()).isEqualTo(forwardMemory);
     }
 
     @Test
@@ -136,6 +138,22 @@ public class TestUpstreamCompileMemoryBudget
         long onePassMemory = (long) program.onePassStateCount() *
                 (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
         assertThat(program.dfaMemory()).isEqualTo((1 << 20) - onePassMemory);
+    }
+
+    private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixShiftsMemory)
+    {
+        int maxMemory = 4096;
+        Prog program = Compiler.compile(parse(pattern), false, maxMemory);
+
+        long programMemory = 512L + ((long) program.size() * 8);
+        if (program.canBitState()) {
+            programMemory += (long) program.size() * 2;
+        }
+        long onePassMemory = (long) program.onePassStateCount() *
+                (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
+        assertThat(program.isOnePass()).isTrue();
+        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - onePassMemory - prefixShiftsMemory);
+        assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isEqualTo(maxMemory);
     }
 
     private static Regexp parse(String pattern)

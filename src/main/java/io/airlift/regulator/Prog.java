@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static java.util.Objects.requireNonNull;
 
 @SuppressFBWarnings(
-        value = {"AT_NONATOMIC_64BIT_PRIMITIVE", "AT_STALE_THREAD_WRITE_OF_PRIMITIVE"},
+        value = {"AT_NONATOMIC_64BIT_PRIMITIVE", "AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE", "AT_STALE_THREAD_WRITE_OF_PRIMITIVE"},
         justification = "Prog is mutated during single-threaded compilation and safely published before matching")
 final class Prog
 {
@@ -386,6 +386,11 @@ final class Prog
     private int prefixProbeOffset;
     private int prefixCheckOffset;
     private long prefixProbeBroadcastMask;
+    // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
+    // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
+    private int[] prefixShifts;
+    // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
+    private long prefixShiftsCharge;
     private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
 
     // The literal every match begins with behind a leading assertion, and its search; see
@@ -646,6 +651,11 @@ final class Prog
     public int[] onePassAction()
     {
         return onePassAction;
+    }
+
+    long prefixShiftsMemory()
+    {
+        return prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
     }
 
     long onePassMemory()
@@ -1062,12 +1072,17 @@ final class Prog
 
     /// Returns the absolute index in `data` of the first occurrence of `literal`, of at least two
     /// bytes, in the range, or `-1`. Ranges of at least the fused vector scan's minimum take the
-    /// vector scan of [PrefixAccelStrategy#FUSED_VECTOR], and shorter ones take `literalSearch`,
-    /// the literal's call-free search.
+    /// vector scan of [PrefixAccelStrategy#FUSED_VECTOR], finished with KMP once its failed
+    /// candidates pass the comparison budget, and shorter ones take `literalSearch`, the
+    /// literal's call-free search.
     static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
     {
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
-            return VectorPrefixScanner.find(data, offset, length, literal, 0, literal.length - 1);
+            int found = VectorPrefixScanner.find(data, offset, length, literal, 0, literal.length - 1);
+            if (found < -1) {
+                return literalSearch.findKmp(data, -2 - found, offset + length);
+            }
+            return found;
         }
         return literalSearch.findContains(data, offset, length);
     }
@@ -1299,6 +1314,9 @@ final class Prog
         this.prefixProbeOffset = 0;
         this.prefixCheckOffset = 0;
         this.prefixProbeBroadcastMask = 0;
+        this.prefixShifts = null;
+        this.dfaMemory += prefixShiftsCharge;
+        this.prefixShiftsCharge = 0;
         if (bytes == null || bytes.length == 0) {
             this.prefix = null;
             this.prefixSize = 0;
@@ -1324,6 +1342,10 @@ final class Prog
             this.prefixProbeOffset = probeOffset;
             this.prefixCheckOffset = probeOffset > lastOffset - probeOffset ? 0 : lastOffset;
             this.prefixProbeBroadcastMask = (bytes[probeOffset] & 0xFFL) * 0x0101010101010101L;
+            this.prefixShifts = LiteralSearchKernel.computePrefixShifts(bytes);
+            // Like the OnePass table, the retained shifts come out of the DFA allowance.
+            this.prefixShiftsCharge = Math.min(dfaMemory, prefixShiftsMemory());
+            this.dfaMemory -= prefixShiftsCharge;
         }
         else {
             // For single-byte non-foldCase, use simple memchr-style search
@@ -1343,6 +1365,10 @@ final class Prog
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
+    ///
+    /// The non-folded multi-byte scans charge their failed candidates to
+    /// [LiteralSearchKernel]'s comparison budget and finish with KMP once they pass it, so
+    /// candidates with long partial matches cannot make the search quadratic.
     public int prefixAccel(byte[] data, int offset, int length)
     {
         if (!canPrefixAccel()) {
@@ -1363,33 +1389,28 @@ final class Prog
             return indexOf(data, offset, length, prefix[0], prefixFoldCase);
         }
 
+        int end = offset + length;
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
         if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
-            return VectorPrefixScanner.find(
-                    data,
-                    offset,
-                    length,
-                    prefix,
-                    0,
-                    prefixSize - 1);
+            return finishWithKmp(data, end, VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1));
         }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
-            return prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
+            return finishWithKmp(data, end, prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length));
         }
 
         // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
         // upstream loop below.
         if (prefixProbeOffset != 0) {
-            return prefixAccelProbe(data, offset, length);
+            return finishWithKmp(data, end, prefixAccelProbe(data, offset, length));
         }
 
         // FrontAndBack optimization: use first and last bytes to filter candidates
         byte prefixFront = prefix[0];
         byte prefixBack = prefix[prefixSize - 1];
-        int end = offset + length;
         int lastStart = end - prefixSize;
 
-        // Search for prefix_front, then check prefix_back before full match
+        // Search for prefix_front, then check prefix_back before full match. The first failed
+        // candidate hands the scan to continueFrontAndBack, so this loop keeps no budget state.
         int position = offset;
         while (position <= lastStart) {
             // Find next occurrence of first byte
@@ -1406,9 +1427,73 @@ final class Prog
                 if (prefixMatchesAt(data, position)) {
                     return position;
                 }
+                return finishWithKmp(data, end, continueFrontAndBack(data, offset, position, end));
             }
 
             position++;  // Move to next position
+        }
+
+        return -1;
+    }
+
+    /// Returns the absolute index where [#prefixAccel] continues with KMP; only tests call it.
+    /// Returns -1 when the search ends, with or without a match, before it switches to KMP, and
+    /// for a folded or one-byte prefix. It runs the scans [#prefixAccel] runs, except that the
+    /// first-byte scan starts in [#continueFrontAndBack], whose handoff is the same because the
+    /// scan charges nothing before its first failed candidate.
+    int prefixAccelKmpHandoffForDiagnostics(byte[] data, int offset, int length)
+    {
+        if (prefixFoldCase || prefixSize <= 1 || length < prefixSize) {
+            return -1;
+        }
+        int found = switch (prefixAccelStrategy(length)) {
+            case FUSED_VECTOR -> VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1);
+            case FUSED_SWAR -> prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
+            case REPEATED_BYTE -> prefixProbeOffset != 0 ? prefixAccelProbe(data, offset, length) : continueFrontAndBack(data, offset, offset, offset + length);
+        };
+        return found < -1 ? -2 - found : -1;
+    }
+
+    /// Returns `found`, the result of a scan that ends at `end`, or continues the scan with KMP
+    /// when `found` is `-2 - resume`.
+    private int finishWithKmp(byte[] data, int end, int found)
+    {
+        if (found < -1) {
+            return LiteralSearchKernel.findKmp(data, -2 - found, end, prefix, prefixShifts);
+        }
+        return found;
+    }
+
+    /// Continues the first-byte scan of [#prefixAccel] from `position`, charging failed
+    /// candidates to the comparison budget from `offset`. Returns what [#prefixAccel] returns,
+    /// or `-2 - resume` when the search must continue with KMP at `resume`. Out of line so the
+    /// scan up to the first failed candidate keeps no budget state.
+    private int continueFrontAndBack(byte[] data, int offset, int position, int end)
+    {
+        byte prefixFront = prefix[0];
+        byte prefixBack = prefix[prefixSize - 1];
+        int lastStart = end - prefixSize;
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
+        while (position <= lastStart) {
+            int next = indexOf(data, position, (lastStart + 1) - position, prefixFront, false);
+            if (next < 0) {
+                return -1;
+            }
+
+            position = next;
+
+            if (data[position + prefixSize - 1] == prefixBack) {
+                int matchedLength = prefixMatchingLength(data, position);
+                if (matchedLength == prefixSize) {
+                    return position;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, position)) {
+                    return -2 - (position + 1);
+                }
+            }
+
+            position++;
         }
 
         return -1;
@@ -1426,6 +1511,7 @@ final class Prog
         byte checkByte = prefix[checkOffset];
         int end = offset + length;
         int lastStart = end - prefixSize;
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
 
         int position = offset;
         while (position <= lastStart) {
@@ -1436,8 +1522,15 @@ final class Prog
 
             position = next - probeOffset;
 
-            if (data[position + checkOffset] == checkByte && prefixMatchesAt(data, position)) {
-                return position;
+            if (data[position + checkOffset] == checkByte) {
+                int matchedLength = prefixMatchingLength(data, position);
+                if (matchedLength == prefixSize) {
+                    return position;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, position)) {
+                    return -2 - (position + 1);
+                }
             }
 
             position++;
@@ -1458,6 +1551,7 @@ final class Prog
         int secondaryOffset = prefixSize - 1;
         long primaryBroadcast = (prefix[primaryOffset] & 0xFFL) * lowBits;
         long secondaryBroadcast = (prefix[secondaryOffset] & 0xFFL) * lowBits;
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
         int position = offset;
 
         for (; position < wordEnd; position += Long.BYTES) {
@@ -1467,8 +1561,13 @@ final class Prog
                     ((secondaryDifference - lowBits) & ~secondaryDifference & highBits);
             while (candidates != 0) {
                 int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
-                if (prefixMatchesAt(data, candidate)) {
+                int matchedLength = prefixMatchingLength(data, candidate);
+                if (matchedLength == prefixSize) {
                     return candidate;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, candidate)) {
+                    return -2 - (candidate + 1);
                 }
                 candidates &= candidates - 1;
             }
@@ -1477,9 +1576,15 @@ final class Prog
         int end = offset + candidateCount;
         for (; position < end; position++) {
             if (data[position + primaryOffset] == prefix[primaryOffset] &&
-                    data[position + secondaryOffset] == prefix[secondaryOffset] &&
-                    prefixMatchesAt(data, position)) {
-                return position;
+                    data[position + secondaryOffset] == prefix[secondaryOffset]) {
+                int matchedLength = prefixMatchingLength(data, position);
+                if (matchedLength == prefixSize) {
+                    return position;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, position)) {
+                    return -2 - (position + 1);
+                }
             }
         }
         return -1;
@@ -1511,7 +1616,7 @@ final class Prog
                     foldCaseMatches(backBytes, prefix[backOffset]);
             while (candidates != 0) {
                 int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
-                if (prefixMatchesAt(data, candidate)) {
+                if (foldCasePrefixMatchesAt(data, candidate)) {
                     return candidate;
                 }
                 candidates &= candidates - 1;
@@ -1522,7 +1627,7 @@ final class Prog
         for (; position < end; position++) {
             if (byteMatches(data[position], prefix[0], true) &&
                     byteMatches(data[position + backOffset], prefix[backOffset], true) &&
-                    prefixMatchesAt(data, position)) {
+                    foldCasePrefixMatchesAt(data, position)) {
                 return position;
             }
         }
@@ -1675,17 +1780,32 @@ final class Prog
         return asciiLower(a & 0xFF) == asciiLower(b & 0xFF);
     }
 
-    private boolean prefixMatchesAt(byte[] data, int i)
+    /// Returns whether a non-folded prefix occurs at `position`. The first-byte loop of
+    /// [#prefixAccel] needs no matched length, and this check compiles smaller than
+    /// [#prefixMatchingLength].
+    private boolean prefixMatchesAt(byte[] data, int position)
     {
-        if (!prefixFoldCase) {
-            for (int j = 0; j < prefixSize; j++) {
-                if (data[i + j] != prefix[j]) {
-                    return false;
-                }
+        for (int index = 0; index < prefixSize; index++) {
+            if (data[position + index] != prefix[index]) {
+                return false;
             }
-            return true;
         }
+        return true;
+    }
 
+    /// Returns how many leading bytes of a non-folded prefix occur at `position`.
+    private int prefixMatchingLength(byte[] data, int position)
+    {
+        for (int index = 0; index < prefixSize; index++) {
+            if (data[position + index] != prefix[index]) {
+                return index;
+            }
+        }
+        return prefixSize;
+    }
+
+    private boolean foldCasePrefixMatchesAt(byte[] data, int i)
+    {
         // ASCII case-insensitive comparison (matches RE2's byte-oriented foldCase hint).
         for (int j = 0; j < prefixSize; j++) {
             int a = asciiLower(data[i + j] & 0xFF);

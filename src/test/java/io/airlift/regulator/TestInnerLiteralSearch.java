@@ -158,7 +158,8 @@ public class TestInnerLiteralSearch
                 "\\bab",
                 "\\Bab",
                 "(?m)^Sherlock \\w+",
-                "\\bHolmes[a-z]*");
+                "\\bHolmes[a-z]*",
+                "(?m)^" + "a".repeat(40) + "ba|" + "a".repeat(40) + "ba$");
         List<Slice> texts = transparentStartLiteralTexts();
         for (Language language : Language.values()) {
             List<String> languagePatterns = new ArrayList<>(patterns);
@@ -349,6 +350,9 @@ public class TestInnerLiteralSearch
             }
             texts.add(output.slice());
         }
+        // A run long enough for the vector scan, whose candidates for the long literal each match
+        // 40 bytes, so the scan passes the comparison budget and finishes with KMP.
+        texts.add(utf8Slice("a".repeat(1100) + "\n" + "a".repeat(40) + "ba\n"));
         return texts;
     }
 

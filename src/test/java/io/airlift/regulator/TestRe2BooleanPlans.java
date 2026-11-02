@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.util.List;
 
 import static io.airlift.regulator.Re2.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.Re2.BooleanPlanKind.ENDS_WITH;
@@ -95,6 +96,26 @@ public class TestRe2BooleanPlans
         assertPlans("foo(?s:.*)bar", GENERAL, GENERAL, GENERAL);
         assertPlans("(?m:^foo$)", GENERAL, GENERAL, GENERAL);
         assertPlans("\\bfoo\\b", GENERAL, GENERAL, GENERAL);
+    }
+
+    @Test
+    public void testLongContainedLiteralUsesLiteralSearch()
+    {
+        // Languages other than Trino find a contained literal up to the literal search's
+        // comparison budget with Slice.indexOf, and a longer one with the search: in a run of the
+        // literal's first byte, Slice.indexOf would compare half the literal at every position.
+        // Here each candidate compares 33 bytes and covers one, so the second passes the budget.
+        String half = "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2);
+        String literal = half + "b" + half;
+        assertThat(Re2.compile(utf8("(?s:.*" + literal.substring(1) + ".*)")).literalSearchForDiagnostics()).isNull();
+
+        Slice pattern = utf8("(?s:.*" + literal + ".*)");
+        Slice input = utf8(half.repeat(64) + literal);
+        for (Re2 re2 : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern).re2(), RustRegexp.compile(pattern).re2())) {
+            assertThat(re2.findPlanForDiagnostics()).isEqualTo(CONTAINS);
+            assertThat(re2.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
+            assertThat(re2.find(input)).isTrue();
+        }
     }
 
     @Test

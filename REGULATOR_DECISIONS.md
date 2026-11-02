@@ -904,6 +904,22 @@ The strategy byte adds one fixed dispatch operation to ordinary calls. Future
 changes must keep that cost independent of input size, allocation-free, and
 within the protected-path gate on Intel and Graviton.
 
+Every case-sensitive `Prog.prefixAccel` scan of a prefix of two or more bytes
+(the fused vector and SWAR pair scans, the first-byte scan with its last-byte
+check, and the moved-probe scan) charges its failed candidates to the contains
+search's comparison budget and continues with KMP once they pass it. A prefix
+with long partial matches, such as `a`×500 `b` `a`×500 in a run of `a`, then
+costs time linear in the input instead of the input times the prefix. The KMP
+shifts are built when the prefix is configured and charged to the program's DFA
+allowance, up to what remains; a prefix under 64 bytes whose first byte does not
+recur shares the contains search's read-only table and is charged nothing.
+Case-insensitive prefixes stop at nine bytes and keep their scan.
+`Slice.indexOf` puts no limit on the bytes its failed candidates compare, so
+RE2, Java, and Rust contains of a literal longer than the budget uses the
+contains search when it fits the forward-DFA allowance; shorter literals keep
+`Slice.indexOf`. Scan-plan leading and required literals, capped at 256 bytes,
+still check every candidate; bounding them is a separate change.
+
 ## Trino LIKE Frontend
 
 `TrinoLikePattern` is a separate language frontend rather than an RE2 dialect.
@@ -1134,8 +1150,10 @@ route. ASCII and single-byte prefixes retain repeated-byte scanning.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
-candidate is compared with the complete prefix. Front/back byte selection
-keeps preprocessing bounded and the integrated scanner compact.
+candidate is compared with the complete prefix until failed candidates spend
+the contains search's comparison budget, after which KMP finishes the search.
+Front/back byte selection keeps preprocessing bounded and the integrated scanner
+compact.
 
 ## Literal Probe Byte Selection
 

@@ -34,6 +34,8 @@ final class LiteralSearchKernel
     // covered plus this budget, so candidate work stays linear in the input. Candidates that
     // compare at most one byte per byte covered, such as "bba" over repeated "aabx", never switch,
     // while closely spaced candidates with long partial matches switch within a few candidates.
+    // The prefix scans in Prog and VectorPrefixScanner apply the same rule through the static
+    // methods below.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
 
     // The prefix shifts of every literal shorter than this table's 64 entries whose first byte
@@ -85,7 +87,14 @@ final class LiteralSearchKernel
 
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + (prefixShifts == BORDER_FREE_PREFIX_SHIFTS ? 0 : SizeOf.sizeOf(prefixShifts));
+        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + prefixShiftsRetainedSize(prefixShifts);
+    }
+
+    /// Returns the retained size of a table from [#computePrefixShifts]: 0 for the shared table
+    /// of border-free literals.
+    static long prefixShiftsRetainedSize(int[] prefixShifts)
+    {
+        return prefixShifts == BORDER_FREE_PREFIX_SHIFTS ? 0 : SizeOf.sizeOf(prefixShifts);
     }
 
     byte[] literal()
@@ -137,7 +146,8 @@ final class LiteralSearchKernel
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
-    /// Trino dot-star spans, OrderedLiteralMatcher, and LiteralGapMatcher's first literal call it
+    /// Trino dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal, and the
+    /// other languages' contains of a literal longer than [#CANDIDATE_COMPARISON_BUDGET] call it
     /// for such literals. Its word scan makes no call until it finds a possible candidate, and a
     /// separate method verifies the candidates.
     int findContains(Slice input, int offset, int length)
@@ -151,7 +161,7 @@ final class LiteralSearchKernel
         int searchEnd = searchStart + length;
         int matchOffset = skipToContainsCandidate(inputBytes, searchStart, searchEnd);
         if (matchOffset < -1) {
-            matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd);
+            matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd, literal, prefixShifts);
         }
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
     }
@@ -245,12 +255,10 @@ final class LiteralSearchKernel
         int wordEnd = searchStart + (candidateCount / Long.BYTES) * Long.BYTES;
         int backOffset = literal.length - 1;
         long lowBits = this.lowBits;
-        // searchStart plus the failed candidates' compared bytes, minus the budget, so the search
-        // switches when it passes the candidate. It never passes the current candidate by more
-        // than the literal length, so it cannot overflow. In the former in-line scan, counting the
-        // bytes alone and comparing them with candidate - searchStart kept searchStart live in the
-        // loop, and on aarch64 C2 then rebuilt the -LOW_BITS constant on every word.
-        int comparisonEnd = searchStart - CANDIDATE_COMPARISON_BUDGET;
+        // In the former in-line scan, counting the compared bytes alone and comparing them with
+        // candidate - searchStart kept searchStart live in the loop, and on aarch64 C2 then rebuilt
+        // the -LOW_BITS constant on every word.
+        int comparisonEnd = initialComparisonEnd(searchStart);
         int position = verifyStart;
 
         for (; position < wordEnd; position += Long.BYTES) {
@@ -263,8 +271,8 @@ final class LiteralSearchKernel
                 if (matchedLength == literal.length) {
                     return candidate;
                 }
-                comparisonEnd += matchedLength + 1;
-                if (comparisonEnd > candidate) {
+                comparisonEnd = chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (comparisonBudgetSpent(comparisonEnd, candidate)) {
                     return -2 - (candidate + 1);
                 }
                 candidates &= candidates - 1;
@@ -278,8 +286,8 @@ final class LiteralSearchKernel
                 if (matchedLength == literal.length) {
                     return position;
                 }
-                comparisonEnd += matchedLength + 1;
-                if (comparisonEnd > position) {
+                comparisonEnd = chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (comparisonBudgetSpent(comparisonEnd, position)) {
                     return -2 - (position + 1);
                 }
             }
@@ -287,8 +295,41 @@ final class LiteralSearchKernel
         return -1;
     }
 
-    // Copied as TrinoLikeKernelSupport.findKmp; keep the copy in step.
-    private int findKmp(byte[] input, int searchStart, int searchEnd)
+    /// Returns `searchStart` minus [#CANDIDATE_COMPARISON_BUDGET], the comparison end that a
+    /// candidate search over text from `searchStart` begins with. Each failed candidate adds its
+    /// compared bytes to it, and the search switches to KMP when the comparison end passes the
+    /// failed candidate. It never passes the current candidate by more than the literal length, so
+    /// it cannot overflow.
+    static int initialComparisonEnd(int searchStart)
+    {
+        return searchStart - CANDIDATE_COMPARISON_BUDGET;
+    }
+
+    /// Charges a failed candidate's compared bytes, the `matchedLength` matching bytes and the
+    /// mismatch, to the comparison end from [#initialComparisonEnd].
+    static int chargeFailedCandidate(int comparisonEnd, int matchedLength)
+    {
+        return comparisonEnd + matchedLength + 1;
+    }
+
+    /// True when the search must switch to KMP after the failed `candidate`, because the
+    /// comparison end passed it.
+    static boolean comparisonBudgetSpent(int comparisonEnd, int candidate)
+    {
+        return comparisonEnd > candidate;
+    }
+
+    /// Returns the absolute offset of the first occurrence of this kernel's literal that lies in
+    /// `[searchStart, searchEnd)`, or -1; [Prog#findLiteral] continues a budgeted scan with it.
+    int findKmp(byte[] input, int searchStart, int searchEnd)
+    {
+        return findKmp(input, searchStart, searchEnd, literal, prefixShifts);
+    }
+
+    /// Returns the absolute offset of the first occurrence of `literal` that lies in
+    /// `[searchStart, searchEnd)`, or -1, using the shifts from [#computePrefixShifts].
+    /// Copied as `TrinoLikeKernelSupport.findKmp`; keep the copy in step.
+    static int findKmp(byte[] input, int searchStart, int searchEnd, byte[] literal, int[] prefixShifts)
     {
         int matchedLength = 0;
         for (int position = searchStart; position < searchEnd; position++) {
@@ -339,7 +380,7 @@ final class LiteralSearchKernel
         return length;
     }
 
-    private static int[] computePrefixShifts(byte[] literal)
+    static int[] computePrefixShifts(byte[] literal)
     {
         if (literal.length < BORDER_FREE_PREFIX_SHIFTS.length && !firstByteRecurs(literal)) {
             return BORDER_FREE_PREFIX_SHIFTS;

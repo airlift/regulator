@@ -1121,8 +1121,11 @@ public sealed class Re2
             }
         }
         // A call-free first-and-last-byte search for contains and dot-star spans. Only Trino rows
-        // were measured, so other languages' contains keeps Slice.indexOf.
-        LiteralSearchKernel literalSearch = compilerDialect == Compiler.Dialect.TRINO ? createLiteralSearch(booleanPlans) : null;
+        // were measured, so other languages' contains keeps Slice.indexOf for a literal of at most
+        // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes. Slice.indexOf puts no limit on
+        // the bytes its failed candidates compare, so for a longer literal, long partial matches
+        // cost the input times the literal.
+        LiteralSearchKernel literalSearch = createLiteralSearch(booleanPlans, compilerDialect == Compiler.Dialect.TRINO);
         if (literalSearch != null && literalSearch.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSearch.estimatedRetainedSize());
             booleanPlans = booleanPlans.withLiteralSearch(literalSearch);
@@ -1178,11 +1181,15 @@ public sealed class Re2
                 null);
     }
 
-    /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
+    /// Creates a search for a CONTAINS plan whose literal is at least two bytes long and, outside
+    /// Trino, longer than [LiteralSearchKernel#CANDIDATE_COMPARISON_BUDGET] bytes, or returns
     /// null. Boolean contains and dot-star span matching share this search.
-    private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans)
+    private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans, boolean trino)
     {
         if (booleanPlans.partialMatchStrategy() != BooleanPartialMatchStrategy.CONTAINS || booleanPlans.literal().length() < 2) {
+            return null;
+        }
+        if (!trino && booleanPlans.literal().length() <= LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET) {
             return null;
         }
         return new LiteralSearchKernel(booleanPlans.literal());
@@ -1222,7 +1229,8 @@ public sealed class Re2
 
         if (forwardMemory > 0) {
             long semanticProgramMemory = Compiler.estimatedProgramMemory(semanticProgram);
-            // Compilation has already charged the lowered program and any retained OnePass table.
+            // Compilation has already charged the lowered program, any retained OnePass table,
+            // and its prefix's KMP shifts.
             if (semanticProgramMemory > program.dfaMemory()) {
                 return null;
             }
@@ -3456,9 +3464,11 @@ public sealed class Re2
             // The scan plan's boolean plan, resolved here so that full-Slice boolean find loads
             // it as directly as it would load the plan.
             ScanPlan scanBooleanPlan,
-            // Scans for a literal of two or more bytes by its first and last bytes together, for
-            // Trino's boolean contains and dot-star spans; null leaves them on Slice.indexOf.
-            // Exact-literal spans never use it.
+            // Scans for a literal of two or more bytes by its first and last bytes together, when
+            // it fits the forward-DFA allowance: for boolean contains and dot-star spans in Trino,
+            // and in the other languages for contains of a literal longer than
+            // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes; null leaves them on
+            // Slice.indexOf. Exact-literal spans never use it.
             LiteralSearchKernel literalSearch,
             // Searches an alternation of more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES
             // literals for the RE2, Java, and Rust RegexpMatcher.find() group-zero spans; every
