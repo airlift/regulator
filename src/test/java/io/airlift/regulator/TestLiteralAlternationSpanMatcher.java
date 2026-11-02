@@ -433,7 +433,7 @@ public class TestLiteralAlternationSpanMatcher
         // passes ERxO, WAxN, and FAxA, and the trie rejects each at its third byte. Every fifth
         // byte starts such a near miss, and nothing matches.
         int length = 4 * RECHECK_BYTES;
-        byte[] nearMisses = "ERxO WAxN FAxA ".repeat(length / 15 + 1).substring(0, length).getBytes(UTF_8);
+        byte[] nearMisses = nearMisses(length);
         Slice input = wrappedBuffer(nearMisses);
         LiteralAlternationSpanMatcher scanner = scanner("ERROR|WARN|FATAL");
         StartLiteralFilter filter = scanner.startLiteralFilterForDiagnostics();
@@ -529,6 +529,88 @@ public class TestLiteralAlternationSpanMatcher
             log.append("2026-11-01T12:00:00 ").append(level).append(" request served for user ").append(line).append('\n');
         }
         return log.toString();
+    }
+
+    @Test
+    public void testDenseNearMissesAtTheStartRunTheDfa()
+    {
+        // RE2 boolean find and count hand a long input whose filter stops are dense from its
+        // start to the DFA, which runs as it does without the matcher, so the matcher reads none
+        // of it after its sample. A real ERROR every 10,007 bytes gives the DFA matches to find.
+        byte[] bytes = nearMisses(4 * RECHECK_BYTES);
+        int insertedMatches = 0;
+        for (int position = 5_000; position + 5 <= bytes.length; position += 10_007) {
+            System.arraycopy("ERROR".getBytes(UTF_8), 0, bytes, position, 5);
+            insertedMatches++;
+        }
+        Slice input = wrappedBuffer(bytes);
+        Re2 pattern = Re2.compile(utf8Slice("ERROR|WARN|FATAL"));
+        Re2 reference = Re2.compile(utf8Slice("ERROR|WARN|FATAL"));
+        LiteralAlternationSpanMatcher scanner = pattern.literalAlternationSpanMatcherForDiagnostics();
+        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+        // The reference runs the same count and find on the DFA directly, which also builds the
+        // DFA counters the hand-off must reproduce.
+        long dfaCount = Dfa.countMatches(reference.forwardProgramForDiagnostics(), input, Prog.MatchKind.FIRST_MATCH);
+        assertThat(dfaCount).isEqualTo(insertedMatches);
+        assertThat(reference.matchInto(input, Re2.Anchor.UNANCHORED, null)).isTrue();
+        assertThat(pattern.countMatches(input)).isEqualTo(dfaCount);
+        assertThat(pattern.find(input)).isTrue();
+        // With the Vector API each call samples the filter's stops once and declines, so the
+        // matcher reads no position; without it there is no filter, and the matcher keeps both.
+        assertThat(scanner.filterStopCountForDiagnostics()).isZero();
+        assertThat(scanner.rootTablePositionCountForDiagnostics() == 0).isEqualTo(VectorSupport.isAvailable());
+        assertThat(scanner.sampledPositionCountForDiagnostics()).isEqualTo(VectorSupport.isAvailable() ? 2L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
+        if (VectorSupport.isAvailable()) {
+            assertThat(dfaScanCounters(pattern)).isNotEmpty().isEqualTo(dfaScanCounters(reference));
+        }
+
+        // Only the check at the start hands off. Here it samples three windows of sparse log lines
+        // and one of near misses, so the matcher keeps the input and reads the root table where a
+        // later check samples mostly near misses.
+        int logLines = 9_362;
+        int nearMissBytes = 3 * RECHECK_BYTES - 4 * 1024;
+        Slice mixed = utf8Slice("WARN disk usage above threshold on node 7\n".repeat(logLines) + nearMissText(nearMissBytes));
+        List<String> dfaCounters = dfaScanCounters(pattern);
+        long rootTablePositions = scanner.rootTablePositionCountForDiagnostics();
+        assertThat(pattern.count(mixed)).isEqualTo(logLines);
+        assertThat(dfaScanCounters(pattern)).isEqualTo(dfaCounters);
+        assertThat(scanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
+        assertThat(scanner.rootTablePositionCountForDiagnostics() - rootTablePositions).isGreaterThanOrEqualTo(RECHECK_BYTES);
+
+        // Find follows the same rule: in the same layout without matches, the later dense checks
+        // read the root table rather than hand off.
+        Slice quiet = utf8Slice("INFO disk usage above threshold on node 7\n".repeat(logLines) + nearMissText(nearMissBytes));
+        assertThat(pattern.find(quiet)).isFalse();
+        assertThat(dfaScanCounters(pattern)).isEqualTo(dfaCounters);
+    }
+
+    // Near misses of ERROR|WARN|FATAL that its start literal filter passes, one every five bytes.
+    private static String nearMissText(int length)
+    {
+        return "ERxO WAxN FAxA ".repeat(length / 15 + 1).substring(0, length);
+    }
+
+    private static byte[] nearMisses(int length)
+    {
+        return nearMissText(length).getBytes(UTF_8);
+    }
+
+    // The scan counters of each DFA the pattern's forward program has built.
+    private static List<String> dfaScanCounters(Re2 pattern)
+    {
+        List<String> counters = new ArrayList<>();
+        for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(kind);
+            if (dfa != null) {
+                counters.add(kind + " fallbacks " + dfa.byteScanFallbackCount() +
+                        " filter scans " + dfa.startLiteralFilterScanCount() +
+                        " small set scans " + dfa.smallByteSetScanCount() +
+                        " mixed set scans " + dfa.mixedByteSetScanCount() +
+                        " range scans " + dfa.contiguousRangeScanCount() +
+                        " self-loop count scans " + dfa.countSelfLoopScanCount());
+            }
+        }
+        return counters;
     }
 
     // The literals, prefixes of them that the trie walks and abandons, single bytes and two-byte

@@ -1337,6 +1337,17 @@ and each call of Trino's position, extract-all, split, and replace carry that
 choice from one match to the next, so they sample at most once per 64 KiB
 rather than once per match.
 
+When the first sample of an input finds the stops dense, RE2, Java, and Rust
+boolean find and count do not read the root table: they hand the input to the
+general engine, whose DFA reads each byte once, as it did before the matcher.
+Reading the root table on such near misses measured 1.30 to 2.05 times the
+DFA's time in Rust. The decline reuses the compiled program and may build the
+DFA within what remains of the budget, which the matcher's size has already
+reduced. Only the first sample hands off: the general engine searches the whole
+input, so a later hand-off would repeat what the matcher has read, and a later
+dense sample keeps the root table. Trino's literal-alternation pattern holds no
+general engine, so it reads the root table on a dense first sample as well.
+
 This follows the Rust regex crate's packed Teddy prefilter, which the crate
 treats as fast only when every literal has at least three bytes. It is a
 performance-only deviation. The filter accepts every position where a match

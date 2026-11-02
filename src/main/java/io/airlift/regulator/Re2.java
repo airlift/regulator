@@ -1510,6 +1510,13 @@ public sealed class Re2
         return booleanPlans.literalSearch();
     }
 
+    /// Returns the matcher that full-Slice boolean find and count search for an alternation of
+    /// at most [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`.
+    LiteralAlternationSpanMatcher literalAlternationSpanMatcherForDiagnostics()
+    {
+        return booleanPlans.literalAlternationMatcher();
+    }
+
     /// Returns the matcher that [RegexpMatcher#find()] searches for an alternation of more than
     /// [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`.
     LiteralSetSpanMatcher literalSetSpanMatcher()
@@ -1828,13 +1835,26 @@ public sealed class Re2
             case BOOLEAN_FIND_ENDS_WITH -> endsWithBooleanPlanLiteral(input, literal);
             case BOOLEAN_FIND_EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
             case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> endsWithFinalLineBooleanPlanLiteral(input, literal);
-            case BOOLEAN_FIND_LITERAL_ALTERNATION -> booleanPlans.literalAlternationMatcher().findSpan(input, 0) >= 0;
+            case BOOLEAN_FIND_LITERAL_ALTERNATION -> findWithLiteralAlternation(input);
             case BOOLEAN_FIND_FIXED_WIDTH_BYTE -> booleanPlans.fixedWidthByteMatcher().findSpan(input, 0) >= 0;
             case BOOLEAN_FIND_BYTE_RUN -> input.length() > MAX_DIRECT_BYTE_SCAN_BYTES
                     ? matchInto(input, Anchor.UNANCHORED, null)
                     : booleanPlans.byteRunMatcher().find(input, 0) >= 0;
             default -> throw new IllegalStateException("strategy cannot be executed directly: " + strategy);
         };
+    }
+
+    // A long input whose filter stops are dense from its start runs the general engine, whose
+    // DFA reads each byte once, as it would without the matcher. A decline reuses the compiled
+    // program and may build the DFA within what remains of the budget, which the matcher's size
+    // has already reduced.
+    private boolean findWithLiteralAlternation(Slice input)
+    {
+        long span = booleanPlans.literalAlternationMatcher().findSpanOrDecline(input);
+        if (span == LiteralAlternationSpanMatcher.DECLINED) {
+            return matchInto(input, Anchor.UNANCHORED, null);
+        }
+        return span >= 0;
     }
 
     /// Returns whether the pattern matches all of `input` without allocating capture storage.
@@ -2363,7 +2383,11 @@ public sealed class Re2
     private long countWithSpanMatcher(Slice text)
     {
         if (booleanFindStrategy == BOOLEAN_FIND_LITERAL_ALTERNATION) {
-            return booleanPlans.literalAlternationMatcher().count(text);
+            // A declined count runs the DFA count, the route countMatches takes for this pattern
+            // without the matcher: no exact-literal, disjoint-suffix, or class-counter route can be
+            // built beside a literal alternation.
+            long count = booleanPlans.literalAlternationMatcher().countOrDecline(text);
+            return count != LiteralAlternationSpanMatcher.DECLINED ? count : countDfaMatches(text);
         }
         return booleanPlans.fixedWidthByteMatcher().count(text);
     }
