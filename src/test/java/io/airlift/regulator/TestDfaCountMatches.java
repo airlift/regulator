@@ -500,13 +500,16 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanShortScansHandOffUsesPointerTable()
     {
+        // The alternative я, two bytes long and absent from the input, leaves no third narrow
+        // position for a start literal filter, so the count keeps the start-byte scan.
         // The Russian letters in this input start with 0xD0 or 0xD1, the start state's exits, so
         // the start-byte scan's productivity check (64 KiB minimum, 64 sampled bytes) rejects the
         // scan, and four short scans stop the route with no match pending. The search continues
         // through the absolute-pointer loop, which the first count requests and its exclusive
         // search builds. Paired rows requested from the route would block the table.
-        Prog program = compile("(?i)шерлок холмс");
+        Prog program = compile("(?i)шерлок холмс|я");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.startLiteralFilter()).isNull();
         Slice input = utf8Slice(("Где же доктор Ватсон? Он ушёл на прогулку. ".repeat(10) + "Шерлок Холмс\n").repeat(200));
         for (int iteration = 0; iteration < 2; iteration++) {
             assertThat(Dfa.countMatches(program, input, Prog.MatchKind.FIRST_MATCH)).isEqualTo(200);
