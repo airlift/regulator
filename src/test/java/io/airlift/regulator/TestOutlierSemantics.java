@@ -28,6 +28,7 @@ import java.util.stream.IntStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -39,9 +40,15 @@ public class TestOutlierSemantics
         Slice expression = utf8Slice("[a-q][^u-z]{80}x");
         int flags = JavaRegexp.Options.defaults().parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(expression, flags);
-        Re2 pattern = Re2.compileParsed(expression, parsed, flags);
-        assertThat(pattern.count(utf8Slice("b".repeat(100_000) + "x"))).isEqualTo(1);
-        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        Slice input = utf8Slice("b".repeat(100_000) + "x");
+        // RE2's Latin-1 mode and Rust's byte mode read [^u-z] one byte per character.
+        for (Re2 pattern : List.of(
+                Re2.compileParsed(expression, parsed, flags),
+                Re2.compile(expression, Re2.Options.latin1()),
+                RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)).re2())) {
+            assertThat(pattern.count(input)).isEqualTo(1);
+            assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        }
     }
 
     @Test
@@ -53,6 +60,34 @@ public class TestOutlierSemantics
         assertThat(matcher.start(2)).isZero();
         assertThat(matcher.end(2)).isEqualTo(utf8Slice(value).length());
         assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    @Test
+    public void testLatin1WholeInputCaptureSkipsValidation()
+    {
+        // A dot-all star of RE2's Latin-1 dot, or of the any-byte dot of Rust's byte mode without
+        // Unicode, accepts every byte, so input that is not UTF-8 needs no validation. Every
+        // group agrees with the semantic NFA.
+        Slice expression = utf8Slice("(?s)^((.*)()()($))");
+        Slice value = wrappedBuffer("ab\u00FF\n".repeat(100_000).getBytes(ISO_8859_1));
+        for (Re2 pattern : List.of(Re2.compile(expression, Re2.Options.latin1()), RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)).re2())) {
+            for (Slice input : List.of(utf8Slice(""), utf8Slice("\n"), wrappedBuffer((byte) 0xFF), value)) {
+                RegexpMatcher matcher = pattern.matcher(input);
+                assertThat(matcher.find()).isTrue();
+                int[] expected = new int[2 * (matcher.groupCount() + 1)];
+                assertThat(Nfa.search(pattern.forwardProgramForDiagnostics(), input, false, Prog.MatchKind.FIRST_MATCH, expected)).isTrue();
+                for (int group = 0; group <= matcher.groupCount(); group++) {
+                    assertThat(matcher.start(group)).isEqualTo(expected[2 * group]);
+                    assertThat(matcher.end(group)).isEqualTo(expected[2 * group + 1]);
+                }
+                assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isFalse();
+                assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+            }
+        }
+
+        // In byte mode with Unicode, the dot reads only UTF-8.
+        RustRegexp unicode = RustRegexp.compile(expression, RustRegexp.Options.bytes());
+        assertThat(unicode.find(value)).isFalse();
     }
 
     @Test

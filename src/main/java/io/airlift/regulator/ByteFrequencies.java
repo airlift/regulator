@@ -24,14 +24,17 @@ import static java.util.Objects.requireNonNull;
 /// offsets. The options default to [#uniform()], which gives every byte the same
 /// probability, so every literal scan probes its first byte.
 ///
-/// A scan for a literal stops at every occurrence of its probe byte, so probing a rare byte
-/// hands fewer candidates to verification. The probe leaves the first byte only for a later
-/// byte more than {@value #PROBE_FACTOR} times rarer, earliest on ties. The factor keeps the
-/// first byte when the estimate is close, because an estimate is not the searched text. A
+/// A single-probe scan for a literal stops at every occurrence of its probe byte, so probing a
+/// rare byte hands fewer candidates to verification. The probe leaves the first byte only for a
+/// later byte more than {@value #PROBE_FACTOR} times rarer, earliest on ties. The factor keeps
+/// the first byte when the estimate is close, because an estimate is not the searched text. A
 /// distribution that matches the searched data lets the scan probe a rarer byte. A mismatched
-/// distribution can make literal scans several times slower per byte than the default, because
-/// the probe byte occurs more often than the first byte. A distribution never changes what
-/// matches, and the cost stays linear in the input.
+/// distribution can make these scans several times slower per byte than the default, because
+/// the probe byte occurs more often than the first byte. On inputs of at least 1 KiB with the
+/// Vector API, a pattern's literal prefix that probes its first byte is instead scanned for its
+/// first and last bytes together, and a moved probe gives up that pair scan, so a distribution
+/// can be slower than the default there even when it matches the data. A distribution never
+/// changes what matches, and the cost stays linear in the input.
 ///
 /// Only a case-sensitive literal of more than one byte can probe a later byte. Outside scan plans,
 /// Rust, RE2, and Java patterns move the probe only when the literal's first byte is ASCII. Some

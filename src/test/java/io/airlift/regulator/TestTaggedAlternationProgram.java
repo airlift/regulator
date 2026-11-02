@@ -154,7 +154,7 @@ public class TestTaggedAlternationProgram
         assertThat(longestPattern.usesTaggedAlternationForDiagnostics()).isFalse();
         RegexpMatcher longestMatcher = longestPattern.matcher(utf8Slice("ab"));
         assertThat(longestMatcher.find()).isTrue();
-        assertThat(longestMatcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(longestMatcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
     @Test
@@ -196,7 +196,7 @@ public class TestTaggedAlternationProgram
         RegexpMatcher fallbackMatcher = memoryFallback.matcher(utf8Slice("ab"));
         assertThat(fallbackMatcher.find()).isTrue();
         assertMatch(fallbackMatcher, 0, 1, 1);
-        assertThat(fallbackMatcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(fallbackMatcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
     @Test
@@ -246,7 +246,7 @@ public class TestTaggedAlternationProgram
 
         RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
-        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
     private static void assertMatch(RegexpMatcher matcher, int start, int end, int winningGroup)

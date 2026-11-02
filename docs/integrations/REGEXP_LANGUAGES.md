@@ -38,7 +38,7 @@ that run on the same bounded DFA, NFA, OnePass, and BitState engines.
 pattern analysis proves it will produce the same result. In all four
 languages, patterns of a few common extraction shapes also select a
 [scan plan](../benchmarks/SCAN_PLAN.md), except Latin-1 or longest-match RE2
-patterns and Rust byte-mode patterns.
+patterns.
 
 `TrinoLikePattern` parses LIKE directly and has its own general wildcard
 matcher. It does not translate LIKE into regex text. LIKE and regex plans can

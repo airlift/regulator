@@ -43,6 +43,7 @@ public sealed class TrinoRegexp
                 TrinoRegexp.CompiledScanTrinoRegexp,
                 TrinoRegexp.DotStarLiteralTrinoRegexp,
                 TrinoRegexp.ExactLiteralTrinoRegexp,
+                TrinoRegexp.FixedWidthByteTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
                 TrinoRegexp.OrderedLiteralTrinoRegexp
 {
@@ -818,7 +819,7 @@ public sealed class TrinoRegexp
         }
     }
 
-    static non-sealed class DotStarLiteralTrinoRegexp
+    private static final class DotStarLiteralTrinoRegexp
             extends TrinoRegexp
     {
         private final DotStarLiteralSpanMatcher spanMatcher;
@@ -826,19 +827,13 @@ public sealed class TrinoRegexp
         private DotStarLiteralTrinoRegexp(Re2 re2, DotStarLiteralSpanMatcher spanMatcher)
         {
             super(re2);
-            this.spanMatcher = spanMatcher;
-        }
-
-        DotStarLiteralTrinoRegexp(Re2 re2)
-        {
-            super(re2);
-            this.spanMatcher = null;
+            this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
         @Override
         boolean usesDotStarLiteralSpanMatcherForDiagnostics()
         {
-            return spanMatcher != null;
+            return true;
         }
 
         @Override
@@ -940,9 +935,6 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (spanMatcher == null) {
-                return super.replace(source, replacement);
-            }
 
             TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
             if (replacementPlan.maximumCapturingGroup() != 0) {
@@ -999,8 +991,12 @@ public sealed class TrinoRegexp
         }
     }
 
+    /// Answers every operation from the fixed-width matcher. Compiled RE2, Java, and Rust
+    /// patterns retain this matcher too, and so does this subtype's compiled pattern, but
+    /// contains and count call it directly here rather than through the compiled pattern's
+    /// dispatch, which measured about 9% slower per call.
     static final class FixedWidthByteTrinoRegexp
-            extends DotStarLiteralTrinoRegexp
+            extends TrinoRegexp
     {
         private final FixedWidthByteSpanMatcher spanMatcher;
 
@@ -1031,17 +1027,7 @@ public sealed class TrinoRegexp
         public long count(Slice source)
         {
             requireNonNull(source, "source is null");
-            long count = 0;
-            int searchStart = 0;
-            while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
-                if (span < 0) {
-                    break;
-                }
-                count++;
-                searchStart = spanEnd(span);
-            }
-            return count;
+            return spanMatcher.count(source);
         }
 
         @Override
@@ -1237,17 +1223,7 @@ public sealed class TrinoRegexp
         public long count(Slice source)
         {
             requireNonNull(source, "source is null");
-            long count = 0;
-            int searchStart = 0;
-            while (searchStart < source.length()) {
-                long span = spanMatcher.findSpan(source, searchStart);
-                if (span < 0) {
-                    break;
-                }
-                count++;
-                searchStart = spanEnd(span);
-            }
-            return count;
+            return spanMatcher.count(source);
         }
 
         @Override

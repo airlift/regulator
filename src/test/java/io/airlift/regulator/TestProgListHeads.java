@@ -53,4 +53,15 @@ public class TestProgListHeads
         assertThat(prog.listCount()).isGreaterThan(sHead);
         assertThat(prog.listCount()).isGreaterThan(suHead);
     }
+
+    @Test
+    public void testListHeadsUpToMaximumListCount()
+    {
+        // A list head is a short, so a program of at most 32,767 lists gets list heads at any size.
+        ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[ab]".repeat(32764)), Regexp.LIKE_PERL | Regexp.LATIN1);
+
+        Prog prog = Compiler.compile(parsed.regexp(), false, 0);
+        assertThat(prog.listCount()).isEqualTo(Short.MAX_VALUE);
+        assertThat(prog.canBitState()).isTrue();
+    }
 }

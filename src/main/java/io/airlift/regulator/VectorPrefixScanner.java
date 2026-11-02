@@ -44,6 +44,10 @@ final class VectorPrefixScanner
                     .compare(VectorOperators.EQ, primaryVector)
                     .and(ByteVector.fromArray(SPECIES, data, position + secondaryOffset)
                             .compare(VectorOperators.EQ, secondaryVector));
+            // Most vectors hold no candidate, so test for one before converting the mask.
+            if (!candidates.anyTrue()) {
+                continue;
+            }
             long candidateBits = candidates.toLong();
             while (candidateBits != 0) {
                 int candidate = position + Long.numberOfTrailingZeros(candidateBits);

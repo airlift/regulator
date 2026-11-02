@@ -17,21 +17,24 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
-/// Searches A B{n} x where A is ASCII and the ASCII suffix x is excluded from B.
+/// Searches A B{n} x where A is ASCII and the ASCII suffix x is excluded from B. A Latin-1 B,
+/// as in RE2's Latin-1 mode and Rust's byte mode, reads one byte per character.
 final class DisjointSuffixRepeatMatcher
 {
     private final long prefixLowMask;
     private final long prefixHighMask;
     private final int[] repeatedRanges;
+    private final boolean repeatedLatin1;
     private final boolean repeatedMatchesAllNonAscii;
     private final int repeatCount;
     private final Slice suffix;
 
-    private DisjointSuffixRepeatMatcher(long prefixLowMask, long prefixHighMask, int[] repeatedRanges, boolean repeatedMatchesAllNonAscii, int repeatCount, int suffix)
+    private DisjointSuffixRepeatMatcher(long prefixLowMask, long prefixHighMask, int[] repeatedRanges, boolean repeatedLatin1, boolean repeatedMatchesAllNonAscii, int repeatCount, int suffix)
     {
         this.prefixLowMask = prefixLowMask;
         this.prefixHighMask = prefixHighMask;
         this.repeatedRanges = repeatedRanges;
+        this.repeatedLatin1 = repeatedLatin1;
         this.repeatedMatchesAllNonAscii = repeatedMatchesAllNonAscii;
         this.repeatCount = repeatCount;
         this.suffix = Slices.wrappedBuffer((byte) suffix);
@@ -39,8 +42,7 @@ final class DisjointSuffixRepeatMatcher
 
     static DisjointSuffixRepeatMatcher analyze(Regexp expression)
     {
-        if (expression.op() != RegexpOp.CONCAT || expression.childCount() != 3 ||
-                (expression.parseFlags() & (Regexp.LATIN1 | Regexp.FOLD_CASE)) != 0) {
+        if (expression.op() != RegexpOp.CONCAT || expression.childCount() != 3 || (expression.parseFlags() & Regexp.FOLD_CASE) != 0) {
             return null;
         }
         Regexp first = expression.child(0);
@@ -50,7 +52,7 @@ final class DisjointSuffixRepeatMatcher
                 repeat.op() != RegexpOp.REPEAT || repeat.min() != repeat.max() || repeat.min() < 1 || repeat.max() > 1000 ||
                 repeat.child(0).op() != RegexpOp.CHAR_CLASS || repeat.child(0).charClass().foldsAscii() ||
                 last.op() != RegexpOp.LITERAL || last.rune() < 0 || last.rune() > 127 ||
-                ((first.parseFlags() | repeat.parseFlags() | repeat.child(0).parseFlags() | last.parseFlags()) & (Regexp.FOLD_CASE | Regexp.LATIN1)) != 0) {
+                ((first.parseFlags() | repeat.parseFlags() | repeat.child(0).parseFlags() | last.parseFlags()) & Regexp.FOLD_CASE) != 0) {
             return null;
         }
         CharClass repeated = repeat.child(0).charClass();
@@ -81,7 +83,9 @@ final class DisjointSuffixRepeatMatcher
             ranges[2 * index + 1] = range.high();
             matchesAllNonAscii |= Compiler.holdsAllNonAscii(range);
         }
-        return new DisjointSuffixRepeatMatcher(lowMask, highMask, ranges, matchesAllNonAscii, repeat.min(), last.rune());
+        // A and x are ASCII, which reads alike in both encodings, so only B's encoding matters.
+        boolean repeatedLatin1 = (repeat.child(0).parseFlags() & Regexp.LATIN1) != 0;
+        return new DisjointSuffixRepeatMatcher(lowMask, highMask, ranges, repeatedLatin1, matchesAllNonAscii, repeat.min(), last.rune());
     }
 
     long estimatedRetainedSize()
@@ -146,6 +150,9 @@ final class DisjointSuffixRepeatMatcher
     /// holds it, or `-1`.
     private int previousRepeatedStart(byte[] bytes, int start, int end)
     {
+        if (repeatedLatin1) {
+            return containsRepeated(bytes[end - 1] & 0xFF) ? end - 1 : -1;
+        }
         int previous = previousRuneStart(bytes, start, end);
         if (previous >= 0) {
             return containsRepeated(Utf8.decodedCodePoint(Utf8.decode(bytes, previous, end))) ? previous : -1;

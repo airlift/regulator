@@ -358,6 +358,31 @@ public class TestBoundedCharacterClassCounter
     }
 
     @Test
+    public void testAsciiClassReadsBytesInEveryFrontEnd()
+    {
+        // Every byte of a non-ASCII character, malformed or not, is at least 0x80, so a class of
+        // only ASCII characters reads alike byte by byte, which Rust byte mode's ASCII classes
+        // need, as they carry no Latin-1 flag.
+        Slice input = Slices.wrappedBuffer(new byte[] {
+                'a', 'b', (byte) 0xC3, (byte) 0xA9, 'c', 'd', 'e', (byte) 0xE2, (byte) 0x82, 'f', 'g',
+                (byte) 0x80, 'h', 'i', 'j', 'k', 'l', (byte) 0xFF, 'm', 'n', (byte) 0xF0, (byte) 0x9F, (byte) 0x98, (byte) 0x80, 'o', 'p',
+        });
+        String pattern = "[A-Za-z]{2,4}";
+        for (Re2 re2 : List.of(
+                Re2.compile(utf8Slice(pattern)),
+                JavaRegexp.compile(utf8Slice(pattern)).re2(),
+                TrinoRegexp.compile(utf8Slice(pattern)).re2(),
+                RustRegexp.compile(utf8Slice(pattern)).re2(),
+                RustRegexp.compile(utf8Slice(pattern), RustRegexp.Options.bytes()).re2())) {
+            BoundedCharacterClassCounter counter = re2.createBoundedCharacterClassCounter();
+            assertThat(counter.readsBytesForDiagnostics()).isTrue();
+            assertThat(counter.count(input)).isEqualTo(countWithGeneralMatcher(re2, input));
+            assertThat(counter.findSpan(input, 0, input.length(), 2)).isEqualTo(packSpan(4, 7));
+        }
+        assertThat(Re2.compile(utf8Slice("[a-z\\x{80}]{2,4}")).createBoundedCharacterClassCounter().readsBytesForDiagnostics()).isFalse();
+    }
+
+    @Test
     public void testRejectsUnsupportedShapes()
     {
         for (String pattern : List.of("[a-z]*", "[a-z]{2,4}?", "^[a-z]{2,4}", "(?:ab){2,4}")) {
@@ -377,6 +402,8 @@ public class TestBoundedCharacterClassCounter
         assertThat(bounded.findSpan(input, 0, input.length(), 6)).isEqualTo(packSpan(10, 14));
         assertThat(bounded.findSpan(input, 0, input.length(), 14)).isEqualTo(packSpan(14, 16));
         assertThat(bounded.findSpan(input, 0, input.length(), 16)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(bounded.contains(input)).isTrue();
+        assertThat(bounded.contains(utf8Slice("a é 1 ж"))).isFalse();
 
         Slice regionBacking = utf8Slice("!éж  cdef?");
         Slice region = Slices.wrappedBuffer(regionBacking.byteArray(), regionBacking.byteArrayOffset() + 1, regionBacking.length() - 2);
@@ -384,6 +411,7 @@ public class TestBoundedCharacterClassCounter
                 .createBoundedCharacterClassCounter();
         assertThat(unbounded.findSpan(region, 0, region.length(), 0)).isEqualTo(packSpan(0, 4));
         assertThat(unbounded.findSpan(region, 0, region.length(), 4)).isEqualTo(packSpan(6, 10));
+        assertThat(unbounded.contains(utf8Slice("a!").slice(1, 1))).isFalse();
 
         Slice nonzeroRegion = utf8Slice("!abcde?");
         BoundedCharacterClassCounter regionMatcher = Re2.compile(utf8Slice("[a-z]{2,3}"))
@@ -396,6 +424,8 @@ public class TestBoundedCharacterClassCounter
         Slice malformed = Slices.wrappedBuffer(new byte[] {'a', (byte) 0xFF, 'b'});
         assertThat(malformedMatcher.findSpan(malformed, 0, malformed.length(), 0)).isEqualTo(packSpan(0, 1));
         assertThat(malformedMatcher.findSpan(malformed, 0, malformed.length(), 1)).isEqualTo(packSpan(2, 3));
+        assertThat(malformedMatcher.contains(malformed)).isTrue();
+        assertThat(Re2.compile(utf8Slice("[^x]{2,3}")).createBoundedCharacterClassCounter().contains(malformed)).isFalse();
 
         BoundedCharacterClassCounter latin1Matcher = Re2.compile(utf8Slice("[^x]{1,3}"), Re2.Options.latin1())
                 .createBoundedCharacterClassCounter();

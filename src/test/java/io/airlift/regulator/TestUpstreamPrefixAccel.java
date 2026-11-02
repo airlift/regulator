@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestUpstreamPrefixAccel
 {
     @Test
-    public void testNonAsciiPrefixAccelRoute()
+    public void testFusedPrefixAccelRoute()
     {
         Prog nonAsciiProgram = compile("x");
         nonAsciiProgram.configurePrefixAccel(Slices.utf8Slice("Шерлок Холмс"), false);
@@ -36,21 +36,25 @@ public class TestUpstreamPrefixAccel
 
         Prog asciiProgram = compile("x");
         asciiProgram.configurePrefixAccel(Slices.utf8Slice("Sherlock Holmes"), false);
-        assertThat(asciiProgram.prefixAccelStrategy(32768)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(asciiProgram.prefixAccelStrategy(1023)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(asciiProgram.prefixAccelStrategy(1024)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_VECTOR);
     }
 
     @Test
-    public void testNonAsciiPrefixAccelMatchesReference()
+    public void testFusedPrefixAccelMatchesReference()
     {
         Random random = new Random(2);
-        for (String prefix : List.of("Шерлок Холмс", "夏洛克·福尔摩斯")) {
+        for (String prefix : List.of("Шерлок Холмс", "夏洛克·福尔摩斯", "Sherlock Holmes", "aqj")) {
             byte[] literal = prefix.getBytes(StandardCharsets.UTF_8);
             Prog program = compile("x");
             program.configurePrefixAccel(Slices.wrappedBuffer(literal), false);
 
             for (int iteration = 0; iteration < 1_000; iteration++) {
+                // Half the bytes come from the literal, so first-and-last candidates are dense.
                 byte[] data = new byte[random.nextInt(2049) + literal.length + 8];
-                random.nextBytes(data);
+                for (int index = 0; index < data.length; index++) {
+                    data[index] = random.nextBoolean() ? literal[random.nextInt(literal.length)] : (byte) random.nextInt(256);
+                }
                 if (random.nextBoolean()) {
                     int insertionPosition = random.nextInt(data.length - literal.length + 1);
                     System.arraycopy(literal, 0, data, insertionPosition, literal.length);

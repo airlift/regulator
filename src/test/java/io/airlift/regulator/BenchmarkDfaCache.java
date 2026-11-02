@@ -51,7 +51,9 @@ public class BenchmarkDfaCache
 {
     private static final String HARD = "[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ$";
     private static final String LATE_TRANSITION = "^a*bc$";
-    private static final String STATE_GROWTH = "[a-q][^u-z]{80}x";
+    // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
+    // answer it without the DFA.
+    private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
 
     @State(Scope.Benchmark)
     public static class SharedWarmState

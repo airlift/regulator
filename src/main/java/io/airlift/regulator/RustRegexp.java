@@ -197,8 +197,7 @@ public final class RustRegexp
         /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
         /// so each operation that would run its specialized scan runs dedicated bytecode instead.
         /// Operations that take another route keep it. Patterns that are not eligible, or whose
-        /// class cannot be generated, compile as they do without this option. Byte-mode patterns
-        /// have no specialized scan, so they are never eligible. Disabled by default.
+        /// class cannot be generated, compile as they do without this option. Disabled by default.
         ///
         /// @see RustRegexp#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
@@ -312,15 +311,11 @@ public final class RustRegexp
         Slice patternCopy = pattern.copy();
         ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
         int compileFlags = options.compileFlags();
-        // Byte mode builds no scan plan. Only byte constructs carry the Latin-1 flag the analysis
-        // checks, so the analysis alone would still admit an ASCII-only byte-mode pattern.
-        Re2 compiled = Re2.compileParsedForRust(
-                patternCopy,
-                parsed,
-                compileFlags,
-                options.maxMemory(),
-                options.byteFrequencies(),
-                (compileFlags & Regexp.LATIN1) == 0 ? scanPlanMode : ScanPlanMode.DISABLED);
+        // Byte mode keeps its scan plan. A plan never matches empty, so byte mode's one-byte advance
+        // past an empty match never applies, and the analysis declines every byte construct that
+        // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
+        // the any-byte dot, which has no such flag, by its kind.
+        Re2 compiled = Re2.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         return new RustRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 
