@@ -89,15 +89,14 @@ final class VectorByteSetScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Finds the first position where one of the filter's literals
-    // matches at all three of its positions. Each vector step loads three vectors. For two or
-    // four groups, it ORs each once with its position's mask and compares every group against
-    // those three; for eight, it looks up every group's bit by nibble.
+    // matches at all three of its positions. Each vector step loads three vectors. For two
+    // groups, it ORs each once with its position's mask and compares both groups against those
+    // three; for more, it looks up every group's bit by nibble.
     static int findLiteralSet(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         return switch (filter.values().length / 3) {
             case 2 -> findTwoLiterals(data, offset, length, filter);
-            case 4 -> findFourLiterals(data, offset, length, filter);
-            case 8 -> findLiteralNibbles(data, offset, length, filter);
+            case 4, 8 -> findLiteralNibbles(data, offset, length, filter);
             default -> throw new IllegalArgumentException("literal filter width must be two, four, or eight");
         };
     }
@@ -127,46 +126,6 @@ final class VectorByteSetScanner
             ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
             VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
                     .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1));
-            if (matches.anyTrue()) {
-                return position + matches.firstTrue();
-            }
-        }
-        return filter.find(data, position, end - position);
-    }
-
-    private static int findFourLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
-    {
-        byte[] values = filter.values();
-        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
-        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
-        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
-        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
-        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
-        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
-        ByteVector firstValue2 = ByteVector.broadcast(SPECIES, values[6]);
-        ByteVector secondValue2 = ByteVector.broadcast(SPECIES, values[7]);
-        ByteVector thirdValue2 = ByteVector.broadcast(SPECIES, values[8]);
-        ByteVector firstValue3 = ByteVector.broadcast(SPECIES, values[9]);
-        ByteVector secondValue3 = ByteVector.broadcast(SPECIES, values[10]);
-        ByteVector thirdValue3 = ByteVector.broadcast(SPECIES, values[11]);
-        ByteVector firstMask = ByteVector.broadcast(SPECIES, filter.firstMask());
-        ByteVector secondMask = ByteVector.broadcast(SPECIES, filter.secondMask());
-        ByteVector thirdMask = ByteVector.broadcast(SPECIES, filter.thirdMask());
-        int firstOffset = filter.firstOffset();
-        int secondOffset = filter.secondOffset();
-        int thirdOffset = filter.thirdOffset();
-        int end = offset + length;
-        // The third position of the last vector's last lane must lie before the end.
-        int vectorEnd = end - thirdOffset - SPECIES.length();
-        int position = offset;
-        for (; position <= vectorEnd; position += SPECIES.length()) {
-            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
-            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
-            VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
-                    .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1))
-                    .or(literalMatches(first, second, third, firstValue2, secondValue2, thirdValue2))
-                    .or(literalMatches(first, second, third, firstValue3, secondValue3, thirdValue3));
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
