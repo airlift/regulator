@@ -507,7 +507,8 @@ public class TestDfaStartByteAcceleration
                 assertThat(VectorByteSetScanner.findLiteralSet(text, 0, end, filter)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
             }
         }
-        // Each scanner width runs its own kernel.
+        // Two-group filters run the compare kernel; four- and eight-group filters share the
+        // nibble kernel, the eight-group one with group bits up to the sign bit.
         assertThat(scannerWidths).containsExactlyInAnyOrder(2, 4, 8);
     }
 
@@ -559,6 +560,26 @@ public class TestDfaStartByteAcceleration
         program = compile(pattern);
         text = Slices.utf8Slice(".".repeat(4_096) + "abcdef abc def GHI");
         assertDfaMatchesNfa(program, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, pattern);
+
+        // Three literals make a four-group filter, which the nibble kernel scans with a two-bit
+        // mask at the second position: [bc] with [bf] keeps it inside the low nibble, and [bc]
+        // with [bB] spreads it across both nibbles. The scan finds every literal the pattern
+        // accepts inside a full vector.
+        for (char other : "fB".toCharArray()) {
+            pattern = "a[bc]x|e[b" + other + "]y|idz";
+            program = compile(pattern);
+            dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(dfa.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
+            if (dfa.startLiteralFilter() != null) {
+                assertThat(dfa.startLiteralFilter().secondMask()).isEqualTo((byte) (other == 'f' ? 0x05 : 0x21));
+            }
+            for (String literal : List.of("abx", "acx", "eby", "e" + other + "y", "idz")) {
+                text = Slices.utf8Slice(".".repeat(2_048) + literal + ".".repeat(64));
+                assertDfaMatchesNfa(program, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, pattern);
+                assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).as("pattern %s literal %s", pattern, literal).isEqualTo(2_051);
+            }
+            assertThat(dfa.startLiteralFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
+        }
     }
 
     @Test
