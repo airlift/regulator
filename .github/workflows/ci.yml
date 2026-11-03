@@ -159,7 +159,7 @@ jobs:
           npm run check
 
   build:
-    name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }})
+    name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }}${{ matrix.max-vector-size && format(', {0}-byte vectors', matrix.max-vector-size) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -171,6 +171,15 @@ jobs:
         native-access:
           - disabled
           - enabled
+        max-vector-size:
+          - ""
+        include:
+          - java-version: 26
+            native-access: enabled
+            max-vector-size: 8
+          - java-version: 26
+            native-access: enabled
+            max-vector-size: 16
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -184,10 +193,14 @@ jobs:
       - name: Build
         env:
           NATIVE_ACCESS: ${{ matrix.native-access }}
+          MAX_VECTOR_SIZE: ${{ matrix.max-vector-size }}
         run: |
           arguments=()
           if [[ "$NATIVE_ACCESS" == enabled ]]; then
             arguments+=("-Dregulator.nativeAccessJvmArgument=--enable-native-access=ALL-UNNAMED")
+          fi
+          if [[ -n "$MAX_VECTOR_SIZE" ]]; then
+            arguments+=("-Dregulator.vectorJvmArgument=-XX:MaxVectorSize=${MAX_VECTOR_SIZE}")
           fi
           ./mvnw clean install -B -V -P ci "${arguments[@]}"
 

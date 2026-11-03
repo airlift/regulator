@@ -51,6 +51,18 @@ locally:
 ./mvnw clean install -Dregulator.nativeAccessJvmArgument=--enable-native-access=ALL-UNNAMED
 ```
 
+CI also runs the current feature release with native access enabled at 8-byte
+and 16-byte vectors, whatever the runner's hardware width. At 8 bytes the
+vector scanners are off and searches use the scalar or SWAR scanners; 16 bytes
+is the narrowest width the vector scanners use, as on our Graviton benchmark
+hosts. To reproduce one:
+
+```bash
+./mvnw clean install \
+    -Dregulator.nativeAccessJvmArgument=--enable-native-access=ALL-UNNAMED \
+    -Dregulator.vectorJvmArgument=-XX:MaxVectorSize=8
+```
+
 Before changing the Unicode database generator, its manifest, or the
 generated database, run the same check CI runs. It downloads the pinned UCD
 files from unicode.org:
