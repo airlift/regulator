@@ -178,7 +178,7 @@ public class BenchmarkSpecializedRustRegexp
             Workload workload = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             requireCaptureOperation(workload, operation);
             RustRegexp regexp = RustRegexp.compile(workload.pattern());
-            if (!regexp.re2().usesScanPlanForDiagnostics() || regexp.usesGeneratedBytecode()) {
+            if (!regexp.usesScanPlanForDiagnostics() || regexp.usesGeneratedBytecode()) {
                 throw new IllegalStateException("default compile does not interpret a scan plan: " + workloadId);
             }
             load(workload, regexp);
@@ -191,7 +191,7 @@ public class BenchmarkSpecializedRustRegexp
         void load(WorkloadData data)
         {
             RustRegexp regularEngine = RustRegexp.compileWithoutScanPlanForTesting(data.definition.pattern(), RustRegexp.Options.defaults());
-            if (regularEngine.re2().usesScanPlanForDiagnostics()) {
+            if (regularEngine.usesScanPlanForDiagnostics()) {
                 throw new IllegalStateException("regular-engine compile has a scan plan: " + data.definition.workloadId());
             }
             load(data.definition, regularEngine);

@@ -37,6 +37,16 @@ public class TestJavaRegexp
             (byte) 'a', (byte) ' ', (byte) '\n', (byte) 0xC2, (byte) 0xB2, (byte) 0xCC, (byte) 0x81);
 
     @Test
+    public void testNullInputFailures()
+    {
+        // Every operation but count names a null input `input`, and checks it first.
+        TestRe2Api.assertNullInputFailures(JavaRegexp.compile(utf8Slice("(a)(b)?")), operation ->
+                operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
+        TestRe2Api.assertNullInputFailures(JavaRegexp.compile(utf8Slice("abc")), operation ->
+                operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
+    }
+
+    @Test
     public void testCaptureResultsUseUtf8ByteOffsets()
     {
         String patternText = "(?<money>💰)(é)?";
@@ -203,7 +213,7 @@ public class TestJavaRegexp
         // between ASCII bytes and quit next to any other byte, and OnePass evaluates them as
         // BitState does, over text with ², a combining acute accent, and their bytes alone.
         Slice text = utf8Slice("x foo bar");
-        Re2 words = JavaRegexp.compile(utf8Slice("\\bfoo\\b")).re2();
+        JavaRegexp words = JavaRegexp.compile(utf8Slice("\\bfoo\\b"));
         assertThat(words.findInto(text, new int[2])).isTrue();
         assertThat(words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
 

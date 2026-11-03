@@ -133,16 +133,11 @@ public class TestRustRegexp
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a"), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("options is null");
-        RustRegexp regexp = RustRegexp.compile(utf8Slice("a*"));
-        assertThatThrownBy(() -> regexp.find(null))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("input is null");
-        assertThatThrownBy(() -> regexp.findResult(null, 0, 0))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("input is null");
-        assertThatThrownBy(() -> regexp.matchesInto(null, new int[2]))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("input is null");
+        // Every operation but count names a null input `input`, and checks it first.
+        for (String pattern : List.of("a*", "(a)(b)?", "abc")) {
+            TestRe2Api.assertNullInputFailures(RustRegexp.compile(utf8Slice(pattern)), operation ->
+                    operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
+        }
     }
 
     @Test
@@ -292,7 +287,7 @@ public class TestRustRegexp
         Slice text = utf8Slice("x foo bar\r\nbaz");
         for (RustRegexp.Options options : List.of(RustRegexp.Options.defaults(), RustRegexp.Options.bytes())) {
             for (String pattern : DFA_ROUTE_PATTERNS) {
-                Re2 compiled = RustRegexp.compile(utf8Slice(pattern), options).re2();
+                RustRegexp compiled = RustRegexp.compile(utf8Slice(pattern), options);
                 Prog forward = compiled.forwardProgramForDiagnostics();
                 assertThat(forward.hasDfaUnsupportedAssertions()).as(pattern).isFalse();
                 assertThat(compiled.findInto(text, new int[2])).as(pattern).isTrue();
@@ -300,7 +295,7 @@ public class TestRustRegexp
             }
 
             // A match of variable length takes its start from the reverse program.
-            Re2 words = RustRegexp.compile(utf8Slice("\\b{start}\\w+\\b{end}"), options).re2();
+            RustRegexp words = RustRegexp.compile(utf8Slice("\\b{start}\\w+\\b{end}"), options);
             int[] groups = new int[2];
             assertThat(words.findInto(utf8Slice("!! foo"), groups)).isTrue();
             assertThat(groups).containsExactly(3, 6);
@@ -364,7 +359,7 @@ public class TestRustRegexp
 
             // When the reverse program quits after the forward program found the end, and when a
             // count quits, the search reruns without the DFA.
-            Re2 compiled = RustRegexp.compile(utf8Slice("a|é\\b"), options).re2();
+            RustRegexp compiled = RustRegexp.compile(utf8Slice("a|é\\b"), options);
             int[] groups = new int[2];
             assertThat(compiled.findInto(text, groups)).isTrue();
             assertThat(groups).containsExactly(0, 1);
@@ -390,7 +385,7 @@ public class TestRustRegexp
             spans.add(matcher.start() + "-" + matcher.end());
             assertThat(matcher.dfaQuitStreak()).isEqualTo(quit + 1);
         }
-        Dfa.DfaInstance forward = words.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Dfa.DfaInstance forward = words.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(forward).isNotNull();
         int stateCount = forward.cacheSnapshot().stateCount();
         while (matcher.find()) {

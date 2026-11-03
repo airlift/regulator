@@ -15,9 +15,9 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 
-/// The RE2 executor class of one RE2, Java, or Rust pattern, a [Re2] compiled in the RE2
-/// dialect, whose case-sensitive scan plan was compiled to its own hidden class. Each method returns
-/// what the [ScanPlan] method it names returns, with the same groups. A start-anchored
+/// The RE2 executor class of one RE2, Java, or Rust pattern, a [CompiledPattern] compiled in
+/// the RE2 dialect, whose case-sensitive scan plan was compiled to its own hidden class. Each
+/// method returns what the [ScanPlan] method it names returns, with the same groups. A start-anchored
 /// plan implements only `match`, and an unanchored plan only `search` and, when
 /// full-Slice find hands off to the ordinary engine, `searchBeforeHandoff`; the others throw
 /// [UnsupportedOperationException]. A generated class is stateless and never calls back into

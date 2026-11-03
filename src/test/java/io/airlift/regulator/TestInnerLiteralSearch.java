@@ -85,12 +85,12 @@ public class TestInnerLiteralSearch
         // An alternation of literals is searched as a set. Every language's parser factors the
         // class out of this one's alternatives.
         Slice target = utf8Slice("([A-Za-z]awyer|[A-Za-z]inn)\\s");
-        for (Map.Entry<String, Re2> compiled : List.of(
+        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
                 Map.entry("RE2", Re2.compile(target)),
-                Map.entry("Java", JavaRegexp.compile(target).re2()),
+                Map.entry("Java", JavaRegexp.compile(target)),
                 Map.entry("Trino", TrinoRegexp.compile(target).re2()),
-                Map.entry("Rust", RustRegexp.compile(target).re2()),
-                Map.entry("Rust bytes", RustRegexp.compile(target, RUST_BYTES_OPTIONS).re2()))) {
+                Map.entry("Rust", RustRegexp.compile(target)),
+                Map.entry("Rust bytes", RustRegexp.compile(target, RUST_BYTES_OPTIONS)))) {
             InnerLiteralSearch search = compiled.getValue().innerLiteralSearchForDiagnostics();
             assertThat(search).as(compiled.getKey()).isNotNull();
             assertThat(literal(search)).as(compiled.getKey()).isEqualTo("awyer|inn");
@@ -226,8 +226,8 @@ public class TestInnerLiteralSearch
                 // An alternative that never matches, but that the literal walk reads as empty, leaves
                 // the literal out of the expected engine.
                 String ordinary = "(?:" + pattern + ")|\\b\\B";
-                assertThat(language.re2(pattern).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, pattern).isNotNull();
-                assertThat(language.re2(ordinary).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, ordinary).isNull();
+                assertThat(language.compiledPattern(pattern).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, pattern).isNotNull();
+                assertThat(language.compiledPattern(ordinary).forwardProgramForDiagnostics().transparentStartLiteral()).as("%s %s", language, ordinary).isNull();
                 Engine actual = language.compile(pattern);
                 Engine expected = language.compile(ordinary);
                 for (Slice text : texts) {
@@ -283,7 +283,7 @@ public class TestInnerLiteralSearch
         for (String regex : List.of("[\\w.+-]+@[\\w.-]+\\.\\w+", "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?([A-Z]+[0-9]+))?)")) {
             for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.RUST_BYTES)) {
                 String description = language + " " + regex;
-                Re2 pattern = language.compileRe2(regex);
+                CompiledPattern pattern = language.compiledPattern(regex);
                 assertThat(pattern.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
                 Slice absent = utf8Slice("    return contact.support(value)");
                 assertThat(pattern.find(absent)).as(description).isFalse();
@@ -298,7 +298,7 @@ public class TestInnerLiteralSearch
         }
     }
 
-    private static long forwardStateCount(Re2 pattern)
+    private static long forwardStateCount(CompiledPattern pattern)
     {
         long states = 0;
         for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
@@ -361,7 +361,7 @@ public class TestInnerLiteralSearch
         }
     }
 
-    private static void assertSearchRoute(Re2 pattern, InnerLiteralSearch search, Engine expected, Slice text, boolean nearStart)
+    private static void assertSearchRoute(CompiledPattern pattern, InnerLiteralSearch search, Engine expected, Slice text, boolean nearStart)
     {
         String description = text.toStringUtf8();
         long span = search.search(text, 0, text.length(), 0, text.length());
@@ -477,7 +477,7 @@ public class TestInnerLiteralSearch
 
     private static InnerLiteralSearch innerLiteralSearch(String pattern)
     {
-        return RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).re2().innerLiteralSearchForDiagnostics();
+        return RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).innerLiteralSearchForDiagnostics();
     }
 
     private record SmallBudget(String pattern, long maxMemory, String match, boolean keepsSearch) {}
@@ -486,34 +486,21 @@ public class TestInnerLiteralSearch
     {
         RE2, JAVA, TRINO, RUST, RUST_BYTES, RUST_BYTES_ASCII;
 
-        Re2 compileRe2(String pattern)
-        {
-            Slice slice = utf8Slice(pattern);
-            return switch (this) {
-                case RE2 -> Re2.compile(slice);
-                case JAVA -> JavaRegexp.compile(slice).re2();
-                case RUST -> RustRegexp.compile(slice).re2();
-                case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS).re2();
-                case RUST_BYTES_ASCII -> RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false)).re2();
-                case TRINO -> throw new IllegalArgumentException("Trino has no Re2 handle");
-            };
-        }
-
         Engine compile(String pattern)
         {
-            return this == TRINO ? trinoEngine(TrinoRegexp.compile(utf8Slice(pattern))) : regexpEngine(re2(pattern));
+            return this == TRINO ? trinoEngine(TrinoRegexp.compile(utf8Slice(pattern))) : regexpEngine(compiledPattern(pattern));
         }
 
-        Re2 re2(String pattern)
+        CompiledPattern compiledPattern(String pattern)
         {
             Slice slice = utf8Slice(pattern);
             return switch (this) {
                 case RE2 -> Re2.compile(slice);
-                case JAVA -> JavaRegexp.compile(slice).re2();
+                case JAVA -> JavaRegexp.compile(slice);
                 case TRINO -> TrinoRegexp.compile(slice).re2();
-                case RUST -> RustRegexp.compile(slice).re2();
-                case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS).re2();
-                case RUST_BYTES_ASCII -> RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false)).re2();
+                case RUST -> RustRegexp.compile(slice);
+                case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS);
+                case RUST_BYTES_ASCII -> RustRegexp.compile(slice, RustRegexp.Options.defaults().setBytes(true).setUnicode(false));
             };
         }
     }
@@ -527,7 +514,7 @@ public class TestInnerLiteralSearch
         boolean find(Slice text);
     }
 
-    private static Engine regexpEngine(Re2 pattern)
+    private static Engine regexpEngine(CompiledPattern pattern)
     {
         return new Engine()
         {
