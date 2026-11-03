@@ -112,7 +112,8 @@ public sealed class TrinoRegexp
     // TrinoRegexp.Options has no syntax settings, so parsing always starts from the same flags.
     private static final int PARSE_FLAGS = Regexp.LIKE_PERL;
 
-    private final Re2 re2;
+    // The compiled engine; null only in the literal-alternation and literal-set subclasses.
+    private final TrinoCompiledPattern re2;
     private final boolean mayHaveSingleByteRepeatMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
     private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
@@ -124,10 +125,10 @@ public sealed class TrinoRegexp
     }
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
-    private TrinoRegexp(Re2 re2)
+    private TrinoRegexp(TrinoCompiledPattern compiledPattern)
     {
-        this.re2 = requireNonNull(re2, "re2 is null");
-        this.mayHaveSingleByteRepeatMatcher = re2.canMatchEmpty();
+        this.re2 = requireNonNull(compiledPattern, "compiledPattern is null");
+        this.mayHaveSingleByteRepeatMatcher = compiledPattern.canMatchEmpty();
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -195,7 +196,7 @@ public sealed class TrinoRegexp
         if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
         }
-        Re2 compiledPattern = CompiledPattern.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        TrinoCompiledPattern compiledPattern = new TrinoCompiledPattern(CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode));
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);
@@ -253,7 +254,7 @@ public sealed class TrinoRegexp
                 re2.matcher(source, retainedCapturingGroupCount));
     }
 
-    Re2 re2()
+    TrinoCompiledPattern re2()
     {
         return re2;
     }
@@ -430,7 +431,7 @@ public sealed class TrinoRegexp
     private static final class BeginLineTrinoRegexp
             extends TrinoRegexp
     {
-        private BeginLineTrinoRegexp(Re2 re2)
+        private BeginLineTrinoRegexp(TrinoCompiledPattern re2)
         {
             super(re2);
         }
@@ -463,7 +464,7 @@ public sealed class TrinoRegexp
     {
         private final OrderedLiteralMatcher matcher;
 
-        private OrderedLiteralTrinoRegexp(Re2 re2, OrderedLiteralMatcher matcher)
+        private OrderedLiteralTrinoRegexp(TrinoCompiledPattern re2, OrderedLiteralMatcher matcher)
         {
             super(re2);
             this.matcher = requireNonNull(matcher, "matcher is null");
@@ -834,7 +835,7 @@ public sealed class TrinoRegexp
     {
         private final DotStarLiteralSpanMatcher spanMatcher;
 
-        private DotStarLiteralTrinoRegexp(Re2 re2, DotStarLiteralSpanMatcher spanMatcher)
+        private DotStarLiteralTrinoRegexp(TrinoCompiledPattern re2, DotStarLiteralSpanMatcher spanMatcher)
         {
             super(re2);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
@@ -1010,7 +1011,7 @@ public sealed class TrinoRegexp
     {
         private final FixedWidthByteSpanMatcher spanMatcher;
 
-        FixedWidthByteTrinoRegexp(Re2 re2, FixedWidthByteSpanMatcher spanMatcher)
+        FixedWidthByteTrinoRegexp(TrinoCompiledPattern re2, FixedWidthByteSpanMatcher spanMatcher)
         {
             super(re2);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
@@ -1181,7 +1182,7 @@ public sealed class TrinoRegexp
     private static final class LiteralAlternationTrinoRegexp
             extends TrinoRegexp
     {
-        // This subtype has no compiled RE2 pattern to hold the source bytes, so it keeps them.
+        // This subtype has no compiled engine to hold the source bytes, so it keeps them.
         private final Slice patternBytes;
         private final LiteralAlternationSpanMatcher spanMatcher;
 
@@ -1391,7 +1392,7 @@ public sealed class TrinoRegexp
     private static final class LiteralSetTrinoRegexp
             extends TrinoRegexp
     {
-        // This subtype has no compiled RE2 pattern to hold the source bytes, so it keeps them.
+        // This subtype has no compiled engine to hold the source bytes, so it keeps them.
         private final Slice patternBytes;
         private final LiteralSetSpanMatcher spanMatcher;
 
@@ -1602,7 +1603,7 @@ public sealed class TrinoRegexp
     private static final class ExactLiteralTrinoRegexp
             extends TrinoRegexp
     {
-        private ExactLiteralTrinoRegexp(Re2 re2)
+        private ExactLiteralTrinoRegexp(TrinoCompiledPattern re2)
         {
             super(re2);
         }
@@ -1776,7 +1777,7 @@ public sealed class TrinoRegexp
     private static final class CharacterClassTrinoRegexp
             extends TrinoRegexp
     {
-        private CharacterClassTrinoRegexp(Re2 re2)
+        private CharacterClassTrinoRegexp(TrinoCompiledPattern re2)
         {
             super(re2);
         }
@@ -1944,7 +1945,7 @@ public sealed class TrinoRegexp
         private final ScanKernelGenerator.CompiledTrinoKernel generated;
         private final CompiledTrinoScan scan;
 
-        private CompiledScanTrinoRegexp(Re2 re2, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
+        private CompiledScanTrinoRegexp(TrinoCompiledPattern re2, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
         {
             super(re2);
             this.contains = contains;
@@ -1952,10 +1953,10 @@ public sealed class TrinoRegexp
             this.scan = generated.scan();
         }
 
-        /// Returns `re2` with a generated class, or `null` when the pattern is not
-        /// eligible or the class cannot be generated. The declared type keeps verification of the
-        /// base class from loading this class.
-        static TrinoRegexp create(Re2 re2)
+        /// Returns a Trino pattern over the compiled engine `re2` with a generated class, or `null`
+        /// when the pattern is not eligible or the class cannot be generated. The declared type
+        /// keeps verification of the base class from loading this class.
+        static TrinoRegexp create(TrinoCompiledPattern re2)
         {
             ScanKernelGenerator.TrinoRoutes routes = ScanKernelGenerator.TrinoRoutes.of(re2);
             if (routes == null) {

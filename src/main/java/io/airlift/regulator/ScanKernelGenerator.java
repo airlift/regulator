@@ -147,7 +147,7 @@ final class ScanKernelGenerator
     ///
     /// @param contains whether full-Slice find reaches the plan rather than a retained literal kernel
     /// @param count how count reaches the plan
-    record TrinoRoutes(Re2 pattern, ScanPlan plan, boolean contains, CompiledPattern.ScanPlanCount count)
+    record TrinoRoutes(TrinoCompiledPattern pattern, ScanPlan plan, boolean contains, CompiledPattern.ScanPlanCount count)
     {
         TrinoRoutes
         {
@@ -159,7 +159,7 @@ final class ScanKernelGenerator
         /// Returns the routes of a pattern compiled to the base [TrinoRegexp], or `null`
         /// when it has no case-sensitive scan plan or an operation other than `contains`
         /// would skip it.
-        static TrinoRoutes of(Re2 pattern)
+        static TrinoRoutes of(TrinoCompiledPattern pattern)
         {
             ScanPlan plan = pattern.caseSensitiveScanPlan();
             if (plan == null) {

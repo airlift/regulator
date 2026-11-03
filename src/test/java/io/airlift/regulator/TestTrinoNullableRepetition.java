@@ -275,7 +275,7 @@ public class TestTrinoNullableRepetition
         String inputText = "x".repeat(512) + "a".repeat(65_536) + "b";
         Slice input = utf8Slice(inputText);
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("((?:a?|b)*)"));
-        Re2 pattern = regexp.re2();
+        TrinoCompiledPattern pattern = regexp.re2();
         assertThat(pattern.isReverseProgramComputed()).isFalse();
 
         RegexpMatcher matcher = pattern.matcher(input);

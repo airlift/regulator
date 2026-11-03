@@ -934,7 +934,7 @@ public class TestDfaCountMatches
                 .isEqualTo(expected);
         routeAssertion.accept(countSelfLoopScanCount(pattern));
 
-        // Re2.count falls back to the matcher loop for a negative result, so also check the DFA directly.
+        // The inherited count falls back to the matcher loop for a negative result, so also check the DFA directly.
         Prog program = TrinoRegexp.compile(utf8Slice(expression)).re2().forwardProgramForDiagnostics();
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
                 .as(expression)
@@ -973,7 +973,7 @@ public class TestDfaCountMatches
         return countSelfLoopScanCount(pattern.re2(), Dfa.DfaInstance.Kind.FIRST_MATCH);
     }
 
-    private static int countSelfLoopScanCount(Re2 pattern, Dfa.DfaInstance.Kind kind)
+    private static int countSelfLoopScanCount(CompiledPattern pattern, Dfa.DfaInstance.Kind kind)
     {
         return countSelfLoopScanCount(pattern.forwardProgramForDiagnostics(), kind);
     }

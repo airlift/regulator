@@ -150,7 +150,7 @@ public class TestScanPlan
         assertThat(TrinoRegexp.compile(utf8Slice(URL)).re2().findInto(finalLf, 0, finalLf.length() - 1, groups)).isTrue();
         assertThat(groups).containsExactly(0, finalLf.length() - 1, 8, 12);
         // The complete range reaches the plan, which must stop before the final LF.
-        Re2 planOnly = TrinoRegexp.compile(utf8Slice(URL)).re2();
+        TrinoCompiledPattern planOnly = TrinoRegexp.compile(utf8Slice(URL)).re2();
         disableOrdinaryEngine(planOnly);
         assertThat(planOnly.findInto(finalLf, 0, finalLf.length(), groups)).isTrue();
         assertThat(groups).containsExactly(0, finalLf.length() - 1, 8, 12);
@@ -168,7 +168,7 @@ public class TestScanPlan
             Prog control = Compiler.compileNormalized(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), false, maxMemory - maxMemory / 3, Compiler.Dialect.TRINO, parsed.caseFolding());
             ScanPlan plan = analyze(expression);
             assertThat(plan).isNotNull();
-            Re2 compiled = TrinoRegexp.compile(pattern).re2();
+            TrinoCompiledPattern compiled = TrinoRegexp.compile(pattern).re2();
             assertThat(compiled.usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(compiled.forwardProgramForDiagnostics().dfaMemory())
                     .as(expression)
@@ -329,7 +329,7 @@ public class TestScanPlan
                 "(?i)^ABC([a-h]+)",
                 "(?i)^colou?r:([a-h]+)",
                 "(?i)^(?:ab){1,3}([c-h]+)")) {
-            Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
             assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isTrue();
             verifyAgainstJoni(expression, inputs);
@@ -674,7 +674,7 @@ public class TestScanPlan
                 new ExpressionAttempts("([^/]+)/", 1));
         for (ExpressionAttempts attempts : cases) {
             String expression = attempts.expression();
-            Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
             ScanPlan plan = requireNonNull(analyze(expression));
@@ -752,20 +752,20 @@ public class TestScanPlan
         // A literal led by a non-ASCII byte moves its probe, though the prefix scan of the same
         // pattern keeps the first byte.
         assertThat(leadingLiteralProbe("été=([a-z]+)", json)).isEqualTo(5);
-        Re2 accented = TrinoRegexp.compile(utf8Slice("été=([a-z]+)"), TrinoRegexp.Options.defaults().setByteFrequencies(json)).re2();
+        TrinoCompiledPattern accented = TrinoRegexp.compile(utf8Slice("été=([a-z]+)"), TrinoRegexp.Options.defaults().setByteFrequencies(json)).re2();
         assertThat(accented.usesScanPlanForDiagnostics()).isTrue();
         assertThat(accented.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
         // A one-byte literal keeps the first byte.
         assertThat(leadingLiteralProbe("\"([^\"]*)\"", json)).isZero();
         // Default options keep first-byte scanning.
         assertThat(requireNonNull(analyze("svc1://(?:www\\.)?([^/]+)/")).leadingLiteralProbeOffsetForDiagnostics()).isZero();
-        Re2 service = TrinoRegexp.compile(utf8Slice("svc1://(?:www\\.)?([^/]+)/")).re2();
+        TrinoCompiledPattern service = TrinoRegexp.compile(utf8Slice("svc1://(?:www\\.)?([^/]+)/")).re2();
         assertThat(service.usesScanPlanForDiagnostics()).isTrue();
         assertThat(service.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
         // A distribution in which punctuation is rare probes the colon.
         ByteFrequencies rareNonLetters = TestingByteFrequencies.rareNonLetters();
         assertThat(leadingLiteralProbe("https://(?:www\\.)?([^/]+)/", rareNonLetters)).isEqualTo(5);
-        Re2 compiled = TrinoRegexp.compile(utf8Slice("https://(?:www\\.)?([^/]+)/"), TrinoRegexp.Options.defaults().setByteFrequencies(rareNonLetters)).re2();
+        TrinoCompiledPattern compiled = TrinoRegexp.compile(utf8Slice("https://(?:www\\.)?([^/]+)/"), TrinoRegexp.Options.defaults().setByteFrequencies(rareNonLetters)).re2();
         assertThat(compiled.usesScanPlanForDiagnostics()).isTrue();
         assertThat(compiled.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isEqualTo(5);
         // ASCII-folded literals and run-leading plans keep their own scans.
@@ -1110,7 +1110,7 @@ public class TestScanPlan
 
     private static int candidateAttempts(String expression, ByteFrequencies frequencies, String input)
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(frequencies)).re2();
+        TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(frequencies)).re2();
         assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isTrue();
         return requireNonNull(analyze(expression, frequencies)).candidateAttemptsForDiagnostics(utf8Slice(input));
     }
@@ -1580,7 +1580,7 @@ public class TestScanPlan
         assertThat(regexp.re2().findInto(input, 1, input.length() - 1, groups)).isFalse();
         assertThat(groups).containsOnly(-1);
         // The complete range reaches the plan. A failure after a match must clear stale offsets.
-        Re2 planOnly = TrinoRegexp.compile(utf8Slice(URL)).re2();
+        TrinoCompiledPattern planOnly = TrinoRegexp.compile(utf8Slice(URL)).re2();
         disableOrdinaryEngine(planOnly);
         assertThat(planOnly.findInto(utf8Slice("https://host/path"), groups)).isTrue();
         assertThat(planOnly.findInto(input, 1, input.length(), groups)).isFalse();
@@ -1676,11 +1676,11 @@ public class TestScanPlan
 
         // Boolean calls on these shapes reach the executors that contain the early return.
         for (String expression : List.of("^abc.*", "^https?://([^/]+)", "(?i)^ABC([^:]+)")) {
-            Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(expression)).re2();
             assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(expression).isTrue();
         }
-        Re2 unanchored = TrinoRegexp.compile(utf8Slice("(x)[^/]+")).re2();
+        TrinoCompiledPattern unanchored = TrinoRegexp.compile(utf8Slice("(x)[^/]+")).re2();
         assertThat(unanchored.usesPartialScanPlanForDiagnostics()).isFalse();
         assertThat(unanchored.usesScanPlanForFindForDiagnostics()).isTrue();
     }
@@ -1696,7 +1696,7 @@ public class TestScanPlan
                 new LiteralKernelShape("^(abc)$", CompiledPattern.BooleanPartialMatchStrategy.EQUALS_FINAL_LINE, "abc\n", "abc"))) {
             String expression = shape.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-            Re2 pattern = regexp.re2();
+            TrinoCompiledPattern pattern = regexp.re2();
             assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(expression).isEqualTo(shape.strategy());
             assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(expression).isFalse();
@@ -1783,7 +1783,7 @@ public class TestScanPlan
     public void testExecutorRoutes()
     {
         for (ExecutorRoute route : EXECUTOR_ROUTES) {
-            Re2 pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(pattern.usesPartialScanPlanForDiagnostics()).as(route.expression()).isEqualTo(route.partial());
             assertThat(pattern.usesAsciiFoldedScanExecutorForDiagnostics()).as(route.expression()).isEqualTo(route.folded());
@@ -1798,7 +1798,7 @@ public class TestScanPlan
     public void testRegionsForEveryExecutor()
     {
         for (ExecutorRoute route : EXECUTOR_ROUTES) {
-            Re2 regexp = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
+            TrinoCompiledPattern regexp = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             Regex oracle = joniPattern(route.expression());
             String complete = route.text("host");
             for (String text : List.of(
@@ -2229,7 +2229,7 @@ public class TestScanPlan
                 new BooleanSearchRoute("(?i)content-type:([^;]+);", false),
                 new BooleanSearchRoute("^(\\d+)zz", false));
         for (BooleanSearchRoute route : routes) {
-            Re2 pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
+            TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(route.expression()).isEqualTo(route.ordinarySearch());
             if (route.ordinarySearch()) {
@@ -2267,7 +2267,7 @@ public class TestScanPlan
                 new ShortBooleanMatchRoute("https?://(www\\.)?([0-9]+)/", false, false));
         for (ShortBooleanMatchRoute route : routes) {
             Re2 re2 = Re2.compile(utf8Slice(route.expression()));
-            Re2 trino = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
+            TrinoCompiledPattern trino = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             assertThat(re2.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(trino.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(re2.usesOrdinaryShortBooleanMatchForDiagnostics()).as(route.expression()).isEqualTo(route.re2Ordinary());
@@ -2290,7 +2290,7 @@ public class TestScanPlan
         assertThat(shortInput.length()).isEqualTo(48);
         int[] bounds = new int[2];
         for (String expression : List.of("^(a)?(b)?abcd([0-9]+)/\\z", "(?i)^(a)?(b)?abcd([0-9]+)/")) {
-            for (Re2 pattern : List.of(Re2.compile(utf8Slice(expression)), TrinoRegexp.compile(utf8Slice(expression)).re2())) {
+            for (CompiledPattern pattern : List.of(Re2.compile(utf8Slice(expression)), TrinoRegexp.compile(utf8Slice(expression)).re2())) {
                 disableOrdinaryEngine(pattern);
                 assertThat(pattern.find(shortInput)).as(expression).isFalse();
                 assertThat(pattern.find(shortInput, 0, shortInput.length())).as(expression).isFalse();
@@ -2374,7 +2374,7 @@ public class TestScanPlan
         for (ExpressionTemplates entry : cases) {
             String expression = entry.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-            Re2 pattern = regexp.re2();
+            TrinoCompiledPattern pattern = regexp.re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isEqualTo(!withoutPlan.contains(expression));
             for (String template : entry.templates().stream().flatMap(template -> contexts.stream().map(context -> context.replace("%s", template))).toList()) {
                 for (byte[] bytes : malformed) {
@@ -2482,8 +2482,8 @@ public class TestScanPlan
         String text = "p/q!x " + "a/".repeat(2048) + "!y!x/b/c!x tail";
         Slice input = view(text);
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-        Re2 re2 = regexp.re2();
-        assertThat(re2.usesScanPlanForDiagnostics()).isTrue();
+        TrinoCompiledPattern compiledPattern = regexp.re2();
+        assertThat(compiledPattern.usesScanPlanForDiagnostics()).isTrue();
 
         ScanPlan plan = requireNonNull(analyze(expression));
         int[] groups = new int[6];
@@ -2501,7 +2501,7 @@ public class TestScanPlan
         assertThat(planOnly.find()).isFalse();
 
         // Regions are the context of the plan and of its continuation.
-        RegexpMatcher matcher = re2.matcher(input);
+        RegexpMatcher matcher = compiledPattern.matcher(input);
         for (int[] range : new int[][] {{2, input.length()}, {6, input.length() - 5}, {7, input.length() - 6}, {0, input.length() - 6}}) {
             verifyRegionAgainstJoni(oracle, matcher, input, range[0], range[1], expression + " on [" + range[0] + ", " + range[1] + ")");
         }
@@ -2518,10 +2518,10 @@ public class TestScanPlan
                 assertThat(matcher.start(group)).as("from %s", start).isEqualTo(region.beg[group]);
                 assertThat(matcher.end(group)).as("from %s", start).isEqualTo(region.end[group]);
             }
-            assertThat(re2.find(input, start, input.length())).isTrue();
+            assertThat(compiledPattern.find(input, start, input.length())).isTrue();
         }
         assertThat(regexp.count(input)).isEqualTo(2);
-        assertThat(re2.count(input)).isEqualTo(2);
+        assertThat(compiledPattern.count(input)).isEqualTo(2);
 
         // An end assertion must see the region end, not the Slice end, after a handoff.
         String anchoredEnd = "x([^z]+)zq$";
@@ -2752,9 +2752,9 @@ public class TestScanPlan
         for (ExpressionInputs entry : cases) {
             String expression = entry.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-            Re2 re2 = regexp.re2();
+            TrinoCompiledPattern compiledPattern = regexp.re2();
             ScanPlan plan = analyze(expression);
-            assertThat(re2.usesScanPlanForDiagnostics()).as(expression).isEqualTo(plan != null);
+            assertThat(compiledPattern.usesScanPlanForDiagnostics()).as(expression).isEqualTo(plan != null);
             byte[] required = plan == null ? null : plan.requiredLiteralForDiagnostics();
             String literal = required == null ? null : new String(required, UTF_8);
             Regex oracle = joniPattern(expression);
@@ -2771,8 +2771,8 @@ public class TestScanPlan
 
                 Slice region = input.slice(byteStart, byteEnd - byteStart);
                 List<int[]> matches = joniMatches(oracle, region);
-                verifyRegionAgainstJoni(oracle, re2.matcher(input), input, byteStart, byteEnd, description);
-                assertThat(re2.find(input, byteStart, byteEnd)).as(description).isEqualTo(!matches.isEmpty());
+                verifyRegionAgainstJoni(oracle, compiledPattern.matcher(input), input, byteStart, byteEnd, description);
+                assertThat(compiledPattern.find(input, byteStart, byteEnd)).as(description).isEqualTo(!matches.isEmpty());
                 assertThat(regexp.contains(region)).as(description).isEqualTo(!matches.isEmpty());
                 assertThat(regexp.count(region)).as(description).isEqualTo(matches.size());
                 assertThat(regexp.extract(region, 0)).as(description).isEqualTo(matches.isEmpty() ? null : group(region, matches.getFirst(), 0));
@@ -2897,7 +2897,7 @@ public class TestScanPlan
         verifyBooleanCallsAgainstJoni(expression, TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern).re2(), inputs, " after handoff");
     }
 
-    private static void verifyBooleanCallsAgainstJoni(String expression, Re2 regexp, List<String> inputs, String route)
+    private static void verifyBooleanCallsAgainstJoni(String expression, TrinoCompiledPattern regexp, List<String> inputs, String route)
     {
         Regex oracle = joniPattern(expression);
         Regex wholeOracle = joniPattern("\\A(?:" + expression + ")\\z");
