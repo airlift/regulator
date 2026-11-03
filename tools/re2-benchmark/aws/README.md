@@ -1294,6 +1294,8 @@ Before it launches any host, the controller puts each archive once in every
 region that may launch a host installing it, under
 `shared/engine-builds/<sha256>.tar.zst`, and skips an object with that key
 whose metadata records the archive's SHA-256 and which is under five days old.
+It reads the archives from the build root's retained attempts, which keep them
+for that and for the revalidation that rehashes them.
 The frozen candidate archive, which every host unpacks first,
 travels the same way under `shared/candidates/<sha256>.tar.gz`. A
 language plan's bundle, which a language unit worker
@@ -1610,11 +1612,16 @@ on a pool of request threads, and writes the loop's leases and launches on the
 same threads. The controller processes a lease's markers in its groups' order,
 each as it lands. Four acceptance threads gather a group's completion, one
 group of a lease at a time: its result must match `result_sha256` and its
-lease, and the group then passes the unit gate. The controller applies each
-gathered group on the loop's own thread, normally the loop after it landed: it
-retains the group and appends it to `accepted-units.tsv`, one row per group,
-and the marker's upload timings and the seconds between its `started_at` and
-`finished_at`, the group's measured seconds, to `unit-uploads.tsv`. Once its row is durable,
+lease, and the group then passes the unit gate. A group that still needs its
+result has it extracted into the phase's `unit-results/` staging, and the
+downloaded archive is deleted once it extracts; an archive that fails its hash
+or extraction stays as evidence. A group already accepted elsewhere, or one of a
+semantically rejected unit, is gathered from its marker alone. The
+controller applies each gathered group on the loop's own thread, normally the
+loop after it landed: it retains the group, moving it from staging to `units/`
+so the phase root keeps one copy, and appends it to `accepted-units.tsv`, one
+row per group, and the marker's upload timings and the seconds between its
+`started_at` and `finished_at`, the group's measured seconds, to `unit-uploads.tsv`. Once its row is durable,
 the group's marker and result are deleted from S3, and a settled lease's
 heartbeat and lease object go too, so a worker's prefix holds only its current
 leases however long it runs; the ledgers keep the group finished across a

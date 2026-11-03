@@ -2240,6 +2240,8 @@ def gather_group(validation, result_root, staging, item, expected, needs_result,
     except (OSError, tarfile.TarError) as error:
         evidence.rejection = f"result archive is unreadable: {error}"
         return evidence
+    # Every later check reads the extracted directory, and a later gather downloads the result again.
+    archive.unlink()
     evidence.directory = directory
     if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
         try:
