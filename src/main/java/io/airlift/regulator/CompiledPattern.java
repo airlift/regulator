@@ -25,8 +25,8 @@ import java.util.function.IntPredicate;
 import static java.util.Objects.requireNonNull;
 
 /// The matching engine of a compiled pattern: its analysis, programs, and routes, and the
-/// matching operations of the public pattern class that extends it. RE2, Java, Rust, and Trino
-/// patterns all compile to it.
+/// matching operations of the public pattern class that extends it. RE2, Java, and Rust patterns
+/// extend the engine, and a Trino pattern holds one when it needs one.
 ///
 /// Instances are immutable and thread-safe. Matching operates directly on [Slice] byte ranges;
 /// offsets are byte offsets relative to the logical Slice, not its backing array.
@@ -34,7 +34,8 @@ import static java.util.Objects.requireNonNull;
 abstract sealed class CompiledPattern
         permits JavaRegexp,
                 Re2,
-                RustRegexp
+                RustRegexp,
+                TrinoCompiledPattern
 {
     enum BooleanPartialMatchStrategy
     {
@@ -236,7 +237,7 @@ abstract sealed class CompiledPattern
     private volatile BoundedCharacterClassCounter boundedCharacterClassCounter;
     private volatile SingleByteMatcher singleByteMatcher;
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only the pattern classes and their private final nested implementations")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only final or sealed classes of this package")
     CompiledPattern(Analysis analysis)
     {
         Compiler.Dialect compilerDialect = requireNonNull(analysis.compilerDialect(), "compilerDialect is null");
@@ -406,9 +407,9 @@ abstract sealed class CompiledPattern
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, language, scanPlanMode);
     }
 
-    /// The caller passes a private snapshot that it never mutates. `scanPlanMode` selects
-    /// the scan plan to build.
-    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
+    /// Analyzes a pattern parsed by the Trino frontend. The caller passes a private snapshot that
+    /// it never mutates. `scanPlanMode` selects the scan plan to build.
+    static Analysis analyzeParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -430,7 +431,7 @@ abstract sealed class CompiledPattern
             if (fixedWidthMatcher.estimatedRetainedSize() <= placeholderProgram.dfaMemory()) {
                 placeholderProgram.setDfaMemory(0);
                 BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram).withFixedWidthByteMatcher(fixedWidthMatcher);
-                return new Re2(new Analysis(
+                return new Analysis(
                         flags,
                         maxMemory,
                         Compiler.Dialect.TRINO,
@@ -448,10 +449,10 @@ abstract sealed class CompiledPattern
                         booleanPlans,
                         0,
                         Map.of(),
-                        null));
+                        null);
             }
         }
-        return new Re2(build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode));
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)

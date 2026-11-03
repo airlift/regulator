@@ -319,7 +319,7 @@ public class TestBoundedCharacterClassCounter
             assertCounterMatcherAgrees("RE2", Re2::compile, pattern, true, inputs);
         }
 
-        // The matrix above calls Re2 directly, which bypasses the Trino matcher wrapper.
+        // The matrix above calls the engine directly, which bypasses the Trino matcher wrapper.
         TrinoRegexpMatcher trino = TrinoRegexp.compile(utf8Slice("\\p{L}")).matcher(input, 0);
         TrinoRegexpMatcher trinoOrdinary = TrinoRegexp.compile(utf8Slice("(\\p{L})")).matcher(input, 0);
         while (trinoOrdinary.find()) {

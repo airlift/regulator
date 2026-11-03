@@ -86,7 +86,7 @@ final class FixedWidthByteSpanMatcher
         return new FixedWidthByteSpanMatcher(lowMasks, highMasks, candidateOffset, candidateByte);
     }
 
-    static TrinoRegexp createTrinoRegexp(Re2 pattern)
+    static TrinoRegexp createTrinoRegexp(TrinoCompiledPattern pattern)
     {
         FixedWidthByteSpanMatcher spanMatcher = pattern.createFixedWidthByteSpanMatcher();
         if (spanMatcher == null) {

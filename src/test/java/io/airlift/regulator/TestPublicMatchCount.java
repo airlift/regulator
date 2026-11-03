@@ -58,7 +58,7 @@ public class TestPublicMatchCount
             throws Exception
     {
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[,;]"));
-        Re2 pattern = trino.re2();
+        TrinoCompiledPattern pattern = trino.re2();
         long reservedDfaMemory = pattern.forwardProgramForDiagnostics().dfaMemory();
         assertThat(pattern.isSingleByteMatcherComputed()).isFalse();
         pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);

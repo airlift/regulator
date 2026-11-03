@@ -55,7 +55,7 @@ public class BenchmarkLiteralGapMatcher
         private TrinoLikeWildcardMatcher wildcardControl;
         private TrinoLikePattern likePattern;
         private TrinoRegexp trinoRegexp;
-        private Re2 regexpPattern;
+        private TrinoCompiledPattern regexpPattern;
 
         @Setup
         public void setup()

@@ -454,7 +454,7 @@ public class TestScanKernel
     {
         record Family(String name, String unanchoredLead, String anchoredLead, IntFunction<String> body, int repeats) {}
 
-        record Language(String name, Function<Slice, CompiledPattern> compile, boolean trinoClass) {}
+        record Language(String name, Function<Slice, CompiledPattern> compile) {}
 
         IntFunction<String> runChain = runs -> "(abcdefghijklmnop)(?:Tbcdefghijklmnop){0,4}" +
                 IntStream.range(0, runs).mapToObj(run -> Character.forDigit(run, 36) + "*").collect(joining());
@@ -464,9 +464,9 @@ public class TestScanKernel
                 new Family("captured literals", "xbcdefghijklmnop", "^x", literals ->
                         "(?:0(?:1(?:2(?:3" + "(-bcdefghijklmnop)".repeat(literals) + ")?)?)?)?-bcdefghijklmnop[a-z]+", 7));
         List<Language> languages = List.of(
-                new Language("RE2", Re2::compile, false),
-                new Language("Java", JavaRegexp::compile, false),
-                new Language("Trino", expression -> TrinoRegexp.compile(expression).re2(), true));
+                new Language("RE2", Re2::compile),
+                new Language("Java", JavaRegexp::compile),
+                new Language("Trino", expression -> TrinoRegexp.compile(expression).re2()));
         for (Family family : families) {
             for (Attempt attempt : Attempt.values()) {
                 String lead = attempt == Attempt.UNANCHORED ? family.unanchoredLead() : family.anchoredLead();
@@ -479,8 +479,8 @@ public class TestScanKernel
                     assertThat(plan).as(description).isNotNull();
                     assertThat(Attempt.of(plan)).as(description).isEqualTo(attempt);
                     assertThat(compile.apply(family.repeats() + 1).caseSensitiveScanPlan()).as(description).isNull();
-                    if (language.trinoClass()) {
-                        TrinoRoutes routes = TrinoRoutes.of((Re2) pattern);
+                    if (pattern instanceof TrinoCompiledPattern trinoPattern) {
+                        TrinoRoutes routes = TrinoRoutes.of(trinoPattern);
                         assertThat(routes).as(description).isNotNull();
                         byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(routes);
                         assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);

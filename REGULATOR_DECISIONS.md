@@ -467,10 +467,10 @@ original pattern, including when quoting rewrites it before parsing.
   there is concrete user demand for exact Joni behavior in this case.
 - `contains` may select the shared ordered-literal matcher when expression
   analysis proves two or more case-sensitive literals separated by unrestricted
-  dot-star gaps. The complete compiled `Re2` remains authoritative for every
-  other operation, including captures and boundaries. The matcher retained size
-  is deducted from the forward-DFA budget; compilation keeps the ordinary RE2
-  route when that optional allocation does not fit.
+  dot-star gaps. The compiled `TrinoCompiledPattern` remains authoritative for
+  every other operation, including captures and boundaries. The matcher retained
+  size is deducted from the forward-DFA budget; compilation keeps the ordinary
+  RE2 route when that optional allocation does not fit.
 - A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
   first invalid byte, as `JavaRegexp`, `RustRegexp`, and UTF-8 `Re2` patterns
   do. This deliberately differs from Trino, whose non-strict Joni path accepts

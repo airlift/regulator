@@ -100,7 +100,7 @@ public class TestDotStarLiteralSpanMatcher
         assertGeneralEngineAgreement(pattern, matcher);
 
         // Trino spans share the pattern's contains search, so this checks the call-free scan's spans.
-        Re2 trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
+        TrinoCompiledPattern trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
         DotStarLiteralSpanMatcher trinoMatcher = trinoPattern.createDotStarLiteralSpanMatcher();
         assertThat(trinoMatcher.searchForDiagnostics())
                 .isNotNull()
@@ -108,7 +108,7 @@ public class TestDotStarLiteralSpanMatcher
         assertGeneralEngineAgreement(trinoPattern, trinoMatcher);
     }
 
-    private static void assertGeneralEngineAgreement(Re2 pattern, DotStarLiteralSpanMatcher matcher)
+    private static void assertGeneralEngineAgreement(CompiledPattern pattern, DotStarLiteralSpanMatcher matcher)
     {
         List<Slice> inputs = List.of(
                 utf8Slice(""),

@@ -267,7 +267,7 @@ public sealed class Re2
         }
     }
 
-    Re2(Analysis analysis)
+    private Re2(Analysis analysis)
     {
         super(analysis);
     }

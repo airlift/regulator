@@ -317,7 +317,7 @@ public class TestTrinoRegexpFunctions
     {
         Slice pattern = utf8("first(?s:.*)second(?s:.*)third");
         ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        Re2 baseline = CompiledPattern.compileParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT);
+        TrinoCompiledPattern baseline = new TrinoCompiledPattern(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
         long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();
@@ -399,7 +399,7 @@ public class TestTrinoRegexpFunctions
         for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
             TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
             Prog baseline = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2().booleanProgramForDiagnostics();
-            Re2 regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();
+            TrinoCompiledPattern regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();
             Prog lowered = regexp.booleanProgramForDiagnostics();
             boolean keeps = (baseline.dfaMemory() - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(lowered, Dfa.DfaInstance.Kind.LONGEST_MATCH);
             assertThat(regexp.forwardProgramForDiagnostics().transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
@@ -1039,20 +1039,20 @@ public class TestTrinoRegexpFunctions
     @Test
     public void testForwardOnlyCountEligibility()
     {
-        Re2 delimiter = TrinoRegexp.compile(utf8(",")).re2();
+        TrinoCompiledPattern delimiter = TrinoRegexp.compile(utf8(",")).re2();
         assertThat(delimiter.countMatches(utf8("a,b,,c"))).isEqualTo(3);
 
-        Re2 anchored = TrinoRegexp.compile(utf8("^a")).re2();
+        TrinoCompiledPattern anchored = TrinoRegexp.compile(utf8("^a")).re2();
         assertThat(anchored.countMatches(utf8("aa"))).isEqualTo(1);
 
-        Re2 nullable = TrinoRegexp.compile(utf8("x*")).re2();
+        TrinoCompiledPattern nullable = TrinoRegexp.compile(utf8("x*")).re2();
         assertThat(nullable.countMatches(utf8("xxx"))).isEqualTo(-1);
     }
 
     @Test
     public void testTrinoBeginLineCountUsesDfa()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8("(?m)^[a-z]+")).re2();
+        TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8("(?m)^[a-z]+")).re2();
         Prog program = pattern.forwardProgramForDiagnostics();
         Slice input = utf8("one\ntwo\n");
 

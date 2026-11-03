@@ -792,7 +792,7 @@ suffix, such as `containsEntry`; the suffix keeps the entries apart from the
 `CompiledTrinoScan` interface methods, which delegate to them. The subclass
 calls the interface once per operation, and the `generated*` accessors return
 the entries as method handles. The class is stateless and holds the pattern's
-`Re2`, plan, literals, and runs as class data.
+`TrinoCompiledPattern`, plan, literals, and runs as class data.
 
 `TrinoRegexpMatcher` is sealed, permitting one nested subclass that runs the
 generated `find` into its own offset array. Without the option it is never

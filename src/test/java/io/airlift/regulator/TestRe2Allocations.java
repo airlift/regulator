@@ -282,12 +282,12 @@ public class TestRe2Allocations
         assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
-        Re2 anchored = TrinoRegexp.compile(Slices.utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$")).re2();
-        Re2 folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)^content-type: ([^;]+);.*$")).re2();
-        Re2 unanchored = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/")).re2();
+        TrinoCompiledPattern anchored = TrinoRegexp.compile(Slices.utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$")).re2();
+        TrinoCompiledPattern folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)^content-type: ([^;]+);.*$")).re2();
+        TrinoCompiledPattern unanchored = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/")).re2();
         // Every unanchored search on this plan continues on the ordinary engine.
-        Re2 handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(Slices.utf8Slice("https?://([^/]+)/")).re2();
-        for (Re2 pattern : List.of(anchored, folded, unanchored, handoff)) {
+        TrinoCompiledPattern handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(Slices.utf8Slice("https?://([^/]+)/")).re2();
+        for (TrinoCompiledPattern pattern : List.of(anchored, folded, unanchored, handoff)) {
             assertThat(pattern.usesScanPlanForDiagnostics()).as(pattern.pattern().toStringUtf8()).isTrue();
         }
         assertThat(folded.usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
@@ -394,7 +394,7 @@ public class TestRe2Allocations
         }
     }
 
-    private static int runScanPlanOperations(Re2 anchored, Re2 folded, Re2 unanchored, Re2 handoff, Slice url, Slice header, Slice link, int[] groups)
+    private static int runScanPlanOperations(TrinoCompiledPattern anchored, TrinoCompiledPattern folded, TrinoCompiledPattern unanchored, TrinoCompiledPattern handoff, Slice url, Slice header, Slice link, int[] groups)
     {
         int matchCount = 0;
         for (int iteration = 0; iteration < 10_000; iteration++) {
