@@ -41,8 +41,8 @@ public class TestBenchmarkDfaSelfLoopExitScan
                         .isEqualTo(benchmark.expectedResult());
                 assertThat(benchmark.selfLoopExitByteScanCount())
                         .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
-                        .matches(count -> (count > 0) == inputShape.vectorRoute());
-                if (inputShape.vectorRoute()) {
+                        .matches(count -> (count > 0) == (inputShape.vectorRoute() && VectorSupport.isAvailable()));
+                if (inputShape.vectorRoute() && VectorSupport.isAvailable()) {
                     assertThat(benchmark.hasExpectedExitByteSet())
                             .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
                             .isTrue();
@@ -66,7 +66,7 @@ public class TestBenchmarkDfaSelfLoopExitScan
         assertThat(benchmark.search()).isEqualTo(benchmark.expectedResult());
         assertThat(benchmark.selfLoopExitByteScanCount()).isEqualTo(scanCount);
         assertThat(benchmark.search()).isEqualTo(benchmark.expectedResult());
-        assertThat(benchmark.selfLoopExitByteScanCount()).isGreaterThan(scanCount);
+        assertThat(benchmark.selfLoopExitByteScanCount() > scanCount).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -92,7 +92,7 @@ public class TestBenchmarkDfaSelfLoopExitScan
                 assertThat(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(expected);
                 assertThat(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(expected);
             }
-            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).selfLoopExitByteScanCount()).isPositive();
+            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).selfLoopExitByteScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         }
     }
 }

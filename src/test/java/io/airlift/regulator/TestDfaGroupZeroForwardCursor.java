@@ -55,7 +55,7 @@ public class TestDfaGroupZeroForwardCursor
         assertThat(search(cursor, input, PRODUCTIVITY_EPOCH_BYTES))
                 .isEqualTo(sparseMatchStart + 3L - PRODUCTIVITY_EPOCH_BYTES);
         assertThat(cursor.byteScanProductivityCheckCount()).isEqualTo(3);
-        assertThat(scannerCount(dfa)).isGreaterThan(scansBeforeRevalidation);
+        assertThat(scannerCount(dfa) > scansBeforeRevalidation).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
