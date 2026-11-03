@@ -808,7 +808,7 @@ case-sensitive plan to a private `Re2` subclass backed by a hidden class from
 the same emitter, and `Re2.usesGeneratedBytecode()` reports whether it has
 one. `JavaRegexp.Options.setGenerateBytecode(true)` and
 `RustRegexp.Options.setGenerateBytecode(true)` compile a Java or Rust pattern to
-the same subclass. ASCII-folded plans and a pattern whose class cannot be
+a private subclass of its own class, backed the same way. ASCII-folded plans and a pattern whose class cannot be
 defined compile as they do without the option. The accepted trade-offs are
 recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).

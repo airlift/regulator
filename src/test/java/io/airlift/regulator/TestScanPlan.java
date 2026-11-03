@@ -2631,7 +2631,7 @@ public class TestScanPlan
         disableOrdinaryEngine(regexp.re2());
     }
 
-    static void disableOrdinaryEngine(Re2 pattern)
+    static void disableOrdinaryEngine(CompiledPattern pattern)
     {
         // Instruction zero is FAIL.
         Prog semantic = pattern.forwardProgramForDiagnostics();

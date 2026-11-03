@@ -87,7 +87,7 @@ import static java.util.Objects.requireNonNull;
 /// operation the pattern routes to the plan. The class implements [CompiledTrinoScan] by
 /// delegating to those entries, so a caller can also bind an entry directly.
 ///
-/// An RE2, Java, or Rust pattern, a [Re2] compiled in the RE2 dialect, gets a smaller class
+/// An RE2, Java, or Rust pattern, compiled in the RE2 dialect, gets a smaller class
 /// from the same attempt loop: an RE2 executor class, which implements [CompiledRe2Scan] with
 /// the plan methods it replaces, while the pattern keeps its own routing.
 ///

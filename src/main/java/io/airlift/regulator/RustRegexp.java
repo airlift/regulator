@@ -13,11 +13,9 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
-import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
@@ -32,7 +30,9 @@ import static java.util.Objects.requireNonNull;
 /// input outside it as assertion context, as in the crate's `Input::range`. Unicode
 /// properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
 /// compilation. Match offsets are byte offsets, as in the crate.
-public final class RustRegexp
+public sealed class RustRegexp
+        extends CompiledPattern
+        permits RustRegexp.CompiledScanRustRegexp
 {
     /// Mutable Rust-language compilation options. Compilation snapshots every option, so later
     /// changes do not affect an existing [RustRegexp]. Options instances are not thread-safe.
@@ -251,14 +251,19 @@ public final class RustRegexp
         }
     }
 
-    private final Re2 re2;
     // The crate's bytes API, where an empty match may split a UTF-8 character.
     private final boolean bytes;
 
-    private RustRegexp(Re2 re2)
+    private RustRegexp(Analysis analysis)
     {
-        this.re2 = requireNonNull(re2, "re2 is null");
-        this.bytes = (re2.flags() & Regexp.LATIN1) != 0;
+        super(analysis);
+        this.bytes = (flags() & Regexp.LATIN1) != 0;
+    }
+
+    private RustRegexp(RustRegexp pattern)
+    {
+        super(pattern);
+        this.bytes = pattern.bytes;
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -315,28 +320,34 @@ public final class RustRegexp
         // past an empty match never applies, and the analysis declines every byte construct that
         // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
         // the any-byte dot, which has no such flag, by its kind.
-        Re2 compiled = CompiledPattern.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
-        return new RustRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
-    }
-
-    Re2 re2()
-    {
-        return re2;
+        RustRegexp compiled = new RustRegexp(analyzeParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode));
+        if (options.generateBytecode()) {
+            RustRegexp generated = CompiledScanRustRegexp.create(compiled);
+            if (generated != null) {
+                return generated;
+            }
+        }
+        return compiled;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
     /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
     /// would run its specialized scan runs the generated class.
+    @Override
     public boolean usesGeneratedBytecode()
     {
-        return re2.usesGeneratedBytecode();
+        return false;
     }
 
+    /// Returns whether the pattern has a match anywhere in `input` without allocating capture
+    /// storage. Outside byte mode, a pattern that can match empty allocates storage for the
+    /// match span, to skip an empty match that splits a UTF-8 character.
+    @Override
     public boolean find(Slice input)
     {
         requireNonNull(input, "input is null");
-        if (!re2.canMatchEmpty()) {
-            return re2.find(input);
+        if (!canMatchEmpty()) {
+            return super.find(input);
         }
         return search(input, 0, input.length(), null);
     }
@@ -345,96 +356,72 @@ public final class RustRegexp
     /// As in the Rust crate, an empty match that ends where the previous match ended is skipped,
     /// and outside byte mode, so is one that splits a UTF-8 character. No capture values are
     /// returned.
+    @Override
     public long count(Slice input)
     {
-        return re2.count(input);
-    }
-
-    public boolean lookingAt(Slice input)
-    {
-        return re2.lookingAt(requireNonNull(input, "input is null"));
-    }
-
-    public boolean matches(Slice input)
-    {
-        return re2.matches(requireNonNull(input, "input is null"));
+        return super.count(input);
     }
 
     /// Returns whether the pattern has a match in `[start, end)`.
+    @Override
     public boolean find(Slice input, int start, int end)
     {
         return search(requireNonNull(input, "input is null"), start, end, null);
     }
 
     /// Returns whether the pattern matches at `start` within `[start, end)`.
+    @Override
     public boolean lookingAt(Slice input, int start, int end)
     {
-        return re2.lookingAt(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
+        return super.lookingAt(input, start, end) && isSearchStart(input, start);
     }
 
     /// Returns whether the pattern matches all of `[start, end)`.
+    @Override
     public boolean matches(Slice input, int start, int end)
     {
-        return re2.matches(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
-    }
-
-    /// Creates a mutable matcher retaining every capturing group.
-    public RegexpMatcher matcher(Slice input)
-    {
-        return re2.matcher(requireNonNull(input, "input is null"));
-    }
-
-    /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-    public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
-    {
-        return re2.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
+        return super.matches(input, start, end) && isSearchStart(input, start);
     }
 
     /// Finds a match and writes byte-offset start/end pairs into caller-owned storage.
+    @Override
     public boolean findInto(Slice input, int[] groups)
     {
         return findInto(requireNonNull(input, "input is null"), 0, input.length(), groups);
     }
 
     /// Finds a match in `[start, end)` and writes byte-offset start/end pairs.
+    @Override
     public boolean findInto(Slice input, int start, int end, int[] groups)
     {
         return search(requireNonNull(input, "input is null"), start, end, groups);
     }
 
-    /// Matches at the beginning of the input and writes byte-offset start/end pairs.
-    public boolean lookingAtInto(Slice input, int[] groups)
-    {
-        return re2.lookingAtInto(requireNonNull(input, "input is null"), groups);
-    }
-
     /// Matches at `start` within `[start, end)` and writes byte-offset start/end pairs.
+    @Override
     public boolean lookingAtInto(Slice input, int start, int end, int[] groups)
     {
-        boolean matched = re2.lookingAtInto(requireNonNull(input, "input is null"), start, end, groups);
+        boolean matched = super.lookingAtInto(input, start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
-    /// Matches the complete input and writes byte-offset start/end pairs.
-    public boolean matchesInto(Slice input, int[] groups)
-    {
-        return re2.matchesInto(requireNonNull(input, "input is null"), groups);
-    }
-
     /// Matches all of `[start, end)` and writes byte-offset start/end pairs.
+    @Override
     public boolean matchesInto(Slice input, int start, int end, int[] groups)
     {
-        boolean matched = re2.matchesInto(requireNonNull(input, "input is null"), start, end, groups);
+        boolean matched = super.matchesInto(input, start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
     /// Returns the first match, or `null` when there is no match.
+    @Override
     public MatchResult findResult(Slice input)
     {
         return findResult(requireNonNull(input, "input is null"), 0, input.length());
     }
 
     /// Returns the first match in `[start, end)`, or `null` when there is no match.
+    @Override
     public MatchResult findResult(Slice input, int start, int end)
     {
         requireNonNull(input, "input is null");
@@ -445,66 +432,32 @@ public final class RustRegexp
         return new MatchResult(input, groups, namedCapturingGroups());
     }
 
-    /// Returns the match at the beginning of the input, or `null` when there is no match.
-    public MatchResult lookingAtResult(Slice input)
-    {
-        return re2.lookingAtResult(requireNonNull(input, "input is null"));
-    }
-
     /// Returns the match at `start` within `[start, end)`, or `null`.
+    @Override
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
-        MatchResult result = re2.lookingAtResult(requireNonNull(input, "input is null"), start, end);
+        MatchResult result = super.lookingAtResult(input, start, end);
         return isSearchStart(input, start) ? result : null;
-    }
-
-    /// Returns the complete-input match, or `null` when there is no match.
-    public MatchResult matchesResult(Slice input)
-    {
-        return re2.matchesResult(requireNonNull(input, "input is null"));
     }
 
     /// Returns the complete-region match, or `null` when there is no match.
+    @Override
     public MatchResult matchesResult(Slice input, int start, int end)
     {
-        MatchResult result = re2.matchesResult(requireNonNull(input, "input is null"), start, end);
+        MatchResult result = super.matchesResult(input, start, end);
         return isSearchStart(input, start) ? result : null;
-    }
-
-    /// Returns a copy of the compiled pattern bytes.
-    public Slice pattern()
-    {
-        return re2.pattern();
-    }
-
-    /// Returns the number of capturing groups, excluding group zero (the whole match).
-    public int capturingGroupCount()
-    {
-        return re2.capturingGroupCount();
-    }
-
-    /// Returns an immutable mapping from capture names to group numbers.
-    public Map<String, Integer> namedCapturingGroups()
-    {
-        return re2.namedCapturingGroups();
-    }
-
-    /// Returns an immutable mapping from group numbers to capture names.
-    public Map<Integer, String> capturingGroupNames()
-    {
-        return re2.capturingGroupNames();
     }
 
     // Every unanchored search of a range comes here. Outside byte mode, the crate skips an empty
     // match that splits a UTF-8 character and searches again one byte later.
     private boolean search(Slice input, int start, int end, int[] groups)
     {
-        if (bytes || !re2.canMatchEmpty()) {
-            return re2.findInto(input, start, end, groups);
+        if (bytes || !canMatchEmpty()) {
+            return super.findInto(input, start, end, groups);
         }
         int[] span = groups == null ? new int[2] : groups;
         int searchStart = start;
-        while (re2.findInto(input, searchStart, end, span)) {
+        while (super.findInto(input, searchStart, end, span)) {
             if (span[0] != span[1] || Utf8.isCharacterBoundary(input, span[0])) {
                 return true;
             }
@@ -533,5 +486,71 @@ public final class RustRegexp
     private boolean isSearchStart(Slice input, int start)
     {
         return bytes || Utf8.isCharacterBoundary(input, start);
+    }
+
+    /// A Rust pattern whose case-sensitive scan plan runs a class generated for it.
+    private static final class CompiledScanRustRegexp
+            extends RustRegexp
+    {
+        private final CompiledRe2Scan scan;
+        // Whether the plan is start-anchored, so its attempt runs alone; otherwise it searches.
+        private final boolean anchored;
+        // Whether full-Slice find hands off to the ordinary engine, so it runs the capture-free
+        // search before the handoff.
+        private final boolean ordinaryHandoff;
+
+        private CompiledScanRustRegexp(RustRegexp pattern, CompiledRe2Scan scan)
+        {
+            super(pattern);
+            this.scan = scan;
+            this.anchored = pattern.caseSensitiveScanPlan().isAnchoredStart();
+            this.ordinaryHandoff = pattern.generatedFindHandsOff();
+        }
+
+        /// Returns a copy of `pattern` with a generated class, or `null` when the
+        /// pattern is not eligible or the class cannot be generated. The declared type keeps
+        /// verification of the base class from loading this class.
+        static RustRegexp create(RustRegexp pattern)
+        {
+            CompiledRe2Scan scan = pattern.generateScanExecutor();
+            return scan == null ? null : new CompiledScanRustRegexp(pattern, scan);
+        }
+
+        @Override
+        public boolean usesGeneratedBytecode()
+        {
+            return true;
+        }
+
+        // Short boolean calls run the generated class rather than the ordinary engine.
+        @Override
+        boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+        {
+            return false;
+        }
+
+        @Override
+        boolean findWithScanPlan(Slice input, byte strategy)
+        {
+            return findWithGeneratedScan(scan, anchored, ordinaryHandoff, input);
+        }
+
+        @Override
+        long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
+        {
+            return countWithGeneratedScan(scan, text);
+        }
+
+        @Override
+        boolean findWithStartAnchoredScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, int[] groups)
+        {
+            return findWithGeneratedStartAnchoredScan(scan, text, contextStart, contextEnd, groups);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalWithGeneratedScan(scan, anchored, prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+        }
     }
 }

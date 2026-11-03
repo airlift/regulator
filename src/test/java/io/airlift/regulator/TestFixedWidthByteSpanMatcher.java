@@ -175,9 +175,9 @@ public class TestFixedWidthByteSpanMatcher
         // Boolean find and count of RE2, Java, and Rust patterns run on the matcher and agree
         // with the general engine, including on malformed UTF-8.
         for (String expression : patterns) {
-            for (Map.Entry<String, Re2> entry : re2JavaAndRustPatterns(expression).entrySet()) {
+            for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns(expression).entrySet()) {
                 String label = entry.getKey();
-                Re2 pattern = entry.getValue();
+                CompiledPattern pattern = entry.getValue();
                 assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
                 // Count answers from the matcher without building the general engine's DFA.
                 pattern.count(inputs.getLast());
@@ -218,9 +218,9 @@ public class TestFixedWidthByteSpanMatcher
     {
         // The matcher would check every s for [a-z]shing, which English text holds far more often
         // than shing, so boolean find and count keep the DFA's search for the inner literal.
-        for (Map.Entry<String, Re2> entry : re2JavaAndRustPatterns("[a-z]shing").entrySet()) {
+        for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns("[a-z]shing").entrySet()) {
             String label = entry.getKey();
-            Re2 pattern = entry.getValue();
+            CompiledPattern pattern = entry.getValue();
             assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(label).isFalse();
             assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
             assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
@@ -232,16 +232,16 @@ public class TestFixedWidthByteSpanMatcher
 
     // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.
     // Trino's fixed-width subtype is covered separately.
-    private static Map<String, Re2> re2JavaAndRustPatterns(String expression)
+    private static Map<String, CompiledPattern> re2JavaAndRustPatterns(String expression)
     {
         return Map.of(
                 "RE2 " + expression, Re2.compile(utf8Slice(expression)),
-                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)).re2(),
-                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)).re2(),
-                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()).re2());
+                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
+                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)),
+                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
     }
 
-    private static long generalEngineCount(Re2 pattern, Slice input)
+    private static long generalEngineCount(CompiledPattern pattern, Slice input)
     {
         RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
         long count = 0;

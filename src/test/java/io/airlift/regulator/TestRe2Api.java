@@ -15,14 +15,19 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.function.Function;
 
 import static io.airlift.regulator.Regexp.LATIN1;
 import static io.airlift.regulator.Regexp.LIKE_PERL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 public class TestRe2Api
 {
@@ -163,5 +168,59 @@ public class TestRe2Api
                 .isInstanceOf(IndexOutOfBoundsException.class);
         assertThatThrownBy(() -> re2.matchesInto(text, 0, 4, groups))
                 .isInstanceOf(IndexOutOfBoundsException.class);
+    }
+
+    @Test
+    public void testNullInputFailures()
+    {
+        // An RE2 pattern names a null input `text`, except in full-input find and matcher.
+        assertNullInputFailures(Re2.compile(Slices.utf8Slice("(a)(b)?")), operation -> switch (operation) {
+            case "find", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";
+            case "matcher retaining -1 groups" -> "IllegalArgumentException: capturingGroupCount out of range: -1";
+            default -> "NullPointerException: text is null";
+        });
+        // An exact literal's boolean plan names it `input` in full-input lookingAt and matches.
+        assertNullInputFailures(Re2.compile(Slices.utf8Slice("abc")), operation -> switch (operation) {
+            case "find", "lookingAt", "matches", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";
+            case "matcher retaining -1 groups" -> "IllegalArgumentException: capturingGroupCount out of range: -1";
+            default -> "NullPointerException: text is null";
+        });
+    }
+
+    /// Requires each operation of `pattern` that takes an input to fail on a null input with the
+    /// exception type and message `expectedFailure` gives for the operation's name.
+    static void assertNullInputFailures(CompiledPattern pattern, Function<String, String> expectedFailure)
+    {
+        int[] groups = new int[2];
+        Map<String, ThrowingCallable> operations = new LinkedHashMap<>();
+        operations.put("find", () -> pattern.find(null));
+        operations.put("find range", () -> pattern.find(null, 0, 0));
+        operations.put("count", () -> pattern.count(null));
+        operations.put("lookingAt", () -> pattern.lookingAt(null));
+        operations.put("lookingAt range", () -> pattern.lookingAt(null, 0, 0));
+        operations.put("matches", () -> pattern.matches(null));
+        operations.put("matches range", () -> pattern.matches(null, 0, 0));
+        operations.put("matcher", () -> pattern.matcher(null));
+        operations.put("matcher retaining groups", () -> pattern.matcher(null, 0));
+        operations.put("matcher retaining -1 groups", () -> pattern.matcher(null, -1));
+        operations.put("findInto", () -> pattern.findInto(null, groups));
+        operations.put("findInto range", () -> pattern.findInto(null, 0, 0, groups));
+        operations.put("lookingAtInto", () -> pattern.lookingAtInto(null, groups));
+        operations.put("lookingAtInto range", () -> pattern.lookingAtInto(null, 0, 0, groups));
+        operations.put("matchesInto", () -> pattern.matchesInto(null, groups));
+        operations.put("matchesInto range", () -> pattern.matchesInto(null, 0, 0, groups));
+        operations.put("findResult", () -> pattern.findResult(null));
+        operations.put("findResult range", () -> pattern.findResult(null, 0, 0));
+        operations.put("lookingAtResult", () -> pattern.lookingAtResult(null));
+        operations.put("lookingAtResult range", () -> pattern.lookingAtResult(null, 0, 0));
+        operations.put("matchesResult", () -> pattern.matchesResult(null));
+        operations.put("matchesResult range", () -> pattern.matchesResult(null, 0, 0));
+        String expression = pattern.pattern().toStringUtf8();
+        for (Map.Entry<String, ThrowingCallable> entry : operations.entrySet()) {
+            String operation = entry.getKey();
+            Throwable failure = catchThrowable(entry.getValue());
+            assertThat(failure).as("%s %s", expression, operation).isNotNull();
+            assertThat(failure.getClass().getSimpleName() + ": " + failure.getMessage()).as("%s %s", expression, operation).isEqualTo(expectedFailure.apply(operation));
+        }
     }
 }

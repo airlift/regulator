@@ -143,7 +143,7 @@ public class TestNfaNoSubmatchParity
         // and from every search start the two find the same match under each Java line terminator.
         Slice text = Slices.utf8Slice("ab xab\r\nab\rab\u0085ab\u2028ab\nab\r\n\nab ab\u2029abab\n");
         for (String pattern : List.of("(?m)^ab|ab$", "(?m)^ab")) {
-            Prog prog = JavaRegexp.compile(Slices.utf8Slice(pattern)).re2().forwardProgramForDiagnostics();
+            Prog prog = JavaRegexp.compile(Slices.utf8Slice(pattern)).forwardProgramForDiagnostics();
             assertThat(prog.canSkipToStartCandidate()).as(pattern).isTrue();
             assertThat(prog.canPrefixAccel()).as(pattern).isFalse();
             for (int start = 0; start <= text.length(); start++) {

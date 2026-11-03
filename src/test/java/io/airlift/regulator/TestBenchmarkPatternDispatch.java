@@ -51,7 +51,7 @@ public class TestBenchmarkPatternDispatch
     public void testBenchmarkResults()
     {
         BenchmarkPatternDispatch benchmark = new BenchmarkPatternDispatch();
-        Map<String, Re2> interpreted = new HashMap<>();
+        Map<String, CompiledPattern> interpreted = new HashMap<>();
         for (String language : List.of("RE2", "JAVA", "RUST")) {
             for (String target : targets()) {
                 // The target, then every other target in order, then the pollution patterns.
@@ -62,10 +62,10 @@ public class TestBenchmarkPatternDispatch
                         .map(BenchmarkPatternDispatch::expression)
                         .forEach(expressions::add);
                 expressions.addAll(POLLUTION);
-                List<Re2> sharedSite = expressions.stream()
+                List<CompiledPattern> sharedSite = expressions.stream()
                         .map(expression -> interpreted.computeIfAbsent(language + " " + expression, _ -> interpreted(language, expression)))
                         .toList();
-                Re2 reference = sharedSite.getFirst();
+                CompiledPattern reference = sharedSite.getFirst();
                 if (!GENERATED_TARGETS.contains(target)) {
                     assertThatThrownBy(() -> data(language, target, "SHORT", false, true))
                             .as("%s %s", language, target)
@@ -107,7 +107,7 @@ public class TestBenchmarkPatternDispatch
                         assertPatterns(data.patterns, expressions, generated, description);
                         int sharedSiteFinds = 0;
                         for (Slice input : data.inputs) {
-                            for (Re2 pattern : sharedSite) {
+                            for (CompiledPattern pattern : sharedSite) {
                                 sharedSiteFinds += pattern.find(input) ? 1 : 0;
                             }
                         }
@@ -141,11 +141,11 @@ public class TestBenchmarkPatternDispatch
     /// when `generated` is set and the pattern is eligible for one.
     private static void assertPatterns(BenchmarkPatternDispatch.LanguagePatterns patterns, List<String> expressions, boolean generated, String description)
     {
-        Re2[] compiled = compiledPatterns(patterns);
+        CompiledPattern[] compiled = compiledPatterns(patterns);
         assertThat(Arrays.stream(compiled).map(pattern -> pattern.pattern().toStringUtf8()))
                 .as(description)
                 .containsExactlyElementsOf(expressions);
-        for (Re2 pattern : compiled) {
+        for (CompiledPattern pattern : compiled) {
             String expression = pattern.pattern().toStringUtf8();
             boolean eligible = POLLUTION.contains(expression) || GENERATED_TARGETS.stream()
                     .map(BenchmarkPatternDispatch::expression)
@@ -155,7 +155,7 @@ public class TestBenchmarkPatternDispatch
     }
 
     /// Requires `compiled` to take the full-Slice `find` route that `target` names.
-    private static void assertRoute(String target, Re2 compiled, String description)
+    private static void assertRoute(String target, CompiledPattern compiled, String description)
     {
         if (GENERATED_TARGETS.contains(target)) {
             assertThat(compiled.usesScanPlanForFindForDiagnostics()).as(description).isTrue();
@@ -181,23 +181,22 @@ public class TestBenchmarkPatternDispatch
         }
     }
 
-    private static Re2[] compiledPatterns(BenchmarkPatternDispatch.LanguagePatterns patterns)
+    private static CompiledPattern[] compiledPatterns(BenchmarkPatternDispatch.LanguagePatterns patterns)
     {
         return switch (patterns) {
             case BenchmarkPatternDispatch.Re2Patterns re2 -> re2.patterns;
-            case BenchmarkPatternDispatch.JavaPatterns java -> Arrays.stream(java.patterns).map(JavaRegexp::re2).toArray(Re2[]::new);
-            case BenchmarkPatternDispatch.RustPatterns rust -> Arrays.stream(rust.patterns).map(RustRegexp::re2).toArray(Re2[]::new);
+            case BenchmarkPatternDispatch.JavaPatterns java -> java.patterns;
+            case BenchmarkPatternDispatch.RustPatterns rust -> rust.patterns;
         };
     }
 
-    // No shared-site pattern can match empty, so each language's find is the find of its Re2.
-    private static Re2 interpreted(String language, String expression)
+    private static CompiledPattern interpreted(String language, String expression)
     {
         Slice pattern = utf8Slice(expression);
         return switch (language) {
             case "RE2" -> Re2.compile(pattern);
-            case "JAVA" -> JavaRegexp.compile(pattern).re2();
-            case "RUST" -> RustRegexp.compile(pattern).re2();
+            case "JAVA" -> JavaRegexp.compile(pattern);
+            case "RUST" -> RustRegexp.compile(pattern);
             default -> throw new IllegalArgumentException("unknown language: " + language);
         };
     }

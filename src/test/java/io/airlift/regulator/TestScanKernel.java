@@ -297,7 +297,7 @@ public class TestScanKernel
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
         // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
         // results with the JDK.
-        Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).re2();
+        JavaRegexp javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true));
         assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
         boolean javaEndHandoff = javaEnd.usesScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
         invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveScanPlan(), javaEndHandoff)));
@@ -454,7 +454,7 @@ public class TestScanKernel
     {
         record Family(String name, String unanchoredLead, String anchoredLead, IntFunction<String> body, int repeats) {}
 
-        record Language(String name, Function<Slice, Re2> compile, boolean trinoClass) {}
+        record Language(String name, Function<Slice, CompiledPattern> compile, boolean trinoClass) {}
 
         IntFunction<String> runChain = runs -> "(abcdefghijklmnop)(?:Tbcdefghijklmnop){0,4}" +
                 IntStream.range(0, runs).mapToObj(run -> Character.forDigit(run, 36) + "*").collect(joining());
@@ -465,22 +465,22 @@ public class TestScanKernel
                         "(?:0(?:1(?:2(?:3" + "(-bcdefghijklmnop)".repeat(literals) + ")?)?)?)?-bcdefghijklmnop[a-z]+", 7));
         List<Language> languages = List.of(
                 new Language("RE2", Re2::compile, false),
-                new Language("Java", expression -> JavaRegexp.compile(expression).re2(), false),
+                new Language("Java", JavaRegexp::compile, false),
                 new Language("Trino", expression -> TrinoRegexp.compile(expression).re2(), true));
         for (Family family : families) {
             for (Attempt attempt : Attempt.values()) {
                 String lead = attempt == Attempt.UNANCHORED ? family.unanchoredLead() : family.anchoredLead();
                 String end = attempt == Attempt.END_ANCHORED ? "$" : "";
                 for (Language language : languages) {
-                    IntFunction<Re2> compile = repeats -> language.compile().apply(utf8Slice(lead + family.body().apply(repeats) + end));
-                    Re2 pattern = compile.apply(family.repeats());
+                    IntFunction<CompiledPattern> compile = repeats -> language.compile().apply(utf8Slice(lead + family.body().apply(repeats) + end));
+                    CompiledPattern pattern = compile.apply(family.repeats());
                     ScanPlan plan = pattern.caseSensitiveScanPlan();
                     String description = family.name() + " " + language.name() + " " + attempt;
                     assertThat(plan).as(description).isNotNull();
                     assertThat(Attempt.of(plan)).as(description).isEqualTo(attempt);
                     assertThat(compile.apply(family.repeats() + 1).caseSensitiveScanPlan()).as(description).isNull();
                     if (language.trinoClass()) {
-                        TrinoRoutes routes = TrinoRoutes.of(pattern);
+                        TrinoRoutes routes = TrinoRoutes.of((Re2) pattern);
                         assertThat(routes).as(description).isNotNull();
                         byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(routes);
                         assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);

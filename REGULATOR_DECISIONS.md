@@ -2433,11 +2433,11 @@ plans; the last bullets record the rules and measurements specific to each.
   operations than Trino, and they all reach the plan through four calls, so
   overriding those calls keeps every operation's route without a generated
   entry per operation.
-- `Re2` is sealed rather than final, permitting one private subclass that
-  overrides those four package-private calls; callers still cannot extend it.
-  The subclass holds the generated executor, so `Re2`'s own fields, and its
-  guarded object layout, do not change. Released versions had a final `Re2`;
-  the LIKE generator made the same change to `TrinoLikePattern`.
+- `Re2`, `JavaRegexp`, and `RustRegexp` are sealed classes over a
+  package-private engine. Each permits one private subclass that overrides
+  those four package-private calls; callers still cannot extend the pattern
+  classes. The subclass holds the generated executor, so the pattern classes'
+  own fields, and their guarded object layout, do not change.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
   stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
   count that skips the plan does not exclude a pattern, because only the calls
@@ -2478,39 +2478,40 @@ plans; the last bullets record the rules and measurements specific to each.
   classes under the same rules. The Java end adds a generated end check, and a
   Java-only rule on which runs may precede it decides whether a plan exists;
   once a plan exists, the decision whether to generate it and the routes are
-  RE2's, and `JavaRegexp` holds the generated `Re2` subclass. On R9g and R8i,
-  the 65 matching rows of `BenchmarkJavaScanPlan` with `generateBytecode=true`,
-  on the `URL`, `URL_SHORT`, `ANCHORED_HOST`, `ANCHORED_QUERY`,
-  `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
-  `OPTIONAL_MIXED`, `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED`
-  workloads, take a geometric mean of 0.51 and 0.56 times the interpreted
-  plan's time and 0.12 and 0.13 times the ordinary engine's, excluding
-  compilation and the `FOLDED_MIXED` control. No generated row is slower than
-  the interpreted plan or the ordinary engine, and R8i `LONG_HOST`, RE2's
-  exception, is within noise for Java. Compilation with generation takes 0.44
-  to 0.71 ms per pattern on R9g and 1.0 to 1.6 ms on R8i, against 3.9 to 15.1
-  us for the interpreted plan. Over the 50 Java end rows, generated classes
-  take 0.489 and 0.507 times the interpreted plan's time and 0.064 and 0.057
-  times the ordinary engine's; no row is slower than the interpreted plan, and
-  R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to 0.69 ms per
-  pattern on R9g and 1.11 to 1.52 ms on R8i.
+  RE2's, and a private `JavaRegexp` subclass holds the generated executor. On
+  R9g and R8i, the 65 matching rows of `BenchmarkJavaScanPlan` with
+  `generateBytecode=true`, on the `URL`, `URL_SHORT`, `ANCHORED_HOST`,
+  `ANCHORED_QUERY`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
+  `OPTIONAL_RETRY`, `OPTIONAL_MIXED`, `RETRY_64`, `LONG_HOST`, `MIXED`, and
+  `URL_MALFORMED` workloads, take a geometric mean of 0.51 and 0.56 times the
+  interpreted plan's time and 0.12 and 0.13 times the ordinary engine's,
+  excluding compilation and the `FOLDED_MIXED` control. No generated row is
+  slower than the interpreted plan or the ordinary engine, and R8i `LONG_HOST`,
+  RE2's exception, is within noise for Java. Compilation with generation takes
+  0.44 to 0.71 ms per pattern on R9g and 1.0 to 1.6 ms on R8i, against 3.9 to
+  15.1 us for the interpreted plan. Over the 50 Java end rows, generated
+  classes take 0.489 and 0.507 times the interpreted plan's time and 0.064 and
+  0.057 times the ordinary engine's; no row is slower than the interpreted
+  plan, and R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to
+  0.69 ms per pattern on R9g and 1.11 to 1.52 ms on R8i.
 - `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same executor
   classes under the same rules. A Rust plan is an RE2 plan, so the emitter,
-  eligibility, and routes are RE2's, and `RustRegexp` holds the generated `Re2`
-  subclass. Byte-mode patterns build plans and generated classes under the
-  same rules. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
-  with `generateBytecode=true`, on the `URL`, `ANCHORED_HOST`,
-  `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
-  `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED` workloads, take
-  a geometric mean of 0.536 and 0.597 times the interpreted plan's time and
-  0.113 and 0.123 times the ordinary engine's, excluding compilation. Over the
-  40 of those rows that the Java measurement shares, Rust classes take 0.535
-  and 0.604 times and Java classes took 0.530 and 0.606. No generated row is
-  slower than the interpreted plan or the ordinary engine beyond noise, and R8i
-  `LONG_HOST`, RE2's exception, is within noise for Rust. Compilation with
-  generation takes 453 to 715 us per pattern on R9g and 1024 to 1602 us on R8i,
-  against 4 to 13 us and 5 to 16 us for the interpreted plan and 3 to 11 us and
-  4 to 12 us for the ordinary engine.
+  eligibility, and routes are RE2's, and a private `RustRegexp` subclass holds
+  the generated executor. Byte-mode patterns build plans and generated classes
+  under the same rules. On R9g and R8i, the 45 matching rows of
+  `BenchmarkRustScanPlan` with `generateBytecode=true`, on the `URL`,
+  `ANCHORED_HOST`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
+  `OPTIONAL_RETRY`, `LONG_HOST`, `URL_MALFORMED`, and
+  `UNANCHORED_URL_MALFORMED` workloads, take a geometric mean of 0.536 and
+  0.597 times the interpreted plan's time and 0.113 and 0.123 times the
+  ordinary engine's, excluding compilation. Over the 40 of those rows that the
+  Java measurement shares, Rust classes take 0.535 and 0.604 times and Java
+  classes took 0.530 and 0.606. No generated row is slower than the interpreted
+  plan or the ordinary engine beyond noise, and R8i `LONG_HOST`, RE2's
+  exception, is within noise for Rust. Compilation with generation takes 453 to
+  715 us per pattern on R9g and 1024 to 1602 us on R8i, against 4 to 13 us and
+  5 to 16 us for the interpreted plan and 3 to 11 us and 4 to 12 us for the
+  ordinary engine.
 - Generated classes read a set of some non-ASCII characters with a copy of the
   interpreter's reader, full lead entries and lead-byte width included. With
   the trie walk for every lead, generated Java `URL_NON_ASCII` `contains` and

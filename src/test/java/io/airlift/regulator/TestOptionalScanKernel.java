@@ -53,6 +53,8 @@ public class TestOptionalScanKernel
                     .doesNotContain("io.airlift.regulator.TrinoRegexp$CompiledScanTrinoRegexp ")
                     .doesNotContain("io.airlift.regulator.TrinoRegexpMatcher$CompiledScanMatcher ")
                     .doesNotContain("io.airlift.regulator.Re2$CompiledScanRe2 ")
+                    .doesNotContain("io.airlift.regulator.JavaRegexp$CompiledScanJavaRegexp ")
+                    .doesNotContain("io.airlift.regulator.RustRegexp$CompiledScanRustRegexp ")
                     .doesNotContain("io.airlift.regulator.ScanKernelGenerator")
                     .doesNotContain("io.airlift.regulator.ScanKernelSupport ")
                     .doesNotContain("io.airlift.regulator.VectorScanKernelSupport ")

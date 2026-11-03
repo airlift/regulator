@@ -144,7 +144,7 @@ public class TestJavaRegexpDifferential
         for (String pattern : List.of("(?d)^ab|ab$", "(?d)^ab|ab\\Z", "(?m)^Sherlock Holmes|Sherlock Holmes$")) {
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             Pattern jdk = Pattern.compile(pattern);
-            Prog prog = regexp.re2().forwardProgramForDiagnostics();
+            Prog prog = regexp.forwardProgramForDiagnostics();
             assertThat(prog.canSkipToStartCandidate()).as(pattern).isTrue();
             String literal = pattern.contains("Sherlock") ? "Sherlock Holmes" : "ab";
             String fillerUnit = "filler text, ";
@@ -179,7 +179,7 @@ public class TestJavaRegexpDifferential
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
-        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).re2().usesScanPlanForDiagnostics()).isTrue();
+        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).usesScanPlanForDiagnostics()).isTrue();
         List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
         for (String pattern : List.of(
                 "^",
@@ -331,17 +331,17 @@ public class TestJavaRegexpDifferential
     {
         // A caret after which every path to a match consumes a byte is never at the end of the
         // input, so both programs drop its end-of-input check and the search runs on the DFA.
-        Re2 re2 = JavaRegexp.compile(utf8Slice("(?dm)^ab+|ab+$")).re2();
-        Prog program = re2.forwardProgramForDiagnostics();
+        JavaRegexp regexp = JavaRegexp.compile(utf8Slice("(?dm)^ab+|ab+$"));
+        Prog program = regexp.forwardProgramForDiagnostics();
         assertThat(program.hasTextDependentAssertions()).isFalse();
         assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
 
         // A match of variable length takes its start from the reverse program.
         int[] groups = new int[2];
-        assertThat(re2.findInto(utf8Slice("x\nabb"), groups)).isTrue();
+        assertThat(regexp.findInto(utf8Slice("x\nabb"), groups)).isTrue();
         assertThat(groups).containsExactly(2, 5);
         assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
-        Prog reverse = re2.reverseProgramIfComputedForDiagnostics();
+        Prog reverse = regexp.reverseProgramIfComputedForDiagnostics();
         assertThat(reverse).isNotNull();
         assertThat(reverse.hasTextDependentAssertions()).isFalse();
         assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).isNotNull();

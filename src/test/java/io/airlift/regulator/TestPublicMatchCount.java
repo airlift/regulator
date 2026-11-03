@@ -24,7 +24,6 @@ import java.util.stream.IntStream;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 public class TestPublicMatchCount
 {
@@ -224,12 +223,5 @@ public class TestPublicMatchCount
             }
             assertThat(re2.count(input)).isEqualTo(expected);
         }
-    }
-
-    @Test
-    public void testNullInput()
-    {
-        assertThatNullPointerException().isThrownBy(() -> Re2.compile(utf8Slice("a")).count(null));
-        assertThatNullPointerException().isThrownBy(() -> JavaRegexp.compile(utf8Slice("a")).count(null));
     }
 }

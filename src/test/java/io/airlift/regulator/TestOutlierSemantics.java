@@ -42,10 +42,10 @@ public class TestOutlierSemantics
         ParseResult parsed = JavaRegexpParser.parse(expression, flags);
         Slice input = utf8Slice("b".repeat(100_000) + "x");
         // RE2's Latin-1 mode and Rust's byte mode read [^u-z] one byte per character.
-        for (Re2 pattern : List.of(
+        for (CompiledPattern pattern : List.of(
                 Re2.compileParsed(expression, parsed, flags),
                 Re2.compile(expression, Re2.Options.latin1()),
-                RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)).re2())) {
+                RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)))) {
             assertThat(pattern.count(input)).isEqualTo(1);
             assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
         }
@@ -70,7 +70,7 @@ public class TestOutlierSemantics
         // group agrees with the semantic NFA.
         Slice expression = utf8Slice("(?s)^((.*)()()($))");
         Slice value = wrappedBuffer("ab\u00FF\n".repeat(100_000).getBytes(ISO_8859_1));
-        for (Re2 pattern : List.of(Re2.compile(expression, Re2.Options.latin1()), RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)).re2())) {
+        for (CompiledPattern pattern : List.of(Re2.compile(expression, Re2.Options.latin1()), RustRegexp.compile(expression, RustRegexp.Options.bytes().setUnicode(false)))) {
             for (Slice input : List.of(utf8Slice(""), utf8Slice("\n"), wrappedBuffer((byte) 0xFF), value)) {
                 RegexpMatcher matcher = pattern.matcher(input);
                 assertThat(matcher.find()).isTrue();

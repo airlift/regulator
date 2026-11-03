@@ -229,10 +229,10 @@ public class TestLanguageBulkBenchmark
         data.engine = engine;
         data.workloadFile = input("count", "ex", "exex", extraFields).toString();
         data.initialize();
-        Re2 pattern = switch (data.compilePattern()) {
-            case JavaRegexp java -> java.re2();
+        CompiledPattern pattern = switch (data.compilePattern()) {
+            case JavaRegexp java -> java;
             case TrinoRegexp trino -> trino.re2();
-            case RustRegexp rust -> rust.re2();
+            case RustRegexp rust -> rust;
             default -> throw new IllegalArgumentException("not a Regulator pattern: " + engine);
         };
         return pattern.forwardProgramForDiagnostics().prefixAccelProbeOffset();

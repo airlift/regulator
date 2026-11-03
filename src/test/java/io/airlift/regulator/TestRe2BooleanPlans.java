@@ -111,10 +111,10 @@ public class TestRe2BooleanPlans
 
         Slice pattern = utf8("(?s:.*" + literal + ".*)");
         Slice input = utf8(half.repeat(64) + literal);
-        for (Re2 re2 : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern).re2(), RustRegexp.compile(pattern).re2())) {
-            assertThat(re2.findPlanForDiagnostics()).isEqualTo(CONTAINS);
-            assertThat(re2.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
-            assertThat(re2.find(input)).isTrue();
+        for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern))) {
+            assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
+            assertThat(compiledPattern.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
+            assertThat(compiledPattern.find(input)).isTrue();
         }
     }
 

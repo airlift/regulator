@@ -190,6 +190,10 @@ own hidden class. Results are unchanged; `usesGeneratedBytecode()` reports
 whether the pattern has such a class. A pattern that is not eligible, or whose
 class cannot be generated, compiles as it does without the option.
 
+`Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are sealed classes that
+callers cannot extend, and `compile` may return a subclass of the class it is
+called on, such as one that runs a generated class.
+
 ## Runtime acceleration
 
 Regulator works without special JVM flags. Two optional flags enable faster

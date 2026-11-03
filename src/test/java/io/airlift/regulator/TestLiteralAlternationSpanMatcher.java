@@ -84,15 +84,15 @@ public class TestLiteralAlternationSpanMatcher
 
         // Boolean find and count of RE2, Java, and Rust patterns run on the matcher and agree
         // with the general engine, including on malformed UTF-8.
-        Map<String, Re2> compiledPatterns = new LinkedHashMap<>();
+        Map<String, CompiledPattern> compiledPatterns = new LinkedHashMap<>();
         for (String expression : patterns) {
             compiledPatterns.putAll(re2JavaAndRustPatterns(expression));
         }
         // A Rust byte-mode escape is a single byte, not a code point.
-        compiledPatterns.put("Rust bytes (?-u)ERROR|\\xFF\\xFE", RustRegexp.compile(utf8Slice("(?-u)ERROR|\\xFF\\xFE"), RustRegexp.Options.bytes()).re2());
-        for (Map.Entry<String, Re2> entry : compiledPatterns.entrySet()) {
+        compiledPatterns.put("Rust bytes (?-u)ERROR|\\xFF\\xFE", RustRegexp.compile(utf8Slice("(?-u)ERROR|\\xFF\\xFE"), RustRegexp.Options.bytes()));
+        for (Map.Entry<String, CompiledPattern> entry : compiledPatterns.entrySet()) {
             String label = entry.getKey();
-            Re2 pattern = entry.getValue();
+            CompiledPattern pattern = entry.getValue();
             assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
             // Count answers from the matcher without building the general engine's DFA.
             pattern.count(inputs.getLast());
@@ -191,13 +191,13 @@ public class TestLiteralAlternationSpanMatcher
         Slice input = backing.slice(1, backing.length() - 2);
         // Rust's parser folds (?i)k into the class [Kk\x{212A}], which carries no case-folding flag.
         String foldedDictionary = "(?i)" + IntStream.range(0, 65).mapToObj(index -> index + "k").collect(Collectors.joining("|"));
-        List<Re2> patterns = List.of(
+        List<CompiledPattern> patterns = List.of(
                 Re2.compile(dictionary),
-                JavaRegexp.compile(dictionary).re2(),
-                RustRegexp.compile(dictionary).re2(),
-                RustRegexp.compile(dictionary, RustRegexp.Options.defaults().setUnicode(false).setBytes(true)).re2(),
-                RustRegexp.compile(utf8Slice(foldedDictionary)).re2());
-        for (Re2 pattern : patterns) {
+                JavaRegexp.compile(dictionary),
+                RustRegexp.compile(dictionary),
+                RustRegexp.compile(dictionary, RustRegexp.Options.defaults().setUnicode(false).setBytes(true)),
+                RustRegexp.compile(utf8Slice(foldedDictionary)));
+        for (CompiledPattern pattern : patterns) {
             assertLiteralSetFind(pattern, input);
         }
         // A Latin-1 program reads a class's members as bytes.
@@ -596,7 +596,7 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     // The scan counters of each DFA the pattern's forward program has built.
-    private static List<String> dfaScanCounters(Re2 pattern)
+    private static List<String> dfaScanCounters(CompiledPattern pattern)
     {
         List<String> counters = new ArrayList<>();
         for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
@@ -668,7 +668,7 @@ public class TestLiteralAlternationSpanMatcher
 
     // A routed find runs the automaton, leaving the program's first-match DFA unbuilt, and its
     // spans are the general engine's.
-    private static void assertLiteralSetFind(Re2 pattern, Slice input)
+    private static void assertLiteralSetFind(CompiledPattern pattern, Slice input)
     {
         assertThat(pattern.literalSetSpanMatcher()).isNotNull();
         RegexpMatcher matcher = pattern.matcher(input);
@@ -680,7 +680,7 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     // The routed matcher's finds, region finds, and find(int) give the general engine's spans.
-    private static void assertFindAgreement(Re2 pattern, Slice input)
+    private static void assertFindAgreement(CompiledPattern pattern, Slice input)
     {
         String expression = pattern.pattern().toStringUtf8();
         String text = input.toStringUtf8();
@@ -713,16 +713,16 @@ public class TestLiteralAlternationSpanMatcher
 
     // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.
     // Trino's literal-alternation subtype is covered separately.
-    private static Map<String, Re2> re2JavaAndRustPatterns(String expression)
+    private static Map<String, CompiledPattern> re2JavaAndRustPatterns(String expression)
     {
         return Map.of(
                 "RE2 " + expression, Re2.compile(utf8Slice(expression)),
-                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)).re2(),
-                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)).re2(),
-                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()).re2());
+                "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
+                "Rust " + expression, RustRegexp.compile(utf8Slice(expression)),
+                "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
     }
 
-    private static long generalEngineCount(Re2 pattern, Slice input)
+    private static long generalEngineCount(CompiledPattern pattern, Slice input)
     {
         RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
         long count = 0;

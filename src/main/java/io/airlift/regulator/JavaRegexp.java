@@ -13,10 +13,7 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.Slice;
-
-import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
@@ -26,7 +23,9 @@ import static java.util.Objects.requireNonNull;
 /// Constructs that require backtracking, stateful assertions, or unsupported Java assertion semantics
 /// fail during compilation. Match offsets are UTF-8 byte offsets rather than the UTF-16 indexes returned
 /// by [java.util.regex.Matcher].
-public final class JavaRegexp
+public sealed class JavaRegexp
+        extends CompiledPattern
+        permits JavaRegexp.CompiledScanJavaRegexp
 {
     /// Mutable Java-language compilation options. Compilation snapshots every option, so later
     /// changes do not affect an existing [JavaRegexp]. Options instances are not thread-safe.
@@ -178,11 +177,14 @@ public final class JavaRegexp
         }
     }
 
-    private final Re2 re2;
-
-    private JavaRegexp(Re2 re2)
+    private JavaRegexp(Analysis analysis)
     {
-        this.re2 = requireNonNull(re2, "re2 is null");
+        super(analysis);
+    }
+
+    private JavaRegexp(JavaRegexp pattern)
+    {
+        super(pattern);
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -235,169 +237,97 @@ public final class JavaRegexp
         Slice patternCopy = pattern.copy();
         int parseFlags = options.parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        Re2 compiled = CompiledPattern.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
-        return new JavaRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
-    }
-
-    Re2 re2()
-    {
-        return re2;
+        JavaRegexp compiled = new JavaRegexp(analyzeParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.JAVA, scanPlanMode));
+        if (options.generateBytecode()) {
+            JavaRegexp generated = CompiledScanJavaRegexp.create(compiled);
+            if (generated != null) {
+                return generated;
+            }
+        }
+        return compiled;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
     /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
     /// would run its specialized scan runs the generated class.
+    @Override
     public boolean usesGeneratedBytecode()
     {
-        return re2.usesGeneratedBytecode();
-    }
-
-    public boolean find(Slice input)
-    {
-        return re2.find(requireNonNull(input, "input is null"));
+        return false;
     }
 
     /// Returns the number of non-overlapping matches, including empty matches.
     /// Empty matches advance by one UTF-8 code point as in [RegexpMatcher#find()].
     /// No capture values are returned.
+    @Override
     public long count(Slice input)
     {
-        return re2.count(input);
+        return super.count(input);
     }
 
-    public boolean lookingAt(Slice input)
+    /// A Java pattern whose case-sensitive scan plan runs a class generated for it.
+    private static final class CompiledScanJavaRegexp
+            extends JavaRegexp
     {
-        return re2.lookingAt(requireNonNull(input, "input is null"));
-    }
+        private final CompiledRe2Scan scan;
+        // Whether the plan is start-anchored, so its attempt runs alone; otherwise it searches.
+        private final boolean anchored;
+        // Whether full-Slice find hands off to the ordinary engine, so it runs the capture-free
+        // search before the handoff.
+        private final boolean ordinaryHandoff;
 
-    public boolean matches(Slice input)
-    {
-        return re2.matches(requireNonNull(input, "input is null"));
-    }
+        private CompiledScanJavaRegexp(JavaRegexp pattern, CompiledRe2Scan scan)
+        {
+            super(pattern);
+            this.scan = scan;
+            this.anchored = pattern.caseSensitiveScanPlan().isAnchoredStart();
+            this.ordinaryHandoff = pattern.generatedFindHandsOff();
+        }
 
-    /// Returns whether the pattern has a match in `[start, end)`.
-    public boolean find(Slice input, int start, int end)
-    {
-        return re2.find(requireNonNull(input, "input is null"), start, end);
-    }
+        /// Returns a copy of `pattern` with a generated class, or `null` when the
+        /// pattern is not eligible or the class cannot be generated. The declared type keeps
+        /// verification of the base class from loading this class.
+        static JavaRegexp create(JavaRegexp pattern)
+        {
+            CompiledRe2Scan scan = pattern.generateScanExecutor();
+            return scan == null ? null : new CompiledScanJavaRegexp(pattern, scan);
+        }
 
-    /// Returns whether the pattern matches at `start` within `[start, end)`.
-    public boolean lookingAt(Slice input, int start, int end)
-    {
-        return re2.lookingAt(requireNonNull(input, "input is null"), start, end);
-    }
+        @Override
+        public boolean usesGeneratedBytecode()
+        {
+            return true;
+        }
 
-    /// Returns whether the pattern matches all of `[start, end)`.
-    public boolean matches(Slice input, int start, int end)
-    {
-        return re2.matches(requireNonNull(input, "input is null"), start, end);
-    }
+        // Short boolean calls run the generated class rather than the ordinary engine.
+        @Override
+        boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+        {
+            return false;
+        }
 
-    /// Creates a mutable matcher retaining every capturing group.
-    public RegexpMatcher matcher(Slice input)
-    {
-        return re2.matcher(requireNonNull(input, "input is null"));
-    }
+        @Override
+        boolean findWithScanPlan(Slice input, byte strategy)
+        {
+            return findWithGeneratedScan(scan, anchored, ordinaryHandoff, input);
+        }
 
-    /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-    public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
-    {
-        return re2.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
-    }
+        @Override
+        long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
+        {
+            return countWithGeneratedScan(scan, text);
+        }
 
-    /// Finds a match and writes byte-offset start/end pairs into caller-owned storage.
-    public boolean findInto(Slice input, int[] groups)
-    {
-        return re2.findInto(requireNonNull(input, "input is null"), groups);
-    }
+        @Override
+        boolean findWithStartAnchoredScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, int[] groups)
+        {
+            return findWithGeneratedStartAnchoredScan(scan, text, contextStart, contextEnd, groups);
+        }
 
-    /// Finds a match in `[start, end)` and writes byte-offset start/end pairs.
-    public boolean findInto(Slice input, int start, int end, int[] groups)
-    {
-        return re2.findInto(requireNonNull(input, "input is null"), start, end, groups);
-    }
-
-    /// Matches at the beginning of the input and writes byte-offset start/end pairs.
-    public boolean lookingAtInto(Slice input, int[] groups)
-    {
-        return re2.lookingAtInto(requireNonNull(input, "input is null"), groups);
-    }
-
-    /// Matches at `start` within `[start, end)` and writes byte-offset start/end pairs.
-    public boolean lookingAtInto(Slice input, int start, int end, int[] groups)
-    {
-        return re2.lookingAtInto(requireNonNull(input, "input is null"), start, end, groups);
-    }
-
-    /// Matches the complete input and writes byte-offset start/end pairs.
-    public boolean matchesInto(Slice input, int[] groups)
-    {
-        return re2.matchesInto(requireNonNull(input, "input is null"), groups);
-    }
-
-    /// Matches all of `[start, end)` and writes byte-offset start/end pairs.
-    public boolean matchesInto(Slice input, int start, int end, int[] groups)
-    {
-        return re2.matchesInto(requireNonNull(input, "input is null"), start, end, groups);
-    }
-
-    /// Returns the first match, or `null` when there is no match.
-    public MatchResult findResult(Slice input)
-    {
-        return re2.findResult(requireNonNull(input, "input is null"));
-    }
-
-    /// Returns the first match in `[start, end)`, or `null` when there is no match.
-    public MatchResult findResult(Slice input, int start, int end)
-    {
-        return re2.findResult(requireNonNull(input, "input is null"), start, end);
-    }
-
-    /// Returns the match at the beginning of the input, or `null` when there is no match.
-    public MatchResult lookingAtResult(Slice input)
-    {
-        return re2.lookingAtResult(requireNonNull(input, "input is null"));
-    }
-
-    /// Returns the match at `start` within `[start, end)`, or `null`.
-    public MatchResult lookingAtResult(Slice input, int start, int end)
-    {
-        return re2.lookingAtResult(requireNonNull(input, "input is null"), start, end);
-    }
-
-    /// Returns the complete-input match, or `null` when there is no match.
-    public MatchResult matchesResult(Slice input)
-    {
-        return re2.matchesResult(requireNonNull(input, "input is null"));
-    }
-
-    /// Returns the complete-region match, or `null` when there is no match.
-    public MatchResult matchesResult(Slice input, int start, int end)
-    {
-        return re2.matchesResult(requireNonNull(input, "input is null"), start, end);
-    }
-
-    /// Returns a copy of the compiled pattern bytes.
-    public Slice pattern()
-    {
-        return re2.pattern();
-    }
-
-    /// Returns the number of capturing groups, excluding group zero (the whole match).
-    public int capturingGroupCount()
-    {
-        return re2.capturingGroupCount();
-    }
-
-    /// Returns an immutable mapping from capture names to group numbers.
-    public Map<String, Integer> namedCapturingGroups()
-    {
-        return re2.namedCapturingGroups();
-    }
-
-    /// Returns an immutable mapping from group numbers to capture names.
-    public Map<Integer, String> capturingGroupNames()
-    {
-        return re2.capturingGroupNames();
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalWithGeneratedScan(scan, anchored, prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+        }
     }
 }

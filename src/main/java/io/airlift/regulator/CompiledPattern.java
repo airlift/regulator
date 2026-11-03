@@ -32,7 +32,9 @@ import static java.util.Objects.requireNonNull;
 /// offsets are byte offsets relative to the logical Slice, not its backing array.
 @SuppressWarnings("CharUsedInArithmeticContext")
 abstract sealed class CompiledPattern
-        permits Re2
+        permits JavaRegexp,
+                Re2,
+                RustRegexp
 {
     enum BooleanPartialMatchStrategy
     {
@@ -389,10 +391,11 @@ abstract sealed class CompiledPattern
         return (regexp.op() == RegexpOp.CHAR_CLASS || regexp.op() == RegexpOp.ANY_CHAR) && (regexp.parseFlags() & Regexp.LATIN1) == 0;
     }
 
-    /// Compiles a pattern parsed by the Java frontend. The caller passes a private snapshot that it
-    /// never mutates. `scanPlanMode` decides whether the scan plan of an eligible shape is
-    /// built, and how it runs.
-    static Re2 compileParsedForJava(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
+    /// Analyzes a parsed pattern that compiles in the RE2 dialect: an RE2 pattern compiled from
+    /// its parse result, or a pattern that the Java or Rust frontend parsed. The caller passes a
+    /// private snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an
+    /// eligible shape is built, and how it runs.
+    static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlan.Language language, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -400,21 +403,7 @@ abstract sealed class CompiledPattern
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return new Re2(build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, ScanPlan.Language.JAVA, scanPlanMode));
-    }
-
-    /// Compiles a pattern parsed by the Rust frontend. The caller passes a private snapshot that it
-    /// never mutates. `scanPlanMode` decides whether the scan plan of an eligible shape is
-    /// built, and how it runs.
-    static Re2 compileParsedForRust(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
-    {
-        requireNonNull(pattern, "pattern is null");
-        requireNonNull(parsed, "parsed is null");
-        requireNonNull(byteFrequencies, "byteFrequencies is null");
-        if (maxMemory <= 0) {
-            throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
-        }
-        return new Re2(build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, ScanPlan.Language.RUST, scanPlanMode));
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, language, scanPlanMode);
     }
 
     /// The caller passes a private snapshot that it never mutates. `scanPlanMode` selects
@@ -837,6 +826,10 @@ abstract sealed class CompiledPattern
     {
         return (flags & TRINO_COMPILER_DIALECT_FLAG) == 0 ? Compiler.Dialect.RE2 : Compiler.Dialect.TRINO;
     }
+
+    /// Returns whether this compiled pattern has a class generated for it. Each language
+    /// documents the option that enables it.
+    public abstract boolean usesGeneratedBytecode();
 
     /// Returns a copy of the compiled pattern bytes.
     public Slice pattern()
@@ -1306,12 +1299,14 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern has a match in `[start, end)`, retaining the complete Slice as assertion context.
     public boolean find(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchInto(input, start, end, Anchor.UNANCHORED, null);
     }
 
     /// Returns whether the pattern matches at the beginning of `input` without allocating capture storage.
     public boolean lookingAt(Slice input)
     {
+        requireInput(input);
         BooleanPlanKind plan = booleanPlans.lookingAt();
         if (plan != BooleanPlanKind.GENERAL) {
             requireNonNull(input, "input is null");
@@ -1323,6 +1318,7 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches at `start` within `[start, end)`, retaining the complete Slice as assertion context.
     public boolean lookingAt(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchInto(input, start, end, Anchor.ANCHOR_START, null);
     }
 
@@ -1377,6 +1373,7 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches all of `input` without allocating capture storage.
     public boolean matches(Slice input)
     {
+        requireInput(input);
         BooleanPlanKind plan = booleanPlans.matches();
         if (plan != BooleanPlanKind.GENERAL) {
             requireNonNull(input, "input is null");
@@ -1455,6 +1452,7 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches all of `[start, end)`, retaining the complete Slice as assertion context.
     public boolean matches(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchInto(input, start, end, Anchor.ANCHOR_BOTH, null);
     }
 
@@ -1468,6 +1466,7 @@ abstract sealed class CompiledPattern
     /// capturing groups. Use zero when only complete-match boundaries are required.
     public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
+        requireInput(input);
         return new RegexpMatcher(this, input, null, retainedCapturingGroupCount);
     }
 
@@ -2114,18 +2113,21 @@ abstract sealed class CompiledPattern
     /// unavailable groups are set to `-1, -1`. A `null` buffer requests no captures.
     public boolean findInto(Slice text, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, Anchor.UNANCHORED, groups);
     }
 
     /// Matches at the beginning of the input and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice text, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, Anchor.ANCHOR_START, groups);
     }
 
     /// Matches the complete input and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice text, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, Anchor.ANCHOR_BOTH, groups);
     }
 
@@ -2133,6 +2135,7 @@ abstract sealed class CompiledPattern
     /// Reported offsets are relative to the complete logical Slice.
     public boolean findInto(Slice text, int start, int end, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, start, end, Anchor.UNANCHORED, groups);
     }
 
@@ -2140,6 +2143,7 @@ abstract sealed class CompiledPattern
     /// Reported offsets are relative to the complete logical Slice.
     public boolean lookingAtInto(Slice text, int start, int end, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, start, end, Anchor.ANCHOR_START, groups);
     }
 
@@ -2147,7 +2151,18 @@ abstract sealed class CompiledPattern
     /// Reported offsets are relative to the complete logical Slice.
     public boolean matchesInto(Slice text, int start, int end, int[] groups)
     {
+        requireInput(text);
         return matchInto(text, start, end, Anchor.ANCHOR_BOTH, groups);
+    }
+
+    // A Java or Rust pattern names a null input `input` in every operation but count, and
+    // checks it before any other argument. An RE2 pattern names it `text` where its own checks
+    // reach it first.
+    private void requireInput(Slice input)
+    {
+        if (input == null && (this instanceof JavaRegexp || this instanceof RustRegexp)) {
+            throw new NullPointerException("input is null");
+        }
     }
 
     boolean matchInto(Slice text, Anchor anchor, int[] groups)
@@ -2347,36 +2362,42 @@ abstract sealed class CompiledPattern
     /// Returns an immutable snapshot of the first match, or `null` when no match exists.
     public MatchResult findResult(Slice input)
     {
+        requireInput(input);
         return matchResult(input, Anchor.UNANCHORED);
     }
 
     /// Returns an immutable snapshot of the first match in `[start, end)`, or `null`.
     public MatchResult findResult(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchResult(input, start, end, Anchor.UNANCHORED);
     }
 
     /// Returns an immutable snapshot when the pattern matches the complete input, or `null`.
     public MatchResult matchesResult(Slice input)
     {
+        requireInput(input);
         return matchResult(input, Anchor.ANCHOR_BOTH);
     }
 
     /// Returns an immutable snapshot when the pattern matches all of `[start, end)`, or `null`.
     public MatchResult matchesResult(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchResult(input, start, end, Anchor.ANCHOR_BOTH);
     }
 
     /// Returns an immutable snapshot of a match at the beginning of the input, or `null`.
     public MatchResult lookingAtResult(Slice input)
     {
+        requireInput(input);
         return matchResult(input, Anchor.ANCHOR_START);
     }
 
     /// Returns an immutable snapshot of a match at `start` within `[start, end)`, or `null`.
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
+        requireInput(input);
         return matchResult(input, start, end, Anchor.ANCHOR_START);
     }
 

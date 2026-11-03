@@ -99,14 +99,14 @@ public class TestSingleByteMatcher
     public void testOneByteRunFindAgreesWithRegularMatching()
     {
         // Boolean find of a run of one-byte members tests for one member, in every language.
-        List<Re2> patterns = List.of(
+        List<CompiledPattern> patterns = List.of(
                 Re2.compile(Slices.utf8Slice("\\s+")),
                 Re2.compile(Slices.utf8Slice("[,;]{1,}")),
                 Re2.compile(Slices.utf8Slice("[\\x80-\\xff]+"), Re2.Options.latin1()),
-                JavaRegexp.compile(Slices.utf8Slice("\\s+")).re2(),
+                JavaRegexp.compile(Slices.utf8Slice("\\s+")),
                 TrinoRegexp.compile(Slices.utf8Slice("\\s+")).re2(),
-                RustRegexp.compile(Slices.utf8Slice("[\\t\\n\\f\\r ]+")).re2(),
-                RustRegexp.compile(Slices.utf8Slice("(?-u)[\\x80-\\xff]+"), RustRegexp.Options.bytes()).re2());
+                RustRegexp.compile(Slices.utf8Slice("[\\t\\n\\f\\r ]+")),
+                RustRegexp.compile(Slices.utf8Slice("(?-u)[\\x80-\\xff]+"), RustRegexp.Options.bytes()));
         List<Slice> inputs = List.of(
                 Slices.EMPTY_SLICE,
                 Slices.utf8Slice("no_whitespace_here"),
@@ -115,17 +115,17 @@ public class TestSingleByteMatcher
                 Slices.utf8Slice("x".repeat(70)),
                 Slices.wrappedBuffer(new byte[] {'z', (byte) 0xFF, (byte) 0xC2, ' ', 'a'}));
 
-        for (Re2 re2 : patterns) {
-            assertThat(re2.booleanPartialMatchStrategyForDiagnostics()).as(re2.pattern().toStringUtf8()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.BYTE_RUN);
+        for (CompiledPattern compiledPattern : patterns) {
+            assertThat(compiledPattern.booleanPartialMatchStrategyForDiagnostics()).as(compiledPattern.pattern().toStringUtf8()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.BYTE_RUN);
             // A short find answers from the byte table without building the general engine's DFA.
-            re2.find(inputs.get(2));
-            assertThat(re2.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(re2.pattern().toStringUtf8()).isNull();
+            compiledPattern.find(inputs.get(2));
+            assertThat(compiledPattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(compiledPattern.pattern().toStringUtf8()).isNull();
             for (Slice input : inputs) {
-                assertThat(re2.find(input)).as("pattern %s, input %s", re2.pattern().toStringUtf8(), input).isEqualTo(re2.genericGroupZeroMatcherForDiagnostics(input).find());
+                assertThat(compiledPattern.find(input)).as("pattern %s, input %s", compiledPattern.pattern().toStringUtf8(), input).isEqualTo(compiledPattern.genericGroupZeroMatcherForDiagnostics(input).find());
             }
         }
         // Rust's Unicode \s also matches non-ASCII spaces, so it keeps the general engine.
-        assertThat(RustRegexp.compile(Slices.utf8Slice("\\s+")).re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
+        assertThat(RustRegexp.compile(Slices.utf8Slice("\\s+")).booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
     }
 
     @Test
