@@ -52,7 +52,7 @@ public class TestRe2BugRegression
     public void testBug1816809AnchoredMatch()
     {
         Re2 re = Re2.compile(utf8("(((((llx((-3)|(4)))(;(llx((-3)|(4))))*))))"), Re2.Options.defaults());
-        MatchResult result = re.matchResult(utf8("llx-3;llx4"), Re2.Anchor.ANCHOR_START);
+        MatchResult result = re.matchResult(utf8("llx-3;llx4"), CompiledPattern.Anchor.ANCHOR_START);
         assertThat(result).isNotNull();
     }
 
@@ -158,11 +158,11 @@ public class TestRe2BugRegression
         Slice text = utf8("abc");
         int[] submatch = new int[2];
 
-        assertThat(re.matchInto(text, Re2.Anchor.UNANCHORED, submatch)).isTrue();
+        assertThat(re.matchInto(text, CompiledPattern.Anchor.UNANCHORED, submatch)).isTrue();
         assertThat(submatch[0]).as("UNANCHORED start").isEqualTo(0);
         assertThat(submatch[1]).as("UNANCHORED end").isEqualTo(3);
 
-        assertThat(re.matchInto(text, Re2.Anchor.ANCHOR_BOTH, submatch)).isTrue();
+        assertThat(re.matchInto(text, CompiledPattern.Anchor.ANCHOR_BOTH, submatch)).isTrue();
         assertThat(submatch[0]).as("ANCHOR_BOTH start").isEqualTo(0);
         assertThat(submatch[1]).as("ANCHOR_BOTH end").isEqualTo(3);
     }
@@ -200,13 +200,13 @@ public class TestRe2BugRegression
         int[] submatch = new int[2];
 
         Re2 star = Re2.compile(utf8("(?:|a)*"), Re2.Options.defaults());
-        assertThat(star.matchInto(text, Re2.Anchor.UNANCHORED, submatch)).isTrue();
+        assertThat(star.matchInto(text, CompiledPattern.Anchor.UNANCHORED, submatch)).isTrue();
         // Should match empty string due to first-match semantics (empty alternative comes first)
         assertThat(submatch[0]).isEqualTo(0);
         assertThat(submatch[1]).isEqualTo(0);
 
         Re2 plus = Re2.compile(utf8("(?:|a)+"), Re2.Options.defaults());
-        assertThat(plus.matchInto(text, Re2.Anchor.UNANCHORED, submatch)).isTrue();
+        assertThat(plus.matchInto(text, CompiledPattern.Anchor.UNANCHORED, submatch)).isTrue();
         // Should also match empty string
         assertThat(submatch[0]).isEqualTo(0);
         assertThat(submatch[1]).isEqualTo(0);
@@ -242,7 +242,7 @@ public class TestRe2BugRegression
         Re2 regexp = Re2.compile(utf8("(?:(b)(?:(b)?))"), parseFlags);
 
         int[] groups = new int[6];
-        assertThat(regexp.matchInto(utf8("bbbbbcac"), 0, 7, Re2.Anchor.ANCHOR_START, groups)).isTrue();
+        assertThat(regexp.matchInto(utf8("bbbbbcac"), 0, 7, CompiledPattern.Anchor.ANCHOR_START, groups)).isTrue();
         assertThat(groups).containsExactly(0, 1, 0, 1, -1, -1);
     }
 

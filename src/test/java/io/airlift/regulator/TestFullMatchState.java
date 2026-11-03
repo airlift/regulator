@@ -61,7 +61,7 @@ public class TestFullMatchState
         byte[] text = "hello world".getBytes(StandardCharsets.UTF_8);
         int[] submatch = new int[2];
 
-        assertThat(regexp.matchInto(Slices.wrappedBuffer(text), Re2.Anchor.ANCHOR_BOTH, submatch)).isTrue();
+        assertThat(regexp.matchInto(Slices.wrappedBuffer(text), CompiledPattern.Anchor.ANCHOR_BOTH, submatch)).isTrue();
         assertThat(submatch).containsExactly(0, text.length);
     }
 

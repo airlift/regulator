@@ -21,7 +21,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.BooleanSupplier;
 
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTraditionalBenchmarkInputs

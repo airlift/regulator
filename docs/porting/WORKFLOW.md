@@ -78,7 +78,7 @@ it instead of creating a standalone diagnostic program.
 | `Nfa.java` | `re2/nfa.cc` |
 | `OnePass.java` | `re2/onepass.cc` |
 | `BitState.java` | `re2/bitstate.cc` |
-| `Re2.java` | `re2/re2.cc`, `re2/re2.h` |
+| `Re2.java`, `CompiledPattern.java` | `re2/re2.cc`, `re2/re2.h` |
 | `Re2Set.java` | `re2/set.cc`, `re2/set.h` |
 | `FilteredRe2.java`, `Prefilter.java` | `re2/filtered_re2.cc`, `re2/prefilter.cc` |
 | test-scope `Backtrack.java` | `re2/testing/backtrack.cc` |

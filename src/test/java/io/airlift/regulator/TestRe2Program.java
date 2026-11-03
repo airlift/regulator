@@ -48,7 +48,7 @@ public class TestRe2Program
         Re2 re100 = Re2.compile(utf8("(?:(?:(?:(?:(?:.)?){100})*)+)"), Re2.Options.defaults());
         Re2 re1000 = Re2.compile(utf8("(?:(?:(?:(?:(?:.)?){1000})*)+)"), Re2.Options.defaults());
 
-        Re2.FanoutResult fanout;
+        CompiledPattern.FanoutResult fanout;
 
         fanout = re1.programFanout();
         assertThat(fanout.maxBucket()).isEqualTo(3);

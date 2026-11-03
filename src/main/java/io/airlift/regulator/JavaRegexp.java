@@ -13,7 +13,7 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.Re2.ScanPlanMode;
+import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.Slice;
 
 import java.util.Map;
@@ -235,7 +235,7 @@ public final class JavaRegexp
         Slice patternCopy = pattern.copy();
         int parseFlags = options.parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        Re2 compiled = Re2.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        Re2 compiled = CompiledPattern.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         return new JavaRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 

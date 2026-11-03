@@ -77,7 +77,7 @@ public final class TestingExpressionPlanBenchmarkInputs
             Slice literalSource,
             Slice orderedSource,
             Expected expected,
-            Re2.BooleanPartialMatchStrategy orderedStrategy) {}
+            CompiledPattern.BooleanPartialMatchStrategy orderedStrategy) {}
 
     static Input create(Workload workload)
     {
@@ -98,7 +98,7 @@ public final class TestingExpressionPlanBenchmarkInputs
                 literalSource,
                 orderedSource,
                 workload.outcome.expected(),
-                tokens.length == 1 ? Re2.BooleanPartialMatchStrategy.EXACT_LITERAL : Re2.BooleanPartialMatchStrategy.GENERAL);
+                tokens.length == 1 ? CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL : CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
     }
 
     private static byte[] literalSource(Workload workload, byte[] literal)

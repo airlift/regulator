@@ -20,13 +20,13 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.util.List;
 
-import static io.airlift.regulator.Re2.BooleanPlanKind.CONTAINS;
-import static io.airlift.regulator.Re2.BooleanPlanKind.ENDS_WITH;
-import static io.airlift.regulator.Re2.BooleanPlanKind.EQUALS;
-import static io.airlift.regulator.Re2.BooleanPlanKind.GENERAL;
-import static io.airlift.regulator.Re2.BooleanPlanKind.LITERAL_SEARCH;
-import static io.airlift.regulator.Re2.BooleanPlanKind.NULLABLE_START;
-import static io.airlift.regulator.Re2.BooleanPlanKind.STARTS_WITH;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ENDS_WITH;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.EQUALS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_SEARCH;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.NULLABLE_START;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -36,7 +36,7 @@ public class TestRe2BooleanPlans
     public void testFindStrategyAndSharedCacheLayout()
             throws ReflectiveOperationException
     {
-        Field strategy = Re2.class.getDeclaredField("booleanFindStrategy");
+        Field strategy = CompiledPattern.class.getDeclaredField("booleanFindStrategy");
         assertThat(strategy.getType()).isEqualTo(byte.class);
         assertThat(instanceSize(Re2.class)).isEqualTo(104);
     }
@@ -47,13 +47,13 @@ public class TestRe2BooleanPlans
         assertPlans("foo", LITERAL_SEARCH, STARTS_WITH, EQUALS);
         assertPlans("foo{1}", LITERAL_SEARCH, STARTS_WITH, EQUALS);
         assertThat(Re2.compile(utf8("foo{1}")).booleanPartialMatchStrategyForDiagnostics())
-                .isEqualTo(Re2.BooleanPartialMatchStrategy.EXACT_LITERAL);
+                .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL);
         assertPlans("(foo)", LITERAL_SEARCH, STARTS_WITH, EQUALS);
         assertPlans("^foo", STARTS_WITH, STARTS_WITH, EQUALS);
         assertPlans("foo$", ENDS_WITH, EQUALS, EQUALS);
         assertPlans("^foo$", EQUALS, EQUALS, EQUALS);
         assertThat(Re2.compile(utf8("^foo$")).booleanPartialMatchStrategyForDiagnostics())
-                .isEqualTo(Re2.BooleanPartialMatchStrategy.EQUALS);
+                .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.EQUALS);
 
         assertPlans("(?s:.*foo.*)", CONTAINS, GENERAL, GENERAL);
         assertPlans("(?s:.*?foo.*?)", CONTAINS, GENERAL, GENERAL);
@@ -136,9 +136,9 @@ public class TestRe2BooleanPlans
 
     private static void assertPlans(
             String pattern,
-            Re2.BooleanPlanKind find,
-            Re2.BooleanPlanKind lookingAt,
-            Re2.BooleanPlanKind matches)
+            CompiledPattern.BooleanPlanKind find,
+            CompiledPattern.BooleanPlanKind lookingAt,
+            CompiledPattern.BooleanPlanKind matches)
     {
         assertPlans(pattern, Re2.Options.defaults(), find, lookingAt, matches);
     }
@@ -146,9 +146,9 @@ public class TestRe2BooleanPlans
     private static void assertPlans(
             String pattern,
             Re2.Options options,
-            Re2.BooleanPlanKind find,
-            Re2.BooleanPlanKind lookingAt,
-            Re2.BooleanPlanKind matches)
+            CompiledPattern.BooleanPlanKind find,
+            CompiledPattern.BooleanPlanKind lookingAt,
+            CompiledPattern.BooleanPlanKind matches)
     {
         Re2 re2 = Re2.compile(utf8(pattern), options);
         assertThat(re2.findPlanForDiagnostics()).as("find: %s", pattern).isEqualTo(find);

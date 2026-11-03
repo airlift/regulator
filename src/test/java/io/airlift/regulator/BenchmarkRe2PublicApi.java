@@ -32,7 +32,7 @@ import org.openjdk.jmh.runner.options.Options;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static java.nio.charset.StandardCharsets.UTF_8;
 

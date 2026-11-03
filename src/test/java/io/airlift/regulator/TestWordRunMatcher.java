@@ -74,15 +74,15 @@ public class TestWordRunMatcher
                 Slice text = backing.slice(1, backing.length() - 2);
                 for (int start = 0; start <= text.length(); start++) {
                     for (int end = start; end <= text.length(); end++) {
-                        for (Re2.Anchor anchor : Re2.Anchor.values()) {
+                        for (CompiledPattern.Anchor anchor : CompiledPattern.Anchor.values()) {
                             int[] offsets = new int[2];
                             boolean matched = Nfa.search(
                                     program,
                                     text,
                                     start,
                                     end,
-                                    anchor != Re2.Anchor.UNANCHORED,
-                                    anchor == Re2.Anchor.ANCHOR_BOTH ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH,
+                                    anchor != CompiledPattern.Anchor.UNANCHORED,
+                                    anchor == CompiledPattern.Anchor.ANCHOR_BOTH ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH,
                                     offsets);
                             long span = scanner.search(text, 0, text.length(), start, end, anchor);
                             assertThat(span != Dfa.SEARCH_NO_MATCH).as("%s %s %s:%s %s", pattern, value, start, end, anchor).isEqualTo(matched);

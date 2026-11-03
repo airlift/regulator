@@ -109,13 +109,13 @@ then scans the remainder by bytes. In a Trino plan, malformed input still has
 no promised exact result; the decoder is a bounded character-advancement
 mechanism, not a validation pass.
 
-`Re2` retains the immutable plan in its plan bundle and charges the
+The shared engine retains the immutable plan in its plan bundle and charges the
 complete plan and literal storage against the forward DFA budget. If the budget
 does not fit, compilation retains the ordinary route. The semantic program is
 kept for range-limited calls outside the scan plan's supported context.
 
 Plan execution uses its own strategy byte, `scanPlanStrategy`, separate from
-the boolean `find` strategy; both fit in the 104-byte `Re2` layout.
+the boolean `find` strategy; both fit in the shared engine's 104-byte layout.
 Shared capture matching checks the plan strategy byte before loading the plan,
 avoiding an extra dependent plan lookup for unrelated patterns. It invokes the
 plan before required-prefix stripping. Full-Slice boolean `find` keeps the

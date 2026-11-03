@@ -13,7 +13,7 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.Re2.Anchor;
+import io.airlift.regulator.CompiledPattern.Anchor;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.openjdk.jmh.annotations.Benchmark;

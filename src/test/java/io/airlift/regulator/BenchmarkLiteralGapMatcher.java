@@ -85,7 +85,7 @@ public class BenchmarkLiteralGapMatcher
                     likePattern.matches(input) != expected ||
                     trinoRegexp.contains(input) != expected ||
                     regexpPattern.find(input) != expected ||
-                    regexpPattern.matchInto(input, Re2.Anchor.UNANCHORED, null) != expected) {
+                    regexpPattern.matchInto(input, CompiledPattern.Anchor.UNANCHORED, null) != expected) {
                 throw new IllegalStateException("benchmark outcome mismatch for " + scenario);
             }
         }
@@ -178,7 +178,7 @@ public class BenchmarkLiteralGapMatcher
     @Benchmark
     public boolean regexpGeneralDfaControl(BenchmarkData data)
     {
-        return data.regexpPattern.matchInto(data.input, Re2.Anchor.UNANCHORED, null);
+        return data.regexpPattern.matchInto(data.input, CompiledPattern.Anchor.UNANCHORED, null);
     }
 
     public static void main(String[] args)

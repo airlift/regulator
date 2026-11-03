@@ -105,7 +105,7 @@ public class TestScanPlan
 
     private record BooleanTailShape(String expression, String text, int attemptEnd) {}
 
-    private record LiteralKernelShape(String expression, Re2.BooleanPartialMatchStrategy strategy, String text, String group) {}
+    private record LiteralKernelShape(String expression, CompiledPattern.BooleanPartialMatchStrategy strategy, String text, String group) {}
 
     private record MalformedView(String expression, String template, boolean scanPlan) {}
 
@@ -1689,11 +1689,11 @@ public class TestScanPlan
     public void testLiteralBooleanKernelsKeepPlanForBoundaries()
     {
         for (LiteralKernelShape shape : List.of(
-                new LiteralKernelShape("abc(.*)", Re2.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "def"),
-                new LiteralKernelShape("(abc).*", Re2.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "abc"),
-                new LiteralKernelShape("^(abc)", Re2.BooleanPartialMatchStrategy.STARTS_WITH, "abcdef", "abc"),
-                new LiteralKernelShape("^(abc)\\z", Re2.BooleanPartialMatchStrategy.EQUALS, "abc", "abc"),
-                new LiteralKernelShape("^(abc)$", Re2.BooleanPartialMatchStrategy.EQUALS_FINAL_LINE, "abc\n", "abc"))) {
+                new LiteralKernelShape("abc(.*)", CompiledPattern.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "def"),
+                new LiteralKernelShape("(abc).*", CompiledPattern.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "abc"),
+                new LiteralKernelShape("^(abc)", CompiledPattern.BooleanPartialMatchStrategy.STARTS_WITH, "abcdef", "abc"),
+                new LiteralKernelShape("^(abc)\\z", CompiledPattern.BooleanPartialMatchStrategy.EQUALS, "abc", "abc"),
+                new LiteralKernelShape("^(abc)$", CompiledPattern.BooleanPartialMatchStrategy.EQUALS_FINAL_LINE, "abc\n", "abc"))) {
             String expression = shape.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             Re2 pattern = regexp.re2();

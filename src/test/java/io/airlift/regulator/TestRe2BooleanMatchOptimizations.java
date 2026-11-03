@@ -49,7 +49,7 @@ public class TestRe2BooleanMatchOptimizations
         assertThat(pattern.find(region)).isTrue();
 
         int[] groups = new int[6];
-        assertThat(pattern.matchInto(region, Re2.Anchor.UNANCHORED, groups)).isTrue();
+        assertThat(pattern.matchInto(region, CompiledPattern.Anchor.UNANCHORED, groups)).isTrue();
         assertThat(groups).containsExactly(0, 6, 0, 2, 2, 6);
     }
 
