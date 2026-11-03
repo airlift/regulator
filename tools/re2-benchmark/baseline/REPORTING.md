@@ -18,9 +18,9 @@ lists an attempt that failed its correctness stage, as
 other attempts show. It reads each accepted measured group of a unit attempt
 where the controller retains it, at
 `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>/group-<g>`
-under its phase root, the layout `unit_dispatch.py` owns, and ignores the
-controller's staged copies under `unit-results/`. Each group directory must
-contain:
+under its phase root, the layout `unit_dispatch.py` owns, and ignores any
+group left in the controller's staging under `unit-results/`. Each group
+directory must contain:
 
 - `unit-receipt.tsv`
 - `unit-session.tsv`

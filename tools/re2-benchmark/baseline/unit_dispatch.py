@@ -298,12 +298,9 @@ def extract_unit_result(archive, directory):
 
 
 def retain_unit_attempt(directory, final):
-    """Copy an accepted attempt to its retained directory."""
+    """Move an accepted attempt from its staging to its retained directory, so the phase root holds one copy."""
     if final.exists():
         raise UnsafeCampaignError(f"retained unit attempt already exists: {final}")
-    temporary = final.with_name(f".{final.name}.new")
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    shutil.copytree(directory, temporary)
-    os.replace(temporary, final)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(directory, final)
     fsync_directory(final.parent)

@@ -3477,6 +3477,10 @@ class TestUnitWorkers(unittest.TestCase):
                            RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")),
                     sorted((row["unit_id"], row["group_id"], row["upload_seconds"])
                            for row in csv.DictReader(uploads, delimiter="\t")))
+            # An accepted group is kept once, where it is retained: its staging keeps neither the downloaded
+            # result nor a copy of the group.
+            self.assertEqual([], [path.name for path in (result_root / "unit-results").glob("*/*")
+                                  if path.suffix != ".json"])
 
     def test_leases_wait_for_the_budget_to_cover_their_hosts_stop_times(self):
         # A host powers off at the stop time it was launched with or a lease sent it, so whatever becomes of its

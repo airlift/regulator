@@ -288,7 +288,7 @@ def discover_session_directories(artifact_roots, session_directories):
     for root in artifact_roots:
         if not root.is_dir():
             raise ReductionError(f"artifact root does not exist: {root}")
-        # A phase's unit-results/ holds the controller's staged copies of the same attempts.
+        # A phase's unit-results/ holds only groups the controller left in staging, never a retained attempt.
         directories.update(
             path.parent.resolve() for path in root.rglob(RECEIPT_NAME) if retained_unit_attempt(path.parent))
     return sorted(directories, key=str)
