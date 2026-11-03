@@ -49,7 +49,7 @@ public class TestRe2CaptureCount
         Re2 re = Re2.compile(utf8(pattern.toString()), Re2.Options.defaults());
         int[] groups = new int[2 * (count + 1)];
 
-        assertThat(re.matchInto(utf8(text), Re2.Anchor.ANCHOR_BOTH, groups)).isTrue();
+        assertThat(re.matchInto(utf8(text), CompiledPattern.Anchor.ANCHOR_BOTH, groups)).isTrue();
         for (int i = 0; i < count; i++) {
             int expected = text.charAt(i) - '0';
             int captureStart = groups[(i + 1) * 2];

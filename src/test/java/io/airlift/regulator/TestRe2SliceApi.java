@@ -17,8 +17,8 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
-import static io.airlift.regulator.Re2.Anchor.ANCHOR_BOTH;
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.ANCHOR_BOTH;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2SliceApi

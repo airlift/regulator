@@ -60,12 +60,12 @@ public class TestExhaustiveCharClass
                             Re2 contextual = Re2.compile(utf8Slice("a(" + atom + ")b"), options);
                             for (Slice character : characters) {
                                 boolean expected = !negated && !(neverNewline && character.length() == 1 && character.getByte(0) == '\n');
-                                assertThat(standalone.matchInto(character, 0, character.length(), Re2.Anchor.ANCHOR_BOTH, null))
+                                assertThat(standalone.matchInto(character, 0, character.length(), CompiledPattern.Anchor.ANCHOR_BOTH, null))
                                         .as("%s %s dotNewline=%s neverNewline=%s character=%s", atom, encoding, dotNewline, neverNewline, character)
                                         .isEqualTo(expected);
                                 Slice text = wrappedBuffer(ByteArrays.concat(utf8Slice("paddinga"), character, utf8Slice("b"))).slice(7, character.length() + 2);
                                 int[] groups = new int[4];
-                                assertThat(contextual.matchInto(text, 0, text.length(), Re2.Anchor.ANCHOR_BOTH, groups))
+                                assertThat(contextual.matchInto(text, 0, text.length(), CompiledPattern.Anchor.ANCHOR_BOTH, groups))
                                         .as("context: %s %s dotNewline=%s neverNewline=%s", atom, encoding, dotNewline, neverNewline)
                                         .isEqualTo(expected);
                                 if (expected) {

@@ -20,7 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;

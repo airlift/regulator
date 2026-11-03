@@ -72,7 +72,7 @@ final class Regexp
     // RUST_WORD_END its end boundary; RUST_WORD_HALF checks only that boundary's non-word side.
     // JAVA_UNICODE_CHARACTER_CLASS selects Unicode word characters. With JAVA_WORD_BOUNDARY,
     // RUST_ASSERTION selects the crate's Unicode \b and \B instead. Bit 13 is now the only free
-    // parse-flag bit; Re2 uses bit 31 for the compiler dialect.
+    // parse-flag bit; CompiledPattern uses bit 31 for the compiler dialect.
     static final int RUST_ASSERTION = 1 << 28;
     static final int RUST_WORD_END = 1 << 29;
     static final int RUST_WORD_HALF = 1 << 30;

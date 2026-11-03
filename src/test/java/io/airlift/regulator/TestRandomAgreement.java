@@ -153,7 +153,7 @@ public class TestRandomAgreement
     {
         int[] actualGroups = new int[testCase.groupCount() * 2];
         boolean actualMatched = regexpState.regexp().matchInto(
-                testCase.text(), 0, testCase.text().length(), Re2.Anchor.UNANCHORED, actualGroups);
+                testCase.text(), 0, testCase.text().length(), CompiledPattern.Anchor.UNANCHORED, actualGroups);
         check(actualMatched == testCase.matched(),
                 testCase.caseId() + " native matched=" + testCase.matched() + ", Java matched=" + actualMatched);
         if (actualMatched) {

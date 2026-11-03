@@ -87,7 +87,7 @@ public class TestNativeLongestBoundaryAgreement
         Slice text = decodeHex(testCase.getString("textHex"));
         int start = Integer.parseInt(testCase.getString("start"));
         int end = Integer.parseInt(testCase.getString("end"));
-        Re2.Anchor anchor = parseAnchor(testCase.getString("anchor"));
+        CompiledPattern.Anchor anchor = parseAnchor(testCase.getString("anchor"));
         boolean expectedMatched = testCase.getBoolean("matched");
         int[] expectedGroups = expectedMatched ? parseGroups(testCase.getString("groups")) : null;
 
@@ -138,12 +138,12 @@ public class TestNativeLongestBoundaryAgreement
         }
     }
 
-    private static Re2.Anchor parseAnchor(String anchor)
+    private static CompiledPattern.Anchor parseAnchor(String anchor)
     {
         return switch (anchor) {
-            case "unanchored" -> Re2.Anchor.UNANCHORED;
-            case "start" -> Re2.Anchor.ANCHOR_START;
-            case "both" -> Re2.Anchor.ANCHOR_BOTH;
+            case "unanchored" -> CompiledPattern.Anchor.UNANCHORED;
+            case "start" -> CompiledPattern.Anchor.ANCHOR_START;
+            case "both" -> CompiledPattern.Anchor.ANCHOR_BOTH;
             default -> throw new IllegalArgumentException("unknown anchor: " + anchor);
         };
     }

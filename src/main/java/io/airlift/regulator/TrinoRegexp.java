@@ -14,7 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import io.airlift.regulator.Re2.ScanPlanMode;
+import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
@@ -195,7 +195,7 @@ public sealed class TrinoRegexp
         if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
         }
-        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        Re2 compiledPattern = CompiledPattern.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

@@ -139,15 +139,15 @@ final class ScanKernelGenerator
 
     /// Where each Trino operation of a pattern runs, decided once when the pattern compiles. An
     /// operation runs on the generated class exactly when [TrinoRegexp] would run it on the
-    /// case-sensitive scan plan, or would hand a short boolean `contains` or `count` to
-    /// the ordinary engine (see [Re2#usesOrdinaryShortBooleanMatchForDiagnostics()]), a route
-    /// that avoids the interpreter's per-operation dispatch, which the generated class does not
-    /// have. Only `contains` can keep another route, a retained literal kernel; every other
+    /// case-sensitive scan plan, or would hand a short boolean `contains` or `count` to the
+    /// ordinary engine (see [CompiledPattern#usesOrdinaryShortBooleanMatchForDiagnostics()]), a
+    /// route that avoids the interpreter's per-operation dispatch, which the generated class does
+    /// not have. Only `contains` can keep another route, a retained literal kernel; every other
     /// operation reaches the plan.
     ///
     /// @param contains whether full-Slice find reaches the plan rather than a retained literal kernel
     /// @param count how count reaches the plan
-    record TrinoRoutes(Re2 pattern, ScanPlan plan, boolean contains, Re2.ScanPlanCount count)
+    record TrinoRoutes(Re2 pattern, ScanPlan plan, boolean contains, CompiledPattern.ScanPlanCount count)
     {
         TrinoRoutes
         {
@@ -168,8 +168,8 @@ final class ScanKernelGenerator
             // A pattern with a scan plan has neither a single-byte matcher, which group-zero
             // operations ask before the pattern, nor a count that skips the plan. A pattern that
             // breaks either rule keeps the interpreter rather than reach the generated class.
-            Re2.ScanPlanCount count = pattern.scanPlanCount();
-            if (pattern.hasSingleByteMatcher() || count == Re2.ScanPlanCount.OTHER) {
+            CompiledPattern.ScanPlanCount count = pattern.scanPlanCount();
+            if (pattern.hasSingleByteMatcher() || count == CompiledPattern.ScanPlanCount.OTHER) {
                 return null;
             }
             return new TrinoRoutes(pattern, plan, pattern.usesScanPlanForFindForDiagnostics(), count);
@@ -1154,7 +1154,7 @@ final class ScanKernelGenerator
                     .condition(result.equal(constantInt(ScanPlan.NO_MATCH)))
                     .then(constantFalse().ret())
                     .build());
-            return boundConstant(routes.pattern(), Re2.class)
+            return boundConstant(routes.pattern(), CompiledPattern.class)
                     .invoke("continueScanSearch", boolean.class, input, result, groups);
         }
 
@@ -1173,12 +1173,12 @@ final class ScanKernelGenerator
             body.ret(finishSearch(body, input, result, noGroups));
         }
 
-        // The loop of Re2.countUnanchoredScanMatches; keep in step.
+        // The loop of CompiledPattern.countUnanchoredScanMatches; keep in step.
         private void defineCount()
         {
             Parameter input = arg("input", Slice.class);
             CodeBlock.Builder body = entry("count", MethodType.methodType(long.class, Slice.class), input).body();
-            if (routes.count() == Re2.ScanPlanCount.SINGLE_ATTEMPT && !anchored) {
+            if (routes.count() == CompiledPattern.ScanPlanCount.SINGLE_ATTEMPT && !anchored) {
                 throw new IllegalStateException("an unanchored plan counts by searching");
             }
             if (anchored) {
@@ -1210,7 +1210,7 @@ final class ScanKernelGenerator
                                     .condition(handoffGroups.isNull())
                                     .then(handoffGroups.set(newArray(int[].class, 2)))
                                     .build(),
-                            ifThenJump(boundConstant(routes.pattern(), Re2.class).invoke("continueScanSearch", boolean.class, input, matchEnd, handoffGroups).not(), done),
+                            ifThenJump(boundConstant(routes.pattern(), CompiledPattern.class).invoke("continueScanSearch", boolean.class, input, matchEnd, handoffGroups).not(), done),
                             matchEnd.set(handoffGroups.getElement(1))))
                     .build());
             body.append(count.set(count.add(constantLong(1))));

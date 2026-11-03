@@ -90,13 +90,13 @@ public class BenchmarkRe2Practical
     @Benchmark
     public boolean httpPartialMatch(PracticalState state)
     {
-        return state.re2Http.matchInto(state.httpInput, Re2.Anchor.UNANCHORED, state.httpCaptureGroups);
+        return state.re2Http.matchInto(state.httpInput, CompiledPattern.Anchor.UNANCHORED, state.httpCaptureGroups);
     }
 
     @Benchmark
     public boolean smallHttpPartialMatch(PracticalState state)
     {
-        return state.re2Http.matchInto(state.smallHttpInput, Re2.Anchor.UNANCHORED, state.httpCaptureGroups);
+        return state.re2Http.matchInto(state.smallHttpInput, CompiledPattern.Anchor.UNANCHORED, state.httpCaptureGroups);
     }
 
     @Benchmark

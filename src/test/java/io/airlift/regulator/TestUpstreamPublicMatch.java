@@ -51,10 +51,10 @@ public class TestUpstreamPublicMatch
 
         Re2 regexp = Re2.compile(decodeHex(testCase.getString("patternHex")), options);
         Slice text = decodeHex(testCase.getString("textHex"));
-        Re2.Anchor anchor = switch (testCase.getString("anchor")) {
-            case "unanchored" -> Re2.Anchor.UNANCHORED;
-            case "start" -> Re2.Anchor.ANCHOR_START;
-            case "both" -> Re2.Anchor.ANCHOR_BOTH;
+        CompiledPattern.Anchor anchor = switch (testCase.getString("anchor")) {
+            case "unanchored" -> CompiledPattern.Anchor.UNANCHORED;
+            case "start" -> CompiledPattern.Anchor.ANCHOR_START;
+            case "both" -> CompiledPattern.Anchor.ANCHOR_BOTH;
             default -> throw new IllegalArgumentException("unknown anchor: " + testCase.getString("anchor"));
         };
 

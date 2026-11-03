@@ -185,12 +185,12 @@ final class ScanPlan
     // match sequence.
     private final boolean allowsOrdinaryBooleanSearch;
     // Set when a boolean match of a start-anchored plan on a short input (see
-    // Re2.MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) may run on the ordinary engine instead. A fork
-    // retries its continuation, dispatching the continuation's operations again even in the
-    // boolean plan without capture saves, so on a short input the plan dispatches more operations
-    // than the DFA makes transitions, and its faster run scans cannot repay them. A plan with a
-    // boolean tail keeps the plan, since its attempt stops at the run's minimum; without one the
-    // attempt reads as far as the DFA does. The input's length picks the engine, so as for the
+    // CompiledPattern.MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) may run on the ordinary engine
+    // instead. A fork retries its continuation, dispatching the continuation's operations again
+    // even in the boolean plan without capture saves, so on a short input the plan dispatches more
+    // operations than the DFA makes transitions, and its faster run scans cannot repay them. A plan
+    // with a boolean tail keeps the plan, since its attempt stops at the run's minimum; without one
+    // the attempt reads as far as the DFA does. The input's length picks the engine, so as for the
     // density handoff both engines must agree on every input: an RE2, Java, or Rust plan always
     // does, and a Trino plan does when it consumes only ASCII bytes. Calls that report boundaries
     // or captures always run the plan.

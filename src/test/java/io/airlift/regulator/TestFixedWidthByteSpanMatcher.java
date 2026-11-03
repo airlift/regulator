@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static io.airlift.regulator.CompiledPattern.shouldAnalyzeFixedWidthByteSpanForTrino;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -31,11 +32,11 @@ public class TestFixedWidthByteSpanMatcher
     @Test
     public void testTrinoCompactAnalysisEligibility()
     {
-        assertThat(Re2.shouldAnalyzeFixedWidthByteSpanForTrino(
+        assertThat(shouldAnalyzeFixedWidthByteSpanForTrino(
                 TrinoRegexpParser.parse(utf8Slice("literal"), Regexp.LIKE_PERL))).isFalse();
-        assertThat(Re2.shouldAnalyzeFixedWidthByteSpanForTrino(
+        assertThat(shouldAnalyzeFixedWidthByteSpanForTrino(
                 TrinoRegexpParser.parse(utf8Slice("[0-9]{2}-[0-9]{2}"), Regexp.LIKE_PERL))).isTrue();
-        assertThat(Re2.shouldAnalyzeFixedWidthByteSpanForTrino(
+        assertThat(shouldAnalyzeFixedWidthByteSpanForTrino(
                 TrinoRegexpParser.parse(utf8Slice("([0-9]{2}-[0-9]{2})"), Regexp.LIKE_PERL))).isFalse();
     }
 
@@ -71,7 +72,7 @@ public class TestFixedWidthByteSpanMatcher
         // program must therefore be the compact sentinel rather than the otherwise unused
         // 37-state OnePass program.
         assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).isTrue();
-        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
+        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
 
         // Only Trino's fixed-width route drops the semantic program.
@@ -177,7 +178,7 @@ public class TestFixedWidthByteSpanMatcher
             for (Map.Entry<String, Re2> entry : re2JavaAndRustPatterns(expression).entrySet()) {
                 String label = entry.getKey();
                 Re2 pattern = entry.getValue();
-                assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
+                assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE);
                 // Count answers from the matcher without building the general engine's DFA.
                 pattern.count(inputs.getLast());
                 assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(label).isNull();
@@ -221,7 +222,7 @@ public class TestFixedWidthByteSpanMatcher
             String label = entry.getKey();
             Re2 pattern = entry.getValue();
             assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(label).isFalse();
-            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
+            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
             assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 

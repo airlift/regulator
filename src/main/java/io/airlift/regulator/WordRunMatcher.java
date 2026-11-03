@@ -80,7 +80,7 @@ final class WordRunMatcher
         return SizeOf.instanceSize(WordRunMatcher.class);
     }
 
-    long search(Slice text, int contextStart, int contextEnd, int start, int end, Re2.Anchor anchor)
+    long search(Slice text, int contextStart, int contextEnd, int start, int end, CompiledPattern.Anchor anchor)
     {
         byte[] bytes = text.byteArray();
         int base = text.byteArrayOffset();
@@ -88,7 +88,7 @@ final class WordRunMatcher
         int limit = base + end;
         while (position < limit) {
             if (!contains(bytes[position])) {
-                if (anchor != Re2.Anchor.UNANCHORED) {
+                if (anchor != CompiledPattern.Anchor.UNANCHORED) {
                     return Dfa.SEARCH_NO_MATCH;
                 }
                 position++;
@@ -104,10 +104,10 @@ final class WordRunMatcher
             // satisfy a boundary, including when a narrower class splits a larger word.
             if ((EmptyOp.contextFlags(bytes, base + contextStart, base + contextEnd, runStart, boundary) & boundary) != 0 &&
                     (EmptyOp.contextFlags(bytes, base + contextStart, base + contextEnd, position, boundary) & boundary) != 0 &&
-                    (anchor != Re2.Anchor.ANCHOR_BOTH || position == limit)) {
+                    (anchor != CompiledPattern.Anchor.ANCHOR_BOTH || position == limit)) {
                 return ((long) (runStart - base - contextStart) << 32) | ((position - base - contextStart) & 0xFFFF_FFFFL);
             }
-            if (anchor != Re2.Anchor.UNANCHORED) {
+            if (anchor != CompiledPattern.Anchor.UNANCHORED) {
                 return Dfa.SEARCH_NO_MATCH;
             }
         }

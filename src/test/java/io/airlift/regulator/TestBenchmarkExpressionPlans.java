@@ -15,12 +15,12 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
-import static io.airlift.regulator.Re2.BooleanPartialMatchStrategy.EXACT_LITERAL;
-import static io.airlift.regulator.Re2.BooleanPlanKind.CONTAINS;
-import static io.airlift.regulator.Re2.BooleanPlanKind.EQUALS;
-import static io.airlift.regulator.Re2.BooleanPlanKind.GENERAL;
-import static io.airlift.regulator.Re2.BooleanPlanKind.LITERAL_SEARCH;
-import static io.airlift.regulator.Re2.BooleanPlanKind.STARTS_WITH;
+import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.EQUALS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_SEARCH;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkExpressionPlans
@@ -36,7 +36,7 @@ public class TestBenchmarkExpressionPlans
 
             assertThat(data.literal.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(EXACT_LITERAL);
             assertThat(data.contains.booleanPartialMatchStrategyForDiagnostics())
-                    .isEqualTo(Re2.BooleanPartialMatchStrategy.CONTAINS);
+                    .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.CONTAINS);
             assertThat(data.ordered.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(data.orderedStrategy);
 
             assertThat(data.literal.findPlanForDiagnostics()).isEqualTo(LITERAL_SEARCH);

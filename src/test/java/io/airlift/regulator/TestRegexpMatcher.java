@@ -35,7 +35,7 @@ public class TestRegexpMatcher
     {
         Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z]+"));
         Slice input = Slices.utf8Slice("123abc456");
-        Method matchInternal = Re2.class.getDeclaredMethod(
+        Method matchInternal = CompiledPattern.class.getDeclaredMethod(
                 "matchInternal",
                 Prog.class,
                 Slice.class,
@@ -43,9 +43,9 @@ public class TestRegexpMatcher
                 int.class,
                 int.class,
                 int.class,
-                Re2.Anchor.class,
+                CompiledPattern.Anchor.class,
                 int[].class,
-                Re2.MatchWorkspaces.class);
+                CompiledPattern.MatchWorkspaces.class);
         matchInternal.setAccessible(true);
 
         assertThat(matchInternal.invoke(
@@ -56,7 +56,7 @@ public class TestRegexpMatcher
                 input.length(),
                 0,
                 input.length(),
-                Re2.Anchor.UNANCHORED,
+                CompiledPattern.Anchor.UNANCHORED,
                 null,
                 new UnreadableMatchWorkspaces()))
                 .isEqualTo(true);
@@ -190,8 +190,8 @@ public class TestRegexpMatcher
         int[] groupZero = new int[2];
 
         assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        assertThat(pattern.matchInto(input, 0, input.length(), Re2.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
-        assertThat(pattern.matchInto(input, 0, input.length(), Re2.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
+        assertThat(pattern.matchInto(input, 0, input.length(), CompiledPattern.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
+        assertThat(pattern.matchInto(input, 0, input.length(), CompiledPattern.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
         assertThat(workspace.groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
     }
 
@@ -796,5 +796,5 @@ public class TestRegexpMatcher
     }
 
     private static final class UnreadableMatchWorkspaces
-            implements Re2.MatchWorkspaces {}
+            implements CompiledPattern.MatchWorkspaces {}
 }

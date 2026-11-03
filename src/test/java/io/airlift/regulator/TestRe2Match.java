@@ -61,10 +61,10 @@ public class TestRe2Match
         int[] group = new int[8];
 
         Slice text = utf8("zyzzyva");
-        assertThat(re2.matchInto(text, Re2.Anchor.UNANCHORED, group)).isFalse();
+        assertThat(re2.matchInto(text, CompiledPattern.Anchor.UNANCHORED, group)).isFalse();
 
         text = utf8("a chrisr:9000 here");
-        assertThat(re2.matchInto(text, Re2.Anchor.UNANCHORED, group)).isTrue();
+        assertThat(re2.matchInto(text, CompiledPattern.Anchor.UNANCHORED, group)).isTrue();
         assertThat(slice(text, group[0], group[1])).isEqualTo("chrisr:9000");
         assertThat(slice(text, group[2], group[3])).isEqualTo("chrisr:9000");
         assertThat(slice(text, group[4], group[5])).isEqualTo("chrisr");

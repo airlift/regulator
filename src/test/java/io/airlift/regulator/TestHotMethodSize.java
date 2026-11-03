@@ -34,8 +34,8 @@ public class TestHotMethodSize
     @Test
     public void testCountMatchesFitsInlineSize()
     {
-        assertThat(codeLength(Re2.class, "countMatches"))
-                .as("Re2.countMatches bytecode bytes")
+        assertThat(codeLength(CompiledPattern.class, "countMatches"))
+                .as("CompiledPattern.countMatches bytecode bytes")
                 .isPositive()
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }

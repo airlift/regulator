@@ -667,7 +667,7 @@ if (can_bit_state && text.size() <= bit_state_text_max_size && ncap > 1) {
 
 ### O-RE2-016: Match-Every-Byte Detection (IMPORTANT, Java-only)
 
-**Location**: `Compiler.java`, `Re2.java`
+**Location**: `Compiler.java`, `CompiledPattern.java`
 **Function**: `matchesAnyByteString()`, `matchInternal()`
 
 **Trigger condition** (Compiler.java):
@@ -684,7 +684,7 @@ private static boolean matchesAnyByteString(Regexp regexp)
 }
 ```
 
-**Short-circuit condition** (Re2.java):
+**Short-circuit condition** (CompiledPattern.java):
 ```java
 if (anchorMode == Anchor.ANCHOR_BOTH && prog.matchesAnyByteString() && captureCount <= 1) {
     if (mutableGroupOffsets != null && mutableGroupOffsets.length >= 2) {

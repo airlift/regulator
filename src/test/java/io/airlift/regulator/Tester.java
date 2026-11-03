@@ -413,9 +413,9 @@ public final class Tester
                 return true;
             }
 
-            Re2.Anchor publicAnchor = switch (kind) {
-                case FULL_MATCH -> Re2.Anchor.ANCHOR_BOTH;
-                case FIRST_MATCH -> anchor == Anchor.ANCHORED ? Re2.Anchor.ANCHOR_START : Re2.Anchor.UNANCHORED;
+            CompiledPattern.Anchor publicAnchor = switch (kind) {
+                case FULL_MATCH -> CompiledPattern.Anchor.ANCHOR_BOTH;
+                case FIRST_MATCH -> anchor == Anchor.ANCHORED ? CompiledPattern.Anchor.ANCHOR_START : CompiledPattern.Anchor.UNANCHORED;
                 case LONGEST_MATCH -> throw new IllegalStateException("longest match handled above");
             };
 

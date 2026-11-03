@@ -371,10 +371,10 @@ public class TestRe2Allocations
             // An RE2 pattern's generated class counts with its own copy of the count loop.
             Re2 re2Handoff = Re2.compileForcingScanPlanHandoffForTesting(expression, Re2.Options.defaults().setGenerateBytecode(generateBytecode));
             assertThat(handoff.re2().usesScanPlanForDiagnostics()).isTrue();
-            assertThat(handoff.re2().scanPlanCount()).isEqualTo(Re2.ScanPlanCount.SEARCH_LOOP);
+            assertThat(handoff.re2().scanPlanCount()).isEqualTo(CompiledPattern.ScanPlanCount.SEARCH_LOOP);
             assertThat(handoff.usesGeneratedBytecode()).isEqualTo(generateBytecode);
             assertThat(re2Handoff.usesScanPlanForDiagnostics()).isTrue();
-            assertThat(re2Handoff.scanPlanCount()).isEqualTo(Re2.ScanPlanCount.SEARCH_LOOP);
+            assertThat(re2Handoff.scanPlanCount()).isEqualTo(CompiledPattern.ScanPlanCount.SEARCH_LOOP);
             assertThat(re2Handoff.usesGeneratedBytecode()).isEqualTo(generateBytecode);
             LongSupplier counts = () -> handoff.count(source) + re2Handoff.count(source);
 
@@ -400,16 +400,16 @@ public class TestRe2Allocations
         for (int iteration = 0; iteration < 10_000; iteration++) {
             matchCount += anchored.find(url) ? 1 : 0;
             matchCount += anchored.matches(url) ? 1 : 0;
-            matchCount += anchored.matchInto(url, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += anchored.matchInto(url, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
             matchCount += folded.find(header) ? 1 : 0;
             matchCount += folded.matches(header) ? 1 : 0;
-            matchCount += folded.matchInto(header, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += folded.matchInto(header, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
             matchCount += unanchored.find(link) ? 1 : 0;
             matchCount += !unanchored.matches(link) ? 1 : 0;
-            matchCount += unanchored.matchInto(link, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += unanchored.matchInto(link, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
             matchCount += handoff.find(link) ? 1 : 0;
             matchCount += !handoff.matches(link) ? 1 : 0;
-            matchCount += handoff.matchInto(link, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += handoff.matchInto(link, CompiledPattern.Anchor.UNANCHORED, groups) ? 1 : 0;
         }
         return matchCount;
     }
@@ -568,13 +568,13 @@ public class TestRe2Allocations
         int[] groups = new int[6];
 
         for (int iteration = 0; iteration < 20_000; iteration++) {
-            assertThat(pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)).isTrue();
+            assertThat(pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)).isTrue();
         }
 
         long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
             int matchCount = 0;
             for (int iteration = 0; iteration < 10_000; iteration++) {
-                if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
+                if (pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)) {
                     matchCount++;
                 }
             }
@@ -597,13 +597,13 @@ public class TestRe2Allocations
         int[] groups = new int[6];
 
         for (int iteration = 0; iteration < 20_000; iteration++) {
-            assertThat(pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)).isTrue();
+            assertThat(pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)).isTrue();
         }
 
         long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
             int matchCount = 0;
             for (int iteration = 0; iteration < 10_000; iteration++) {
-                if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
+                if (pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)) {
                     matchCount++;
                 }
             }

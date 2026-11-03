@@ -20,9 +20,9 @@ import io.airlift.slice.SliceUtf8;
 import java.util.HashMap;
 import java.util.Map;
 
-import static io.airlift.regulator.Re2.Anchor.ANCHOR_BOTH;
-import static io.airlift.regulator.Re2.Anchor.ANCHOR_START;
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.ANCHOR_BOTH;
+import static io.airlift.regulator.CompiledPattern.Anchor.ANCHOR_START;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static java.util.Objects.requireNonNull;
 
 /// A reusable matcher for one compiled RE2, Java, or Rust pattern, and the matcher that
@@ -31,15 +31,15 @@ import static java.util.Objects.requireNonNull;
 /// The matcher owns one capture buffer and reuses it across operations. It is mutable and not
 /// thread-safe. Group values are zero-copy views of the current input.
 public final class RegexpMatcher
-        implements Re2.MatchWorkspaces
+        implements CompiledPattern.MatchWorkspaces
 {
-    private final Re2 pattern;
+    private final CompiledPattern pattern;
     private final int[] groups;
     private final Map<String, Integer> namedCapturingGroups;
     private final boolean latin1;
     private final SingleByteMatcher singleByteMatcher;
     // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
-    // of the program. See Re2.literalSetSpanMatcher.
+    // of the program. See CompiledPattern.literalSetSpanMatcher.
     private final LiteralSetSpanMatcher literalSet;
     private final BoundedCharacterClassCounter characterClassCounter;
     private final Dfa.CandidateStartCursor candidateStartCursor;
@@ -47,7 +47,7 @@ public final class RegexpMatcher
     private final boolean hasLoweredCandidateSearch;
     private final boolean hasDirectLoweredGroupZeroSearch;
     // The pattern's start-anchored scan plan that find() can run directly. See
-    // Re2.startAnchoredScanPlan.
+    // CompiledPattern.startAnchoredScanPlan.
     private final ScanPlan startAnchoredScanPlan;
     private final boolean rustSearch;
     private final boolean readsCarriageReturnBeforeRegion;
@@ -69,34 +69,35 @@ public final class RegexpMatcher
     // skipped. In contrast, retryStart starts at 0 and records every match.
     private int previousMatchEnd = -1;
     // Set at reset when the region starts on the LF of a CR LF and the pattern's Java $ reads that
-    // CR, so every search of the region runs on the NFA. See Re2.matchRegionAfterCarriageReturnInto.
+    // CR, so every search of the region runs on the NFA. See
+    // CompiledPattern.matchRegionAfterCarriageReturnInto.
     private boolean regionStartsAfterCarriageReturn;
     // The consecutive searches of the current input whose DFA failed, in a program whose DFA can
-    // quit on a byte outside ASCII. See Re2.DFA_QUIT_STREAK_LIMIT.
+    // quit on a byte outside ASCII. See CompiledPattern.DFA_QUIT_STREAK_LIMIT.
     private int dfaQuitStreak;
     // Set when the current find's candidate cursor quit, so its fallback skips the DFA: the quit
     // already counted toward the streak.
     private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
-    RegexpMatcher(Re2 pattern, Slice input)
+    RegexpMatcher(CompiledPattern pattern, Slice input)
     {
         this(pattern, input, null);
     }
 
-    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher)
+    RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
         this(pattern, input, singleByteMatcher, pattern.capturingGroupCount());
     }
 
-    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount)
+    RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount)
     {
         this(pattern, input, singleByteMatcher, capturingGroupCount, true);
     }
 
     /// `enableSpecializedGroupZeroRoutes` false turns off the group-zero forward cursor, the class
     /// counter, and the literal set search of [#find()], for comparisons.
-    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
+    RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
@@ -122,7 +123,7 @@ public final class RegexpMatcher
         reset(input);
     }
 
-    private static Map<String, Integer> retainedNamedCapturingGroups(Re2 pattern, int capturingGroupCount)
+    private static Map<String, Integer> retainedNamedCapturingGroups(CompiledPattern pattern, int capturingGroupCount)
     {
         if (capturingGroupCount == 0) {
             return Map.of();
@@ -306,7 +307,7 @@ public final class RegexpMatcher
         // After the quit streak reaches its limit, a cursor whose DFA can quit is skipped with the
         // DFA until the next reset.
         boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled() &&
-                !(dfaQuitStreak >= Re2.DFA_QUIT_STREAK_LIMIT && candidateStartCursor.quitsOnNonAscii());
+                !(dfaQuitStreak >= CompiledPattern.DFA_QUIT_STREAK_LIMIT && candidateStartCursor.quitsOnNonAscii());
         // Where the inner literal lies matters only to a cursor the inner literal search would replace.
         boolean searchesInnerLiteral = (candidateCursorEnabled || enableGroupZeroForwardCursor) && pattern.searchesInnerLiteral(input, regionStart + nextFindStart, regionEnd);
         if (!searchesInnerLiteral && candidateCursorEnabled) {
@@ -317,7 +318,7 @@ public final class RegexpMatcher
                     regionEnd,
                     regionStart + nextFindStart);
             if (candidateBoundary >= 0) {
-                // A completed DFA search ends the streak, as in Re2.
+                // A completed DFA search ends the streak, as in CompiledPattern.
                 dfaQuitStreak = 0;
                 groups[0] = (int) (candidateBoundary >>> 32);
                 groups[1] = (int) candidateBoundary;
@@ -441,7 +442,7 @@ public final class RegexpMatcher
     }
 
     // The pattern's $ reads a CR the region cannot show, so this search runs on the NFA through
-    // Re2.matchRegionAfterCarriageReturnInto.
+    // CompiledPattern.matchRegionAfterCarriageReturnInto.
     private boolean findNextAfterCarriageReturn()
     {
         if (!pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart + nextFindStart, UNANCHORED, groups, this)) {
@@ -526,7 +527,7 @@ public final class RegexpMatcher
         return match(ANCHOR_START);
     }
 
-    private boolean match(Re2.Anchor anchor)
+    private boolean match(CompiledPattern.Anchor anchor)
     {
         invalidateMatch();
         if (rustSearch) {
@@ -543,7 +544,7 @@ public final class RegexpMatcher
         return true;
     }
 
-    private boolean matchWithInputContext(Re2.Anchor anchor)
+    private boolean matchWithInputContext(CompiledPattern.Anchor anchor)
     {
         // An anchored Rust search cannot skip ahead, so an empty match splitting a character fails,
         // except in the crate's bytes API.

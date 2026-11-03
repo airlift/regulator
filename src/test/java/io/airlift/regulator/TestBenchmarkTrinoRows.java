@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-import static io.airlift.regulator.Re2.BooleanPartialMatchStrategy.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.CONTAINS;
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;

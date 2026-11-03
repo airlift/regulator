@@ -31,9 +31,9 @@ import org.openjdk.jmh.runner.options.Options;
 
 import java.util.concurrent.TimeUnit;
 
-import static io.airlift.regulator.Re2.Anchor.ANCHOR_BOTH;
-import static io.airlift.regulator.Re2.Anchor.ANCHOR_START;
-import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
+import static io.airlift.regulator.CompiledPattern.Anchor.ANCHOR_BOTH;
+import static io.airlift.regulator.CompiledPattern.Anchor.ANCHOR_START;
+import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 
 @BenchmarkMode(Mode.AverageTime)
@@ -58,7 +58,7 @@ public class BenchmarkExpressionPlans
         private Slice literalSource;
         private Slice orderedSource;
         TestingExpressionPlanBenchmarkInputs.Expected expected;
-        Re2.BooleanPartialMatchStrategy orderedStrategy;
+        CompiledPattern.BooleanPartialMatchStrategy orderedStrategy;
 
         @Setup
         public void setup()

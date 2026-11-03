@@ -1769,10 +1769,10 @@ Count, group-zero extraction, position, split, and replacement without capture
 references use the direct boundary route when eligible. The eligibility value
 shares the existing boolean-strategy byte. Ordinary boolean `find` retains its
 direct strategy load; the separate single-byte matcher cache and matcher
-counter account for the current 104-byte `Re2` layout. The two forward programs
-and the lowered program's DFA share the original forward memory budget. No warm
-DFA search loop contains a frontend-specific branch; the Trino check runs only
-while an uncached transition is constructed.
+counter account for the shared engine's current 104-byte layout. The two forward
+programs and the lowered program's DFA share the original forward memory budget.
+No warm DFA search loop contains a frontend-specific branch; the Trino check
+runs only while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call

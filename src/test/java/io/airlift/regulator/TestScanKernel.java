@@ -79,7 +79,7 @@ public class TestScanKernel
     // shared helper from the generated callers' profiles and the interpreter can then no longer
     // inline it. Methods outside this package belong to Slice or the JDK.
     private static final Set<String> GENERATED_CODE_CALLS = Set.of(
-            "Re2.continueScanSearch",
+            "CompiledPattern.continueScanSearch",
             "TrinoRegexp.newReplacementPlan",
             "TrinoRegexp.positionSearchStart",
             "TrinoReplacementPlan.addMatch",

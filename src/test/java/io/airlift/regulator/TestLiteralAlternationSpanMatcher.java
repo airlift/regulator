@@ -93,7 +93,7 @@ public class TestLiteralAlternationSpanMatcher
         for (Map.Entry<String, Re2> entry : compiledPatterns.entrySet()) {
             String label = entry.getKey();
             Re2 pattern = entry.getValue();
-            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
             // Count answers from the matcher without building the general engine's DFA.
             pattern.count(inputs.getLast());
             assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(label).isNull();
@@ -128,7 +128,7 @@ public class TestLiteralAlternationSpanMatcher
         // The matcher reports leftmost-first matches, so a leftmost-longest pattern keeps the
         // general engine.
         assertThat(Re2.compile(utf8Slice("xa|b|xab"), Re2.Options.defaults().setLongestMatch(true)).booleanPartialMatchStrategyForDiagnostics())
-                .isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
+                .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
     }
 
     @Test
@@ -364,7 +364,7 @@ public class TestLiteralAlternationSpanMatcher
             LiteralAlternationSpanMatcher scanner = scanner(expression);
             Re2 pattern = Re2.compile(utf8Slice(expression));
             TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice(expression));
-            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(expression).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(expression).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
             assertThat(trinoPattern.literalAlternationSpanMatcher()).as(expression).isNotNull();
             for (int trial = 0; trial < 4; trial++) {
                 // A literal ends the text, so a match lands in its last bytes.
@@ -547,12 +547,12 @@ public class TestLiteralAlternationSpanMatcher
         Re2 pattern = Re2.compile(utf8Slice("ERROR|WARN|FATAL"));
         Re2 reference = Re2.compile(utf8Slice("ERROR|WARN|FATAL"));
         LiteralAlternationSpanMatcher scanner = pattern.literalAlternationSpanMatcherForDiagnostics();
-        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
+        assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.LITERAL_ALTERNATION);
         // The reference runs the same count and find on the DFA directly, which also builds the
         // DFA counters the hand-off must reproduce.
         long dfaCount = Dfa.countMatches(reference.forwardProgramForDiagnostics(), input, Prog.MatchKind.FIRST_MATCH);
         assertThat(dfaCount).isEqualTo(insertedMatches);
-        assertThat(reference.matchInto(input, Re2.Anchor.UNANCHORED, null)).isTrue();
+        assertThat(reference.matchInto(input, CompiledPattern.Anchor.UNANCHORED, null)).isTrue();
         assertThat(pattern.countMatches(input)).isEqualTo(dfaCount);
         assertThat(pattern.find(input)).isTrue();
         // With the Vector API each call samples the filter's stops once and declines, so the

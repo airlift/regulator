@@ -287,7 +287,7 @@ public class TestPrefixProbeAcceleration
                 // A Trino pattern of the bare literal plans the exact-literal search.
                 TrinoRegexp trino = TrinoRegexp.compile(Slices.utf8Slice(value), TrinoRegexp.Options.defaults().setByteFrequencies(options.byteFrequencies()));
                 assertThat(trino.re2().hasExactLiteralSpan()).isTrue();
-                assertThat(trino.re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.EXACT_LITERAL);
+                assertThat(trino.re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL);
                 assertThat(trino.re2().forwardProgramForDiagnostics().prefixAccelProbeOffset()).as(value).isEqualTo(probe);
                 assertThat(trino.re2().exactLiteralSpanUsesPrefixScan(63)).as(value).isEqualTo(probe > 0);
                 assertThat(trino.re2().exactLiteralSpanUsesPrefixScan(64)).as(value).isTrue();

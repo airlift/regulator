@@ -13,7 +13,7 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.Re2.ScanPlanMode;
+import io.airlift.regulator.CompiledPattern.ScanPlanMode;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -315,7 +315,7 @@ public final class RustRegexp
         // past an empty match never applies, and the analysis declines every byte construct that
         // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
         // the any-byte dot, which has no such flag, by its kind.
-        Re2 compiled = Re2.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        Re2 compiled = CompiledPattern.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         return new RustRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 

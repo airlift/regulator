@@ -37,7 +37,7 @@ public class TestRe2EmptyCharset
         Slice text = utf8("abc");
         for (String pattern : empties) {
             Re2 re2 = Re2.compile(utf8(pattern), Re2.Options.defaults());
-            assertThat(re2.matchInto(text, Re2.Anchor.UNANCHORED, null)).as("pattern: %s", pattern).isFalse();
+            assertThat(re2.matchInto(text, CompiledPattern.Anchor.UNANCHORED, null)).as("pattern: %s", pattern).isFalse();
         }
     }
 

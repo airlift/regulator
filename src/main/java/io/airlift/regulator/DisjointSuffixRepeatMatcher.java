@@ -98,7 +98,7 @@ final class DisjointSuffixRepeatMatcher
         long count = 0;
         int start = 0;
         while (start < input.length()) {
-            long span = search(input, start, input.length(), Re2.Anchor.UNANCHORED);
+            long span = search(input, start, input.length(), CompiledPattern.Anchor.UNANCHORED);
             if (span == Dfa.SEARCH_NO_MATCH) {
                 break;
             }
@@ -108,12 +108,12 @@ final class DisjointSuffixRepeatMatcher
         return count;
     }
 
-    long search(Slice input, int start, int end, Re2.Anchor anchor)
+    long search(Slice input, int start, int end, CompiledPattern.Anchor anchor)
     {
         if (end - start < repeatCount + 2) {
             return Dfa.SEARCH_NO_MATCH;
         }
-        int searchEnd = anchor == Re2.Anchor.UNANCHORED ? end : (int) Math.min(end, (long) start + 4L * repeatCount + 2);
+        int searchEnd = anchor == CompiledPattern.Anchor.UNANCHORED ? end : (int) Math.min(end, (long) start + 4L * repeatCount + 2);
         Slice searchText = searchEnd == input.length() ? input : input.slice(0, searchEnd);
         byte[] bytes = input.byteArray();
         int base = input.byteArrayOffset();
@@ -137,8 +137,8 @@ final class DisjointSuffixRepeatMatcher
             }
             int matchStart = position - base - 1;
             if (remaining == 0 && matchStart >= start && containsPrefix(bytes[position - 1]) &&
-                    (anchor == Re2.Anchor.UNANCHORED || matchStart == start) &&
-                    (anchor != Re2.Anchor.ANCHOR_BOTH || found + 1 == end)) {
+                    (anchor == CompiledPattern.Anchor.UNANCHORED || matchStart == start) &&
+                    (anchor != CompiledPattern.Anchor.ANCHOR_BOTH || found + 1 == end)) {
                 return ((long) matchStart << 32) | ((found + 1) & 0xFFFF_FFFFL);
             }
             candidate = found + 1;

@@ -395,7 +395,7 @@ final class Prog
     private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
 
     // The literal every match begins with behind a leading assertion, and its search; see
-    // buildTransparentStartLiteral. Both are null unless Re2 compilation configures them.
+    // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
     private byte[] transparentStartLiteral;
     private LiteralSearchKernel transparentStartLiteralSearch;
     // Whether an unanchored group-zero NFA search with no live thread skips to the next possible
@@ -1875,7 +1875,6 @@ final class Prog
     }
 
     /// Check if text starts with the required prefix.
-    /// Used for instant rejection in Re2.matchInto() before engine cascade.
     public boolean textMatchesRequiredPrefix(byte[] data, int offset, int length)
     {
         if (!hasRequiredPrefix()) {
@@ -1907,7 +1906,7 @@ final class Prog
         return true;
     }
 
-    /// Set the DFA memory budget (called from Re2.build()).
+    /// Set the DFA memory budget (called from CompiledPattern.build()).
     /// Like upstream Prog::set_dfa_mem().
     public void setDfaMemory(long dfaMemory)
     {
