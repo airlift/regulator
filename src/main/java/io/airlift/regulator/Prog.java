@@ -3337,14 +3337,32 @@ final class Prog
         long[] stackCaptureMasks = hasExtendedCaptures ? new long[Math.max(8, maximumStackSize)] : null;
         int[] stackAssertions = hasExtendedAssertions ? new int[Math.max(8, maximumStackSize)] : null;
 
+        // Every node but the start is the target of a byte range, so the distinct targets bound
+        // the node count far more tightly than the node limit does: a large Unicode class has
+        // several byte ranges for each shared suffix. Count the distinct targets by marking
+        // nodeById, which is then cleared for the walk. The unanchored start is not counted: only
+        // the loop of its unanchored prefix returns to it, and the walk from the anchored start
+        // never reaches it.
         int[] nodeById = new int[size()];
+        nodeById[start()] = 1;
+        nodeById[startUnanchored()] = 1;
+        int nodeBound = 1;
+        for (int id = 0; id < size(); id++) {
+            Inst instruction = inst(id);
+            if (instruction.opcode() == InstOp.BYTE_RANGE && nodeById[instruction.out()] == 0) {
+                nodeById[instruction.out()] = 1;
+                nodeBound++;
+            }
+        }
         Arrays.fill(nodeById, -1);
 
-        // Like upstream, grow node storage as nodes are allocated when the bound is large; such
-        // programs usually need far fewer nodes or stop being one-pass after a few. Small tables
-        // are allocated at their bound, because growing them costs more than zeroing them.
+        // Like upstream, start node storage small when the bound is large, as programs that stop
+        // being one-pass usually do so after a few nodes. Storage doubles on overflow, capped at
+        // the bound rather than the node limit, so no step allocates more than doubling to the
+        // limit would, and a one-pass program ends exactly at the bound with no final copy. Small
+        // tables are allocated at their bound, because growing them costs more than zeroing them.
         int byteClassCount = bytemapRange();
-        int nodeCapacity = Math.min(maximumNodeCount, onePassInitialNodeCapacity(byteClassCount));
+        int nodeCapacity = Math.min(nodeBound, onePassInitialNodeCapacity(byteClassCount));
         int[] nodeMatchCondition = new int[nodeCapacity];
         int[] nodeAction = new int[nodeCapacity * byteClassCount];
         long[] nodeMatchCapture = hasExtendedCaptures ? new long[nodeCapacity] : null;
@@ -3412,11 +3430,11 @@ final class Prog
                             int nextInstructionId = instruction.out();
                             int nextIndex = nodeById[nextInstructionId];
                             if (nextIndex == -1) {
-                                if (allocatedNodeCount >= maximumNodeCount) {
+                                if (allocatedNodeCount >= nodeBound) {
                                     return false;
                                 }
                                 if (allocatedNodeCount == nodeCapacity) {
-                                    nodeCapacity = Math.min(maximumNodeCount, nodeCapacity * 2);
+                                    nodeCapacity = Math.min(nodeBound, nodeCapacity * 2);
                                     nodeMatchCondition = Arrays.copyOf(nodeMatchCondition, nodeCapacity);
                                     nodeAction = Arrays.copyOf(nodeAction, nodeCapacity * byteClassCount);
                                     if (hasExtendedCaptures) {
@@ -3576,17 +3594,28 @@ final class Prog
             }
         }
 
+        // The walk normally reaches every counted target, so a one-pass program ends with its
+        // tables exactly sized. The trim is a safety net for a counted target the walk never
+        // reached.
+        if (allocatedNodeCount < nodeCapacity) {
+            nodeMatchCondition = Arrays.copyOf(nodeMatchCondition, allocatedNodeCount);
+            nodeAction = Arrays.copyOf(nodeAction, allocatedNodeCount * byteClassCount);
+            if (hasExtendedCaptures) {
+                nodeMatchCapture = Arrays.copyOf(nodeMatchCapture, allocatedNodeCount);
+                nodeActionCapture = Arrays.copyOf(nodeActionCapture, allocatedNodeCount * byteClassCount);
+            }
+            if (hasExtendedAssertions) {
+                nodeMatchAssertions = Arrays.copyOf(nodeMatchAssertions, allocatedNodeCount);
+                nodeActionAssertions = Arrays.copyOf(nodeActionAssertions, allocatedNodeCount * byteClassCount);
+            }
+        }
         onePassStateCount = allocatedNodeCount;
-        onePassMatchCond = Arrays.copyOf(nodeMatchCondition, allocatedNodeCount);
-        onePassAction = Arrays.copyOf(nodeAction, allocatedNodeCount * byteClassCount);
-        if (hasExtendedCaptures) {
-            onePassMatchCapture = Arrays.copyOf(nodeMatchCapture, allocatedNodeCount);
-            onePassActionCapture = Arrays.copyOf(nodeActionCapture, allocatedNodeCount * byteClassCount);
-        }
-        if (hasExtendedAssertions) {
-            onePassMatchAssertions = Arrays.copyOf(nodeMatchAssertions, allocatedNodeCount);
-            onePassActionAssertions = Arrays.copyOf(nodeActionAssertions, allocatedNodeCount * byteClassCount);
-        }
+        onePassMatchCond = nodeMatchCondition;
+        onePassAction = nodeAction;
+        onePassMatchCapture = nodeMatchCapture;
+        onePassActionCapture = nodeActionCapture;
+        onePassMatchAssertions = nodeMatchAssertions;
+        onePassActionAssertions = nodeActionAssertions;
         dfaMemory -= allocatedNodeCount * stateSize;
         return true;
     }
