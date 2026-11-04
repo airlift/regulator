@@ -192,7 +192,7 @@ class cannot be generated, compiles as it does without the option.
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are sealed classes that
 callers cannot extend, and `compile` may return a subclass of the class it is
-called on, such as one that runs a generated class.
+called on, such as a pattern's generated class.
 
 ## Runtime acceleration
 

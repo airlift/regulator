@@ -344,7 +344,9 @@ patterns. RE2's `$` is the strict end, so the final-LF forms never arise, and
 RE2's simple case folding has no multi-character folds for the ASCII-fold proof
 to exclude.
 `Re2.Options.setGenerateBytecode(true)` compiles a case-sensitive RE2 plan to
-its own class, as [RE2 executor classes](#re2-executor-classes) describes.
+its own class, as
+[RE2, Java, and Rust pattern classes](#re2-java-and-rust-pattern-classes)
+describes.
 
 `JavaRegexp.compile` analyzes every pattern the same way, and a Java plan reads
 input by the RE2 rule below, so it reports what the ordinary engine reports on
@@ -368,7 +370,8 @@ word boundaries, and reluctant runs keep the ordinary engine; Java's `(?i)`
 without Unicode case folds each letter as its ASCII pair, so `(?i)s` and `(?i)k`
 reach a plan.
 `JavaRegexp.Options.setGenerateBytecode(true)` compiles a case-sensitive Java
-plan to an RE2 executor class, as [RE2 executor classes](#re2-executor-classes)
+plan to its own class, as
+[RE2, Java, and Rust pattern classes](#re2-java-and-rust-pattern-classes)
 describes.
 
 `RustRegexp.compile` analyzes every pattern the same way, and a Rust plan reads
@@ -389,7 +392,8 @@ as assertion context, so a matcher runs its start-anchored plan directly only
 over the whole input; a partial region reaches the plan, as a range does, only
 when it ends at the input end.
 `RustRegexp.Options.setGenerateBytecode(true)` compiles a case-sensitive Rust
-plan to an RE2 executor class, as [RE2 executor classes](#re2-executor-classes)
+plan to its own class, as
+[RE2, Java, and Rust pattern classes](#re2-java-and-rust-pattern-classes)
 describes.
 
 An RE2 plan reports exactly what the ordinary engine reports on every input,
@@ -801,40 +805,46 @@ loaded, so the existing matcher keeps its single implementation.
 Set the system property `io.airlift.regulator.scan-kernel.dump-directory` to a
 directory to write each generated class file there before it is defined.
 
-### RE2 executor classes
+### RE2, Java, and Rust pattern classes
 
-`Re2.Options.setGenerateBytecode(true)` compiles a pattern with a
-case-sensitive plan to a private `Re2` subclass backed by a hidden class from
-the same emitter, and `Re2.usesGeneratedBytecode()` reports whether it has
-one. `JavaRegexp.Options.setGenerateBytecode(true)` and
-`RustRegexp.Options.setGenerateBytecode(true)` compile a Java or Rust pattern to
-a private subclass of its own class, backed the same way. ASCII-folded plans and a pattern whose class cannot be
-defined compile as they do without the option. The accepted trade-offs are
-recorded in
+`Re2.Options.setGenerateBytecode(true)`,
+`JavaRegexp.Options.setGenerateBytecode(true)`, and
+`RustRegexp.Options.setGenerateBytecode(true)` compile a pattern with a
+case-sensitive plan to a hidden class from the same emitter, and
+`usesGeneratedBytecode()` reports whether the pattern has one. `Re2`,
+`JavaRegexp`, and `RustRegexp` are sealed classes over a package-private
+engine, and each permits a package-private non-sealed class that the hidden
+class extends, so the compiled pattern is an instance of the hidden class.
+ASCII-folded plans and a pattern whose class cannot be defined compile as they
+do without the option. The accepted trade-offs are recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
 
-The class implements `CompiledRe2Scan` with the plan methods it replaces
-rather than operation entries. A start-anchored plan's `match` is the attempt
-method itself. An unanchored plan gets `search`, the interpreter's region
-search with its context, start, anchoring, and full-match arguments, and,
-when full-Slice `find` would hand off to the ordinary boolean search,
-`searchBeforeHandoff`. The class emits the same attempt and candidate loops as
-the [generated class](#generated-class) above; `RE2_RUN`, `RE2_SET_RUN`, and
+The class declares the plan's attempt and search methods and its full-Slice
+entries. Every class gets the attempt method; an unanchored plan's class also
+gets a whole-input search, the interpreter's region search with its context,
+start, anchoring, and full-match arguments, and, when full-Slice `find` would
+hand off to the ordinary boolean search, `searchBeforeHandoff`.
+The class emits the same attempt and candidate loops as the
+[generated class](#generated-class) above; `RE2_RUN`, `RE2_SET_RUN`, and
 `RE2_DELIMITED_CAPTURE`, which RE2, Java, and Rust plans use, call
-`ScanKernelSupport` copies of the RE2 run reader and, for
-an `RE2_SET_RUN`, of the member reader, and an RE2 run's stop scan calls a copy
-in `VectorScanKernelSupport`. A Java end calls the
-`ScanKernelSupport` copy of the final-terminator check. The class never
-calls back into the pattern.
+`ScanKernelSupport` copies of the RE2 run reader and, for an `RE2_SET_RUN`, of
+the member reader, and an RE2 run's stop scan calls a copy in
+`VectorScanKernelSupport`. A Java end calls the `ScanKernelSupport` copy of the
+final-terminator check.
 
-The subclass overrides the four `Re2` calls that reach a plan: full-Slice
-boolean `find`, the unanchored count loop, a matcher's start-anchored first
-search, and the plan route of the match dispatch. Each runs the generated
-class where the interpreter would run the plan, and the match dispatch passes
-every other call to the base route. A search that hands off continues on the
-ordinary engine as an interpreted one does. Short boolean calls that the
-interpreter sends to the DFA, and boolean calls that the interpreter runs on a
-start-anchored plan's save-free boolean plan, run the generated full plan.
+The class declares its own full-Slice `find`, `count`, `matches`, and
+`lookingAt` where the pattern's route for that call reaches the plan, with the
+route fixed when the class is generated, so each entry's branch profile holds
+only its own pattern. `count` runs one attempt for a start-anchored plan and
+the unanchored count loop otherwise. Other calls that reach the plan go
+through the engine's match dispatch, which the class overrides with its own
+plan arm, passing every other route to the base dispatch. A matcher's
+start-anchored first search uses its own engine hook, which a start-anchored
+plan's class also overrides. A search that hands off
+continues on the ordinary engine through final engine methods, as an
+interpreted one does. Short boolean calls that the interpreter sends to the
+DFA, and boolean calls that the interpreter runs on a start-anchored plan's
+save-free boolean plan, run the generated full plan.
 
 ### Benchmarks
 
@@ -858,7 +868,7 @@ against a build without it on the same hosts:
   `BenchmarkTrinoScanPlan` and `BenchmarkTrinoScanProfiles` with
   `generateBytecode=true`, where twelve compiled patterns share each call site.
   `BenchmarkRe2ScanPlan`, `BenchmarkJavaScanPlan`, and `BenchmarkRustScanPlan`
-  with `generateBytecode` true and false measure RE2, Java, and Rust executor
+  with `generateBytecode` true and false measure RE2, Java, and Rust pattern
   classes the same way, with `scanPlan=false` as the ordinary-engine control.
   The decisions record holds
   [the RE2, Java, and Rust results](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).

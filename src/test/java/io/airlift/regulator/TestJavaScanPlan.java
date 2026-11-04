@@ -30,6 +30,7 @@ import java.util.regex.Pattern;
 import static io.airlift.regulator.TestRe2ScanPlan.PROBED_LEADS;
 import static io.airlift.regulator.TestRe2ScanPlan.PROBE_DISTRIBUTIONS;
 import static io.airlift.regulator.TestRe2ScanPlan.bytes;
+import static io.airlift.regulator.TestRe2ScanPlan.declaredEntries;
 import static io.airlift.regulator.TestRe2ScanPlan.describe;
 import static io.airlift.regulator.TestRe2ScanPlan.disableInterpretedPlan;
 import static io.airlift.regulator.TestRe2ScanPlan.matches;
@@ -198,6 +199,9 @@ public class TestJavaScanPlan
             JavaRegexp interpreted = JavaRegexp.compile(pattern);
             JavaRegexp generated = JavaRegexp.compile(pattern, GENERATING);
             assertThat(generated.usesGeneratedBytecode()).as(planCase.expression()).isTrue();
+            // Each plan reaches every full-Slice entry, so the generated class declares them all,
+            // including a count that the second pattern's interpreted route takes through a matcher.
+            assertThat(declaredEntries(generated)).as(planCase.expression()).isEqualTo(Set.of("find", "count", "matches", "lookingAt"));
             // Make ordinary program execution unable to succeed, and the generated pattern's
             // interpreted plan too, so these calls pass only if they run on the plan or its class.
             disableOrdinaryEngine(interpreted);
@@ -217,10 +221,12 @@ public class TestJavaScanPlan
             }
         }
 
+        // An unanchored plan reaches every full-Slice entry too.
+        Slice handoffPattern = utf8Slice("x([^/]+)/");
+        assertThat(declaredEntries(JavaRegexp.compile(handoffPattern, GENERATING))).isEqualTo(Set.of("find", "count", "matches", "lookingAt"));
         // A forced handoff continues every unanchored search on the ordinary engine before the
         // plan's first attempt, which would match here, so with that engine unable to succeed it
         // finds nothing.
-        Slice handoffPattern = utf8Slice("x([^/]+)/");
         Slice handoffSource = utf8Slice("xéb/xc/");
         for (JavaRegexp.Options options : List.of(JavaRegexp.Options.defaults(), GENERATING)) {
             String name = options.generateBytecode() ? "generated" : "interpreted";

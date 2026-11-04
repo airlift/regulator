@@ -237,7 +237,7 @@ abstract sealed class CompiledPattern
     private volatile BoundedCharacterClassCounter boundedCharacterClassCounter;
     private volatile SingleByteMatcher singleByteMatcher;
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only final or sealed classes of this package")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only classes of this package, and only its generated classes extend the non-sealed ones")
     CompiledPattern(Analysis analysis)
     {
         Compiler.Dialect compilerDialect = requireNonNull(analysis.compilerDialect(), "compilerDialect is null");
@@ -1212,6 +1212,8 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern has a match anywhere in `input` without allocating capture storage.
     public boolean find(Slice input)
     {
+        // ScanKernelGenerator.definePatternFind emits this route for a generated class; keep in
+        // step.
         requireNonNull(input, "input is null");
         byte strategy = booleanFindStrategy;
         if (strategy != BOOLEAN_FIND_GENERAL) {
@@ -1242,7 +1244,7 @@ abstract sealed class CompiledPattern
     /// callers. A short input of a plan that allows it runs on the ordinary engine; any other runs
     /// the plan's [ScanPlan#booleanPlan()], resolved at compile time. Calls that report
     /// positions never come here.
-    boolean findWithScanPlan(Slice input, byte strategy)
+    private boolean findWithScanPlan(Slice input, byte strategy)
     {
         int length = input.length();
         if (ordinaryShortBooleanMatch && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) {
@@ -1279,7 +1281,7 @@ abstract sealed class CompiledPattern
     /// anchor, and context-relative capture offsets the plan received. No match starts between
     /// the plan's search start and that offset. This route skips the plan, so the search cannot
     /// hand off again.
-    private boolean finishScanSearch(
+    final boolean finishScanSearch(
             Slice text,
             int contextStart,
             int contextEnd,
@@ -1307,6 +1309,8 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches at the beginning of `input` without allocating capture storage.
     public boolean lookingAt(Slice input)
     {
+        // ScanKernelGenerator.defineAnchoredMatch emits the general plan's route for a generated
+        // class; keep in step.
         requireInput(input);
         BooleanPlanKind plan = booleanPlans.lookingAt();
         if (plan != BooleanPlanKind.GENERAL) {
@@ -1374,6 +1378,8 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches all of `input` without allocating capture storage.
     public boolean matches(Slice input)
     {
+        // ScanKernelGenerator.defineAnchoredMatch emits the general plan's route for a generated
+        // class; keep in step.
         requireInput(input);
         BooleanPlanKind plan = booleanPlans.matches();
         if (plan != BooleanPlanKind.GENERAL) {
@@ -1566,7 +1572,7 @@ abstract sealed class CompiledPattern
 
     /// Continues on the ordinary engine an unanchored search of all of `text` that a
     /// scan-plan search handed off when it returned `result`, as [#finishScanSearch] does.
-    boolean continueScanSearch(Slice text, int result, int[] groups)
+    final boolean continueScanSearch(Slice text, int result, int[] groups)
     {
         return matchInternal(partialProg, text, 0, text.length(), ~result, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
     }
@@ -1821,6 +1827,8 @@ abstract sealed class CompiledPattern
     /// in UTF-8 mode or one byte in Latin-1 mode. No capture values are returned.
     public long count(Slice input)
     {
+        // ScanKernelGenerator.definePatternCount emits this route for a generated class; keep in
+        // step.
         long optimizedCount = countMatches(input);
         if (optimizedCount >= 0) {
             return optimizedCount;
@@ -1967,9 +1975,9 @@ abstract sealed class CompiledPattern
     /// matches empty, so each search resumes at the previous match end. As in a find loop, each
     /// search starts on the plan with its own work budget, and one that hands off finds its
     /// match on the ordinary engine.
-    long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
+    private long countUnanchoredScanMatches(Slice text, boolean asciiFolded)
     {
-        // countWithGeneratedScan and ScanKernelGenerator.defineCount copy this loop; keep in step.
+        // The count that ScanKernelGenerator emits copies this loop; keep in step.
         ScanPlan plan = booleanPlans.scanPlan();
         int length = text.length();
         long count = 0;
@@ -2157,9 +2165,10 @@ abstract sealed class CompiledPattern
     }
 
     // A Java or Rust pattern names a null input `input` in every operation but count, and
-    // checks it before any other argument. An RE2 pattern names it `text` where its own checks
-    // reach it first.
-    private void requireInput(Slice input)
+    // checks it before any other argument. An RE2 pattern or a Trino engine names it `text`
+    // where its own checks reach it first. Of the entries a generated class declares, `matches`
+    // and `lookingAt` call this check too.
+    final void requireInput(Slice input)
     {
         if (input == null && (this instanceof JavaRegexp || this instanceof RustRegexp)) {
             throw new NullPointerException("input is null");
@@ -2488,8 +2497,8 @@ abstract sealed class CompiledPattern
             MatchWorkspaces workspaces,
             boolean scanPlanSearch)
     {
-        // matchInternalWithGeneratedScan makes the same checks and inverts the plan-route
-        // conditions below; keep in step.
+        // reachesScanPlan mirrors the common plan-route conditions below, and
+        // acceptsScanPlanArguments mirrors these argument checks; keep both in step.
         requireNonNull(text, "text is null");
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > text.length() ||
                 start < contextStart || end < start || end > contextEnd) {
@@ -3456,25 +3465,17 @@ abstract sealed class CompiledPattern
         return 31 - Integer.numberOfLeadingZeros(value);
     }
 
-    /// Generates the executor class of this pattern's case-sensitive scan plan, or returns
-    /// `null` when the pattern has no such plan or the class cannot be generated. A pattern
-    /// class's generated subclass runs the class through the routes below:
-    /// [#findWithGeneratedScan], [#countWithGeneratedScan],
-    /// [#findWithGeneratedStartAnchoredScan], and [#matchInternalWithGeneratedScan]. Each call
-    /// keeps the route it has without the class, decided once when the pattern compiles: one that
-    /// would run the plan runs the generated class instead, and any other runs the ordinary route.
-    /// Short boolean calls that the interpreter hands to the ordinary engine to avoid its operation
-    /// dispatch also stay on the generated class. A start-anchored plan runs its full plan rather
-    /// than the save-free boolean plan, since the generated class guards each save with one branch
-    /// on whether the caller asked for that group.
-    final CompiledRe2Scan generateScanExecutor()
+    /// Returns a copy of this pattern as an instance of a class generated for its case-sensitive
+    /// scan plan, or `null` when the pattern has no such plan or the class cannot be generated.
+    /// The caller keeps the copy and discards this pattern. The class extends `superclass`, the
+    /// language's `CompiledScan…` class.
+    final <T extends CompiledPattern> T generateScanPattern(Class<T> superclass)
     {
-        ScanPlan plan = caseSensitiveScanPlan();
-        if (plan == null) {
+        if (caseSensitiveScanPlan() == null) {
             return null;
         }
         try {
-            return ScanKernelGenerator.generateCompiledRe2Scan(plan, generatedFindHandsOff());
+            return ScanKernelGenerator.generateCompiledScanPattern(this, superclass);
         }
         catch (RuntimeException | LinkageError ignored) {
             // Linking the generator fails here only if a consumer excluded the classfile
@@ -3484,83 +3485,23 @@ abstract sealed class CompiledPattern
         }
     }
 
-    /// Returns whether full-Slice find of a pattern with a generated class hands off to the
-    /// ordinary engine, which happens only when it reaches the plan.
-    final boolean generatedFindHandsOff()
+    /// Returns whether a [#matchInternal] call of `prog` over a region ending at `end` of a
+    /// context ending at `contextEnd` takes the plan route of a pattern with a case-sensitive
+    /// scan plan, apart from an unanchored boolean search that
+    /// [#usesOrdinaryUnanchoredBooleanSearchForDiagnostics()] keeps on the ordinary engine. It
+    /// leaves out the interpreter's short boolean route on purpose: a short boolean call that the
+    /// interpreter sends to the ordinary engine stays on the generated class. A generated class's
+    /// override sends every other call to the base method; these are the common plan-route
+    /// conditions of [#matchInternal], so keep them in step.
+    final boolean reachesScanPlan(Prog prog, int contextEnd, int end)
     {
-        return usesScanPlanForFindForDiagnostics() && ordinaryUnanchoredBooleanSearch;
+        return prog == partialProg && end == contextEnd;
     }
 
-    /// The generated route of [#findWithScanPlan]. `anchored` is whether the plan is
-    /// start-anchored, so its attempt runs alone, and `ordinaryHandoff` is
-    /// [#generatedFindHandsOff()].
-    final boolean findWithGeneratedScan(CompiledRe2Scan scan, boolean anchored, boolean ordinaryHandoff, Slice input)
+    /// Makes the argument checks of [#matchInternal] for a generated class's plan route, and
+    /// returns whether the region lies within the context and the input; keep in step.
+    final boolean acceptsScanPlanArguments(Slice text, int contextStart, int contextEnd, int start, int end, int[] groupOffsets)
     {
-        int length = input.length();
-        if (anchored) {
-            return scan.match(input, 0, length, false, null);
-        }
-        int result = ordinaryHandoff ? scan.searchBeforeHandoff(input) : scan.search(input, 0, length, 0, false, false, null);
-        return finishScanSearch(input, 0, length, result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
-    }
-
-    /// The generated route of [#countUnanchoredScanMatches]: its loop; keep in step. A
-    /// case-sensitive plan never counts ASCII-folded.
-    final long countWithGeneratedScan(CompiledRe2Scan scan, Slice text)
-    {
-        int length = text.length();
-        long count = 0;
-        int start = 0;
-        int[] handoffGroups = null;
-        while (start < length) {
-            int matchEnd = scan.search(text, 0, length, start, false, false, ScanPlan.END_ONLY_GROUPS);
-            if (matchEnd < 0) {
-                if (matchEnd == ScanPlan.NO_MATCH) {
-                    break;
-                }
-                if (handoffGroups == null) {
-                    handoffGroups = new int[2];
-                }
-                if (!continueScanSearch(text, matchEnd, handoffGroups)) {
-                    break;
-                }
-                matchEnd = handoffGroups[1];
-            }
-            count++;
-            start = matchEnd;
-        }
-        return count;
-    }
-
-    /// The generated route of [#findWithStartAnchoredScanPlan].
-    static boolean findWithGeneratedStartAnchoredScan(CompiledRe2Scan scan, Slice text, int contextStart, int contextEnd, int[] groups)
-    {
-        Arrays.fill(groups, -1);
-        return scan.match(text, contextStart, contextEnd, false, groups);
-    }
-
-    /// Runs the plan route of [#matchInternal] on the generated class. Every other call,
-    /// including an unanchored boolean search that the base method keeps on the ordinary
-    /// engine, runs the base method.
-    final boolean matchInternalWithGeneratedScan(
-            CompiledRe2Scan scan,
-            boolean anchored,
-            Prog prog,
-            Slice text,
-            int contextStart,
-            int contextEnd,
-            int start,
-            int end,
-            Anchor anchor,
-            int[] groupOffsets,
-            MatchWorkspaces workspaces)
-    {
-        Anchor anchorMode = (anchor == null) ? Anchor.UNANCHORED : anchor;
-        // The inverse of the base method's plan-route conditions; keep in step.
-        if (prog != partialProg || end != contextEnd || (!anchored && groupOffsets == null && anchorMode == Anchor.UNANCHORED && ordinaryUnanchoredBooleanSearch)) {
-            return matchInternal(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, true);
-        }
-        // The same checks as the base method; keep in step.
         requireNonNull(text, "text is null");
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > text.length() || start < contextStart || end < start || end > contextEnd) {
             return false;
@@ -3568,10 +3509,6 @@ abstract sealed class CompiledPattern
         if (groupOffsets != null && (groupOffsets.length % 2) != 0) {
             throw new IllegalArgumentException("groupOffsets length must be even: " + groupOffsets.length);
         }
-        if (anchored) {
-            return start == contextStart && scan.match(text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
-        }
-        int result = scan.search(text, contextStart, contextEnd, start, anchorMode != Anchor.UNANCHORED, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
-        return finishScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
+        return true;
     }
 }

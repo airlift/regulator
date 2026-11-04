@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -173,12 +174,17 @@ public class TestRe2Api
     @Test
     public void testNullInputFailures()
     {
-        // An RE2 pattern names a null input `text`, except in full-input find and matcher.
-        assertNullInputFailures(Re2.compile(Slices.utf8Slice("(a)(b)?")), operation -> switch (operation) {
-            case "find", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";
-            case "matcher retaining -1 groups" -> "IllegalArgumentException: capturingGroupCount out of range: -1";
-            default -> "NullPointerException: text is null";
-        });
+        // An RE2 pattern names a null input `text`, except in full-input find and matcher, and so
+        // do the entries of a generated class.
+        Re2 generated = Re2.compile(Slices.utf8Slice("x([^/]+)/"), Re2.Options.defaults().setGenerateBytecode(true));
+        assertThat(generated.usesGeneratedBytecode()).isTrue();
+        for (Re2 pattern : List.of(Re2.compile(Slices.utf8Slice("(a)(b)?")), generated)) {
+            assertNullInputFailures(pattern, operation -> switch (operation) {
+                case "find", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";
+                case "matcher retaining -1 groups" -> "IllegalArgumentException: capturingGroupCount out of range: -1";
+                default -> "NullPointerException: text is null";
+            });
+        }
         // An exact literal's boolean plan names it `input` in full-input lookingAt and matches.
         assertNullInputFailures(Re2.compile(Slices.utf8Slice("abc")), operation -> switch (operation) {
             case "find", "lookingAt", "matches", "matcher", "matcher retaining groups" -> "NullPointerException: input is null";

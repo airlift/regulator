@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.airlift.regulator.CompiledPattern.DFA_QUIT_STREAK_LIMIT;
+import static io.airlift.regulator.TestRe2Api.assertNullInputFailures;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -133,9 +134,12 @@ public class TestRustRegexp
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a"), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("options is null");
-        // Every operation but count names a null input `input`, and checks it first.
-        for (String pattern : List.of("a*", "(a)(b)?", "abc")) {
-            TestRe2Api.assertNullInputFailures(RustRegexp.compile(utf8Slice(pattern)), operation ->
+        // Every operation but count names a null input `input`, and checks it first, as do the
+        // entries of a generated class.
+        RustRegexp generated = RustRegexp.compile(utf8Slice("x([^/]+)/"), RustRegexp.Options.defaults().setGenerateBytecode(true));
+        assertThat(generated.usesGeneratedBytecode()).isTrue();
+        for (RustRegexp pattern : List.of(RustRegexp.compile(utf8Slice("a*")), RustRegexp.compile(utf8Slice("(a)(b)?")), RustRegexp.compile(utf8Slice("abc")), generated)) {
+            assertNullInputFailures(pattern, operation ->
                     operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
         }
     }

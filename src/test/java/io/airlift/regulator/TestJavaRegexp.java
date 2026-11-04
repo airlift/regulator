@@ -25,6 +25,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.TestRe2Api.assertNullInputFailures;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -39,11 +40,14 @@ public class TestJavaRegexp
     @Test
     public void testNullInputFailures()
     {
-        // Every operation but count names a null input `input`, and checks it first.
-        TestRe2Api.assertNullInputFailures(JavaRegexp.compile(utf8Slice("(a)(b)?")), operation ->
-                operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
-        TestRe2Api.assertNullInputFailures(JavaRegexp.compile(utf8Slice("abc")), operation ->
-                operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
+        // Every operation but count names a null input `input`, and checks it first, as do the
+        // entries of a generated class.
+        JavaRegexp generated = JavaRegexp.compile(utf8Slice("x([^/]+)/"), JavaRegexp.Options.defaults().setGenerateBytecode(true));
+        assertThat(generated.usesGeneratedBytecode()).isTrue();
+        for (JavaRegexp pattern : List.of(JavaRegexp.compile(utf8Slice("(a)(b)?")), JavaRegexp.compile(utf8Slice("abc")), generated)) {
+            assertNullInputFailures(pattern, operation ->
+                    operation.equals("count") ? "NullPointerException: text is null" : "NullPointerException: input is null");
+        }
     }
 
     @Test

@@ -59,7 +59,6 @@ public class TestOptionalScanKernel
                     .doesNotContain("io.airlift.regulator.ScanKernelSupport ")
                     .doesNotContain("io.airlift.regulator.VectorScanKernelSupport ")
                     .doesNotContain("CompiledTrinoScan")
-                    .doesNotContain("CompiledRe2Scan")
                     .doesNotContain("io.airlift.regulator.TrinoLikeKernelGenerator")
                     .doesNotContain("io.airlift.regulator.TrinoLikeKernelSupport ")
                     .doesNotContain("CompiledTrinoLike")
@@ -70,7 +69,7 @@ public class TestOptionalScanKernel
         }
     }
 
-    /// The dump directory property writes each generated scan class, here the RE2 executor class
+    /// The dump directory property writes each generated scan class, here the generated RE2 class
     /// of each attempt kind, before it is defined.
     @Test
     public void testDumpDirectoryReceivesGeneratedClasses()
@@ -82,11 +81,11 @@ public class TestOptionalScanKernel
             try (Stream<Path> files = Files.list(directory)) {
                 List<Path> classFiles = files.toList();
                 assertThat(classFiles.stream().map(file -> file.getFileName().toString().replaceAll("-[0-9a-f]{8}\\.class$", "")))
-                        .containsExactlyInAnyOrder("EndAnchoredCompiledRe2Scan", "PartialCompiledRe2Scan", "UnanchoredCompiledRe2Scan");
-                // Each file holds a whole class of the RE2 executor interface.
+                        .containsExactlyInAnyOrder("EndAnchoredCompiledScanRe2", "PartialCompiledScanRe2", "UnanchoredCompiledScanRe2");
+                // Each file holds a whole class that extends the handwritten `Re2.CompiledScanRe2`.
                 for (Path file : classFiles) {
                     ClassModel model = ClassFile.of().parse(Files.readAllBytes(file));
-                    assertThat(model.interfaces().stream().map(ClassEntry::asInternalName).toList()).as(file.toString()).containsExactly("io/airlift/regulator/CompiledRe2Scan");
+                    assertThat(model.superclass().map(ClassEntry::asInternalName)).as(file.toString()).contains("io/airlift/regulator/Re2$CompiledScanRe2");
                 }
             }
         }

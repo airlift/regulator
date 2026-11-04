@@ -19,11 +19,13 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.TreeSet;
 
 import static io.airlift.regulator.TestScanPlan.disableOrdinaryEngine;
@@ -31,6 +33,7 @@ import static io.airlift.regulator.TestScanPlan.generatedSequence;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2ScanPlan
@@ -208,6 +211,27 @@ public class TestRe2ScanPlan
             RegexpMatcher generatedMatcher = generated.matcher(source);
             assertThat(generatedMatcher.find()).as(expression).isTrue();
             assertThat(generatedMatcher.group("name")).as(expression).isEqualTo(utf8Slice("abc"));
+        }
+    }
+
+    @Test
+    public void testGeneratedClassDeclaresTheEntriesThatReachThePlan()
+    {
+        // One pattern for each route of a full-Slice entry. A retained literal kernel answers
+        // find, matches, and lookingAt, and count makes the plan's single attempt. A
+        // start-anchored plan answers every entry with its attempt. An unanchored plan answers
+        // every entry with its search, counting with a search loop, and a dense one hands boolean
+        // find to the ordinary engine after a capture-free search.
+        record EntryCase(String expression, Set<String> entries) {}
+
+        for (EntryCase entryCase : List.of(
+                new EntryCase("^(a)", Set.of("count")),
+                new EntryCase("^x(?P<name>[^/]+)/", Set.of("find", "count", "matches", "lookingAt")),
+                new EntryCase("x(?P<name>[^/]+)/", Set.of("find", "count", "matches", "lookingAt")),
+                new EntryCase("[0-9]([0-9]*)zz", Set.of("find", "count", "matches", "lookingAt", "searchBeforeHandoff")))) {
+            Re2 generated = Re2.compile(utf8Slice(entryCase.expression()), Re2.Options.defaults().setGenerateBytecode(true));
+            assertThat(generated.usesGeneratedBytecode()).as(entryCase.expression()).isTrue();
+            assertThat(declaredEntries(generated)).as(entryCase.expression()).isEqualTo(entryCase.entries());
         }
     }
 
@@ -554,6 +578,19 @@ public class TestRe2ScanPlan
     private static Slice witness(String expression)
     {
         return wrappedBuffer(PLAN_CASES.stream().filter(planCase -> planCase.expression().equals(expression)).findFirst().orElseThrow().witness());
+    }
+
+    /// Returns the full-Slice `find`, `count`, `matches`, and `lookingAt` that the generated class
+    /// of `pattern` declares, and its `searchBeforeHandoff` when full-Slice find hands off to the
+    /// ordinary engine.
+    static Set<String> declaredEntries(CompiledPattern pattern)
+    {
+        Set<String> entries = Set.of("find", "count", "matches", "lookingAt");
+        return Arrays.stream(pattern.getClass().getDeclaredMethods())
+                .filter(method -> (entries.contains(method.getName()) && Arrays.equals(method.getParameterTypes(), new Class<?>[] {Slice.class})) ||
+                        method.getName().equals("searchBeforeHandoff"))
+                .map(Method::getName)
+                .collect(toSet());
     }
 
     /// Makes every search of the pattern's interpreted plan throw. A generated class holds the

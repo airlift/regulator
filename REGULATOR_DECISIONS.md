@@ -2404,7 +2404,7 @@ operation by operation.
 - There is no size guard. A method longer than HotSpot's 8,000-byte
   huge-method limit is never JIT-compiled, but the plan's operation and
   optional limits hold the attempt, the only generated method that grows with
-  the plan, far below it, in this class and in the RE2 executor class.
+  the plan, far below it, in this class and in the RE2, Java, and Rust classes.
   `TestScanKernel` pins the largest plans of each operation kind below the
   limit.
 
@@ -2426,18 +2426,28 @@ included.
 `RustRegexp.Options.setGenerateBytecode` apply these decisions to Java and Rust
 plans; the last bullets record the rules and measurements specific to each.
 
-- The class is an executor, not a set of operation entries. It replaces the
-  plan's attempt, or an unanchored plan's region search, with the same
-  signature and results, and `Re2` keeps its strategy dispatch, argument
-  checks, and ordinary-engine handoff in Java. `Re2` has far more public
-  operations than Trino, and they all reach the plan through four calls, so
-  overriding those calls keeps every operation's route without a generated
-  entry per operation.
+- The class declares the plan's attempt method, an unanchored plan's search
+  methods, and full-Slice `find`, `count`, `matches`, and `lookingAt` entries.
+  The attempt and search methods return the plan's results. Each entry exists
+  only when that operation reaches the plan, and its route is fixed when the
+  class is generated: the attempt, the search, or the capture-free search before
+  the ordinary-engine handoff, and for count the search loop or the single
+  attempt. An operation answered without the plan, such as a `find` on a
+  retained literal kernel, keeps the inherited entry. Other operations that
+  reach the plan go through the overridden `matchInternal` hook, whose anchored
+  or unanchored arm is also fixed at generation, so `Re2`'s many public
+  operations keep their routes without a generated entry each; a matcher's
+  start-anchored first search uses the overridden
+  `findWithStartAnchoredScanPlan` hook instead. A shared entry method carries
+  the branch profiles of every pattern that calls it; an entry per generated
+  class carries one pattern's.
 - `Re2`, `JavaRegexp`, and `RustRegexp` are sealed classes over a
-  package-private engine. Each permits one private subclass that overrides
-  those four package-private calls; callers still cannot extend the pattern
-  classes. The subclass holds the generated executor, so the pattern classes'
-  own fields, and their guarded object layout, do not change.
+  package-private engine. Each permits one package-private, non-sealed class
+  that the hidden class extends, so the pattern a caller holds is the
+  generated class, and a caller's call site that sees one pattern binds its
+  entries directly; callers still cannot extend the pattern classes. The
+  generated class adds no fields, so the guarded object layout does not
+  change.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
   stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
   count that skips the plan does not exclude a pattern, because only the calls
@@ -2450,6 +2460,19 @@ plans; the last bullets record the rules and measurements specific to each.
   caller holding a constant pattern, such as Trino's own generated code, can
   bind an operation directly; no `Re2` caller does that, so only
   `usesGeneratedBytecode()` is public.
+- With other generated patterns in the process, a generated class takes 0.81
+  times the time of the earlier executor design, in which a private `Re2`
+  subclass held the generated executor in a field and Java and Rust patterns
+  wrapped an `Re2`. That is the geometric mean of `find`, `count`, and
+  `matches` over the three scan-plan targets of `BenchmarkPatternDispatch` in
+  RE2, Java, and Rust on R9g short rows, with the other 13 patterns trained
+  first; R8i takes 0.83. Part of the gain is the generated `matches` entry,
+  which also speeds up a single pattern. With generation off, the geometric
+  means of the same benchmark and of the Trino and public API controls stay
+  within 0.97 to 1.01 of the earlier design.
+- The pooled measurements below are of the earlier executor design. On the
+  two exception workloads, the per-pattern classes changed no row: they take
+  0.99 to 1.01 times the earlier design's time, generated or not.
 - A generated plan must not be slower than the interpreted plan. Measured on
   a build that looked the boolean plan up on every call, the matching rows of
   `BenchmarkRe2ScanPlan` with `generateBytecode=true` on R9g, R8g, and R8i take
@@ -2459,26 +2482,24 @@ plans; the last bullets record the rules and measurements specific to each.
   non-ASCII and malformed workloads and the `RETRY_128` and `RETRY_256`
   workloads, and exclude compilation and the ASCII-folded `FOLDED_MIXED`
   control. No matching row is slower than the ordinary engine.
-- Two workloads fail that bar, and both are accepted as known exceptions. On
-  R8i `LONG_HOST`, every method takes 1.05 to 1.14 times the interpreted time,
-  `contains` 493 ns against 440 ns, while the same rows take 0.83 to 0.96
-  times on Graviton. Since the vector run scans broadcast their bytes once,
-  `contains` without dotAll on R8i takes 0.92 times, 229 ns against 250 ns;
-  the other methods and dotAll were not measured again. On R9g,
-  `UNANCHORED_TAIL_4096_NON_ASCII` `replace` takes 1.07 to 1.09 times, 2730 ns
-  against 2544 ns. Both slowdowns repeated on an identical rebuild. Each
-  exceeds the host's A/A spread, the largest difference between two builds of
-  the same source, over rows with one mode, but not its spread over all rows.
+- One workload fails that bar and is accepted as a known exception. On R9g,
+  `UNANCHORED_TAIL_4096_NON_ASCII` `replace` takes 1.03 to 1.04 times the
+  interpreted time, about 3.0 us against 2.9 us, in both of two replicas, but
+  within the error of either; the earlier design took 1.04 to 1.10 times. On
+  R8i it takes 0.93 to 0.96 times. R8i `LONG_HOST`, the other recorded
+  exception, no longer reproduces: every method, with and without dotAll,
+  takes 0.89 to 0.97 times the interpreted time, on the earlier design and on
+  the per-pattern classes.
 - Compilation is reported separately from matching. With generation it takes
   0.44 to 0.70 ms per pattern on R9g and 0.69 to 1.55 ms on R8g and R8i,
   against 3.6 to 16 us for the interpreted plan, and up to about 353 times the
   ordinary engine's compilation, on R8i `UNANCHORED_TAIL_4096`. With the option
   off, sealing `Re2` changed no row on any host.
-- `JavaRegexp.Options.setGenerateBytecode` gives Java patterns the same executor
-  classes under the same rules. The Java end adds a generated end check, and a
-  Java-only rule on which runs may precede it decides whether a plan exists;
-  once a plan exists, the decision whether to generate it and the routes are
-  RE2's, and a private `JavaRegexp` subclass holds the generated executor. On
+- `JavaRegexp.Options.setGenerateBytecode` gives Java patterns the same
+  generated classes under the same rules. The Java end adds a generated end
+  check, and a Java-only rule on which runs may precede it decides whether a
+  plan exists; once a plan exists, the decision whether to generate it and the
+  routes are RE2's, and the generated class extends `CompiledScanJavaRegexp`. On
   R9g and R8i, the 65 matching rows of `BenchmarkJavaScanPlan` with
   `generateBytecode=true`, on the `URL`, `URL_SHORT`, `ANCHORED_HOST`,
   `ANCHORED_QUERY`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
@@ -2489,29 +2510,30 @@ plans; the last bullets record the rules and measurements specific to each.
   slower than the interpreted plan or the ordinary engine, and R8i `LONG_HOST`,
   RE2's exception, is within noise for Java. Compilation with generation takes
   0.44 to 0.71 ms per pattern on R9g and 1.0 to 1.6 ms on R8i, against 3.9 to
-  15.1 us for the interpreted plan. Over the 50 Java end rows, generated
-  classes take 0.489 and 0.507 times the interpreted plan's time and 0.064 and
-  0.057 times the ordinary engine's; no row is slower than the interpreted
-  plan, and R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to
-  0.69 ms per pattern on R9g and 1.11 to 1.52 ms on R8i.
-- `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same executor
-  classes under the same rules. A Rust plan is an RE2 plan, so the emitter,
-  eligibility, and routes are RE2's, and a private `RustRegexp` subclass holds
-  the generated executor. Byte-mode patterns build plans and generated classes
+  15.1 us for the interpreted plan. Over the 50 Java end rows, generated classes
+  take 0.489 and 0.507 times the interpreted plan's time and 0.064 and 0.057
+  times the ordinary engine's; no row is slower than the interpreted plan, and
+  R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to 0.69 ms per
+  pattern on R9g and 1.11 to 1.52 ms on R8i.
+- `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same
+  generated classes under the same rules. A Rust plan is an RE2 plan, so the
+  emitter, eligibility, and routes are RE2's, and the generated class extends
+  `CompiledScanRustRegexp`. A generated `find` skips the Rust search's rule for
+  empty matches, so generation refuses a pattern that can match empty, which no
+  plan accepts either. Byte-mode patterns build plans and generated classes
   under the same rules. On R9g and R8i, the 45 matching rows of
   `BenchmarkRustScanPlan` with `generateBytecode=true`, on the `URL`,
   `ANCHORED_HOST`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
-  `OPTIONAL_RETRY`, `LONG_HOST`, `URL_MALFORMED`, and
-  `UNANCHORED_URL_MALFORMED` workloads, take a geometric mean of 0.536 and
-  0.597 times the interpreted plan's time and 0.113 and 0.123 times the
-  ordinary engine's, excluding compilation. Over the 40 of those rows that the
-  Java measurement shares, Rust classes take 0.535 and 0.604 times and Java
-  classes took 0.530 and 0.606. No generated row is slower than the interpreted
-  plan or the ordinary engine beyond noise, and R8i `LONG_HOST`, RE2's
-  exception, is within noise for Rust. Compilation with generation takes 453 to
-  715 us per pattern on R9g and 1024 to 1602 us on R8i, against 4 to 13 us and
-  5 to 16 us for the interpreted plan and 3 to 11 us and 4 to 12 us for the
-  ordinary engine.
+  `OPTIONAL_RETRY`, `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED`
+  workloads, take a geometric mean of 0.536 and 0.597 times the interpreted
+  plan's time and 0.113 and 0.123 times the ordinary engine's, excluding
+  compilation. Over the 40 of those rows that the Java measurement shares, Rust
+  classes take 0.535 and 0.604 times and Java classes took 0.530 and 0.606. No
+  generated row is slower than the interpreted plan or the ordinary engine
+  beyond noise, and R8i `LONG_HOST`, RE2's exception, is within noise for Rust.
+  Compilation with generation takes 453 to 715 us per pattern on R9g and 1024 to
+  1602 us on R8i, against 4 to 13 us and 5 to 16 us for the interpreted plan and
+  3 to 11 us and 4 to 12 us for the ordinary engine.
 - Generated classes read a set of some non-ASCII characters with a copy of the
   interpreter's reader, full lead entries and lead-byte width included. With
   the trie walk for every lead, generated Java `URL_NON_ASCII` `contains` and

@@ -29,10 +29,10 @@ Treat these as performance-sensitive unless analysis proves otherwise:
 - candidate-byte and literal scanners
 - engine selection and capture-boundary recovery
 - Slice range and UTF-8 decoding paths used by matching
-- generated Trino scan kernels and RE2 executor classes, their search driver,
-  the operation entries of a Trino kernel, the scan helper copies they call, the
-  code that emits them, and the `CompiledPattern` calls that the generated
-  pattern subclasses override
+- generated Trino scan kernels and RE2, Java, and Rust pattern classes, their
+  search driver, the operation entries they declare, the scan helper copies
+  they call, the code that emits them, and the `CompiledPattern` calls that the
+  generated pattern classes override or call
 - generated Trino LIKE kernels, the helper copies they call, and the code that
   emits them
 
