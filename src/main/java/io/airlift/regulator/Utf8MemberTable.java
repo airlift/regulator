@@ -15,12 +15,8 @@ package io.airlift.regulator;
 
 import io.airlift.slice.SizeOf;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 
 /// The UTF-8 encodings of the non-ASCII members of a character set that holds some non-ASCII
 /// characters but not all, as byte tables. The tables are built from the pieces that
@@ -349,13 +345,19 @@ final class Utf8MemberTable
         }
     }
 
-    /// Blocks and masks, each stored once. Block and mask zero reject every byte.
+    /// Blocks and masks, each stored once in the order first interned. Block and mask zero reject
+    /// every byte. Each is found through an open-addressing table that holds its index plus one,
+    /// so a zero slot is empty. Interned blocks are never modified, so their entries stay valid
+    /// hash keys. The hash is mixed because the masks of runs of continuation bytes collide under
+    /// `Long.hashCode`.
     private static final class Nodes
     {
-        private final List<int[]> blocks = new ArrayList<>();
-        private final Map<Block, Integer> blockIndexes = new HashMap<>();
-        private final List<Long> masks = new ArrayList<>();
-        private final Map<Long, Integer> maskIndexes = new HashMap<>();
+        private int[][] blocks = new int[16][];
+        private int blockCount;
+        private int[] blockSlots = new int[32];
+        private long[] masks = new long[64];
+        private int maskCount;
+        private int[] maskSlots = new int[128];
 
         private Nodes()
         {
@@ -365,48 +367,88 @@ final class Utf8MemberTable
 
         private int internBlock(int[] block)
         {
-            return blockIndexes.computeIfAbsent(new Block(block), _ -> {
-                blocks.add(block);
-                return blocks.size() - 1;
-            });
+            int slotMask = blockSlots.length - 1;
+            int slot = hash(Arrays.hashCode(block)) & slotMask;
+            while (blockSlots[slot] != 0) {
+                int index = blockSlots[slot] - 1;
+                if (Arrays.equals(blocks[index], block)) {
+                    return index;
+                }
+                slot = (slot + 1) & slotMask;
+            }
+            if (blockCount == blocks.length) {
+                blocks = Arrays.copyOf(blocks, blocks.length * 2);
+            }
+            blocks[blockCount] = block;
+            blockCount++;
+            blockSlots[slot] = blockCount;
+            if (blockCount * 2 > blockSlots.length) {
+                blockSlots = new int[blockSlots.length * 2];
+                for (int index = 0; index < blockCount; index++) {
+                    blockSlots[emptySlot(blockSlots, hash(Arrays.hashCode(blocks[index])))] = index + 1;
+                }
+            }
+            return blockCount - 1;
         }
 
         private int internMask(long mask)
         {
-            return maskIndexes.computeIfAbsent(mask, _ -> {
-                masks.add(mask);
-                return masks.size() - 1;
-            });
+            int slotMask = maskSlots.length - 1;
+            int slot = hash(mask) & slotMask;
+            while (maskSlots[slot] != 0) {
+                int index = maskSlots[slot] - 1;
+                if (masks[index] == mask) {
+                    return index;
+                }
+                slot = (slot + 1) & slotMask;
+            }
+            if (maskCount == masks.length) {
+                masks = Arrays.copyOf(masks, masks.length * 2);
+            }
+            masks[maskCount] = mask;
+            maskCount++;
+            maskSlots[slot] = maskCount;
+            if (maskCount * 2 > maskSlots.length) {
+                maskSlots = new int[maskSlots.length * 2];
+                for (int index = 0; index < maskCount; index++) {
+                    maskSlots[emptySlot(maskSlots, hash(masks[index]))] = index + 1;
+                }
+            }
+            return maskCount - 1;
+        }
+
+        private static int emptySlot(int[] slots, int hash)
+        {
+            int slotMask = slots.length - 1;
+            int slot = hash & slotMask;
+            while (slots[slot] != 0) {
+                slot = (slot + 1) & slotMask;
+            }
+            return slot;
+        }
+
+        private static int hash(long key)
+        {
+            key ^= key >>> 33;
+            key *= 0xFF51AFD7ED558CCDL;
+            key ^= key >>> 33;
+            key *= 0xC4CEB9FE1A85EC53L;
+            key ^= key >>> 33;
+            return (int) key;
         }
 
         private int[] nodes()
         {
-            int[] nodes = new int[blocks.size() * NODE_ENTRIES];
-            for (int block = 0; block < blocks.size(); block++) {
-                System.arraycopy(blocks.get(block), 0, nodes, block * NODE_ENTRIES, NODE_ENTRIES);
+            int[] nodes = new int[blockCount * NODE_ENTRIES];
+            for (int block = 0; block < blockCount; block++) {
+                System.arraycopy(blocks[block], 0, nodes, block * NODE_ENTRIES, NODE_ENTRIES);
             }
             return nodes;
         }
 
         private long[] lastBytes()
         {
-            return masks.stream().mapToLong(Long::longValue).toArray();
-        }
-    }
-
-    // A stored block is never changed, so its entries can key it.
-    private record Block(int[] entries)
-    {
-        @Override
-        public boolean equals(Object object)
-        {
-            return object instanceof Block other && Arrays.equals(entries, other.entries);
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Arrays.hashCode(entries);
+            return Arrays.copyOf(masks, maskCount);
         }
     }
 }
