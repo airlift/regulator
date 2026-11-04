@@ -199,9 +199,11 @@ public class TestJavaScanPlan
             JavaRegexp interpreted = JavaRegexp.compile(pattern);
             JavaRegexp generated = JavaRegexp.compile(pattern, GENERATING);
             assertThat(generated.usesGeneratedBytecode()).as(planCase.expression()).isTrue();
-            // Each plan reaches every full-Slice entry, so the generated class declares them all,
-            // including a count that the second pattern's interpreted route takes through a matcher.
+            // Each plan reaches every full-Slice entry, so the generated class declares them all.
+            // A start-anchored pattern matches at most once, so count makes one attempt, also
+            // when the plan evaluates a Java end the DFA cannot.
             assertThat(declaredEntries(generated)).as(planCase.expression()).isEqualTo(Set.of("find", "count", "matches", "lookingAt"));
+            assertThat(interpreted.scanPlanCount()).as(planCase.expression()).isEqualTo(CompiledPattern.ScanPlanCount.SINGLE_ATTEMPT);
             // Make ordinary program execution unable to succeed, and the generated pattern's
             // interpreted plan too, so these calls pass only if they run on the plan or its class.
             disableOrdinaryEngine(interpreted);
@@ -210,6 +212,7 @@ public class TestJavaScanPlan
             Matcher jdk = Pattern.compile(planCase.expression()).matcher(planCase.witness());
             assertThat(jdk.find()).as(planCase.expression()).isTrue();
             Slice source = utf8Slice(planCase.witness());
+            assertThat(interpreted.countMatches(source)).as(planCase.expression()).isEqualTo(1);
             for (NamedRegexp regexp : List.of(new NamedRegexp("interpreted", interpreted), new NamedRegexp("generated", generated))) {
                 String description = regexp.name() + " " + planCase.expression();
                 assertThat(regexp.regexp().find(source)).as(description).isTrue();
@@ -220,6 +223,12 @@ public class TestJavaScanPlan
                 assertThat(matcher.group(1)).as(description).isEqualTo(utf8Slice(jdk.group(1)));
             }
         }
+
+        // A Trino start-anchored plan counts with one attempt too; its end matches before a
+        // final LF.
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("^x([a-z]+)$"));
+        assertThat(trino.re2().scanPlanCount()).isEqualTo(CompiledPattern.ScanPlanCount.SINGLE_ATTEMPT);
+        assertThat(trino.count(utf8Slice("xab\n"))).isEqualTo(1);
 
         // An unanchored plan reaches every full-Slice entry too.
         Slice handoffPattern = utf8Slice("x([^/]+)/");
