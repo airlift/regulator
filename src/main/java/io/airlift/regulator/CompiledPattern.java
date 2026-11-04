@@ -165,9 +165,14 @@ abstract sealed class CompiledPattern
 
     record FanoutResult(int maxBucket, int[] histogram) {}
 
-    /// The analysis, programs, and plans that a compile builds for one pattern, for the pattern
-    /// class's constructor. Construction reserves memory from `partialProg`'s DFA budget, so one
-    /// analysis constructs one pattern.
+    /// The analysis, programs, and plans that a compile builds for one pattern, with the routes
+    /// [#selectRoutes] chose for it, which the pattern class's constructor receives. Route
+    /// selection reserves memory from `partialProg`'s DFA budget, so one analysis constructs one
+    /// pattern.
+    ///
+    /// @param matcherClassCounter off the compact route, the counter that finds a class pattern's
+    ///         matches, whose memory is reserved, or `null`
+    /// @param singleByteMatcherReserved whether the single-byte table's memory is reserved
     record Analysis(
             int flags,
             long maxMemory,
@@ -186,7 +191,13 @@ abstract sealed class CompiledPattern
             BooleanPlans booleanPlans,
             int capturingGroupCount,
             Map<Integer, String> capturingGroupNames,
-            BoundedCharacterClassCounter compactBoundedCharacterClass) {}
+            BoundedCharacterClassCounter compactBoundedCharacterClass,
+            BoundedCharacterClassCounter matcherClassCounter,
+            boolean singleByteMatcherReserved,
+            byte booleanFindStrategy,
+            byte scanPlanStrategy,
+            boolean ordinaryUnanchoredBooleanSearch,
+            boolean ordinaryShortBooleanMatch) {}
 
     private final int flags;
     private final long maxMemory;
@@ -256,98 +267,20 @@ abstract sealed class CompiledPattern
         this.exactLiteralLength = analysis.exactLiteralLength();
         this.partialProg = requireNonNull(analysis.partialProg(), "partialProg is null");
         this.booleanPlans = requireNonNull(analysis.booleanPlans(), "booleanPlans is null");
-        BoundedCharacterClassCounter compactBoundedCharacterClass = analysis.compactBoundedCharacterClass();
-        byte findStrategy;
-        if (compactBoundedCharacterClass == null) {
-            findStrategy = encodeBooleanFindStrategy(booleanPlans.partialMatchStrategy());
-        }
-        else if (partialProg.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
-            findStrategy = BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA;
-        }
-        else {
-            findStrategy = BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS;
-        }
-        if (compactBoundedCharacterClass == null && canUseDirectLoweredGroupZeroSearch(
-                partialProg,
-                booleanPlans.loweredProgram(),
-                expressionAnalysis,
-                requiredPrefix)) {
-            findStrategy = BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
-        }
-        // As on the compact route, a pattern with a capture keeps the engine.
-        BoundedCharacterClassCounter matcherClass = requiredPrefix == null && compactBoundedCharacterClass == null && analysis.capturingGroupCount() == 0
-                ? BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch)
-                : null;
-        if (matcherClass != null && matcherClass.estimatedRetainedSize() <= partialProg.dfaMemory()) {
-            partialProg.setDfaMemory(partialProg.dfaMemory() - matcherClass.estimatedRetainedSize());
-        }
-        else {
-            matcherClass = null;
-        }
-        this.matcherClassCounter = matcherClass;
-        if (supportsSingleByteMatcher() &&
-                SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory()) {
-            // Reserve before any DFA can snapshot its budget. The table itself stays lazy.
-            partialProg.setDfaMemory(partialProg.dfaMemory() - SingleByteMatcher.estimatedRetainedSize());
-            if (findStrategy == BOOLEAN_FIND_GENERAL) {
-                findStrategy = BOOLEAN_FIND_SINGLE_BYTE;
-            }
-        }
-        else {
+        this.matcherClassCounter = analysis.matcherClassCounter();
+        if (!analysis.singleByteMatcherReserved()) {
             singleByteMatcher = SingleByteMatcher.unsupported();
         }
-        byte scanPlanStrategy = BOOLEAN_FIND_GENERAL;
-        boolean ordinaryBooleanSearch = false;
-        boolean ordinaryShortMatch = false;
-        ScanPlan scanPlan = booleanPlans.scanPlan();
-        if (scanPlan != null) {
-            if (!scanPlan.isAnchoredStart()) {
-                scanPlanStrategy = scanPlan.usesAsciiFoldedExecutor()
-                        ? BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN
-                        : BOOLEAN_FIND_UNANCHORED_SCAN_PLAN;
-                ordinaryBooleanSearch = scanPlan.allowsOrdinaryBooleanSearch();
-            }
-            else {
-                scanPlanStrategy = scanPlan.isPartialMatch()
-                        ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_PARTIAL_SCAN_PLAN)
-                        : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_SCAN_PLAN);
-                // The short route is the ordinary engine's general search, which must run the
-                // DFA. A Trino final-line end or a Java final-terminator end, which the DFA cannot
-                // evaluate, keeps the plan.
-                ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && findStrategy == BOOLEAN_FIND_GENERAL && !partialProg.hasDfaUnsupportedAssertions();
-            }
-            // Literal kernels answer existence without reading past the literal; keep them for
-            // full-Slice find. Every other strategy that can coexist with a plan is replaced.
-            if (findStrategy != BOOLEAN_FIND_CONTAINS &&
-                    findStrategy != BOOLEAN_FIND_STARTS_WITH &&
-                    findStrategy != BOOLEAN_FIND_EQUALS &&
-                    findStrategy != BOOLEAN_FIND_EQUALS_FINAL_LINE) {
-                findStrategy = scanPlanStrategy;
-            }
-        }
-        // A retained span or byte-run matcher answers full-Slice find only in place of the
-        // general engine.
-        if (findStrategy == BOOLEAN_FIND_GENERAL) {
-            if (booleanPlans.literalAlternationMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_LITERAL_ALTERNATION;
-            }
-            else if (booleanPlans.fixedWidthByteMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_FIXED_WIDTH_BYTE;
-            }
-            else if (booleanPlans.byteRunMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_BYTE_RUN;
-            }
-        }
-        this.booleanFindStrategy = findStrategy;
-        this.countsWithSpanMatcher = findStrategy == BOOLEAN_FIND_LITERAL_ALTERNATION || findStrategy == BOOLEAN_FIND_FIXED_WIDTH_BYTE;
-        this.scanPlanStrategy = scanPlanStrategy;
-        this.ordinaryUnanchoredBooleanSearch = ordinaryBooleanSearch;
-        this.ordinaryShortBooleanMatch = ordinaryShortMatch;
+        this.booleanFindStrategy = analysis.booleanFindStrategy();
+        this.countsWithSpanMatcher = booleanFindStrategy == BOOLEAN_FIND_LITERAL_ALTERNATION || booleanFindStrategy == BOOLEAN_FIND_FIXED_WIDTH_BYTE;
+        this.scanPlanStrategy = analysis.scanPlanStrategy();
+        this.ordinaryUnanchoredBooleanSearch = analysis.ordinaryUnanchoredBooleanSearch();
+        this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
         this.capturingGroupCount = analysis.capturingGroupCount();
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
         // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
         // single class's counter serves matchers alone.
-        this.boundedCharacterClassCounter = matcherClass != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS ? matcherClass : compactBoundedCharacterClass;
+        this.boundedCharacterClassCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS ? matcherClassCounter : analysis.compactBoundedCharacterClass();
     }
 
     /// Copies every field of `pattern`, which the caller then discards, except the named
@@ -431,7 +364,7 @@ abstract sealed class CompiledPattern
             if (fixedWidthMatcher.estimatedRetainedSize() <= placeholderProgram.dfaMemory()) {
                 placeholderProgram.setDfaMemory(0);
                 BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram).withFixedWidthByteMatcher(fixedWidthMatcher);
-                return new Analysis(
+                return selectRoutes(
                         flags,
                         maxMemory,
                         Compiler.Dialect.TRINO,
@@ -510,7 +443,7 @@ abstract sealed class CompiledPattern
                     // The optional DFA could not fit; the compact counter remains the fallback.
                 }
             }
-            return new Analysis(
+            return selectRoutes(
                     flags,
                     maxMemory,
                     compilerDialect,
@@ -717,7 +650,7 @@ abstract sealed class CompiledPattern
             booleanPlans = booleanPlans.withByteRunMatcher(byteRunMatcher);
         }
 
-        return new Analysis(
+        return selectRoutes(
                 flags,
                 maxMemory,
                 compilerDialect,
@@ -736,6 +669,134 @@ abstract sealed class CompiledPattern
                 capturingGroupCount,
                 parsed.capturingGroupNames(),
                 null);
+    }
+
+    /// Returns the analysis of a pattern with its routes selected. Selection reserves the memory of
+    /// the matcher class counter and the single-byte table from `partialProg`'s DFA budget, before
+    /// any DFA can snapshot it; the table itself stays lazy.
+    private static Analysis selectRoutes(
+            int flags,
+            long maxMemory,
+            Compiler.Dialect compilerDialect,
+            boolean longestMatch,
+            Slice pattern,
+            Regexp regexp,
+            ExpressionAnalysis expressionAnalysis,
+            Regexp suffixRegexp,
+            Regexp normalizedReverseRegexp,
+            byte[] requiredPrefix,
+            boolean requiredPrefixFoldCase,
+            int matchLength,
+            int exactLiteralLength,
+            Prog partialProg,
+            BooleanPlans booleanPlans,
+            int capturingGroupCount,
+            Map<Integer, String> capturingGroupNames,
+            BoundedCharacterClassCounter compactBoundedCharacterClass)
+    {
+        byte findStrategy;
+        if (compactBoundedCharacterClass == null) {
+            findStrategy = encodeBooleanFindStrategy(booleanPlans.partialMatchStrategy());
+        }
+        else if (partialProg.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
+            findStrategy = BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA;
+        }
+        else {
+            findStrategy = BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS;
+        }
+        if (compactBoundedCharacterClass == null && canUseDirectLoweredGroupZeroSearch(
+                partialProg,
+                booleanPlans.loweredProgram(),
+                expressionAnalysis,
+                requiredPrefix)) {
+            findStrategy = BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
+        }
+        // As on the compact route, a pattern with a capture keeps the engine.
+        BoundedCharacterClassCounter matcherClass = requiredPrefix == null && compactBoundedCharacterClass == null && capturingGroupCount == 0
+                ? BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch)
+                : null;
+        if (matcherClass != null && matcherClass.estimatedRetainedSize() <= partialProg.dfaMemory()) {
+            partialProg.setDfaMemory(partialProg.dfaMemory() - matcherClass.estimatedRetainedSize());
+        }
+        else {
+            matcherClass = null;
+        }
+        boolean singleByteMatcher = mayHaveSingleByteMatcher(requiredPrefix, partialProg, matchLength) &&
+                SingleByteMatcher.supports(suffixRegexp, expressionAnalysis.caseFolding()) &&
+                SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory();
+        if (singleByteMatcher) {
+            partialProg.setDfaMemory(partialProg.dfaMemory() - SingleByteMatcher.estimatedRetainedSize());
+            if (findStrategy == BOOLEAN_FIND_GENERAL) {
+                findStrategy = BOOLEAN_FIND_SINGLE_BYTE;
+            }
+        }
+        byte scanPlanStrategy = BOOLEAN_FIND_GENERAL;
+        boolean ordinaryBooleanSearch = false;
+        boolean ordinaryShortMatch = false;
+        ScanPlan scanPlan = booleanPlans.scanPlan();
+        if (scanPlan != null) {
+            if (!scanPlan.isAnchoredStart()) {
+                scanPlanStrategy = scanPlan.usesAsciiFoldedExecutor()
+                        ? BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN
+                        : BOOLEAN_FIND_UNANCHORED_SCAN_PLAN;
+                ordinaryBooleanSearch = scanPlan.allowsOrdinaryBooleanSearch();
+            }
+            else {
+                scanPlanStrategy = scanPlan.isPartialMatch()
+                        ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_PARTIAL_SCAN_PLAN)
+                        : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_SCAN_PLAN);
+                // The short route is the ordinary engine's general search, which must run the
+                // DFA. A Trino final-line end or a Java final-terminator end, which the DFA cannot
+                // evaluate, keeps the plan.
+                ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && findStrategy == BOOLEAN_FIND_GENERAL && !partialProg.hasDfaUnsupportedAssertions();
+            }
+            // Literal kernels answer existence without reading past the literal; keep them for
+            // full-Slice find. Every other strategy that can coexist with a plan is replaced.
+            if (findStrategy != BOOLEAN_FIND_CONTAINS &&
+                    findStrategy != BOOLEAN_FIND_STARTS_WITH &&
+                    findStrategy != BOOLEAN_FIND_EQUALS &&
+                    findStrategy != BOOLEAN_FIND_EQUALS_FINAL_LINE) {
+                findStrategy = scanPlanStrategy;
+            }
+        }
+        // A retained span or byte-run matcher answers full-Slice find only in place of the
+        // general engine.
+        if (findStrategy == BOOLEAN_FIND_GENERAL) {
+            if (booleanPlans.literalAlternationMatcher() != null) {
+                findStrategy = BOOLEAN_FIND_LITERAL_ALTERNATION;
+            }
+            else if (booleanPlans.fixedWidthByteMatcher() != null) {
+                findStrategy = BOOLEAN_FIND_FIXED_WIDTH_BYTE;
+            }
+            else if (booleanPlans.byteRunMatcher() != null) {
+                findStrategy = BOOLEAN_FIND_BYTE_RUN;
+            }
+        }
+        return new Analysis(
+                flags,
+                maxMemory,
+                compilerDialect,
+                longestMatch,
+                pattern,
+                regexp,
+                expressionAnalysis,
+                suffixRegexp,
+                normalizedReverseRegexp,
+                requiredPrefix,
+                requiredPrefixFoldCase,
+                matchLength,
+                exactLiteralLength,
+                partialProg,
+                booleanPlans,
+                capturingGroupCount,
+                capturingGroupNames,
+                compactBoundedCharacterClass,
+                matcherClass,
+                singleByteMatcher,
+                findStrategy,
+                scanPlanStrategy,
+                ordinaryBooleanSearch,
+                ordinaryShortMatch);
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long and, outside
@@ -2039,6 +2100,11 @@ abstract sealed class CompiledPattern
     }
 
     boolean mayHaveSingleByteMatcher()
+    {
+        return mayHaveSingleByteMatcher(requiredPrefix, partialProg, matchLength);
+    }
+
+    private static boolean mayHaveSingleByteMatcher(byte[] requiredPrefix, Prog partialProg, int matchLength)
     {
         return requiredPrefix == null &&
                 !partialProg.hasTextDependentAssertions() &&
