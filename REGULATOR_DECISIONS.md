@@ -850,18 +850,31 @@ difference explicitly.
 
 Full-Slice boolean `find`, `lookingAt`, and `matches` calls may use
 compile-time plans for exact literal, nullable-start, contains, equality,
-prefix, and suffix expressions. `Re2.find` caches its strategy in a primitive
-field to avoid a dependent metadata load in tiny direct calls. The direct
-strategy uses one byte. The shared single-byte matcher cache and the
-[matcher counter](#bounded-character-class-counting) add one reference each,
-bringing the `Re2` layout to 104
-bytes with compressed references. A scan plan dispatches on a second strategy
-byte that fits in the same 104-byte layout.
-When a pattern also has a scan plan, full-Slice `find` keeps the literal
-contains, prefix, equality, and final-line equality kernels, which answer
-without reading past the literal; other boolean strategies yield to the plan.
-Scan-plan boolean calls also stop once a match is certain, as described in
-the [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
+prefix, and suffix expressions. Compilation selects a pattern's full-Slice
+routes once, and the pattern's class fixes them. Each language class is the
+engine shape. Its package-private shape classes (exact literal, literal kernel,
+literal alternation, fixed width, class run, byte table, and scan plan)
+override `find`. They override the count, `matches`, and `lookingAt` where
+their routes differ from the engine's. Each override makes one call to a final
+route method of `CompiledPattern`, so a call site that sees one class can
+inline one route. The class selects the routes; within them, the class-run
+shape holds one immutable per-instance fact, whether it counts on the retained
+count DFA, and the scan-plan shape three: whether `find` keeps its literal
+kernel, whether a start-anchored plan counts with one attempt, and whether
+short boolean calls run on the ordinary engine. The literal-kernel routes each
+switch on their own plan kind, so the kind one operation runs stays out of
+another's branch profile. Only a pattern that cannot match empty takes a shape
+other than the engine. With compressed references, the `Re2` layout is 96
+bytes, including one reference each for the shared single-byte matcher cache
+and the [matcher counter](#bounded-character-class-counting), and the scan-plan
+shape's layout, with its three facts, is 104 bytes. A pattern with a scan plan
+takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
+prefix, equality, and final-line equality kernels, and its `matches` and
+`lookingAt` keep their literal kernels, which answer without reading past the
+literal. Its other boolean calls run the plan, apart from the short-input and
+count routes that leave it for the ordinary engine. Scan-plan boolean calls
+also stop once a match is certain, as described in the
+[scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
 
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
@@ -901,11 +914,15 @@ route applies only to inputs of at most 64 bytes; larger inputs retain the DFA
 and its ordinary failure fallback. Full-Slice boolean `find` of a capture-free
 one-byte member run (`x+`) tests bytes with the single-byte table under the same
 64-byte limit, and `find` of a compact class run stops at the first run reaching
-its minimum. Trino's existing byte count and explicit matcher routes share the
-same table without changing their input-size policy. Capture-retaining iteration
-remains generic. The table's retained size is reserved before a DFA can snapshot
-its memory budget. If it does not fit, the pattern keeps its generic execution
-route. Trino delegates to this cache instead of retaining a second table.
+its minimum. Anchored `matches` and `lookingAt` of a compact class run fail at
+once when no run begins at the start; otherwise they run the same search, which
+goes on to scan the non-members after the start only when the run there is
+shorter than the minimum. Trino's existing byte count and explicit matcher
+routes share the same table without changing their input-size policy.
+Capture-retaining iteration remains generic. The table's retained size is
+reserved before a DFA can snapshot its memory budget. If it does not fit, the
+pattern keeps its generic execution route. Trino delegates to this cache instead
+of retaining a second table.
 
 Targeted Java 25 measurements on C9g, C8g, and C8i retain this bounded sharing.
 Unconditional scalar literal and byte-table counting were rejected because
@@ -931,9 +948,11 @@ accepted for the larger measured literal/delimiter gains, not treated as noise
 or hidden in an aggregate. These are targeted qualification results, not a
 complete release benchmark refresh.
 
-The strategy byte adds one fixed dispatch operation to ordinary calls. Future
-changes must keep that cost independent of input size, allocation-free, and
-within the protected-path gate on Intel and Graviton.
+Each ordinary call dispatches on its pattern's class rather than on a strategy
+byte. A call site that sees more than two pattern classes, counting each
+generated class, makes a virtual call. Future changes must keep each route's
+fixed cost independent of input size, allocation-free, and within the
+protected-path gate on Intel and Graviton.
 
 Every case-sensitive `Prog.prefixAccel` scan of a prefix of two or more bytes
 (the fused vector and SWAR pair scans, the first-byte scan with its last-byte
@@ -1766,13 +1785,11 @@ program. Boolean `matches` never uses the lowered boundary route, although exact
 shapes may retain their pre-existing direct complete-match plan.
 
 Count, group-zero extraction, position, split, and replacement without capture
-references use the direct boundary route when eligible. The eligibility value
-shares the existing boolean-strategy byte. Ordinary boolean `find` retains its
-direct strategy load; the separate single-byte matcher cache and matcher
-counter account for the shared engine's current 104-byte layout. The two forward
-programs and the lowered program's DFA share the original forward memory budget.
-No warm DFA search loop contains a frontend-specific branch; the Trino check
-runs only while an uncached transition is constructed.
+references use the direct boundary route when eligible. A matcher reads the
+eligibility once, when it is created, and the pattern stores no field for it.
+The two forward programs and the lowered program's DFA share the original
+forward memory budget. No warm DFA search loop contains a frontend-specific
+branch; the Trino check runs only while an uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call
@@ -2019,13 +2036,13 @@ ASCII and requires no full multi-character fold. An ASCII letter pair, such as
 letters, as [Pinned Unicode Case Folding](#pinned-unicode-case-folding) states,
 so a plan folds it as that pair even for `k` and `s`, whose cycles leave ASCII.
 The pair is the same tree in every language, so this holds for each of them.
-Folded plans use separate executors and strategy values. On R9g, folded
-anchored, optional, unanchored, run, and mixed workloads take 0.20 to 1.10
-times the ordinary engine's time for `contains`, extraction, and replacement,
-with a geometric mean of 0.38. The accepted costs are folded optional boolean
-matching, at about 1.10 times the ordinary engine's time, and unanchored folded
-compilation, at about 1.19 times. Ordinary URL and mixed operations remain
-faster than the ordinary engine on R8i and R9g.
+Folded plans use separate executors. On R9g, folded anchored, optional,
+unanchored, run, and mixed workloads take 0.20 to 1.10 times the ordinary
+engine's time for `contains`, extraction, and replacement, with a geometric mean
+of 0.38. The accepted costs are folded optional boolean matching, at about 1.10
+times the ordinary engine's time, and unanchored folded compilation, at about
+1.19 times. Ordinary URL and mixed operations remain faster than the ordinary
+engine on R8i and R9g.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
@@ -2432,22 +2449,24 @@ plans; the last bullets record the rules and measurements specific to each.
   only when that operation reaches the plan, and its route is fixed when the
   class is generated: the attempt, the search, or the capture-free search before
   the ordinary-engine handoff, and for count the search loop or the single
-  attempt. An operation answered without the plan, such as a `find` on a
-  retained literal kernel, keeps the inherited entry. Other operations that
-  reach the plan go through the overridden `matchInternal` hook, whose anchored
-  or unanchored arm is also fixed at generation, so `Re2`'s many public
-  operations keep their routes without a generated entry each; a matcher's
-  start-anchored first search uses the overridden
-  `findWithStartAnchoredScanPlan` hook instead. A shared entry method carries
-  the branch profiles of every pattern that calls it; an entry per generated
-  class carries one pattern's.
+  attempt. An operation answered without the plan, such as a `find` or `matches`
+  on a retained literal kernel, keeps the entry of the scan-plan shape the class
+  extends. Other operations that reach the plan go through the overridden
+  `matchInternal` hook, whose anchored or unanchored arm is also fixed at
+  generation, so `Re2`'s many public operations keep their routes without a
+  generated entry each; a matcher's start-anchored first search uses the
+  overridden `findWithStartAnchoredScanPlan` hook instead. A shared entry method
+  carries the branch profiles of every pattern that calls it; an entry per
+  generated class carries one pattern's.
 - `Re2`, `JavaRegexp`, and `RustRegexp` are sealed classes over a
-  package-private engine. Each permits one package-private, non-sealed class
-  that the hidden class extends, so the pattern a caller holds is the
-  generated class, and a caller's call site that sees one pattern binds its
-  entries directly; callers still cannot extend the pattern classes. The
-  generated class adds no fields, so the guarded object layout does not
-  change.
+  package-private engine. Each permits its package-private [shape
+  classes](#boolean-partial-match-specializations). The scan-plan shape is
+  sealed too and permits only its package-private `CompiledScan…` class, which
+  is non-sealed so that the hidden class extends it. The pattern a caller holds
+  is the generated class, and a caller's call site that sees one pattern binds
+  its entries directly; callers still cannot extend the pattern classes. The
+  generated class adds no fields, so it keeps the scan-plan shape's 104-byte
+  layout.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
   stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
   count that skips the plan does not exclude a pattern, because only the calls
@@ -2499,41 +2518,43 @@ plans; the last bullets record the rules and measurements specific to each.
   generated classes under the same rules. The Java end adds a generated end
   check, and a Java-only rule on which runs may precede it decides whether a
   plan exists; once a plan exists, the decision whether to generate it and the
-  routes are RE2's, and the generated class extends `CompiledScanJavaRegexp`. On
-  R9g and R8i, the 65 matching rows of `BenchmarkJavaScanPlan` with
-  `generateBytecode=true`, on the `URL`, `URL_SHORT`, `ANCHORED_HOST`,
-  `ANCHORED_QUERY`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
-  `OPTIONAL_RETRY`, `OPTIONAL_MIXED`, `RETRY_64`, `LONG_HOST`, `MIXED`, and
-  `URL_MALFORMED` workloads, take a geometric mean of 0.51 and 0.56 times the
-  interpreted plan's time and 0.12 and 0.13 times the ordinary engine's,
-  excluding compilation and the `FOLDED_MIXED` control. No generated row is
-  slower than the interpreted plan or the ordinary engine, and R8i `LONG_HOST`,
-  RE2's exception, is within noise for Java. Compilation with generation takes
-  0.44 to 0.71 ms per pattern on R9g and 1.0 to 1.6 ms on R8i, against 3.9 to
-  15.1 us for the interpreted plan. Over the 50 Java end rows, generated classes
-  take 0.489 and 0.507 times the interpreted plan's time and 0.064 and 0.057
-  times the ordinary engine's; no row is slower than the interpreted plan, and
-  R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to 0.69 ms per
-  pattern on R9g and 1.11 to 1.52 ms on R8i.
+  routes are RE2's, and the generated class extends `CompiledScanJavaRegexp`,
+  which extends `JavaRegexp`'s scan-plan shape. On R9g and R8i, the 65 matching
+  rows of `BenchmarkJavaScanPlan` with `generateBytecode=true`, on the `URL`,
+  `URL_SHORT`, `ANCHORED_HOST`, `ANCHORED_QUERY`, `UNANCHORED_URL`,
+  `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`, `OPTIONAL_MIXED`,
+  `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED` workloads, take a
+  geometric mean of 0.51 and 0.56 times the interpreted plan's time and 0.12 and
+  0.13 times the ordinary engine's, excluding compilation and the `FOLDED_MIXED`
+  control. No generated row is slower than the interpreted plan or the ordinary
+  engine, and R8i `LONG_HOST`, RE2's exception, is within noise for Java.
+  Compilation with generation takes 0.44 to 0.71 ms per pattern on R9g and 1.0
+  to 1.6 ms on R8i, against 3.9 to 15.1 us for the interpreted plan. Over the 50
+  Java end rows, generated classes take 0.489 and 0.507 times the interpreted
+  plan's time and 0.064 and 0.057 times the ordinary engine's; no row is slower
+  than the interpreted plan, and R8i `LONG_HOST` is within noise. Their
+  compilation takes 0.47 to 0.69 ms per pattern on R9g and 1.11 to 1.52 ms on
+  R8i.
 - `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same
   generated classes under the same rules. A Rust plan is an RE2 plan, so the
   emitter, eligibility, and routes are RE2's, and the generated class extends
-  `CompiledScanRustRegexp`. A generated `find` skips the Rust search's rule for
-  empty matches, so generation refuses a pattern that can match empty, which no
-  plan accepts either. Byte-mode patterns build plans and generated classes
-  under the same rules. On R9g and R8i, the 45 matching rows of
-  `BenchmarkRustScanPlan` with `generateBytecode=true`, on the `URL`,
-  `ANCHORED_HOST`, `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`,
-  `OPTIONAL_RETRY`, `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED`
-  workloads, take a geometric mean of 0.536 and 0.597 times the interpreted
-  plan's time and 0.113 and 0.123 times the ordinary engine's, excluding
-  compilation. Over the 40 of those rows that the Java measurement shares, Rust
-  classes take 0.535 and 0.604 times and Java classes took 0.530 and 0.606. No
-  generated row is slower than the interpreted plan or the ordinary engine
-  beyond noise, and R8i `LONG_HOST`, RE2's exception, is within noise for Rust.
-  Compilation with generation takes 453 to 715 us per pattern on R9g and 1024 to
-  1602 us on R8i, against 4 to 13 us and 5 to 16 us for the interpreted plan and
-  3 to 11 us and 4 to 12 us for the ordinary engine.
+  `CompiledScanRustRegexp`, which extends `RustRegexp`'s scan-plan shape. A
+  generated `find` skips the Rust search's rule for empty matches, so generation
+  refuses a pattern that can match empty, which no plan accepts either.
+  Byte-mode patterns build plans and generated classes under the same rules. On
+  R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan` with
+  `generateBytecode=true`, on the `URL`, `ANCHORED_HOST`, `UNANCHORED_URL`,
+  `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`, `LONG_HOST`,
+  `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED` workloads, take a geometric
+  mean of 0.536 and 0.597 times the interpreted plan's time and 0.113 and 0.123
+  times the ordinary engine's, excluding compilation. Over the 40 of those rows
+  that the Java measurement shares, Rust classes take 0.535 and 0.604 times and
+  Java classes took 0.530 and 0.606. No generated row is slower than the
+  interpreted plan or the ordinary engine beyond noise, and R8i `LONG_HOST`,
+  RE2's exception, is within noise for Rust. Compilation with generation takes
+  453 to 715 us per pattern on R9g and 1024 to 1602 us on R8i, against 4 to 13
+  us and 5 to 16 us for the interpreted plan and 3 to 11 us and 4 to 12 us for
+  the ordinary engine.
 - Generated classes read a set of some non-ASCII characters with a copy of the
   interpreter's reader, full lead entries and lead-byte width included. With
   the trie walk for every lead, generated Java `URL_NON_ASCII` `contains` and

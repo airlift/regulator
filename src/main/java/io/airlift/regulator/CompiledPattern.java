@@ -37,23 +37,6 @@ abstract sealed class CompiledPattern
                 RustRegexp,
                 TrinoCompiledPattern
 {
-    enum BooleanPartialMatchStrategy
-    {
-        GENERAL,
-        EXACT_LITERAL,
-        NULLABLE_START,
-        CONTAINS,
-        EQUALS,
-        STARTS_WITH,
-        ENDS_WITH,
-        EQUALS_FINAL_LINE,
-        ENDS_WITH_FINAL_LINE,
-        LOWERED_PROGRAM,
-        LITERAL_ALTERNATION,
-        FIXED_WIDTH_BYTE,
-        BYTE_RUN,
-    }
-
     enum BooleanPlanKind
     {
         GENERAL,
@@ -94,30 +77,6 @@ abstract sealed class CompiledPattern
         // Builds no plan.
         DISABLED,
     }
-
-    private static final byte BOOLEAN_FIND_GENERAL = 0;
-    private static final byte BOOLEAN_FIND_EXACT_LITERAL = 1;
-    private static final byte BOOLEAN_FIND_NULLABLE_START = 2;
-    private static final byte BOOLEAN_FIND_CONTAINS = 3;
-    private static final byte BOOLEAN_FIND_EQUALS = 4;
-    private static final byte BOOLEAN_FIND_STARTS_WITH = 5;
-    private static final byte BOOLEAN_FIND_ENDS_WITH = 6;
-    private static final byte BOOLEAN_FIND_EQUALS_FINAL_LINE = 7;
-    private static final byte BOOLEAN_FIND_ENDS_WITH_FINAL_LINE = 8;
-    private static final byte BOOLEAN_FIND_LOWERED_PROGRAM = 9;
-    private static final byte BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO = 10;
-    private static final byte BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS = 11;
-    private static final byte BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA = 12;
-    private static final byte BOOLEAN_FIND_LITERAL_ALTERNATION = 13;
-    private static final byte BOOLEAN_FIND_FIXED_WIDTH_BYTE = 14;
-    private static final byte BOOLEAN_FIND_BYTE_RUN = 15;
-    private static final byte BOOLEAN_FIND_SINGLE_BYTE = 16;
-    private static final byte BOOLEAN_FIND_SCAN_PLAN = 17;
-    private static final byte BOOLEAN_FIND_PARTIAL_SCAN_PLAN = 18;
-    private static final byte BOOLEAN_FIND_UNANCHORED_SCAN_PLAN = 19;
-    private static final byte BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN = 20;
-    private static final byte BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN = 21;
-    private static final byte BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN = 22;
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
@@ -165,14 +124,50 @@ abstract sealed class CompiledPattern
 
     record FanoutResult(int maxBucket, int[] histogram) {}
 
-    /// The analysis, programs, and plans that a compile builds for one pattern, with the routes
-    /// [#selectRoutes] chose for it, which the pattern class's constructor receives. Route
+    /// The class a pattern compiles to within its language, which fixes the routes of its
+    /// full-Slice `find`, `count`, `matches`, and `lookingAt`. Every shape other than
+    /// [#ENGINE] requires a pattern that cannot match empty.
+    enum Shape
+    {
+        // The ordinary engine, on the lowered boolean program where there is one, with the literal
+        // matches and lookingAt plans.
+        ENGINE,
+        // A nonempty literal anywhere in the input, found by the program's prefix scan.
+        EXACT_LITERAL,
+        // A pattern whose find uses a literal kernel: contains, prefix, suffix, or equality.
+        LITERAL_KERNEL,
+        // An alternation of short literals, found by the literal-alternation span matcher.
+        LITERAL_ALTERNATION,
+        // A fixed-width pattern, found by the fixed-width byte span matcher.
+        FIXED_WIDTH,
+        // A large Unicode class repeat, found by the compact class counter, and counted on the
+        // counter or on an optional retained count DFA.
+        CLASS_RUN,
+        // A one-byte member or member run, found by the single-byte table on short inputs.
+        BYTE_TABLE,
+        // A pattern with a scan plan, whose captures and full-Slice operations run the plan,
+        // apart from a find, matches, or lookingAt that a literal kernel answers, and the
+        // short-input and count routes that leave the plan for the ordinary engine.
+        SCAN_PLAN,
+    }
+
+    /// The analysis, programs, and plans that a compile builds for one pattern, with the shape and
+    /// routes [#selectRoutes] chose for it, which the pattern class's constructor receives. Route
     /// selection reserves memory from `partialProg`'s DFA budget, so one analysis constructs one
     /// pattern.
     ///
     /// @param matcherClassCounter off the compact route, the counter that finds a class pattern's
     ///         matches, whose memory is reserved, or `null`
     /// @param singleByteMatcherReserved whether the single-byte table's memory is reserved
+    /// @param retainedClassCountDfa whether a [Shape#CLASS_RUN] pattern counts on the retained
+    ///         class count DFA rather than its counter
+    /// @param ordinaryShortBooleanMatch whether unanchored boolean calls of a
+    ///         [Shape#SCAN_PLAN] pattern's start-anchored plan run on the ordinary engine over
+    ///         short inputs
+    /// @param singleAttemptCount whether a [Shape#SCAN_PLAN] pattern's start-anchored
+    ///         plan counts with one boolean attempt
+    /// @param literalKernelFind whether a [Shape#SCAN_PLAN] pattern's full-Slice find
+    ///         runs the literal kernel of its find plan rather than the plan
     record Analysis(
             int flags,
             long maxMemory,
@@ -192,12 +187,19 @@ abstract sealed class CompiledPattern
             int capturingGroupCount,
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass,
+            Shape shape,
             BoundedCharacterClassCounter matcherClassCounter,
             boolean singleByteMatcherReserved,
-            byte booleanFindStrategy,
-            byte scanPlanStrategy,
-            boolean ordinaryUnanchoredBooleanSearch,
-            boolean ordinaryShortBooleanMatch) {}
+            boolean retainedClassCountDfa,
+            boolean ordinaryShortBooleanMatch,
+            boolean singleAttemptCount,
+            boolean literalKernelFind)
+    {
+        Analysis
+        {
+            requireNonNull(shape, "shape is null");
+        }
+    }
 
     private final int flags;
     private final long maxMemory;
@@ -221,23 +223,6 @@ abstract sealed class CompiledPattern
     private final boolean singleCharacterMatch;
     private final int exactLiteralLength;
     private final BooleanPlans booleanPlans;
-    // Cached directly on the pattern because an extra dependent load measurably affects tiny find operations.
-    private final byte booleanFindStrategy;
-    // Set for the literal-alternation and fixed-width strategies. One test for both keeps
-    // countMatches small enough for C2 to inline.
-    private final boolean countsWithSpanMatcher;
-    // Scan-plan executor for calls that reach matchInternal. A retained literal boolean kernel
-    // may answer full-Slice find while boundaries, captures, and ranges still use the plan.
-    private final byte scanPlanStrategy;
-    // Set when unanchored boolean searches may continue on the ordinary engine. Full-Slice find
-    // starts on the plan and hands off once failed attempts are dense; ranged boolean find uses
-    // the ordinary engine. Calls that report match boundaries start on the plan and continue on
-    // the ordinary engine only as every plan search does, past the plan's work budget.
-    private final boolean ordinaryUnanchoredBooleanSearch;
-    // Set when unanchored boolean calls of a start-anchored plan run on the ordinary engine over
-    // at most MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES. Longer inputs, and calls that report
-    // positions, run the plan.
-    private final boolean ordinaryShortBooleanMatch;
     // Off the compact route, the counter that finds a class pattern's matches: the single members
     // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
     // repeat's counter.
@@ -248,7 +233,7 @@ abstract sealed class CompiledPattern
     private volatile BoundedCharacterClassCounter boundedCharacterClassCounter;
     private volatile SingleByteMatcher singleByteMatcher;
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only classes of this package, and only its generated classes extend the non-sealed ones")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only classes of this package; each scan-plan shape class permits only its non-sealed CompiledScan class, which only its generated hidden class extends")
     CompiledPattern(Analysis analysis)
     {
         Compiler.Dialect compilerDialect = requireNonNull(analysis.compilerDialect(), "compilerDialect is null");
@@ -271,21 +256,38 @@ abstract sealed class CompiledPattern
         if (!analysis.singleByteMatcherReserved()) {
             singleByteMatcher = SingleByteMatcher.unsupported();
         }
-        this.booleanFindStrategy = analysis.booleanFindStrategy();
-        this.countsWithSpanMatcher = booleanFindStrategy == BOOLEAN_FIND_LITERAL_ALTERNATION || booleanFindStrategy == BOOLEAN_FIND_FIXED_WIDTH_BYTE;
-        this.scanPlanStrategy = analysis.scanPlanStrategy();
-        this.ordinaryUnanchoredBooleanSearch = analysis.ordinaryUnanchoredBooleanSearch();
-        this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
         this.capturingGroupCount = analysis.capturingGroupCount();
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
         // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
         // single class's counter serves matchers alone.
         this.boundedCharacterClassCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS ? matcherClassCounter : analysis.compactBoundedCharacterClass();
+        // Every shape other than the engine answers its operations on the assumption that no
+        // match is empty.
+        if (analysis.shape() != Shape.ENGINE && canMatchEmpty()) {
+            throw new IllegalStateException("a pattern that can match empty has no shape other than the engine: " + analysis.shape());
+        }
+        // An exact literal answers matches and lookingAt by equality and prefix, as its plans say.
+        if (analysis.shape() == Shape.EXACT_LITERAL && (exactLiteralLength <= 0 ||
+                booleanPlans.matches() != BooleanPlanKind.EQUALS ||
+                booleanPlans.lookingAt() != BooleanPlanKind.STARTS_WITH)) {
+            throw new IllegalStateException("an exact literal's plans disagree with its shape: length " + exactLiteralLength +
+                    ", matches " + booleanPlans.matches() + ", lookingAt " + booleanPlans.lookingAt());
+        }
+        // A byte table counts past its table on the class counter or the DFA, the only routes of
+        // the ordinary count that a one-byte member or member run reaches.
+        if (analysis.shape() == Shape.BYTE_TABLE && (booleanPlans.disjointSuffixRepeatMatcher() != null ||
+                partialProg.hasDfaUnsupportedAssertions() ||
+                requiredPrefix != null ||
+                partialProg.anchorStart())) {
+            throw new IllegalStateException("a byte table's count disagrees with its shape: disjoint suffix repeat " + (booleanPlans.disjointSuffixRepeatMatcher() != null) +
+                    ", DFA-unsupported assertions " + partialProg.hasDfaUnsupportedAssertions() +
+                    ", required prefix " + (requiredPrefix != null) +
+                    ", anchored start " + partialProg.anchorStart());
+        }
     }
 
     /// Copies every field of `pattern`, which the caller then discards, except the named
-    /// group map, which is computed on first use. Rerunning the main constructor would reserve
-    /// its pattern's DFA memory a second time.
+    /// group map, which is computed on first use.
     CompiledPattern(CompiledPattern pattern)
     {
         this.flags = pattern.flags;
@@ -305,11 +307,6 @@ abstract sealed class CompiledPattern
         this.singleCharacterMatch = pattern.singleCharacterMatch;
         this.exactLiteralLength = pattern.exactLiteralLength;
         this.booleanPlans = pattern.booleanPlans;
-        this.booleanFindStrategy = pattern.booleanFindStrategy;
-        this.countsWithSpanMatcher = pattern.countsWithSpanMatcher;
-        this.scanPlanStrategy = pattern.scanPlanStrategy;
-        this.ordinaryUnanchoredBooleanSearch = pattern.ordinaryUnanchoredBooleanSearch;
-        this.ordinaryShortBooleanMatch = pattern.ordinaryShortBooleanMatch;
         this.reverseProg = pattern.reverseProg;
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
@@ -624,7 +621,7 @@ abstract sealed class CompiledPattern
         // spans. The literal trie prefers the first alternative, so a longest-match pattern keeps
         // the general engine; every fixed-width match has the same width, so its leftmost-longest
         // and leftmost-first spans coincide.
-        boolean generalFind = booleanPlans.partialMatchStrategy() == BooleanPartialMatchStrategy.GENERAL && booleanPlans.scanPlan() == null;
+        boolean generalFind = booleanPlans.find() == BooleanPlanKind.GENERAL && booleanPlans.scanPlan() == null;
         LiteralAlternationSpanMatcher literalAlternationMatcher = generalFind && !longestMatch
                 ? LiteralAlternationSpanMatcher.analyze(entireRegexp, capturingGroupCount)
                 : null;
@@ -671,9 +668,9 @@ abstract sealed class CompiledPattern
                 null);
     }
 
-    /// Returns the analysis of a pattern with its routes selected. Selection reserves the memory of
-    /// the matcher class counter and the single-byte table from `partialProg`'s DFA budget, before
-    /// any DFA can snapshot it; the table itself stays lazy.
+    /// Returns the analysis of a pattern with its shape and routes selected. Selection reserves the
+    /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
+    /// budget, before any DFA can snapshot it; the table itself stays lazy.
     private static Analysis selectRoutes(
             int flags,
             long maxMemory,
@@ -694,22 +691,27 @@ abstract sealed class CompiledPattern
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass)
     {
-        byte findStrategy;
-        if (compactBoundedCharacterClass == null) {
-            findStrategy = encodeBooleanFindStrategy(booleanPlans.partialMatchStrategy());
-        }
-        else if (partialProg.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
-            findStrategy = BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA;
+        // The shape full-Slice find takes, in the order each route was added. A pattern whose find
+        // runs the ordinary engine on the forward program alone is general, and only a general
+        // pattern takes the single-byte, short ordinary, span, or byte-run route.
+        Shape shape;
+        boolean general = false;
+        boolean retainedClassCountDfa = false;
+        if (compactBoundedCharacterClass != null) {
+            shape = Shape.CLASS_RUN;
+            retainedClassCountDfa = partialProg.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY;
         }
         else {
-            findStrategy = BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS;
-        }
-        if (compactBoundedCharacterClass == null && canUseDirectLoweredGroupZeroSearch(
-                partialProg,
-                booleanPlans.loweredProgram(),
-                expressionAnalysis,
-                requiredPrefix)) {
-            findStrategy = BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
+            shape = switch (booleanPlans.find()) {
+                case GENERAL -> {
+                    general = true;
+                    yield Shape.ENGINE;
+                }
+                // Only Trino's fixed-width route passes no exact literal with a literal search.
+                case LITERAL_SEARCH -> exactLiteralLength > 0 ? Shape.EXACT_LITERAL : Shape.ENGINE;
+                case NULLABLE_START, LOWERED_PROGRAM -> Shape.ENGINE;
+                case CONTAINS, EQUALS, STARTS_WITH, ENDS_WITH, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE -> Shape.LITERAL_KERNEL;
+            };
         }
         // As on the compact route, a pattern with a capture keeps the engine.
         BoundedCharacterClassCounter matcherClass = requiredPrefix == null && compactBoundedCharacterClass == null && capturingGroupCount == 0
@@ -726,50 +728,46 @@ abstract sealed class CompiledPattern
                 SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory();
         if (singleByteMatcher) {
             partialProg.setDfaMemory(partialProg.dfaMemory() - SingleByteMatcher.estimatedRetainedSize());
-            if (findStrategy == BOOLEAN_FIND_GENERAL) {
-                findStrategy = BOOLEAN_FIND_SINGLE_BYTE;
+            if (general) {
+                shape = Shape.BYTE_TABLE;
+                general = false;
             }
         }
-        byte scanPlanStrategy = BOOLEAN_FIND_GENERAL;
-        boolean ordinaryBooleanSearch = false;
         boolean ordinaryShortMatch = false;
+        boolean singleAttemptCount = false;
+        boolean literalKernelFind = false;
         ScanPlan scanPlan = booleanPlans.scanPlan();
         if (scanPlan != null) {
-            if (!scanPlan.isAnchoredStart()) {
-                scanPlanStrategy = scanPlan.usesAsciiFoldedExecutor()
-                        ? BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN
-                        : BOOLEAN_FIND_UNANCHORED_SCAN_PLAN;
-                ordinaryBooleanSearch = scanPlan.allowsOrdinaryBooleanSearch();
-            }
-            else {
-                scanPlanStrategy = scanPlan.isPartialMatch()
-                        ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_PARTIAL_SCAN_PLAN)
-                        : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN : BOOLEAN_FIND_SCAN_PLAN);
+            if (scanPlan.isAnchoredStart()) {
                 // The short route is the ordinary engine's general search, which must run the
                 // DFA. A Trino final-line end or a Java final-terminator end, which the DFA cannot
                 // evaluate, keeps the plan.
-                ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && findStrategy == BOOLEAN_FIND_GENERAL && !partialProg.hasDfaUnsupportedAssertions();
+                ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && general && !partialProg.hasDfaUnsupportedAssertions();
+                // A start-anchored pattern matches at most once.
+                singleAttemptCount = !partialProg.hasDfaUnsupportedAssertions() && (requiredPrefix != null || partialProg.anchorStart());
             }
-            // Literal kernels answer existence without reading past the literal; keep them for
-            // full-Slice find. Every other strategy that can coexist with a plan is replaced.
-            if (findStrategy != BOOLEAN_FIND_CONTAINS &&
-                    findStrategy != BOOLEAN_FIND_STARTS_WITH &&
-                    findStrategy != BOOLEAN_FIND_EQUALS &&
-                    findStrategy != BOOLEAN_FIND_EQUALS_FINAL_LINE) {
-                findStrategy = scanPlanStrategy;
-            }
+            // The contains, prefix, equality, and final-line equality kernels answer existence
+            // without reading past the literal; full-Slice find keeps them. The other operations
+            // reach the plan, apart from literal matches and lookingAt plans and the short-input
+            // and count routes that leave it for the ordinary engine.
+            BooleanPlanKind find = booleanPlans.find();
+            literalKernelFind = shape == Shape.LITERAL_KERNEL && (find == BooleanPlanKind.CONTAINS ||
+                    find == BooleanPlanKind.STARTS_WITH ||
+                    find == BooleanPlanKind.EQUALS ||
+                    find == BooleanPlanKind.EQUALS_FINAL_LINE);
+            shape = Shape.SCAN_PLAN;
         }
         // A retained span or byte-run matcher answers full-Slice find only in place of the
         // general engine.
-        if (findStrategy == BOOLEAN_FIND_GENERAL) {
+        else if (general) {
             if (booleanPlans.literalAlternationMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_LITERAL_ALTERNATION;
+                shape = Shape.LITERAL_ALTERNATION;
             }
             else if (booleanPlans.fixedWidthByteMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_FIXED_WIDTH_BYTE;
+                shape = Shape.FIXED_WIDTH;
             }
             else if (booleanPlans.byteRunMatcher() != null) {
-                findStrategy = BOOLEAN_FIND_BYTE_RUN;
+                shape = Shape.BYTE_TABLE;
             }
         }
         return new Analysis(
@@ -791,12 +789,13 @@ abstract sealed class CompiledPattern
                 capturingGroupCount,
                 capturingGroupNames,
                 compactBoundedCharacterClass,
+                shape,
                 matcherClass,
                 singleByteMatcher,
-                findStrategy,
-                scanPlanStrategy,
-                ordinaryBooleanSearch,
-                ordinaryShortMatch);
+                retainedClassCountDfa,
+                ordinaryShortMatch,
+                singleAttemptCount,
+                literalKernelFind);
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long and, outside
@@ -804,7 +803,7 @@ abstract sealed class CompiledPattern
     /// null. Boolean contains and dot-star span matching share this search.
     private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans, boolean trino)
     {
-        if (booleanPlans.partialMatchStrategy() != BooleanPartialMatchStrategy.CONTAINS || booleanPlans.literal().length() < 2) {
+        if (booleanPlans.find() != BooleanPlanKind.CONTAINS || booleanPlans.literal().length() < 2) {
             return null;
         }
         if (!trino && booleanPlans.literal().length() <= LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET) {
@@ -868,10 +867,7 @@ abstract sealed class CompiledPattern
         BooleanPlanKind lookingAt = plans.lookingAt() == BooleanPlanKind.GENERAL
                 ? BooleanPlanKind.LOWERED_PROGRAM
                 : plans.lookingAt();
-        BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
-                ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
-                : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalSet(), plans.innerLiteralSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher(), plans.byteRunMatcher());
+        return new BooleanPlans(plans.literal(), find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalSet(), plans.innerLiteralSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher(), plans.byteRunMatcher());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -986,10 +982,11 @@ abstract sealed class CompiledPattern
         return boundedCharacterClassCounter;
     }
 
+    /// Returns whether the compact class counter answers this pattern's operations, which only
+    /// the class-run shape's classes do.
     boolean usesCompactBoundedCharacterClassForDiagnostics()
     {
-        return booleanFindStrategy == BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS ||
-                booleanFindStrategy == BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA;
+        return false;
     }
 
     boolean hasRetainedFixedWidthByteSpanMatcher()
@@ -1004,36 +1001,37 @@ abstract sealed class CompiledPattern
 
     boolean usesPartialScanPlanForDiagnostics()
     {
-        return scanPlanStrategy == BOOLEAN_FIND_PARTIAL_SCAN_PLAN ||
-                scanPlanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN;
+        ScanPlan plan = booleanPlans.scanPlan();
+        return plan != null && plan.isAnchoredStart() && plan.isPartialMatch();
     }
 
     boolean usesAsciiFoldedScanExecutorForDiagnostics()
     {
-        return scanPlanStrategy == BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN ||
-                scanPlanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN ||
-                scanPlanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN;
+        ScanPlan plan = booleanPlans.scanPlan();
+        return plan != null && plan.usesAsciiFoldedExecutor();
     }
 
-    /// Returns whether full-Slice [#find(Slice)] dispatches to the scan plan rather than
-    /// a retained literal kernel. Other calls reach the plan through the plan dispatch strategy.
+    /// Returns whether full-Slice [#find(Slice)] dispatches to the scan plan rather than a
+    /// retained literal kernel. Only the scan-plan shape's classes can.
     boolean usesScanPlanForFindForDiagnostics()
     {
-        return booleanFindStrategy != BOOLEAN_FIND_GENERAL && booleanFindStrategy == scanPlanStrategy;
+        return false;
     }
 
     /// Returns whether unanchored boolean searches may continue on the ordinary engine although
     /// calls that report match boundaries use the unanchored scan plan.
     boolean usesOrdinaryUnanchoredBooleanSearchForDiagnostics()
     {
-        return ordinaryUnanchoredBooleanSearch;
+        ScanPlan plan = booleanPlans.scanPlan();
+        return plan != null && plan.allowsOrdinaryBooleanSearch();
     }
 
     /// Returns whether unanchored boolean calls of a start-anchored plan run on the ordinary
-    /// engine over short inputs although calls that report positions use the plan.
+    /// engine over short inputs although calls that report positions use the plan. Only the
+    /// scan-plan shape's classes can.
     boolean usesOrdinaryShortBooleanMatchForDiagnostics()
     {
-        return ordinaryShortBooleanMatch;
+        return false;
     }
 
     boolean usesTaggedAlternationForDiagnostics()
@@ -1070,11 +1068,6 @@ abstract sealed class CompiledPattern
     Slice exactLiteralForDiagnostics()
     {
         return regexp.exactLiteral();
-    }
-
-    boolean usesExactLiteralPartialMatchForDiagnostics()
-    {
-        return booleanFindStrategy == BOOLEAN_FIND_EXACT_LITERAL;
     }
 
     LiteralSearchKernel literalSearchForDiagnostics()
@@ -1221,11 +1214,6 @@ abstract sealed class CompiledPattern
         return partialProg.prefixAccel(bytes, offset, length);
     }
 
-    BooleanPartialMatchStrategy booleanPartialMatchStrategyForDiagnostics()
-    {
-        return decodeBooleanFindStrategy(booleanFindStrategy);
-    }
-
     InnerLiteralSearch innerLiteralSearchForDiagnostics()
     {
         return booleanPlans.innerLiteralSearch();
@@ -1273,27 +1261,6 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern has a match anywhere in `input` without allocating capture storage.
     public boolean find(Slice input)
     {
-        // ScanKernelGenerator.definePatternFind emits this route for a generated class; keep in
-        // step.
-        requireNonNull(input, "input is null");
-        byte strategy = booleanFindStrategy;
-        if (strategy != BOOLEAN_FIND_GENERAL) {
-            // The single-byte strategy and the scan-plan strategies are the highest values, so one
-            // comparison keeps them off the established literal dispatch. A scan-plan strategy
-            // appears here only when it equals scanPlanStrategy; a retained literal kernel or
-            // ordinary strategy keeps its own value.
-            if (strategy >= BOOLEAN_FIND_SINGLE_BYTE) {
-                if (strategy != BOOLEAN_FIND_SINGLE_BYTE) {
-                    return findOnScanPlan(input, ordinaryShortBooleanMatch);
-                }
-                return findOnByteTable(input);
-            }
-            if (strategy == BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS ||
-                    strategy == BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA) {
-                return findOnClassRun(input);
-            }
-            return optimizedPartialMatch(input, strategy);
-        }
         return findOnEngine(input);
     }
 
@@ -1301,6 +1268,7 @@ abstract sealed class CompiledPattern
     /// search of the lowered boolean program where there is one, or else of the forward program.
     private boolean findOnEngine(Slice input)
     {
+        requireNonNull(input, "input is null");
         if (canReturnEmptyAtStartForBooleanMatch(input, 0)) {
             return true;
         }
@@ -1385,11 +1353,19 @@ abstract sealed class CompiledPattern
         return (byteRunMatcher != null ? byteRunMatcher : sharedSingleByteMatcher()).find(input, 0) >= 0;
     }
 
-    /// The full-Slice find of a scan plan. A short input of a plan that allows it runs on the
-    /// ordinary engine; any other runs the plan's [ScanPlan#booleanPlan()], resolved at compile
-    /// time, with the executor the plan's facts pick. Calls that report positions never come here.
-    final boolean findOnScanPlan(Slice input, boolean ordinaryShortBooleanMatch)
+    /// The full-Slice find of a scan plan. A pattern whose find keeps the literal kernel of its
+    /// find plan, when `literalKernelFind` is set, runs that kernel, as [#findOnLiteralKernel]
+    /// does. Otherwise a short input of a plan that allows it runs on the ordinary engine, and
+    /// any other runs the plan's [ScanPlan#booleanPlan()], resolved at compile time, with the
+    /// executor the plan's facts pick. Calls that report positions never come here; the
+    /// single-attempt count of [#countOnScanPlan] does.
+    final boolean findOnScanPlan(Slice input, boolean ordinaryShortBooleanMatch, boolean literalKernelFind)
     {
+        // ScanKernelGenerator.definePatternFind emits the plan route for a generated class; keep
+        // in step.
+        if (literalKernelFind) {
+            return findOnLiteralKernel(input);
+        }
         requireNonNull(input, "input is null");
         int length = input.length();
         if (ordinaryShortBooleanMatch && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) {
@@ -1472,8 +1448,6 @@ abstract sealed class CompiledPattern
     /// Returns whether the pattern matches at the beginning of `input` without allocating capture storage.
     public boolean lookingAt(Slice input)
     {
-        // ScanKernelGenerator.defineAnchoredMatch emits the general plan's route for a generated
-        // class; keep in step.
         requireInput(input);
         BooleanPlanKind plan = booleanPlans.lookingAt();
         if (plan != BooleanPlanKind.GENERAL) {
@@ -1490,34 +1464,9 @@ abstract sealed class CompiledPattern
         return matchInto(input, start, end, Anchor.ANCHOR_START, null);
     }
 
-    private boolean optimizedPartialMatch(Slice input, byte strategy)
-    {
-        if (strategy == BOOLEAN_FIND_LOWERED_PROGRAM ||
-                strategy == BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO ||
-                strategy == BOOLEAN_FIND_NULLABLE_START) {
-            return findOnEngine(input);
-        }
-        if (strategy == BOOLEAN_FIND_EXACT_LITERAL) {
-            if (exactLiteralLength == 0) {
-                return true;
-            }
-            return findOnExactLiteral(input);
-        }
-        return switch (strategy) {
-            case BOOLEAN_FIND_CONTAINS, BOOLEAN_FIND_EQUALS, BOOLEAN_FIND_STARTS_WITH, BOOLEAN_FIND_ENDS_WITH,
-                 BOOLEAN_FIND_EQUALS_FINAL_LINE, BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> findOnLiteralKernel(input);
-            case BOOLEAN_FIND_LITERAL_ALTERNATION -> findOnLiteralAlternation(input);
-            case BOOLEAN_FIND_FIXED_WIDTH_BYTE -> findOnFixedWidth(input);
-            case BOOLEAN_FIND_BYTE_RUN -> findOnByteTable(input);
-            default -> throw new IllegalStateException("strategy cannot be executed directly: " + strategy);
-        };
-    }
-
     /// Returns whether the pattern matches all of `input` without allocating capture storage.
     public boolean matches(Slice input)
     {
-        // ScanKernelGenerator.defineAnchoredMatch emits the general plan's route for a generated
-        // class; keep in step.
         requireInput(input);
         BooleanPlanKind plan = booleanPlans.matches();
         if (plan != BooleanPlanKind.GENERAL) {
@@ -1536,13 +1485,105 @@ abstract sealed class CompiledPattern
         return switch (kind) {
             case CONTAINS -> containsBooleanPlanLiteral(input, literal);
             case EQUALS -> LiteralMatchKernel.equals(input, literal);
-            case STARTS_WITH -> startsWithBooleanPlanLiteral(input, literal);
-            case ENDS_WITH -> endsWithBooleanPlanLiteral(input, literal);
+            case STARTS_WITH -> LiteralMatchKernel.startsWith(input, literal);
+            case ENDS_WITH -> LiteralMatchKernel.endsWith(input, literal);
             case EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
             case ENDS_WITH_FINAL_LINE -> endsWithFinalLineBooleanPlanLiteral(input, literal);
             case LOWERED_PROGRAM -> matchLoweredBooleanProgram(input, Anchor.ANCHOR_START);
             case GENERAL, LITERAL_SEARCH, NULLABLE_START -> throw new IllegalStateException("plan cannot be executed directly: " + kind);
         };
+    }
+
+    /// The full-Slice `matches` of a nonempty exact literal.
+    final boolean matchesOnExactLiteral(Slice input)
+    {
+        requireNonNull(input, "input is null");
+        return LiteralMatchKernel.equals(input, booleanPlans.literal());
+    }
+
+    /// The full-Slice `lookingAt` of a nonempty exact literal.
+    final boolean lookingAtOnExactLiteral(Slice input)
+    {
+        requireNonNull(input, "input is null");
+        return LiteralMatchKernel.startsWith(input, booleanPlans.literal());
+    }
+
+    /// The full-Slice `matches` of a pattern whose find is a literal kernel: the equality,
+    /// prefix, or suffix kernel of the matches plan's kind, or the ordinary engine when the plan
+    /// is general. As for [#findOnLiteralKernel], the switch is this route's own.
+    final boolean matchesOnLiteralKernel(Slice input)
+    {
+        requireInput(input);
+        BooleanPlanKind kind = booleanPlans.matches();
+        if (kind == BooleanPlanKind.GENERAL) {
+            return matchInto(input, Anchor.ANCHOR_BOTH, null);
+        }
+        requireNonNull(input, "input is null");
+        Slice literal = booleanPlans.literal();
+        return switch (kind) {
+            case EQUALS -> LiteralMatchKernel.equals(input, literal);
+            case STARTS_WITH -> LiteralMatchKernel.startsWith(input, literal);
+            case ENDS_WITH -> LiteralMatchKernel.endsWith(input, literal);
+            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE, LOWERED_PROGRAM -> throw new IllegalStateException("not a literal matches plan: " + kind);
+        };
+    }
+
+    /// The full-Slice `lookingAt` of a pattern whose find is a literal kernel: the prefix,
+    /// equality, or final-line equality kernel of the lookingAt plan's kind, the lowered boolean
+    /// program, or the ordinary engine when the plan is general. As for [#findOnLiteralKernel],
+    /// the switch is this route's own.
+    final boolean lookingAtOnLiteralKernel(Slice input)
+    {
+        requireInput(input);
+        BooleanPlanKind kind = booleanPlans.lookingAt();
+        if (kind == BooleanPlanKind.GENERAL) {
+            return matchInto(input, Anchor.ANCHOR_START, null);
+        }
+        requireNonNull(input, "input is null");
+        Slice literal = booleanPlans.literal();
+        return switch (kind) {
+            case EQUALS -> LiteralMatchKernel.equals(input, literal);
+            case STARTS_WITH -> LiteralMatchKernel.startsWith(input, literal);
+            case EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
+            case LOWERED_PROGRAM -> matchLoweredBooleanProgram(input, Anchor.ANCHOR_START);
+            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, ENDS_WITH, ENDS_WITH_FINAL_LINE -> throw new IllegalStateException("not a literal lookingAt plan: " + kind);
+        };
+    }
+
+    /// The full-Slice `matches` of a scan plan; see [#matchOnScanPlan].
+    final boolean matchesOnScanPlan(Slice input)
+    {
+        return matchOnScanPlan(input, booleanPlans.matches(), Anchor.ANCHOR_BOTH);
+    }
+
+    /// The full-Slice `lookingAt` of a scan plan; see [#matchOnScanPlan].
+    final boolean lookingAtOnScanPlan(Slice input)
+    {
+        return matchOnScanPlan(input, booleanPlans.lookingAt(), Anchor.ANCHOR_START);
+    }
+
+    /// The full-Slice `matches`, or `lookingAt` when `anchor` is [Anchor#ANCHOR_START], of a
+    /// scan plan: the literal kernel of a literal `kind`, or else the plan route of
+    /// [#matchInternalOnScanPlan] for an anchored call over all of `input`, which is the attempt
+    /// of a start-anchored plan or one anchored search of an unanchored one.
+    private boolean matchOnScanPlan(Slice input, BooleanPlanKind kind, Anchor anchor)
+    {
+        // ScanKernelGenerator.defineAnchoredMatch emits the general plan's route for a generated
+        // class; keep in step.
+        requireInput(input);
+        if (kind != BooleanPlanKind.GENERAL) {
+            requireNonNull(input, "input is null");
+            return matchLiteralPlan(input, kind);
+        }
+        // A literal plan names a null input as the engine's does; the plan route, as matchInternal.
+        requireNonNull(input, "text is null");
+        ScanPlan plan = booleanPlans.scanPlan();
+        int length = input.length();
+        boolean fullMatch = anchor == Anchor.ANCHOR_BOTH;
+        if (plan.isAnchoredStart()) {
+            return matchStartAnchoredScanPlan(plan, input, 0, length, fullMatch, null);
+        }
+        return finishScanSearch(input, 0, length, searchScanPlan(plan, input, 0, length, 0, true, fullMatch, null), anchor, null, NO_MATCH_WORKSPACES);
     }
 
     private boolean matchLoweredBooleanProgram(Slice input, Anchor anchor)
@@ -1567,16 +1608,6 @@ abstract sealed class CompiledPattern
                 : literalSearch.findContains(input, 0, input.length()) >= 0;
     }
 
-    private static boolean startsWithBooleanPlanLiteral(Slice input, Slice literal)
-    {
-        return LiteralMatchKernel.startsWith(input, literal);
-    }
-
-    private static boolean endsWithBooleanPlanLiteral(Slice input, Slice literal)
-    {
-        return LiteralMatchKernel.endsWith(input, literal);
-    }
-
     private static boolean equalsFinalLineBooleanPlanLiteral(Slice input, Slice literal)
     {
         return LiteralMatchKernel.equals(input, literal) ||
@@ -1587,7 +1618,7 @@ abstract sealed class CompiledPattern
 
     private static boolean endsWithFinalLineBooleanPlanLiteral(Slice input, Slice literal)
     {
-        if (endsWithBooleanPlanLiteral(input, literal)) {
+        if (LiteralMatchKernel.endsWith(input, literal)) {
             return true;
         }
         int finalLineEnd = input.length() - 1;
@@ -1679,23 +1710,29 @@ abstract sealed class CompiledPattern
         return singleByteMatcher != SingleByteMatcher.unsupported();
     }
 
-    /// Returns how [#countMatches] counts this pattern, following its checks in order, for a
-    /// pattern with a [#caseSensitiveScanPlan()].
+    /// Returns how [#countMatches] counts this pattern, for a pattern with a
+    /// [#caseSensitiveScanPlan()], which only the scan-plan shape's classes have. This base
+    /// method, for every other class, returns [ScanPlanCount#OTHER].
     ScanPlanCount scanPlanCount()
     {
-        if (scanPlanStrategy == BOOLEAN_FIND_UNANCHORED_SCAN_PLAN) {
+        return ScanPlanCount.OTHER;
+    }
+
+    /// Returns how [#countOnScanPlan] counts this pattern, following its checks in order, when
+    /// `singleAttemptCount` is its argument.
+    final ScanPlanCount countRouteOnScanPlan(boolean singleAttemptCount)
+    {
+        // ScanKernelGenerator defines a generated count for each route this returns other than
+        // OTHER; keep in step.
+        if (!booleanPlans.scanPlan().isAnchoredStart()) {
             return ScanPlanCount.SEARCH_LOOP;
         }
-        if (exactLiteralLength > 0 ||
-                booleanPlans.disjointSuffixRepeatMatcher() != null ||
-                booleanFindStrategy == BOOLEAN_FIND_SINGLE_BYTE) {
-            return ScanPlanCount.OTHER;
-        }
-        if (canMatchEmpty() || partialProg.hasDfaUnsupportedAssertions()) {
-            return ScanPlanCount.SEARCH_LOOP;
-        }
-        if (requiredPrefix != null || partialProg.anchorStart()) {
+        if (singleAttemptCount) {
             return ScanPlanCount.SINGLE_ATTEMPT;
+        }
+        // The ordinary count: the disjoint suffix-repeat matcher, or a decline to a matcher.
+        if (partialProg.hasDfaUnsupportedAssertions()) {
+            return ScanPlanCount.SEARCH_LOOP;
         }
         return ScanPlanCount.OTHER;
     }
@@ -1855,7 +1892,10 @@ abstract sealed class CompiledPattern
 
     boolean hasDirectLoweredGroupZeroSearch()
     {
-        return booleanFindStrategy == BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO;
+        // As in route selection, a class-run pattern or a pattern with a plan takes its own route.
+        return booleanPlans.scanPlan() == null &&
+                !usesCompactBoundedCharacterClassForDiagnostics() &&
+                canUseDirectLoweredGroupZeroSearch(partialProg, booleanPlans.loweredProgram(), expressionAnalysis, requiredPrefix);
     }
 
     long findLoweredCandidateStart(Slice input, int contextStart, int contextEnd, int start)
@@ -1879,12 +1919,11 @@ abstract sealed class CompiledPattern
                 LOWERED_CANDIDATE_SEARCH_BYTES);
     }
 
+    /// Finds the group-zero boundary of the next match on the lowered program. Only a pattern
+    /// whose [#hasDirectLoweredGroupZeroSearch()] holds may call it; a matcher checks that once
+    /// when it is created rather than on every find.
     long findLoweredGroupZeroBoundary(Slice input, int contextStart, int contextEnd, int start)
     {
-        if (!hasDirectLoweredGroupZeroSearch()) {
-            return Dfa.CANDIDATE_SEARCH_FALLBACK;
-        }
-
         Prog reverseProgram = reverseProg();
         if (reverseProgram == null) {
             return Dfa.CANDIDATE_SEARCH_FALLBACK;
@@ -1970,34 +2009,9 @@ abstract sealed class CompiledPattern
         return count;
     }
 
+    /// Returns the number of matches, or `-1` when only a matcher can count them.
     long countMatches(Slice text)
     {
-        requireNonNull(text, "text is null");
-        // Count through an unanchored plan so that count agrees with find. A Trino plan gives
-        // malformed UTF-8 bytes the membership find gives them, which the DFA count would reject.
-        // An RE2, Java, or Rust plan agrees with the ordinary engine, and its count takes the plan
-        // route as find does.
-        if (scanPlanStrategy == BOOLEAN_FIND_UNANCHORED_SCAN_PLAN || scanPlanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN) {
-            return countOnScanPlan(text, ordinaryShortBooleanMatch, false);
-        }
-        if (countsWithSpanMatcher) {
-            return booleanFindStrategy == BOOLEAN_FIND_LITERAL_ALTERNATION ? countOnLiteralAlternation(text) : countOnFixedWidth(text);
-        }
-        if (exactLiteralLength > 0) {
-            return countOnExactLiteral(text);
-        }
-        if (booleanFindStrategy == BOOLEAN_FIND_SINGLE_BYTE) {
-            return countOnByteTable(text);
-        }
-        if (booleanFindStrategy == BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS || booleanFindStrategy == BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA) {
-            return countOnClassRun(text, booleanFindStrategy == BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA);
-        }
-        if (startAnchoredScanPlan() != null) {
-            boolean singleAttempt = booleanPlans.disjointSuffixRepeatMatcher() == null &&
-                    !partialProg.hasDfaUnsupportedAssertions() &&
-                    (requiredPrefix != null || partialProg.anchorStart());
-            return countOnScanPlan(text, ordinaryShortBooleanMatch, singleAttempt);
-        }
         return countOnEngine(text);
     }
 
@@ -2073,21 +2087,30 @@ abstract sealed class CompiledPattern
     }
 
     /// The count of a one-byte member: the single-byte table over at most
-    /// {@value #MAX_DIRECT_BYTE_SCAN_BYTES} bytes. A longer input, and a run of one-byte members,
-    /// takes the ordinary count.
+    /// {@value #MAX_DIRECT_BYTE_SCAN_BYTES} bytes. A longer input counts where the ordinary count
+    /// would take it, as does a run of one-byte members at any length: on the class counter
+    /// where the pattern has one, and otherwise on the DFA. No byte-table pattern reaches the ordinary count's
+    /// other routes, as the constructor checks, and this route skips their branches.
     final long countOnByteTable(Slice text)
     {
         requireNonNull(text, "text is null");
         if (booleanPlans.byteRunMatcher() == null && text.length() <= MAX_DIRECT_BYTE_SCAN_BYTES) {
             return sharedSingleByteMatcher().count(text);
         }
-        return countOnEngine(text);
+        BoundedCharacterClassCounter characterClassCounter = boundedCharacterClassCounter();
+        if (characterClassCounter != BoundedCharacterClassCounter.unsupported()) {
+            return characterClassCounter.count(text);
+        }
+        return countDfaMatches(text);
     }
 
     /// The count of a scan plan: the search loop of an unanchored plan, or for a start-anchored
-    /// one, which matches at most once, the attempt full-Slice find makes, so a plan with capture
-    /// saves runs its save-free plan. A start-anchored plan that `singleAttemptCount` does
-    /// not cover takes the ordinary count.
+    /// one, which matches at most once, the capture-free boolean attempt of [#findOnScanPlan],
+    /// so a plan with capture saves runs its save-free plan. A start-anchored plan that
+    /// `singleAttemptCount` does not cover takes the ordinary count. An unanchored count stays on
+    /// the plan so that count agrees with find: a Trino plan gives malformed UTF-8 bytes the
+    /// membership find gives them, which the DFA count would reject, and an RE2, Java, or Rust
+    /// plan agrees with the ordinary engine.
     final long countOnScanPlan(Slice text, boolean ordinaryShortBooleanMatch, boolean singleAttemptCount)
     {
         // ScanKernelGenerator.definePatternCount emits this route for a generated class; keep in
@@ -2098,7 +2121,7 @@ abstract sealed class CompiledPattern
             return countUnanchoredScanMatches(text, plan);
         }
         if (singleAttemptCount) {
-            return findOnScanPlan(text, ordinaryShortBooleanMatch) ? 1 : 0;
+            return findOnScanPlan(text, ordinaryShortBooleanMatch, false) ? 1 : 0;
         }
         return countOnEngine(text);
     }
@@ -2233,7 +2256,7 @@ abstract sealed class CompiledPattern
                 MatchLength.fixed(matchLength) == 1;
     }
 
-    boolean supportsSingleByteMatcher()
+    boolean supportsSingleByteMatcherForDiagnostics()
     {
         return mayHaveSingleByteMatcher() && SingleByteMatcher.supports(suffixRegexp, caseFolding());
     }
@@ -2480,9 +2503,6 @@ abstract sealed class CompiledPattern
             }
             Arrays.fill(groups, -1);
         }
-        if (usesCompactBoundedCharacterClassForDiagnostics()) {
-            return matchCompactBoundedCharacterClass(text, contextStart, end, start, anchor, groups);
-        }
         return matchInternal(
                 partialProg,
                 text,
@@ -2536,6 +2556,11 @@ abstract sealed class CompiledPattern
             Anchor anchor,
             int[] groups)
     {
+        // An anchored match fails at once unless a run begins at `start`, rather than searching
+        // past it.
+        if (anchor != Anchor.UNANCHORED && !boundedCharacterClassCounter.beginsRun(text, contextStart, end, start)) {
+            return false;
+        }
         long span = boundedCharacterClassCounter.findSpan(text, contextStart, end, start);
         if (span < 0) {
             return false;
@@ -2636,6 +2661,8 @@ abstract sealed class CompiledPattern
                 workspaces);
     }
 
+    /// The engine hook through which every call of a program over a region runs: the ordinary
+    /// engine. The class-run and scan-plan shapes override it.
     boolean matchInternal(
             Prog prog,
             Slice text,
@@ -2647,8 +2674,16 @@ abstract sealed class CompiledPattern
             int[] groupOffsets,
             MatchWorkspaces workspaces)
     {
-        if (scanPlanStrategy != BOOLEAN_FIND_GENERAL) {
-            return matchInternalOnScanPlan(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, ordinaryShortBooleanMatch);
+        return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+    }
+
+    /// The [#matchInternal] route of a pattern that the compact class counter answers: every
+    /// call of the forward program runs the counter, which reports group zero only, as a
+    /// pattern without captures needs.
+    final boolean matchInternalOnClassRun(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+    {
+        if (prog == partialProg) {
+            return matchCompactBoundedCharacterClass(text, contextStart, end, start, anchor, groupOffsets);
         }
         return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
     }
@@ -3112,90 +3147,17 @@ abstract sealed class CompiledPattern
             }
         }
 
-        BooleanPartialMatchStrategy partialMatchStrategy = selectBooleanPartialMatchStrategy(
-                find,
-                exactLiteralLength,
-                requiredPrefix,
-                partialProg);
-        find = switch (partialMatchStrategy) {
-            case GENERAL -> BooleanPlanKind.GENERAL;
-            case EXACT_LITERAL -> BooleanPlanKind.LITERAL_SEARCH;
-            case NULLABLE_START -> BooleanPlanKind.NULLABLE_START;
-            case CONTAINS -> BooleanPlanKind.CONTAINS;
-            case EQUALS -> BooleanPlanKind.EQUALS;
-            case STARTS_WITH -> BooleanPlanKind.STARTS_WITH;
-            case ENDS_WITH -> BooleanPlanKind.ENDS_WITH;
-            case EQUALS_FINAL_LINE -> BooleanPlanKind.EQUALS_FINAL_LINE;
-            case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
-            case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
-            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE, BYTE_RUN -> throw new IllegalStateException("construction selects this matcher strategy: " + partialMatchStrategy);
-        };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null, null, null, null);
-    }
-
-    private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
-            BooleanPlanKind findPlan,
-            int exactLiteralLength,
-            byte[] requiredPrefix,
-            Prog partialProg)
-    {
-        return switch (findPlan) {
-            case LITERAL_SEARCH -> BooleanPartialMatchStrategy.EXACT_LITERAL;
-            case NULLABLE_START -> BooleanPartialMatchStrategy.NULLABLE_START;
-            case CONTAINS -> BooleanPartialMatchStrategy.CONTAINS;
-            case EQUALS -> BooleanPartialMatchStrategy.EQUALS;
-            case STARTS_WITH -> BooleanPartialMatchStrategy.STARTS_WITH;
-            case ENDS_WITH -> BooleanPartialMatchStrategy.ENDS_WITH;
-            case EQUALS_FINAL_LINE -> BooleanPartialMatchStrategy.EQUALS_FINAL_LINE;
-            case ENDS_WITH_FINAL_LINE -> BooleanPartialMatchStrategy.ENDS_WITH_FINAL_LINE;
-            case LOWERED_PROGRAM -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
-            case GENERAL -> exactLiteralLength >= 0
-                    ? BooleanPartialMatchStrategy.EXACT_LITERAL
-                    : (requiredPrefix == null && partialProg.canMatchEmpty()
-                               ? BooleanPartialMatchStrategy.NULLABLE_START
-                               : BooleanPartialMatchStrategy.GENERAL);
-        };
-    }
-
-    private static byte encodeBooleanFindStrategy(BooleanPartialMatchStrategy strategy)
-    {
-        return switch (strategy) {
-            case GENERAL -> BOOLEAN_FIND_GENERAL;
-            case EXACT_LITERAL -> BOOLEAN_FIND_EXACT_LITERAL;
-            case NULLABLE_START -> BOOLEAN_FIND_NULLABLE_START;
-            case CONTAINS -> BOOLEAN_FIND_CONTAINS;
-            case EQUALS -> BOOLEAN_FIND_EQUALS;
-            case STARTS_WITH -> BOOLEAN_FIND_STARTS_WITH;
-            case ENDS_WITH -> BOOLEAN_FIND_ENDS_WITH;
-            case EQUALS_FINAL_LINE -> BOOLEAN_FIND_EQUALS_FINAL_LINE;
-            case ENDS_WITH_FINAL_LINE -> BOOLEAN_FIND_ENDS_WITH_FINAL_LINE;
-            case LOWERED_PROGRAM -> BOOLEAN_FIND_LOWERED_PROGRAM;
-            case LITERAL_ALTERNATION, FIXED_WIDTH_BYTE, BYTE_RUN -> throw new IllegalStateException("construction selects this matcher strategy: " + strategy);
-        };
-    }
-
-    private static BooleanPartialMatchStrategy decodeBooleanFindStrategy(byte strategy)
-    {
-        return switch (strategy) {
-            case BOOLEAN_FIND_GENERAL -> BooleanPartialMatchStrategy.GENERAL;
-            case BOOLEAN_FIND_EXACT_LITERAL -> BooleanPartialMatchStrategy.EXACT_LITERAL;
-            case BOOLEAN_FIND_NULLABLE_START -> BooleanPartialMatchStrategy.NULLABLE_START;
-            case BOOLEAN_FIND_CONTAINS -> BooleanPartialMatchStrategy.CONTAINS;
-            case BOOLEAN_FIND_EQUALS -> BooleanPartialMatchStrategy.EQUALS;
-            case BOOLEAN_FIND_STARTS_WITH -> BooleanPartialMatchStrategy.STARTS_WITH;
-            case BOOLEAN_FIND_ENDS_WITH -> BooleanPartialMatchStrategy.ENDS_WITH;
-            case BOOLEAN_FIND_EQUALS_FINAL_LINE -> BooleanPartialMatchStrategy.EQUALS_FINAL_LINE;
-            case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> BooleanPartialMatchStrategy.ENDS_WITH_FINAL_LINE;
-            case BOOLEAN_FIND_LOWERED_PROGRAM, BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
-            case BOOLEAN_FIND_LITERAL_ALTERNATION -> BooleanPartialMatchStrategy.LITERAL_ALTERNATION;
-            case BOOLEAN_FIND_FIXED_WIDTH_BYTE -> BooleanPartialMatchStrategy.FIXED_WIDTH_BYTE;
-            case BOOLEAN_FIND_BYTE_RUN -> BooleanPartialMatchStrategy.BYTE_RUN;
-            case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE,
-                 BOOLEAN_FIND_SCAN_PLAN, BOOLEAN_FIND_PARTIAL_SCAN_PLAN, BOOLEAN_FIND_UNANCHORED_SCAN_PLAN,
-                 BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN, BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN,
-                 BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN -> BooleanPartialMatchStrategy.GENERAL;
-            default -> throw new IllegalArgumentException("unknown boolean find strategy: " + strategy);
-        };
+        // A pattern that is exactly a literal searches for it, and one that can match empty at its
+        // start answers find there first.
+        if (find == BooleanPlanKind.GENERAL) {
+            if (exactLiteralLength >= 0) {
+                find = BooleanPlanKind.LITERAL_SEARCH;
+            }
+            else if (requiredPrefix == null && partialProg.canMatchEmpty()) {
+                find = BooleanPlanKind.NULLABLE_START;
+            }
+        }
+        return new BooleanPlans(literal, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private static BooleanPlanKind selectFindPlan(
@@ -3277,7 +3239,6 @@ abstract sealed class CompiledPattern
 
     private record BooleanPlans(
             Slice literal,
-            BooleanPartialMatchStrategy partialMatchStrategy,
             BooleanPlanKind find,
             BooleanPlanKind lookingAt,
             BooleanPlanKind matches,
@@ -3313,57 +3274,57 @@ abstract sealed class CompiledPattern
         private BooleanPlans withScanPlan(ScanPlan scanPlan)
         {
             ScanPlan scanBooleanPlan = scanPlan == null ? null : scanPlan.booleanPlan();
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withLiteralSearch(LiteralSearchKernel literalSearch)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withLiteralSet(LiteralSetSpanMatcher literalSet)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withInnerLiteralSearch(InnerLiteralSearch innerLiteralSearch)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withLiteralAlternationMatcher(LiteralAlternationSpanMatcher literalAlternationMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withFixedWidthByteMatcher(FixedWidthByteSpanMatcher fixedWidthByteMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
 
         private BooleanPlans withByteRunMatcher(SingleByteMatcher byteRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher);
         }
     }
 
@@ -3648,10 +3609,10 @@ abstract sealed class CompiledPattern
     }
 
     /// Returns whether a [#matchInternal] call of `prog` over a region ending at `end` of a
-    /// context ending at `contextEnd` takes the plan route of a pattern with a case-sensitive
-    /// scan plan, apart from an unanchored boolean search that
-    /// [#usesOrdinaryUnanchoredBooleanSearchForDiagnostics()] keeps on the ordinary engine. It
-    /// leaves out the interpreter's short boolean route on purpose: a short boolean call that the
+    /// context ending at `contextEnd` takes the plan route of a pattern with a scan plan: a call
+    /// of the forward program over a region that ends at the context end. The caller still keeps
+    /// an unanchored boolean search that the plan allows on the ordinary engine there. It leaves
+    /// out the interpreter's short boolean route on purpose: a short boolean call that the
     /// interpreter sends to the ordinary engine stays on the generated class. The plan route of
     /// [#matchInternalOnScanPlan] and of a generated class's override sends every other call to
     /// [#matchOnOrdinaryEngine].

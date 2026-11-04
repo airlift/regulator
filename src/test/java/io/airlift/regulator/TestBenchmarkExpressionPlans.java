@@ -15,12 +15,14 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.EQUALS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_SEARCH;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
+import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
+import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkExpressionPlans
@@ -34,10 +36,9 @@ public class TestBenchmarkExpressionPlans
             data.workload = workload;
             data.setup();
 
-            assertThat(data.literal.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(EXACT_LITERAL);
-            assertThat(data.contains.booleanPartialMatchStrategyForDiagnostics())
-                    .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.CONTAINS);
-            assertThat(data.ordered.booleanPartialMatchStrategyForDiagnostics()).isEqualTo(data.orderedStrategy);
+            assertThat(shape(data.literal)).isEqualTo(EXACT_LITERAL);
+            assertThat(shape(data.contains)).isEqualTo(LITERAL_KERNEL);
+            assertThat(shape(data.ordered)).isEqualTo(data.orderedShape);
 
             assertThat(data.literal.findPlanForDiagnostics()).isEqualTo(LITERAL_SEARCH);
             assertThat(data.literal.lookingAtPlanForDiagnostics()).isEqualTo(STARTS_WITH);

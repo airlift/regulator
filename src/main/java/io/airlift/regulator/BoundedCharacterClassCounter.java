@@ -481,6 +481,18 @@ final class BoundedCharacterClassCounter
         return Dfa.SEARCH_NO_MATCH;
     }
 
+    /// Returns whether a member begins at `start` within the region, without checking the run's
+    /// minimum. If not, [#findSpan] from `start` reports no span beginning there.
+    boolean beginsRun(Slice input, int contextStart, int contextEnd, int start)
+    {
+        if (contextStart < 0 || contextEnd > input.length() || start < contextStart || start >= contextEnd) {
+            return false;
+        }
+        byte[] bytes = input.byteArray();
+        int position = input.byteArrayOffset() + start;
+        return memberStartBytes[bytes[position] & 0xFF] && matches(Utf8.decodedCodePoint(decode(bytes, position, input.byteArrayOffset() + contextEnd)));
+    }
+
     // Returns the first index at or after `position` of a byte that can begin a member, or `-1`.
     private int findMemberStart(byte[] bytes, int position, int end)
     {

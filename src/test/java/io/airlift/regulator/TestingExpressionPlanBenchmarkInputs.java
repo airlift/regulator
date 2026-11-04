@@ -77,7 +77,7 @@ public final class TestingExpressionPlanBenchmarkInputs
             Slice literalSource,
             Slice orderedSource,
             Expected expected,
-            CompiledPattern.BooleanPartialMatchStrategy orderedStrategy) {}
+            CompiledPattern.Shape orderedShape) {}
 
     static Input create(Workload workload)
     {
@@ -98,7 +98,7 @@ public final class TestingExpressionPlanBenchmarkInputs
                 literalSource,
                 orderedSource,
                 workload.outcome.expected(),
-                tokens.length == 1 ? CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL : CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
+                tokens.length == 1 ? CompiledPattern.Shape.EXACT_LITERAL : CompiledPattern.Shape.ENGINE);
     }
 
     private static byte[] literalSource(Workload workload, byte[] literal)

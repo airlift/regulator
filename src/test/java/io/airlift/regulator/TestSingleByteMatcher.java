@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestSingleByteMatcher
@@ -52,7 +53,7 @@ public class TestSingleByteMatcher
 
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
-            assertThat(re2.supportsSingleByteMatcher()).as(patternCase.pattern()).isTrue();
+            assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(patternCase.pattern()).isTrue();
             SingleByteMatcher singleByteMatcher = re2.createSingleByteMatcher();
             assertThat(singleByteMatcher).as(patternCase.pattern()).isNotNull();
 
@@ -90,7 +91,7 @@ public class TestSingleByteMatcher
 
         for (String pattern : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(pattern));
-            assertThat(re2.supportsSingleByteMatcher()).as(pattern).isFalse();
+            assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(pattern).isFalse();
             assertThat(re2.createSingleByteMatcher()).as(pattern).isNull();
         }
     }
@@ -116,7 +117,7 @@ public class TestSingleByteMatcher
                 Slices.wrappedBuffer(new byte[] {'z', (byte) 0xFF, (byte) 0xC2, ' ', 'a'}));
 
         for (CompiledPattern compiledPattern : patterns) {
-            assertThat(compiledPattern.booleanPartialMatchStrategyForDiagnostics()).as(compiledPattern.pattern().toStringUtf8()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.BYTE_RUN);
+            assertThat(shape(compiledPattern)).as(compiledPattern.pattern().toStringUtf8()).isEqualTo(CompiledPattern.Shape.BYTE_TABLE);
             // A short find answers from the byte table without building the general engine's DFA.
             compiledPattern.find(inputs.get(2));
             assertThat(compiledPattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(compiledPattern.pattern().toStringUtf8()).isNull();
@@ -125,7 +126,7 @@ public class TestSingleByteMatcher
             }
         }
         // Rust's Unicode \s also matches non-ASCII spaces, so it keeps the general engine.
-        assertThat(RustRegexp.compile(Slices.utf8Slice("\\s+")).booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
+        assertThat(shape(RustRegexp.compile(Slices.utf8Slice("\\s+")))).isEqualTo(CompiledPattern.Shape.ENGINE);
     }
 
     @Test
