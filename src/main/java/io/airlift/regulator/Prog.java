@@ -3970,10 +3970,19 @@ final class Prog
         // up during this many initial merges.
         private static final int GROUP_DEDUPLICATION_MERGES = 32;
 
+        // The most live colors there can be, one for each split.
+        private static final int MAXIMUM_LIVE_COLORS = 256;
+
         private final Bitmap256 splits = new Bitmap256();
         private final int[] colors = new int[256];
-        // Colors are numbered densely from 0. build() numbers byte classes with a separate
-        // generation, so the remap tables only need to cover colors actually assigned.
+        // Colors are numbered from 0, and a merge gives each new color the next number. Upstream
+        // never reuses a number and looks colors up in a per-merge list. The remap tables here
+        // are indexed by color instead, so once a merge takes the next number past
+        // MAXIMUM_LIVE_COLORS, the live colors are renumbered densely. A merge creates at most one
+        // color for each live one, so the tables never need more than twice MAXIMUM_LIVE_COLORS
+        // entries, where a large Unicode class would otherwise number thousands of colors.
+        // build() numbers byte classes by first appearance, so no color number reaches the byte
+        // map.
         private int nextColor = 1;
 
         private int[] colorRemap = new int[64];
@@ -4050,12 +4059,45 @@ final class Prog
                     c = next + 1;
                 }
             }
+            nextRemapGeneration();
+            if (nextColor > MAXIMUM_LIVE_COLORS) {
+                renumberColors();
+            }
+            rangeSize = 0;
+        }
+
+        // Renumbers the live colors from 0 in order of first appearance. Only the colors at
+        // splits are ever read. Relies on a fresh remap generation, so every color starts
+        // unmapped; the constructor, merge() and this method each leave one.
+        private void renumberColors()
+        {
+            int liveColorCount = 0;
+            int c = 0;
+            while (c < 256) {
+                int next = splits.findNextSetBit(c);
+                int color = colors[next];
+                if (colorRemapGeneration[color] == remapGeneration) {
+                    colors[next] = colorRemap[color];
+                }
+                else {
+                    colorRemap[color] = liveColorCount;
+                    colorRemapGeneration[color] = remapGeneration;
+                    colors[next] = liveColorCount;
+                    liveColorCount++;
+                }
+                c = next + 1;
+            }
+            nextColor = liveColorCount;
+            nextRemapGeneration();
+        }
+
+        private void nextRemapGeneration()
+        {
             remapGeneration++;
             if (remapGeneration == 0) {
                 Arrays.fill(colorRemapGeneration, 0);
                 remapGeneration = 1;
             }
-            rangeSize = 0;
         }
 
         private long groupKey()
@@ -4126,29 +4168,16 @@ final class Prog
                 throw new IllegalArgumentException("bytemapRangeOut must have length 1");
             }
 
-            // Assign byte classes numbered from 0 in order of first appearance. The current
-            // generation is unused, so every color starts unmapped.
-            int byteClassCount = 0;
+            // Byte classes are the live colors numbered from 0 in order of first appearance.
+            renumberColors();
             int c = 0;
             while (c < 256) {
                 int next = splits.findNextSetBit(c);
-                int color = colors[next];
-                int byteClass;
-                if (colorRemapGeneration[color] == remapGeneration) {
-                    byteClass = colorRemap[color];
-                }
-                else {
-                    byteClass = byteClassCount++;
-                    colorRemap[color] = byteClass;
-                    colorRemapGeneration[color] = remapGeneration;
-                }
-                while (c <= next) {
-                    bytemap[c] = (byte) byteClass;
-                    c++;
-                }
+                Arrays.fill(bytemap, c, next + 1, (byte) colors[next]);
+                c = next + 1;
             }
 
-            bytemapRangeOut[0] = byteClassCount;
+            bytemapRangeOut[0] = nextColor;
         }
 
         private int recolor(int oldColor)
