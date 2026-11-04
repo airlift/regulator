@@ -55,8 +55,7 @@ abstract sealed class CompiledPattern
     /// [#scanPlanCount()].
     enum ScanPlanCount
     {
-        // countMatches loops over the plan's search, or declines so that the caller counts with
-        // a group-zero matcher, whose finds reach the plan.
+        // countMatches loops over the search of an unanchored plan.
         SEARCH_LOOP,
         // countMatches makes one start-anchored boolean attempt, which runs on the ordinary
         // engine over a short input when the plan allows it.
@@ -743,8 +742,9 @@ abstract sealed class CompiledPattern
                 // DFA. A Trino final-line end or a Java final-terminator end, which the DFA cannot
                 // evaluate, keeps the plan.
                 ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && general && !partialProg.hasDfaUnsupportedAssertions();
-                // A start-anchored pattern matches at most once.
-                singleAttemptCount = !partialProg.hasDfaUnsupportedAssertions() && (requiredPrefix != null || partialProg.anchorStart());
+                // A start-anchored pattern matches at most once, and the attempt evaluates the
+                // ends the DFA cannot.
+                singleAttemptCount = requiredPrefix != null || partialProg.anchorStart();
             }
             // The contains, prefix, equality, and final-line equality kernels answer existence
             // without reading past the literal; full-Slice find keeps them. The other operations
@@ -1729,10 +1729,6 @@ abstract sealed class CompiledPattern
         }
         if (singleAttemptCount) {
             return ScanPlanCount.SINGLE_ATTEMPT;
-        }
-        // The ordinary count: the disjoint suffix-repeat matcher, or a decline to a matcher.
-        if (partialProg.hasDfaUnsupportedAssertions()) {
-            return ScanPlanCount.SEARCH_LOOP;
         }
         return ScanPlanCount.OTHER;
     }
