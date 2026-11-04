@@ -29,15 +29,40 @@ public class TestHotMethodSize
     // default on x86-64, AArch64 and RISC-V. PPC64 and s390x use 175 through JDK 26.
     private static final int FREQ_INLINE_SIZE = 325;
 
-    /// Keeps countMatches small enough for C2 to inline into callers such as `Re2.count` and
-    /// `TrinoRegexp.count`.
+    /// Keeps each full-Slice find, count, matches, and lookingAt route small enough for C2 to
+    /// inline into the one-line override of the pattern's shape class, and that override into
+    /// callers such as `Re2.count` and `TrinoRegexp.count`.
     @Test
-    public void testCountMatchesFitsInlineSize()
+    public void testRoutesFitInlineSize()
     {
-        assertThat(codeLength(CompiledPattern.class, "countMatches"))
-                .as("CompiledPattern.countMatches bytecode bytes")
-                .isPositive()
-                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        for (String route : List.of(
+                "findOnEngine",
+                "findOnExactLiteral",
+                "findOnLiteralKernel",
+                "findOnLiteralAlternation",
+                "findOnFixedWidth",
+                "findOnClassRun",
+                "findOnByteTable",
+                "findOnScanPlan",
+                "matchesOnExactLiteral",
+                "lookingAtOnExactLiteral",
+                "matchesOnLiteralKernel",
+                "lookingAtOnLiteralKernel",
+                "matchesOnScanPlan",
+                "lookingAtOnScanPlan",
+                "matchOnScanPlan",
+                "countOnEngine",
+                "countOnExactLiteral",
+                "countOnLiteralAlternation",
+                "countOnFixedWidth",
+                "countOnClassRun",
+                "countOnByteTable",
+                "countOnScanPlan")) {
+            assertThat(codeLength(CompiledPattern.class, route))
+                    .as("CompiledPattern.%s bytecode bytes", route)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
     }
 
     private static int codeLength(Class<?> type, String methodName)

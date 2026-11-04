@@ -7,7 +7,7 @@ engine for captures do not need this extra step.
 
 ## Public search flow
 
-For an ordinary unanchored search, `CompiledPattern.matchInternal` performs:
+For an ordinary unanchored search, `CompiledPattern.matchOnOrdinaryEngine` performs:
 
 1. A forward DFA search to find the selected match end.
 2. A reverse DFA search over the prefix ending at that boundary to find the

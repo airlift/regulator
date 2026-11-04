@@ -24,7 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -74,7 +76,8 @@ public class TestBenchmarkTrinoRows
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(row.get("pattern")));
             String cell = row.get("workload") + "/" + row.get("literal_id");
             assertThat(regexp.usesDotStarLiteralSpanMatcherForDiagnostics()).as(cell).isTrue();
-            assertThat(regexp.re2().booleanPartialMatchStrategyForDiagnostics()).as(cell).isEqualTo(CONTAINS);
+            assertThat(shape(regexp.re2())).as(cell).isEqualTo(LITERAL_KERNEL);
+            assertThat(regexp.re2().findPlanForDiagnostics()).as(cell).isEqualTo(CONTAINS);
         }
     }
 

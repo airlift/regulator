@@ -32,7 +32,13 @@ import static java.util.Objects.requireNonNull;
 /// compilation. Match offsets are byte offsets, as in the crate.
 public sealed class RustRegexp
         extends CompiledPattern
-        permits RustRegexp.CompiledScanRustRegexp
+        permits RustRegexp.ByteTableRustRegexp,
+                RustRegexp.ClassRunRustRegexp,
+                RustRegexp.ExactLiteralRustRegexp,
+                RustRegexp.FixedWidthRustRegexp,
+                RustRegexp.LiteralAlternationRustRegexp,
+                RustRegexp.LiteralKernelRustRegexp,
+                RustRegexp.ScanPlanRustRegexp
 {
     /// Mutable Rust-language compilation options. Compilation snapshots every option, so later
     /// changes do not affect an existing [RustRegexp]. Options instances are not thread-safe.
@@ -266,6 +272,21 @@ public sealed class RustRegexp
         this.bytes = pattern.bytes;
     }
 
+    /// Constructs an instance of the analyzed pattern's shape class.
+    private static RustRegexp create(Analysis analysis)
+    {
+        return switch (analysis.shape()) {
+            case ENGINE -> new RustRegexp(analysis);
+            case EXACT_LITERAL -> new ExactLiteralRustRegexp(analysis);
+            case LITERAL_KERNEL -> new LiteralKernelRustRegexp(analysis);
+            case LITERAL_ALTERNATION -> new LiteralAlternationRustRegexp(analysis);
+            case FIXED_WIDTH -> new FixedWidthRustRegexp(analysis);
+            case CLASS_RUN -> new ClassRunRustRegexp(analysis);
+            case BYTE_TABLE -> new ByteTableRustRegexp(analysis);
+            case SCAN_PLAN -> new ScanPlanRustRegexp(analysis);
+        };
+    }
+
     /// Validates a pattern and returns its capture metadata without constructing a matching
     /// engine. Parse errors and capture numbering are the same as for [#compile(Slice)];
     /// compilation memory limits are not checked.
@@ -320,7 +341,7 @@ public sealed class RustRegexp
         // past an empty match never applies, and the analysis declines every byte construct that
         // can match a byte above 0x7F: byte classes and literals by their Latin-1 node flag, and
         // the any-byte dot, which has no such flag, by its kind.
-        RustRegexp compiled = new RustRegexp(analyzeParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode));
+        RustRegexp compiled = create(analyzeParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), ScanPlan.Language.RUST, scanPlanMode));
         if (options.generateBytecode()) {
             RustRegexp generated = CompiledScanRustRegexp.create(compiled);
             if (generated != null) {
@@ -341,7 +362,8 @@ public sealed class RustRegexp
 
     /// Returns whether the pattern has a match anywhere in `input` without allocating capture
     /// storage. Outside byte mode, a pattern that can match empty allocates storage for the
-    /// match span, to skip an empty match that splits a UTF-8 character.
+    /// match span, to skip an empty match that splits a UTF-8 character. The shape classes,
+    /// which never match empty, bypass this `find`.
     @Override
     public boolean find(Slice input)
     {
@@ -488,6 +510,247 @@ public sealed class RustRegexp
         return bytes || Utf8.isCharacterBoundary(input, start);
     }
 
+    /// A pattern of the [exact-literal shape][Shape#EXACT_LITERAL].
+    static final class ExactLiteralRustRegexp
+            extends RustRegexp
+    {
+        private ExactLiteralRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnExactLiteral(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnExactLiteral(text);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnExactLiteral(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnExactLiteral(input);
+        }
+    }
+
+    /// A pattern of the [literal-kernel shape][Shape#LITERAL_KERNEL].
+    static final class LiteralKernelRustRegexp
+            extends RustRegexp
+    {
+        private LiteralKernelRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralKernel(input);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnLiteralKernel(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnLiteralKernel(input);
+        }
+    }
+
+    /// A pattern of the [literal-alternation shape][Shape#LITERAL_ALTERNATION].
+    static final class LiteralAlternationRustRegexp
+            extends RustRegexp
+    {
+        private LiteralAlternationRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralAlternation(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnLiteralAlternation(text);
+        }
+    }
+
+    /// A pattern of the [fixed-width shape][Shape#FIXED_WIDTH].
+    static final class FixedWidthRustRegexp
+            extends RustRegexp
+    {
+        private FixedWidthRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnFixedWidth(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnFixedWidth(text);
+        }
+    }
+
+    /// A pattern of the [class-run shape][Shape#CLASS_RUN].
+    static final class ClassRunRustRegexp
+            extends RustRegexp
+    {
+        private final boolean retainedClassCountDfa;
+
+        private ClassRunRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnClassRun(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnClassRun(text, retainedClassCountDfa);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnClassRun(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+        }
+
+        @Override
+        boolean usesCompactBoundedCharacterClassForDiagnostics()
+        {
+            return true;
+        }
+    }
+
+    /// A pattern of the [byte-table shape][Shape#BYTE_TABLE].
+    static final class ByteTableRustRegexp
+            extends RustRegexp
+    {
+        private ByteTableRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnByteTable(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnByteTable(text);
+        }
+    }
+
+    /// A pattern of the [scan-plan shape][Shape#SCAN_PLAN]. A generated class extends this
+    /// through [CompiledScanRustRegexp].
+    static sealed class ScanPlanRustRegexp
+            extends RustRegexp
+            permits CompiledScanRustRegexp
+    {
+        private final boolean ordinaryShortBooleanMatch;
+        private final boolean singleAttemptCount;
+        private final boolean literalKernelFind;
+
+        private ScanPlanRustRegexp(Analysis analysis)
+        {
+            super(analysis);
+            this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
+            this.singleAttemptCount = analysis.singleAttemptCount();
+            this.literalKernelFind = analysis.literalKernelFind();
+        }
+
+        /// Copies `pattern`, which the caller then discards.
+        private ScanPlanRustRegexp(ScanPlanRustRegexp pattern)
+        {
+            super(pattern);
+            this.ordinaryShortBooleanMatch = pattern.ordinaryShortBooleanMatch;
+            this.singleAttemptCount = pattern.singleAttemptCount;
+            this.literalKernelFind = pattern.literalKernelFind;
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnScanPlan(input, ordinaryShortBooleanMatch, literalKernelFind);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnScanPlan(text, ordinaryShortBooleanMatch, singleAttemptCount);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnScanPlan(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnScanPlan(input);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnScanPlan(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, ordinaryShortBooleanMatch);
+        }
+
+        @Override
+        ScanPlanCount scanPlanCount()
+        {
+            return countRouteOnScanPlan(singleAttemptCount);
+        }
+
+        @Override
+        boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+        {
+            return ordinaryShortBooleanMatch;
+        }
+
+        @Override
+        boolean usesScanPlanForFindForDiagnostics()
+        {
+            return !literalKernelFind;
+        }
+    }
+
     /// A Rust pattern whose case-sensitive scan plan was compiled to its own hidden class,
     /// which extends this class, so the pattern a caller holds is an instance of that class. The
     /// generated class declares each full-Slice `find`, `count`, `matches`, and `lookingAt` that
@@ -499,11 +762,11 @@ public sealed class RustRegexp
     /// one branch on whether the caller asked for that group. The generated class adds no state.
     /// Callers that never request generated bytecode never load this class.
     abstract static non-sealed class CompiledScanRustRegexp
-            extends RustRegexp
+            extends ScanPlanRustRegexp
     {
         /// Copies `pattern`, which the caller then discards. Only the generated subclass calls
         /// this.
-        CompiledScanRustRegexp(RustRegexp pattern)
+        CompiledScanRustRegexp(ScanPlanRustRegexp pattern)
         {
             super(pattern);
         }
@@ -513,7 +776,10 @@ public sealed class RustRegexp
         /// verification of the base class from loading this class.
         static RustRegexp create(RustRegexp pattern)
         {
-            return pattern.generateScanPattern(CompiledScanRustRegexp.class);
+            if (!(pattern instanceof ScanPlanRustRegexp scanPlanPattern)) {
+                return null;
+            }
+            return scanPlanPattern.generateScanPattern(CompiledScanRustRegexp.class);
         }
 
         @Override

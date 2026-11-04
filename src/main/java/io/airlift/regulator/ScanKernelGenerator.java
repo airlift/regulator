@@ -186,9 +186,11 @@ final class ScanKernelGenerator
             return new TrinoRoutes(pattern, plan, pattern.usesScanPlanForFindForDiagnostics(), count);
         }
 
+        /// Whether `contains` runs the capture-free search before its handoff to the ordinary
+        /// engine.
         boolean ordinaryHandoff()
         {
-            return contains && pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+            return contains && plan.allowsOrdinaryBooleanSearch();
         }
 
         int capturingGroupCount()
@@ -197,26 +199,22 @@ final class ScanKernelGenerator
         }
     }
 
-    /// Where each full-Slice operation of an RE2, Java, or Rust pattern runs, decided once when
-    /// the pattern compiles from the facts its inherited routes read at run time. The generated
-    /// class declares the operations among `find`, `count`, `matches`, and `lookingAt` that these
-    /// routes select; other operations use the inherited methods. Other calls that reach the plan
-    /// go through the generated class's `matchInternal`, except a matcher's start-anchored first
-    /// search, which uses `findWithStartAnchoredScanPlan`.
+    /// Records each full-Slice operation's route at compile time, using the facts read by the
+    /// inherited scan-plan routes, for an RE2, Java, or Rust pattern. The generated class
+    /// declares the operations among `find`, `count`, `matches`, and `lookingAt` that reach the
+    /// plan; the others keep the inherited route. Other calls that reach the plan go through the
+    /// generated class's `matchInternal`, except a matcher's start-anchored first search, which
+    /// uses `findWithStartAnchoredScanPlan`.
     ///
     /// @param find whether full-Slice find reaches the plan rather than a retained literal kernel
-    /// @param ordinaryBooleanSearch whether an unanchored boolean search without groups runs on
-    ///         the ordinary engine; see
-    ///         [CompiledPattern#usesOrdinaryUnanchoredBooleanSearchForDiagnostics()]
     /// @param count how count reaches the plan
     /// @param matches whether full-Slice matches reaches the plan, which it does through
-    ///         `matchInternal` when its boolean plan is general
+    ///         [CompiledPattern#matchesOnScanPlan] when its boolean plan is general
     /// @param lookingAt whether full-Slice lookingAt reaches the plan, as for `matches`
     record PatternRoutes(
             CompiledPattern pattern,
             ScanPlan plan,
             boolean find,
-            boolean ordinaryBooleanSearch,
             CompiledPattern.ScanPlanCount count,
             boolean matches,
             boolean lookingAt)
@@ -244,7 +242,6 @@ final class ScanKernelGenerator
                     pattern,
                     plan,
                     pattern.usesScanPlanForFindForDiagnostics(),
-                    pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics(),
                     pattern.scanPlanCount(),
                     pattern.matchesPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.GENERAL,
                     pattern.lookingAtPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.GENERAL);
@@ -254,7 +251,7 @@ final class ScanKernelGenerator
         /// ordinary engine.
         boolean ordinaryHandoff()
         {
-            return find && ordinaryBooleanSearch;
+            return find && plan.allowsOrdinaryBooleanSearch();
         }
     }
 
@@ -348,7 +345,7 @@ final class ScanKernelGenerator
     /// Generates and defines the pattern class of an RE2, Java, or Rust `pattern` for its
     /// case-sensitive scan plan, and returns the copy of `pattern` that is an instance of it. The
     /// class extends `superclass`, the language's `CompiledScan…` class, whose copy constructor
-    /// takes the language's pattern class, the superclass of `superclass`; the generated
+    /// takes the language's scan-plan shape class, the superclass of `superclass`; the generated
     /// constructor has the same type and passes its argument to it. Its entries follow the
     /// pattern's [PatternRoutes]. Failures propagate, including the refusal of a pattern that can
     /// match empty.
@@ -368,7 +365,7 @@ final class ScanKernelGenerator
     }
 
     /// The type of the copy constructor of a `CompiledScan…` class, and of its generated
-    /// subclass: it takes the language's pattern class, which `superclass` extends.
+    /// subclass: it takes the language's scan-plan shape class, which `superclass` extends.
     private static MethodType copyConstructorType(Class<? extends CompiledPattern> superclass)
     {
         return MethodType.methodType(void.class, superclass.getSuperclass());
@@ -1355,8 +1352,8 @@ final class ScanKernelGenerator
             return boundConstant(routes.pattern(), CompiledPattern.class);
         }
 
-        /// Full-Slice find of a pattern whose find reaches the plan: the route of
-        /// [CompiledPattern#find(Slice)] without the ordinary engine's short-input route.
+        /// Full-Slice find on the plan route of [CompiledPattern#findOnScanPlan], without its
+        /// short-input route.
         private void definePatternFind()
         {
             Parameter input = arg("input", Slice.class);
@@ -1380,9 +1377,9 @@ final class ScanKernelGenerator
         }
 
         /// Full-Slice `matches`, or `lookingAt` when `fullMatch` is false, of a pattern whose
-        /// inherited entry reaches the plan through `matchInternal` because its boolean plan is
-        /// general. The generated entry runs that hook's plan route for an anchored search of all
-        /// of the input.
+        /// inherited entry reaches the plan through [CompiledPattern#matchesOnScanPlan] or
+        /// [CompiledPattern#lookingAtOnScanPlan] because its boolean plan is general. The generated
+        /// entry runs that entry's plan route for an anchored call over all of the input.
         private void defineAnchoredMatch(String name, boolean fullMatch)
         {
             Parameter input = arg("input", Slice.class);
@@ -1423,12 +1420,12 @@ final class ScanKernelGenerator
             CodeBlock.Builder body = method.body();
             BytecodeExpression unanchoredMode = getStatic(CompiledPattern.Anchor.class, "UNANCHORED");
             Variable anchorMode = body.declare("anchorMode", inlineIf(anchor.isNull(), unanchoredMode, anchor));
-            BytecodeExpression inheritedRoute = self.invoke(REACHES_SCAN_PLAN, prog, contextEnd, end).not();
-            if (!anchored && patternRoutes.ordinaryBooleanSearch()) {
-                inheritedRoute = inheritedRoute.or(groupOffsets.isNull().and(anchorMode.equal(unanchoredMode)));
+            BytecodeExpression offPlan = self.invoke(REACHES_SCAN_PLAN, prog, contextEnd, end).not();
+            if (!anchored && plan.allowsOrdinaryBooleanSearch()) {
+                offPlan = offPlan.or(groupOffsets.isNull().and(anchorMode.equal(unanchoredMode)));
             }
             body.append(IfStatement.builder()
-                    .condition(inheritedRoute)
+                    .condition(offPlan)
                     .then(self.invoke(MATCH_ON_ORDINARY_ENGINE, prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces).ret())
                     .build());
             body.append(IfStatement.builder()

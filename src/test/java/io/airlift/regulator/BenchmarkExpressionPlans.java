@@ -58,7 +58,7 @@ public class BenchmarkExpressionPlans
         private Slice literalSource;
         private Slice orderedSource;
         TestingExpressionPlanBenchmarkInputs.Expected expected;
-        CompiledPattern.BooleanPartialMatchStrategy orderedStrategy;
+        CompiledPattern.Shape orderedShape;
 
         @Setup
         public void setup()
@@ -73,7 +73,7 @@ public class BenchmarkExpressionPlans
             literalSource = input.literalSource();
             orderedSource = input.orderedSource();
             expected = input.expected();
-            orderedStrategy = input.orderedStrategy();
+            orderedShape = input.orderedShape();
         }
     }
 

@@ -668,7 +668,7 @@ if (can_bit_state && text.size() <= bit_state_text_max_size && ncap > 1) {
 ### O-RE2-016: Match-Every-Byte Detection (IMPORTANT, Java-only)
 
 **Location**: `Compiler.java`, `CompiledPattern.java`
-**Function**: `matchesAnyByteString()`, `matchInternal()`
+**Function**: `matchesAnyByteString()`, `matchOnOrdinaryEngine()`
 
 **Trigger condition** (Compiler.java):
 ```java

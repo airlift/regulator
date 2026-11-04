@@ -196,7 +196,7 @@ public sealed class TrinoRegexp
         if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
         }
-        TrinoCompiledPattern compiledPattern = new TrinoCompiledPattern(CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode));
+        TrinoCompiledPattern compiledPattern = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode));
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

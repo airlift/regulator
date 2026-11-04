@@ -31,6 +31,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
 
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TestingTrinoJoni.group;
 import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
 import static io.airlift.regulator.TestingTrinoJoni.joniPattern;
@@ -105,7 +106,7 @@ public class TestScanPlan
 
     private record BooleanTailShape(String expression, String text, int attemptEnd) {}
 
-    private record LiteralKernelShape(String expression, CompiledPattern.BooleanPartialMatchStrategy strategy, String text, String group) {}
+    private record LiteralKernelCase(String expression, CompiledPattern.BooleanPlanKind find, String text, String group) {}
 
     private record MalformedView(String expression, String template, boolean scanPlan) {}
 
@@ -1688,35 +1689,35 @@ public class TestScanPlan
     @Test
     public void testLiteralBooleanKernelsKeepPlanForBoundaries()
     {
-        for (LiteralKernelShape shape : List.of(
-                new LiteralKernelShape("abc(.*)", CompiledPattern.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "def"),
-                new LiteralKernelShape("(abc).*", CompiledPattern.BooleanPartialMatchStrategy.CONTAINS, "xxabcdef\nz", "abc"),
-                new LiteralKernelShape("^(abc)", CompiledPattern.BooleanPartialMatchStrategy.STARTS_WITH, "abcdef", "abc"),
-                new LiteralKernelShape("^(abc)\\z", CompiledPattern.BooleanPartialMatchStrategy.EQUALS, "abc", "abc"),
-                new LiteralKernelShape("^(abc)$", CompiledPattern.BooleanPartialMatchStrategy.EQUALS_FINAL_LINE, "abc\n", "abc"))) {
-            String expression = shape.expression();
+        for (LiteralKernelCase kernelCase : List.of(
+                new LiteralKernelCase("abc(.*)", CompiledPattern.BooleanPlanKind.CONTAINS, "xxabcdef\nz", "def"),
+                new LiteralKernelCase("(abc).*", CompiledPattern.BooleanPlanKind.CONTAINS, "xxabcdef\nz", "abc"),
+                new LiteralKernelCase("^(abc)", CompiledPattern.BooleanPlanKind.STARTS_WITH, "abcdef", "abc"),
+                new LiteralKernelCase("^(abc)\\z", CompiledPattern.BooleanPlanKind.EQUALS, "abc", "abc"),
+                new LiteralKernelCase("^(abc)$", CompiledPattern.BooleanPlanKind.EQUALS_FINAL_LINE, "abc\n", "abc"))) {
+            String expression = kernelCase.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             TrinoCompiledPattern pattern = regexp.re2();
-            assertThat(pattern.booleanPartialMatchStrategyForDiagnostics()).as(expression).isEqualTo(shape.strategy());
-            assertThat(pattern.usesScanPlanForDiagnostics()).as(expression).isTrue();
+            assertThat(pattern.findPlanForDiagnostics()).as(expression).isEqualTo(kernelCase.find());
+            assertThat(shape(pattern)).as(expression).isEqualTo(CompiledPattern.Shape.SCAN_PLAN);
             assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(expression).isFalse();
 
             // Disable the semantic program: every call below must be answered by the literal
             // kernel or the retained plan.
             disableOrdinaryEngine(pattern);
-            Slice source = utf8Slice(shape.text());
-            int matchStart = shape.text().indexOf("abc");
+            Slice source = utf8Slice(kernelCase.text());
+            int matchStart = kernelCase.text().indexOf("abc");
             assertThat(regexp.contains(source)).as(expression).isTrue();
-            assertThat(regexp.extract(source, 1)).as(expression).isEqualTo(utf8Slice(shape.group()));
+            assertThat(regexp.extract(source, 1)).as(expression).isEqualTo(utf8Slice(kernelCase.group()));
             assertThat(regexp.position(source)).as(expression).isEqualTo(matchStart + 1);
             TrinoRegexpMatcher matcher = regexp.matcher(source);
             assertThat(matcher.find()).as(expression).isTrue();
-            assertThat(matcher.group(1)).as(expression).isEqualTo(utf8Slice(shape.group()));
+            assertThat(matcher.group(1)).as(expression).isEqualTo(utf8Slice(kernelCase.group()));
             assertThat(pattern.find(source, 0, source.length())).as(expression).isTrue();
             assertThat(pattern.lookingAt(source, matchStart, source.length())).as(expression).isTrue();
             RegexpMatcher region = pattern.matcher(source).reset(source, matchStart, source.length());
             assertThat(region.lookingAt()).as(expression).isTrue();
-            assertThat(region.start(1)).as(expression).isEqualTo(shape.text().indexOf(shape.group()));
+            assertThat(region.start(1)).as(expression).isEqualTo(kernelCase.text().indexOf(kernelCase.group()));
         }
     }
 
@@ -2232,9 +2233,7 @@ public class TestScanPlan
             TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(route.expression())).re2();
             assertThat(pattern.usesScanPlanForDiagnostics()).as(route.expression()).isTrue();
             assertThat(pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(route.expression()).isEqualTo(route.ordinarySearch());
-            if (route.ordinarySearch()) {
-                assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(route.expression()).isTrue();
-            }
+            assertThat(pattern.usesScanPlanForFindForDiagnostics()).as(route.expression()).isTrue();
         }
         // Longer leading runs keep the ordinary engine for every call.
         for (String expression : List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "([a-c]{2,}):", "(?i)(\\d+)zz", "(\\d+)(?:abc)?z", "(\\d+)é", "(\\d+)zz(é)")) {

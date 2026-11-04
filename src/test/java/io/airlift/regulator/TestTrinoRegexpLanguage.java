@@ -361,15 +361,11 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testTerminalFinalLineDollarGroupZeroBoundaryFallsBackWhenNotEquivalent()
+    public void testTerminalFinalLineDollarGroupZeroSearchEligibility()
     {
-        TrinoCompiledPattern newlineConsuming = TrinoRegexp.compile(utf8Slice("(?s:.+)$")).re2();
-        assertThat(newlineConsuming.findLoweredGroupZeroBoundary(utf8Slice("a\n"), 0, 2, 0))
-                .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
-
-        TrinoCompiledPattern nullable = TrinoRegexp.compile(utf8Slice("[a-z]*$")).re2();
-        assertThat(nullable.findLoweredGroupZeroBoundary(utf8Slice("a\n"), 0, 2, 0))
-                .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
+        assertThat(TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2().hasDirectLoweredGroupZeroSearch()).isTrue();
+        assertThat(TrinoRegexp.compile(utf8Slice("(?s:.+)$")).re2().hasDirectLoweredGroupZeroSearch()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8Slice("[a-z]*$")).re2().hasDirectLoweredGroupZeroSearch()).isFalse();
     }
 
     @Test

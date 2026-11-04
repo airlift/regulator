@@ -34,6 +34,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -212,8 +213,7 @@ public class TestTrinoRegexpFunctions
         // Each search resumes after the previous match, so an occurrence overlapping it is
         // skipped, but one at a later start position is found.
         TrinoRegexp overlapping = TrinoRegexp.compile(utf8("aba"));
-        assertThat(overlapping.re2().booleanPartialMatchStrategyForDiagnostics())
-                .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL);
+        assertThat(shape(overlapping.re2())).isEqualTo(CompiledPattern.Shape.EXACT_LITERAL);
         Slice overlappingSource = utf8("ababa_aba");
         assertThat(overlapping.count(overlappingSource)).isEqualTo(2);
         assertThat(overlapping.position(overlappingSource, 1, 2)).isEqualTo(7);
@@ -297,8 +297,7 @@ public class TestTrinoRegexpFunctions
 
         assertThat(regexp.usesLiteralGapMatcherForDiagnostics()).isFalse();
         assertThat(regexp.contains(utf8("xxalpha💰omegayy"))).isTrue();
-        assertThat(regexp.re2().booleanPartialMatchStrategyForDiagnostics())
-                .isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.GENERAL);
+        assertThat(shape(regexp.re2())).isEqualTo(CompiledPattern.Shape.ENGINE);
         assertThat(regexp.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH))
                 .as("literal-gap contains route initialized the existing general boolean-search DFA")
                 .isNotNull();
@@ -317,7 +316,7 @@ public class TestTrinoRegexpFunctions
     {
         Slice pattern = utf8("first(?s:.*)second(?s:.*)third");
         ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        TrinoCompiledPattern baseline = new TrinoCompiledPattern(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
+        TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
         long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();
@@ -375,7 +374,8 @@ public class TestTrinoRegexpFunctions
         }
         assertThat(fallback).isNotNull();
         assertThat(fallback.re2().forwardProgramForDiagnostics().dfaMemory()).isLessThan(search.estimatedRetainedSize());
-        assertThat(fallback.re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(CompiledPattern.BooleanPartialMatchStrategy.CONTAINS);
+        assertThat(shape(fallback.re2())).isEqualTo(CompiledPattern.Shape.LITERAL_KERNEL);
+        assertThat(fallback.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.CONTAINS);
         assertThat(fallback.usesDotStarLiteralSpanMatcherForDiagnostics()).isTrue();
         Slice source = utf8("xxliteralyy\nliteral");
         assertThat(fallback.contains(source)).isTrue();

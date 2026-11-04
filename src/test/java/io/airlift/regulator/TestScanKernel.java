@@ -498,13 +498,9 @@ public class TestScanKernel
                         assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
                         continue;
                     }
-                    // Every entry, and the handoff search, which only an unanchored attempt has.
-                    PatternRoutes routes = PatternRoutes.of(pattern);
-                    for (boolean ordinaryHandoff : attempt == Attempt.UNANCHORED ? List.of(false, true) : List.of(false)) {
-                        byte[] classfile = patternClassfile(new PatternRoutes(pattern, plan, true, ordinaryHandoff, routes.count(), true, true));
-                        String handoffDescription = description + " ordinary handoff " + ordinaryHandoff;
-                        assertThat(largestMethodBytes(classfile)).as(handoffDescription).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
-                    }
+                    // Every entry, and the handoff search where the plan allows one.
+                    byte[] classfile = patternClassfile(new PatternRoutes(pattern, plan, true, PatternRoutes.of(pattern).count(), true, true));
+                    assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
                 }
             }
         }

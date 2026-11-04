@@ -17,6 +17,8 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2BooleanMatchOptimizations
@@ -39,7 +41,7 @@ public class TestRe2BooleanMatchOptimizations
     public void testExactLiteralPartialMatch()
     {
         Re2 pattern = compile("(ab)(💰)");
-        assertThat(pattern.usesExactLiteralPartialMatchForDiagnostics()).isTrue();
+        assertThat(shape(pattern)).isEqualTo(EXACT_LITERAL);
         assertThat(pattern.find(utf8("xxab💰yy"))).isTrue();
         assertThat(pattern.find(utf8("xxabyy"))).isFalse();
         assertThat(compile("abc").find(utf8("xxaxcyy"))).isFalse();

@@ -26,7 +26,13 @@ import static java.util.Objects.requireNonNull;
 @SuppressWarnings("CharUsedInArithmeticContext")
 public sealed class Re2
         extends CompiledPattern
-        permits Re2.CompiledScanRe2
+        permits Re2.ByteTableRe2,
+                Re2.ClassRunRe2,
+                Re2.ExactLiteralRe2,
+                Re2.FixedWidthRe2,
+                Re2.LiteralAlternationRe2,
+                Re2.LiteralKernelRe2,
+                Re2.ScanPlanRe2
 {
     /// The result of replacing every non-overlapping match.
     @SuppressFBWarnings(
@@ -277,6 +283,21 @@ public sealed class Re2
         super(pattern);
     }
 
+    /// Constructs an instance of the analyzed pattern's shape class.
+    private static Re2 create(Analysis analysis)
+    {
+        return switch (analysis.shape()) {
+            case ENGINE -> new Re2(analysis);
+            case EXACT_LITERAL -> new ExactLiteralRe2(analysis);
+            case LITERAL_KERNEL -> new LiteralKernelRe2(analysis);
+            case LITERAL_ALTERNATION -> new LiteralAlternationRe2(analysis);
+            case FIXED_WIDTH -> new FixedWidthRe2(analysis);
+            case CLASS_RUN -> new ClassRunRe2(analysis);
+            case BYTE_TABLE -> new ByteTableRe2(analysis);
+            case SCAN_PLAN -> new ScanPlanRe2(analysis);
+        };
+    }
+
     /// Validates a pattern and returns its capture metadata without constructing a matching
     /// engine. Parse errors and capture numbering are the same as for [#compile(Slice)];
     /// compilation memory limits are not checked.
@@ -519,7 +540,7 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return new Re2(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode));
+        return create(build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode));
     }
 
     /// The caller passes a private snapshot that it never mutates.
@@ -537,7 +558,7 @@ public sealed class Re2
     /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies)
     {
-        return new Re2(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, ScanPlan.Language.RE2, ScanPlanMode.DISABLED));
+        return create(analyzeParsed(pattern, parsed, flags, maxMemory, byteFrequencies, ScanPlan.Language.RE2, ScanPlanMode.DISABLED));
     }
 
     private static boolean rewrite(DynamicSliceOutput out, Slice rewrite, Slice text, int[] groupOffsets, int captureSlotCount)
@@ -611,6 +632,247 @@ public sealed class Re2
         out.writeBytes(bytes, offset, length);
     }
 
+    /// A pattern of the [exact-literal shape][Shape#EXACT_LITERAL].
+    static final class ExactLiteralRe2
+            extends Re2
+    {
+        private ExactLiteralRe2(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnExactLiteral(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnExactLiteral(text);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnExactLiteral(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnExactLiteral(input);
+        }
+    }
+
+    /// A pattern of the [literal-kernel shape][Shape#LITERAL_KERNEL].
+    static final class LiteralKernelRe2
+            extends Re2
+    {
+        private LiteralKernelRe2(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralKernel(input);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnLiteralKernel(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnLiteralKernel(input);
+        }
+    }
+
+    /// A pattern of the [literal-alternation shape][Shape#LITERAL_ALTERNATION].
+    static final class LiteralAlternationRe2
+            extends Re2
+    {
+        private LiteralAlternationRe2(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralAlternation(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnLiteralAlternation(text);
+        }
+    }
+
+    /// A pattern of the [fixed-width shape][Shape#FIXED_WIDTH].
+    static final class FixedWidthRe2
+            extends Re2
+    {
+        private FixedWidthRe2(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnFixedWidth(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnFixedWidth(text);
+        }
+    }
+
+    /// A pattern of the [class-run shape][Shape#CLASS_RUN].
+    static final class ClassRunRe2
+            extends Re2
+    {
+        private final boolean retainedClassCountDfa;
+
+        private ClassRunRe2(Analysis analysis)
+        {
+            super(analysis);
+            this.retainedClassCountDfa = analysis.retainedClassCountDfa();
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnClassRun(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnClassRun(text, retainedClassCountDfa);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnClassRun(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+        }
+
+        @Override
+        boolean usesCompactBoundedCharacterClassForDiagnostics()
+        {
+            return true;
+        }
+    }
+
+    /// A pattern of the [byte-table shape][Shape#BYTE_TABLE].
+    static final class ByteTableRe2
+            extends Re2
+    {
+        private ByteTableRe2(Analysis analysis)
+        {
+            super(analysis);
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnByteTable(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnByteTable(text);
+        }
+    }
+
+    /// A pattern of the [scan-plan shape][Shape#SCAN_PLAN]. A generated class extends this
+    /// through [CompiledScanRe2].
+    static sealed class ScanPlanRe2
+            extends Re2
+            permits CompiledScanRe2
+    {
+        private final boolean ordinaryShortBooleanMatch;
+        private final boolean singleAttemptCount;
+        private final boolean literalKernelFind;
+
+        private ScanPlanRe2(Analysis analysis)
+        {
+            super(analysis);
+            this.ordinaryShortBooleanMatch = analysis.ordinaryShortBooleanMatch();
+            this.singleAttemptCount = analysis.singleAttemptCount();
+            this.literalKernelFind = analysis.literalKernelFind();
+        }
+
+        /// Copies `pattern`, which the caller then discards.
+        private ScanPlanRe2(ScanPlanRe2 pattern)
+        {
+            super(pattern);
+            this.ordinaryShortBooleanMatch = pattern.ordinaryShortBooleanMatch;
+            this.singleAttemptCount = pattern.singleAttemptCount;
+            this.literalKernelFind = pattern.literalKernelFind;
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnScanPlan(input, ordinaryShortBooleanMatch, literalKernelFind);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnScanPlan(text, ordinaryShortBooleanMatch, singleAttemptCount);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            return matchesOnScanPlan(input);
+        }
+
+        @Override
+        public boolean lookingAt(Slice input)
+        {
+            return lookingAtOnScanPlan(input);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnScanPlan(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, ordinaryShortBooleanMatch);
+        }
+
+        @Override
+        ScanPlanCount scanPlanCount()
+        {
+            return countRouteOnScanPlan(singleAttemptCount);
+        }
+
+        @Override
+        boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+        {
+            return ordinaryShortBooleanMatch;
+        }
+
+        @Override
+        boolean usesScanPlanForFindForDiagnostics()
+        {
+            return !literalKernelFind;
+        }
+    }
+
     /// An RE2 pattern whose case-sensitive scan plan was compiled to its own hidden class,
     /// which extends this class, so the pattern a caller holds is an instance of that class. The
     /// generated class declares each full-Slice `find`, `count`, `matches`, and `lookingAt` that
@@ -622,11 +884,11 @@ public sealed class Re2
     /// one branch on whether the caller asked for that group. The generated class adds no state.
     /// Callers that never request generated bytecode never load this class.
     abstract static non-sealed class CompiledScanRe2
-            extends Re2
+            extends ScanPlanRe2
     {
         /// Copies `pattern`, which the caller then discards. Only the generated subclass calls
         /// this.
-        CompiledScanRe2(Re2 pattern)
+        CompiledScanRe2(ScanPlanRe2 pattern)
         {
             super(pattern);
         }
@@ -636,7 +898,10 @@ public sealed class Re2
         /// verification of the base class from loading this class.
         static Re2 create(Re2 pattern)
         {
-            return pattern.generateScanPattern(CompiledScanRe2.class);
+            if (!(pattern instanceof ScanPlanRe2 scanPlanPattern)) {
+                return null;
+            }
+            return scanPlanPattern.generateScanPattern(CompiledScanRe2.class);
         }
 
         @Override

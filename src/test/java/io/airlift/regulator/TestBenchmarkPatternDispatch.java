@@ -26,10 +26,14 @@ import java.util.Set;
 
 import static io.airlift.regulator.BenchmarkPatternDispatch.expression;
 import static io.airlift.regulator.BenchmarkPatternDispatch.targets;
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.CONTAINS;
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.EXACT_LITERAL;
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.GENERAL;
-import static io.airlift.regulator.CompiledPattern.BooleanPartialMatchStrategy.LITERAL_ALTERNATION;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.Shape.CLASS_RUN;
+import static io.airlift.regulator.CompiledPattern.Shape.ENGINE;
+import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
+import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
+import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
+import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -158,23 +162,22 @@ public class TestBenchmarkPatternDispatch
     private static void assertRoute(String target, CompiledPattern compiled, String description)
     {
         if (GENERATED_TARGETS.contains(target)) {
+            assertThat(shape(compiled)).as(description).isEqualTo(SCAN_PLAN);
             assertThat(compiled.usesScanPlanForFindForDiagnostics()).as(description).isTrue();
             return;
         }
         assertThat(compiled.usesScanPlanForDiagnostics()).as(description).isFalse();
         switch (target) {
-            case "EXACT_LITERAL" -> assertThat(compiled.booleanPartialMatchStrategyForDiagnostics()).as(description).isEqualTo(EXACT_LITERAL);
-            case "CONTAINS" -> assertThat(compiled.booleanPartialMatchStrategyForDiagnostics()).as(description).isEqualTo(CONTAINS);
-            case "CHARACTER_CLASS" -> assertThat(compiled.usesCompactBoundedCharacterClassForDiagnostics()).as(description).isTrue();
-            case "LITERAL_ALTERNATION" -> {
-                assertThat(compiled.booleanPartialMatchStrategyForDiagnostics()).as(description).isEqualTo(LITERAL_ALTERNATION);
-                assertThat(compiled.literalAlternationSpanMatcherForDiagnostics()).as(description).isNotNull();
+            case "EXACT_LITERAL" -> assertThat(shape(compiled)).as(description).isEqualTo(EXACT_LITERAL);
+            case "CONTAINS" -> {
+                assertThat(shape(compiled)).as(description).isEqualTo(LITERAL_KERNEL);
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
             }
+            case "CHARACTER_CLASS" -> assertThat(shape(compiled)).as(description).isEqualTo(CLASS_RUN);
+            case "LITERAL_ALTERNATION" -> assertThat(shape(compiled)).as(description).isEqualTo(LITERAL_ALTERNATION);
             case "GENERAL" -> {
-                // The plan, single-byte, class-counter and inner-literal routes must all be absent.
-                assertThat(compiled.booleanPartialMatchStrategyForDiagnostics()).as(description).isEqualTo(GENERAL);
-                assertThat(compiled.supportsSingleByteMatcher()).as(description).isFalse();
-                assertThat(compiled.usesCompactBoundedCharacterClassForDiagnostics()).as(description).isFalse();
+                assertThat(shape(compiled)).as(description).isEqualTo(ENGINE);
+                assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isFalse();
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNull();
             }
             default -> throw new IllegalArgumentException("unknown target: " + target);

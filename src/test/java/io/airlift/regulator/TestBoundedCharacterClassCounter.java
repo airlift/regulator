@@ -314,10 +314,13 @@ public class TestBoundedCharacterClassCounter
         for (String pattern : List.of("\\pL", "\\p{Lu}", "(?i)\\p{Lu}", "\\d", "[\\pL\\x{3FFFF}]")) {
             assertCounterMatcherAgrees("Rust", RustRegexp::compile, pattern, false, inputs);
         }
-        // Compact patterns find through the same counter.
+        // Compact patterns find through the same counter, and match through it in every language.
         for (String pattern : List.of("\\p{Lu}+", "\\p{L}{2,3}", ALL_NON_ASCII_CLASS + "+")) {
             assertCounterMatcherAgrees("RE2", Re2::compile, pattern, true, inputs);
         }
+        assertCounterMatcherAgrees("Java", JavaRegexp::compile, "\\p{L}{2,3}", true, inputs);
+        assertCounterMatcherAgrees("Trino", source -> TrinoRegexp.compile(source).re2(), "\\p{L}+", true, inputs);
+        assertCounterMatcherAgrees("Rust", RustRegexp::compile, ALL_NON_ASCII_CLASS + "+", true, inputs);
 
         // The matrix above calls the engine directly, which bypasses the Trino matcher wrapper.
         TrinoRegexpMatcher trino = TrinoRegexp.compile(utf8Slice("\\p{L}")).matcher(input, 0);
@@ -642,10 +645,20 @@ public class TestBoundedCharacterClassCounter
             assertThat(spans(counted.matcher(input, 0)))
                     .as("%s on %s", description, hex)
                     .isEqualTo(spans(reference.matcher(input, 0)));
+            if (compact) {
+                assertThat(anchoredSpans(counted, input, 0, input.length()))
+                        .as("%s anchored on %s", description, hex)
+                        .isEqualTo(anchoredSpans(reference, input, 0, input.length()));
+            }
             if (input.length() >= 5) {
                 assertThat(spans(counted.matcher(input, 0).reset(input, 3, input.length() - 2)))
                         .as("%s on a region of %s", description, hex)
                         .isEqualTo(spans(reference.matcher(input, 0).reset(input, 3, input.length() - 2)));
+                if (compact) {
+                    assertThat(anchoredSpans(counted, input, 3, input.length() - 2))
+                            .as("%s anchored on a region of %s", description, hex)
+                            .isEqualTo(anchoredSpans(reference, input, 3, input.length() - 2));
+                }
             }
         }
     }
@@ -706,6 +719,17 @@ public class TestBoundedCharacterClassCounter
             spans.add(packSpan(matcher.start(), matcher.end()));
         }
         return spans;
+    }
+
+    // The lookingAt and matches answers over `[start, end)`: the boolean routes over the region
+    // sliced out, then the matcher's spans over the region, or -1 for no match.
+    private static List<Object> anchoredSpans(CompiledPattern pattern, Slice input, int start, int end)
+    {
+        Slice region = input.slice(start, end - start);
+        RegexpMatcher matcher = pattern.matcher(input, 0).reset(input, start, end);
+        long lookingAt = matcher.lookingAt() ? packSpan(matcher.start(), matcher.end()) : -1;
+        long matches = matcher.matches() ? packSpan(matcher.start(), matcher.end()) : -1;
+        return List.of(pattern.lookingAt(region), pattern.matches(region), lookingAt, matches);
     }
 
     private static long packSpan(int start, int end)

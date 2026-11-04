@@ -114,15 +114,18 @@ complete plan and literal storage against the forward DFA budget. If the budget
 does not fit, compilation retains the ordinary route. The semantic program is
 kept for range-limited calls outside the scan plan's supported context.
 
-Plan execution uses its own strategy byte, `scanPlanStrategy`, separate from
-the boolean `find` strategy; both fit in the shared engine's 104-byte layout.
-Shared capture matching checks the plan strategy byte before loading the plan,
-avoiding an extra dependent plan lookup for unrelated patterns. It invokes the
-plan before required-prefix stripping. Full-Slice boolean `find` keeps the
-literal `CONTAINS`, `STARTS_WITH`, `EQUALS`, and `EQUALS_FINAL_LINE` kernels
-when a plan also exists, because they answer without reading past the literal.
-Any other boolean strategy is replaced by the plan. Boundary, capture, range,
-and count calls reach the plan through its own strategy either way. Unanchored
+A pattern with a plan takes the
+[scan-plan shape class](../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations),
+which overrides the shared capture matching hook, so a pattern without a plan
+never loads one. The hook invokes the plan before required-prefix stripping.
+Full-Slice boolean `find` keeps the literal `CONTAINS`, `STARTS_WITH`, `EQUALS`,
+and `EQUALS_FINAL_LINE` kernels, and `matches` and `lookingAt` keep theirs,
+because they answer without reading past the literal. The shape class fixes the
+routes, and three immutable facts that the pattern records when it compiles
+choose within them: whether `find` keeps its kernel, whether a start-anchored
+plan counts with one attempt, and whether short boolean calls run on the
+ordinary engine. Boundary, capture, and range calls reach the plan through the
+hook, and count through the shape's own count route. Unanchored
 plans count with a loop over the plan's search that resumes at each match end,
 not the DFA count. For a Trino plan this keeps `count` in agreement with
 `extract`, `position`, and `extractAll` on malformed bytes; an RE2, Java, or
@@ -135,8 +138,10 @@ over a partial region; see [RE2 patterns](#re2-patterns), and a Java matcher
 region whose `$` reads a CR before it, which runs on the NFA). Its matchers
 therefore call the plan entry directly, as does `extract` of a capture group,
 which also skips building a matcher. This removes the shared path's out-of-line
-calls from the capture path. Matchers given a single-byte matcher, `matches`,
-`lookingAt`, and unanchored plans keep shared capture matching.
+calls from the capture path. Matchers given a single-byte matcher, ranged
+`matches` and `lookingAt`, and unanchored plans keep shared capture matching;
+full-Slice `matches` and `lookingAt` reach the plan through the shape class's
+own routes rather than the hook.
 
 Boolean `find` and `count` of a start-anchored plan run on the ordinary engine's
 DFA instead of the plan when the input is at most 48 bytes and the plan has an
@@ -813,8 +818,9 @@ directory to write each generated class file there before it is defined.
 case-sensitive plan to a hidden class from the same emitter, and
 `usesGeneratedBytecode()` reports whether the pattern has one. `Re2`,
 `JavaRegexp`, and `RustRegexp` are sealed classes over a package-private
-engine, and each permits a package-private non-sealed class that the hidden
-class extends, so the compiled pattern is an instance of the hidden class.
+engine. Each permits a sealed scan-plan shape class, which permits only a
+package-private non-sealed class that the hidden class extends, so the compiled
+pattern is an instance of the hidden class.
 ASCII-folded plans and a pattern whose class cannot be defined compile as they
 do without the option. The accepted trade-offs are recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
@@ -838,7 +844,8 @@ route fixed when the class is generated, so each entry's branch profile holds
 only its own pattern. `count` runs one attempt for a start-anchored plan and
 the unanchored count loop otherwise. Other calls that reach the plan go
 through the engine's match dispatch, which the class overrides with its own
-plan arm, passing every other route to the base dispatch. A matcher's
+plan arm, passing every other call to the ordinary engine,
+`matchOnOrdinaryEngine`. A matcher's
 start-anchored first search uses its own engine hook, which a start-anchored
 plan's class also overrides. A search that hands off
 continues on the ordinary engine through final engine methods, as an
