@@ -23,6 +23,7 @@ import java.util.List;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestCompilerAllocations
 {
@@ -210,6 +211,61 @@ public class TestCompilerAllocations
         assertThat(table.memberWidth(member, 0, member.length)).isEqualTo(4);
         assertThat(table.memberWidth(nonMember, 0, nonMember.length)).isZero();
         assertThat(allocatedBytes).isLessThan(32_000_000);
+    }
+
+    @Test
+    public void testLargeUnicodeClassCompileAllocation()
+    {
+        // Unicode \w compiles to hundreds of byte ranges. The ceiling guards the combined savings of
+        // the byte-map, member-table and one-pass changes: a compile allocates about 1.24 MB, and
+        // about 1.45 MB when the JIT has not applied escape analysis, so it leaves room for both.
+        assumeTrue(((ThreadMXBean) ManagementFactory.getThreadMXBean()).isThreadAllocatedMemorySupported(), "requires thread allocation counting");
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        Slice pattern = utf8Slice("^(\\w+)-(\\d+)/");
+        for (int iteration = 0; iteration < 1_000; iteration++) {
+            assertThat(RustRegexp.compile(pattern).pattern()).isEqualTo(pattern);
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        int iterations = 100;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            RustRegexp.compile(pattern);
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes / iterations).isLessThan(1_600_000);
+    }
+
+    @Test
+    public void testOnePassRejectedLateAllocatesForVisitedNodes()
+    {
+        // The literals use 63 byte classes, so node storage starts at 130 nodes, and the x|xy branch
+        // stops the analysis just after the literals before it, so storage doubles as nodes are
+        // visited, capped at the bound, rather than jumping to the bound. With 3 alphabets before the
+        // branch and 60 after, the bound is 3,910 nodes, a 985 KB action table, and the analysis stops
+        // near node 190, at about 180 KB in all. With 5 and 11, the bound is 996 nodes and the
+        // analysis stops near node 310, after storage doubled to 260 and then 520 nodes, at about
+        // 250 KB; jumping to the bound at the second overflow would cost 375 KB.
+        assumeTrue(((ThreadMXBean) ManagementFactory.getThreadMXBean()).isThreadAllocatedMemorySupported(), "requires thread allocation counting");
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        String alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        List<String> patterns = List.of(
+                "^" + alphanumeric.repeat(3) + "(?:x|xy)y" + alphanumeric.repeat(60) + "$",
+                "^" + alphanumeric.repeat(5) + "(?:x|xy)y" + alphanumeric.repeat(11) + "$");
+        for (String pattern : patterns) {
+            Regexp regexp = Simplifier.simplify(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp(), CaseFolding.RE2);
+            Prog program = Compiler.compileNormalizedForBenchmark(regexp, false, 8 << 20, Compiler.CompileStage.BYTEMAP);
+
+            long threadId = Thread.currentThread().threadId();
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            program.prepareOnePass();
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+            assertThat(program.bytemapRange()).isEqualTo(63);
+            assertThat(program.isOnePass()).isFalse();
+            assertThat(allocatedBytes).isLessThan(300_000);
+        }
     }
 
     private static void assertTrinoCompileAllocation(String pattern, int instructionCount, long maxAllocatedBytes)

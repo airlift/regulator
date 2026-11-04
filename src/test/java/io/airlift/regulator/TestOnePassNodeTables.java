@@ -18,9 +18,9 @@ import org.junit.jupiter.api.Test;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
-/// One-pass node tables start at the bound for small programs and grow on demand for large ones.
-/// These programs need more nodes than the initial capacity, so the growth path must keep every
-/// earlier node and action intact.
+/// One-pass node tables start at the bound for small programs and grow to it on demand for large
+/// ones. These programs need more nodes than the initial capacity, so the growth path must keep
+/// every earlier node and action intact.
 public class TestOnePassNodeTables
 {
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -28,7 +28,8 @@ public class TestOnePassNodeTables
     @Test
     public void testNodeTablesGrowForLongLiteral()
     {
-        // 310 byte ranges over about 63 byte classes: the initial capacity of 130 nodes grows twice.
+        // 310 byte ranges over about 63 byte classes: the initial capacity of 130 nodes grows to
+        // 260 and then to the 311 the program needs.
         String literal = ALPHANUMERIC.repeat(5);
         Prog program = compile("(" + literal + ")");
         assertThat(program.isOnePass()).isTrue();
@@ -71,8 +72,8 @@ public class TestOnePassNodeTables
         assertThat(OnePass.search(program, utf8Slice(text.substring(0, text.length() - 1) + "!"), true, Prog.MatchKind.FULL_MATCH, groups)).isFalse();
     }
 
-    // More states than two doublings of the initial capacity proves two growths; the retained
-    // action table is trimmed to the final state count.
+    // More states than twice the initial capacity proves two growths; the retained action table
+    // holds exactly the final states.
     private static void assertNodeTablesGrewTwice(Prog program)
     {
         int initialNodeCapacity = Prog.onePassInitialNodeCapacity(program.bytemapRange());
