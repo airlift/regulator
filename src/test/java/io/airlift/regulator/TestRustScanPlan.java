@@ -28,6 +28,7 @@ import java.util.regex.Pattern;
 
 import static io.airlift.regulator.TestRe2ScanPlan.PROBED_LEADS;
 import static io.airlift.regulator.TestRe2ScanPlan.PROBE_DISTRIBUTIONS;
+import static io.airlift.regulator.TestRe2ScanPlan.declaredEntries;
 import static io.airlift.regulator.TestRe2ScanPlan.describe;
 import static io.airlift.regulator.TestRe2ScanPlan.disableInterpretedPlan;
 import static io.airlift.regulator.TestRe2ScanPlan.matches;
@@ -39,6 +40,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /// Rust patterns on the scan plans that [TestRe2ScanPlan] and [TestScanPlan]
 /// cover: which Rust constructs reach a plan, and that a planned pattern gives the results of the
@@ -157,6 +159,13 @@ public class TestRustScanPlan
             assertThat(RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setGenerateBytecode(true)).usesGeneratedBytecode()).as(expression).isFalse();
         }
         assertThat(RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(PLAN_CASES.getFirst().expression()), RustRegexp.Options.defaults()).usesScanPlanForDiagnostics()).isFalse();
+        // A generated find skips the empty-match rule of the Rust search, so generation refuses a
+        // pattern that can match empty, as the plan analysis does.
+        assertThatThrownBy(() -> ScanKernelGenerator.generateCompiledScanPattern(
+                RustRegexp.compile(utf8Slice("x*")),
+                RustRegexp.CompiledScanRustRegexp.class))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("a pattern that can match empty has no generated class");
     }
 
     @Test
@@ -175,6 +184,8 @@ public class TestRustScanPlan
             for (RustRegexp regexp : List.of(anchored, unanchored)) {
                 disableOrdinaryEngine(regexp);
                 if (generate) {
+                    // Each plan reaches every full-Slice entry, so the generated class declares them all.
+                    assertThat(declaredEntries(regexp)).as(regexp.pattern().toStringUtf8()).isEqualTo(Set.of("find", "count", "matches", "lookingAt"));
                     disableInterpretedPlan(regexp);
                 }
             }

@@ -45,6 +45,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -56,16 +57,19 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 import java.util.zip.CRC32;
 
 import static io.airlift.classfile.BytecodeExpressions.boundConstant;
+import static io.airlift.classfile.BytecodeExpressions.constantBoolean;
 import static io.airlift.classfile.BytecodeExpressions.constantFalse;
 import static io.airlift.classfile.BytecodeExpressions.constantInt;
 import static io.airlift.classfile.BytecodeExpressions.constantLong;
 import static io.airlift.classfile.BytecodeExpressions.constantNull;
 import static io.airlift.classfile.BytecodeExpressions.constantString;
 import static io.airlift.classfile.BytecodeExpressions.constantTrue;
+import static io.airlift.classfile.BytecodeExpressions.getStatic;
 import static io.airlift.classfile.BytecodeExpressions.inlineIf;
 import static io.airlift.classfile.BytecodeExpressions.invokeStatic;
 import static io.airlift.classfile.BytecodeExpressions.newArray;
@@ -87,9 +91,12 @@ import static java.util.Objects.requireNonNull;
 /// operation the pattern routes to the plan. The class implements [CompiledTrinoScan] by
 /// delegating to those entries, so a caller can also bind an entry directly.
 ///
-/// An RE2, Java, or Rust pattern, compiled in the RE2 dialect, gets a smaller class
-/// from the same attempt loop: an RE2 executor class, which implements [CompiledRe2Scan] with
-/// the plan methods it replaces, while the pattern keeps its own routing.
+/// An RE2, Java, or Rust pattern, compiled in the RE2 dialect, gets a smaller class from the same
+/// attempt loop: a pattern class, which extends its language's `CompiledScan…` class, such as
+/// [Re2.CompiledScanRe2]. It declares full-Slice `find`, `count`, `matches`, and `lookingAt`
+/// for the operations that reach the plan and overrides the engine hooks that every other plan
+/// call runs through, each with its route fixed when the class is generated. The instance of that
+/// class is the pattern itself, so a caller's call site sees the generated class as its receiver.
 ///
 /// Setting the system property {@value #DUMP_DIRECTORY_PROPERTY} writes each generated class to
 /// that directory before it is defined.
@@ -113,14 +120,18 @@ final class ScanKernelGenerator
         private static final MethodType ANCHORED_TYPE = MethodType.methodType(boolean.class, Slice.class, int.class, int.class, boolean.class, int[].class);
 
         private final String name;
-        private final String trinoClassName;
-        private final String re2ClassName;
+        private final String classPrefix;
 
         Attempt(String name, String classPrefix)
         {
             this.name = name;
-            this.trinoClassName = CompiledTrinoScan.class.getPackageName() + "." + classPrefix + "CompiledTrinoScan";
-            this.re2ClassName = CompiledRe2Scan.class.getPackageName() + "." + classPrefix + "CompiledRe2Scan";
+            this.classPrefix = classPrefix;
+        }
+
+        /// The name of the pattern class that extends or implements `superclass`.
+        String patternClassName(Class<?> superclass)
+        {
+            return superclass.getPackageName() + "." + classPrefix + superclass.getSimpleName();
         }
 
         static Attempt of(ScanPlan plan)
@@ -186,6 +197,67 @@ final class ScanKernelGenerator
         }
     }
 
+    /// Where each full-Slice operation of an RE2, Java, or Rust pattern runs, decided once when
+    /// the pattern compiles from the facts its inherited routes read at run time. The generated
+    /// class declares the operations among `find`, `count`, `matches`, and `lookingAt` that these
+    /// routes select; other operations use the inherited methods. Other calls that reach the plan
+    /// go through the generated class's `matchInternal`, except a matcher's start-anchored first
+    /// search, which uses `findWithStartAnchoredScanPlan`.
+    ///
+    /// @param find whether full-Slice find reaches the plan rather than a retained literal kernel
+    /// @param ordinaryBooleanSearch whether an unanchored boolean search without groups runs on
+    ///         the ordinary engine; see
+    ///         [CompiledPattern#usesOrdinaryUnanchoredBooleanSearchForDiagnostics()]
+    /// @param count how count reaches the plan
+    /// @param matches whether full-Slice matches reaches the plan, which it does through
+    ///         `matchInternal` when its boolean plan is general
+    /// @param lookingAt whether full-Slice lookingAt reaches the plan, as for `matches`
+    record PatternRoutes(
+            CompiledPattern pattern,
+            ScanPlan plan,
+            boolean find,
+            boolean ordinaryBooleanSearch,
+            CompiledPattern.ScanPlanCount count,
+            boolean matches,
+            boolean lookingAt)
+    {
+        PatternRoutes
+        {
+            requireNonNull(pattern, "pattern is null");
+            requireNonNull(plan, "plan is null");
+            requireNonNull(count, "count is null");
+        }
+
+        /// Returns the routes of `pattern`, which must have a case-sensitive scan plan.
+        ///
+        /// @throws IllegalArgumentException if the pattern can match empty, which no pattern with
+        ///         a plan can: the generated entries rely on it, as count resumes each search at
+        ///         the previous match end and a generated find skips the empty-match rule of the
+        ///         Rust search
+        static PatternRoutes of(CompiledPattern pattern)
+        {
+            if (pattern.canMatchEmpty()) {
+                throw new IllegalArgumentException("a pattern that can match empty has no generated class");
+            }
+            ScanPlan plan = requireNonNull(pattern.caseSensitiveScanPlan(), "pattern has no case-sensitive scan plan");
+            return new PatternRoutes(
+                    pattern,
+                    plan,
+                    pattern.usesScanPlanForFindForDiagnostics(),
+                    pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics(),
+                    pattern.scanPlanCount(),
+                    pattern.matchesPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.GENERAL,
+                    pattern.lookingAtPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.GENERAL);
+        }
+
+        /// Whether full-Slice find runs the capture-free search before its handoff to the
+        /// ordinary engine.
+        boolean ordinaryHandoff()
+        {
+            return find && ordinaryBooleanSearch;
+        }
+    }
+
     /// A generated class for one pattern: its [CompiledTrinoScan] instance and a handle on
     /// each static entry, with `contains` `null` when the routes do not reach it. The
     /// replace handle takes the owning [TrinoRegexp] first, and the extraction handles take
@@ -242,7 +314,7 @@ final class ScanKernelGenerator
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
         CompiledUnit unit = compile(definer, ScanEmitter.forTrino(routes));
         Class<? extends CompiledTrinoScan> scanClass = define(definer, unit, CompiledTrinoScan.class);
-        CompiledTrinoScan scan = newInstance(scanClass);
+        CompiledTrinoScan scan = newInstance(scanClass, MethodType.methodType(void.class));
         MethodType extract = MethodType.methodType(Slice.class, Slice.class, int.class);
         MethodType extractAll = MethodType.methodType(List.class, Slice.class, int.class);
         CompiledTrinoKernel compiled = new CompiledTrinoKernel(
@@ -273,22 +345,33 @@ final class ScanKernelGenerator
         return unit.classfile(unit.primaryType());
     }
 
-    /// Generates and defines the executor class of an RE2, Java, or Rust pattern for its
-    /// case-sensitive scan `plan`, with a `searchBeforeHandoff` entry when
-    /// `ordinaryHandoff` says that full-Slice find hands off to the ordinary engine. Failures
-    /// propagate.
-    static CompiledRe2Scan generateCompiledRe2Scan(ScanPlan plan, boolean ordinaryHandoff)
+    /// Generates and defines the pattern class of an RE2, Java, or Rust `pattern` for its
+    /// case-sensitive scan plan, and returns the copy of `pattern` that is an instance of it. The
+    /// class extends `superclass`, the language's `CompiledScan…` class, whose copy constructor
+    /// takes the language's pattern class, the superclass of `superclass`; the generated
+    /// constructor has the same type and passes its argument to it. Its entries follow the
+    /// pattern's [PatternRoutes]. Failures propagate, including the refusal of a pattern that can
+    /// match empty.
+    static <T extends CompiledPattern> T generateCompiledScanPattern(CompiledPattern pattern, Class<T> superclass)
     {
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
-        CompiledUnit unit = compile(definer, ScanEmitter.forRe2(plan, ordinaryHandoff));
-        return newInstance(define(definer, unit, CompiledRe2Scan.class));
+        CompiledUnit unit = compile(definer, ScanEmitter.forPattern(PatternRoutes.of(pattern), superclass));
+        return newInstance(define(definer, unit, superclass), copyConstructorType(superclass), pattern);
     }
 
-    /// Returns the RE2 executor class file that [#generateCompiledRe2Scan] would define.
-    static byte[] re2ClassfileForDiagnostics(ScanPlan plan, boolean ordinaryHandoff)
+    /// Returns the class file of the pattern class that [#generateCompiledScanPattern] would
+    /// define for a pattern with `routes`, without defining it.
+    static byte[] patternClassfileForDiagnostics(PatternRoutes routes, Class<? extends CompiledPattern> superclass)
     {
-        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), ScanEmitter.forRe2(plan, ordinaryHandoff));
+        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), ScanEmitter.forPattern(routes, superclass));
         return unit.classfile(unit.primaryType());
+    }
+
+    /// The type of the copy constructor of a `CompiledScan…` class, and of its generated
+    /// subclass: it takes the language's pattern class, which `superclass` extends.
+    private static MethodType copyConstructorType(Class<? extends CompiledPattern> superclass)
+    {
+        return MethodType.methodType(void.class, superclass.getSuperclass());
     }
 
     private static CompiledUnit compile(HiddenClassDefiner definer, ScanEmitter emitter)
@@ -305,10 +388,10 @@ final class ScanKernelGenerator
         return defined.primaryClass(type);
     }
 
-    private static <T> T newInstance(Class<? extends T> scanClass)
+    private static <T> T newInstance(Class<? extends T> scanClass, MethodType constructorType, Object... arguments)
     {
         try {
-            return scanClass.getConstructor().newInstance();
+            return scanClass.getConstructor(constructorType.parameterArray()).newInstance(arguments);
         }
         catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot instantiate generated scan class", e);
@@ -804,30 +887,42 @@ final class ScanKernelGenerator
     /// Emits the class of one pattern. The class of a Trino pattern holds the attempt loop, the
     /// search driver of an unanchored plan, and a static entry for each operation that reaches the
     /// plan, named for the operation with an `Entry` suffix; it implements
-    /// [CompiledTrinoScan] with one-line delegates to those entries. An RE2 executor class
-    /// holds the attempt loop and the searches of an unanchored plan, and implements
-    /// [CompiledRe2Scan]. A plan never matches empty, so every match loop resumes at the
-    /// previous match end, as a matcher does. Scans call the copies in
-    /// [ScanKernelSupport], not the interpreter's helpers; other shared code is reached
-    /// only through static calls or calls on class-data constants.
+    /// [CompiledTrinoScan] with one-line delegates to those entries. The class of an RE2, Java, or
+    /// Rust pattern extends its language's `CompiledScan…` class and holds the attempt loop, the
+    /// searches of an unanchored plan, and an instance body for each full-Slice operation and
+    /// engine hook that reaches the plan, each with its route fixed by the pattern's
+    /// [PatternRoutes]. A plan never matches empty, so every match loop resumes at the previous
+    /// match end, as a matcher does. Scans call the copies in [ScanKernelSupport], not the
+    /// interpreter's helpers; other shared code is reached only through static calls, calls on
+    /// class-data constants, final engine methods of the pattern itself, and the direct
+    /// superclass call to `matchInternal` that the generated hook makes for a call off the plan.
     private static final class ScanEmitter
     {
-        // The interface methods each class implements, the same for every pattern.
-        private static final List<InterfaceMethod> RE2_INTERFACE_METHODS = interfaceMethods(CompiledRe2Scan.class);
+        // The interface methods a Trino class implements, the same for every pattern.
         private static final List<InterfaceMethod> TRINO_INTERFACE_METHODS = interfaceMethods(CompiledTrinoScan.class);
 
         // Reflective lookups the emitters would otherwise repeat for every pattern.
         private static final Method LIST_ADD = method(List.class, "add", Object.class);
         private static final Method FUNCTION_APPLY = method(Function.class, "apply", Object.class);
+        private static final Method REQUIRE_NON_NULL = method(Objects.class, "requireNonNull", Object.class, String.class);
         private static final Constructor<?> NEW_ARRAY_LIST = constructor(ArrayList.class);
         private static final Constructor<?> NEW_ARRAY_LIST_WITH_CAPACITY = constructor(ArrayList.class, int.class);
         private static final Constructor<?> NEW_DYNAMIC_SLICE_OUTPUT = constructor(DynamicSliceOutput.class, int.class);
         private static final Constructor<?> NEW_UNSUPPORTED_OPERATION_EXCEPTION = constructor(UnsupportedOperationException.class, String.class);
 
-        // Whether this emits an RE2 executor class rather than the class of a Trino pattern.
-        private final boolean re2;
-        // Null for an RE2 executor class.
+        // The final engine methods the generated classes call on a pattern.
+        private static final Method CONTINUE_SCAN_SEARCH = engineMethod("continueScanSearch");
+        private static final Method REQUIRE_INPUT = engineMethod("requireInput");
+        private static final Method REACHES_SCAN_PLAN = engineMethod("reachesScanPlan");
+        private static final Method ACCEPTS_SCAN_PLAN_ARGUMENTS = engineMethod("acceptsScanPlanArguments");
+        private static final Method FINISH_SCAN_SEARCH = engineMethod("finishScanSearch");
+
+        // Null for the class of an RE2, Java, or Rust pattern.
         private final TrinoRoutes routes;
+        // Null for the class of a Trino pattern.
+        private final PatternRoutes patternRoutes;
+        // The superclass of the class of an RE2, Java, or Rust pattern; null for a Trino pattern.
+        private final Class<? extends CompiledPattern> superclass;
         private final ScanPlan plan;
         private final boolean ordinaryHandoff;
         private final Attempt attempt;
@@ -837,6 +932,7 @@ final class ScanKernelGenerator
         private ClassDefinition definition;
         private MethodDefinition attemptLoop;
         private MethodDefinition search;
+        private MethodDefinition regionSearch;
         private MethodDefinition searchBeforeHandoff;
         private MethodDefinition find;
 
@@ -855,10 +951,11 @@ final class ScanKernelGenerator
             }
         }
 
-        private ScanEmitter(boolean re2, TrinoRoutes routes, ScanPlan plan, boolean ordinaryHandoff)
+        private ScanEmitter(TrinoRoutes routes, PatternRoutes patternRoutes, ScanPlan plan, boolean ordinaryHandoff, Class<? extends CompiledPattern> superclass)
         {
-            this.re2 = re2;
             this.routes = routes;
+            this.patternRoutes = patternRoutes;
+            this.superclass = superclass;
             this.plan = requireNonNull(plan, "plan is null");
             this.ordinaryHandoff = ordinaryHandoff;
             this.attempt = Attempt.of(plan);
@@ -867,51 +964,74 @@ final class ScanKernelGenerator
 
         private static ScanEmitter forTrino(TrinoRoutes routes)
         {
-            return new ScanEmitter(false, routes, routes.plan(), routes.ordinaryHandoff());
+            return new ScanEmitter(routes, null, routes.plan(), routes.ordinaryHandoff(), null);
         }
 
-        private static ScanEmitter forRe2(ScanPlan plan, boolean ordinaryHandoff)
+        private static ScanEmitter forPattern(PatternRoutes routes, Class<? extends CompiledPattern> superclass)
         {
-            return new ScanEmitter(true, null, plan, ordinaryHandoff);
+            return new ScanEmitter(null, routes, routes.plan(), routes.ordinaryHandoff(), requireNonNull(superclass, "superclass is null"));
         }
 
         private ClassModel define()
         {
-            return re2 ? defineRe2() : defineTrino();
+            return patternRoutes != null ? definePattern() : defineTrino();
         }
 
-        private void defineClass(String className, Class<?> type)
+        private void defineClass(String className)
         {
             if (plan.usesAsciiFoldedExecutor()) {
                 throw new IllegalArgumentException("ASCII-folded scan plans have no generated class");
             }
-            definition = ClassDefinition.define(ClassDesc.of(className)).access(PUBLIC, FINAL).addInterface(type);
-            definition.defaultConstructor().access(PUBLIC);
-            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
+            definition = ClassDefinition.define(ClassDesc.of(className)).access(PUBLIC, FINAL);
         }
 
-        /// The RE2 executor class: the attempt loop of a start-anchored plan, or the region search
-        /// of an unanchored one, each with the signature of the plan method it replaces. The pattern
-        /// keeps its own routing and finishes a search that handed off.
-        private ClassModel defineRe2()
+        /// The class of an RE2, Java, or Rust pattern, with a constructor of the type of its
+        /// superclass's copy constructor. It overrides `find`, `count`, `matches`, and
+        /// `lookingAt` where its routes reach the plan, and the engine hooks used by other calls
+        /// that reach the plan.
+        private ClassModel definePattern()
         {
-            defineClass(attempt.re2ClassName, CompiledRe2Scan.class);
-            if (anchored) {
-                entries.put(key("match", attempt.type()), attemptLoop);
-            }
-            else {
-                defineRegionSearch();
+            defineClass(attempt.patternClassName(superclass));
+            definition.superClass(superclass);
+            Parameter pattern = arg("pattern", copyConstructorType(superclass).parameterType(0));
+            definition.constructor(pattern)
+                    .access(PUBLIC)
+                    .body()
+                    .invokeSuperConstructor(pattern)
+                    .ret();
+            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
+            if (!anchored) {
+                search = defineSearch();
+                regionSearch = defineRegionSearch();
                 if (ordinaryHandoff) {
-                    defineSearchBeforeHandoff();
+                    searchBeforeHandoff = defineSearchBeforeHandoff();
                 }
             }
-            defineInterface(RE2_INTERFACE_METHODS);
+            if (patternRoutes.find()) {
+                definePatternFind();
+            }
+            if (patternRoutes.count() != CompiledPattern.ScanPlanCount.OTHER) {
+                definePatternCount();
+            }
+            if (patternRoutes.matches()) {
+                defineAnchoredMatch("matches", true);
+            }
+            if (patternRoutes.lookingAt()) {
+                defineAnchoredMatch("lookingAt", false);
+            }
+            defineMatchInternal();
+            if (anchored) {
+                defineFindWithStartAnchoredScanPlan();
+            }
             return definition.build();
         }
 
         private ClassModel defineTrino()
         {
-            defineClass(attempt.trinoClassName, CompiledTrinoScan.class);
+            defineClass(attempt.patternClassName(CompiledTrinoScan.class));
+            definition.addInterface(CompiledTrinoScan.class);
+            definition.defaultConstructor().access(PUBLIC);
+            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
             if (!anchored) {
                 search = defineSearch();
                 if (ordinaryHandoff) {
@@ -947,8 +1067,8 @@ final class ScanKernelGenerator
         }
 
         /// The search of [ScanPlan#search] over a region, with the same arguments and
-        /// results, as the `search` entry of an RE2 executor class.
-        private void defineRegionSearch()
+        /// results.
+        private MethodDefinition defineRegionSearch()
         {
             Parameter input = arg("input", Slice.class);
             Parameter contextStart = arg("contextStart", int.class);
@@ -957,20 +1077,18 @@ final class ScanKernelGenerator
             Parameter anchoredSearch = arg("anchored", boolean.class);
             Parameter fullMatch = arg("fullMatch", boolean.class);
             Parameter groups = arg("groups", int[].class);
-            MethodType type = MethodType.methodType(int.class, Slice.class, int.class, int.class, int.class, boolean.class, boolean.class, int[].class);
-            MethodDefinition method = entry("search", type, input, contextStart, contextEnd, start, anchoredSearch, fullMatch, groups);
+            MethodDefinition method = definition.method("regionSearch", int.class, input, contextStart, contextEnd, start, anchoredSearch, fullMatch, groups)
+                    .access(PRIVATE, STATIC);
             emitCandidateLoop(method.body(), input, new Region(contextStart, contextEnd, anchoredSearch, fullMatch), start, groups, false);
+            return method;
         }
 
         /// The capture-free search of [ScanPlan#searchBeforeHandoff] over the whole
-        /// input, with the same results. An RE2 executor class makes it the
-        /// `searchBeforeHandoff` entry.
+        /// input, with the same results.
         private MethodDefinition defineSearchBeforeHandoff()
         {
             Parameter input = arg("input", Slice.class);
-            MethodDefinition method = re2
-                    ? entry("searchBeforeHandoff", MethodType.methodType(int.class, Slice.class), input)
-                    : definition.method("searchBeforeHandoff", int.class, input).access(PRIVATE, STATIC);
+            MethodDefinition method = definition.method("searchBeforeHandoff", int.class, input).access(PRIVATE, STATIC);
             emitCandidateLoop(method.body(), input, null, null, constantNull(int[].class), true);
             return method;
         }
@@ -1139,12 +1257,12 @@ final class ScanKernelGenerator
                 return;
             }
             Variable result = body.declare("result", invokeStatic(search, input, start, groups));
-            body.ret(finishSearch(body, input, result, groups));
+            body.ret(finishSearch(body, input, result, groups, trinoPattern()));
         }
 
         /// Returns whether an unanchored search that returned `result` matched, continuing
-        /// one that handed off on the ordinary engine.
-        private BytecodeExpression finishSearch(CodeBlock.Builder body, Parameter input, Variable result, BytecodeExpression groups)
+        /// one that handed off on the ordinary engine of `pattern`.
+        private static BytecodeExpression finishSearch(CodeBlock.Builder body, Parameter input, Variable result, BytecodeExpression groups, BytecodeExpression pattern)
         {
             body.append(IfStatement.builder()
                     .condition(result.greaterThanOrEqual(constantInt(0)))
@@ -1154,14 +1272,20 @@ final class ScanKernelGenerator
                     .condition(result.equal(constantInt(ScanPlan.NO_MATCH)))
                     .then(constantFalse().ret())
                     .build());
-            return boundConstant(routes.pattern(), CompiledPattern.class)
-                    .invoke("continueScanSearch", boolean.class, input, result, groups);
+            return pattern.invoke(CONTINUE_SCAN_SEARCH, input, result, groups);
         }
 
         private void defineContains()
         {
             Parameter input = arg("input", Slice.class);
-            CodeBlock.Builder body = entry("contains", MethodType.methodType(boolean.class, Slice.class), input).body();
+            emitBooleanFind(entry("contains", MethodType.methodType(boolean.class, Slice.class), input).body(), input, trinoPattern());
+        }
+
+        /// Emits code that returns whether `input` holds a match: the attempt of a start-anchored
+        /// plan, or the search of an unanchored one, before its handoff where it hands off,
+        /// finished on the ordinary engine of `pattern`.
+        private void emitBooleanFind(CodeBlock.Builder body, Parameter input, BytecodeExpression pattern)
+        {
             BytecodeExpression noGroups = constantNull(int[].class);
             if (anchored) {
                 body.ret(invokeStatic(attemptLoop, input, constantInt(0), length(input), constantFalse(), noGroups));
@@ -1170,15 +1294,19 @@ final class ScanKernelGenerator
             Variable result = body.declare("result", searchBeforeHandoff != null
                     ? invokeStatic(searchBeforeHandoff, input)
                     : invokeStatic(search, input, constantInt(0), noGroups));
-            body.ret(finishSearch(body, input, result, noGroups));
+            body.ret(finishSearch(body, input, result, noGroups, pattern));
         }
 
-        // The loop of CompiledPattern.countUnanchoredScanMatches; keep in step.
         private void defineCount()
         {
             Parameter input = arg("input", Slice.class);
-            CodeBlock.Builder body = entry("count", MethodType.methodType(long.class, Slice.class), input).body();
-            if (routes.count() == CompiledPattern.ScanPlanCount.SINGLE_ATTEMPT && !anchored) {
+            emitCount(entry("count", MethodType.methodType(long.class, Slice.class), input).body(), input, routes.count(), trinoPattern());
+        }
+
+        // The loop of CompiledPattern.countUnanchoredScanMatches; keep in step.
+        private void emitCount(CodeBlock.Builder body, Parameter input, CompiledPattern.ScanPlanCount route, BytecodeExpression pattern)
+        {
+            if (route == CompiledPattern.ScanPlanCount.SINGLE_ATTEMPT && !anchored) {
                 throw new IllegalStateException("an unanchored plan counts by searching");
             }
             if (anchored) {
@@ -1210,7 +1338,7 @@ final class ScanKernelGenerator
                                     .condition(handoffGroups.isNull())
                                     .then(handoffGroups.set(newArray(int[].class, 2)))
                                     .build(),
-                            ifThenJump(boundConstant(routes.pattern(), CompiledPattern.class).invoke("continueScanSearch", boolean.class, input, matchEnd, handoffGroups).not(), done),
+                            ifThenJump(pattern.invoke(CONTINUE_SCAN_SEARCH, input, matchEnd, handoffGroups).not(), done),
                             matchEnd.set(handoffGroups.getElement(1))))
                     .build());
             body.append(count.set(count.add(constantLong(1))));
@@ -1218,6 +1346,126 @@ final class ScanKernelGenerator
             body.jump(loop);
             body.mark(done);
             body.ret(count);
+        }
+
+        /// The pattern a Trino class finishes its handed-off searches on, as a class-data constant.
+        private BytecodeExpression trinoPattern()
+        {
+            return boundConstant(routes.pattern(), CompiledPattern.class);
+        }
+
+        /// Full-Slice find of a pattern whose find reaches the plan: the route of
+        /// [CompiledPattern#find(Slice)] without the ordinary engine's short-input route.
+        private void definePatternFind()
+        {
+            Parameter input = arg("input", Slice.class);
+            MethodDefinition method = definition.method("find", boolean.class, input).access(PUBLIC);
+            CodeBlock.Builder body = method.body();
+            body.append(nullCheck(input, "input is null"));
+            emitBooleanFind(body, input, method.thisVariable());
+        }
+
+        /// Full-Slice count of a pattern whose count reaches the plan, as
+        /// [CompiledPattern#count(Slice)] counts it. A start-anchored plan whose count the engine
+        /// declines gets no generated `count`; the inherited one counts with a matcher, which
+        /// reaches the plan once.
+        private void definePatternCount()
+        {
+            Parameter input = arg("input", Slice.class);
+            MethodDefinition method = definition.method("count", long.class, input).access(PUBLIC);
+            CodeBlock.Builder body = method.body();
+            body.append(nullCheck(input, "text is null"));
+            emitCount(body, input, patternRoutes.count(), method.thisVariable());
+        }
+
+        /// Full-Slice `matches`, or `lookingAt` when `fullMatch` is false, of a pattern whose
+        /// inherited entry reaches the plan through `matchInternal` because its boolean plan is
+        /// general. The generated entry runs that hook's plan route for an anchored search of all
+        /// of the input.
+        private void defineAnchoredMatch(String name, boolean fullMatch)
+        {
+            Parameter input = arg("input", Slice.class);
+            MethodDefinition method = definition.method(name, boolean.class, input).access(PUBLIC);
+            CodeBlock.Builder body = method.body();
+            // The checks of the inherited entry, which name a null input as the language does.
+            body.append(method.thisVariable().invoke(REQUIRE_INPUT, input));
+            body.append(nullCheck(input, "text is null"));
+            BytecodeExpression noGroups = constantNull(int[].class);
+            BytecodeExpression fullMatchConstant = constantBoolean(fullMatch);
+            if (anchored) {
+                body.ret(invokeStatic(attemptLoop, input, constantInt(0), length(input), fullMatchConstant, noGroups));
+                return;
+            }
+            // An anchored search makes at most one attempt and never hands off.
+            body.ret(invokeStatic(regionSearch, input, constantInt(0), length(input), constantInt(0), constantTrue(), fullMatchConstant, noGroups)
+                    .greaterThanOrEqual(constantInt(0)));
+        }
+
+        /// The engine hook through which other calls that reach the plan run, except a matcher's
+        /// start-anchored first search, which uses `findWithStartAnchoredScanPlan`: the plan route
+        /// of [CompiledPattern#matchInternal], with the attempt or search fixed by the plan. A
+        /// call off that route, including an unanchored boolean search that the routes keep on the
+        /// ordinary engine, runs the inherited hook.
+        private void defineMatchInternal()
+        {
+            Parameter prog = arg("prog", Prog.class);
+            Parameter text = arg("text", Slice.class);
+            Parameter contextStart = arg("contextStart", int.class);
+            Parameter contextEnd = arg("contextEnd", int.class);
+            Parameter start = arg("start", int.class);
+            Parameter end = arg("end", int.class);
+            Parameter anchor = arg("anchor", CompiledPattern.Anchor.class);
+            Parameter groupOffsets = arg("groupOffsets", int[].class);
+            Parameter workspaces = arg("workspaces", CompiledPattern.MatchWorkspaces.class);
+            MethodDefinition method = definition.method("matchInternal", boolean.class, prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+            Variable self = method.thisVariable();
+            CodeBlock.Builder body = method.body();
+            BytecodeExpression unanchoredMode = getStatic(CompiledPattern.Anchor.class, "UNANCHORED");
+            Variable anchorMode = body.declare("anchorMode", inlineIf(anchor.isNull(), unanchoredMode, anchor));
+            BytecodeExpression inheritedRoute = self.invoke(REACHES_SCAN_PLAN, prog, contextEnd, end).not();
+            if (!anchored && patternRoutes.ordinaryBooleanSearch()) {
+                inheritedRoute = inheritedRoute.or(groupOffsets.isNull().and(anchorMode.equal(unanchoredMode)));
+            }
+            body.append(IfStatement.builder()
+                    .condition(inheritedRoute)
+                    .then(self.invokeSpecial(
+                            superclass.describeConstable().orElseThrow(),
+                            "matchInternal",
+                            method.methodType(),
+                            prog,
+                            text,
+                            contextStart,
+                            contextEnd,
+                            start,
+                            end,
+                            anchor,
+                            groupOffsets,
+                            workspaces).ret())
+                    .build());
+            body.append(IfStatement.builder()
+                    .condition(self.invoke(ACCEPTS_SCAN_PLAN_ARGUMENTS, text, contextStart, contextEnd, start, end, groupOffsets).not())
+                    .then(constantFalse().ret())
+                    .build());
+            BytecodeExpression fullMatch = anchorMode.equal(getStatic(CompiledPattern.Anchor.class, "ANCHOR_BOTH"));
+            if (anchored) {
+                body.ret(start.equal(contextStart).and(invokeStatic(attemptLoop, text, contextStart, contextEnd, fullMatch, groupOffsets)));
+                return;
+            }
+            Variable result = body.declare("result", invokeStatic(regionSearch, text, contextStart, contextEnd, start, anchorMode.notEqual(unanchoredMode), fullMatch, groupOffsets));
+            body.ret(self.invoke(FINISH_SCAN_SEARCH, text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces));
+        }
+
+        /// The capture find of [CompiledPattern#findWithStartAnchoredScanPlan] on the attempt.
+        private void defineFindWithStartAnchoredScanPlan()
+        {
+            Parameter scanPlan = arg("plan", ScanPlan.class);
+            Parameter text = arg("text", Slice.class);
+            Parameter contextStart = arg("contextStart", int.class);
+            Parameter contextEnd = arg("contextEnd", int.class);
+            Parameter groups = arg("groups", int[].class);
+            CodeBlock.Builder body = definition.method("findWithStartAnchoredScanPlan", boolean.class, scanPlan, text, contextStart, contextEnd, groups).body();
+            body.append(fill(groups));
+            body.ret(invokeStatic(attemptLoop, text, contextStart, contextEnd, constantFalse(), groups));
         }
 
         private void definePosition()
@@ -1442,6 +1690,26 @@ final class ScanKernelGenerator
         private static String key(String operation, MethodType type)
         {
             return operation + type.toMethodDescriptorString();
+        }
+
+        /// Returns the final engine method named `name`; being final, a call to it on a pattern
+        /// binds without a type check.
+        private static Method engineMethod(String name)
+        {
+            List<Method> methods = Arrays.stream(CompiledPattern.class.getDeclaredMethods())
+                    .filter(method -> method.getName().equals(name))
+                    .toList();
+            if (methods.size() != 1 || !Modifier.isFinal(methods.getFirst().getModifiers())) {
+                throw new IllegalStateException("not one final engine method: " + name);
+            }
+            return methods.getFirst();
+        }
+
+        /// Throws [NullPointerException] with `message` when `input` is null, as
+        /// [java.util.Objects#requireNonNull(Object,String)] does.
+        private static BytecodeExpression nullCheck(Parameter input, String message)
+        {
+            return invokeStatic(REQUIRE_NON_NULL, input, constantString(message)).pop();
         }
 
         /// Returns a view of `group` of the current match, or `null` when it did not

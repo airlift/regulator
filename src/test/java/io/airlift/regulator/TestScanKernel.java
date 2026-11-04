@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.regulator.ScanKernelGenerator.Attempt;
+import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
 import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.regulator.TestScanPlan.QuadraticSearch;
@@ -79,7 +80,17 @@ public class TestScanKernel
     // shared helper from the generated callers' profiles and the interpreter can then no longer
     // inline it. Methods outside this package belong to Slice or the JDK.
     private static final Set<String> GENERATED_CODE_CALLS = Set.of(
+            "CompiledPattern.acceptsScanPlanArguments",
             "CompiledPattern.continueScanSearch",
+            "CompiledPattern.finishScanSearch",
+            "CompiledPattern.reachesScanPlan",
+            "CompiledPattern.requireInput",
+            "JavaRegexp$CompiledScanJavaRegexp.<init>",
+            "JavaRegexp$CompiledScanJavaRegexp.matchInternal",
+            "Re2$CompiledScanRe2.<init>",
+            "Re2$CompiledScanRe2.matchInternal",
+            "RustRegexp$CompiledScanRustRegexp.<init>",
+            "RustRegexp$CompiledScanRustRegexp.matchInternal",
             "TrinoRegexp.newReplacementPlan",
             "TrinoRegexp.positionSearchStart",
             "TrinoReplacementPlan.addMatch",
@@ -211,8 +222,8 @@ public class TestScanKernel
     /// minimum, both tails, END with and without the final line terminator, capture-free boolean
     /// tails, saves, forks that clear skipped captures, retries late in the plan, and the range,
     /// byte-set, and nibble-table candidate scans of a leading run, on views and exact-length
-    /// copies. In this package, the generated Trino and RE2 classes and the helpers they call
-    /// invoke only [#GENERATED_CODE_CALLS].
+    /// copies. In this package, the Trino, RE2, Java and Rust generated classes and the helpers
+    /// they call invoke only [#GENERATED_CODE_CALLS].
     @Test
     public void testEveryOperationShape()
             throws Throwable
@@ -284,14 +295,13 @@ public class TestScanKernel
             verifySameOperations(expression, generated, TrinoRegexp.compile(utf8Slice(expression)), sources, true);
         }
         assertThat(kinds).contains("LITERAL", "OPTIONAL", "DELIMITED_CAPTURE", "DOT_ALL_TAIL", "LINE_TAIL", "END", "RUN", "SAVE", "FORK");
-        // The RE2 executor class of each attempt kind, whose run steps read characters as RE2 does.
+        // The RE2 pattern class of each attempt kind, whose run steps read characters as RE2 does.
         // TestRe2ScanPlan compares their results with the ordinary engine.
         Set<String> re2Kinds = new LinkedHashSet<>();
         for (String expression : List.of("^https?://([^/]+)/.*$", "^https?://([^/]+)/", "^x([^/]+)", "x([^/]+)", "([^:]+):", "^x([^/\\x{85}]+)")) {
             Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
             assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
-            boolean ordinaryHandoff = re2.usesScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
-            invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(re2.caseSensitiveScanPlan(), ordinaryHandoff)));
+            invoked.addAll(invokedMethods(patternClassfile(PatternRoutes.of(re2))));
             re2Kinds.addAll(List.of(re2.caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
         }
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
@@ -299,8 +309,13 @@ public class TestScanKernel
         // results with the JDK.
         JavaRegexp javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true));
         assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
-        boolean javaEndHandoff = javaEnd.usesScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
-        invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveScanPlan(), javaEndHandoff)));
+        invoked.addAll(invokedMethods(patternClassfile(PatternRoutes.of(javaEnd))));
+        // Rust patterns of each plan kind, whose classes extend the Rust superclass.
+        for (String expression : List.of("^x([^/]+)", "x([^/]+)")) {
+            RustRegexp rust = RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.defaults().setGenerateBytecode(true));
+            assertThat(rust.usesGeneratedBytecode()).as(expression).isTrue();
+            invoked.addAll(invokedMethods(patternClassfile(PatternRoutes.of(rust))));
+        }
         // Without the vector scans, every run reads its candidates from the member table.
         assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(VectorSupport.isAvailable() ? ScanPlanRun.CANDIDATE_SCAN_RANGE : ScanPlanRun.CANDIDATE_SCAN_TABLE);
         ScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
@@ -341,16 +356,15 @@ public class TestScanKernel
             symbols.addAll(witnessParts(expression));
             verifySameOperations(expression, compiled, interpreted, randomSources(expression.length(), symbols, MALFORMED_SEQUENCES), true);
         }
-        // The RE2 executor class, which Java and Rust plans share, probes the byte its plan
-        // probes. TestRe2ScanPlan compares its results with the ordinary engine.
+        // The class of an RE2 pattern, whose emission logic Java and Rust patterns share, probes
+        // the byte its plan probes. TestRe2ScanPlan compares its results with the ordinary engine.
         String expression = "été=([^/]+)/";
         Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setByteFrequencies(TestingByteFrequencies.learnedJsonRecords()).setGenerateBytecode(true));
         assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
         ScanPlan plan = re2.caseSensitiveScanPlan();
         assertThat(plan).as(expression).isNotNull();
         assertThat(plan.leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(5);
-        boolean ordinaryHandoff = re2.usesScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
-        assertThat(probeOffsets(ScanKernelGenerator.re2ClassfileForDiagnostics(plan, ordinaryHandoff))).as(expression).isNotEmpty().containsOnly(5);
+        assertThat(probeOffsets(patternClassfile(PatternRoutes.of(re2)))).as(expression).isNotEmpty().containsOnly(5);
     }
 
     /// Compares generated and interpreted patterns over the seeded patterns of
@@ -448,7 +462,7 @@ public class TestScanKernel
     /// retrying; and captured 16-byte literals in four such forks, each checked before it is
     /// captured. One more run, capture, or literal leaves the pattern without a plan. Java is
     /// measured because its `$` adds a final-terminator check to the end-anchored attempt; Rust
-    /// plans share RE2's executor class and ends.
+    /// patterns share RE2's emission logic and end checks.
     @Test
     public void testLargestPlansStayUnderHugeMethodLimit()
     {
@@ -486,15 +500,28 @@ public class TestScanKernel
                         assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
                         continue;
                     }
-                    // Only an unanchored attempt has a handoff entry.
+                    // Every entry, and the handoff search, which only an unanchored attempt has.
+                    PatternRoutes routes = PatternRoutes.of(pattern);
                     for (boolean ordinaryHandoff : attempt == Attempt.UNANCHORED ? List.of(false, true) : List.of(false)) {
-                        byte[] classfile = ScanKernelGenerator.re2ClassfileForDiagnostics(plan, ordinaryHandoff);
+                        byte[] classfile = patternClassfile(new PatternRoutes(pattern, plan, true, ordinaryHandoff, routes.count(), true, true));
                         String handoffDescription = description + " ordinary handoff " + ordinaryHandoff;
                         assertThat(largestMethodBytes(classfile)).as(handoffDescription).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
                     }
                 }
             }
         }
+    }
+
+    /// Returns the class file of the pattern class generated for an RE2, Java, or Rust pattern
+    /// with `routes`.
+    private static byte[] patternClassfile(PatternRoutes routes)
+    {
+        return switch (routes.pattern()) {
+            case Re2 _ -> ScanKernelGenerator.patternClassfileForDiagnostics(routes, Re2.CompiledScanRe2.class);
+            case JavaRegexp _ -> ScanKernelGenerator.patternClassfileForDiagnostics(routes, JavaRegexp.CompiledScanJavaRegexp.class);
+            case RustRegexp _ -> ScanKernelGenerator.patternClassfileForDiagnostics(routes, RustRegexp.CompiledScanRustRegexp.class);
+            case TrinoCompiledPattern _ -> throw new IllegalArgumentException("a Trino pattern has its own generated class");
+        };
     }
 
     static byte[] classfile(Class<?> type)
