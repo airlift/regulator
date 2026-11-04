@@ -1062,11 +1062,11 @@ final class TrinoLikeKernelGenerator
                 .build();
     }
 
-    private static CodeBlock ifThenJump(BytecodeExpression condition, CodeLabel target)
+    private static IfStatement ifThenJump(BytecodeExpression condition, CodeLabel target)
     {
-        return CodeBlock.block(IfStatement.builder()
+        return IfStatement.builder()
                 .condition(condition)
                 .then(CodeBlock.blockBuilder().jump(target).build())
-                .build());
+                .build();
     }
 }

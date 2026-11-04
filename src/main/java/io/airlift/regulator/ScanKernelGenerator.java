@@ -39,9 +39,11 @@ import io.airlift.slice.SliceUtf8;
 
 import java.io.IOException;
 import java.lang.constant.ClassDesc;
+import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -67,6 +69,7 @@ import static io.airlift.classfile.BytecodeExpressions.constantTrue;
 import static io.airlift.classfile.BytecodeExpressions.inlineIf;
 import static io.airlift.classfile.BytecodeExpressions.invokeStatic;
 import static io.airlift.classfile.BytecodeExpressions.newArray;
+import static io.airlift.classfile.DescriptorUtils.methodType;
 import static io.airlift.classfile.Parameter.arg;
 import static io.airlift.regulator.ScanPlan.RETRY_OPERATION_BITS;
 import static io.airlift.regulator.ScanPlan.RETRY_OPERATION_MASK;
@@ -106,6 +109,9 @@ final class ScanKernelGenerator
         PARTIAL("matchPartial", "Partial"),
         UNANCHORED("matchUnanchoredAt", "Unanchored");
 
+        private static final MethodType UNANCHORED_TYPE = MethodType.methodType(long.class, byte[].class, int.class, int.class, int.class, boolean.class, int[].class);
+        private static final MethodType ANCHORED_TYPE = MethodType.methodType(boolean.class, Slice.class, int.class, int.class, boolean.class, int[].class);
+
         private final String name;
         private final String trinoClassName;
         private final String re2ClassName;
@@ -127,10 +133,7 @@ final class ScanKernelGenerator
 
         MethodType type()
         {
-            if (this == UNANCHORED) {
-                return MethodType.methodType(long.class, byte[].class, int.class, int.class, int.class, boolean.class, int[].class);
-            }
-            return MethodType.methodType(boolean.class, Slice.class, int.class, int.class, boolean.class, int[].class);
+            return this == UNANCHORED ? UNANCHORED_TYPE : ANCHORED_TYPE;
         }
     }
 
@@ -349,6 +352,8 @@ final class ScanKernelGenerator
     /// past the last operation runs the end-of-operations check of partial and unanchored plans.
     private static final class KernelEmitter
     {
+        private static final Constructor<?> NEW_ILLEGAL_STATE_EXCEPTION = constructor(IllegalStateException.class, String.class);
+
         private final ScanPlan plan;
         private final Attempt attempt;
         private final int operations;
@@ -686,7 +691,7 @@ final class ScanKernelGenerator
         {
             switch (attempt) {
                 // The last operation of an end-anchored plan always returns or fails.
-                case END_ANCHORED -> body.throwObject(BytecodeExpressions.newInstance(IllegalStateException.class, constantString("scan kernel ran past END")));
+                case END_ANCHORED -> body.throwObject(BytecodeExpressions.newInstance(NEW_ILLEGAL_STATE_EXCEPTION, constantString("scan kernel ran past END")));
                 case PARTIAL -> body.append(IfStatement.builder()
                                 .condition(fullMatch.not().or(cursor.equal(end)))
                                 .then(anchoredSuccess(cursor.subtract(base)))
@@ -728,7 +733,7 @@ final class ScanKernelGenerator
                         resume.caseValue(index + 1, resumeBlock(step.branch(), index + 1));
                     }
                 }
-                resume.defaultCase(BytecodeExpressions.newInstance(IllegalStateException.class, constantString("corrupt scan kernel retry stack")).throwObject());
+                resume.defaultCase(BytecodeExpressions.newInstance(NEW_ILLEGAL_STATE_EXCEPTION, constantString("corrupt scan kernel retry stack")).throwObject());
                 body.append(resume.build());
                 body.mark(noRetry);
             }
@@ -807,6 +812,18 @@ final class ScanKernelGenerator
     /// only through static calls or calls on class-data constants.
     private static final class ScanEmitter
     {
+        // The interface methods each class implements, the same for every pattern.
+        private static final List<InterfaceMethod> RE2_INTERFACE_METHODS = interfaceMethods(CompiledRe2Scan.class);
+        private static final List<InterfaceMethod> TRINO_INTERFACE_METHODS = interfaceMethods(CompiledTrinoScan.class);
+
+        // Reflective lookups the emitters would otherwise repeat for every pattern.
+        private static final Method LIST_ADD = method(List.class, "add", Object.class);
+        private static final Method FUNCTION_APPLY = method(Function.class, "apply", Object.class);
+        private static final Constructor<?> NEW_ARRAY_LIST = constructor(ArrayList.class);
+        private static final Constructor<?> NEW_ARRAY_LIST_WITH_CAPACITY = constructor(ArrayList.class, int.class);
+        private static final Constructor<?> NEW_DYNAMIC_SLICE_OUTPUT = constructor(DynamicSliceOutput.class, int.class);
+        private static final Constructor<?> NEW_UNSUPPORTED_OPERATION_EXCEPTION = constructor(UnsupportedOperationException.class, String.class);
+
         // Whether this emits an RE2 executor class rather than the class of a Trino pattern.
         private final boolean re2;
         // Null for an RE2 executor class.
@@ -826,6 +843,17 @@ final class ScanKernelGenerator
         /// The context and attempt arguments of a region search. A search without one covers the
         /// whole input, unanchored and without a full-match requirement.
         private record Region(Parameter contextStart, Parameter contextEnd, Parameter anchored, Parameter fullMatch) {}
+
+        /// An interface method: the signature of its delegate and the key of the entry the
+        /// delegate calls, when the class defines that entry.
+        /// A classfile [Parameter] belongs to one method, so each delegate builds its own.
+        private record InterfaceMethod(String name, MethodTypeDesc type, List<String> parameterNames, String key)
+        {
+            private InterfaceMethod
+            {
+                parameterNames = List.copyOf(parameterNames);
+            }
+        }
 
         private ScanEmitter(boolean re2, TrinoRoutes routes, ScanPlan plan, boolean ordinaryHandoff)
         {
@@ -877,7 +905,7 @@ final class ScanKernelGenerator
                     defineSearchBeforeHandoff();
                 }
             }
-            defineInterface(CompiledRe2Scan.class);
+            defineInterface(RE2_INTERFACE_METHODS);
             return definition.build();
         }
 
@@ -901,7 +929,7 @@ final class ScanKernelGenerator
             defineExtractAll();
             defineReplace();
             defineReplaceWithCallback();
-            defineInterface(CompiledTrinoScan.class);
+            defineInterface(TRINO_INTERFACE_METHODS);
             return definition.build();
         }
 
@@ -1253,14 +1281,14 @@ final class ScanKernelGenerator
                     constantInt(2),
                     constantInt(2 * routes.capturingGroupCount() + 2))));
             Variable matches = body.declare(List.class, "matches");
-            body.append(matches.set(BytecodeExpressions.newInstance(ArrayList.class)));
+            body.append(matches.set(BytecodeExpressions.newInstance(NEW_ARRAY_LIST)));
             Variable start = body.declare("start", constantInt(0));
             Variable groupStart = body.declare(int.class, "groupStart");
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
             body.append(ifThenJump(invokeStatic(find, input, start, groups).not(), done));
-            body.append(matches.invoke(method(List.class, "add", Object.class), groupSlice(body, input, groups, group, groupStart)));
+            body.append(matches.invoke(LIST_ADD, groupSlice(body, input, groups, group, groupStart)));
             body.append(start.set(groups.getElement(1)));
             body.jump(loop);
             body.mark(done);
@@ -1273,17 +1301,17 @@ final class ScanKernelGenerator
             CodeBlock.Builder body = entry("split", MethodType.methodType(List.class, Slice.class), input).body();
             Variable groups = body.declare("groups", newArray(int[].class, 2));
             Variable parts = body.declare(List.class, "parts");
-            body.append(parts.set(BytecodeExpressions.newInstance(ArrayList.class)));
+            body.append(parts.set(BytecodeExpressions.newInstance(NEW_ARRAY_LIST)));
             Variable previousEnd = body.declare("previousEnd", constantInt(0));
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
             body.append(ifThenJump(invokeStatic(find, input, previousEnd, groups).not(), done));
-            body.append(parts.invoke(method(List.class, "add", Object.class), slice(input, previousEnd, groups.getElement(0))));
+            body.append(parts.invoke(LIST_ADD, slice(input, previousEnd, groups.getElement(0))));
             body.append(previousEnd.set(groups.getElement(1)));
             body.jump(loop);
             body.mark(done);
-            body.append(parts.invoke(method(List.class, "add", Object.class), slice(input, previousEnd, length(input))));
+            body.append(parts.invoke(LIST_ADD, slice(input, previousEnd, length(input))));
             body.ret(invokeStatic(Collections.class, "unmodifiableList", List.class, parts));
         }
 
@@ -1316,7 +1344,7 @@ final class ScanKernelGenerator
             CodeBlock.Builder body = entry("replace", MethodType.methodType(Slice.class, Slice.class, Function.class), input, replacement).body();
             int groupCount = routes.capturingGroupCount();
             Variable groups = body.declare("groups", newArray(int[].class, 2 * groupCount + 2));
-            Variable output = body.declare("output", BytecodeExpressions.newInstance(DynamicSliceOutput.class, length(input)));
+            Variable output = body.declare("output", BytecodeExpressions.newInstance(NEW_DYNAMIC_SLICE_OUTPUT, length(input)));
             Variable previousEnd = body.declare("previousEnd", constantInt(0));
             Variable matched = body.declare("matched", constantFalse());
             Variable values = body.declare(List.class, "values");
@@ -1332,16 +1360,16 @@ final class ScanKernelGenerator
             body.append(ifThenJump(invokeStatic(find, input, previousEnd, groups).not(), done));
             body.append(matched.set(constantTrue()));
             body.append(writeBytes(output, input, previousEnd, groups.getElement(0)));
-            body.append(values.set(BytecodeExpressions.newInstance(ArrayList.class, constantInt(groupCount))));
+            body.append(values.set(BytecodeExpressions.newInstance(NEW_ARRAY_LIST_WITH_CAPACITY, constantInt(groupCount))));
             body.append(group.set(constantInt(1)));
             body.mark(nextGroup);
             body.append(ifThenJump(group.greaterThan(constantInt(groupCount)), groupsDone));
-            body.append(values.invoke(method(List.class, "add", Object.class), groupSlice(body, input, groups, group, groupStart)));
+            body.append(values.invoke(LIST_ADD, groupSlice(body, input, groups, group, groupStart)));
             body.append(group.increment());
             body.jump(nextGroup);
             body.mark(groupsDone);
             BytecodeExpression unmodifiable = invokeStatic(Collections.class, "unmodifiableList", List.class, values);
-            body.append(value.set(replacement.invoke(method(Function.class, "apply", Object.class), unmodifiable).cast(Slice.class)));
+            body.append(value.set(replacement.invoke(FUNCTION_APPLY, unmodifiable).cast(Slice.class)));
             body.append(IfStatement.builder()
                     .condition(value.isNull())
                     .then(constantNull(Slice.class).ret())
@@ -1359,26 +1387,46 @@ final class ScanKernelGenerator
             body.ret(output.invoke("slice", Slice.class));
         }
 
-        private void defineInterface(Class<?> type)
+        private void defineInterface(List<InterfaceMethod> methods)
         {
-            Method[] methods = type.getDeclaredMethods();
-            Arrays.sort(methods, Comparator.comparing(Method::toString));
-            for (Method method : methods) {
-                Class<?>[] types = method.getParameterTypes();
-                Parameter[] parameters = new Parameter[types.length];
-                for (int index = 0; index < types.length; index++) {
-                    parameters[index] = arg("argument" + index, types[index]);
+            for (InterfaceMethod method : methods) {
+                MethodTypeDesc type = method.type();
+                Parameter[] parameters = new Parameter[type.parameterCount()];
+                for (int index = 0; index < parameters.length; index++) {
+                    parameters[index] = arg(method.parameterNames().get(index), type.parameterType(index));
                 }
-                MethodDefinition delegate = definition.method(method.getName(), method.getReturnType(), parameters)
+                MethodDefinition delegate = definition.method(method.name(), type.returnType(), parameters)
                         .access(PUBLIC);
-                MethodDefinition target = entries.get(key(method.getName(), MethodType.methodType(method.getReturnType(), types)));
+                MethodDefinition target = entries.get(method.key());
                 if (target == null) {
-                    delegate.body().throwObject(BytecodeExpressions.newInstance(UnsupportedOperationException.class, constantString(method.getName())));
+                    delegate.body().throwObject(BytecodeExpressions.newInstance(NEW_UNSUPPORTED_OPERATION_EXCEPTION, constantString(method.name())));
                 }
                 else {
                     delegate.body().ret(invokeStatic(target, parameters));
                 }
             }
+        }
+
+        /// Returns the methods of `type` in a fixed order, as [#defineInterface] declares their
+        /// delegates.
+        private static List<InterfaceMethod> interfaceMethods(Class<?> type)
+        {
+            Method[] methods = type.getDeclaredMethods();
+            Arrays.sort(methods, Comparator.comparing(Method::toString));
+            List<InterfaceMethod> interfaceMethods = new ArrayList<>(methods.length);
+            for (Method method : methods) {
+                Class<?>[] types = method.getParameterTypes();
+                List<String> parameterNames = new ArrayList<>(types.length);
+                for (int index = 0; index < types.length; index++) {
+                    parameterNames.add("argument" + index);
+                }
+                interfaceMethods.add(new InterfaceMethod(
+                        method.getName(),
+                        methodType(method),
+                        parameterNames,
+                        key(method.getName(), MethodType.methodType(method.getReturnType(), types))));
+            }
+            return List.copyOf(interfaceMethods);
         }
 
         /// Defines the public static entry of `operation`, which the interface method of the
@@ -1423,6 +1471,16 @@ final class ScanKernelGenerator
         }
     }
 
+    private static Constructor<?> constructor(Class<?> type, Class<?>... parameterTypes)
+    {
+        try {
+            return type.getConstructor(parameterTypes);
+        }
+        catch (NoSuchMethodException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private static Method method(Class<?> type, String name, Class<?>... parameterTypes)
     {
         try {
@@ -1433,12 +1491,12 @@ final class ScanKernelGenerator
         }
     }
 
-    private static CodeBlock ifThenJump(BytecodeExpression condition, CodeLabel target)
+    private static IfStatement ifThenJump(BytecodeExpression condition, CodeLabel target)
     {
-        return CodeBlock.block(IfStatement.builder()
+        return IfStatement.builder()
                 .condition(condition)
                 .then(CodeBlock.blockBuilder().jump(target).build())
-                .build());
+                .build();
     }
 
     private static BytecodeExpression fill(BytecodeExpression groups)
