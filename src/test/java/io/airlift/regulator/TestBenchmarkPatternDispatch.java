@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.CompiledPattern.Shape;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Param;
@@ -27,9 +28,12 @@ import java.util.Set;
 import static io.airlift.regulator.BenchmarkPatternDispatch.expression;
 import static io.airlift.regulator.BenchmarkPatternDispatch.targets;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
+import static io.airlift.regulator.CompiledPattern.Shape.BYTE_TABLE;
 import static io.airlift.regulator.CompiledPattern.Shape.CLASS_RUN;
 import static io.airlift.regulator.CompiledPattern.Shape.ENGINE;
 import static io.airlift.regulator.CompiledPattern.Shape.EXACT_LITERAL;
+import static io.airlift.regulator.CompiledPattern.Shape.FIXED_WIDTH;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
@@ -161,26 +165,32 @@ public class TestBenchmarkPatternDispatch
     /// Requires `compiled` to take the full-Slice `find` route that `target` names.
     private static void assertRoute(String target, CompiledPattern compiled, String description)
     {
-        if (GENERATED_TARGETS.contains(target)) {
-            assertThat(shape(compiled)).as(description).isEqualTo(SCAN_PLAN);
+        Shape expected = switch (target) {
+            case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
+            case "EXACT_LITERAL" -> EXACT_LITERAL;
+            case "CONTAINS", "ANCHORED_LITERAL" -> LITERAL_KERNEL;
+            case "CHARACTER_CLASS" -> CLASS_RUN;
+            case "LITERAL_ALTERNATION" -> LITERAL_ALTERNATION;
+            case "FIXED_WIDTH" -> FIXED_WIDTH;
+            // A Rust `\s` is Unicode, so it is no byte run.
+            case "BYTE_TABLE" -> compiled instanceof RustRegexp ? ENGINE : BYTE_TABLE;
+            case "GENERAL" -> ENGINE;
+            default -> throw new IllegalArgumentException("unknown target: " + target);
+        };
+        assertThat(shape(compiled)).as(description).isEqualTo(expected);
+        // A shape class can hold more than one find route, so pin the one the target names.
+        if (expected == SCAN_PLAN) {
             assertThat(compiled.usesScanPlanForFindForDiagnostics()).as(description).isTrue();
-            return;
         }
-        assertThat(compiled.usesScanPlanForDiagnostics()).as(description).isFalse();
         switch (target) {
-            case "EXACT_LITERAL" -> assertThat(shape(compiled)).as(description).isEqualTo(EXACT_LITERAL);
-            case "CONTAINS" -> {
-                assertThat(shape(compiled)).as(description).isEqualTo(LITERAL_KERNEL);
-                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
-            }
-            case "CHARACTER_CLASS" -> assertThat(shape(compiled)).as(description).isEqualTo(CLASS_RUN);
-            case "LITERAL_ALTERNATION" -> assertThat(shape(compiled)).as(description).isEqualTo(LITERAL_ALTERNATION);
+            case "FOLDED_PLAN" -> assertThat(compiled.usesAsciiFoldedScanExecutorForDiagnostics()).as(description).isTrue();
+            case "CONTAINS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
+            case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "GENERAL" -> {
-                assertThat(shape(compiled)).as(description).isEqualTo(ENGINE);
                 assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isFalse();
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNull();
             }
-            default -> throw new IllegalArgumentException("unknown target: " + target);
+            default -> {}
         }
     }
 
