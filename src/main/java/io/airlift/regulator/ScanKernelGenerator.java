@@ -894,8 +894,8 @@ final class ScanKernelGenerator
     /// [PatternRoutes]. A plan never matches empty, so every match loop resumes at the previous
     /// match end, as a matcher does. Scans call the copies in [ScanKernelSupport], not the
     /// interpreter's helpers; other shared code is reached only through static calls, calls on
-    /// class-data constants, final engine methods of the pattern itself, and the direct
-    /// superclass call to `matchInternal` that the generated hook makes for a call off the plan.
+    /// class-data constants, and final engine methods of the pattern itself, including the
+    /// ordinary engine that the generated hook calls for a call off the plan.
     private static final class ScanEmitter
     {
         // The interface methods a Trino class implements, the same for every pattern.
@@ -916,6 +916,7 @@ final class ScanKernelGenerator
         private static final Method REACHES_SCAN_PLAN = engineMethod("reachesScanPlan");
         private static final Method ACCEPTS_SCAN_PLAN_ARGUMENTS = engineMethod("acceptsScanPlanArguments");
         private static final Method FINISH_SCAN_SEARCH = engineMethod("finishScanSearch");
+        private static final Method MATCH_ON_ORDINARY_ENGINE = engineMethod("matchOnOrdinaryEngine");
 
         // Null for the class of an RE2, Java, or Rust pattern.
         private final TrinoRoutes routes;
@@ -1403,9 +1404,9 @@ final class ScanKernelGenerator
 
         /// The engine hook through which other calls that reach the plan run, except a matcher's
         /// start-anchored first search, which uses `findWithStartAnchoredScanPlan`: the plan route
-        /// of [CompiledPattern#matchInternal], with the attempt or search fixed by the plan. A
-        /// call off that route, including an unanchored boolean search that the routes keep on the
-        /// ordinary engine, runs the inherited hook.
+        /// of [CompiledPattern#matchInternalOnScanPlan], with the attempt or search fixed by the
+        /// plan. A call off that route, including an unanchored boolean search that the plan
+        /// allows on the ordinary engine, runs [CompiledPattern#matchOnOrdinaryEngine].
         private void defineMatchInternal()
         {
             Parameter prog = arg("prog", Prog.class);
@@ -1428,19 +1429,7 @@ final class ScanKernelGenerator
             }
             body.append(IfStatement.builder()
                     .condition(inheritedRoute)
-                    .then(self.invokeSpecial(
-                            superclass.describeConstable().orElseThrow(),
-                            "matchInternal",
-                            method.methodType(),
-                            prog,
-                            text,
-                            contextStart,
-                            contextEnd,
-                            start,
-                            end,
-                            anchor,
-                            groupOffsets,
-                            workspaces).ret())
+                    .then(self.invoke(MATCH_ON_ORDINARY_ENGINE, prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces).ret())
                     .build());
             body.append(IfStatement.builder()
                     .condition(self.invoke(ACCEPTS_SCAN_PLAN_ARGUMENTS, text, contextStart, contextEnd, start, end, groupOffsets).not())
