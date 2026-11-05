@@ -54,6 +54,38 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testAnchoredProgramRejectsImpossibleFirstByte()
+    {
+        Prog anchored = compile("^(?i)[urb]*['\"](.*)['\"]$");
+        byte[] startBytes = anchored.anchoredStartBytes();
+        assertThat(startBytes).isNotNull();
+        for (char value : "uUrRbB'\"".toCharArray()) {
+            assertThat(startBytes[value]).as("byte %s", value).isNotZero();
+        }
+        assertThat(startBytes[' ']).isZero();
+        assertThat(startBytes['x']).isZero();
+
+        // Nullable, assertion-led, and unanchored programs keep no table.
+        assertThat(compile("^a*").anchoredStartBytes()).isNull();
+        assertThat(compile("^\\bx").anchoredStartBytes()).isNull();
+        assertThat(compile("ab").anchoredStartBytes()).isNull();
+
+        Re2 pattern = Re2.compile(Slices.utf8Slice("^(?i)[urb]*['\"](?P<raw>.*)['\"]$"));
+        RegexpMatcher matcher = pattern.matcher(Slices.utf8Slice("    x = 'a'"));
+        assertThat(matcher.find()).isFalse();
+        // The rejection comes before any submatch engine sets up.
+        assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        matcher.reset(Slices.utf8Slice("rb'a'"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.group("raw").toStringUtf8()).isEqualTo("a");
+        matcher.reset(Slices.utf8Slice("\"b\""));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.group(1).toStringUtf8()).isEqualTo("b");
+    }
+
+    @Test
     public void testOptionalLeadingByteAndUtf8Candidates()
     {
         Prog optional = compile("(?:[a-z])?[0-9]");

@@ -382,6 +382,12 @@ final class Prog
     private int bytemapRange;
     private final byte[] bytemap = new byte[256];
 
+    // Set by computeByteMap(): the bytes that can begin a match of a start-anchored program. Null
+    // when the program is reversed or not start-anchored, can match empty, never matches
+    // (start() == 0), or reaches an assertion first, and when no byte or every byte can begin a
+    // match.
+    private byte[] anchoredStartBytes;
+
     // Prefix acceleration configuration.
     private boolean prefixFoldCase;
     private int prefixSize;
@@ -753,6 +759,14 @@ final class Prog
         }
     }
 
+    /// Returns a 256-entry table that is nonzero for each byte that can begin a match of this
+    /// start-anchored program, or null. An anchored search cannot match when its first byte has a
+    /// zero entry. Set by [#computeByteMap()].
+    byte[] anchoredStartBytes()
+    {
+        return anchoredStartBytes;
+    }
+
     /// Returns instruction counts by opcode, indexed by [InstOp#ordinal()].
     /// Only valid after [#flatten()] has been called.
     public int[] getInstCount()
@@ -794,6 +808,19 @@ final class Prog
         }
 
         byte[] candidates = new byte[256];
+        int candidateCount = walkStartBytes(stack, candidates, nullable);
+        // Dense candidate sets spend more time handing off to the DFA than they save scanning.
+        if (candidateCount >= 0 && candidateCount <= 64 && (candidateCount > 0 || nullable)) {
+            return candidates;
+        }
+        return null;
+    }
+
+    /// Marks in `candidates` every byte that can begin a non-empty match from [#start()] and
+    /// returns how many it marked, or -1 when the walk reaches an assertion, or reaches a match
+    /// while `nullable` is false.
+    private int walkStartBytes(int[] stack, byte[] candidates, boolean nullable)
+    {
         boolean[] visited = new boolean[size()];
         int stackPointer = 0;
         stack[stackPointer++] = start();
@@ -824,7 +851,7 @@ final class Prog
                     // Skipping input would lose the previous-byte context needed by the assertion.
                     // A search for the buildTransparentStartLiteral literal instead verifies each
                     // occurrence from the byte before it.
-                    return null;
+                    return -1;
                 }
                 case ALT, ALT_MATCH -> {
                     if (!instruction.last()) {
@@ -835,7 +862,7 @@ final class Prog
                 }
                 case MATCH -> {
                     if (!nullable) {
-                        return null;
+                        return -1;
                     }
                 }
                 case FAIL -> {
@@ -845,12 +872,7 @@ final class Prog
                 }
             }
         }
-
-        // Dense candidate sets spend more time handing off to the DFA than they save scanning.
-        if (candidateCount <= 64 && (candidateCount > 0 || nullable)) {
-            return candidates;
-        }
-        return null;
+        return candidateCount;
     }
 
     /// Builds the byte sets at the first `positionCount` positions of every match path, for the
@@ -2494,6 +2516,15 @@ final class Prog
         int[] outRange = new int[1];
         builder.build(bytemap, outRange);
         bytemapRange = outRange[0];
+
+        anchoredStartBytes = null;
+        if (anchorStart && !reversed && !canMatchEmpty && start() != 0) {
+            byte[] candidates = new byte[256];
+            int count = walkStartBytes(new int[3 * size() + 1], candidates, false);
+            if (count > 0 && count < 256) {
+                anchoredStartBytes = candidates;
+            }
+        }
     }
 
     /// Computes a lexicographic range `[min, max]` such that any string `s` that is a
