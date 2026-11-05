@@ -100,27 +100,33 @@ public final class RegexpMatcher
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
-        if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
-            throw new IllegalArgumentException("capturingGroupCount out of range: " + capturingGroupCount);
-        }
+        checkCapturingGroupCount(pattern, capturingGroupCount);
         this.groups = new int[2 * (capturingGroupCount + 1)];
         this.namedCapturingGroups = retainedNamedCapturingGroups(pattern, capturingGroupCount);
         this.latin1 = (pattern.flags() & Regexp.LATIN1) != 0;
-        this.singleByteMatcher = groups.length == 2 ? singleByteMatcher : null;
+        this.singleByteMatcher = capturingGroupCount == 0 ? singleByteMatcher : null;
         this.literalSet = enableSpecializedGroupZeroRoutes && this.singleByteMatcher == null ? pattern.literalSetSpanMatcher() : null;
-        this.characterClassCounter = groups.length == 2 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
-        this.candidateStartCursor = groups.length == 2 && this.singleByteMatcher == null && this.literalSet == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
+        this.characterClassCounter = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
+        this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && this.literalSet == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 this.singleByteMatcher == null &&
                 characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
-        this.hasDirectLoweredGroupZeroSearch =
-                groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
+        this.hasDirectLoweredGroupZeroSearch = capturingGroupCount == 0 && pattern.hasDirectLoweredGroupZeroSearch();
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
         reset(input);
+    }
+
+    /// Checks the retained group count out of line so that the constructor stays small enough for
+    /// C2 to inline.
+    private static void checkCapturingGroupCount(CompiledPattern pattern, int capturingGroupCount)
+    {
+        if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
+            throw new IllegalArgumentException("capturingGroupCount out of range: " + capturingGroupCount);
+        }
     }
 
     private static Map<String, Integer> retainedNamedCapturingGroups(CompiledPattern pattern, int capturingGroupCount)

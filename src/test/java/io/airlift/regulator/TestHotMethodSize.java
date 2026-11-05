@@ -40,13 +40,29 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
+    /// Keeps every RegexpMatcher constructor under the C2 hot-method inline limit. Trino builds a
+    /// new matcher for each row, so a constructor C2 will not inline puts a call on every row.
+    @Test
+    public void testMatcherConstructorsFitInlineSize()
+    {
+        assertThat(codeLengths(RegexpMatcher.class, "<init>"))
+                .as("RegexpMatcher constructor bytecode bytes")
+                .isNotEmpty()
+                .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+    }
+
     private static int codeLength(Class<?> type, String methodName)
     {
-        List<Integer> lengths = ClassFile.of().parse(classfile(type)).methods().stream()
+        List<Integer> lengths = codeLengths(type, methodName);
+        assertThat(lengths).as("methods named %s", methodName).hasSize(1);
+        return lengths.getFirst();
+    }
+
+    private static List<Integer> codeLengths(Class<?> type, String methodName)
+    {
+        return ClassFile.of().parse(classfile(type)).methods().stream()
                 .filter(method -> method.methodName().equalsString(methodName))
                 .map(method -> method.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0))
                 .toList();
-        assertThat(lengths).as("methods named %s", methodName).hasSize(1);
-        return lengths.getFirst();
     }
 }
