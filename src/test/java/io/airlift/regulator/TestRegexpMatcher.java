@@ -159,6 +159,61 @@ public class TestRegexpMatcher
     }
 
     @Test
+    public void testStartAnchoredFindAgreesWithOrdinaryEngine()
+    {
+        // A find over the whole input of a start-anchored pattern, from the input start with
+        // nothing matched since reset, goes straight to its one-pass or BitState engine. The
+        // ordinary engine is the oracle; a second find fails.
+        Random random = new Random(20261105);
+        String alphabet = "ab1;;;;YA\t 'u\"x";
+        List<String> rows = List.of("A1;x;y;1;z;;;;Y", "A;a;b;1;a;;1;;Y", "\"q\"", "aab", "abb");
+        List<CompiledPattern> patterns = List.of(
+                // One-pass; the rest run BitState.
+                RustRegexp.compile(Slices.utf8Slice("^([A-Z0-9]+);([^;]+);([^;]+);([0-9]+);([^;]+);([^;]*);([0-9]*);([^;]*);([YN])$")),
+                Re2.compile(Slices.utf8Slice("^(?i)[urb]*['\"](.*)['\"]$")),
+                Re2.compile(Slices.utf8Slice("^(a+)(a*)b")),
+                Re2.compile(Slices.utf8Slice("^(a|ab)(b*)")));
+        assertThat(patterns.getFirst().forwardProgramForDiagnostics().isOnePass()).isTrue();
+        for (CompiledPattern pattern : patterns) {
+            String regex = pattern.pattern().toStringUtf8();
+            assertThat(pattern.hasAnchoredSubmatchRoute()).as(regex).isTrue();
+            int[] expected = new int[2 * (pattern.capturingGroupCount() + 1)];
+            int matches = 0;
+            for (int iteration = 0; iteration < 2000; iteration++) {
+                String text;
+                if (iteration % 3 == 0) {
+                    text = rows.get(random.nextInt(rows.size()));
+                }
+                else {
+                    StringBuilder builder = new StringBuilder();
+                    for (int length = random.nextInt(32); length > 0; length--) {
+                        builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
+                    }
+                    text = builder.toString();
+                }
+                Slice input = Slices.utf8Slice(text);
+                boolean expectedMatch = pattern.matchRegionInto(input, 0, input.length(), 0, input.length(), CompiledPattern.Anchor.UNANCHORED, expected, new OnePass.Workspace(), new BitState.Workspace(), new Nfa.Workspace());
+                RegexpMatcher matcher = pattern.matcher(input);
+                String description = regex + " on " + text;
+                assertThat(matcher.find()).as(description).isEqualTo(expectedMatch);
+                if (expectedMatch) {
+                    matches++;
+                    for (int group = 0; group <= pattern.capturingGroupCount(); group++) {
+                        assertThat(matcher.start(group)).as(description).isEqualTo(expected[2 * group]);
+                        assertThat(matcher.end(group)).as(description).isEqualTo(expected[2 * group + 1]);
+                    }
+                }
+                assertThat(matcher.find()).as(description).isFalse();
+            }
+            assertThat(matches).as(regex).isPositive();
+        }
+        // A pattern that can match empty, or is not start-anchored, such as the last one above
+        // without its anchor, keeps the usual route.
+        assertThat(Re2.compile(Slices.utf8Slice("^(a*)")).hasAnchoredSubmatchRoute()).isFalse();
+        assertThat(Re2.compile(Slices.utf8Slice("(a|ab)(b*)")).hasAnchoredSubmatchRoute()).isFalse();
+    }
+
+    @Test
     public void testGroupZeroMatcherDoesNotExtractCaptures()
     {
         Re2 pattern = Re2.compile(Slices.utf8Slice("(💰)"));

@@ -208,6 +208,9 @@ public final class RegexpMatcher
         if (literalSet != null) {
             return findLiteralSet();
         }
+        if (pattern.hasAnchoredSubmatchRoute()) {
+            return findAnchoredSubmatch();
+        }
         if (rustSearch) {
             return findRust();
         }
@@ -247,6 +250,23 @@ public final class RegexpMatcher
             return true;
         }
         return failFind();
+    }
+
+    /// A start-anchored pattern can match only at the input start, so a find over the whole input,
+    /// from the input start with nothing matched since reset and with groups to fill, goes
+    /// straight to the submatch engine. The pattern never matches empty, so the Rust empty-match
+    /// rule never applies. Every other find takes the usual route.
+    private boolean findAnchoredSubmatch()
+    {
+        if (nextFindStart != 0 || groups.length == 2 || isPartialRegion()) {
+            return rustSearch ? findRust() : findGeneral();
+        }
+        if (!pattern.matchAnchoredSubmatch(input, groups, this)) {
+            return failFind();
+        }
+        previousMatchEnd = groups[1];
+        setMatchAndAdvance(groups[0], groups[1]);
+        return true;
     }
 
     /// The Rust crate skips an empty match that ends where the previous match ended or, except in
