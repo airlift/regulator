@@ -1566,6 +1566,18 @@ run, so once the run reaches the minimum the search skips to that byte without
 decoding. A dot that matches newline counts as a class of every character, so
 count and Trino's class-span functions also take its repeats.
 
+The span search stays small enough for C2 to inline into its callers, so the
+byte run and the region check are out of line and `TestHotMethodSize` pins its
+size. Reading class runs byte by byte first grew it past the 325 bytes C2
+inlines into a hot caller, and the out-of-line call made Trino `\p{L}+` extract
+up to 11% slower on Graviton. Inlining it again restores Graviton but costs
+Intel about 1 ns on some of these 17 to 24 ns rows: Trino `\p{L}+` position
+goes from 23.1 to 23.8 ns and extract from 17.0 to 18.1 ns. Graviton is weighted
+over Intel, so this is accepted. Splitting the search into a byte method and a
+decoding method, the decoding method being the search as it was before the byte
+runs, cleared Intel position but made Intel Trino replace 12% slower; do not
+repeat it without an Intel profile of replace.
+
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred
 to the first match: Trino pays compile cost up front so the match path stays
