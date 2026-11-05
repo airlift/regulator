@@ -444,6 +444,41 @@ final class OnePass
         matchCaptures[0] = textBegin;
         captures[0] = textBegin;
 
+        if (matchKind == Prog.MatchKind.FULL_MATCH) {
+            // Only an end-of-input match can satisfy a full match, so the loop carries no match
+            // bookkeeping: it loads no match condition or match capture per byte.
+            int stateOffset = 0;
+            for (; position < textEnd; position++) {
+                int actionIndex = stateOffset + (bytemap[bytes[position] & 0xFF] & 0xFF);
+                int condition = stateAction[actionIndex];
+                if ((condition & EMPTY_ALL_FLAGS) != 0 && !satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
+                    state = -1;
+                    break;
+                }
+                state = condition >>> INDEX_SHIFT;
+                stateOffset = state * range;
+                long captureMask = stateActionCapture[actionIndex];
+                if (captureMask != 0) {
+                    applyExtendedCaptures(captureMask, position, captures);
+                }
+            }
+            if (state >= 0) {
+                int matchCondition = stateMatchCondition[state];
+                if (matchCondition != IMPOSSIBLE &&
+                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
+                    applyExtendedCaptures(stateMatchCapture[state], position, captures);
+                    if (captures != matchCaptures || captureFinalization == CaptureFinalization.DIRECT_REBASE) {
+                        for (int captureSlot = 2; captureSlot < captureSlotCount; captureSlot++) {
+                            matchCaptures[captureSlot] = captures[captureSlot];
+                        }
+                    }
+                    matchCaptures[1] = position;
+                    matched = true;
+                }
+            }
+            return finishExtendedCaptures(matched, useCallerCaptures, submatch, captureFinalization, matchCaptures, matchCount, textBegin);
+        }
+
         int nextMatchCondition = stateMatchCondition[state];
         int stateOffset = 0;
 
@@ -506,6 +541,18 @@ final class OnePass
             }
         }
 
+        return finishExtendedCaptures(matched, useCallerCaptures, submatch, captureFinalization, matchCaptures, matchCount, textBegin);
+    }
+
+    private static boolean finishExtendedCaptures(
+            boolean matched,
+            boolean useCallerCaptures,
+            int[] submatch,
+            CaptureFinalization captureFinalization,
+            int[] matchCaptures,
+            int matchCount,
+            int textBegin)
+    {
         if (!matched) {
             if (useCallerCaptures) {
                 Arrays.fill(submatch, -1);
