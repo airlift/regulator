@@ -361,6 +361,10 @@ final class Prog
     private int onePassStateCount;
     private int[] onePassMatchCond;
     private int[] onePassAction; // flattened [stateCount * bytemapRange] actions, encoded like upstream
+    // Parallel to onePassAction: each action's next state times bytemapRange, the offset of that
+    // state's actions, so the loops chain one load and one add per byte instead of a shift and a
+    // multiply.
+    private int[] onePassNextOffset;
     // Only programs exceeding upstream's capture-bit capacity allocate these parallel masks.
     private long[] onePassMatchCapture;
     private long[] onePassActionCapture;
@@ -676,6 +680,11 @@ final class Prog
         return onePassAction;
     }
 
+    int[] onePassNextOffset()
+    {
+        return onePassNextOffset;
+    }
+
     long prefixShiftsMemory()
     {
         return prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
@@ -686,14 +695,20 @@ final class Prog
         if (!isOnePass()) {
             return 0;
         }
-        long stateSize = Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
-        if (onePassActionCapture != null) {
+        return onePassStateCount * onePassStateSize(ONEPASS_ACTION_BYTES, onePassActionCapture != null, onePassActionAssertions != null);
+    }
+
+    /// Returns the bytes one one-pass state retains when each action takes `actionBytes`.
+    private long onePassStateSize(int actionBytes, boolean extendedCaptures, boolean extendedAssertions)
+    {
+        long stateSize = Integer.BYTES + ((long) bytemapRange() * actionBytes);
+        if (extendedCaptures) {
             stateSize += Long.BYTES + ((long) bytemapRange() * Long.BYTES);
         }
-        if (onePassActionAssertions != null) {
+        if (extendedAssertions) {
             stateSize += Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
         }
-        return onePassStateCount * stateSize;
+        return stateSize;
     }
 
     public boolean supportsOnePassCaptureSlots(int captureSlotCount)
@@ -3363,6 +3378,8 @@ final class Prog
     // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
     private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
     private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
+    // The bytes each action retains: the action and its next-state offset.
+    private static final int ONEPASS_ACTION_BYTES = 2 * Integer.BYTES;
     // Action entries allocated before one-pass analysis starts growing node storage.
     private static final int ONEPASS_INITIAL_ACTIONS = 8192;
 
@@ -3411,20 +3428,18 @@ final class Prog
             }
         }
 
-        // Match upstream limits: reserve at most one quarter of the DFA budget and avoid
-        // overflowing the 16-bit node index used by the OnePass action encoding.
+        // Upstream's limit decides which programs are one-pass: tables with four-byte actions take
+        // at most one quarter of the DFA budget, and the node index must fit the 16-bit field of
+        // the OnePass action encoding. The tables are charged at their real size, eight bytes per
+        // action, at most twice upstream's charge. The extra comes out of the DFA's share, so the
+        // same programs are one-pass and the charge never exceeds half the budget.
         int maximumNodeCount = 2 + byteRangeCount;
         boolean hasExtendedCaptures = maximumCaptureSlot >= ONEPASS_MAX_CAP && maximumCaptureSlot < Long.SIZE;
-        long stateSize = Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
-        if (hasExtendedCaptures) {
-            stateSize += Long.BYTES + ((long) bytemapRange() * Long.BYTES);
-        }
-        if (hasExtendedAssertions) {
-            stateSize += Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
-        }
-        if (maximumNodeCount >= 65000 || dfaMemory / 4 / stateSize < maximumNodeCount) {
+        long upstreamStateSize = onePassStateSize(Integer.BYTES, hasExtendedCaptures, hasExtendedAssertions);
+        if (maximumNodeCount >= 65000 || dfaMemory / 4 / upstreamStateSize < maximumNodeCount) {
             return false;
         }
+        long stateSize = onePassStateSize(ONEPASS_ACTION_BYTES, hasExtendedCaptures, hasExtendedAssertions);
 
         int maximumStackSize = captureCount + emptyWidthCount + noOpCount + 1; // +1 for start instruction
         int[] stackInstructionIds = new int[Math.max(8, maximumStackSize)];
@@ -3454,8 +3469,9 @@ final class Prog
         // Like upstream, start node storage small when the bound is large, as programs that stop
         // being one-pass usually do so after a few nodes. Storage doubles on overflow, capped at
         // the bound rather than the node limit, so no step allocates more than doubling to the
-        // limit would, and a one-pass program ends exactly at the bound with no final copy. Small
-        // tables are allocated at their bound, because growing them costs more than zeroing them.
+        // limit would, and a one-pass program ends exactly at the bound with no trimming copy;
+        // only the next-state offsets are then built from the finished actions. Small tables are
+        // allocated at their bound, because growing them costs more than zeroing them.
         int byteClassCount = bytemapRange();
         int nodeCapacity = Math.min(nodeBound, onePassInitialNodeCapacity(byteClassCount));
         int[] nodeMatchCondition = new int[nodeCapacity];
@@ -3707,6 +3723,11 @@ final class Prog
         onePassStateCount = allocatedNodeCount;
         onePassMatchCond = nodeMatchCondition;
         onePassAction = nodeAction;
+        int[] nextOffset = new int[nodeAction.length];
+        for (int index = 0; index < nodeAction.length; index++) {
+            nextOffset[index] = (nodeAction[index] >>> ONEPASS_INDEX_SHIFT) * byteClassCount;
+        }
+        onePassNextOffset = nextOffset;
         onePassMatchCapture = nodeMatchCapture;
         onePassActionCapture = nodeActionCapture;
         onePassMatchAssertions = nodeMatchAssertions;

@@ -29,6 +29,9 @@ import static org.assertj.core.api.Assertions.within;
 // Ported from upstream RE2: re2/testing/compile_test.cc.
 public class TestUpstreamCompileMemoryBudget
 {
+    // Each one-pass action retains the action and its next-state offset.
+    private static final int ONEPASS_ACTION_BYTES = 2 * Integer.BYTES;
+
     @Test
     public void testInsufficientMemoryBudgetOneByteFails()
     {
@@ -202,14 +205,24 @@ public class TestUpstreamCompileMemoryBudget
         Prog reference = Compiler.compile(parsed.regexp(), false, 4096);
 
         long programMemory = 512L + ((long) reference.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
-        int maximumOnePassStates = 2 + 1;
-        long onePassStateSize = Integer.BYTES + ((long) reference.bytemapRange() * Integer.BYTES);
-        long insufficientDfaMemory = (4L * maximumOnePassStates * onePassStateSize) - 1;
+        // Upstream bounds the states by two plus the byte-range instruction count, including the
+        // unanchored prefix's instructions.
+        int maximumOnePassStates = 2 + reference.getInstCount(InstOp.BYTE_RANGE);
+        long upstreamStateSize = Integer.BYTES + ((long) reference.bytemapRange() * Integer.BYTES);
+        long sufficientDfaMemory = 4L * maximumOnePassStates * upstreamStateSize;
 
-        Prog program = Compiler.compile(parsed.regexp(), false, programMemory + insufficientDfaMemory);
+        // Upstream's limit, a quarter of the DFA budget for tables with four-byte actions, still
+        // decides which programs are one-pass. The tables are charged at their real size, which
+        // stays within the budget.
+        Prog program = Compiler.compile(parsed.regexp(), false, programMemory + sufficientDfaMemory);
+        assertThat(program.isOnePass()).isTrue();
+        long onePassMemory = (long) program.onePassStateCount() * (Integer.BYTES + ((long) program.bytemapRange() * ONEPASS_ACTION_BYTES));
+        assertThat(program.onePassMemory()).isEqualTo(onePassMemory);
+        assertThat(program.dfaMemory()).isEqualTo(sufficientDfaMemory - onePassMemory);
 
+        program = Compiler.compile(parsed.regexp(), false, programMemory + sufficientDfaMemory - 1);
         assertThat(program.isOnePass()).isFalse();
-        assertThat(program.dfaMemory()).isEqualTo(insufficientDfaMemory);
+        assertThat(program.dfaMemory()).isEqualTo(sufficientDfaMemory - 1);
     }
 
     @Test
@@ -218,9 +231,7 @@ public class TestUpstreamCompileMemoryBudget
         ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer("a".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
         Prog program = Compiler.compile(parsed.regexp(), false, 0);
 
-        long onePassMemory = (long) program.onePassStateCount() *
-                (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
-        assertThat(program.dfaMemory()).isEqualTo((1 << 20) - onePassMemory);
+        assertThat(program.dfaMemory()).isEqualTo((1 << 20) - program.onePassMemory());
     }
 
     @Test
@@ -280,10 +291,8 @@ public class TestUpstreamCompileMemoryBudget
         Prog program = Compiler.compile(parse(pattern), false, maxMemory);
 
         long programMemory = 512L + ((long) program.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
-        long onePassMemory = (long) program.onePassStateCount() *
-                (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
         assertThat(program.isOnePass()).isTrue();
-        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - onePassMemory - prefixShiftsMemory);
+        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - program.onePassMemory() - prefixShiftsMemory);
         assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isEqualTo(maxMemory);
     }
 

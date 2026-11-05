@@ -1774,8 +1774,8 @@ ordinary class.
 
 Pinned native RE2 stores OnePass capture actions in spare bits of a 32-bit
 transition word, which limits OnePass execution to group zero plus four explicit
-capture groups. Java retains that exact transition representation and hot loop
-for requests within the native limit.
+capture groups. Java retains that action encoding and its small-capture loop for
+requests within the native limit.
 
 For one-pass programs that contain higher capture slots, compilation additionally
 builds parallel 64-bit capture masks for match and transition actions. The
@@ -1786,8 +1786,24 @@ or NFA fallback.
 
 This representation is a performance deviation, not a matching-semantics
 deviation. It avoids sending deterministic high-capture expressions through
-BitState solely because of native RE2's packed-word limit, while keeping the
-more common small-capture loop unchanged.
+BitState solely because of native RE2's packed-word limit, while the more
+common requests within the native limit stay on the small-capture loop rather
+than the extended one.
+
+## OnePass Next-State Offsets
+
+Upstream turns each OnePass action's next node into the offset of that node's
+row with a multiply on every byte, a serial chain that bounds one-pass speed.
+Compilation additionally stores each action's next-state row offset in a table
+parallel to the actions, so the loops chain one load and one add per byte. The
+actions keep upstream's encoding.
+
+Upstream's limit still decides which programs are one-pass: tables of upstream's
+size, with four-byte actions, must fit in a quarter of the DFA budget. The tables
+are charged at their real size, eight bytes per action, which is at most twice
+upstream's charge. The extra comes out of the DFA's share, so the same programs
+are one-pass as under upstream, compilation never fails for it, and the DFA keeps
+at least half its budget instead of three quarters.
 
 ## Text-Dependent Assertions In OnePass
 
