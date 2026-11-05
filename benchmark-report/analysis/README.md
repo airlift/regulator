@@ -1,7 +1,12 @@
 # Reproducing timing intervals
 
 The report build reads saved estimates; it does not run a statistical analysis
-or require NumPy. To reproduce the interval calculation separately:
+or require NumPy. `scripts/build_capture_data.py` computes them once, when it
+captures a release campaign: `estimates.py` replaces each compared row's host
+medians with mean costs and supplies each host's independent-process means to
+`uncertainty` as `processMeansNs`. It refuses a host without `meanNs` and
+`epochMeansNs` rather than infer a mean from a median. Create this environment
+to capture a campaign or to reproduce the interval calculation separately:
 
 ```sh
 python3.12 -m venv target/benchmark-analysis

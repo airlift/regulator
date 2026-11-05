@@ -1,10 +1,11 @@
 """Adapt frozen baseline comparisons to the language report's result schema."""
 
 from collections import defaultdict
+import copy
 import csv
 from pathlib import Path
 
-from language_data import SPECIALIZED_VARIANT_SUFFIXES, reduce_hosts
+from language_data import DIRECTION_WARNING, RATIO_VARIATION_WARNING, SPECIALIZED_VARIANT_SUFFIXES, reduce_hosts
 
 
 # Sizes in the frozen BenchmarkTrinoLike scenario definitions. They describe
@@ -17,8 +18,8 @@ LIKE_INPUT_BYTES = {
 }
 BASELINE_WARNINGS = {
     'precision-rejected': 'At least one original host exceeded the sample precision gate',
-    'host-direction-disagreement': 'Hosts disagree about which engine is faster',
-    'ratio-host-cv-above-5-percent': 'Host ratio variation exceeds 5%',
+    'host-direction-disagreement': DIRECTION_WARNING,
+    'ratio-host-cv-above-5-percent': RATIO_VARIATION_WARNING,
 }
 # A variant's system is regulator, its variant, then its memory route: regulator-generated-object-row.
 SPECIALIZED_SYSTEM_VARIANTS = {'': '', '-regular-engine': '/regular-engine', '-generated': '/generated'}
@@ -273,7 +274,7 @@ def baseline_rows(directory, lifecycle_manifest):
                 'operation': operation, 'model': operation, 'population': population, 'family': family,
                 'language': language, 'platform': row['platform'], 'memoryMode': mode,
                 'comparator': 'Trino DFA' if comparator == 'trino-optimized' else None,
-                'inputBytes': size, 'source': 'baseline', 'result': result,
+                'inputBytes': size, 'source': 'baseline', 'result': copy.deepcopy(result),
                 **workload_details, **contract,
             })
         output.extend(views)

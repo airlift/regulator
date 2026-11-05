@@ -165,13 +165,19 @@ release. Keep the preliminary capture's original identity and label.
 
 `scripts/build_capture_data.py` builds the language report from a release
 campaign: the complete verified language exports and the baseline reduction.
-Provide a separate private complete-capture destination. The baseline is
-accepted against the row protocols and work units, which are generated rather
-than checked in, so generate them first:
+Provide a separate private complete-capture destination. It then estimates
+every numeric comparison as a mean cost with a hierarchical bootstrap interval,
+with `analysis/estimates.py`, from each host's mean and independent-process
+means. A baseline reduction made before the reducer kept those means lacks
+them, and the build names the missing fields and stops; reduce the campaign
+again from its raw archive. The estimates need NumPy, so run this step in the
+analysis environment of [`analysis/README.md`](analysis/README.md). The
+baseline is accepted against the row protocols and work units, which are
+generated rather than checked in, so generate them first:
 
 ```bash
 python3 tools/re2-benchmark/baseline/generate-units.py
-python3 benchmark-report/scripts/build_capture_data.py \
+target/benchmark-analysis/bin/python benchmark-report/scripts/build_capture_data.py \
   --released-campaign campaign-paths.json \
   --complete-output /private/archive/complete-campaign.json \
   --output /tmp/publication.json
