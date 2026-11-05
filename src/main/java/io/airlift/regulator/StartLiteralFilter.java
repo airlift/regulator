@@ -16,7 +16,6 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /// Three byte positions of every literal a match can begin with, checked together to find the
@@ -106,77 +105,104 @@ final class StartLiteralFilter
             }
         }
 
+        // A candidate position is narrow in every group, and its mask has at most two bits: more
+        // would accept more than four bytes for each group's byte.
         int positionCount = paths[0].length / 4;
-        int[] usable = new int[positionCount];
-        int usableCount = 0;
+        int[] positions = new int[positionCount];
+        byte[] candidateMasks = new byte[positionCount];
+        int candidateCount = 0;
+        position:
         for (int position = 0; position < positionCount; position++) {
-            boolean constrained = true;
+            int mask = 0;
             for (long[] group : groups) {
-                constrained &= isNarrow(group, position);
+                if (!isNarrow(group, position)) {
+                    continue position;
+                }
+                mask |= differingBits(group, position);
             }
-            if (constrained) {
-                usable[usableCount++] = position;
+            if (Integer.bitCount(mask) <= 2) {
+                positions[candidateCount] = position;
+                candidateMasks[candidateCount] = (byte) mask;
+                candidateCount++;
+            }
+        }
+        if (candidateCount < FILTER_POSITIONS) {
+            return null;
+        }
+
+        // Every triple reads the same group values and probabilities, so each is computed once.
+        int groupCount = groups.size();
+        int[] candidateValues = new int[groupCount * candidateCount];
+        double[] probabilities = new double[groupCount * candidateCount];
+        for (int group = 0; group < groupCount; group++) {
+            long[] byteSets = groups.get(group);
+            int row = group * candidateCount;
+            for (int candidate = 0; candidate < candidateCount; candidate++) {
+                int mask = candidateMasks[candidate] & 0xFF;
+                int value = firstByte(byteSets, positions[candidate]) | mask;
+                candidateValues[row + candidate] = value;
+                probabilities[row + candidate] = probability(value, mask, byteFrequencies);
             }
         }
 
-        StartLiteralFilter best = null;
-        for (int first = 0; first < usableCount; first++) {
-            for (int second = first + 1; second < usableCount; second++) {
-                for (int third = second + 1; third < usableCount; third++) {
-                    StartLiteralFilter candidate = build(groups, new int[] {usable[first], usable[second], usable[third]}, byteFrequencies);
-                    if (candidate != null && (best == null || candidate.density < best.density)) {
-                        best = candidate;
+        // A triple's density is the sum over its distinct groups, each a key holding the group's
+        // three values, first in the high byte. Only the best triple becomes a filter.
+        int[] keys = new int[MAXIMUM_GROUPS];
+        int[] bestKeys = new int[MAXIMUM_GROUPS];
+        int bestCount = 0;
+        int bestFirst = -1;
+        int bestSecond = -1;
+        int bestThird = -1;
+        double bestDensity = 0;
+        for (int first = 0; first < candidateCount; first++) {
+            for (int second = first + 1; second < candidateCount; second++) {
+                triple:
+                for (int third = second + 1; third < candidateCount; third++) {
+                    int distinctCount = 0;
+                    double density = 0;
+                    for (int group = 0; group < groupCount; group++) {
+                        int row = group * candidateCount;
+                        int key = (candidateValues[row + first] << 16) | (candidateValues[row + second] << 8) | candidateValues[row + third];
+                        int existing = 0;
+                        while (existing < distinctCount && keys[existing] != key) {
+                            existing++;
+                        }
+                        if (existing < distinctCount) {
+                            continue;
+                        }
+                        if (distinctCount == MAXIMUM_GROUPS) {
+                            continue triple;
+                        }
+                        keys[distinctCount++] = key;
+                        density += probabilities[row + first] * probabilities[row + second] * probabilities[row + third];
+                    }
+                    if (bestFirst < 0 || density < bestDensity) {
+                        bestFirst = first;
+                        bestSecond = second;
+                        bestThird = third;
+                        System.arraycopy(keys, 0, bestKeys, 0, distinctCount);
+                        bestCount = distinctCount;
+                        bestDensity = density;
                     }
                 }
             }
         }
-        return best;
-    }
-
-    private static StartLiteralFilter build(List<long[]> groups, int[] offsets, ByteFrequencies byteFrequencies)
-    {
-        byte[] masks = new byte[FILTER_POSITIONS];
-        for (int index = 0; index < FILTER_POSITIONS; index++) {
-            int mask = 0;
-            for (long[] group : groups) {
-                mask |= differingBits(group, offsets[index]);
-            }
-            // Two bits accept four bytes for each group's byte; more would accept too many.
-            if (Integer.bitCount(mask) > 2) {
-                return null;
-            }
-            masks[index] = (byte) mask;
+        if (bestFirst < 0) {
+            return null;
         }
 
-        List<byte[]> distinct = new ArrayList<>();
-        double density = 0;
-        for (long[] group : groups) {
-            byte[] groupValues = new byte[FILTER_POSITIONS];
-            for (int index = 0; index < FILTER_POSITIONS; index++) {
-                groupValues[index] = (byte) (firstByte(group, offsets[index]) | masks[index]);
-            }
-            if (distinct.stream().anyMatch(existing -> Arrays.equals(existing, groupValues))) {
-                continue;
-            }
-            if (distinct.size() == MAXIMUM_GROUPS) {
-                return null;
-            }
-            distinct.add(groupValues);
-            double groupDensity = 1;
-            for (int index = 0; index < FILTER_POSITIONS; index++) {
-                groupDensity *= probability(groupValues[index] & 0xFF, masks[index] & 0xFF, byteFrequencies);
-            }
-            density += groupDensity;
-        }
-
-        int width = scannerWidth(distinct.size());
-        byte[] values = new byte[width * FILTER_POSITIONS];
+        int[] offsets = {positions[bestFirst], positions[bestSecond], positions[bestThird]};
+        byte[] filterMasks = {candidateMasks[bestFirst], candidateMasks[bestSecond], candidateMasks[bestThird]};
+        int width = scannerWidth(bestCount);
+        byte[] filterValues = new byte[width * FILTER_POSITIONS];
         for (int group = 0; group < width; group++) {
-            byte[] groupValues = distinct.get(group < distinct.size() ? group : 0);
-            System.arraycopy(groupValues, 0, values, group * FILTER_POSITIONS, FILTER_POSITIONS);
+            int key = bestKeys[group < bestCount ? group : 0];
+            filterValues[group * FILTER_POSITIONS] = (byte) (key >>> 16);
+            filterValues[group * FILTER_POSITIONS + 1] = (byte) (key >>> 8);
+            filterValues[group * FILTER_POSITIONS + 2] = (byte) key;
         }
-        byte[] nibbleTables = width > 2 ? buildNibbleTables(distinct, masks) : null;
-        return new StartLiteralFilter(offsets, masks, values, distinct.size(), nibbleTables, density);
+        byte[] nibbleTables = width > 2 ? buildNibbleTables(filterValues, bestCount, filterMasks) : null;
+        return new StartLiteralFilter(offsets, filterMasks, filterValues, bestCount, nibbleTables, bestDensity);
     }
 
     // For each position, a low-nibble table then a high-nibble table. Group g sets bit g at the
@@ -184,14 +210,14 @@ final class StartLiteralFilter
     // The table is exact: a group accepts every byte that keeps its value's bits outside the mask
     // and has any combination of the mask's bits, so its accepted low and high nibbles combine
     // independently and every pairing of the two is itself accepted.
-    private static byte[] buildNibbleTables(List<byte[]> groups, byte[] masks)
+    private static byte[] buildNibbleTables(byte[] values, int groupCount, byte[] masks)
     {
         byte[] tables = new byte[FILTER_POSITIONS * 2 * NIBBLE_TABLE_BYTES];
-        for (int group = 0; group < groups.size(); group++) {
+        for (int group = 0; group < groupCount; group++) {
             byte bit = (byte) (1 << group);
             for (int index = 0; index < FILTER_POSITIONS; index++) {
                 int mask = masks[index] & 0xFF;
-                int value = groups.get(group)[index] & ~mask & 0xFF;
+                int value = values[group * FILTER_POSITIONS + index] & ~mask & 0xFF;
                 int lowTable = index * 2 * NIBBLE_TABLE_BYTES;
                 int highTable = lowTable + NIBBLE_TABLE_BYTES;
                 for (int bits = mask; ; bits = (bits - 1) & mask) {
@@ -225,17 +251,16 @@ final class StartLiteralFilter
     // join into one group.
     private static boolean canMerge(long[] group, long[] path)
     {
-        long[] union = new long[4];
         for (int position = 0; position < group.length / 4; position++) {
             boolean groupNarrow = isNarrow(group, position);
             if (groupNarrow != isNarrow(path, position)) {
                 return false;
             }
             if (groupNarrow) {
-                for (int index = 0; index < 4; index++) {
-                    union[index] = group[position * 4 + index] | path[position * 4 + index];
-                }
-                if (!isNarrow(union, 0)) {
+                // The union of two narrow sets is narrow when every byte in it differs from the
+                // group's first byte in the same one bit.
+                int unionBits = differingBits(group, position) | differingBits(path, position) | (firstByte(group, position) ^ firstByte(path, position));
+                if (Integer.bitCount(unionBits) > 1) {
                     return false;
                 }
             }
@@ -257,9 +282,10 @@ final class StartLiteralFilter
     {
         int first = firstByte(byteSets, position);
         int bits = 0;
-        for (int value = 0; value < 256; value++) {
-            if ((byteSets[position * 4 + (value >>> 6)] & (1L << value)) != 0) {
-                bits |= value ^ first;
+        // Visit only the members: a narrow set has one or two.
+        for (int index = 0; index < 4; index++) {
+            for (long members = byteSets[position * 4 + index]; members != 0; members &= members - 1) {
+                bits |= (index * 64 + Long.numberOfTrailingZeros(members)) ^ first;
             }
         }
         return bits;
