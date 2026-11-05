@@ -929,10 +929,11 @@ kernel, whether a start-anchored plan counts with one attempt, and whether
 short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
 another's branch profile. Only a pattern that cannot match empty takes a shape
-other than the engine. With compressed references, the `Re2` layout is 96
+other than the engine. With compressed references, the `Re2` layout is 104
 bytes, including one reference each for the shared single-byte matcher cache
-and the [matcher counter](#bounded-character-class-counting), and the scan-plan
-shape's layout, with its three facts, is 104 bytes. A pattern with a scan plan
+and the [matcher counter](#bounded-character-class-counting), and the base
+pattern's per-pattern ordinary-engine flags. The scan-plan shape's three facts
+fit in its padding, so its layout is also 104 bytes. A pattern with a scan plan
 takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
 prefix, equality, and final-line equality kernels, and its `matches` and
 `lookingAt` keep their literal kernels, which answer without reading past the
