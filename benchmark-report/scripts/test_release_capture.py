@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+import statistics
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -205,6 +206,10 @@ class TestReleaseCapture(unittest.TestCase):
             self.assertEqual({(row['platform'], float(row['median_ratio']), int(row['host_count']))
                               for row in release_capture.read_rows(Path(reduction) / 'comparison-aggregates.tsv')},
                              {(row['platform'], row['result']['ratio'], len(row['result']['hosts'])) for row in rows})
+            # Each host's side keeps its mean beside its median, and the means of its processes that make it up.
+            self.assertEqual({True}, {side['meanNs'] == statistics.fmean(side['epochMeansNs']) > side['medianNs']
+                                      for row in rows for host in row['result']['hosts']
+                                      for side in (host['candidate'], host['comparator'])})
             # The flagged host measured none of them, and the fourth host stands in for it on r8i.
             instances = {(row['platform'], host['instanceId']) for row in rows for host in row['result']['hosts']}
             self.assertNotIn(('r8i', 'i-r8i-3'), instances)

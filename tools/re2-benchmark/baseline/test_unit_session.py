@@ -475,7 +475,7 @@ class UnitFixture:
         observed = directory / "observed-rows.tsv"
         SHARD_RESULTS.write_tsv(observed, SHARD_RESULTS.OBSERVED_FIELDS, [{
             "row_id": row["row_id"], "shard_id": row["shard_id"], "system": row["system"],
-            "score": str(self.score(row)),
+            "score": SHARD_RESULTS.format_number(self.score(row)),
             "score_unit": "ns/op", "allocation_bytes": "0", "result_checksum": "0" * 64, "outcome": "accepted",
         } for row in sorted(share, key=lambda row: row["row_id"])])
         (directory / "observed-rows.tsv.sha256").write_text(
@@ -484,8 +484,9 @@ class UnitFixture:
             (directory / name).write_text("evidence\n")
         shard_rows = [row for row in UNIT_SESSION.load_manifest(BASELINE / "rows.tsv")
                       if row["shard_id"] == self.unit["shard_id"]]
-        SHARD_RESULTS.write_tsv(directory / "jmh-selectors.tsv", UNIT_SESSION.SELECTOR_FIELDS, UNIT_SESSION.selectors(
-            share, shard_rows, self.protocols, "qualification", dict(zip(UNIT_SESSION.SMOKE_SETTINGS, self.SMOKE))))
+        selectors = UNIT_SESSION.selectors(
+            share, shard_rows, self.protocols, "qualification", dict(zip(UNIT_SESSION.SMOKE_SETTINGS, self.SMOKE)))
+        SHARD_RESULTS.write_tsv(directory / "jmh-selectors.tsv", UNIT_SESSION.SELECTOR_FIELDS, selectors)
         report = directory / "semantic-reports" / "TEST-Fixture.xml"
         report.write_text("<testsuite/>\n")
         (directory / "semantic-receipt.sha256").write_text(
@@ -504,13 +505,47 @@ class UnitFixture:
                     "outcome": "accepted",
                 } for row in representatives])
         self.write_metadata(directory, len(representatives))
-        (directory / "raw").mkdir()
+        self.write_raw(directory / "raw", share, selectors)
         (directory / "logs").mkdir()
         log = directory / "logs" / "benchmark.log"
         log.write_text("complete\n")
-        (directory / "raw-artifacts.sha256").write_text(
-            f"{hashlib.sha256(log.read_bytes()).hexdigest()}  logs/benchmark.log\n")
+        (directory / "raw-artifacts.sha256").write_text("".join(
+            f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}\n" for name in sorted(
+                [f"raw/{path.name}" for path in (directory / "raw").iterdir()] + ["logs/benchmark.log"])))
         (directory / "status.txt").write_text("status=complete\n")
+
+    def write_raw(self, directory, share, selectors):
+        """Each selector's raw results as its handler writes them: a JMH selector's processes in one file, and each
+        native row's repetitions in a file of its own. Every process's last sample is twice its row's score, so its
+        median is the score and its mean is not."""
+        directory.mkdir()
+        for selector in selectors:
+            block = (None if selector["parameters"] == UNIT_SESSION.ROUTE_ARGUMENTS
+                     else json.loads(selector["parameters"]))
+            rows = [row for row in share if row["system"] == selector["system"]
+                    and row_protocol.jmh_benchmark(row) in selector["benchmarks"].split(",")
+                    and (block is None or all(value in block[name] for name, value in
+                                              row_protocol.parse_parameters(row["parameters"]).items()))]
+            iterations = int(selector["measurement_iterations"])
+
+            def samples(row):
+                return [self.score(row)] * (iterations - 1) + [2 * self.score(row)]
+            if selector["kind"] == "native":
+                for index, row in enumerate(rows):
+                    (directory / f"fixture-{index}-selector-{selector['selector']}.json").write_text(json.dumps({
+                        "context": {f"parameter.{name}": value for name, value in
+                                    row_protocol.parse_parameters(row["parameters"]).items()},
+                        "benchmarks": [{
+                            "name": row["benchmark"], "run_name": row["benchmark"], "run_type": "iteration",
+                            "repetitions": iterations, "repetition_index": repetition, "iterations": 1,
+                            "time_unit": "ns", "real_time": sample} for repetition, sample in enumerate(samples(row))]}))
+                continue
+            (directory / f"fixture-selector-{selector['selector']}.json").write_text(json.dumps([{
+                "benchmark": row_protocol.jmh_benchmark(row),
+                "params": row_protocol.parse_parameters(row["parameters"]),
+                "primaryMetric": {"score": self.score(row), "scoreUnit": "ns/op",
+                                  "rawData": [samples(row)] * int(selector["processes"])},
+            } for row in rows]))
 
     def write_metadata(self, directory, representative_count):
         receipt = directory / "semantic-receipt.sha256"

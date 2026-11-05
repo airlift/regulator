@@ -534,6 +534,10 @@ class TestUnitCampaignReduction(unittest.TestCase):
                  "regulator-object-row": {aggregate_results.format_number(300 / 100)}},
                 {system: {row["ratio"] for row in ratios if row["candidate_system"] == system}
                  for system in ("regulator-native-access", "regulator-object-row")})
+            # Each host keeps its mean and each of its processes' means beside its median.
+            self.assertEqual({("300", "330", ",".join(["330"] * 5))}, {
+                (row["score"], row["mean_score"], row["process_mean_scores"])
+                for row in read_tsv(output / "host-rows.tsv") if row["system"] == "regulator-object-row"})
             self.assertEqual(
                 [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
                 read_tsv(output / "confirmation-jobs.tsv"))
