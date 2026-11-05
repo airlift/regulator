@@ -2841,6 +2841,15 @@ abstract sealed class CompiledPattern
         if (searchLength < MINIMUM_LENGTH_CHECK_LIMIT && searchLength < MatchLength.minimum(matchLength)) {
             return false;
         }
+        // With one table load before any engine setup, a start-anchored program rejects a first
+        // byte that cannot begin a match; the submatch engines would otherwise pay their setup to
+        // find the same failure.
+        if (anchored && searchLength > 0) {
+            byte[] anchoredStartBytes = prog.anchoredStartBytes();
+            if (anchoredStartBytes != null && anchoredStartBytes[text.byteArray()[text.byteArrayOffset() + start] & 0xFF] == 0) {
+                return false;
+            }
+        }
 
         int[] mutableGroupOffsets = groupOffsets;
         boolean writingCallerGroups = groupOffsets != null;
