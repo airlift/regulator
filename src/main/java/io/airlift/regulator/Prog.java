@@ -4234,7 +4234,7 @@ final class Prog
         private boolean addWithoutResize(long key)
         {
             int mask = mergedGroups.length - 1;
-            int index = slot(key, mask);
+            int index = SeededHash.hash(key) & mask;
             while (mergedGroups[index] != 0) {
                 if (mergedGroups[index] == key) {
                     return false;
@@ -4245,9 +4245,11 @@ final class Prog
             return true;
         }
 
-        private static int slot(long key, int mask)
+        /// Returns where the merged groups ended up in their set, which holds the distinct
+        /// groups merged after the first `GROUP_DEDUPLICATION_MERGES` merges.
+        SeededHash.Placement mergedGroupPlacementForTesting()
         {
-            return (int) ((key * 0x9E3779B97F4A7C15L) >>> 40) & mask;
+            return SeededHash.Placement.of(mergedGroups.length, slot -> mergedGroups[slot] != 0, slot -> mergedGroups[slot]);
         }
 
         void build(byte[] bytemap, int[] bytemapRangeOut)
