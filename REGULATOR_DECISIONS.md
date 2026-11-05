@@ -1455,12 +1455,14 @@ such a class keeps the DFA on the matcher route rather than retain up to
 136 KiB, unless it holds every non-ASCII character, as a negated ASCII class
 does. A counter's span search skips bytes that cannot begin a member before
 decoding, with one table load per byte or, for a sparse class, a vector scan
-after a short scalar prefix. In an unbounded repeat of a UTF-8 class of every
-character, such as `(?s:.)+`, only a byte that begins no character under the
-lenient read ends a run, so once the run reaches the minimum the search skips
-to that byte without decoding. A dot that matches newline counts as a class of
-every character, so count and Trino's class-span functions also take its
-repeats.
+after a short scalar prefix. A Latin-1 or byte-mode class, or a UTF-8 class of
+only ASCII members, marks exactly its members as start bytes, so the search
+reads its whole run on that table, one load per byte, cut at the repeat's
+maximum. In an unbounded repeat of a UTF-8 class of every character, such as
+`(?s:.)+`, only a byte that begins no character under the lenient read ends a
+run, so once the run reaches the minimum the search skips to that byte without
+decoding. A dot that matches newline counts as a class of every character, so
+count and Trino's class-span functions also take its repeats.
 
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred
