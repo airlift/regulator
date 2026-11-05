@@ -422,11 +422,11 @@ final class BoundedCharacterClassCounter
 
     // PERFORMANCE-SENSITIVE HOT LOOP: the start-byte skip, the start-byte run read, and inline
     // decoding replace one DFA restart per match. Changes require focused Intel and Graviton
-    // qualification.
+    // qualification. It stays small enough for C2 to inline into its callers (TestHotMethodSize),
+    // so the region check and the byte run are out of line.
     long findSpan(Slice input, int contextStart, int contextEnd, int start)
     {
-        if (contextStart < 0 || contextEnd < contextStart || contextEnd > input.length() ||
-                start < contextStart || start > contextEnd) {
+        if (!isSearchRegion(input, contextStart, contextEnd, start)) {
             return Dfa.SEARCH_NO_MATCH;
         }
 
@@ -454,13 +454,7 @@ final class BoundedCharacterClassCounter
             }
             int runStart = position;
             if (readsBytes) {
-                // Each member is one byte and the start bytes are exactly the members, so the run
-                // is read on the start-byte table, one load per byte, without decoding.
-                int runEnd = maximum == -1 ? end : (int) Math.min(end, (long) runStart + maximum);
-                position++;
-                while (position < runEnd && memberStartBytes[bytes[position] & 0xFF]) {
-                    position++;
-                }
+                position = byteRunEnd(bytes, runStart, end);
                 if (position - runStart >= minimum) {
                     return packSpan(inputOffset, contextStart, runStart, position);
                 }
@@ -494,6 +488,25 @@ final class BoundedCharacterClassCounter
             }
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // Returns whether the region lies within `input` and `start` lies within the region.
+    private static boolean isSearchRegion(Slice input, int contextStart, int contextEnd, int start)
+    {
+        return contextStart >= 0 && contextEnd >= contextStart && contextEnd <= input.length() && start >= contextStart && start <= contextEnd;
+    }
+
+    // Returns the end of the run of members from `runStart`, which holds a member, cut at the
+    // repeat's maximum. Each member is one byte and the start bytes are exactly the members, so the
+    // run is read on the start-byte table, one load per byte, without decoding.
+    private int byteRunEnd(byte[] bytes, int runStart, int end)
+    {
+        int runEnd = maximum == -1 ? end : (int) Math.min(end, (long) runStart + maximum);
+        int position = runStart + 1;
+        while (position < runEnd && memberStartBytes[bytes[position] & 0xFF]) {
+            position++;
+        }
+        return position;
     }
 
     /// Returns whether a member begins at `start` within the region, without checking the run's

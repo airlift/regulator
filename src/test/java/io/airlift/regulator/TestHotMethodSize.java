@@ -149,6 +149,17 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the class counter's span search small enough for C2 to inline into class-run callers,
+    /// such as Trino's class-run extract and position.
+    @Test
+    public void testClassRunSpanSearchFitsInlineSize()
+    {
+        assertThat(codeLength(BoundedCharacterClassCounter.class, "findSpan"))
+                .as("BoundedCharacterClassCounter.findSpan bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+    }
+
     private static int codeLength(Class<?> type, String methodName)
     {
         List<Integer> lengths = codeLengths(type, methodName);
