@@ -288,10 +288,11 @@ final class Dfa
         return (int) (-2L - result);
     }
 
-    // Like searchAnchoredCandidate, with three differences: the window may end before the context,
-    // so the last step reads the byte after the window; a match at the start is accepted; and there
-    // is no work budget, since the caller bounds the work by never confirming a candidate inside a
-    // span an earlier confirmation already read.
+    // Like searchAnchoredCandidate, with four differences: the window may end before the context,
+    // so the last step reads the byte after the window; a match at the start is accepted; there is
+    // no work budget, since the caller bounds the work by never confirming a candidate inside a
+    // span an earlier confirmation already read; and a transition back into the current state
+    // keeps its row.
     private static long searchAnchoredWithStop(DfaInstance dfa, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
     {
         StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
@@ -335,6 +336,11 @@ final class Dfa
             if ((nextState & T_MATCH_BIT) != 0) {
                 lastMatchBoundary = position;
                 nextState &= ~T_MATCH_BIT;
+            }
+            // Object rows hold no match transitions, so every byte of a matching self-loop takes
+            // this path; staying in the state keeps the current row.
+            if (nextState == stateOffset) {
+                continue;
             }
 
             stateOffset = nextState;
