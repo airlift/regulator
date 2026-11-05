@@ -1,0 +1,21 @@
+{
+  "access": "Private evidence storage. Use credentials authorized to read the benchmark archive bucket.",
+  "archives": [
+    {
+      "name": "r20-20261104a/root-9f59818711ddb5eaee72450657beb69c12b301beb9305910d9db6327525c0be3.tar.zst",
+      "campaign": "r20-20261104a",
+      "s3_uri": "s3://regulator-benchmark-archive-938463256137-us-west-2/campaigns/r20-20261104a/root-9f59818711ddb5eaee72450657beb69c12b301beb9305910d9db6327525c0be3.tar.zst",
+      "bytes": 4160988757,
+      "archive_sha256": "72022d38b4e85ddd00579832d4fc41e79194c97c511256833e1d3d596a1d7f92",
+      "manifest_sha256": "9f59818711ddb5eaee72450657beb69c12b301beb9305910d9db6327525c0be3"
+    },
+    {
+      "name": "r20c-20261105a/root-41d691c889ba28a694cb519800b41b9247dc469fc8243744738c20480b166d70.tar.zst",
+      "campaign": "r20c-20261105a",
+      "s3_uri": "s3://regulator-benchmark-archive-938463256137-us-west-2/campaigns/r20c-20261105a/root-41d691c889ba28a694cb519800b41b9247dc469fc8243744738c20480b166d70.tar.zst",
+      "bytes": 1990595898,
+      "archive_sha256": "004c06ebc72141011a51636c0133c72f6603cd8b0615975a1b7ce242d5fce61a",
+      "manifest_sha256": "41d691c889ba28a694cb519800b41b9247dc469fc8243744738c20480b166d70"
+    }
+  ]
+}
