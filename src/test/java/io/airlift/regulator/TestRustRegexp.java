@@ -451,15 +451,20 @@ public class TestRustRegexp
         assertThat(tail.find()).isFalse();
         assertThat(tail.dfaQuitStreak()).isZero();
 
-        // A failed find that quits retries from the same start, so repeated quits near the end of
-        // the input also reach the limit.
-        RegexpMatcher retrying = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}")).matcher(utf8Slice("fooж " + "x".repeat(70)), 0);
+        // A failed find that quits retries from the same start, so repeated quits also reach the
+        // limit. The input is longer than the pattern's minimum length, so the DFA runs.
+        RegexpMatcher retrying = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}")).matcher(utf8Slice("fooж " + "x".repeat(110)), 0);
         assertThat(retrying.candidateStartCursorSearchesLiteralForDiagnostics()).isTrue();
         for (int quit = 0; quit < 6; quit++) {
             assertThat(retrying.find()).isFalse();
             assertThat(retrying.dfaQuitStreak()).isEqualTo(Math.min(quit + 1, DFA_QUIT_STREAK_LIMIT));
             assertThat(retrying.candidateStartFallbackCountForDiagnostics()).isEqualTo(Math.min(quit + 1, DFA_QUIT_STREAK_LIMIT));
         }
+        // A shorter input fails on length before the DFA can quit.
+        RegexpMatcher tooShort = RustRegexp.compile(utf8Slice("\\bfoo\\b.{100}")).matcher(utf8Slice("fooж " + "x".repeat(70)), 0);
+        assertThat(tooShort.find()).isFalse();
+        assertThat(tooShort.dfaQuitStreak()).isZero();
+        assertThat(tooShort.candidateStartFallbackCountForDiagnostics()).isZero();
 
         // A match the cursor verifies ends the streak, so quits that alternate with matches never
         // reach the limit.

@@ -1237,6 +1237,12 @@ abstract sealed class CompiledPattern
         return booleanPlans.matches();
     }
 
+    /// Returns the fewest bytes any match spans, or 0 when it can be empty.
+    int minimumMatchLength()
+    {
+        return MatchLength.minimum(matchLength);
+    }
+
     boolean canUseDirectBitStateCapture(Prog prog, int searchLength, int captureCount)
     {
         return !longestMatch &&
