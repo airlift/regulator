@@ -341,6 +341,34 @@ Match iteration uses the existing regex execution machinery, the Trino
 and the literal-alternation matcher where applicable; it does not require the
 same specialized route as each higher-level Trino operation.
 
+## Compilation options
+
+`TrinoRegexp.Options.defaults()` creates mutable, chainable options. Trino's SQL
+functions take no compile flags, so the options have no syntax settings; inline
+flags such as `(?i)` are written in the pattern. No option changes what a
+pattern matches:
+
+- `setMaxMemory` sets the compiled-program and DFA-cache budget in bytes,
+  96 MiB by default. A budget that is not positive throws
+  `IllegalArgumentException`, and a pattern that does not fit throws
+  `RegexpCompileMemoryLimitException`.
+- `setByteFrequencies` chooses which literal byte an unanchored search scans
+  for; it affects speed, not results. See
+  [Byte frequencies](../REGULATOR_API.md#byte-frequencies).
+- `setGenerateBytecode` is experimental and compiles an eligible pattern's
+  case-sensitive scan plan into its own hidden class; it affects speed, not
+  results. `usesGeneratedBytecode()` reports whether the pattern has one, and
+  a caller holding a constant pattern can bind an operation's generated code
+  through its `generated*` accessor, such as `generatedContains()`, which is
+  empty when that operation runs elsewhere. See [Trino adapter](../REGULATOR_API.md#trino-adapter) and
+  [Generated kernels](../../benchmarks/SCAN_PLAN.md#generated-kernels).
+
+Compilation copies the pattern and snapshots the option values.
+`TrinoRegexp.parse(pattern, options)` accepts the same options, as the other
+languages' parse methods do, but none of them changes its result, and it does
+not check the memory budget; see
+[pattern validation and capture metadata](../REGULATOR_API.md#pattern-validation-and-capture-metadata).
+
 ## Unsupported features
 
 The following features available in Java or Trino's Joni implementation are
