@@ -17,8 +17,8 @@ into a row-count-weighted overall score.
 
 | Population | Purpose | Comparators | Headline use |
 |---|---|---|---|
-| Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected language; Joni for additional Trino operations | Primary application view |
-| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex, RE2, Java, Rust, and LIKE today | The page comparator: Joni for Trino regex, native RE2 for RE2, JDK `Pattern` for Java, the `regex` crate for Rust, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
+| Application-shaped scalar operations | Reused patterns applied to changing, short and medium inputs | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected language; Joni for additional Trino operations | Primary application view |
+| Compiled patterns | Representative patterns uncompiled and compiled, as warmed steady-state operations; Trino regex, RE2, Java, Rust, and LIKE today | The page comparator: Joni for Trino regex, native RE2 for RE2, JDK `Pattern` for Java, the `regex` crate for Rust, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
 | Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected regex language | Separate report section; excluded from headlines |
@@ -80,20 +80,24 @@ identical Slice-list, SQL-position, split, or lambda-replacement API. The shared
 everyday suite and RE2 bulk workloads provide native RE2 comparisons without
 inventing a C++ facade for Trino-specific operations.
 
-### Specialized engine and compiler
+### Compiled patterns
 
-Specialized-pattern workloads show what happens to representative patterns
-when Regulator's specialized engine and compiler apply. The page names three
-variants. The regular engine is Regulator with scan plans off. The specialized
-engine compiles an eligible pattern to a scan plan and interprets it; code calls
+Specialized-pattern workloads show what the opt-in compiler does for
+representative patterns that get a scan plan. Uncompiled is the default: the
+compile turns an eligible pattern into a scan plan and interprets it; code calls
 it the interpreter. Compiled is the opt-in compiler, enabled with
 `setGenerateBytecode`, which turns that plan into bytecode generated for the
 pattern; code and benchmark names call it generated. Each workload measures one
-ordinary operation with each variant beside the page's comparator. The regular
-engine and the specialized engine make the public call; the compiled pattern is
-[const-bound](SCAN_PLAN.md#benchmarks) the way an engine like Trino binds
-it, the best case such an engine sees. Each pattern runs in its own JVM, so no
-call site sees another pattern. LIKE has no regular-engine variant.
+ordinary operation uncompiled and compiled beside the page's comparator. The
+uncompiled pattern makes the public call; the compiled pattern is
+[const-bound](SCAN_PLAN.md#benchmarks) the way an engine like Trino binds it,
+the best case such an engine sees. Each pattern runs in its own JVM, so no call
+site sees another pattern. The page compares uncompiled with the comparator,
+compiled with uncompiled, and compiled with the comparator.
+
+The regex shards also measure the regular engine, Regulator with scan plans
+off. Its rows stay in the page data and downloads, but the page shows neither
+them nor any gain computed against them. LIKE has no regular-engine variant.
 
 The regex languages share the Trino workloads. Each language applies a
 workload's operation through its own public API, and its comparator applies it
@@ -117,14 +121,14 @@ host:
   `captures_read` and `get` for `extract`, and a `captures_read_at` loop with
   reused locations for `extractAll`. It records no allocation.
 
-Case `trino-specialized/<workload>` is the specialized engine for Trino regex,
+Case `trino-specialized/<workload>` is the uncompiled pattern for Trino regex,
 `re2-specialized/<workload>` for RE2, `java-specialized/<workload>` for Java,
 `rust-specialized/<workload>` for Rust, and `trino-like-specialized/<workload>`
 for LIKE. Appending `/generated` gives the compiled pattern, and
 `/regular-engine`, where measured, the regular engine.
 
-This population answers what a pattern gains from the specialized engine and
-from the opt-in compiler. It reports warmed steady-state operations only;
+This population answers what a pattern gains from the opt-in compiler and how
+both forms compare. It reports warmed steady-state operations only;
 compile and generation costs are not part of it. These rows carry their own
 `specialized-patterns` population and never enter a headline summary. Trino
 regex, RE2, Java, Rust, and LIKE have them today. `COMPARATOR_LANGUAGES` in
@@ -225,30 +229,30 @@ places the explanation in the row details. Neither status is a numeric loss.
 Within each regex language page, report in this order:
 
 1. application-shaped scalar operations
-2. specialized engine and compiler where measured
+2. compiled patterns where measured
 3. integrated single-use and multi-use pattern lifecycle
 4. Trino-specific operations where available
 5. text processing workloads
 6. literal-probe distributions
 7. folded adversarial and synthetic stress workloads
 
-LIKE has its own integrated lifecycle table, preceded by the specialized engine
-and compiler where measured. Put ordinary prefix, suffix, exact, and contains
-shapes first and dense-false stress last, keeping DFA variants adjacent.
-Compile-only rows remain in the public download rather than a separate table.
+LIKE has its own integrated lifecycle table, preceded by compiled patterns
+where measured. Put ordinary prefix, suffix, exact, and contains shapes first
+and dense-false stress last, keeping DFA variants adjacent. Compile-only rows
+remain in the public download rather than a separate table.
 
 Each literal-probe row pairs the default and tuned measurements of one
-workload. It shows both ratios against the comparator, each with its gap in
-instructions, and the tuned-versus-default ratio, computed by dividing those two
-comparator-relative ratios so that differences between the hosts that measured
-them cancel. Its interval divides the far ends of the two ratio intervals, so a
-gain that neither interval clearly supports reads as no clear difference.
+workload. It shows both ratios against the comparator and the
+tuned-versus-default ratio, computed by dividing those two comparator-relative
+ratios so that differences between the hosts that measured them cancel. Its
+interval divides the far ends of the two ratio intervals, so a gain that
+neither interval clearly supports reads as no clear difference.
 
-Each specialized-pattern row pairs the variants of one pattern and operation.
-It shows each variant's time and each later variant's gain over the variant
-first in column order, computed and bounded like a literal-probe gain, then the
-last variant against the comparator and its gap in instructions. The page's
-measured variants, not its language, decide the variant columns.
+Each compiled-pattern row pairs the uncompiled and compiled variants of one
+pattern and operation. It shows both times, both ratios against the comparator,
+and the compiled gain over uncompiled, computed and bounded like a
+literal-probe gain from the host-paired warnings of those two variants. Every
+language, LIKE included, gets the same columns.
 
 Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or

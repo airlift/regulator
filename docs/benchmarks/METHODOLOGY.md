@@ -452,17 +452,9 @@ so color is never the only cue:
 | Clear win or loss | ▲ or ▼, full green or red | Not a tie, with a gap of at least 0.3 ns per byte or 5 ns per call and a ratio of at most 0.8 or at least 1.25 |
 | Modest win or loss | △ or ▽, pale green or red | Every other win or loss |
 
-Below the tie gap, a difference is under 1 instruction per byte or 20 per call,
-too little for its ratio to say much about cost. Gains between Regulator
-variants, such as tuned over default or compiled over the regular engine, have
-no gap or host range, so their ratio and interval decide.
-
-Each comparison where Regulator is slower also shows its gap in instructions,
-at a nominal 10 instructions per ns on every CPU. Per byte, a gap under 0.1 ns
-reads "under one instruction per byte" and one under 0.3 ns "under three
-instructions per byte". Per call, a gap under 2 ns reads "under 20 instructions
-per call" and one under 5 ns "under 50 instructions per call". Lifecycle tables
-give the gap for multi-use only, because single-use times include compilation.
+A difference under the tie gap is too little for its ratio to say much about
+cost. Gains between Regulator variants, such as tuned over default or compiled
+over uncompiled, have no gap or host range, so their ratio and interval decide.
 
 ### Host check
 

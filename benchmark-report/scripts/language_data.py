@@ -273,8 +273,10 @@ def validate_language_report(data):
                 or not isinstance(publication.get('note'), str) or not publication['note'].strip()
                 or 'preliminary' not in data['sources']['currentLabel'].lower()):
             raise ValueError('invalid preliminary publication metadata')
-    # Only the 1.0 preliminary snapshot mixed development revisions with targeted single-host follow-ups.
-    targeted = publication is not None and publication['sourcePolicy'] == 'mixed-development-revisions'
+    # Only the 1.0 preliminary snapshot mixed development revisions with targeted single-host follow-ups; a later
+    # release's mixed report replaces rows with re-measured ones that keep three hosts.
+    targeted = (publication is not None and publication['sourcePolicy'] == 'mixed-development-revisions'
+                and not data['sources'].get('releaseVersion'))
     platforms = data['platforms']
     if set(data['memoryModes']) != set(MEMORY_MODES):
         raise ValueError('missing memory mode')

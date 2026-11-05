@@ -344,6 +344,18 @@ class TestReportData(unittest.TestCase):
         preliminary['sources']['currentLabel'] = 'Regulator 2.0 preliminary results'
         preliminary['publication'] = {'status': 'preliminary', 'sourcePolicy': 'candidate-build',
                                       'note': 'Candidate build.'}
+        # A later candidate's targeted re-measure replaces a row, which keeps the base result.
+        mixed = copy.deepcopy(preliminary)
+        mixed['publication']['sourcePolicy'] = 'mixed-development-revisions'
+        build = {'campaign_id': 'remeasure.main', 'candidate_commit': 'e' * 40, 'engine_tree': 'f' * 40}
+        mixed['provenance']['targetedRemeasure'] = {
+            'campaignId': build['campaign_id'], 'candidateCommit': build['candidate_commit'],
+            'engineTree': build['engine_tree'], 'collectors': {'baseline': dict(build)},
+            'replacedRowKeys': [[mixed['rows'][0][field] for field in ('id', 'language', 'platform', 'memoryMode')]]}
+        original = copy.deepcopy(mixed['rows'][0]['result'])
+        for host in original['hosts']:
+            host['instanceId'] = f"base-{host['instanceId']}"
+        mixed['rows'][0].update(measurementSource=dict(build), originalResult=original)
 
         def unreleased(report):
             del report['sources']['releaseVersion'], report['publicationScope']
@@ -357,10 +369,7 @@ class TestReportData(unittest.TestCase):
              lambda report: report['sources'].update(currentLabel='Regulator 2.0 final results'), 'currentLabel'),
             ('final unreleased', final, unreleased, 'requires a release version'),
             ('candidate without publication', preliminary, lambda report: report.pop('publication'),
-             'report without released-artifact provenance requires candidate-build publication metadata'),
-            ('candidate mixed revisions', preliminary,
-             lambda report: report['publication'].update(sourcePolicy='mixed-development-revisions'),
-             'report without released-artifact provenance requires candidate-build publication metadata'),
+             'report without released-artifact provenance requires preliminary publication metadata'),
             ('candidate label', preliminary,
              lambda report: report['sources'].update(currentLabel='Regulator 9.0 preliminary results'), 'currentLabel'),
             ('candidate without collectors', preliminary, lambda report: report['provenance'].pop('collectors'),
@@ -372,10 +381,31 @@ class TestReportData(unittest.TestCase):
             ('candidate commit', preliminary, lambda report: report['sources'].update(currentCandidate='d' * 40),
              'collector commit'),
             ('candidate unreleased', preliminary, unreleased, 'requires a release version'),
+            ('mixed without measurement source', mixed, lambda report: report['rows'][0].pop('measurementSource'),
+             'replaced row 0'),
+            ('mixed without original result', mixed, lambda report: report['rows'][0].pop('originalResult'),
+             'replaced row 0'),
+            # Baseline hosts name no build, so only the merge's inventory marks a row replaced.
+            ('mixed without replacement fields', mixed,
+             lambda report: [report['rows'][0].pop(field) for field in ('measurementSource', 'originalResult')],
+             'replaced row 0'),
+            ('mixed replacement outside inventory', mixed,
+             lambda report: report['rows'][1].update({field: report['rows'][0][field]
+                                                      for field in ('measurementSource', 'originalResult')}),
+             'outside the replaced-row inventory'),
+            ('mixed original copies the new result', mixed,
+             lambda report: report['rows'][0].update(originalResult=copy.deepcopy(report['rows'][0]['result'])),
+             'not the base campaign evidence'),
         )
         with patch.object(report_data.released_artifact, 'manifest', return_value=release):
             report_data.validate_publication_scope(final, [])
             report_data.validate_publication_scope(preliminary, [])
+            report_data.validate_publication_scope(mixed, [])
+            # Replaced rows still need three hosts.
+            two_hosts = copy.deepcopy(mixed)
+            two_hosts['rows'][0]['result']['hosts'].pop()
+            with self.assertRaisesRegex(ValueError, 'at least three independent hosts'):
+                report_data.validate_report(two_hosts)
             for name, report, change, message in cases:
                 changed = copy.deepcopy(report)
                 change(changed)

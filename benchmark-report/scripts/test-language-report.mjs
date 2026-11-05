@@ -46,34 +46,26 @@ const data = { schemaVersion: 2, sources: { currentLabel: "Test capture", curren
 
 // Each comparison is judged by its ratio and by Regulator's absolute gap: per input byte in the
 // text-processing, literal-probe and stress sections, otherwise per call, as also when a row has no
-// per-byte delta. Each comparison where Regulator is slower also gives its gap in instructions,
-// labeled under the tie gap and under the clear gap.
-const { significance, INSTRUCTIONS_PER_NS, lossGap, rowSignificance, significanceTier, variantGain } = exports;
-const { tieGap, clearGap, tieRatio, clearRatio, gapLabels } = significance;
+// per-byte delta.
+const { significance, rowSignificance, significanceTier, variantGain } = exports;
+const { tieGap, clearGap, tieRatio, clearRatio } = significance;
 const below = value => value * .999;
 // Timings and host range follow from the ratio and the gap, as import derives them.
 const loss = (changes, deltaNs, deltaNsPerByte, ratio = 1.5) => ({ ...reused, ...changes, result: { ...result, candidateNs: deltaNs * ratio / (ratio - 1),
   comparatorNs: deltaNs / (ratio - 1), ratio, minimumRatio: ratio, maximumRatio: ratio, deltaNs, deltaNsPerByte } });
 const bulkLoss = (ns, ratio) => loss({ population: 'bulk-text', operation: 'execute', inputBytes: 1000 }, 1000 * ns, ns, ratio);
 const everydayLoss = (ns, ratio) => loss({}, ns, ns / reused.inputBytes, ratio);
-for (const [basis, lossOf] of [['byte', bulkLoss], ['call', everydayLoss]]) {
-  for (const [ns, label] of [[below(tieGap[basis]), gapLabels[basis][0]], [tieGap[basis], gapLabels[basis][1]],
-    [below(clearGap[basis]), gapLabels[basis][1]], [clearGap[basis], null]]) {
-    assert.deepEqual({ ...lossGap(lossOf(ns)) }, { basis, ns, instructions: ns * INSTRUCTIONS_PER_NS, label });
-  }
-}
+// A 10 ns loss over 1,000 bytes is a tie per byte and a clear loss per call.
+const basisTier = { byte: 'tie', call: 'clear-loss' };
 for (const [changes, basis] of [
   [{ population: 'bulk-text' }, 'byte'], [{ population: 'literal-probe' }, 'byte'],
   [{ population: 'diagnostics-and-stress' }, 'byte'], [{ population: 'bulk-text', caseId: 'unicode/codepoints/any-one' }, 'byte'],
   [{ population: 'ordinary-scalar' }, 'call'], [{ population: 'like', language: 'like' }, 'call'],
   [{ population: 'trino-operations', language: 'trino' }, 'call'], [{ population: 'specialized-patterns' }, 'call'],
 ]) {
-  assert.equal(lossGap(loss({ operation: 'execute', ...changes }, 10, 10 / reused.inputBytes)).basis, basis, JSON.stringify(changes));
+  assert.equal(rowSignificance(loss({ operation: 'execute', ...changes }, 10, 10 / 1000)), basisTier[basis], JSON.stringify(changes));
 }
-assert.equal(lossGap(loss({ population: 'bulk-text', operation: 'execute', inputBytes: null }, 10, null)).basis, 'call');
-// Wins have no gap, and single-use gaps would include compilation.
-assert.equal(lossGap(reused), null);
-assert.equal(lossGap(loss({ operation: 'singleUseContains' }, 10, null)), null);
+assert.equal(rowSignificance(loss({ population: 'bulk-text', operation: 'execute', inputBytes: null }, 10, null)), basisTier.call);
 // Any one tie condition makes a tie: a small gap, a ratio near 1, a host range or a ratio interval
 // including 1. Clear needs both a large gap and a large ratio; every other win or loss is modest.
 const tier = (lossOf, ratio, ns, changes = {}) => { const entry = lossOf(ns, ratio); return rowSignificance({ ...entry, result: { ...entry.result, ...changes } }); };
@@ -97,20 +89,17 @@ for (const [actual, expected] of [
   // Gains between Regulator variants have no gap or host range; the ratio and its interval decide.
   [significanceTier(variantGain({ ...result, ratio: .5 }, { ...result, ratio: 1 }), null), 'clear-win'],
 ]) assert.equal(actual, expected);
-// A comparison where Regulator is slower shows its gap; a tie names the conditions that held.
+// A tie names the conditions that held, in ns; no table converts a gap to instructions.
 const tiedGap = tieGap.byte / 2;
 const tiedRow = bulkLoss(tiedGap);
 // Gaps round toward zero, so one just under the tie gap never reads as reaching it.
 const nearTie = { ...bulkLoss(.0997), id: 'near-tie', caseId: 'near-tie', name: 'near-tie', model: 'count', workContract: 'public-find-count-v2' };
 const gapHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [{ ...tiedRow, id: 'bulk-loss',
   model: 'count', workContract: 'public-find-count-v2', result: { ...tiedRow.result, minimumRatio: .997, maximumRatio: 1.6 } }, nearTie] } }));
-assert.match(gapHtml, />Gap \(instructions\)<span/);
+assert.doesNotMatch(gapHtml, /instruction|instr\/|class="measurement gap"/i);
 assert.match(gapHtml, /class="comparison-row tie"/);
-assert.ok(gapHtml.includes(`${tiedGap * INSTRUCTIONS_PER_NS} instr/B<small class="gap-label">${gapLabels.byte[0]}</small>`));
 assert.ok(gapHtml.includes(`title="Tie: host ratio range 0.997–1.600× includes 1.0; gap ${tiedGap} ns/byte is under ${tieGap.byte} ns/byte. Regulator`));
-assert.ok(gapHtml.includes(`0.99 instr/B<small class="gap-label">${gapLabels.byte[0]}</small>`));
 assert.ok(gapHtml.includes(`gap 0.099 ns/byte is under ${tieGap.byte} ns/byte.`));
-assert.ok(gapHtml.includes(`Gap +${tiedGap} ns/byte ≈ ${tiedGap * INSTRUCTIONS_PER_NS} instructions per byte at ${INSTRUCTIONS_PER_NS} instructions/ns.`));
 
 const releaseData = { ...data, platforms: { r9g: "R9g", r8g: "R8g", r8i: "R8i" },
   rows: data.rows.map(row => ({ ...row, platform: "r9g" })) };
@@ -196,7 +185,7 @@ assert.doesNotMatch(html, /<h2>Pattern construction/);
 assert.ok(downloadData(data).rows.some(entry => entry.operation === 'compile'));
 assert.doesNotMatch(html, /row-evidence-body/);
 assert.match(detailsHtml(row, reused), /Compile the pattern, then test one input/);
-assert.match(detailsHtml(row, reused), /using a warmed compiled pattern/);
+assert.match(detailsHtml(row, reused), /reusing a warmed pattern/);
 assert.doesNotMatch(html, /Single-use measurements|Multi-use measurements/);
 assert.match(html, /type="checkbox"/);
 assert.match(html, /Pure Java/);
@@ -283,7 +272,8 @@ const probeHeadings = [...probeHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => m
 assert.equal(probeHeadings.indexOf('Literal probe distributions'), probeHeadings.indexOf('Text processing workloads') + 1);
 const probeSection = probeHtml.split('<h2>Literal probe distributions</h2>')[1].split('</section>')[0];
 assert.match(probeSection, /Mozilla\/5.0 · nginx access log/);
-assert.match(probeSection, new RegExp(`1.50× slower.*${100 / 1000 * INSTRUCTIONS_PER_NS} instr/B<small class="gap-label">${gapLabels.byte[1]}</small>.*2.00× faster</span></td><td class="measurement gap"></td>.*3.00× faster`, 's'));
+assert.match(probeSection, /1.50× slower<\/span><\/td><td class="measurement">.*2.00× faster<\/span><\/td><td class="measurement">.*3.00× faster/s);
+assert.doesNotMatch(probeSection, /gap/i);
 assert.doesNotMatch(probeHtml.split('<h2>Text processing workloads</h2>')[1].split('</section>')[0], /literal-probe/);
 assert.deepEqual(exports.summaryRatios({ ...data, rows: [...summaryRows, ...probeRows] }), exports.summaryRatios({ ...data, rows: summaryRows }));
 assert.equal(exports.displayedMeasurements(probeRows).length, 2);
@@ -332,8 +322,7 @@ const likeColorHtml = renderToStaticMarkup(React.createElement(LanguageReport, {
 assert.match(likeColorHtml, /class="scan-result clear-loss"[^>]*><span class="tier-symbol"[^>]*>▼<\/span>1.80× slower/);
 assert.match(likeColorHtml, /class="measurement delta clear-loss">\+15.00 ns/);
 assert.doesNotMatch(likeColorHtml.split('<h2>Measurement notes</h2>')[0], /class="scan-result tie"|class="measurement delta tie"/);
-// Only the multi-use phase gets a gap.
-assert.deepEqual(likeColorHtml.match(/class="measurement gap">[^<]+/g), [`class="measurement gap">${15 * INSTRUCTIONS_PER_NS} instr/call`]);
+assert.doesNotMatch(likeColorHtml, /Gap \(instructions\)|class="measurement gap"/);
 // A gap under the tie gap makes both lifecycle deltas ties, whatever the ratio.
 const likeTieHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: likeRows.map(entry => ({
   ...entry, result: { ...entry.result, ratio: 1.8, minimumRatio: 1.8, maximumRatio: 1.8, deltaNs: 1.5, warnings: [] },
@@ -377,8 +366,8 @@ const regexOrder = lifecycleRows(shuffledLikeRows.map(entry => ({ ...entry, lang
 assert.equal(regexOrder[0].reused.caseId, 'trino-like/ORDERED_DENSE_FALSE');
 delete context.window;
 
-// Each specialized pattern is one row: absolute variant times, gains over the page's
-// first measured variant with host speed cancelled, and the last variant against the comparator.
+// Each compiled pattern is one row: uncompiled and compiled times, each against the comparator, and the
+// compiled gain over uncompiled with host speed cancelled. Regular-engine rows stay in the data but not on the page.
 // Rows are shaped as the baseline import emits them, each variant with gain warnings over every earlier one.
 const specializedSuites = { re2: ['re2-specialized-patterns', 're2-specialized'], java: ['java-specialized-patterns', 'java-specialized'],
   trino: ['trino-specialized-patterns', 'trino-specialized'], like: ['trino-like-specialized', 'trino-like-specialized'], rust: ['rust-specialized-patterns', 'rust-specialized'] };
@@ -401,15 +390,15 @@ const specializedVariants = (language, workload, operation, variants) => {
 };
 // Compiled code has its own Joni measurement: its gain divides comparator-relative ratios (0.2 / 2), not raw times (50 / 400).
 const trinoSpecialized = specializedVariants('trino', 'url-host', 'extract',
-  [['/regular-engine', 400, 2, [1.8, 2.2], .2], ['', 200, 1, [.9, 1.1]], ['/generated', 50, .2, [.15, .25], .3]]);
+  [['/regular-engine', 400, 2, [1.8, 2.2], .4], ['', 200, 1, [.9, 1.1], .2], ['/generated', 50, .2, [.15, .25], .3]]);
 const likeSpecialized = specializedVariants('like', 'Q02_TYPE_BRASS', 'matches', [['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])
   .map(entry => ({ ...entry, workload: { pattern: '%BRASS', description: 'Matches part types that end in BRASS.', columnRows: 16384,
     inputDescription: 'Each operation scans the first 16,384 rows of TPC-H part.type at scale factor 1.' } }));
-assert.throws(() => exports.specializedPatternRows([trinoSpecialized[2]]), /Missing specialized-engine partner/);
-assert.equal(exports.displayedMeasurements(trinoSpecialized).length, 3);
-// The three variants share one Joni measurement, which the quality summary counts once.
-assert.equal(exports.qualityDistribution(trinoSpecialized, 'candidate').count, 3);
-assert.equal(exports.qualityDistribution(trinoSpecialized, 'comparator').count, 1);
+assert.throws(() => exports.specializedPatternRows([trinoSpecialized[2]]), /Missing uncompiled partner/);
+assert.equal(exports.displayedMeasurements(trinoSpecialized).length, 2);
+// The two shown variants share one Joni measurement, which the quality summary counts once.
+assert.equal(exports.qualityDistribution(exports.displayedMeasurements(trinoSpecialized), 'candidate').count, 2);
+assert.equal(exports.qualityDistribution(exports.displayedMeasurements(trinoSpecialized), 'comparator').count, 1);
 assert.deepEqual(exports.summaryRatios({ ...data, rows: [...likeSummaryRows, ...likeSpecialized] }).like, likeSummary);
 const specializedPage = (language, rows, pageData = data) => {
   context.window = { location: { hash: `#language=${language}&cpu=c9g&memory=native` } };
@@ -419,35 +408,35 @@ const specializedPage = (language, rows, pageData = data) => {
   } finally {
     delete context.window;
   }
-  const section = html.split('<h2>Specialized engine and compiler</h2>')[1]?.split('</section>')[0];
+  const section = html.split('<h2>Compiled patterns</h2>')[1]?.split('</section>')[0];
   return { headings: [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]), section,
     columns: section && [...section.matchAll(/<button type="button" class="sort-button"[^>]*>(.*?)<span/g)].map(match => match[1]) };
 };
-const regularClause = /the regular engine runs the same patterns without one/;
+const regular = /regular/i;
 // A second operation on one workload keeps its own row.
 const replaceSpecialized = specializedVariants('trino', 'url-host', 'replace',
   [['/regular-engine', 300, 1, [.9, 1.1]], ['', 300, 1, [.9, 1.1]], ['/generated', 450, 1.5, [1.4, 1.6]]]);
 const trinoPage = specializedPage('trino', [...data.rows, ...data.rows.map(entry => ({ ...entry, id: `trino-${entry.id}`, language: 'trino' })), ...trinoSpecialized, ...replaceSpecialized]);
-assert.deepEqual(trinoPage.headings, ['Everyday regex operations', 'Specialized engine and compiler', 'Regex pattern lifecycle', 'Measurement notes']);
-assert.deepEqual(trinoPage.columns, ['Pattern / operation', 'Joni', 'Regular engine', 'Specialized engine', 'Compiled',
-  'Specialized vs regular', 'Compiled vs regular', 'Compiled vs Joni', 'Gap (instructions)']);
-assert.match(trinoPage.section, /url-host<small>extract<\/small>.*200.00 ns.*400.00 ns.*200.00 ns.*50.00 ns.*2.00× faster.*10.00× faster.*5.00× faster/s);
-// The gap belongs to the variant shown against the comparator.
-assert.match(trinoPage.section, new RegExp(`url-host<small>replace</small>.*1.50× slower.*${(150 * INSTRUCTIONS_PER_NS).toLocaleString('en-US')} instr/call`, 's'));
+assert.deepEqual(trinoPage.headings, ['Everyday regex operations', 'Compiled patterns', 'Regex pattern lifecycle', 'Measurement notes']);
+assert.deepEqual(trinoPage.columns, ['Pattern / operation', 'Joni', 'Uncompiled', 'Compiled',
+  'Uncompiled vs Joni', 'Compiled vs uncompiled', 'Compiled vs Joni']);
+assert.match(trinoPage.section, /url-host<small>extract<\/small>.*200.00 ns.*200.00 ns.*50.00 ns.*no clear difference.*5.00× faster.*5.00× faster/s);
 assert.equal(trinoPage.section.split('<tbody>')[1].match(/<tr>/g).length, 2);
-assert.match(trinoPage.section, /Compiled ratio divided by regular engine ratio: 0.1000×. Conservative interval 0.0682 to 0.1389×./);
-assert.match(trinoPage.section, regularClause);
-// Each variant's time carries its own uncertainty marker.
-assert.match(trinoPage.section, /400.00 ns<sup><button[^>]*title="Regulator timing uncertainty: 20.0%. Exceeds 5%."/);
+assert.match(trinoPage.section, /Compiled ratio divided by uncompiled ratio: 0.2000×. Conservative interval 0.1364 to 0.2778×./);
+assert.match(trinoPage.section, /Compiled times are a best case: each compiled pattern is const-bound the way Trino binds it, one pattern per call site\./);
+assert.doesNotMatch(trinoPage.section, regular);
+// Each variant's time carries its own uncertainty marker; the regular engine's is not shown.
+assert.doesNotMatch(trinoPage.section, /400.00 ns|40.0%/);
+assert.match(trinoPage.section, /200.00 ns<sup><button[^>]*title="Regulator timing uncertainty: 20.0%. Exceeds 5%."/);
 assert.match(trinoPage.section, /50.00 ns<sup><button[^>]*title="Regulator timing uncertainty: 30.0%. Exceeds 5%."/);
 assert.equal(trinoPage.section.match(/quality-marker/g).length, 2);
 assert.equal(specializedPage('re2', [...data.rows, ...trinoSpecialized]).section, undefined);
 const likePage = specializedPage('like', compactReport({ ...data, rows: [...likeRows, ...likeSpecialized] }, exports).rows);
-assert.deepEqual(likePage.headings, ['Specialized engine and compiler', 'LIKE pattern lifecycle', 'Measurement notes']);
-assert.deepEqual(likePage.columns, ['Pattern', 'Trino SQL LIKE', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs Trino SQL LIKE', 'Gap (instructions)']);
-assert.match(likePage.section, /Compiled ratio divided by specialized engine ratio: 0.5000×. Conservative interval 0.3333 to 0.7500×./);
+assert.deepEqual(likePage.headings, ['Compiled patterns', 'LIKE pattern lifecycle', 'Measurement notes']);
+assert.deepEqual(likePage.columns, ['Pattern', 'Trino SQL LIKE', 'Uncompiled', 'Compiled', 'Uncompiled vs Trino SQL LIKE', 'Compiled vs uncompiled', 'Compiled vs Trino SQL LIKE']);
+assert.match(likePage.section, /Compiled ratio divided by uncompiled ratio: 0.5000×. Conservative interval 0.3333 to 0.7500×./);
 assert.doesNotMatch(likePage.section, /reused match/);
-assert.doesNotMatch(likePage.section, regularClause);
+assert.doesNotMatch(likePage.section, regular);
 // Each LIKE time scans many column rows, not one input.
 assert.match(likePage.section, /Each time is one scan of the first 16,384 rows of a TPC-H column\./);
 const likeDetails = renderToStaticMarkup(React.createElement(RowEvidence, { row: likeSpecialized[0], comparator: 'Trino SQL LIKE' }));
@@ -462,18 +451,19 @@ assert.match(extractAllDetails('trino', 'Joni'), /every match into a Slice list/
 for (const [language, comparator] of [['re2', 'native RE2'], ['java', 'JDK Pattern'], ['rust', 'Rust regex crate']]) {
   const page = specializedPage(language, [...data.rows.map(entry => ({ ...entry, language })),
     ...specializedVariants(language, 'query-parameter-names', 'extractAll', [['/regular-engine', 200, 1, [.9, 1.1]], ['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])], withRust);
-  assert.deepEqual(page.columns, ['Pattern / operation', comparator, 'Regular engine', 'Specialized engine', 'Compiled',
-    'Specialized vs regular', 'Compiled vs regular', `Compiled vs ${comparator}`, 'Gap (instructions)'], language);
+  assert.deepEqual(page.columns, ['Pattern / operation', comparator, 'Uncompiled', 'Compiled',
+    `Uncompiled vs ${comparator}`, 'Compiled vs uncompiled', `Compiled vs ${comparator}`], language);
   assert.match(page.section, /query-parameter-names<small>extractAll<\/small>/);
-  assert.match(page.section, regularClause);
+  assert.doesNotMatch(page.section, regular);
   const details = extractAllDetails(language, comparator);
   assert.match(details, /Extract the selected capture from every match\./);
   assert.doesNotMatch(details, /Slice list/);
 }
 
-// Without intervals, a gain cell shows the host-paired warnings the import supplies, not either variant's
-// warnings against Joni. Against Joni the regular engine is 0.8, 1.0 and 1.2 and compiled code 0.1, 0.125 and
-// 0.15, so the hosts disagree about Joni, yet compiled code is 0.125 of the regular engine on every host.
+// Without intervals, a gain cell shows the host-paired warnings the import supplies against the uncompiled row,
+// not either variant's warnings against Joni and not those against the regular engine. Against Joni uncompiled
+// code is 0.8, 1.0 and 1.2 and compiled code 0.1, 0.125 and 0.15, so the uncompiled hosts disagree about Joni,
+// yet compiled code is 0.125 of uncompiled code on every host. Against the regular engine it is 0.8, 1.0 and 1.2.
 const hostRun = (entry, candidates, warnings, gains) => {
   const ratios = candidates.map(ns => ns / 100);
   return { ...entry, ...(gains ? { variantGainWarnings: gains } : {}), result: { state: 'compared', candidateNs: candidates[1], comparatorNs: 100, ratio: ratios[1],
@@ -482,28 +472,30 @@ const hostRun = (entry, candidates, warnings, gains) => {
 };
 const variation = 'Host ratio variation exceeds 5%';
 const disagree = 'Hosts disagree about which engine is faster';
-const [regularRun, specializedRun, compiledRun] = trinoSpecialized;
-const constantGain = [hostRun(regularRun, [80, 100, 120], [variation, disagree]),
-  hostRun(specializedRun, [50, 50, 50], [], { [regularRun.id]: [variation] }),
-  hostRun(compiledRun, [10, 12.5, 15], [variation], { [regularRun.id]: [], [specializedRun.id]: [variation] })];
-// Compiled code is 0.9, 1.0 and 1.1 of the regular engine, so those host pairs disagree about which variant is faster.
-const [regularCross, specializedCross, compiledCross] = replaceSpecialized;
-const crossingGain = [hostRun(regularCross, [100, 100, 100], []), hostRun(specializedCross, [100, 100, 100], [], { [regularCross.id]: [] }),
-  hostRun(compiledCross, [90, 100, 110], [variation], { [regularCross.id]: [variation, disagree], [specializedCross.id]: [variation, disagree] })];
+const [regularRun, uncompiledRun, compiledRun] = trinoSpecialized;
+const constantGain = [hostRun(regularRun, [12.5, 12.5, 12.5], []),
+  hostRun(uncompiledRun, [80, 100, 120], [variation, disagree], { [regularRun.id]: [variation] }),
+  hostRun(compiledRun, [10, 12.5, 15], [variation], { [regularRun.id]: [variation, disagree], [uncompiledRun.id]: [] })];
+// Compiled code is 0.9, 1.0 and 1.1 of uncompiled code, so those host pairs disagree about which variant is faster,
+// while it is 1.8, 2.0 and 2.2 of the regular engine.
+const [regularCross, uncompiledCross, compiledCross] = replaceSpecialized;
+const crossingGain = [hostRun(regularCross, [50, 50, 50], []), hostRun(uncompiledCross, [100, 100, 100], [], { [regularCross.id]: [] }),
+  hostRun(compiledCross, [90, 100, 110], [variation], { [regularCross.id]: [variation], [uncompiledCross.id]: [variation, disagree] })];
 const preliminary = { ...data, publication: { status: 'preliminary', sourcePolicy: 'mixed-development-revisions', note: 'Preliminary.' } };
 const constantRows = compactReport({ ...preliminary, rows: [...constantGain, ...crossingGain] }, exports).rows;
 const constantPage = specializedPage('trino', constantRows, preliminary);
 const [constantRow, crossingRow] = ['extract', 'replace'].map(operation => constantPage.section.split('<tr>').find(cells => cells.includes(`<small>${operation}</small>`)));
-assert.match(constantRow, /100.00 ns.*100.00 ns.*50.00 ns.*12.50 ns.*2.00× faster.*8.00× faster.*8.00× faster/s);
-assert.doesNotMatch(constantRow, /no consistent winner/);
-assert.match(crossingRow, /Compiled ratio divided by regular engine ratio: 1.0000×.">no consistent winner/);
+// The uncompiled ratio keeps its own disagreement with Joni; the gain shows none.
+assert.match(constantRow, /100.00 ns.*100.00 ns.*12.50 ns.*no consistent winner.*Compiled ratio divided by uncompiled ratio: 0.1250×.">.*?8.00× faster.*8.00× faster/s);
+assert.equal(constantRow.match(/no consistent winner/g).length, 1);
+assert.match(crossingRow, /Compiled ratio divided by uncompiled ratio: 1.0000×.">no consistent winner/);
 assert.throws(() => specializedPage('trino', [constantGain[0], constantGain[1], { ...constantGain[2], variantGainWarnings: {} }]), /Missing host-paired gain warnings/);
 // The preliminary cells hide variation warnings; the row details keep every variant's full warnings.
 const [constantPattern] = exports.specializedPatternRows(constantRows.filter(entry => entry.operation === 'extract').map(entry => ({ ...entry, measurementWarnings: entry.result.warnings })));
 const constantDetails = renderToStaticMarkup(React.createElement(RowEvidence, { row: constantPattern.anchor, variants: constantPattern.evidence, comparator: 'Joni' }));
-assert.match(constantDetails, /<h4>Regular engine measurement variation<\/h4><p>Host ratio variation exceeds 5%. Hosts disagree about which engine is faster.<\/p>/);
+assert.match(constantDetails, /<h4>Uncompiled measurement variation<\/h4><p>Host ratio variation exceeds 5%. Hosts disagree about which engine is faster.<\/p>/);
 assert.match(constantDetails, /<h4>Compiled measurement variation<\/h4><p>Host ratio variation exceeds 5%.<\/p>/);
-assert.doesNotMatch(constantDetails, /Specialized engine measurement variation/);
+assert.doesNotMatch(constantDetails, regular);
 const classified = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [
   ...data.rows,
   { ...reused, id: 'timeout', name: 'Timed out', result: { state: 'did-not-finish', reason: 'execution exceeded 30 s on 2 attempts', hosts: [], warnings: [] } },

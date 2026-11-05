@@ -210,6 +210,13 @@ def candidate_build(data: dict) -> bool:
     return isinstance(publication, dict) and publication.get('sourcePolicy') == 'candidate-build'
 
 
+def preliminary_release(data: dict) -> bool:
+    """A candidate-build report, possibly with rows replaced by a later candidate's targeted re-measure."""
+    publication = data.get('publication')
+    return (isinstance(publication, dict)
+            and publication.get('sourcePolicy') in ('candidate-build', 'mixed-development-revisions'))
+
+
 def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict]]) -> None:
     sources = data['sources']
     version = sources.get('releaseVersion')
@@ -265,9 +272,10 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
         if 'publication' in data:
             raise ValueError('released-artifact report must not carry publication metadata')
     else:
-        if not candidate_build(data):
+        # A re-measure's rows keep their own sources; the report names its base campaign's build.
+        if not preliminary_release(data):
             raise ValueError(
-                'report without released-artifact provenance requires candidate-build publication metadata')
+                'report without released-artifact provenance requires preliminary publication metadata')
         if sources.get('currentLabel') != f'Regulator {version} preliminary results':
             raise ValueError(
                 f'candidate-build report sources.currentLabel must be Regulator {version} preliminary results')
@@ -281,8 +289,57 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
         if not any(collector.get('candidate_commit') == sources['currentCandidate']
                    for collector in collectors.values()):
             raise ValueError('candidate-build report sources.currentCandidate is not a collector commit')
+        if data['publication']['sourcePolicy'] == 'mixed-development-revisions':
+            validate_targeted_remeasure(data)
     if frozen:
         validate_frozen_workloads(data, scope, releases)
+
+
+def validate_targeted_remeasure(data: dict) -> None:
+    """Each row the re-measure replaced names its build and keeps the base campaign's result; no other row does."""
+    base = data['sources']['currentCandidate']
+    remeasure = data['provenance'].get('targetedRemeasure')
+    collectors = remeasure.get('collectors') if isinstance(remeasure, dict) else None
+    if (not isinstance(collectors, dict) or not collectors
+            or any(not isinstance(collector, dict) for collector in collectors.values())):
+        raise ValueError('mixed-revision report requires targeted re-measure collector provenance')
+    build = {'campaign_id': remeasure.get('campaignId'), 'candidate_commit': remeasure.get('candidateCommit'),
+             'engine_tree': remeasure.get('engineTree')}
+    if (not all(isinstance(value, str) and value for value in build.values()) or build['candidate_commit'] == base
+            or any(collector.get('candidate_commit') != build['candidate_commit']
+                   or collector.get('engine_tree') != build['engine_tree'] for collector in collectors.values())):
+        raise ValueError('targeted re-measure collectors differ from its candidate build')
+    # The merge records the rows it replaced, as (id, language, platform, memoryMode); a row's own fields cannot say
+    # whether it was replaced, because baseline hosts name no build.
+    inventory = remeasure.get('replacedRowKeys')
+    if (not isinstance(inventory, list) or not inventory
+            or any(not isinstance(key, list) or len(key) != 4 for key in inventory)):
+        raise ValueError('mixed-revision report requires its replaced-row inventory')
+    replaced = {tuple(key) for key in inventory}
+    if (len(replaced) != len(inventory)
+            or not replaced <= {(row['id'], row['language'], row['platform'], row['memoryMode'])
+                                for row in data['rows']}):
+        raise ValueError('replaced-row inventory repeats a row or names a row the report lacks')
+    for index, row in enumerate(data['rows']):
+        # Language hosts name the build that measured them; baseline hosts name none.
+        hosts = row['result'].get('hosts', [])
+        builds = {host.get('collector') for host in hosts}
+        if (row['id'], row['language'], row['platform'], row['memoryMode']) not in replaced:
+            if 'measurementSource' in row or 'originalResult' in row or not builds <= {base, None}:
+                raise ValueError(f'row {index} carries replacement evidence outside the replaced-row inventory')
+            continue
+        source, original = row.get('measurementSource'), row.get('originalResult')
+        if (not isinstance(source, dict) or any(source.get(field) != value for field, value in build.items())
+                or not isinstance(original, dict) or not builds <= {build['candidate_commit'], None}):
+            raise ValueError(
+                f'replaced row {index} must name the targeted re-measure build and keep its original result')
+        # The original is the base campaign's evidence, measured on other hosts.
+        original_hosts = original.get('hosts', [])
+        instances = {host.get('instanceId') for host in hosts}
+        if (not original_hosts
+                or {host.get('collector') for host in original_hosts} != ({None} if builds <= {None} else {base})
+                or any(host.get('instanceId') in instances for host in original_hosts)):
+            raise ValueError(f'replaced row {index} original result is not the base campaign evidence')
 
 
 def validate_frozen_workloads(data: dict, scope: dict, releases: list[tuple[dict, Path, dict]]) -> None:
@@ -370,7 +427,7 @@ def summary_markdown(data: dict) -> str:
                if data.get('publication', {}).get('sourcePolicy') == 'mixed-development-revisions'
                else f" `{data['sources']['currentCandidate']}`")
     platform = next(cpu for cpu in data['platforms'] if cpu in ('r9g', 'c9g')).capitalize()
-    lines.extend(("", f"_Source: {source}. {platform} with native access enabled and compiled patterns reused. "
+    lines.extend(("", f"_Source: {source}. {platform} with native access enabled and patterns reused. "
                   "Geometric mean of per-workload time ratios; input conversion excluded._", SUMMARY_END))
     return "\n".join(lines)
 
@@ -399,7 +456,7 @@ def import_data(source: Path) -> None:
     if MANIFEST_FILE.exists():
         _, _, _, stored = validate_published_data()
         # A preliminary report would replace its release's final one as current.
-        if candidate_build(data) and any(
+        if preliminary_release(data) and any(
                 'releasedArtifact' in report.get('provenance', {})
                 and report['sources'].get('releaseVersion') == data['sources'].get('releaseVersion')
                 for _, _, report in stored):
