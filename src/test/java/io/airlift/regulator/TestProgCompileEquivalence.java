@@ -17,6 +17,10 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -39,6 +43,55 @@ public class TestProgCompileEquivalence
 
             assertEquivalent(pattern, false, parsed.regexp());
             assertEquivalent(pattern, true, parsed.regexp());
+        }
+    }
+
+    /// The hash tables built while compiling are seeded per process, and the seed only places
+    /// their entries: programs and member tables compiled under two seeds are identical.
+    @Test
+    public void testHashSeedDoesNotChangeCompiledOutput()
+            throws Exception
+    {
+        List<String> first = runProbe();
+        List<String> second = runProbe();
+        assertThat(first.getFirst()).startsWith("seed ").isNotEqualTo(second.getFirst());
+        assertThat(first.subList(1, first.size())).isEqualTo(second.subList(1, second.size()));
+    }
+
+    private static List<String> runProbe()
+            throws Exception
+    {
+        ProcessBuilder processBuilder = new ProcessBuilder(
+                System.getProperty("java.home") + "/bin/java",
+                "--add-modules",
+                "jdk.incubator.vector",
+                "-cp",
+                System.getProperty("java.class.path"),
+                HashSeedProbe.class.getName());
+        Path output = Files.createTempFile("regulator-hash-seed-probe-", ".log");
+        try {
+            // The incubator module warning goes to stderr, so only stdout is compared.
+            processBuilder.redirectError(ProcessBuilder.Redirect.INHERIT)
+                    .redirectOutput(output.toFile());
+            processBuilder.environment().remove("JDK_JAVA_OPTIONS");
+            Process process = processBuilder.start();
+            try {
+                assertThat(process.waitFor(Duration.ofSeconds(60)))
+                        .as("hash seed probe timed out: %s", Files.readString(output, StandardCharsets.UTF_8))
+                        .isTrue();
+                String probeOutput = Files.readString(output, StandardCharsets.UTF_8);
+                assertThat(process.exitValue()).as(probeOutput).isZero();
+                return probeOutput.lines().toList();
+            }
+            finally {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("hash seed probe did not terminate").isTrue();
+                }
+            }
+        }
+        finally {
+            Files.deleteIfExists(output);
         }
     }
 

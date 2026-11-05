@@ -122,6 +122,16 @@ final class Compiler
         return memory + program.onePassMemory() + program.prefixShiftsMemory();
     }
 
+    /// Returns where the rune cache puts `keys`, rune-suffix keys inserted in order.
+    static SeededHash.Placement runeCachePlacementForTesting(long[] keys)
+    {
+        CompilerState.RuneCache cache = new CompilerState.RuneCache();
+        for (int index = 0; index < keys.length; index++) {
+            cache.put(keys[index], index + 1);
+        }
+        return cache.placement();
+    }
+
     private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect, caseFolding, byteFrequencies);
@@ -1532,7 +1542,7 @@ final class Compiler
                 if (instructionIds == null) {
                     return 0;
                 }
-                int index = hash(key) & mask;
+                int index = SeededHash.hash(key) & mask;
                 while (instructionIds[index] != 0) {
                     if (keys[index] == key) {
                         return instructionIds[index];
@@ -1591,7 +1601,7 @@ final class Compiler
 
             private void putWithoutResize(long key, int instructionId)
             {
-                int index = hash(key) & mask;
+                int index = SeededHash.hash(key) & mask;
                 while (instructionIds[index] != 0) {
                     if (keys[index] == key) {
                         instructionIds[index] = instructionId;
@@ -1609,14 +1619,9 @@ final class Compiler
                 return capacity - (capacity >>> 2);
             }
 
-            private static int hash(long key)
+            private SeededHash.Placement placement()
             {
-                key ^= key >>> 33;
-                key *= 0xFF51AFD7ED558CCDL;
-                key ^= key >>> 33;
-                key *= 0xC4CEB9FE1A85EC53L;
-                key ^= key >>> 33;
-                return (int) key;
+                return SeededHash.Placement.of(instructionIds.length, slot -> instructionIds[slot] != 0, slot -> keys[slot]);
             }
         }
 

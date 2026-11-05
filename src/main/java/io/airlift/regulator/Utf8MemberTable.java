@@ -66,6 +66,19 @@ final class Utf8MemberTable
     /// characters but not every one.
     static Utf8MemberTable of(CharClass set)
     {
+        return of(set, new Nodes());
+    }
+
+    /// Returns where building the table of `set` leaves the keys of its final mask table.
+    static SeededHash.Placement maskPlacementForTesting(CharClass set)
+    {
+        Nodes table = new Nodes();
+        of(set, table);
+        return table.maskPlacement();
+    }
+
+    private static Utf8MemberTable of(CharClass set, Nodes table)
+    {
         Builder builder = new Builder(set);
         for (int index = 0; index < set.rangeCount(); index++) {
             RuneRange range = set.range(index);
@@ -75,7 +88,7 @@ final class Utf8MemberTable
                 Compiler.splitUtf8Range(range.low(), range.high(), false, builder);
             }
         }
-        return builder.build();
+        return builder.build(table);
     }
 
     /// Returns the width of the member whose encoding starts at `cursor`, or 0 when none
@@ -244,11 +257,10 @@ final class Utf8MemberTable
             return blockCount++;
         }
 
-        private Utf8MemberTable build()
+        private Utf8MemberTable build(Nodes table)
         {
             // The table numbers a node once its children are frozen, walking from the leads in
             // ascending order.
-            Nodes table = new Nodes();
             int[] leads = new int[128];
             for (int index = 0; index < leads.length; index++) {
                 if (leadWidths[index] != 0) {
@@ -348,8 +360,9 @@ final class Utf8MemberTable
     /// Blocks and masks, each stored once in the order first interned. Block and mask zero reject
     /// every byte. Each is found through an open-addressing table that holds its index plus one,
     /// so a zero slot is empty. Interned blocks are never modified, so their entries stay valid
-    /// hash keys. The hash is mixed because the masks of runs of continuation bytes collide under
-    /// `Long.hashCode`.
+    /// hash keys. The hash is [SeededHash], mixed because the masks of runs of continuation bytes
+    /// collide under `Long.hashCode`. A block is hashed through `Arrays.hashCode`, which the seed
+    /// does not vary, but a table holds at most 277 blocks.
     private static final class Nodes
     {
         private int[][] blocks = new int[16][];
@@ -368,7 +381,7 @@ final class Utf8MemberTable
         private int internBlock(int[] block)
         {
             int slotMask = blockSlots.length - 1;
-            int slot = hash(Arrays.hashCode(block)) & slotMask;
+            int slot = SeededHash.hash(Arrays.hashCode(block)) & slotMask;
             while (blockSlots[slot] != 0) {
                 int index = blockSlots[slot] - 1;
                 if (Arrays.equals(blocks[index], block)) {
@@ -385,7 +398,7 @@ final class Utf8MemberTable
             if (blockCount * 2 > blockSlots.length) {
                 blockSlots = new int[blockSlots.length * 2];
                 for (int index = 0; index < blockCount; index++) {
-                    blockSlots[emptySlot(blockSlots, hash(Arrays.hashCode(blocks[index])))] = index + 1;
+                    blockSlots[emptySlot(blockSlots, SeededHash.hash(Arrays.hashCode(blocks[index])))] = index + 1;
                 }
             }
             return blockCount - 1;
@@ -394,7 +407,7 @@ final class Utf8MemberTable
         private int internMask(long mask)
         {
             int slotMask = maskSlots.length - 1;
-            int slot = hash(mask) & slotMask;
+            int slot = SeededHash.hash(mask) & slotMask;
             while (maskSlots[slot] != 0) {
                 int index = maskSlots[slot] - 1;
                 if (masks[index] == mask) {
@@ -411,7 +424,7 @@ final class Utf8MemberTable
             if (maskCount * 2 > maskSlots.length) {
                 maskSlots = new int[maskSlots.length * 2];
                 for (int index = 0; index < maskCount; index++) {
-                    maskSlots[emptySlot(maskSlots, hash(masks[index]))] = index + 1;
+                    maskSlots[emptySlot(maskSlots, SeededHash.hash(masks[index]))] = index + 1;
                 }
             }
             return maskCount - 1;
@@ -427,16 +440,6 @@ final class Utf8MemberTable
             return slot;
         }
 
-        private static int hash(long key)
-        {
-            key ^= key >>> 33;
-            key *= 0xFF51AFD7ED558CCDL;
-            key ^= key >>> 33;
-            key *= 0xC4CEB9FE1A85EC53L;
-            key ^= key >>> 33;
-            return (int) key;
-        }
-
         private int[] nodes()
         {
             int[] nodes = new int[blockCount * NODE_ENTRIES];
@@ -449,6 +452,11 @@ final class Utf8MemberTable
         private long[] lastBytes()
         {
             return Arrays.copyOf(masks, maskCount);
+        }
+
+        private SeededHash.Placement maskPlacement()
+        {
+            return SeededHash.Placement.of(maskSlots.length, slot -> maskSlots[slot] != 0, slot -> masks[maskSlots[slot] - 1]);
         }
     }
 }
