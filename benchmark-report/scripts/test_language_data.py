@@ -101,6 +101,19 @@ class TestLanguageData(unittest.TestCase):
             del comparison['work_contract']
         self.assertTrue(all('workContract' not in row for row in language_rows(data, [manifest])))
 
+    def test_native_comparator_repetitions_are_one_process(self):
+        # Native RE2 and the Rust crate time five repetitions in one invocation; each fork of a JVM side is a process.
+        data, manifest = bulk_capture({language: {'pattern': 'a', 'status': 'compatible', 'reason': 'same bytes'}
+                                       for language in ('re2', 'java', 'rust')})
+        for observation in data['observations']:
+            observation['samples_ns'] = [[1], [1], [10], [1], [2]]
+        processes = {(row['language'], side): {tuple(host[side]['epochMeansNs']) for host in row['result']['hosts']}
+                     for row in language_rows(data, [manifest]) for side in ('candidate', 'comparator')}
+        forks, invocation = {(1, 1, 10, 1, 2)}, {(3,)}
+        self.assertEqual({('re2', 'candidate'): forks, ('re2', 'comparator'): invocation,
+                          ('java', 'candidate'): forks, ('java', 'comparator'): forks,
+                          ('rust', 'candidate'): forks, ('rust', 'comparator'): invocation}, processes)
+
     def test_pattern_size_is_the_measured_translation(self):
         # The source pattern is one byte; its translation is 7,000 UTF-8 bytes.
         translated = '[a-zé]' * 1000

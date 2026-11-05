@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from baseline_data import read_rows
 from language_data import digest
@@ -82,7 +83,14 @@ def main():
     except ValueError as error:
         parser.error(str(error))
     from release_capture import build as build_release
+    # The statistical analysis needs NumPy, which only this step, not the report build, requires.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'analysis'))
+    from estimates import estimate_comparisons
     complete = build_release(arguments.released_campaign)
+    try:
+        estimate_comparisons(complete)
+    except ValueError as error:
+        parser.error(str(error))
     write_report(complete, arguments.complete_output)
     report = publication_data(complete)
     write_report(report, arguments.output)

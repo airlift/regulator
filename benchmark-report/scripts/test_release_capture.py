@@ -1,3 +1,4 @@
+from collections import defaultdict
 import argparse
 import copy
 import csv
@@ -210,6 +211,15 @@ class TestReleaseCapture(unittest.TestCase):
             self.assertEqual({True}, {side['meanNs'] == statistics.fmean(side['epochMeansNs']) > side['medianNs']
                                       for row in rows for host in row['result']['hosts']
                                       for side in (host['candidate'], host['comparator'])})
+            # Each memory mode of a LIKE comparison owns its result, so the estimates step, which rewrites a row's
+            # result in place, gives the native and safe rows each their own interval.
+            like = defaultdict(list)
+            for row in rows:
+                if row['language'] == 'like':
+                    like[row['platform'], row['id']].append(row)
+            self.assertEqual({('native', 'safe')}, {tuple(sorted(row['memoryMode'] for row in views))
+                                                    for views in like.values()})
+            self.assertFalse([views for views in like.values() if views[0]['result'] is views[1]['result']])
             # The flagged host measured none of them, and the fourth host stands in for it on r8i.
             instances = {(row['platform'], host['instanceId']) for row in rows for host in row['result']['hosts']}
             self.assertNotIn(('r8i', 'i-r8i-3'), instances)

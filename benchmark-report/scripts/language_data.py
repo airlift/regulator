@@ -27,6 +27,12 @@ CURRENT_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8i': 'R8i · Intel'}
 PROFILES = ((PLATFORMS, RELEASE_1_0_LANGUAGES), (RELEASE_1_0_PLATFORMS, RELEASE_1_0_LANGUAGES),
             (CURRENT_PLATFORMS, LANGUAGES))
 MEMORY_MODES = {'native': 'Native memory', 'safe': 'Pure Java'}
+# The languages whose comparator, native RE2 or the Rust regex crate, runs as one Google Benchmark invocation
+# (the collector's NATIVE_RUNNERS); every other side is a JMH run of forked JVMs.
+NATIVE_COMPARATORS = {'re2', 'rust'}
+# The warnings that a comparison's hosts disagree, from the ratio of each host's costs.
+RATIO_VARIATION_WARNING = 'Host ratio variation exceeds 5%'
+DIRECTION_WARNING = 'Hosts disagree about which engine is faster'
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
 # Specialized-pattern case suffixes in report column order: the regular engine,
 # the specialized engine, then compiled.
@@ -46,16 +52,16 @@ def coefficient(values):
     return stdev(values) / mean(values) if len(values) > 1 else 0
 
 
-def timing(observation):
+def timing(observation, native=False):
     groups = observation['samples_ns']
     if not groups or any(not group for group in groups):
         raise ValueError('missing measurement samples')
     samples = [value for group in groups for value in group]
     if any(isinstance(value, bool) or not math.isfinite(value) or value <= 0 for value in samples):
         raise ValueError('invalid measurement sample')
-    # Iterations in one fork are correlated. Keep the independent process
-    # means as well as the collector's sample-level precision calculation.
-    epochs = [mean(group) for group in groups]
+    # Iterations in one fork are correlated, and the repetitions of one native invocation are one process. Keep the
+    # independent process means as well as the collector's sample-level precision calculation.
+    epochs = [mean(samples)] if native else [mean(group) for group in groups]
     allocation = observation.get('allocation')
     return {
         'medianNs': median(samples), 'meanNs': mean(samples),
@@ -66,12 +72,12 @@ def timing(observation):
     }
 
 
-def outcome(observation):
+def outcome(observation, native=False):
     state = observation['outcome']
     if state not in STATES:
         raise ValueError(f'unpublishable outcome: {state}')
     if state == 'compared':
-        return {'state': state, **timing(observation)}
+        return {'state': state, **timing(observation, native)}
     if state == 'not-compatible':
         if not observation.get('reason'):
             raise ValueError('incompatibility must have a reason')
@@ -105,10 +111,7 @@ def reduce_hosts(hosts, normalization_bytes=None):
         return {'state': state, 'reason': '; '.join(reasons), 'hosts': hosts, 'warnings': warnings}
     ratios = [host['candidate']['medianNs'] / host['comparator']['medianNs'] for host in hosts]
     deltas = [host['candidate']['medianNs'] - host['comparator']['medianNs'] for host in hosts]
-    if coefficient(ratios) > .05:
-        warnings.append('Host ratio variation exceeds 5%')
-    if min(ratios) < .98 and max(ratios) > 1.02:
-        warnings.append('Hosts disagree about which engine is faster')
+    warnings.extend(host_ratio_warnings(ratios))
     for side, label in (('candidate', 'Regulator'), ('comparator', 'Comparator')):
         if any(host[side].get('sampleRse', 0) > .05 for host in hosts):
             warnings.append(f'{label} sample precision exceeds 5%')
@@ -122,6 +125,12 @@ def reduce_hosts(hosts, normalization_bytes=None):
         'deltaNsPerByte': median(deltas) / normalization_bytes if normalization_bytes else None,
         'hosts': hosts, 'warnings': warnings,
     }
+
+
+def host_ratio_warnings(ratios):
+    """Whether the hosts' ratios vary by more than 5%, and whether they disagree about which engine is faster."""
+    return ([RATIO_VARIATION_WARNING] if coefficient(ratios) > .05 else []) + (
+        [DIRECTION_WARNING] if min(ratios) < .98 and max(ratios) > 1.02 else [])
 
 
 def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
@@ -155,7 +164,7 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
         groups[key].append({
             'replica': replica, 'instanceId': host['instance_id'], 'collector': host['collector'],
             'candidate': outcome(observations[identity, comparison['candidate']]),
-            'comparator': outcome(observations[identity, comparison['comparator']]),
+            'comparator': outcome(observations[identity, comparison['comparator']], language in NATIVE_COMPARATORS),
         })
         if key in descriptions and descriptions[key].get('work_contract') != comparison.get('work_contract'):
             raise ValueError('mixed benchmark call contracts across hosts')
