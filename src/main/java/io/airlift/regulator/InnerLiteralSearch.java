@@ -47,6 +47,9 @@ import static java.util.Objects.requireNonNull;
 /// which cannot repay the reverse search and the anchored confirmation. In a window shorter than
 /// that, the search is therefore only a check for the literal: a window without it has no match,
 /// as for the many short lines of a line-by-line search, and any other runs the ordinary engine.
+///
+/// A case-insensitive ASCII literal is searched by its exact head, and each hit is checked for the
+/// folded rest.
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
@@ -70,8 +73,13 @@ final class InnerLiteralSearch
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(InnerLiteralSearch.class);
 
     // A single literal has its search kernel; a set has its members, in alternation order, and
-    // their filter.
+    // their filter. A literal with ASCII case-insensitive bytes, such as `# noqa` in
+    // `\s*# (?i:noqa)`, has the kernel of its exact head, `# `, and the whole literal with its
+    // case-insensitive letters lowered, its exact bytes unchanged, and a mask of 0x20 at each
+    // letter that matches either case.
     private final LiteralSearchKernel literalSearch;
+    private final byte[] foldedBytes;
+    private final byte[] foldedMasks;
     private final byte[][] literalSet;
     private final StartLiteralFilter literalSetFilter;
     private final int minimumLiteralLength;
@@ -79,12 +87,18 @@ final class InnerLiteralSearch
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[][] literalSet, StartLiteralFilter literalSetFilter, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, Prog reversePrefixProgram, Prog forwardProgram)
     {
         this.literalSearch = literalSearch;
+        this.foldedBytes = foldedBytes;
+        this.foldedMasks = foldedMasks;
         this.literalSet = literalSet;
         this.literalSetFilter = literalSetFilter;
-        if (literalSearch != null) {
+        if (foldedBytes != null) {
+            this.minimumLiteralLength = foldedBytes.length;
+            this.maximumLiteralLength = foldedBytes.length;
+        }
+        else if (literalSearch != null) {
             this.minimumLiteralLength = literalSearch.literalLength();
             this.maximumLiteralLength = literalSearch.literalLength();
         }
@@ -122,7 +136,16 @@ final class InnerLiteralSearch
         // prefix acceleration, and the first literal or literal set found decides. A set the
         // filter cannot search is skipped, as the crate skips a prefilter that is not fast.
         for (int index = 1; index < children.size(); index++) {
-            byte[] literal = asciiLiteral(children.get(index));
+            // Case-insensitive ASCII elements extend the literal, with the exact bytes before the
+            // first case-insensitive letter as the literal the kernel searches for and the proofs
+            // check: every occurrence of the whole literal starts an occurrence of that head.
+            FoldedLiteral foldedLiteral = foldedLiteral(children, index);
+            // A head of one common byte would end the search below, so the element is judged by its
+            // own literal as before, and a case-insensitive one lets the loop try later elements.
+            if (foldedLiteral != null && foldedLiteral.head().length == 1 && isCommonByte(foldedLiteral.head()[0])) {
+                foldedLiteral = null;
+            }
+            byte[] literal = foldedLiteral != null ? foldedLiteral.head() : asciiLiteral(children.get(index));
             byte[][] literals;
             StartLiteralFilter literalSetFilter = null;
             if (literal != null) {
@@ -144,7 +167,9 @@ final class InnerLiteralSearch
             }
             LiteralSearchKernel literalSearch = literal == null ? null : new LiteralSearchKernel(Slices.wrappedBuffer(literal));
             byte[][] literalSet = literal == null ? literals : null;
-            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, literalSet, literalSetFilter));
+            byte[] foldedBytes = foldedLiteral == null ? null : foldedLiteral.bytes();
+            byte[] foldedMasks = foldedLiteral == null ? null : foldedLiteral.masks();
+            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter));
             if (memory <= 0) {
                 // The compiler reads a budget of zero or less as no limit.
                 return null;
@@ -162,7 +187,7 @@ final class InnerLiteralSearch
                     reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
                 return null;
             }
-            return new InnerLiteralSearch(literalSearch, literalSet, literalSetFilter, reversePrefixProgram, forwardProgram);
+            return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, reversePrefixProgram, forwardProgram);
         }
         return null;
     }
@@ -190,16 +215,22 @@ final class InnerLiteralSearch
         }
     }
 
-    /// The literal, or the members of the literal set in alternation order.
+    /// The literal, or the members of the literal set in alternation order. A case-insensitive
+    /// literal has its case-insensitive letters lowered and its exact bytes unchanged.
     byte[][] literals()
     {
+        if (foldedBytes != null) {
+            return new byte[][] {foldedBytes.clone()};
+        }
         if (literalSearch != null) {
             return new byte[][] {literalSearch.literal()};
         }
         return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
     }
 
-    /// The literal's length, or the length of the shortest member of the literal set.
+    /// The literal's length, or the length of the shortest member of the literal set. A
+    /// case-insensitive literal counts its whole length, since each hit of its head is checked for
+    /// the folded rest before any engine runs.
     int minimumLiteralLength()
     {
         return minimumLiteralLength;
@@ -207,13 +238,14 @@ final class InnerLiteralSearch
 
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + literalRetainedSize(literalSearch, literalSet, literalSetFilter) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
+        return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
     }
 
-    private static long literalRetainedSize(LiteralSearchKernel literalSearch, byte[][] literalSet, StartLiteralFilter literalSetFilter)
+    // The folded arrays are null unless the literal is case-insensitive.
+    private static long literalRetainedSize(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter)
     {
         if (literalSearch != null) {
-            return literalSearch.estimatedRetainedSize();
+            return literalSearch.estimatedRetainedSize() + SizeOf.sizeOf(foldedBytes) + SizeOf.sizeOf(foldedMasks);
         }
         long size = literalSetFilter.estimatedRetainedSize() + SizeOf.sizeOfObjectArray(literalSet.length);
         for (byte[] literal : literalSet) {
@@ -281,7 +313,44 @@ final class InnerLiteralSearch
         if (literalSearch == null) {
             return findLiteralSetMember(text, offset, length);
         }
+        if (foldedBytes != null) {
+            return findFoldedLiteral(text, offset, length);
+        }
         return minimumLiteralLength == 1 ? literalSearch.findSingleByte(text, offset, length) : literalSearch.findContains(text, offset, length);
+    }
+
+    // Each hit of the exact head, with room for the whole literal, is checked for the folded rest,
+    // and a false hit continues the scan past it.
+    private int findFoldedLiteral(Slice text, int offset, int length)
+    {
+        int headLength = literalSearch.literalLength();
+        int restLength = foldedBytes.length - headLength;
+        byte[] data = text.byteArray();
+        int dataOffset = text.byteArrayOffset();
+        int position = offset;
+        int end = offset + length;
+        while (end - position >= foldedBytes.length) {
+            int headSearchLength = end - position - restLength;
+            int hit = headLength == 1 ? literalSearch.findSingleByte(text, position, headSearchLength) : literalSearch.findContains(text, position, headSearchLength);
+            if (hit < 0) {
+                return -1;
+            }
+            if (foldedRestMatches(data, dataOffset + hit, headLength)) {
+                return hit;
+            }
+            position = hit + 1;
+        }
+        return -1;
+    }
+
+    private boolean foldedRestMatches(byte[] data, int literalStart, int headLength)
+    {
+        for (int index = headLength; index < foldedBytes.length; index++) {
+            if ((data[literalStart + index] | foldedMasks[index]) != foldedBytes[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // The filter accepts a superset of the positions where a member starts, so each hit is
@@ -377,6 +446,85 @@ final class InnerLiteralSearch
         }
         return StartLiteralFilter.build(paths, ByteFrequencies.englishText());
     }
+
+    // The literal of the run of elements starting at `index` that are ASCII literals, folded or
+    // not, and classes of exactly the two cases of an ASCII letter, up to MAXIMUM_LITERAL_LENGTH
+    // bytes; the run stops at the first other element. Null when the run holds no folded letter or
+    // starts with no exact head. A folded letter byte matches as the compiler's folded byte range
+    // does: lowered, it equals the lower-case letter, which `(byte | 0x20) == letter` tests. Any
+    // other folded ASCII byte matches only itself.
+    private static FoldedLiteral foldedLiteral(List<Regexp> children, int index)
+    {
+        byte[] bytes = new byte[MAXIMUM_LITERAL_LENGTH];
+        byte[] masks = new byte[MAXIMUM_LITERAL_LENGTH];
+        int length = 0;
+        for (int childIndex = index; childIndex < children.size(); childIndex++) {
+            int newLength = appendFoldedElement(children.get(childIndex), bytes, masks, length);
+            if (newLength < 0) {
+                break;
+            }
+            length = newLength;
+        }
+        int headLength = 0;
+        while (headLength < length && masks[headLength] == 0) {
+            headLength++;
+        }
+        if (headLength == 0 || headLength == length) {
+            return null;
+        }
+        return new FoldedLiteral(Arrays.copyOf(bytes, headLength), Arrays.copyOf(bytes, length), Arrays.copyOf(masks, length));
+    }
+
+    // Appends the element's bytes and masks after `length`, and returns the new length, or -1 when
+    // the element is not one the folded literal can hold or would not fit.
+    private static int appendFoldedElement(Regexp element, byte[] bytes, byte[] masks, int length)
+    {
+        int flags = element.parseFlags();
+        if ((flags & Regexp.FULL_CASE_FOLD) != 0) {
+            return -1;
+        }
+        boolean foldCase = (flags & Regexp.FOLD_CASE) != 0;
+        int[] runes = switch (element.op()) {
+            case LITERAL -> new int[] {element.rune()};
+            case LITERAL_STRING -> element.runes();
+            case CHAR_CLASS -> {
+                int letter = asciiLetterCasePair(element.charClass());
+                foldCase = true;
+                yield letter < 0 ? null : new int[] {letter};
+            }
+            default -> null;
+        };
+        if (runes == null || runes.length == 0 || length + runes.length > MAXIMUM_LITERAL_LENGTH) {
+            return -1;
+        }
+        for (int rune : runes) {
+            if (rune < 0 || rune > 0x7F || (foldCase && 'A' <= rune && rune <= 'Z')) {
+                // A folded upper-case rune matches no byte, as the compiled range lowers the byte.
+                return -1;
+            }
+            bytes[length] = (byte) rune;
+            masks[length] = foldCase && 'a' <= rune && rune <= 'z' ? (byte) 0x20 : 0;
+            length++;
+        }
+        return length;
+    }
+
+    // The lower-case letter of a class that holds exactly an ASCII letter in both cases, or -1.
+    private static int asciiLetterCasePair(CharClass charClass)
+    {
+        if (charClass.rangeCount() != 2) {
+            return -1;
+        }
+        RuneRange upper = charClass.range(0);
+        RuneRange lower = charClass.range(1);
+        if (upper.low() != upper.high() || lower.low() != lower.high() || upper.low() < 'A' || upper.low() > 'Z' || lower.low() != upper.low() + ('a' - 'A')) {
+            return -1;
+        }
+        return lower.low();
+    }
+
+    // A case-insensitive literal: its exact head, and its whole bytes and masks.
+    private record FoldedLiteral(byte[] head, byte[] bytes, byte[] masks) {}
 
     private static byte[] asciiLiteral(Regexp regexp)
     {

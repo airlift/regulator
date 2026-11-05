@@ -53,6 +53,7 @@ public class TestInnerLiteralSearch
             "(?:a@.*b|c)@",
             "(?:a[^@]*@[^@]*d|c)@",
             "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)",
+            "(\\s*)((?i:# noqa)(?::\\s?([A-Z]+[0-9]+))?)",
             "(\\w+)(@(\\w+))",
             "([A-Za-z]awyer|[A-Za-z]inn)\\s",
             "[a-z](?:inn|innk)\\s",
@@ -76,9 +77,17 @@ public class TestInnerLiteralSearch
         assertThat(literal("\\s[a-zA-Z]{0,12}ing\\s")).isEqualTo("ing");
         assertThat(literal("\\w+(?:ab)?\\s+ing")).isEqualTo("ing");
         // Capturing groups in the top-level concatenation are looked through, as the crate's
-        // top_concat does, so an inner literal may sit inside a group.
-        assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# ");
-        assertThat(literal("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# ");
+        // top_concat does, so an inner literal may sit inside a group. Case-insensitive ASCII
+        // letters extend the literal after its exact head, the exact bytes before the first
+        // case-insensitive letter; the literal is shown with those letters lowered.
+        assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
+        assertThat(literal("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
+        // Without an exact head the folded literal is not searched, and with a head of one common
+        // byte it is not searched either, so a later literal decides.
+        assertThat(innerLiteralSearch("\\s+(?i:noqa)")).isNull();
+        InnerLiteralSearch commonHeadSearch = Re2.compile(utf8Slice("[a-z](?i: noqa)@x")).innerLiteralSearchForDiagnostics();
+        assertThat(commonHeadSearch).isNotNull();
+        assertThat(literal(commonHeadSearch)).isEqualTo("@x");
         // A group that does not capture joins the top level too.
         assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
         assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
@@ -123,7 +132,8 @@ public class TestInnerLiteralSearch
                 "\\w+(?:@\\w+)+",
                 // Nor are the copies of a counted repetition, which the crate keeps as one element.
                 "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])",
-                // Anchored, prefix-accelerated, folded, common single-byte, and overlong literals.
+                // Anchored, prefix-accelerated, folded with no exact head, common single-byte, and
+                // overlong literals.
                 "^\\w+@\\w+",
                 "Holmes\\w+@",
                 "\\w+(?i:holmes)",
@@ -290,6 +300,12 @@ public class TestInnerLiteralSearch
                 assertThat(pattern.matcher(absent).find()).as(description).isFalse();
                 assertThat(pattern.matcher(absent, 0).find()).as(description).isFalse();
                 assertThat(forwardStateCount(pattern)).as(description).isZero();
+                // A comment with the head of a case-insensitive literal but not the rest of it
+                // has no match either. This case targets the second pattern, whose literal
+                // `# noqa` is case-insensitive.
+                Slice headOnly = utf8Slice("    x = 1  # type: ignore[no-any]");
+                assertThat(pattern.matcher(headOnly).find()).as(description).isFalse();
+                assertThat(forwardStateCount(pattern)).as(description).isZero();
 
                 Slice present = utf8Slice("x = 1  # noqa: E501 user@example.com");
                 assertThat(pattern.find(present)).as(description).isTrue();
@@ -419,7 +435,7 @@ public class TestInnerLiteralSearch
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"# noqa", "# NoQA:", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
