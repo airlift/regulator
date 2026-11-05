@@ -101,6 +101,14 @@ def variant_gain_warnings(variant, baseline, hosts):
     return warnings
 
 
+def process_means(host):
+    """A host row's mean and independent-process means, which a reduction made before the reducer kept them lacks."""
+    if 'mean_score' not in host:
+        return {}
+    return {'meanNs': float(host['mean_score']),
+            'epochMeansNs': [float(value) for value in host['process_mean_scores'].split(',')]}
+
+
 def output_contract(pairs, metadata):
     """Require captured contracts for both routes of every paired unit attempt."""
     contracts = []
@@ -242,10 +250,12 @@ def baseline_rows(directory, lifecycle_manifest):
         evidence = []
         for pair in pairs:
             host = hosts[pair['platform'], pair['host_epoch'], pair['candidate_row_id']]
+            comparator_host = hosts[pair['platform'], pair['host_epoch'], pair['comparator_row_ids']]
             evidence.append({
                 'replica': int(pair['replica_id']), 'instanceId': host['instance_id'],
-                'candidate': {'state': 'compared', 'medianNs': float(pair['candidate_score'])},
-                'comparator': {'state': 'compared', 'medianNs': float(pair['comparator_score'])},
+                'candidate': {'state': 'compared', 'medianNs': float(pair['candidate_score']), **process_means(host)},
+                'comparator': {'state': 'compared', 'medianNs': float(pair['comparator_score']),
+                               **process_means(comparator_host)},
             })
         result = reduce_hosts(evidence, size)
         contract = output_contract(pairs, metadata) if language == 'trino' and operation in {

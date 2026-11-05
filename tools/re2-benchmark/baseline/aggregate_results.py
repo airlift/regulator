@@ -20,6 +20,8 @@ from pathlib import Path
 
 from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, ValidationError, exceeds_published_limit
 from campaign_io import ledger_lines
+import row_protocol
+import shard_results
 import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
@@ -378,9 +380,35 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
     identifiers = [row["row_id"] for row in observed]
     if len(identifiers) != len(set(identifiers)) or set(identifiers) != set(expected):
         raise ReductionError(f"artifact does not contain the exact rows of its group: {directory}")
+    add_process_means(directory, observed, expected)
     return verify_measurements(
         directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
         cpu_ticks, directory / CAPACITY_NAME)
+
+
+def add_process_means(directory, observed, expected):
+    """Give each observed row its independent processes' mean scores and their mean, from the raw results of its
+    route, which must reproduce the median score the row recorded."""
+    processes = {}
+    try:
+        for route in unit_session.read_route_plan(directory):
+            route_directory = directory / "routes" / route["route"]
+            selectors = row_protocol.read_tsv(route_directory / "jmh-selectors.tsv")
+            for key, groups in shard_results.route_processes(route_directory, selectors).items():
+                if key in processes:
+                    raise ReductionError(f"two routes measured {key} in {directory}")
+                processes[key] = groups
+    except (OSError, ValueError, KeyError) as error:
+        raise ReductionError(f"invalid raw results in {directory}: {error}") from error
+    for row in observed:
+        manifest = expected[row["row_id"]]
+        groups = processes.get((row["system"], row_protocol.jmh_benchmark(manifest), manifest["parameters"]))
+        if not groups or shard_results.format_number(
+                statistics.median(sample for group in groups for sample in group)) != row["score"]:
+            raise ReductionError(f"raw results do not reproduce the score of {row['row_id']} in {directory}")
+        means = [statistics.fmean(group) for group in groups]
+        row["mean_score"] = shard_results.format_number(statistics.fmean(means))
+        row["process_mean_scores"] = ",".join(map(shard_results.format_number, means))
 
 
 def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
@@ -566,7 +594,7 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
         "shard_id", "replica_id", "instance_id", "host_epoch", "confirmation", "candidate_commit",
         "engine_tree", "evidence_manifest_sha256", "row_id", "suite",
         "system", "benchmark", "parameters", "comparator", "expected_result",
-        "allocation_contract", "workload_checksum", "score", "score_unit",
+        "allocation_contract", "workload_checksum", "score", "mean_score", "process_mean_scores", "score_unit",
         "allocation_bytes", "contract_identity", "outcome",
         "steal_share", "artifact_set_sha256", "artifact_uri",
         "artifact_sha256", "retrieved_at", "campaign_s3_uri", "campaign_version_id",
@@ -588,7 +616,7 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
                     "row_id", "suite", "system", "benchmark", "parameters", "comparator",
                     "expected_result", "allocation_contract", "workload_checksum")},
                 **{field: observed.get(field, "") for field in (
-                    "score", "score_unit", "allocation_bytes", "outcome")},
+                    "score", "mean_score", "process_mean_scores", "score_unit", "allocation_bytes", "outcome")},
                 "contract_identity": observed["result_checksum"],
                 "steal_share": format_number(session.steal_share),
                 "artifact_set_sha256": session.artifact_set_sha256,

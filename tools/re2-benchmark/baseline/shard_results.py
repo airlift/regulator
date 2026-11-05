@@ -162,7 +162,11 @@ def jmh_results(
         merge_secondary_metrics=True,
         allow_missing_secondary_metrics=False,
         allow_disjoint_process_sets=False,
-        expected_process_groups=None):
+        expected_process_groups=None,
+        measurement_iterations=None):
+    """Each benchmark's JMH result, its process sample groups merged across the files. A result without raw samples
+    counts its score as one process's one sample, unless measurement iterations are given: then each process must
+    keep exactly that many samples."""
     results = {}
     process_count = len(paths)
     if process_count == 0:
@@ -182,7 +186,12 @@ def jmh_results(
                 f"JMH process rows differ; missing={sorted(set(results) - set(process_results))[:20]}, "
                 f"unexpected={sorted(set(process_results) - set(results))[:20]} in {path}")
         for key, result in process_results.items():
-            primary_raw_data = result["primaryMetric"].get("rawData") or [[result["primaryMetric"]["score"]]]
+            primary_raw_data = result["primaryMetric"].get("rawData")
+            if measurement_iterations is not None and (not primary_raw_data or any(
+                    len(group) != measurement_iterations for group in primary_raw_data)):
+                raise ValueError(f"JMH result {key} in {path} does not keep {measurement_iterations} raw samples "
+                                 "for each of its processes")
+            primary_raw_data = primary_raw_data or [[result["primaryMetric"]["score"]]]
             if require_one_process_group_per_file and len(primary_raw_data) != 1:
                 raise ValueError(
                     f"JMH process result {key} in {path} has {len(primary_raw_data)} process sample groups, "
@@ -361,55 +370,95 @@ def normalize_mapped_jmh(arguments):
 NATIVE_PARAMETER_PREFIX = "parameter."
 
 
-def native_results(paths, expected_repetitions):
-    """Each Google Benchmark result file's median repetition, keyed by operation and row parameters.
+def native_repetitions(path, expected_repetitions):
+    """One Google Benchmark result file's repetition times, keyed by operation and row parameters.
 
-    Every file must hold the planned selector's repetitions, so a dry run or a runner flag read
+    The file must hold the planned selector's repetitions, so a dry run or a runner flag read
     from the environment cannot stand in for the frozen protocol.
     """
+    document = json.loads(path.read_text(encoding="utf-8"))
+    context = document.get("context") if isinstance(document, dict) else None
+    benchmarks = document.get("benchmarks") if isinstance(document, dict) else None
+    if not isinstance(context, dict) or not isinstance(benchmarks, list) or not benchmarks:
+        raise ValueError(f"Native result is empty or malformed: {path}")
+    if context.get("dry_run", "false") != "false":
+        raise ValueError(f"Native result is a dry run: {path}")
+    parameters = canonical_parameters({
+        name[len(NATIVE_PARAMETER_PREFIX):]: value for name, value in context.items()
+        if name.startswith(NATIVE_PARAMETER_PREFIX)})
+    repetitions = {}
+    for result in benchmarks:
+        if result.get("error_occurred") or result.get("skipped"):
+            raise ValueError(f"Native benchmark {result.get('name')} failed or was skipped in {path}")
+        if result.get("run_type") != "iteration":
+            continue
+        if result.get("time_unit") != "ns":
+            raise ValueError(
+                f"Unexpected native unit for {result.get('name')} in {path}: {result.get('time_unit')}")
+        if int(result["repetitions"]) != expected_repetitions:
+            raise ValueError(f"Native benchmark {result.get('name')} in {path} declares "
+                             f"{result['repetitions']} repetitions, not {expected_repetitions}")
+        if int(result["iterations"]) < 1:
+            raise ValueError(f"Native benchmark {result.get('name')} in {path} ran no iterations")
+        repetitions.setdefault((result["run_name"], parameters), []).append(result)
+    times = {}
+    for key, samples in repetitions.items():
+        if len(samples) != expected_repetitions:
+            raise ValueError(f"Native result {key} in {path} has {len(samples)} of "
+                             f"{expected_repetitions} repetitions")
+        indices = sorted(int(sample["repetition_index"]) for sample in samples)
+        if indices != list(range(expected_repetitions)):
+            raise ValueError(f"Native result {key} in {path} has repetition indices {indices}, "
+                             f"not 0 to {expected_repetitions - 1}")
+        real_times = [float(sample["real_time"]) for sample in samples]
+        invalid = [value for value in real_times if not math.isfinite(value) or value <= 0]
+        if invalid:
+            raise ValueError(f"Native result {key} in {path} has non-finite or non-positive times {invalid}")
+        times[key] = real_times
+    return times
+
+
+def native_results(paths, expected_repetitions):
+    """Each Google Benchmark result file's median repetition, keyed by operation and row parameters."""
     results = {}
     for path in paths:
-        document = json.loads(path.read_text(encoding="utf-8"))
-        context = document.get("context") if isinstance(document, dict) else None
-        benchmarks = document.get("benchmarks") if isinstance(document, dict) else None
-        if not isinstance(context, dict) or not isinstance(benchmarks, list) or not benchmarks:
-            raise ValueError(f"Native result is empty or malformed: {path}")
-        if context.get("dry_run", "false") != "false":
-            raise ValueError(f"Native result is a dry run: {path}")
-        parameters = canonical_parameters({
-            name[len(NATIVE_PARAMETER_PREFIX):]: value for name, value in context.items()
-            if name.startswith(NATIVE_PARAMETER_PREFIX)})
-        repetitions = {}
-        for result in benchmarks:
-            if result.get("error_occurred") or result.get("skipped"):
-                raise ValueError(f"Native benchmark {result.get('name')} failed or was skipped in {path}")
-            if result.get("run_type") != "iteration":
-                continue
-            if result.get("time_unit") != "ns":
-                raise ValueError(
-                    f"Unexpected native unit for {result.get('name')} in {path}: {result.get('time_unit')}")
-            if int(result["repetitions"]) != expected_repetitions:
-                raise ValueError(f"Native benchmark {result.get('name')} in {path} declares "
-                                 f"{result['repetitions']} repetitions, not {expected_repetitions}")
-            if int(result["iterations"]) < 1:
-                raise ValueError(f"Native benchmark {result.get('name')} in {path} ran no iterations")
-            repetitions.setdefault((result["run_name"], parameters), []).append(result)
-        for key, samples in repetitions.items():
+        for key, real_times in native_repetitions(path, expected_repetitions).items():
             if key in results:
                 raise ValueError(f"Duplicate native result {key} in {path}")
-            if len(samples) != expected_repetitions:
-                raise ValueError(f"Native result {key} in {path} has {len(samples)} of "
-                                 f"{expected_repetitions} repetitions")
-            indices = sorted(int(sample["repetition_index"]) for sample in samples)
-            if indices != list(range(expected_repetitions)):
-                raise ValueError(f"Native result {key} in {path} has repetition indices {indices}, "
-                                 f"not 0 to {expected_repetitions - 1}")
-            real_times = [float(sample["real_time"]) for sample in samples]
-            invalid = [value for value in real_times if not math.isfinite(value) or value <= 0]
-            if invalid:
-                raise ValueError(f"Native result {key} in {path} has non-finite or non-positive times {invalid}")
             results[key] = statistics.median(real_times)
     return results
+
+
+# A route's raw result of a planned selector names it; a protocol qualification's raw results name none.
+SELECTOR_RESULT = re.compile(r".+-selector-([0-9]+)(?:-process-[0-9]+)?\.json")
+
+
+def route_processes(route_directory, selectors):
+    """A route's samples from the raw results of its planned selectors, one list per independent process, keyed
+    by system, JMH method or native operation, and parameters.
+
+    A JMH fork is one process; a native invocation is one process of its repetitions.
+    """
+    selectors = {selector["selector"]: selector for selector in selectors}
+    processes = {}
+    for path in sorted((route_directory / "raw").glob("*.json")):
+        match = SELECTOR_RESULT.fullmatch(path.name)
+        if match is None:
+            continue
+        selector = selectors.get(match[1])
+        if selector is None:
+            raise ValueError(f"Raw result {path} names no planned selector")
+        if selector["kind"] == "native":
+            measured = {key: [times] for key, times in
+                        native_repetitions(path, int(selector["measurement_iterations"])).items()}
+        else:
+            measured = {key: result["primaryMetric"]["rawData"] for key, result in jmh_results(
+                [path], require_one_process_group_per_file=False, merge_secondary_metrics=False,
+                measurement_iterations=int(selector["measurement_iterations"])).items()}
+        for (benchmark, parameters), groups in measured.items():
+            processes.setdefault((selector["system"], benchmark, parameters), []).extend(
+                [float(sample) for sample in group] for group in groups)
+    return processes
 
 
 def normalize_native(arguments):

@@ -253,7 +253,11 @@ The reducer writes:
 
 - `host-rows.tsv`: every row of each accepted group, with `unit_id`,
   `unit_attempt_id`, `group_id`, its host's `region` and `market`, and its
-  group's CPU `steal_share`
+  group's CPU `steal_share`. Beside the worker's median `score`, each row keeps
+  its `mean_score` and the `process_mean_scores` of its independent processes,
+  JMH forks or native process, recomputed from the route's raw results, which
+  must reproduce the median exactly. The publication's mean estimate and its
+  bootstrap resample these.
 - `host-checks.tsv`: each host's region, market, rows, slowness, noise, steal
   share, and whether and why it was flagged
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state

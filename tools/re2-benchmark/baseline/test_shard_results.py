@@ -493,6 +493,36 @@ class TestShardResults(unittest.TestCase):
                     allow_disjoint_process_sets=True,
                     expected_process_groups=3)
 
+    def testRouteProcessesKeepEachProcessesMeasurementIterations(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            route = Path(temporary_directory)
+            (route / "raw").mkdir()
+            selectors = [{"selector": "1", "kind": "jmh", "system": "regulator", "measurement_iterations": "2"},
+                         {"selector": "2", "kind": "native", "system": "native", "measurement_iterations": "2"}]
+
+            def processes(primary_metric, repetitions=(1, 3)):
+                (route / "raw" / "route-selector-1.json").write_text(json.dumps([{
+                    "benchmark": "benchmark", "primaryMetric": {"score": 2, "scoreUnit": "ns/op", **primary_metric}}]))
+                (route / "raw" / "route-selector-2.json").write_text(json.dumps({"context": {}, "benchmarks": [{
+                    "name": "operation", "run_name": "operation", "run_type": "iteration",
+                    "repetitions": 2, "repetition_index": index, "iterations": 1, "time_unit": "ns",
+                    "real_time": time} for index, time in enumerate(repetitions)]}))
+                return SHARD_RESULTS.route_processes(route, selectors)
+
+            self.assertEqual({("regulator", "benchmark", "-"): [[1.0, 3.0], [2.0, 2.0]],
+                              ("native", "operation", "-"): [[1.0, 3.0]]},
+                             processes({"rawData": [[1, 3], [2, 2]]}))
+            # Only every process's every measurement iteration states its mean; an aggregate-only result, or a
+            # process cut short, can still reproduce the median.
+            for primary_metric, repetitions, message in (
+                    ({}, (1, 3), "does not keep 2 raw samples"),
+                    ({"rawData": []}, (1, 3), "does not keep 2 raw samples"),
+                    ({"rawData": [[1, 3], [2]]}, (1, 3), "does not keep 2 raw samples"),
+                    ({"rawData": [[1, 3], [2, 2]]}, (2,), "has 1 of 2 repetitions")):
+                with self.subTest(primary_metric=primary_metric, repetitions=repetitions), \
+                        self.assertRaisesRegex(ValueError, message):
+                    processes(primary_metric, repetitions)
+
     def testMappedJmhAcceptsDisjointFullProtocolProcessSets(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
