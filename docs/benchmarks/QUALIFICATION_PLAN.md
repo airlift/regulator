@@ -243,7 +243,7 @@ does not include Trino module wiring, SQL registration, block integration, or
 deployment work.
 
 The application matrix rotates through independent short and medium Slice
-values for each compiled pattern, including nonzero logical offsets. These
+values for each reused pattern, including nonzero logical offsets. These
 application workloads are designed examples, not a measured distribution of
 production use.
 

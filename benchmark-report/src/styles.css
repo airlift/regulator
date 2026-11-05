@@ -46,7 +46,6 @@
 .measurement-table .comparison-row.modest-loss .delta, .measurement-table .delta.modest-loss { background: var(--red-pale-cell); color: var(--red-ink); }
 .measurement-table .comparison-row.tie .delta, .measurement-table .delta.tie { color: var(--muted); font-weight: 400; }
 .measurement-table .comparison-row.na { background: #efeee9; color: var(--muted); }
-.measurement-table .gap-label { display: block; width: fit-content; margin: 4px 0 0 auto; padding: 2px 5px; border-radius: 4px; background: var(--blue); color: var(--blue-ink); font-size: 9px; font-weight: 700; }
 .scan-result.timeout { background: #f7edcd; color: #715b14; }
 .outcome-reason { display: block; max-width: 380px; white-space: normal; color: var(--muted); margin-top: 5px; line-height: 1.4; font-size: 10px; }
 .row-evidence { max-width: 550px; }

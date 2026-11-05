@@ -85,7 +85,14 @@ regenerate the README. A campaign of the released artifact publishes as
 `Regulator <version> results`. A campaign of a candidate build, run before the
 release, publishes as `Regulator <version> preliminary results` with a
 `publication` object whose `sourcePolicy` is `candidate-build`; a later
-campaign of the released JAR supersedes it as the current report.
+campaign of the released JAR supersedes it as the current report. When a
+targeted re-measure of a later candidate replaces some of its rows, the report
+keeps the base campaign's identity in `sources` and marks `sourcePolicy` as
+`mixed-development-revisions`. `provenance.targetedRemeasure` records the
+re-measure's campaign and build, and lists the replaced rows in
+`replacedRowKeys`. Exactly those rows must name that campaign and build in
+`measurementSource` and keep the base campaign's result, measured on other
+hosts, as `originalResult`.
 `publicationScope` records the complete, published, and hidden row counts, the
 last as `excludedCampaignRows`, and import validation rejects a publication
 that contains a hidden row. The 1.0 publication instead kept the rows of a
@@ -221,13 +228,11 @@ Historical C-family datasets retain their labels.
 It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 
-Each comparison's color and symbol follow the
-[significance tiers](../docs/benchmarks/METHODOLOGY.md#report-significance), and
-each comparison where Regulator is slower shows its gap in instructions. Every
-threshold and gap label lives in the `significance` table at the top of
-`src/language-report.tsx`, beside `INSTRUCTIONS_PER_NS`. The page's measurement
-notes and the rendering tests read their numbers from that table; the
-methodology states them for readers.
+Each comparison's color and symbol follow the [significance
+tiers](../docs/benchmarks/METHODOLOGY.md#report-significance). Every threshold,
+in ns per byte or per call, lives in the `significance` table at the top of
+`src/language-report.tsx`. The page's measurement notes and the rendering tests
+read their numbers from that table; the methodology states them for readers.
 
 The report preserves host ranges and timing-precision warnings. A range is not
 a confidence interval. Single-use and multi-use results remain separate, and
@@ -236,21 +241,22 @@ variation. Internal allocation results remain in the separately preserved
 complete baseline evidence.
 
 Every API page combines single-use and multi-use timings in its pattern
-lifecycle table. The page order is everyday operations, the specialized engine
-and compiler where measured, pattern lifecycle, Trino-specific operations where
-available, text processing, literal-probe distributions, then collapsed
-adversarial and synthetic stress groups. Compile-only measurements remain in the
-public JSON download, without a separate construction or compiler-stress table.
+lifecycle table. The page order is everyday operations, compiled patterns where
+measured, pattern lifecycle, Trino-specific operations where available, text
+processing, literal-probe distributions, then collapsed adversarial and
+synthetic stress groups. Compile-only measurements remain in the public JSON
+download, without a separate construction or compiler-stress table.
 
-The specialized engine and compiler table has one row per pattern and
-operation. The comparator a specialized-pattern catalog row names selects its
-page: RE2 for native RE2, Java for JDK `Pattern`, Trino regex for Joni, Rust
-for the `regex` crate, and LIKE for Trino SQL LIKE. The table shows the
-comparator and each measured Regulator variant's time: the regular engine, the
-specialized engine, and compiled. Each later variant's gain over the variant
-first in column order divides their comparator-relative ratios, as the
-literal-probe table's tuned-versus-default gain does. The variants share each
-host's comparator measurement, so baseline import takes the gain's host
+The compiled patterns table has one row per pattern and operation. The
+comparator a specialized-pattern catalog row names selects its page: RE2 for
+native RE2, Java for JDK `Pattern`, Trino regex for Joni, Rust for the `regex`
+crate, and LIKE for Trino SQL LIKE. The table shows the comparator's time, the
+uncompiled and compiled times, the uncompiled and compiled ratios against the
+comparator, and the compiled gain over uncompiled, which divides their
+comparator-relative ratios as the literal-probe table's tuned-versus-default
+gain does. Regular-engine rows stay in the page data and downloads, but the
+page does not show them, nor any gain computed against them. The variants share
+each host's comparator measurement, so baseline import takes the gain's host
 variation and direction warnings from each host's own pair of variant times,
 not from either variant's comparison with the comparator, and adds the
 raw-sample precision warning when either variant's own measurement failed
@@ -258,12 +264,12 @@ precision. Baseline import rejects variants with a different host cohort or
 comparator measurement, an unknown variant system, a suite or comparator the
 specialized-pattern catalog does not name, and any unit other than ns/op on
 either the variant or the comparator. Report validation rejects a variant
-without its specialized-engine row. The last two columns compare the last
-variant with the comparator and give its gap in instructions. Times are warmed
-steady-state operations without compilation; each LIKE time scans the leading
-rows of a TPC-H column, whose row count comes from the TPC-H corpus manifest.
-Any page with `specialized-patterns` rows shows the section; these rows never
-enter the README summary.
+without its uncompiled row. Compiled times are a best case: each compiled
+pattern is const-bound the way Trino binds it, one pattern per call site. Times
+are warmed steady-state operations without compilation; each LIKE time scans
+the leading rows of a TPC-H column, whose row count comes from the TPC-H corpus
+manifest. Any page with `specialized-patterns` rows shows the section; these
+rows never enter the README summary.
 
 LIKE's default row order starts with prefix, suffix, exact and contains checks,
 then ordered literals and fixed-character gaps, then one-character wildcards.

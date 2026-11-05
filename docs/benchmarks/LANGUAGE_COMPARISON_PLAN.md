@@ -101,7 +101,7 @@ silently decoded, replaced, or removed from the report.
 Every regex language has a representative lifecycle matrix:
 
 - **single use:** compile the pattern and execute one complete public operation
-- **reused:** reuse the compiled pattern and the fastest realistic reusable
+- **reused:** reuse the pattern object and the fastest realistic reusable
   matching state for that public contract
 - **break-even:** when measurable, the number of reused operations needed to
   recover a single-use deficit
@@ -165,7 +165,7 @@ platform, and memory mode encoded in the URL. C9g and native-memory Regulator
 remain the defaults. Each language view contains:
 
 1. ordinary shared execution workloads
-2. the specialized engine and compiler where measured
+2. compiled patterns where measured
 3. representative single-use and reused lifecycle results
 4. Trino-specific operations where available
 5. text processing workloads

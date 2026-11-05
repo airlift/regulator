@@ -90,17 +90,10 @@ const percentFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1,
 // Gap magnitudes truncate, so a gap under a cut-off never displays at or above it.
 const gapFormat = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2, roundingMode: "trunc" });
 
-// One nominal rate converts a time gap to instructions on every CPU.
-export const INSTRUCTIONS_PER_NS = 10;
-// Every significance threshold. Gaps are ns per input byte or per call; below the tie gap a
-// difference is under 1 instruction per byte or 20 per call, and its ratio says little about cost.
+// Every significance threshold. Gaps are ns per input byte or per call; a difference under the
+// tie gap is too small for its ratio to say much about cost.
 const tieGap = { byte: .1, call: 2 }, clearGap = { byte: .3, call: 5 };
-export const significance = {
-  tieGap, clearGap, tieRatio: [.95, 1.05], clearRatio: [.8, 1.25],
-  // Labels for gaps under the tie gap and under the clear gap.
-  gapLabels: { byte: ["under one instruction per byte", "under three instructions per byte"],
-    call: [tieGap.call, clearGap.call].map(ns => `under ${ns * INSTRUCTIONS_PER_NS} instructions per call`) },
-} as const;
+export const significance = { tieGap, clearGap, tieRatio: [.95, 1.05], clearRatio: [.8, 1.25] } as const;
 type Significance = "clear-win" | "modest-win" | "tie" | "modest-loss" | "clear-loss";
 type Tier = Significance | "na" | "timeout";
 const significanceSymbols: Record<Significance, [string, string]> = {
@@ -268,15 +261,6 @@ function gapSize(gap: Gap): string {
   return `${gapFormat.format(Math.abs(gap.ns))} ns/${gap.basis}`;
 }
 
-// Single-use timings include compilation, so only steady-state losses get a gap.
-export function lossGap(row: Row): (Gap & { instructions: number; label: string | null }) | null {
-  const gap = comparisonGap(row);
-  if (!gap || !(row.result.ratio! > 1) || comparisonIssue(row) || row.operation.startsWith("singleUse")) return null;
-  const [tieLabel, modestLabel] = significance.gapLabels[gap.basis];
-  return { ...gap, instructions: gap.ns * INSTRUCTIONS_PER_NS,
-    label: gap.ns < significance.tieGap[gap.basis] ? tieLabel : gap.ns < significance.clearGap[gap.basis] ? modestLabel : null };
-}
-
 // Each tie condition that holds, in words: the ratio interval or the host range includes 1.0, the
 // ratio is near 1, or the gap is small.
 function tieConditions(result: Result, gap: Gap | null): string[] {
@@ -324,14 +308,12 @@ function tierSentence(result: Result, gap: Gap | null, tier: Tier): string[] {
 function evidence(row: Row, tier: Tier): string {
   const { result } = row;
   if (result.state !== "compared") return result.reason || result.state;
-  const gap = lossGap(row);
   return [
     ...tierSentence(result, comparisonGap(row), tier),
     `Regulator ${duration(result.candidateNs)}; comparator ${duration(result.comparatorNs)}.`,
     `${result.estimator === "mean" ? "Ratio of mean costs" : "Same-host ratio median"} ${result.ratio!.toFixed(4)}×; host ratio range ${result.minimumRatio!.toFixed(4)}–${result.maximumRatio!.toFixed(4)}×.`,
     ...(result.uncertainty ? [`Approximate 95% ratio interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.`] : []),
     `${result.hosts.length} independent hosts; the observed range is not a confidence interval.`,
-    ...(gap ? [`Gap +${gapSize(gap)} ≈ ${gapFormat.format(gap.instructions)} instructions per ${gap.basis} at ${INSTRUCTIONS_PER_NS} instructions/ns.`] : []),
     ...result.warnings,
   ].join(" ");
 }
@@ -342,12 +324,6 @@ function Ratio({ row, comparator, children }: { row?: Row; comparator: string; c
   return <span className={`scan-result ${tier}`} title={evidence(row, tier)}>
     <TierSymbol tier={tier} />{row.result.state === "compared" ? comparisonText(row.result) : outcomeLabel(row.result, comparator)}{children}
   </span>;
-}
-
-function GapCell({ row }: { row?: Row }) {
-  const gap = row && lossGap(row);
-  return <td className="measurement gap">{gap && <>{gapFormat.format(gap.instructions)} instr/{gap.basis === "byte" ? "B" : "call"}
-    {gap.label && <small className="gap-label">{gap.label}</small>}</>}</td>;
 }
 
 type TimingSide = "candidate" | "comparator";
@@ -382,7 +358,7 @@ function LifecycleFlags({ row, comparator }: { row?: Row; comparator: string }) 
 }
 
 export function displayedMeasurements(rows: Row[]): Row[] {
-  const eligible = rows.filter(row => workloadSection(row) !== "diagnostic-only" && !comparisonIssue(row));
+  const eligible = rows.filter(row => workloadSection(row) !== "diagnostic-only" && !comparisonIssue(row) && !regularEngineRow(row));
   const displayed = eligible.filter(row => (row.population === "ordinary-scalar" && row.operation.startsWith("reused"))
     || row.population === "trino-operations"
     || ["specialized-patterns", "bulk-text", "literal-probe", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
@@ -394,8 +370,8 @@ export function displayedMeasurements(rows: Row[]): Row[] {
 }
 
 export function qualityDistribution(rows: Row[], side: TimingSide) {
-  // Specialized-pattern variants share one comparator measurement, carried by the specialized-engine row.
-  const measured = side === "comparator" ? rows.filter(row => row.population !== "specialized-patterns" || specializedVariantOf(row).key === "specialized") : rows;
+  // Specialized-pattern variants share one comparator measurement, carried by the uncompiled row.
+  const measured = side === "comparator" ? rows.filter(row => row.population !== "specialized-patterns" || specializedVariantOf(row) === uncompiledVariant) : rows;
   const values = measured.map(row => timingUncertainty(row.result, side)).filter((value): value is number => value !== null).sort((a, b) => a - b);
   if (!values.length) return null;
   const quantile = (fraction: number) => {
@@ -448,17 +424,15 @@ function MeasurementNotes({ rows }: { rows: Row[] }) {
   const high = rows.some(row => (["candidate", "comparator"] as const).some(side => (timingUncertainty(row.result, side) ?? 0) > .05));
   const compared = rows.some(row => row.result.state === "compared");
   if (!high && !compared) return null;
-  const { tieGap, clearGap, tieRatio, clearRatio, gapLabels } = significance;
+  const { tieGap, clearGap, tieRatio, clearRatio } = significance;
   const symbol = (tier: Significance) => <TierSymbol tier={tier} />;
   return <section className="measurement-notes" aria-label="Measurement notes"><h2>Measurement notes</h2>
     {high && <p id="quality-high" tabIndex={-1}><strong>* Higher uncertainty.</strong> The approximate 95% interval half-width exceeds 5% of that engine’s mean time. In lifecycle tables, the marker applies to either engine; expand the row to see which. This is an uncertainty annotation, not a failed measurement.</p>}
-    {compared && <><p><strong>Reading a comparison.</strong> Each comparison is judged by its ratio and by Regulator’s absolute gap: per input byte for text processing, literal-probe and stress rows, and per call for all others.
+    {compared && <p><strong>Reading a comparison.</strong> Each comparison is judged by its ratio and by Regulator’s absolute gap: per input byte for text processing, literal-probe and stress rows, and per call for all others.
       It is a tie ({symbol("tie")}, gray) when any one of these holds: the gap is under {tieGap.byte} ns per byte or {tieGap.call} ns per call; the ratio is between {tieRatio[0]}× and {tieRatio[1]}×; the range of per-host ratios includes 1.0; or the 95% ratio interval includes 1.0.
       A clear win or loss ({symbol("clear-win")} or {symbol("clear-loss")}, full green or red) needs both a gap of at least {clearGap.byte} ns per byte or {clearGap.call} ns per call and a ratio of at most {clearRatio[0]}× or at least {clearRatio[1]}×.
       Every other win or loss is modest ({symbol("modest-win")} or {symbol("modest-loss")}, pale green or red). Gains between Regulator variants have no gap or host range, so their ratio and interval decide. A result’s tooltip names the tie conditions that held.
-      <span className="significance-legend">{(Object.keys(significanceSymbols) as Significance[]).map(tier => <span key={tier} className={`scan-result ${tier}`}>{symbol(tier)}{significanceSymbols[tier][1].toLowerCase()}</span>)}</span></p>
-    <p><strong>Gap (instructions).</strong> Each comparison where Regulator is slower also gives its extra time in instructions, at a nominal {INSTRUCTIONS_PER_NS} instructions per ns on every CPU. Lifecycle tables give it for multi-use only, because single-use times include compilation.
-      Per byte, a gap under {tieGap.byte} ns reads “{gapLabels.byte[0]}” and one under {clearGap.byte} ns “{gapLabels.byte[1]}”; per call, a gap under {tieGap.call} ns reads “{gapLabels.call[0]}” and one under {clearGap.call} ns “{gapLabels.call[1]}”.</p></>}
+      <span className="significance-legend">{(Object.keys(significanceSymbols) as Significance[]).map(tier => <span key={tier} className={`scan-result ${tier}`}>{symbol(tier)}{significanceSymbols[tier][1].toLowerCase()}</span>)}</span></p>}
   </section>;
 }
 
@@ -484,9 +458,9 @@ function operationDescription(row: Row): string {
     "count-captures": "Find all matches and count participating capture groups, including the whole match.",
     grep: "Test each line for a match and count matching lines.",
     "grep-captures": "Find the first match on each line and count its participating capture groups.",
-    compile: "Construct the compiled pattern without executing it.",
-    reusedContains: "Test one input for a match using a warmed compiled pattern.",
-    reusedCount: "Count matches in one input using a warmed compiled pattern.",
+    compile: "Construct the pattern without executing it.",
+    reusedContains: "Test one input for a match reusing a warmed pattern.",
+    reusedCount: "Count matches in one input reusing a warmed pattern.",
     singleUseContains: "Compile the pattern, then test one input for a match.",
     singleUseCount: "Compile the pattern, then count matches in one input.",
     singleUse: "Compile the LIKE pattern, then match one input.",
@@ -559,14 +533,12 @@ function operationName(operation: string): string {
   return ({ reusedContains: "contains", reusedCount: "count", singleUseContains: "single-use contains", singleUseCount: "single-use count", compile: "construction", singleUse: "single use", matches: "reused match" } as Record<string, string>)[operation] || operation;
 }
 
-const gapTitle = `Regulator's extra time where it is slower, in instructions at a nominal ${INSTRUCTIONS_PER_NS} instructions/ns`;
-
 function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string }) {
   const [sort, setSort] = useState<Sort>(null);
   const bytes = rows.some(row => !comparisonIssue(row) && row.result.deltaNsPerByte != null);
   const numeric = rows.some(row => row.result.candidateNs != null || row.result.comparatorNs != null);
   const comparable = rows.some(row => !comparisonIssue(row));
-  const ordered = sorted(rows, sort, (row, key) => key === "name" ? row.name : key === "gap" ? lossGap(row)?.instructions : comparisonIssue(row) && ["ratio", "deltaNs", "deltaNsPerByte"].includes(key) ? null : (row.result as unknown as Record<string, SortValue>)[key]);
+  const ordered = sorted(rows, sort, (row, key) => key === "name" ? row.name : comparisonIssue(row) && ["ratio", "deltaNs", "deltaNsPerByte"].includes(key) ? null : (row.result as unknown as Record<string, SortValue>)[key]);
   return <div className="table-scroll"><table className="measurement-table">
     <thead><tr>
       <Header label="Pattern / workload" column="name" sort={sort} setSort={setSort} />
@@ -575,7 +547,6 @@ function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string })
       <Header label={`vs ${comparator}`} column="ratio" sort={sort} setSort={setSort} />
       {numeric && comparable && <Header label="Δ / operation" column="deltaNs" sort={sort} setSort={setSort} />}
       {bytes && <Header label="Δ ns / byte" column="deltaNsPerByte" sort={sort} setSort={setSort} />}
-      {numeric && comparable && <Header label="Gap (instructions)" column="gap" sort={sort} setSort={setSort} title={gapTitle} />}
     </tr></thead>
     <tbody>{ordered.map(row => <tr key={row.id} className={`comparison-row ${comparisonIssue(row) ? "na" : rowSignificance(row)}`}>
       <td><Name row={row} comparator={comparator} /></td>
@@ -585,7 +556,6 @@ function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string })
       {bytes && <td className="measurement delta" title={row.result.deltaNsPerByte != null ? `${row.result.deltaNsPerByte} ns per input byte` : ""}>
         {!comparisonIssue(row) && row.result.deltaNsPerByte != null && `${row.result.deltaNsPerByte < 0 ? "−" : row.result.deltaNsPerByte > 0 ? "+" : ""}${numberFormat.format(Math.abs(row.result.deltaNsPerByte))}`}
       </td>}
-      {numeric && comparable && <GapCell row={row} />}
     </tr>)}</tbody>
   </table></div>;
 }
@@ -659,12 +629,11 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
     if (key === "name") return row.name;
     if (key === "breakEven") return row.breakEven;
     if (key === "reusedBytes") return row.reused.result.deltaNsPerByte;
-    if (key === "reusedGap") return lossGap(row.reused)?.instructions;
     return key === "single" ? row.single?.result.ratio : key === "singleDelta" ? row.single?.result.deltaNs
       : key === "reused" ? row.reused.result.ratio : row.reused.result.deltaNs;
   });
   return <div className="table-scroll"><table className="measurement-table lifecycle-table"><thead><tr>
-    {[[like ? "Pattern" : "Pattern / operation", "name"], ["Single use", "single"], ["Single-use Δ", "singleDelta"], ["Multi-use", "reused"], ["Per-use Δ", "reusedDelta"], ...(bytes ? [["Δ ns / byte", "reusedBytes"]] : []), ["Gap (instructions)", "reusedGap"], ...(!like ? [["Break-even uses", "breakEven"]] : [])].map(([label, column]) => <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "reusedBytes" ? "Multi-use time difference per input byte" : column === "reusedGap" ? `Multi-use: ${gapTitle}` : undefined} />)}
+    {[[like ? "Pattern" : "Pattern / operation", "name"], ["Single use", "single"], ["Single-use Δ", "singleDelta"], ["Multi-use", "reused"], ["Per-use Δ", "reusedDelta"], ...(bytes ? [["Δ ns / byte", "reusedBytes"]] : []), ...(!like ? [["Break-even uses", "breakEven"]] : [])].map(([label, column]) => <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "reusedBytes" ? "Multi-use time difference per input byte" : undefined} />)}
   </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
     <td><Name row={{ ...(row.single ?? row.reused), name: row.name }} reused={row.single ? row.reused : undefined} comparator={comparator} hideOperation={like} missingSingle={!row.single} /></td>
     <td className="measurement"><Ratio row={row.single} comparator={comparator}><LifecycleFlags row={row.single} comparator={comparator} /></Ratio></td>
@@ -674,7 +643,6 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
     {bytes && <td className={`measurement delta ${rowSignificance(row.reused)}`} title={row.reused.result.deltaNsPerByte != null ? `${row.reused.result.deltaNsPerByte} ns per input byte` : ""}>
       {row.reused.result.deltaNsPerByte != null && `${row.reused.result.deltaNsPerByte < 0 ? "−" : row.reused.result.deltaNsPerByte > 0 ? "+" : ""}${numberFormat.format(Math.abs(row.reused.result.deltaNsPerByte))}`}
     </td>}
-    <GapCell row={row.reused} />
     {!like && <td className="measurement" title={row.reason}>{!row.single ? "" : row.breakEven === 1 ? "first use" : row.breakEven != null ? row.breakEven.toLocaleString() : "not determined"}</td>}
   </tr>)}</tbody></table></div>;
 }
@@ -743,12 +711,11 @@ function LiteralProbeTable({ rows, comparator }: { rows: Row[]; comparator: stri
     name: row.name, distribution: row.distribution, comparatorNs: row.standard.result.comparatorNs,
     standardNs: row.standard.result.candidateNs, tunedNs: row.tuned.result.candidateNs,
     standard: row.standard.result.ratio, tuned: row.tuned.result.ratio, gain: row.gain.ratio,
-    standardGap: lossGap(row.standard)?.instructions, tunedGap: lossGap(row.tuned)?.instructions,
   } as Record<string, SortValue>)[key]);
   return <div className="table-scroll"><table className="measurement-table literal-probe-table"><thead><tr>
     {[["Pattern · corpus", "name"], ["Tuned distribution", "distribution"], [`${comparator} (default run)`, "comparatorNs"], ["Regulator default", "standardNs"], ["Regulator tuned", "tunedNs"],
-      [`Default vs ${comparator}`, "standard"], ["Default gap", "standardGap"], [`Tuned vs ${comparator}`, "tuned"], ["Tuned gap", "tunedGap"], ["Tuned vs default", "gain"]].map(([label, column]) =>
-      <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "standardGap" || column === "tunedGap" ? gapTitle : undefined} />)}
+      [`Default vs ${comparator}`, "standard"], [`Tuned vs ${comparator}`, "tuned"], ["Tuned vs default", "gain"]].map(([label, column]) =>
+      <Header key={column} label={label} column={column} sort={sort} setSort={setSort} />)}
   </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
     <td><Name row={{ ...row.standard, name: row.name, workload: { ...row.standard.workload, description: literalProbeWorkloads[row.standard.caseId]?.description } }} comparator={comparator} hideOperation /></td>
     <td>{row.distribution}</td>
@@ -756,89 +723,79 @@ function LiteralProbeTable({ rows, comparator }: { rows: Row[]; comparator: stri
     <td className="measurement">{duration(row.standard.result.candidateNs)}</td>
     <td className="measurement">{duration(row.tuned.result.candidateNs)}</td>
     <td className="measurement"><Ratio row={row.standard} comparator={comparator}><LifecycleFlags row={row.standard} comparator={comparator} /></Ratio></td>
-    <GapCell row={row.standard} />
     <td className="measurement"><Ratio row={row.tuned} comparator={comparator}><LifecycleFlags row={row.tuned} comparator={comparator} /></Ratio></td>
-    <GapCell row={row.tuned} />
     <td className="measurement"><Gain result={row.gain} label="Tuned ratio divided by default ratio" /></td>
   </tr>)}</tbody></table></div>;
 }
 
-type SpecializedVariant = { key: "regular" | "specialized" | "compiled"; suffix: string; label: string; short: string };
+type SpecializedVariant = { key: "uncompiled" | "compiled"; suffix: string; label: string };
 type SpecializedPattern = { id: string; anchor: Row; variants: Partial<Record<SpecializedVariant["key"], Row>>;
-  gains: Partial<Record<SpecializedVariant["key"], Result>>; evidence: Array<{ label: string; row: Row }> };
+  gain?: Result; evidence: Array<{ label: string; row: Row }> };
 
-// Column order; each page shows only the variants it measured.
+// Column order. The default compile interprets the pattern's scan plan; compilation to bytecode is opt-in.
 const specializedVariants: SpecializedVariant[] = [
-  { key: "regular", suffix: "/regular-engine", label: "Regular engine", short: "Regular" },
-  { key: "specialized", suffix: "", label: "Specialized engine", short: "Specialized" },
-  { key: "compiled", suffix: "/generated", label: "Compiled", short: "Compiled" },
+  { key: "uncompiled", suffix: "", label: "Uncompiled" },
+  { key: "compiled", suffix: "/generated", label: "Compiled" },
 ];
-const [, specializedEngine] = specializedVariants;
+const [uncompiledVariant, compiledVariant] = specializedVariants;
+
+// Regular-engine rows stay in the data and downloads; the page compares compiled and uncompiled patterns only.
+function regularEngineRow(row: Row): boolean {
+  return row.population === "specialized-patterns" && row.caseId.endsWith("/regular-engine");
+}
 
 function specializedVariantOf(row: Row): SpecializedVariant {
-  return specializedVariants.find(variant => variant.suffix && row.caseId.endsWith(variant.suffix)) ?? specializedEngine;
+  return specializedVariants.find(variant => variant.suffix && row.caseId.endsWith(variant.suffix)) ?? uncompiledVariant;
 }
 
-function measuredVariants(patterns: SpecializedPattern[]): SpecializedVariant[] {
-  return specializedVariants.filter(variant => patterns.some(pattern => pattern.variants[variant.key]));
-}
-
-// Each later variant's gain over the page's first variant is computed once per pattern.
+// Each pattern's compiled gain is over its uncompiled row, computed once per pattern.
 export function specializedPatternRows(rows: Row[]): SpecializedPattern[] {
-  const patterns = rows.filter(row => row.population === "specialized-patterns");
+  const patterns = rows.filter(row => row.population === "specialized-patterns" && !regularEngineRow(row));
   const anchorKey = (row: Row) => `${row.caseId.slice(0, row.caseId.length - specializedVariantOf(row).suffix.length)}/${row.operation}`;
-  const byAnchor = new Map<string, SpecializedPattern>(patterns.filter(row => specializedVariantOf(row) === specializedEngine)
-    .map(anchor => [anchorKey(anchor), { id: anchor.id, anchor, variants: { specialized: anchor }, gains: {}, evidence: [] }]));
-  for (const row of patterns.filter(row => specializedVariantOf(row) !== specializedEngine)) {
+  const byAnchor = new Map<string, SpecializedPattern>(patterns.filter(row => specializedVariantOf(row) === uncompiledVariant)
+    .map(anchor => [anchorKey(anchor), { id: anchor.id, anchor, variants: { uncompiled: anchor }, evidence: [] }]));
+  for (const row of patterns.filter(row => specializedVariantOf(row) !== uncompiledVariant)) {
     const pattern = byAnchor.get(anchorKey(row));
-    if (!pattern) throw new Error(`Missing specialized-engine partner for ${row.id}`);
+    if (!pattern) throw new Error(`Missing uncompiled partner for ${row.id}`);
     pattern.variants[specializedVariantOf(row).key] = row;
   }
-  const [baseline, ...later] = measuredVariants([...byAnchor.values()]);
   for (const pattern of byAnchor.values()) {
     pattern.evidence = specializedVariants.flatMap(variant => pattern.variants[variant.key] ? [{ label: variant.label, row: pattern.variants[variant.key]! }] : []);
-    const baselineRow = pattern.variants[baseline.key];
-    for (const variant of later) {
-      const variantRow = pattern.variants[variant.key];
-      if (!variantRow || !baselineRow) continue;
-      // The importer pairs each host's two variant times; their warnings against the comparator do not apply.
-      const warnings = variantRow.variantGainWarnings?.[baselineRow.id];
-      if (!warnings) throw new Error(`Missing host-paired gain warnings for ${variantRow.id}`);
-      pattern.gains[variant.key] = variantGain(variantRow.result, baselineRow.result, warnings);
-    }
+    const compiled = pattern.variants.compiled;
+    if (!compiled) continue;
+    // The importer pairs each host's two variant times; their warnings against the comparator do not apply.
+    const warnings = compiled.variantGainWarnings?.[pattern.anchor.id];
+    if (!warnings) throw new Error(`Missing host-paired gain warnings for ${compiled.id}`);
+    pattern.gain = variantGain(compiled.result, pattern.anchor.result, warnings);
   }
   return [...byAnchor.values()];
 }
 
 function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like: boolean; comparator: string }) {
   const [sort, setSort] = useState<Sort>(null);
-  const patterns = specializedPatternRows(rows);
-  const present = measuredVariants(patterns);
-  const [baseline, ...later] = present;
-  const last = present[present.length - 1];
-  const ordered = sorted(patterns, sort, (pattern, key) => ({
-    name: `${pattern.anchor.name} ${pattern.anchor.operation}`, comparatorNs: pattern.anchor.result.comparatorNs, ratio: pattern.variants[last.key]?.result.ratio,
-    gap: pattern.variants[last.key] && lossGap(pattern.variants[last.key]!)?.instructions,
-    ...Object.fromEntries(present.map(variant => [`${variant.key}Ns`, pattern.variants[variant.key]?.result.candidateNs])),
-    ...Object.fromEntries(later.map(variant => [`${variant.key}Gain`, pattern.gains[variant.key]?.ratio])),
+  const ordered = sorted(specializedPatternRows(rows), sort, (pattern, key) => ({
+    name: `${pattern.anchor.name} ${pattern.anchor.operation}`, comparatorNs: pattern.anchor.result.comparatorNs, gain: pattern.gain?.ratio,
+    ...Object.fromEntries(specializedVariants.flatMap(variant => [[`${variant.key}Ns`, pattern.variants[variant.key]?.result.candidateNs],
+      [`${variant.key}Ratio`, pattern.variants[variant.key]?.result.ratio]])),
   } as Record<string, SortValue>)[key]);
+  const [uncompiled, compiled] = [uncompiledVariant.label, compiledVariant.label];
   return <div className="table-scroll"><table className="measurement-table specialized-pattern-table"><thead><tr>
     <Header label={like ? "Pattern" : "Pattern / operation"} column="name" sort={sort} setSort={setSort} />
-    <Header label={comparator} column="comparatorNs" sort={sort} setSort={setSort} title={`${comparator}, measured once per host and shared by every Regulator variant`} />
-    {present.map(variant => <Header key={variant.key} label={variant.label} column={`${variant.key}Ns`} sort={sort} setSort={setSort} />)}
-    {later.map(variant => <Header key={variant.key} label={`${variant.short} vs ${baseline.short.toLowerCase()}`} column={`${variant.key}Gain`} sort={sort} setSort={setSort} />)}
-    <Header label={`${last.short} vs ${comparator}`} column="ratio" sort={sort} setSort={setSort} />
-    <Header label="Gap (instructions)" column="gap" sort={sort} setSort={setSort} title={`${last.label}: ${gapTitle}`} />
+    <Header label={comparator} column="comparatorNs" sort={sort} setSort={setSort} title={`${comparator}, measured once per host and shared by both Regulator variants`} />
+    {specializedVariants.map(variant => <Header key={variant.key} label={variant.label} column={`${variant.key}Ns`} sort={sort} setSort={setSort} />)}
+    <Header label={`${uncompiled} vs ${comparator}`} column="uncompiledRatio" sort={sort} setSort={setSort} />
+    <Header label={`${compiled} vs ${uncompiled.toLowerCase()}`} column="gain" sort={sort} setSort={setSort} />
+    <Header label={`${compiled} vs ${comparator}`} column="compiledRatio" sort={sort} setSort={setSort} />
   </tr></thead><tbody>{ordered.map(pattern => <tr key={pattern.id}>
     <td><Name row={pattern.anchor} variants={pattern.evidence} comparator={comparator} hideOperation={like} /></td>
     <td className="measurement">{duration(pattern.anchor.result.comparatorNs)}<TimingFlags row={pattern.anchor} side="comparator" comparator={comparator} /></td>
-    {present.map(variant => {
+    {specializedVariants.map(variant => {
       const row = pattern.variants[variant.key];
       return <td key={variant.key} className="measurement">{row && <>{duration(row.result.candidateNs)}<TimingFlags row={row} side="candidate" comparator={comparator} /></>}</td>;
     })}
-    {later.map(variant => <td key={variant.key} className="measurement"><Gain result={pattern.gains[variant.key]} label={`${variant.label} ratio divided by ${baseline.label.toLowerCase()} ratio`} /></td>)}
-    <td className="measurement"><Ratio row={pattern.variants[last.key]} comparator={comparator} /></td>
-    <GapCell row={pattern.variants[last.key]} />
+    <td className="measurement"><Ratio row={pattern.variants.uncompiled} comparator={comparator} /></td>
+    <td className="measurement"><Gain result={pattern.gain} label={`${compiled} ratio divided by ${uncompiled.toLowerCase()} ratio`} /></td>
+    <td className="measurement"><Ratio row={pattern.variants.compiled} comparator={comparator} /></td>
   </tr>)}</tbody></table></div>;
 }
 
@@ -862,8 +819,9 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   };
   const { language, cpu, memory } = selection;
   const comparator = data.languages[language].comparator;
-  // Only the 1.0 preliminary snapshot mixed development revisions; a candidate build is one campaign.
-  const mixed = data.publication?.sourcePolicy === "mixed-development-revisions";
+  // The 1.0 preliminary snapshot mixed development revisions with median estimates. A later release's mixed report
+  // keeps each row's mean estimate and warnings, so it renders like a candidate build.
+  const mixed = data.publication?.sourcePolicy === "mixed-development-revisions" && !data.sources.releaseVersion;
   // Mixed preliminary tables show median estimates, but never assert a consistent winner when hosts
   // disagree. Full measurement warnings remain in row details; full gain warnings remain in downloads.
   const shownWarnings = (warnings: string[]) => mixed ? warnings.filter(warning => warning.includes("disagree")) : warnings;
@@ -875,7 +833,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   const ordinary = rows.filter(row => row.population === "ordinary-scalar" && row.operation.startsWith("reused"));
   const bulk = rows.filter(row => workloadSection(row) === "bulk-text");
   const literalProbes = rows.filter(row => workloadSection(row) === "literal-probe");
-  const specialized = rows.filter(row => workloadSection(row) === "specialized-patterns");
+  const specialized = rows.filter(row => workloadSection(row) === "specialized-patterns" && !regularEngineRow(row));
   const columnRows: number[] = [...new Set(specialized.flatMap(row => row.workload?.columnRows ?? []))].sort((left, right) => left - right);
   const operations = rows.filter(row => row.population === "trino-operations");
   const diagnostic = rows.filter(row => workloadSection(row) === "diagnostics-and-stress")
@@ -907,12 +865,12 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
     </div>
     <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
-    {ordinary.length > 0 && section("Everyday regex operations", "Compiled patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
-    {specialized.length > 0 && section("Specialized engine and compiler", <>Patterns that get a scan plan run on the specialized engine, which interprets that plan{specialized.some(row => row.caseId.endsWith("/regular-engine")) && "; the regular engine runs the same patterns without one"}. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
-    {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation with a warmed compiled pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
+    {ordinary.length > 0 && section("Everyday regex operations", "Reused patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
+    {specialized.length > 0 && section("Compiled patterns", <>By default, a pattern with a scan plan runs uncompiled and Regulator interprets the plan. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Compiled times are a best case: each compiled pattern is const-bound the way Trino binds it, one pattern per call site. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
+    {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation on a warmed, reused pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}
-    {operations.length > 0 && section("Trino regex operations", "Complete public operations using compiled patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
-    {bulk.length > 0 && section("Text processing workloads", "Document searches, tokenization, log parsing and capture workloads using compiled patterns. Expand a row for its pattern, operation and input details.", <ResultsTable rows={bulk} comparator={comparator} />)}
+    {operations.length > 0 && section("Trino regex operations", "Complete public operations using reused patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
+    {bulk.length > 0 && section("Text processing workloads", "Document searches, tokenization, log parsing and capture workloads using reused patterns. Expand a row for its pattern, operation and input details.", <ResultsTable rows={bulk} comparator={comparator} />)}
     {literalProbes.length > 0 && section("Literal probe distributions", <>Count every match of one literal across a whole corpus. Regulator runs once with its default uniform byte-frequency distribution and once with a distribution matched to the corpus; {comparator} has no such option. Tuned vs default divides the two {comparator}-relative ratios, so differences between hosts cancel.</>, <LiteralProbeTable rows={literalProbes} comparator={comparator} />)}
     {(diagnostic.length > 0 || stress.length > 0) && section("Adversarial and stress workloads", "Pathological inputs and synthetic stress tests. These are not representative of typical application performance; interpret them individually.", <div className="adversarial-groups">
       {groupNames.map(family => <details className="diagnostic-group" key={family}><summary>{family}<span>{diagnostic.filter(row => row.family === family).length} rows</span></summary><ResultsTable rows={diagnostic.filter(row => row.family === family)} comparator={diagnostic.find(row => row.family === family)?.comparator || comparator} /></details>)}
