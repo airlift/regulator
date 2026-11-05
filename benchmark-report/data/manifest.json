@@ -1,8 +1,14 @@
 {
   "schemaVersion": 1,
   "reportSchemaVersion": 2,
-  "current": "regulator-68e42b7d2a104798524189aac7e2a008b49c3d4a-f045d62d4340a0fd.json.gz",
+  "current": "regulator-858993c3497e2df5576bbf412d4373fc7b7eae5b-137669c8e9fac99b.json.gz",
   "releases": [
+    {
+      "schemaVersion": 2,
+      "candidate": "858993c3497e2df5576bbf412d4373fc7b7eae5b",
+      "label": "Regulator 2.0 preliminary results",
+      "file": "regulator-858993c3497e2df5576bbf412d4373fc7b7eae5b-137669c8e9fac99b.json.gz"
+    },
     {
       "schemaVersion": 2,
       "candidate": "68e42b7d2a104798524189aac7e2a008b49c3d4a",

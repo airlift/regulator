@@ -18,12 +18,13 @@ text-processing workloads:
 <!-- benchmark-summary:start -->
 | Compared with | Everyday expressions | Text processing |
 |---|---:|---:|
-| Native RE2 | 2.4× faster | 1.7× faster |
-| Java regex | 2.1× faster | 6.6× faster |
-| Trino regex (Joni) | 3.8× faster | 4.0× faster |
-| Trino LIKE | 5.5× faster | — |
+| Native RE2 | 3.9× faster | 3.3× faster |
+| Java regex | 3.4× faster | 17.3× faster |
+| Trino regex (Joni) | 4.6× faster | 11.8× faster |
+| Rust regex crate | 1.7× faster | 1.1× slower |
+| Trino LIKE | 6.0× faster | — |
 
-_Source: Regulator 1.0 results `68e42b7d2a104798524189aac7e2a008b49c3d4a`. R9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
+_Source: Regulator 2.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. R9g with native access enabled and patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
 <!-- benchmark-summary:end -->
 
 See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)

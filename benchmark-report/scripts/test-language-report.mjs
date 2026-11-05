@@ -591,14 +591,14 @@ assert.match(workloadCommentary(delimiterCount).performance, /shared byte-class 
 assert.match(workloadCommentary({ ...delimiterCount, operation: 'reusedContains' }).performance, /shared byte-class scanner/);
 assert.equal(workloadCommentary({ ...delimiterCount, measurementSource: undefined }).performance, undefined);
 assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace' }).performance, /specialized character-run counter/);
-assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace', operation: 'reusedContains' }).performance, /Contains currently uses the DFA/);
+assert.match(workloadCommentary({ ...literalCount, caseId: 'everyday/whitespace', operation: 'reusedContains' }).performance, /never builds the DFA/);
 const veryl = { ...reused, caseId: 'curated/05-lexer-veryl/single', language: 'java', operation: 'execute',
   population: 'bulk-text', source: 'fixture', workload: { pattern: '(token)' } };
 assert.match(workloadCommentary(veryl).description, /not single-use compilation/);
 assert.equal(workloadCommentary(veryl).performance, undefined);
 const qualifiedVeryl = { ...veryl, measurementSource: { cohort: 'repeats-final.json' } };
 assert.match(workloadCommentary(qualifiedVeryl).performance, /capture bookkeeping/);
-assert.match(workloadCommentary({ ...qualifiedVeryl, language: 're2' }).performance, /one-pass capture/);
+assert.match(workloadCommentary({ ...qualifiedVeryl, language: 're2' }).performance, /tagged alternation/);
 assert.equal(workloadCommentary({ ...qualifiedVeryl, caseId: 'reported/i13-subset-regex/huge-unicode-nosuffixlit' }).performance, undefined);
 assert.match(workloadCommentary({ ...qualifiedVeryl, caseId: 'reported/i13-subset-regex/huge-unicode' }).performance, /ending x first/);
 context.window = { location: { hash: '#language=java&cpu=c9g&memory=native' } };
@@ -616,7 +616,7 @@ const suffixSingle = { ...row, language: 'like', caseId: 'trino-like/SUFFIX_LARG
 const suffixReused = { ...suffixSingle, id: 'suffix-reused', operation: 'matches' };
 assert.equal(lifecycleRows([suffixSingle, suffixReused])[0].name, 'suffix, 6 bytes · 32 KiB input');
 assert.match(workloadCommentary(suffixReused).description, /not because the suffix is long/);
-assert.match(workloadCommentary(suffixReused).performance, /1-3 ns/);
+assert.match(workloadCommentary(suffixReused).performance, /two overlapping words/);
 const refreshedSuffix = { ...suffixReused, workload: { pattern: '%needle', performanceContext: 'Short literals use precomputed word comparisons.' } };
 assert.equal(workloadCommentary(refreshedSuffix).performance, refreshedSuffix.workload.performanceContext);
 assert.equal(downloadData({ ...data, rows: [refreshedSuffix] }).rows[0].commentary.performance, refreshedSuffix.workload.performanceContext);
@@ -630,7 +630,7 @@ context.window = { location: { hash: '#language=like&cpu=c9g&memory=native' } };
 const likeNotesHtml = detailsHtml(suffixSingle, suffixReused);
 assert.match(likeNotesHtml, /Single-use performance context/);
 assert.match(likeNotesHtml, /Multi-use performance context/);
-assert.match(likeNotesHtml, /Cheaper construction/);
+assert.match(likeNotesHtml, /compact equality, prefix, or suffix plan/);
 assert.match(likeNotesHtml, /six literal bytes/);
 
 const dataDirectory = process.env.REPORT_DATA_DIRECTORY
