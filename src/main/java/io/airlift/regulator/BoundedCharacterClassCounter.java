@@ -420,8 +420,9 @@ final class BoundedCharacterClassCounter
         return false;
     }
 
-    // PERFORMANCE-SENSITIVE HOT LOOP: the start-byte skip and inline decoding replace one DFA
-    // restart per match. Changes require focused Intel and Graviton qualification.
+    // PERFORMANCE-SENSITIVE HOT LOOP: the start-byte skip, the start-byte run read, and inline
+    // decoding replace one DFA restart per match. Changes require focused Intel and Graviton
+    // qualification.
     long findSpan(Slice input, int contextStart, int contextEnd, int start)
     {
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > input.length() ||
@@ -452,6 +453,20 @@ final class BoundedCharacterClassCounter
                 }
             }
             int runStart = position;
+            if (readsBytes) {
+                // Each member is one byte and the start bytes are exactly the members, so the run
+                // is read on the start-byte table, one load per byte, without decoding.
+                int runEnd = maximum == -1 ? end : (int) Math.min(end, (long) runStart + maximum);
+                position++;
+                while (position < runEnd && memberStartBytes[bytes[position] & 0xFF]) {
+                    position++;
+                }
+                if (position - runStart >= minimum) {
+                    return packSpan(inputOffset, contextStart, runStart, position);
+                }
+                position++;
+                continue;
+            }
             int runLength = 0;
             while (position < end) {
                 long decoded = decode(bytes, position, end);
