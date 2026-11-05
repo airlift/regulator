@@ -51,6 +51,9 @@ public final class RegexpMatcher
     private final ScanPlan startAnchoredScanPlan;
     private final boolean rustSearch;
     private final boolean readsCarriageReturnBeforeRegion;
+    // The fewest bytes a match spans, so findGeneral fails a find whose rest of the region is
+    // shorter before any engine runs.
+    private final int minimumMatchLength;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
@@ -117,6 +120,7 @@ public final class RegexpMatcher
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
+        this.minimumMatchLength = pattern.minimumMatchLength();
         reset(input);
     }
 
@@ -266,6 +270,10 @@ public final class RegexpMatcher
         if (nextFindStart > regionLength) {
             invalidateMatch();
             return false;
+        }
+        // A match lies inside the rest of the region, whatever context a Rust search reads.
+        if (regionLength - nextFindStart < minimumMatchLength) {
+            return failFind();
         }
 
         if (rustSearch && isPartialRegion()) {
