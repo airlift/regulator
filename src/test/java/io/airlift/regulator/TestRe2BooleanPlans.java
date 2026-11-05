@@ -48,10 +48,10 @@ public class TestRe2BooleanPlans
     @Test
     public void testInstanceLayout()
     {
-        // The shape class fixes the routes, so a pattern stores no route of its own; only the
-        // class-run shape adds its retained count DFA flag, and the scan-plan shape its count,
-        // short-match, and literal find facts.
-        assertThat(instanceSize(Re2.class)).isEqualTo(96);
+        // The shape class fixes the full-Slice routes, while the base pattern keeps a few
+        // per-pattern ordinary-engine flags. The class-run shape adds its retained count DFA flag,
+        // and the scan-plan shape its count, short-match, and literal find facts.
+        assertThat(instanceSize(Re2.class)).isEqualTo(104);
         assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(104);
     }
 

@@ -104,6 +104,11 @@ abstract sealed class CompiledPattern
     // shorter than this many bytes costs more than the substring search.
     private static final int EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES = 64;
 
+    // The results of matchOnPreEngineMatcher.
+    private static final int PRE_ENGINE_NO_MATCH = 0;
+    private static final int PRE_ENGINE_MATCH = 1;
+    private static final int PRE_ENGINE_CONTINUE = 2;
+
     interface MatchWorkspaces {}
 
     private record FixedMatchWorkspaces(
@@ -222,6 +227,13 @@ abstract sealed class CompiledPattern
     private final boolean singleCharacterMatch;
     private final int exactLiteralLength;
     private final BooleanPlans booleanPlans;
+    // Whether the ordinary engine's disjoint suffix-repeat, whole-input capture, or word-run
+    // matcher exists, so the common call tests one field before the engine cascade.
+    private final boolean hasPreEngineMatcher;
+    // Whether a matcher's search clears its groups before matching. Every shape class clears,
+    // since a shape may override matchInternal to answer without the ordinary engine; the language
+    // classes themselves need not, since the ordinary engine writes every slot of a match.
+    private final boolean clearsGroupsBeforeMatch;
     // Off the compact route, the counter that finds a class pattern's matches: the single members
     // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
     // repeat's counter.
@@ -251,6 +263,8 @@ abstract sealed class CompiledPattern
         this.exactLiteralLength = analysis.exactLiteralLength();
         this.partialProg = requireNonNull(analysis.partialProg(), "partialProg is null");
         this.booleanPlans = requireNonNull(analysis.booleanPlans(), "booleanPlans is null");
+        this.hasPreEngineMatcher = booleanPlans.disjointSuffixRepeatMatcher() != null || booleanPlans.wholeInputCapturePlan() != null || booleanPlans.wordRunMatcher() != null;
+        this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
         this.matcherClassCounter = analysis.matcherClassCounter();
         if (!analysis.singleByteMatcherReserved()) {
             singleByteMatcher = SingleByteMatcher.unsupported();
@@ -306,6 +320,8 @@ abstract sealed class CompiledPattern
         this.singleCharacterMatch = pattern.singleCharacterMatch;
         this.exactLiteralLength = pattern.exactLiteralLength;
         this.booleanPlans = pattern.booleanPlans;
+        this.hasPreEngineMatcher = pattern.hasPreEngineMatcher;
+        this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
         this.reverseProg = pattern.reverseProg;
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
@@ -1235,6 +1251,13 @@ abstract sealed class CompiledPattern
     BooleanPlanKind matchesPlanForDiagnostics()
     {
         return booleanPlans.matches();
+    }
+
+    // The language classes themselves run every program call on the ordinary engine; their
+    // shape subclasses may not.
+    private static boolean isOrdinaryEngineClass(Class<?> type)
+    {
+        return type == Re2.class || type == RustRegexp.class || type == JavaRegexp.class || type == TrinoCompiledPattern.class;
     }
 
     /// Returns the fewest bytes any match spans, or 0 when it can be empty.
@@ -2443,7 +2466,8 @@ abstract sealed class CompiledPattern
                 end,
                 anchor,
                 groups,
-                fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace));
+                fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace),
+                true);
     }
 
     private static void validateRange(Slice text, int start, int end)
@@ -2473,7 +2497,8 @@ abstract sealed class CompiledPattern
                 end,
                 anchor,
                 groups,
-                fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace));
+                fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace),
+                true);
     }
 
     boolean matchRegionInto(
@@ -2494,7 +2519,8 @@ abstract sealed class CompiledPattern
                 end,
                 anchor,
                 groups,
-                (MatchWorkspaces) requireNonNull(workspaceOwner, "workspaceOwner is null"));
+                requireNonNull(workspaceOwner, "workspaceOwner is null"),
+                clearsGroupsBeforeMatch);
     }
 
     private boolean matchRegionInto(
@@ -2505,7 +2531,8 @@ abstract sealed class CompiledPattern
             int end,
             Anchor anchor,
             int[] groups,
-            MatchWorkspaces workspaces)
+            MatchWorkspaces workspaces,
+            boolean clearGroups)
     {
         requireNonNull(text, "text is null");
         int[] searchGroups = groups;
@@ -2516,7 +2543,6 @@ abstract sealed class CompiledPattern
             if (groups.length < 2) {
                 throw new IllegalArgumentException("groups must include group 0 start/end");
             }
-            Arrays.fill(groups, -1);
             int patternSlotCount = 2 * (capturingGroupCount + 1);
             int copySlotCount = Math.min(patternSlotCount, partialProg.captureSlotCount());
             if (groups.length > patternSlotCount && copySlotCount <= Long.SIZE) {
@@ -2526,10 +2552,16 @@ abstract sealed class CompiledPattern
                 // most Long.SIZE slots, and the other engines track at most the program's slots
                 // whatever the buffer, so a wider program searches the caller's buffer.
                 // The program's slots leave out trailing groups the simplifier removed. No engine
-                // writes the pairs past them, and callers read them, so those pairs keep the -1 of
-                // the fill above: a path that skips that fill must still set them to -1.
+                // writes the pairs past them, and callers read them, so they are set to -1 here
+                // whether or not the caller asked for a clear; the copy back writes the rest.
                 searchGroups = new int[copySlotCount];
                 Arrays.fill(searchGroups, -1);
+                Arrays.fill(groups, copySlotCount, groups.length, -1);
+            }
+            else if (clearGroups) {
+                // A matcher reads its groups only after a match, which the ordinary engine writes
+                // in full; every other caller sees cleared groups after a failure.
+                Arrays.fill(groups, -1);
             }
         }
         boolean matched = matchInternal(partialProg, text, contextStart, contextEnd, start, end, anchor, searchGroups, workspaces);
@@ -2775,37 +2807,11 @@ abstract sealed class CompiledPattern
 
         Anchor anchorMode = (anchor == null) ? Anchor.UNANCHORED : anchor;
 
-        if (prog == partialProg && booleanPlans.disjointSuffixRepeatMatcher() != null) {
-            long span = booleanPlans.disjointSuffixRepeatMatcher().search(text, start, end, anchorMode);
-            if (span == Dfa.SEARCH_NO_MATCH) {
-                return false;
+        if (hasPreEngineMatcher && prog == partialProg) {
+            int preEngineResult = matchOnPreEngineMatcher(text, contextStart, contextEnd, start, end, anchorMode, groupOffsets);
+            if (preEngineResult != PRE_ENGINE_CONTINUE) {
+                return preEngineResult == PRE_ENGINE_MATCH;
             }
-            if (groupOffsets != null && groupOffsets.length >= 2) {
-                Arrays.fill(groupOffsets, -1);
-                groupOffsets[0] = (int) (span >>> 32) - contextStart;
-                groupOffsets[1] = (int) span - contextStart;
-            }
-            return true;
-        }
-
-        if (prog == partialProg && booleanPlans.wholeInputCapturePlan() != null &&
-                start == contextStart && end == contextEnd &&
-                booleanPlans.wholeInputCapturePlan().matches(logicalContext(text, contextStart, contextEnd))) {
-            booleanPlans.wholeInputCapturePlan().materialize(end - start, groupOffsets);
-            return true;
-        }
-
-        if (prog == partialProg && booleanPlans.wordRunMatcher() != null) {
-            long span = booleanPlans.wordRunMatcher().search(text, contextStart, contextEnd, start, end, anchorMode);
-            if (span == Dfa.SEARCH_NO_MATCH) {
-                return false;
-            }
-            if (groupOffsets != null && groupOffsets.length >= 2) {
-                Arrays.fill(groupOffsets, -1);
-                groupOffsets[0] = (int) (span >>> 32);
-                groupOffsets[1] = (int) span;
-            }
-            return true;
         }
 
         int strippedPrefixLength = 0;
@@ -3148,6 +3154,45 @@ abstract sealed class CompiledPattern
         }
 
         return true;
+    }
+
+    /// The disjoint suffix-repeat, whole-input capture, and word-run matchers of the forward
+    /// program, out of line so that the ordinary engine tests one field for all three.
+    private int matchOnPreEngineMatcher(Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchorMode, int[] groupOffsets)
+    {
+        if (booleanPlans.disjointSuffixRepeatMatcher() != null) {
+            long span = booleanPlans.disjointSuffixRepeatMatcher().search(text, start, end, anchorMode);
+            if (span == Dfa.SEARCH_NO_MATCH) {
+                return PRE_ENGINE_NO_MATCH;
+            }
+            if (groupOffsets != null && groupOffsets.length >= 2) {
+                Arrays.fill(groupOffsets, -1);
+                groupOffsets[0] = (int) (span >>> 32) - contextStart;
+                groupOffsets[1] = (int) span - contextStart;
+            }
+            return PRE_ENGINE_MATCH;
+        }
+
+        if (booleanPlans.wholeInputCapturePlan() != null &&
+                start == contextStart && end == contextEnd &&
+                booleanPlans.wholeInputCapturePlan().matches(logicalContext(text, contextStart, contextEnd))) {
+            booleanPlans.wholeInputCapturePlan().materialize(end - start, groupOffsets);
+            return PRE_ENGINE_MATCH;
+        }
+
+        if (booleanPlans.wordRunMatcher() != null) {
+            long span = booleanPlans.wordRunMatcher().search(text, contextStart, contextEnd, start, end, anchorMode);
+            if (span == Dfa.SEARCH_NO_MATCH) {
+                return PRE_ENGINE_NO_MATCH;
+            }
+            if (groupOffsets != null && groupOffsets.length >= 2) {
+                Arrays.fill(groupOffsets, -1);
+                groupOffsets[0] = (int) (span >>> 32);
+                groupOffsets[1] = (int) span;
+            }
+            return PRE_ENGINE_MATCH;
+        }
+        return PRE_ENGINE_CONTINUE;
     }
 
     private static Slice logicalContext(Slice text, int contextStart, int contextEnd)
