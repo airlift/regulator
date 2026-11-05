@@ -93,6 +93,9 @@ abstract sealed class CompiledPattern
     // minimum-width metadata measurably affected the sub-nanosecond anchored path.
     private static final int MINIMUM_LENGTH_CHECK_LIMIT = 4 * 1024;
     private static final int DIRECT_BIT_STATE_CAPTURE_MINIMUM_LENGTH = 4 * 1024;
+    // Up to this input length, a start-anchored search for submatches that can run OnePass skips
+    // the DFA.
+    private static final int ONE_PASS_SUBMATCH_MAXIMUM_LENGTH = 4096;
     private static final int LOWERED_CANDIDATE_SEARCH_BYTES = 64;
     // After this many consecutive unanchored searches of one matcher's input whose DFA failed, in
     // a program whose DFA can quit on a byte outside ASCII, the matcher's later searches of that
@@ -234,6 +237,11 @@ abstract sealed class CompiledPattern
     // since a shape may override matchInternal to answer without the ordinary engine; the language
     // classes themselves need not, since the ordinary engine writes every slot of a match.
     private final boolean clearsGroupsBeforeMatch;
+    // Whether a matcher's find over its whole input, from the input start with nothing matched
+    // since reset, may take matchAnchoredSubmatch: an ordinary pattern without longest-match
+    // semantics whose program can match, is start-anchored, never matches empty, runs one-pass or
+    // BitState, and has no prefix, plan, or tagged alternation ahead of those engines.
+    private final boolean hasAnchoredSubmatchRoute;
     // Off the compact route, the counter that finds a class pattern's matches: the single members
     // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
     // repeat's counter.
@@ -265,6 +273,7 @@ abstract sealed class CompiledPattern
         this.booleanPlans = requireNonNull(analysis.booleanPlans(), "booleanPlans is null");
         this.hasPreEngineMatcher = booleanPlans.disjointSuffixRepeatMatcher() != null || booleanPlans.wholeInputCapturePlan() != null || booleanPlans.wordRunMatcher() != null;
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
+        this.hasAnchoredSubmatchRoute = !clearsGroupsBeforeMatch && takesAnchoredSubmatchRoute();
         this.matcherClassCounter = analysis.matcherClassCounter();
         if (!analysis.singleByteMatcherReserved()) {
             singleByteMatcher = SingleByteMatcher.unsupported();
@@ -322,6 +331,7 @@ abstract sealed class CompiledPattern
         this.booleanPlans = pattern.booleanPlans;
         this.hasPreEngineMatcher = pattern.hasPreEngineMatcher;
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
+        this.hasAnchoredSubmatchRoute = !clearsGroupsBeforeMatch && pattern.hasAnchoredSubmatchRoute;
         this.reverseProg = pattern.reverseProg;
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
@@ -1258,6 +1268,49 @@ abstract sealed class CompiledPattern
     private static boolean isOrdinaryEngineClass(Class<?> type)
     {
         return type == Re2.class || type == RustRegexp.class || type == JavaRegexp.class || type == TrinoCompiledPattern.class;
+    }
+
+    // The constructor calls this after assigning every field it reads.
+    private boolean takesAnchoredSubmatchRoute()
+    {
+        Prog prog = partialProg;
+        return prog.anchorStart() && prog.start() != 0 && (prog.isOnePass() || prog.canBitState()) &&
+                minimumMatchLength() > 0 &&
+                !hasPreEngineMatcher && requiredPrefix == null && !longestMatch &&
+                booleanPlans.scanPlan() == null && booleanPlans.literalSet() == null &&
+                !(prog.hasTextDependentAssertions() && booleanPlans.taggedAlternationProgram() != null);
+    }
+
+    boolean hasAnchoredSubmatchRoute()
+    {
+        return hasAnchoredSubmatchRoute;
+    }
+
+    /// A matcher's find over its whole input, from the input start with nothing matched since
+    /// reset, on a pattern with [#hasAnchoredSubmatchRoute()] and groups beyond group zero. It
+    /// makes the checks [#matchOnOrdinaryEngine] makes for this case and calls the OnePass or
+    /// BitState search that [#matchOnOrdinaryEngine] would reach, skipping its prologue; an input
+    /// too long for those engines goes to [#matchOnOrdinaryEngine].
+    final boolean matchAnchoredSubmatch(Slice text, int[] groups, RegexpMatcher matcher)
+    {
+        Prog prog = partialProg;
+        int length = text.length();
+        if (length < MINIMUM_LENGTH_CHECK_LIMIT && length < minimumMatchLength()) {
+            return false;
+        }
+        byte[] anchoredStartBytes = prog.anchoredStartBytes();
+        if (anchoredStartBytes != null && anchoredStartBytes[text.byteArray()[text.byteArrayOffset()] & 0xFF] == 0) {
+            return false;
+        }
+        Prog.MatchKind matchKind = prog.anchorEnd() ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH;
+        boolean canOnePass = prog.isOnePass() && prog.supportsOnePassCaptureSlots(groups.length);
+        if (canOnePass && length <= ONE_PASS_SUBMATCH_MAXIMUM_LENGTH) {
+            return OnePass.search(prog, text, 0, length, true, matchKind, groups, matcher.onePassWorkspace());
+        }
+        if (!canOnePass && prog.canBitState() && length <= prog.bitStateTextMaxSize()) {
+            return BitState.search(prog, text, 0, length, true, matchKind, groups, matcher.bitStateWorkspace());
+        }
+        return matchOnOrdinaryEngine(prog, text, 0, length, 0, length, Anchor.UNANCHORED, groups, matcher);
     }
 
     /// Returns the fewest bytes any match spans, or 0 when it can be empty.
@@ -3055,9 +3108,11 @@ abstract sealed class CompiledPattern
             boolean canBitState = prog.canBitState();
             int bitStateMaxSize = prog.bitStateTextMaxSize();
 
-            // Skip DFA if we have fast engines and need submatches
+            // Skip DFA if we have fast engines and need submatches. takesAnchoredSubmatchRoute and
+            // matchAnchoredSubmatch make the same engine choice for a start-anchored find with
+            // groups; keep in step.
             boolean skipDfa = dfaSearchSkippedOrFailed;
-            if (canOnePass && searchLength <= 4096 && (captureCount > 1 || searchLength <= 16)) {
+            if (canOnePass && searchLength <= ONE_PASS_SUBMATCH_MAXIMUM_LENGTH && (captureCount > 1 || searchLength <= 16)) {
                 skipDfa = true;
             }
             else if (canBitState && searchLength <= bitStateMaxSize && captureCount > 1) {
