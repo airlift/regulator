@@ -121,7 +121,7 @@ public class TestBitStateWorkspace
     }
 
     @Test
-    public void testGrownJobStackIsRetained()
+    public void testJobStackStartsAtSixteenAndGrownStackIsRetained()
             throws ReflectiveOperationException
     {
         int capturingGroupCount = 64;
@@ -130,6 +130,13 @@ public class TestBitStateWorkspace
         BitState.Workspace workspace = new BitState.Workspace();
         int[] groups = new int[2 * (capturingGroupCount + 1)];
 
+        // A shallow search whose maximum exceeds the model's first capacity starts with sixteen
+        // jobs, however large the program.
+        assertThat(program.size()).isGreaterThan(64);
+        assertThat(BitState.search(program, input, 0, 4, true, Prog.MatchKind.FULL_MATCH, groups, workspace)).isFalse();
+        assertThat((Object[]) field("jobs").get(workspace)).hasSize(16);
+
+        // A deep one doubles the stack until it holds the search's jobs.
         assertThat(BitState.search(
                 program,
                 input,
@@ -140,7 +147,7 @@ public class TestBitStateWorkspace
                 groups,
                 workspace)).isTrue();
         Object[] grownJobs = (Object[]) field("jobs").get(workspace);
-        assertThat(grownJobs.length).isGreaterThan(BitState.initialJobCapacity(program.size()));
+        assertThat(grownJobs).hasSize(128);
 
         assertThat(BitState.search(
                 program,

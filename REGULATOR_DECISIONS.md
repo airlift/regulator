@@ -2019,10 +2019,14 @@ once, where J counts a job for each BYTE_RANGE with a hint and each CAPTURE,
 EMPTY_WIDTH, or NOP that is not last, and one more for each CAPTURE's undo.
 Compilation lowers the text limit until the visited bitmap, capture slots and
 job stack, at the capacity its doubling reaches, and the search's objects fit
-the forward share, the allowance the capture NFA plans against. A longer input
-takes the engine it would take without BitState. As in the capture NFA, a search
-tracks only the slots through the program's highest surviving CAPTURE, so a
-trailing group the simplifier removes costs it nothing.
+the forward share, the allowance the capture NFA plans against. A search's stack
+starts at sixteen jobs, or at its maximum when that is no more than the modeled
+first capacity, and grows within that count, taking its maximum at once near the
+end, so a deep search can hold its maximum where the modeled doubling would have
+stopped short. A longer input takes the engine it would take without BitState.
+As in the capture NFA, a search tracks only the slots through the program's
+highest surviving CAPTURE, so a trailing group the simplifier removes costs it
+nothing.
 
 Upstream gives list heads, and so BitState, only to programs of at most 512
 instructions. Regulator gives output list ids to every program with at most

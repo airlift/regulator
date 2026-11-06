@@ -383,6 +383,7 @@ final class Prog
     // The list id of the start instruction, or -1 when the program cannot run BitState.
     private int startList;
     private int bitStateTextMaxSize;
+    private int bitStateJobsPerPosition;
 
     // Instruction counts by opcode, populated by flatten().
     private final int[] instCount = new int[InstOp.values().length];
@@ -781,6 +782,14 @@ final class Prog
     public int bitStateTextMaxSize()
     {
         return bitStateTextMaxSize;
+    }
+
+    /// Returns the jobs a BitState search may push for each position of its text; see
+    /// [BitState#jobsPerPosition]. Meaningful only when [#canBitState()] is true, and only valid
+    /// after [#flatten()] has been called.
+    int bitStateJobsPerPosition()
+    {
+        return bitStateJobsPerPosition;
     }
 
     /// Lowers the BitState text limit so that a search's visited bitmap, capture slots, job stack,
@@ -3391,6 +3400,7 @@ final class Prog
         this.outputLists = null;
         startList = -1;
         bitStateTextMaxSize = 0;
+        bitStateJobsPerPosition = 0;
         if (outputLists != null) {
             this.outputLists = outputLists;
             startList = startRootId;
@@ -3400,6 +3410,7 @@ final class Prog
             // complete capture passes over a long input.
             long maximumBitmapBits = BIT_STATE_BITMAP_MAXIMUM_BYTES * Byte.SIZE;
             bitStateTextMaxSize = (int) (maximumBitmapBits / Math.max(1, listCount) - 1);
+            bitStateJobsPerPosition = BitState.jobsPerPosition(this);
         }
 
         if (!recordStructure) {

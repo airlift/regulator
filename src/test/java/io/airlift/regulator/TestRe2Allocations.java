@@ -21,7 +21,9 @@ import org.junit.jupiter.api.Test;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -945,6 +947,81 @@ public class TestRe2Allocations
         expectedGroups[0] = 0;
         expectedGroups[1] = 0;
         assertThat(allRemovedGroups).containsExactly(expectedGroups);
+    }
+
+    @Test
+    public void testBitStateJobStackStaysWithinMemoryModel()
+    {
+        // The text limits follow the memory model, whose job stack starts at the program's size,
+        // from 16 to 64 jobs, and doubles. keyValue's limit stays where that model sets it, 161,318
+        // bytes with compressed class pointers. Turning them off, which JDK 25 and 26 deprecate,
+        // together with compressed references makes its objects larger and its limit 83,739.
+        if (TestCompilerAllocations.compressedClassPointers()) {
+            Re2 keyValue = Re2.compile(TestingEverydayTrinoRegexpBenchmarkInputs.create("keyValue").pattern());
+            assertThat(keyValue.forwardProgramForDiagnostics().bitStateTextMaxSize()).isEqualTo(161_318);
+        }
+
+        // This program has 48 instructions and pushes up to 19 jobs per position, so a search over
+        // four bytes holds at most 96 jobs, and the model's stack takes 48 and then 96. A stack that
+        // doubled from sixteen to 32 before taking the 96 allocated 16 bytes more than the model
+        // with the default object layout, and a public search over a four-byte region more than
+        // the search's model bytes.
+        String regionPattern = "(?:" + "(".repeat(5) + "(a?)*" + ")".repeat(5) + "|" + "z".repeat(22) + ")*";
+        Re2 region = Re2.compile(Slices.utf8Slice(regionPattern));
+        Prog regionProgram = region.forwardProgramForDiagnostics();
+        assertThat(regionProgram.size()).isEqualTo(48);
+        assertThat(regionProgram.bitStateJobsPerPosition()).isEqualTo(19);
+        long regionSearchBytes = BitState.searchBytes(regionProgram, regionProgram.captureSlotCount(), 4);
+        Slice regionText = Slices.utf8Slice("zaaaaz");
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+        long threadId = Thread.currentThread().threadId();
+        // The fewest bytes over three fresh matchers leaves out one-time allocation, such as the
+        // tables a program's first search builds.
+        long regionAllocatedBytes = Long.MAX_VALUE;
+        for (int run = 0; run < 3; run++) {
+            RegexpMatcher regionMatcher = region.matcher(regionText).reset(regionText, 1, 5);
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            boolean regionFound = regionMatcher.find();
+            regionAllocatedBytes = Math.min(regionAllocatedBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore);
+            assertThat(regionFound).isTrue();
+            assertThat(regionMatcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
+        }
+        assertThat(regionAllocatedBytes).isLessThanOrEqualTo(regionSearchBytes);
+
+        // A search's stack starts at sixteen jobs, or at its maximum when that is no more than the
+        // model's first capacity, and grows within that model, at every text length up to the
+        // limit, for the corpus patterns and that program at three budgets.
+        Set<String> patterns = new LinkedHashSet<>();
+        for (String resource : List.of("/io/airlift/regulator/everyday-trino-workloads.tsv", "/io/airlift/regulator/specialized-trino-workloads.tsv")) {
+            for (TestingEverydayTrinoRegexpBenchmarkInputs.Input input : TestingEverydayTrinoRegexpBenchmarkInputs.loadInputs(resource).values()) {
+                patterns.add(input.pattern().toStringUtf8());
+            }
+        }
+        for (TsvTestData.Row row : TsvTestData.load("/io/airlift/regulator/trino-function-cases.tsv", 5, 109)) {
+            patterns.add(row.field(1));
+        }
+        patterns.addAll(List.of(".*x.*", ".*(x|y).*", "(?:(a)|a)*", "(a)".repeat(64), "(\\pL+)(\\pL*) ([0-9]+)", regionPattern));
+        for (long maxMemory : new long[] {Re2.Options.DEFAULT_MAX_MEMORY, 1L << 20, 1L << 16}) {
+            for (String pattern : patterns) {
+                Prog program;
+                try {
+                    program = Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+                }
+                catch (RegexpCompileMemoryLimitException _) {
+                    continue;
+                }
+                if (!program.canBitState()) {
+                    continue;
+                }
+                long mostOverModel = Long.MIN_VALUE;
+                for (int length = 0; length <= program.bitStateTextMaxSize(); length++) {
+                    mostOverModel = Math.max(mostOverModel, BitState.jobStackBytesForTesting(program, length) - BitState.modelJobStackBytes(program, length));
+                }
+                assertThat(mostOverModel).as("%s at %s bytes", pattern, maxMemory).isLessThanOrEqualTo(0);
+            }
+        }
     }
 
     private record CaptureSearch(String name, Prog program, Supplier<Object> search, Object expected) {}

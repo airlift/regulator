@@ -20,11 +20,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestBitStateJobCapacity
 {
     @Test
-    public void testInitialCapacityBounds()
+    public void testModelCapacityBounds()
     {
-        assertThat(BitState.initialJobCapacity(1)).isEqualTo(16);
-        assertThat(BitState.initialJobCapacity(24)).isEqualTo(24);
-        assertThat(BitState.initialJobCapacity(64)).isEqualTo(64);
-        assertThat(BitState.initialJobCapacity(100)).isEqualTo(64);
+        assertThat(BitState.modelJobCapacity(1)).isEqualTo(16);
+        assertThat(BitState.modelJobCapacity(24)).isEqualTo(24);
+        assertThat(BitState.modelJobCapacity(64)).isEqualTo(64);
+        assertThat(BitState.modelJobCapacity(100)).isEqualTo(64);
     }
 }
