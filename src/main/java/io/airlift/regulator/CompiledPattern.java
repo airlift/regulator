@@ -1814,15 +1814,16 @@ abstract sealed class CompiledPattern
     }
 
     boolean materializeTaggedAlternation(
-            Slice input,
+            Slice context,
+            int contextStart,
+            int contextEnd,
             int matchStart,
             int matchEnd,
-            int contextStart,
-            int[] groups)
+            int[] groupOffsets)
     {
         TaggedAlternationProgram taggedAlternationProgram = booleanPlans.taggedAlternationProgram();
         return taggedAlternationProgram != null &&
-                taggedAlternationProgram.materialize(input, matchStart, matchEnd, contextStart, groups);
+                taggedAlternationProgram.materialize(context, contextStart, contextEnd, matchStart, matchEnd, groupOffsets);
     }
 
     long findGroupZeroBoundary(

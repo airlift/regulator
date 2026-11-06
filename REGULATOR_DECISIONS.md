@@ -1619,14 +1619,15 @@ lifecycle from the caller-managed low-level contract.
 `RegexpMatcher.reset(input, start, end)` binds a logical region of an existing
 Slice without constructing a Slice view. Public matcher and snapshot offsets
 remain relative to the complete logical Slice, consistent with Java Matcher and
-the one-shot APIs. DFA start-state analysis treats the region boundaries exactly
-like the boundaries of an actual Slice view. This is required for anchors, empty
-matches, word boundaries, and malformed or split UTF-8 input. Rust patterns are
-one exception; see [Rust Frontend](#rust-frontend). Java patterns are another:
-a Java region is the context, except that, as in the JDK, `$` and `\Z` do not
-match at the start of a nonempty region that splits a CR LF (without `(?d)`).
-Such a rare region runs the pattern on the NFA, which is told the CR precedes
-it; see [Java Regular-Subset Frontend](#java-regular-subset-frontend).
+the one-shot APIs. DFA start-state analysis and end-of-text transitions treat
+the region boundaries exactly like the boundaries of an actual Slice view. This
+is required for anchors, empty matches, word boundaries, and malformed or split
+UTF-8 input. Rust patterns are one exception; see
+[Rust Frontend](#rust-frontend). Java patterns are another: a Java region is the
+context, except that, as in the JDK, `$` and `\Z` do not match at the start of a
+nonempty region that splits a CR LF (without `(?d)`). Such a rare region runs
+the pattern on the NFA, which is told the CR precedes it; see
+[Java Regular-Subset Frontend](#java-regular-subset-frontend).
 
 The region is represented only in matcher and DFA setup state, plus an NFA flag
 for the Java CR case; protected DFA transition loops remain unchanged. A real
@@ -1725,8 +1726,11 @@ anchors, text-dependent assertions, or a class counter that finds the matches.
 Empty matches are still handled by the existing empty-at-start check before the
 cursor runs. DFA allocation failure or cache-search failure falls back to the
 ordinary matcher path, and the cursor uses the same reader and exclusive-cache
-mutation protocol as other DFA searches. It adds no public API and does not
-change capturing or longest-match execution.
+mutation protocol as other DFA searches. It adds no public API and leaves
+longest-match execution unchanged. It also serves an alternation whose every
+branch is one capture group: the tagged program picks the winning branch over
+the cursor's match span, using the matcher region as assertion context like the
+group-zero search, and a declined pick falls back to the ordinary matcher path.
 
 ## Large Literal Alternations
 

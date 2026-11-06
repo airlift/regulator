@@ -123,13 +123,14 @@ final class TaggedAlternationProgram
     }
 
     boolean materialize(
-            Slice text,
+            Slice context,
+            int contextStart,
+            int contextEnd,
             int matchStart,
             int matchEnd,
-            int contextStart,
             int[] groupOffsets)
     {
-        int winningBranch = Dfa.searchManyFull(program, text, matchStart, matchEnd);
+        int winningBranch = Dfa.searchManyFull(program, context, contextStart, contextEnd, matchStart, matchEnd);
         if (winningBranch < 0 || winningBranch >= branchCount) {
             return false;
         }

@@ -1909,11 +1909,12 @@ final class Dfa
     }
 
     @SuppressWarnings("UnusedException")
-    static int searchManyFull(Prog prog, Slice text, int rangeStart, int rangeEnd)
+    static int searchManyFull(Prog prog, Slice context, int contextStart, int contextEnd, int rangeStart, int rangeEnd)
     {
         requireNonNull(prog, "prog is null");
-        requireNonNull(text, "text is null");
-        if (rangeStart < 0 || rangeEnd < rangeStart || rangeEnd > text.length() || prog.start() == 0) {
+        requireNonNull(context, "context is null");
+        if (contextStart < 0 || contextEnd < contextStart || contextEnd > context.length() ||
+                rangeStart < contextStart || rangeEnd < rangeStart || rangeEnd > contextEnd || prog.start() == 0) {
             return -1;
         }
 
@@ -1936,17 +1937,19 @@ final class Dfa
                 continue;
             }
             try {
-                int contextEnd = text.byteArrayOffset() + text.length();
-                int textBegin = text.byteArrayOffset() + rangeStart;
-                int textEnd = text.byteArrayOffset() + rangeEnd;
-                StateData start = dfa.analyzeStart(text, textBegin, textEnd, true, true);
+                byte[] bytes = context.byteArray();
+                int contextOffset = context.byteArrayOffset();
+                int contextBegin = contextOffset + contextStart;
+                int contextLimit = contextOffset + contextEnd;
+                int textBegin = contextOffset + rangeStart;
+                int textEnd = contextOffset + rangeEnd;
+                StateData start = dfa.analyzeStart(bytes, contextBegin, contextLimit, textBegin, textEnd, true, true);
                 if (start.offset() == T_DEAD) {
                     return -1;
                 }
 
                 int startOffset = start.offset();
                 int stateOffset = startOffset;
-                byte[] bytes = text.byteArray();
                 int position = textBegin;
                 int[] transitions = dfa.transitions;
                 while (position < textEnd) {
@@ -1980,7 +1983,7 @@ final class Dfa
                     stateOffset = transition & ~T_MATCH_BIT;
                 }
 
-                int boundaryByte = textEnd < contextEnd ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
+                int boundaryByte = textEnd < contextLimit ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
                 int transition = getTransition(transitions, stateOffset + dfa.byteMap(boundaryByte));
                 if (transition == T_UNCOMPUTED) {
                     transition = dfa.computeTransition(stateOffset, boundaryByte);

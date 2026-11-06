@@ -214,7 +214,7 @@ public class TestDfaStartStateFailure
         Dfa.DfaInstance dfa = taggedProgram.cachedDfaIfPresent(MANY_MATCH);
         dfa.failStateAllocationsForTesting(2);
 
-        assertThat(Dfa.searchManyFull(taggedProgram, utf8Slice("a"), 0, 1)).isEqualTo(-1);
+        assertThat(Dfa.searchManyFull(taggedProgram, utf8Slice("a"), 0, 1, 0, 1)).isEqualTo(-1);
         RegexpMatcher matcher = pattern.matcher(utf8Slice("a"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
