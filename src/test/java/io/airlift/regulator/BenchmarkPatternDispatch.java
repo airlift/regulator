@@ -63,7 +63,9 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
 /// literal, `[a-z]shing`: every language, Trino included, keeps the DFA's inner literal search
 /// instead of the fixed-width matcher, which would check every `s`. ORDERED_LITERALS finds
-/// three literals in order with any text between them and runs the ordinary search today.
+/// three literals in order with any text between them and runs the ordinary search: the
+/// ordered-literal find plan takes only gaps that match any bytes, and its UTF-8 `(?s:.)` gaps
+/// match no malformed UTF-8.
 /// LITERAL_SET is an alternation of 100 words, more than the 64 literals of the literal-alternation
 /// span matcher, which RE2, Java, and Rust search with the literal set's automaton for full-Slice
 /// `find` and `count` and a matcher's `find`. SINGLE_BYTE is the one-byte exact literal `,`, which

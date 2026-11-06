@@ -324,21 +324,31 @@ public class TestTrinoRegexpFunctions
         assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(retainedSize);
 
-        TrinoRegexp fallback = null;
-        for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
-            try {
-                TrinoRegexp candidate = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-                if (!candidate.usesOrderedLiteralMatcherForDiagnostics()) {
-                    fallback = candidate;
-                    break;
-                }
-            }
-            catch (RegexpCompileMemoryLimitException ignored) {
-                // Continue until the semantic program fits but the optional matcher does not.
-            }
+        // No Trino pattern takes the ordered-literal find plan of the other languages, whose gaps
+        // must read any bytes, so the subtype's reservation is the pattern's only one. Pinned:
+        // each pattern compiles from the first budget, on the general subtype, and takes the
+        // ordered-literal subtype from the second.
+
+        record Budgets(String pattern, long compiles, long orderedLiterals) {}
+
+        for (Budgets row : List.of(
+                new Budgets("a(?s:.*)b(?s:.*)c", 1115, 1490),
+                new Budgets("(?s)a.*b.*c", 1115, 1490),
+                new Budgets("first(?s:.*)second(?s:.*)third", 1271, 1685))) {
+            Slice rowPattern = utf8(row.pattern());
+            assertThatThrownBy(() -> TrinoRegexp.compile(rowPattern, TrinoRegexp.Options.defaults().setMaxMemory(row.compiles() - 1)))
+                    .as(row.pattern())
+                    .isInstanceOf(RegexpCompileMemoryLimitException.class);
+            TrinoRegexp fallback = TrinoRegexp.compile(rowPattern, TrinoRegexp.Options.defaults().setMaxMemory(row.compiles()));
+            assertThat(fallback.usesOrderedLiteralMatcherForDiagnostics()).as(row.pattern()).isFalse();
+            assertThat(fallback.contains(utf8("xxfirst-a-second-b-third-cyy"))).as(row.pattern()).isTrue();
+            assertThat(TrinoRegexp.compile(rowPattern, TrinoRegexp.Options.defaults().setMaxMemory(row.orderedLiterals() - 1)).usesOrderedLiteralMatcherForDiagnostics())
+                    .as(row.pattern())
+                    .isFalse();
+            assertThat(TrinoRegexp.compile(rowPattern, TrinoRegexp.Options.defaults().setMaxMemory(row.orderedLiterals())).usesOrderedLiteralMatcherForDiagnostics())
+                    .as(row.pattern())
+                    .isTrue();
         }
-        assertThat(fallback).isNotNull();
-        assertThat(fallback.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
     }
 
     @Test

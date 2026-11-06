@@ -48,6 +48,8 @@ abstract sealed class CompiledPattern
         ENDS_WITH,
         EQUALS_FINAL_LINE,
         ENDS_WITH_FINAL_LINE,
+        // Two or more literals in order, with gaps that match every byte sequence between them.
+        ORDERED_LITERALS,
         LOWERED_PROGRAM,
     }
 
@@ -133,7 +135,8 @@ abstract sealed class CompiledPattern
         ENGINE,
         // A nonempty literal anywhere in the input, found by the program's prefix scan.
         EXACT_LITERAL,
-        // A pattern whose find uses a literal kernel: contains, prefix, suffix, or equality.
+        // A pattern whose find uses a literal kernel: contains, prefix, suffix, equality, or
+        // ordered literals.
         LITERAL_KERNEL,
         // An alternation of literals: short literals found by the literal-alternation span matcher,
         // or more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES found by the literal set.
@@ -660,6 +663,17 @@ abstract sealed class CompiledPattern
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSet.estimatedRetainedSize());
             booleanPlans = booleanPlans.withLiteralSet(literalSet);
         }
+        // Full-Slice boolean find of literals in order whose gaps read any bytes, such as RE2's
+        // `a\C*b\C*c`, searches for each in turn after the last, in place of a find the general
+        // engine would answer. The gaps decide, with no language branch; see
+        // createOrderedLiteralPlan. The matcher reserves its memory from the forward DFA budget
+        // under the rule Trino's ordered-literal subtype reserves by.
+        if (booleanPlans.find() == BooleanPlanKind.GENERAL && booleanPlans.scanPlan() == null) {
+            OrderedLiteralMatcher orderedLiteralMatcher = createOrderedLiteralPlan(expressionAnalysis);
+            if (orderedLiteralMatcher != null && tryReserveForwardDfaMemory(booleanPlans, semanticProgram, orderedLiteralMatcher.estimatedRetainedSize())) {
+                booleanPlans = booleanPlans.withOrderedLiteralMatcher(orderedLiteralMatcher);
+            }
+        }
         // Span matchers for full-Slice boolean find and count of a pattern that no literal plan,
         // lowered program, or scan plan answers. Each finds the general engine's leftmost-first
         // spans. The literal trie prefers the first alternative, so a longest-match pattern keeps
@@ -754,7 +768,7 @@ abstract sealed class CompiledPattern
                 // Only Trino's fixed-width route passes no exact literal with a literal search.
                 case LITERAL_SEARCH -> exactLiteralLength > 0 ? Shape.EXACT_LITERAL : Shape.ENGINE;
                 case NULLABLE_START, LOWERED_PROGRAM -> Shape.ENGINE;
-                case CONTAINS, EQUALS, STARTS_WITH, ENDS_WITH, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE -> Shape.LITERAL_KERNEL;
+                case CONTAINS, EQUALS, STARTS_WITH, ENDS_WITH, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE, ORDERED_LITERALS -> Shape.LITERAL_KERNEL;
             };
         }
         // As on the compact route, a pattern with a capture keeps the engine.
@@ -856,6 +870,28 @@ abstract sealed class CompiledPattern
         return new LiteralSearchKernel(booleanPlans.literal());
     }
 
+    /// Creates the matcher of an [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan for
+    /// literals in order, or returns null. The matcher reads nothing between the literals, so each
+    /// gap between two of them must match every byte sequence: a gap of any bytes, such as RE2's
+    /// `\C*` or Rust's `(?s-u:.*)` in the bytes API, or a gap of any characters in a Latin-1
+    /// pattern. A gap of any characters in UTF-8 rejects malformed UTF-8 in the general engine of
+    /// RE2, Java, and Rust alike, so `(?s:a.*b)` matches neither `a\xFFb` nor `a\x80b` there, and
+    /// such a pattern keeps that engine. A leading or trailing gap can match empty, so it does not
+    /// decide whether a match exists.
+    private static OrderedLiteralMatcher createOrderedLiteralPlan(ExpressionAnalysis analysis)
+    {
+        ExpressionAnalysis.LiteralSequence sequence = analysis.literalSequence();
+        if (sequence == null) {
+            return null;
+        }
+        for (int literalIndex = 0; literalIndex < sequence.literalCount() - 1; literalIndex++) {
+            if (!canMatchUnrestrictedGapDirectly(sequence.gapAfter(literalIndex), analysis.latin1())) {
+                return null;
+            }
+        }
+        return OrderedLiteralMatcher.analyze(analysis);
+    }
+
     private static LoweredBooleanProgram compileLoweredBooleanProgram(
             Regexp suffixRegexp,
             Prog semanticProgram,
@@ -911,7 +947,7 @@ abstract sealed class CompiledPattern
         BooleanPlanKind lookingAt = plans.lookingAt() == BooleanPlanKind.GENERAL
                 ? BooleanPlanKind.LOWERED_PROGRAM
                 : plans.lookingAt();
-        return new BooleanPlans(plans.literal(), find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalSet(), plans.innerLiteralSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher(), plans.byteRunMatcher(), plans.dotStarLiteralMatcher());
+        return new BooleanPlans(plans.literal(), find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.scanPlan(), plans.scanBooleanPlan(), plans.literalSearch(), plans.literalSet(), plans.innerLiteralSearch(), plans.literalAlternationMatcher(), plans.fixedWidthByteMatcher(), plans.byteRunMatcher(), plans.dotStarLiteralMatcher(), plans.orderedLiteralMatcher());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1170,20 +1206,41 @@ abstract sealed class CompiledPattern
         return booleanPlans.dotStarLiteralMatcher();
     }
 
+    /// Returns the ordered-literal matcher of Trino's contains, which reads any bytes between its
+    /// literals under Trino's garbage-in, garbage-out rule, or `null`. The caller reserves its
+    /// memory with [#tryReserveForwardDfaMemory]. Trino calls this once, as it compiles. Its
+    /// patterns never take the [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan,
+    /// whose gaps must match every byte sequence, since a Trino pattern reads only UTF-8 and has
+    /// no dot that matches any byte, so this matcher's reservation is the pattern's only one.
     OrderedLiteralMatcher createOrderedLiteralMatcher()
     {
         return OrderedLiteralMatcher.analyze(expressionAnalysis);
     }
 
+    /// Returns the matcher of the [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan, or
+    /// `null`.
+    OrderedLiteralMatcher orderedLiteralMatcherForDiagnostics()
+    {
+        return booleanPlans.orderedLiteralMatcher();
+    }
+
     boolean tryReserveForwardDfaMemory(long retainedSize)
+    {
+        return tryReserveForwardDfaMemory(booleanPlans, partialProg, retainedSize);
+    }
+
+    /// Reserves `retainedSize` from `program`'s forward DFA budget for a matcher that answers in
+    /// place of the program, or returns false. A pattern with a lowered boolean program or a
+    /// tagged alternation program reserves none.
+    private static boolean tryReserveForwardDfaMemory(BooleanPlans booleanPlans, Prog program, long retainedSize)
     {
         if (retainedSize <= 0 ||
                 booleanPlans.loweredProgram() != null ||
                 booleanPlans.taggedAlternationProgram() != null ||
-                retainedSize > partialProg.dfaMemory()) {
+                retainedSize > program.dfaMemory()) {
             return false;
         }
-        partialProg.setDfaMemory(partialProg.dfaMemory() - retainedSize);
+        program.setDfaMemory(program.dfaMemory() - retainedSize);
         return true;
     }
 
@@ -1370,8 +1427,8 @@ abstract sealed class CompiledPattern
     }
 
     /// The full-Slice find of a literal plan: the contains, prefix, suffix, or equality kernel
-    /// of the find plan's kind. The switch is this route's own, so the kinds of a pattern's
-    /// `matches` and `lookingAt` stay out of its profile.
+    /// of the find plan's kind, or the ordered-literal matcher. The switch is this route's own, so
+    /// the kinds of a pattern's `matches` and `lookingAt` stay out of its profile.
     final boolean findOnLiteralKernel(Slice input)
     {
         requireNonNull(input, "input is null");
@@ -1383,6 +1440,7 @@ abstract sealed class CompiledPattern
             case ENDS_WITH -> LiteralMatchKernel.endsWith(input, literal);
             case EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
             case ENDS_WITH_FINAL_LINE -> endsWithFinalLineBooleanPlanLiteral(input, literal);
+            case ORDERED_LITERALS -> booleanPlans.orderedLiteralMatcher().matches(input, 0, input.length());
             case GENERAL, LITERAL_SEARCH, NULLABLE_START, LOWERED_PROGRAM -> throw new IllegalStateException("not a literal find plan: " + booleanPlans.find());
         };
     }
@@ -1579,7 +1637,7 @@ abstract sealed class CompiledPattern
             case EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
             case ENDS_WITH_FINAL_LINE -> endsWithFinalLineBooleanPlanLiteral(input, literal);
             case LOWERED_PROGRAM -> matchLoweredBooleanProgram(input, Anchor.ANCHOR_START);
-            case GENERAL, LITERAL_SEARCH, NULLABLE_START -> throw new IllegalStateException("plan cannot be executed directly: " + kind);
+            case GENERAL, LITERAL_SEARCH, NULLABLE_START, ORDERED_LITERALS -> throw new IllegalStateException("plan cannot be executed directly: " + kind);
         };
     }
 
@@ -1613,7 +1671,7 @@ abstract sealed class CompiledPattern
             case EQUALS -> LiteralMatchKernel.equals(input, literal);
             case STARTS_WITH -> LiteralMatchKernel.startsWith(input, literal);
             case ENDS_WITH -> LiteralMatchKernel.endsWith(input, literal);
-            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE, LOWERED_PROGRAM -> throw new IllegalStateException("not a literal matches plan: " + kind);
+            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE, ORDERED_LITERALS, LOWERED_PROGRAM -> throw new IllegalStateException("not a literal matches plan: " + kind);
         };
     }
 
@@ -1635,7 +1693,7 @@ abstract sealed class CompiledPattern
             case STARTS_WITH -> LiteralMatchKernel.startsWith(input, literal);
             case EQUALS_FINAL_LINE -> equalsFinalLineBooleanPlanLiteral(input, literal);
             case LOWERED_PROGRAM -> matchLoweredBooleanProgram(input, Anchor.ANCHOR_START);
-            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, ENDS_WITH, ENDS_WITH_FINAL_LINE -> throw new IllegalStateException("not a literal lookingAt plan: " + kind);
+            case GENERAL, LITERAL_SEARCH, NULLABLE_START, CONTAINS, ENDS_WITH, ENDS_WITH_FINAL_LINE, ORDERED_LITERALS -> throw new IllegalStateException("not a literal lookingAt plan: " + kind);
         };
     }
 
@@ -3255,7 +3313,7 @@ abstract sealed class CompiledPattern
                 find = BooleanPlanKind.NULLABLE_START;
             }
         }
-        return new BooleanPlans(literal, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+        return new BooleanPlans(literal, find, lookingAt, matches, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private static BooleanPlanKind selectFindPlan(
@@ -3369,67 +3427,76 @@ abstract sealed class CompiledPattern
             // Finds the spans of a `.*literal.*` pattern, whose dots match any character but a line
             // feed, for the count of the literal-kernel shape, every language's group-zero
             // RegexpMatcher.find(), and Trino's span operations; null leaves them on the program.
-            DotStarLiteralSpanMatcher dotStarLiteralMatcher)
+            DotStarLiteralSpanMatcher dotStarLiteralMatcher,
+            // Answers full-Slice boolean find of the ORDERED_LITERALS plan; null for every other
+            // plan.
+            OrderedLiteralMatcher orderedLiteralMatcher)
     {
         private BooleanPlans withScanPlan(ScanPlan scanPlan)
         {
             ScanPlan scanBooleanPlan = scanPlan == null ? null : scanPlan.booleanPlan();
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withLiteralSearch(LiteralSearchKernel literalSearch)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withLiteralSet(LiteralSetSpanMatcher literalSet)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withInnerLiteralSearch(InnerLiteralSearch innerLiteralSearch)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withLiteralAlternationMatcher(LiteralAlternationSpanMatcher literalAlternationMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withFixedWidthByteMatcher(FixedWidthByteSpanMatcher fixedWidthByteMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withByteRunMatcher(SingleByteMatcher byteRunMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
 
         private BooleanPlans withDotStarLiteralMatcher(DotStarLiteralSpanMatcher dotStarLiteralMatcher)
         {
-            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher);
+            return new BooleanPlans(literal, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
+        }
+
+        /// Returns these plans with find on `orderedLiteralMatcher`.
+        private BooleanPlans withOrderedLiteralMatcher(OrderedLiteralMatcher orderedLiteralMatcher)
+        {
+            return new BooleanPlans(literal, BooleanPlanKind.ORDERED_LITERALS, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, scanPlan, scanBooleanPlan, literalSearch, literalSet, innerLiteralSearch, literalAlternationMatcher, fixedWidthByteMatcher, byteRunMatcher, dotStarLiteralMatcher, orderedLiteralMatcher);
         }
     }
 
