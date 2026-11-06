@@ -73,6 +73,15 @@ and Latin-1. Inputs and generated expectations are in:
 - `src/test/resources/io/airlift/regulator/testing/native_longest_boundary.jsonl`
 - `io.airlift.regulator.TestNativeLongestBoundaryAgreement`
 
+A third native corpus of 426 cases pins empty-iteration priority in nested
+nullable loops: one to four quantified groups, greedy and lazy, around
+alternations of empty-matching atoms, with every capture span compared. Inputs
+and generated expectations are in:
+
+- `tools/re2-golden/nested-nullable-cases.tsv`
+- `src/test/resources/io/airlift/regulator/upstream_nested_nullable_match.jsonl`
+- `io.airlift.regulator.TestUpstreamPublicMatch`
+
 `TestPublicEngineAgreement` adds a direct-engine matrix over 11 patterns and
 11 byte strings, including malformed and truncated UTF-8. Every input also
 uses the three context windows described above.

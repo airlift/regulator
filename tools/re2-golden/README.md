@@ -117,6 +117,17 @@ GENERATOR=target/re2-golden-build/re2_golden
     > src/test/resources/io/airlift/regulator/upstream_public_match.jsonl
 ```
 
+The nested nullable-loop fixture covers quantified groups, nested one to four
+deep, around alternations of empty-matching atoms. Which empty iteration wins
+in these shapes depends on how the compiler splits instruction lists, so the
+fixture pins upstream match priority and group spans:
+
+```bash
+"${GENERATOR}" --mode=match \
+    < tools/re2-golden/nested-nullable-cases.tsv \
+    > src/test/resources/io/airlift/regulator/upstream_nested_nullable_match.jsonl
+```
+
 The bounded public-options matrix uses a separate fixture so every public
 toggle and material interaction remains visible without multiplying the core
 match corpus:

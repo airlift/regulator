@@ -36,6 +36,15 @@ public class TestUpstreamPublicMatch
                 .toList();
     }
 
+    // Empty-iteration priority in nested nullable loops depends on how the compiler splits instruction lists.
+    @TestFactory
+    public List<DynamicTest> testNestedNullableLoopCases()
+    {
+        return GoldenJsonl.readObjects("io/airlift/regulator/upstream_nested_nullable_match.jsonl").stream()
+                .map(testCase -> DynamicTest.dynamicTest(testCase.getString("id"), () -> assertMatch(testCase)))
+                .toList();
+    }
+
     private static void assertMatch(GoldenJsonl.JsonObject testCase)
     {
         assertThat(testCase.getBoolean("ok"))
