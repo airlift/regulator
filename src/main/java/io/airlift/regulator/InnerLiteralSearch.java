@@ -236,6 +236,19 @@ final class InnerLiteralSearch
         return minimumLiteralLength;
     }
 
+    /// The reversed program of the prefix before the literal, whose longest-match DFA finds a
+    /// candidate's start.
+    Prog reversePrefixProgramForDiagnostics()
+    {
+        return reversePrefixProgram;
+    }
+
+    /// The forward program, whose first-match DFA confirms a candidate from its start.
+    Prog forwardProgramForDiagnostics()
+    {
+        return forwardProgram;
+    }
+
     long estimatedRetainedSize()
     {
         return INSTANCE_SIZE + literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter) + Compiler.estimatedProgramMemory(reversePrefixProgram) + reversePrefixProgram.dfaMemory();
@@ -287,25 +300,43 @@ final class InnerLiteralSearch
                 return FALLBACK;
             }
             int maximumReverseBytes = minimumMatchStart == start ? Integer.MAX_VALUE : Math.max(1, literalStart - minimumMatchStart);
-            long reverse = Dfa.searchReverseCandidate(reversePrefixProgram, text, contextStart, contextEnd, start, literalStart, maximumReverseBytes);
-            if (reverse == Dfa.CANDIDATE_SEARCH_FALLBACK || reverse == Dfa.SEARCH_FAILED) {
-                return FALLBACK;
+            long candidate = Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+            if (candidate == Dfa.SEARCH_FAILED) {
+                candidate = confirmCandidate(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
             }
-            if (reverse >= 0) {
-                int matchStart = start + (int) reverse;
-                long forward = Dfa.searchAnchoredWithStop(forwardProgram, text, contextStart, contextEnd, matchStart, end);
-                if (forward >= 0) {
-                    return ((long) matchStart << 32) | forward;
-                }
-                if (forward == Dfa.SEARCH_FAILED) {
-                    return FALLBACK;
-                }
-                minimumLiteralStart = Dfa.anchoredStopPosition(forward);
+            if (candidate >= 0 || candidate == FALLBACK) {
+                return candidate;
+            }
+            if (candidate != Dfa.SEARCH_NO_MATCH) {
+                minimumLiteralStart = Dfa.anchoredStopPosition(candidate);
             }
             scanStart = literalStart + 1;
             minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // Confirms the candidate at `literalStart` with the two searches one at a time, for a
+    // candidate the single pass gave up on. Returns as that pass does, with FALLBACK in place of
+    // its failure.
+    private long confirmCandidate(Slice text, int contextStart, int contextEnd, int start, int literalStart, int end, int maximumReverseBytes)
+    {
+        long reverse = Dfa.searchReverseCandidate(reversePrefixProgram, text, contextStart, contextEnd, start, literalStart, maximumReverseBytes);
+        if (reverse == Dfa.CANDIDATE_SEARCH_FALLBACK || reverse == Dfa.SEARCH_FAILED) {
+            return FALLBACK;
+        }
+        if (reverse < 0) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+        int matchStart = start + (int) reverse;
+        long forward = Dfa.searchAnchoredWithStop(forwardProgram, text, contextStart, contextEnd, matchStart, end);
+        if (forward >= 0) {
+            return ((long) matchStart << 32) | forward;
+        }
+        if (forward == Dfa.SEARCH_FAILED) {
+            return FALLBACK;
+        }
+        return forward;
     }
 
     private int findLiteral(Slice text, int offset, int length)
