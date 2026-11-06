@@ -2497,10 +2497,9 @@ plans; the last bullets record the rules and measurements specific to each.
   generated class, as in Trino. Boolean calls of a start-anchored plan run its
   full plan rather than the save-free boolean plan: a capture save without
   groups is one null check in generated code, not an operation dispatch.
-- `Re2` exposes no generated method handles. Trino exposes them so that a
-  caller holding a constant pattern, such as Trino's own generated code, can
-  bind an operation directly; no `Re2` caller does that, so only
-  `usesGeneratedBytecode()` is public.
+- No language exposes generated method handles; only
+  `usesGeneratedBytecode()` is public. A caller holding a constant pattern
+  binds the public method to the pattern, which reaches the generated entry.
 - With other generated patterns in the process, a generated class takes 0.81
   times the time of the earlier executor design, in which a private `Re2`
   subclass held the generated executor in a field and Java and Rust patterns
@@ -2598,8 +2597,10 @@ plans; the last bullets record the rules and measurements specific to each.
 disabled by default, that compiles a LIKE pattern into its own hidden class
 with the same rules as generated Trino scan kernels: generation happens once
 at compilation, a pattern whose class cannot be generated or defined is
-silently interpreted, the interpreter never references generated code, and
-generated code calls its own copies of the interpreter's helpers. Every plan
+silently interpreted, the interpreter never references generated code,
+generated code calls its own copies of the interpreter's helpers, per-pattern
+state on the entry's hot path belongs to the generated class rather than the
+hand-written base, and the entry stays within HotSpot's inline size. Every plan
 has a class, because each is one call per row and the interpreter dispatches
 every plan through the same `matches`, so a hot pattern of any plan otherwise
 shares that dispatch and its profile with every other pattern. The generated
@@ -2671,9 +2672,12 @@ UTF-8, which differential tests check over the corpus and seeded patterns.
 - The copied helpers, character width, code-point decoding, candidate prefix
   comparison, and KMP search, live in one LIKE kernel support class, separate
   from the scan-kernel copies.
-- A caller holding a constant pattern can bind the generated entry directly
-  through `generatedMatches`, an `Optional` of a `(Slice)boolean`
-  `MethodHandle` that is empty for an interpreted pattern.
-- `TrinoLikePattern` is sealed rather than final, so a pattern with a
-  generated class can run it through a private subclass. Callers still cannot
-  extend it.
+- `TrinoLikePattern` is sealed rather than final, and permits a
+  package-private non-sealed subclass that the generated class extends, so the
+  pattern a caller holds is the generated class and its public `matches` is
+  the class's own entry, as for [Trino scan kernels](#generated-trino-scan-kernels).
+  A caller holding a constant pattern binds `matches` to it. Callers still
+  cannot extend it.
+- Unlike the regular-expression classes, a LIKE class has no empty-match
+  refusal: its only entry is a full match, so `%`, `%%`, and the empty pattern
+  have classes.

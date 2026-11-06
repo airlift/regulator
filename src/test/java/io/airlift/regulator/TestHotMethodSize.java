@@ -112,6 +112,29 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the generated `matches` of a LIKE pattern small enough for C2 to inline into a
+    /// caller that holds the pattern as a constant, with the longest prefix and suffix that it
+    /// compares inline on both sides of a middle.
+    @Test
+    public void testGeneratedLikeMatchesFitsInlineSize()
+    {
+        for (String pattern : List.of(
+                "",
+                "abcdefghijklmnop",
+                "abcdefghijklmnopq",
+                "abcdefghijklmnop%abcdefghijklmnop",
+                "abcdefghijklmnop%needle%abcdefghijklmnop",
+                "abcdefghijklmnop%ab_c%abcdefghijklmnop",
+                "abcdefghijklmnop%a_%b%abcdefghijklmnop",
+                "abcdefghijklmnop_abcdefghijklmnop",
+                "abcdefghijklmnopq%abcdefghijklmnopq")) {
+            TrinoLikePattern compiled = TrinoLikePattern.compile(utf8Slice(pattern));
+            for (boolean aarch64 : new boolean[] {false, true}) {
+                assertEntriesFitInlineSize("LIKE " + pattern + " aarch64=" + aarch64, TrinoLikeKernelGenerator.classfileForDiagnostics(compiled.kernelForDiagnostics(), aarch64));
+            }
+        }
+    }
+
     private static void assertEntriesFitInlineSize(String description, byte[] classfile)
     {
         List<MethodModel> entries = ClassFile.of().parse(classfile).methods().stream()

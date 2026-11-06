@@ -32,20 +32,21 @@ import io.airlift.classfile.Variable;
 import io.airlift.slice.Slice;
 
 import java.lang.constant.ClassDesc;
-import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static io.airlift.classfile.BytecodeExpressions.boundConstant;
 import static io.airlift.classfile.BytecodeExpressions.constantFalse;
 import static io.airlift.classfile.BytecodeExpressions.constantInt;
 import static io.airlift.classfile.BytecodeExpressions.constantLong;
+import static io.airlift.classfile.BytecodeExpressions.constantString;
 import static io.airlift.classfile.BytecodeExpressions.constantTrue;
 import static io.airlift.classfile.BytecodeExpressions.getStatic;
 import static io.airlift.classfile.BytecodeExpressions.invokeStatic;
@@ -60,13 +61,13 @@ import static java.lang.reflect.AccessFlag.STATIC;
 import static java.util.Objects.requireNonNull;
 
 /// Compiles one [TrinoLikePattern] to a hidden class in this package, with every literal,
-/// length bound, and wildcard position as a constant. Every plan has a class. Its public static
-/// `matchesEntry` checks the length bounds, the anchored prefix and suffix with constant word
-/// comparisons, or `Arrays.equals` for one of more than 16 bytes, and calls the method of the
-/// pattern's middle: a copy of the literal search for contained and ordered literals, a literal
-/// search with constant character gaps, or a bit-parallel automaton for other wildcard patterns.
-/// The class implements [CompiledTrinoLike] by delegating to `matchesEntry`, so a caller
-/// can also bind the entry directly.
+/// length bound, and wildcard position as a constant. Every plan has a class, which extends
+/// [TrinoLikePattern.CompiledTrinoLikePattern], so the pattern a caller holds is an instance of
+/// it. Its public `matches` checks the input as [TrinoLikePattern#matches(Slice)] does, the
+/// length bounds, and the anchored prefix and suffix with constant word comparisons, or
+/// `Arrays.equals` for one of more than 16 bytes, and calls the static method of the pattern's
+/// middle: a copy of the literal search for contained and ordered literals, a literal search with
+/// constant character gaps, or a bit-parallel automaton for other wildcard patterns.
 ///
 /// Every generated method must stay within HotSpot's huge-method limit, because HotSpot never
 /// compiles a larger method. A pattern whose class would exceed it has no class.
@@ -82,6 +83,7 @@ final class TrinoLikeKernelGenerator
     private static final int UNROLLED_GAP_CHARACTERS = 4;
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
+    private static final Method REQUIRE_NON_NULL = requireNonNullMethod();
 
     private TrinoLikeKernelGenerator() {}
 
@@ -148,22 +150,15 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /// A generated class for one pattern: its [CompiledTrinoLike] instance and a handle on its
-    /// static entry.
-    record CompiledLike(CompiledTrinoLike like, MethodHandle matches)
+    /// Generates and defines the class for the kernel of `pattern`, searching literals as on
+    /// aarch64 when `aarch64` is true, and returns the copy of `pattern` that is an instance of
+    /// it, or `null` when a method of the class would exceed [#HUGE_METHOD_LIMIT]. The generated
+    /// constructor has the type of the copy constructor of
+    /// [TrinoLikePattern.CompiledTrinoLikePattern] and passes its argument to it. Other failures
+    /// propagate.
+    static TrinoLikePattern.CompiledTrinoLikePattern generate(TrinoLikePattern pattern, boolean aarch64)
     {
-        CompiledLike
-        {
-            requireNonNull(like, "like is null");
-            requireNonNull(matches, "matches is null");
-        }
-    }
-
-    /// Generates and defines the class for `kernel`, searching literals as on aarch64 when
-    /// `aarch64` is true, or returns `null` when a method of the class would exceed
-    /// [#HUGE_METHOD_LIMIT]. Other failures propagate.
-    static CompiledLike generate(Kernel kernel, boolean aarch64)
-    {
+        Kernel kernel = TrinoLikePattern.CompiledTrinoLikePattern.kernel(pattern);
         // Building the class of a large pattern costs time and memory that grow with the
         // pattern, so a pattern certain to exceed the limit is rejected before it is built.
         if (certainlyExceedsLimit(kernel.region())) {
@@ -175,22 +170,13 @@ final class TrinoLikeKernelGenerator
             return null;
         }
         DefinedUnit defined = definer.defineUnit(unit);
-        Class<? extends CompiledTrinoLike> likeClass = defined.primaryClass(CompiledTrinoLike.class);
-        CompiledTrinoLike like;
+        Class<? extends TrinoLikePattern.CompiledTrinoLikePattern> likeClass = defined.primaryClass(TrinoLikePattern.CompiledTrinoLikePattern.class);
         try {
-            like = likeClass.getConstructor().newInstance();
+            return likeClass.getConstructor(TrinoLikePattern.class).newInstance(pattern);
         }
         catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot instantiate generated LIKE class", e);
         }
-        MethodHandle matches;
-        try {
-            matches = MethodHandles.lookup().findStatic(likeClass, "matchesEntry", MethodType.methodType(boolean.class, Slice.class));
-        }
-        catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("generated LIKE class lacks matchesEntry", e);
-        }
-        return new CompiledLike(like, matches);
     }
 
     /// Returns the class file generated for `kernel`, as [#generate] generates it for
@@ -261,6 +247,16 @@ final class TrinoLikeKernelGenerator
         return region.exact();
     }
 
+    private static Method requireNonNullMethod()
+    {
+        try {
+            return Objects.class.getMethod("requireNonNull", Object.class, String.class);
+        }
+        catch (NoSuchMethodException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     private static CompiledUnit compile(HiddenClassDefiner definer, Kernel kernel, boolean aarch64)
     {
         return ClassCompiler.forTarget(definer.compilationTarget())
@@ -278,7 +274,7 @@ final class TrinoLikeKernelGenerator
         return largest;
     }
 
-    /// Emits the class of one pattern: `matchesEntry`, the method of its middle, a search
+    /// Emits the class of one pattern: `matches`, the method of its middle, a search
     /// method for each literal the middle searches for, a method that verifies the candidates of
     /// each search of a literal of two or more bytes, and a class initializer that sets the
     /// constant fields those searches read.
@@ -301,10 +297,9 @@ final class TrinoLikeKernelGenerator
 
         private ClassModel define()
         {
-            definition = ClassDefinition.define(ClassDesc.of(className(kernel.plan())))
-                    .access(PUBLIC, FINAL)
-                    .addInterface(CompiledTrinoLike.class);
-            definition.defaultConstructor().access(PUBLIC);
+            definition = ClassDefinition.define(ClassDesc.of(className(kernel.plan()))).access(PUBLIC, FINAL).superClass(TrinoLikePattern.CompiledTrinoLikePattern.class);
+            Parameter pattern = arg("pattern", TrinoLikePattern.class);
+            definition.constructor(pattern).access(PUBLIC).body().invokeSuperConstructor(pattern).ret();
 
             MethodDefinition middle = switch (kernel.region()) {
                 case null -> null;
@@ -312,13 +307,7 @@ final class TrinoLikeKernelGenerator
                 case LiteralGaps literalGaps -> defineLiteralGaps(literalGaps);
                 case Wildcard wildcard -> defineWildcard(wildcard);
             };
-            MethodDefinition entry = defineEntry(middle);
-
-            Parameter input = arg("input", Slice.class);
-            definition.method("matches", boolean.class, input)
-                    .access(PUBLIC)
-                    .body()
-                    .ret(invokeStatic(entry, input));
+            defineMatches(middle);
             if (!constantFields.isEmpty()) {
                 CodeBlock.Builder initializer = definition.classInitializer().body();
                 for (ConstantField constant : constantFields.values()) {
@@ -341,17 +330,17 @@ final class TrinoLikeKernelGenerator
                 case TRINO_WILDCARD -> "TrinoWildcard";
                 case LITERAL_GAPS -> "LiteralGaps";
             };
-            return CompiledTrinoLike.class.getPackageName() + "." + classPrefix + "CompiledTrinoLike";
+            return TrinoLikePattern.class.getPackageName() + "." + classPrefix + "CompiledTrinoLikePattern";
         }
 
-        /// The steps of `TrinoLikePattern.matches`: the length bounds, the prefix at the
-        /// start, the suffix at the end, and the middle between them.
-        private MethodDefinition defineEntry(MethodDefinition middle)
+        /// The steps of `TrinoLikePattern.matches`: the input check, the length bounds, the
+        /// prefix at the start, the suffix at the end, and the middle between them.
+        private void defineMatches(MethodDefinition middle)
         {
             Parameter input = arg("input", Slice.class);
-            MethodDefinition method = definition.method("matchesEntry", boolean.class, input)
-                    .access(PUBLIC, STATIC);
+            MethodDefinition method = definition.method("matches", boolean.class, input).access(PUBLIC);
             CodeBlock.Builder body = method.body();
+            body.append(invokeStatic(REQUIRE_NON_NULL, input, constantString("input is null")).pop());
             Variable length = body.declare("length", input.invoke("length", int.class));
             int minimumSize = kernel.minimumSize();
             int maximumSize = kernel.maximumSize();
@@ -370,7 +359,7 @@ final class TrinoLikeKernelGenerator
             byte[] suffix = kernel.suffix();
             if (prefix.length == 0 && suffix.length == 0 && middle == null) {
                 body.ret(constantTrue());
-                return method;
+                return;
             }
 
             Variable bytes = body.declare("bytes", input.invoke("byteArray", byte[].class));
@@ -393,7 +382,6 @@ final class TrinoLikeKernelGenerator
                         base.add(constantInt(prefix.length)),
                         base.add(length).subtract(constantInt(suffix.length))));
             }
-            return method;
         }
 
         /// A copy of `OrderedLiteralMatcher.matches` over the middle `[start, end)` of
