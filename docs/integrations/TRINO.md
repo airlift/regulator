@@ -44,17 +44,18 @@ uses the same ordered-literal search as LIKE, while the compiled RE2 program
 remains available for count, position, extraction, replacement, split, and
 fallback behavior.
 
-`TrinoRegexp.Options.setGenerateBytecode(true)` is an experimental option, off
-by default, that compiles an eligible pattern's scan plan into its own hidden
-class. `usesGeneratedBytecode()` reports whether a pattern has one. For a
-constant pattern, the `generated*` accessors return each operation's generated
-code as an `Optional<MethodHandle>`, so a generated expression can bind it as
-a constant instead of calling the public method; an empty `Optional` means
-that operation runs elsewhere, and the public method remains the call to use.
-Variable patterns use the public API. The handle types are listed in the
-[API guide](../reference/REGULATOR_API.md#trino-adapter). Each successful
-generation defines a new hidden class, so compile patterns that are not cached,
-such as a different pattern on every row, without this option.
+`TrinoRegexp.Options.setGenerateBytecode(true)` is an option, off by default,
+that compiles an eligible pattern's scan plan into its own hidden class.
+`usesGeneratedBytecode()` reports whether a pattern has one, and such a pattern
+is an instance of its generated class. For a constant pattern, a generated
+expression binds the public method to the pattern with
+`findVirtual(...).bindTo(pattern)`, inserting a fixed extract group with
+`insertArguments`, and holds the handle as a constant, so the call reaches the
+pattern's own generated operation directly, with no dispatch, and C2 can
+inline it.
+Variable patterns call the public API. Each successful generation defines a
+new hidden class, so compile patterns that are not cached, such as a different
+pattern on every row, without this option.
 
 ## Why Slice is explicit
 

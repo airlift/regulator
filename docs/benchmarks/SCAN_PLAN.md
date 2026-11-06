@@ -738,11 +738,14 @@ participation and retry behavior receive coverage alongside rejection.
 
 ## Generated kernels
 
-`TrinoRegexp.Options.setGenerateBytecode(true)` is an experimental opt-in. It
-compiles an eligible pattern to a private `TrinoRegexp` subclass backed by a
-hidden class that `ScanKernelGenerator` emits for the pattern's
-case-sensitive plan. `TrinoRegexp.usesGeneratedBytecode()` reports whether a
-pattern has one. The accepted trade-offs are recorded in
+`TrinoRegexp.Options.setGenerateBytecode(true)` is opt-in, off by default. It
+compiles an eligible pattern to a hidden class that `ScanKernelGenerator`
+emits for the pattern's case-sensitive plan. The class extends a
+package-private non-sealed `TrinoRegexp` subclass, so the compiled pattern is
+an instance of the hidden class, as for
+[RE2, Java, and Rust](#re2-java-and-rust-pattern-classes).
+`TrinoRegexp.usesGeneratedBytecode()` reports whether a pattern has one. The
+accepted trade-offs are recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-trino-scan-kernels).
 
 ### Eligibility and routing
@@ -796,16 +799,20 @@ the literal byte that the pattern's byte distribution chose, emitted as a
 constant, so a supplied distribution or preset moves the generated probe
 exactly as it moves the interpreter's.
 
-Each routed operation has a public static entry named for it with an `Entry`
-suffix, such as `containsEntry`; the suffix keeps the entries apart from the
-`CompiledTrinoScan` interface methods, which delegate to them. The subclass
-calls the interface once per operation, and the `generated*` accessors return
-the entries as method handles. The class is stateless and holds the pattern's
-`TrinoCompiledPattern`, plan, literals, and runs as class data.
+For each routed operation, the generated class declares a public instance
+method that overrides the corresponding `TrinoRegexp` method, with its route
+fixed when the class is generated: `count`, `position`, `extract`,
+`extractAll`, `split`, both `replace` operations, and `contains` when
+full-Slice `find` runs the plan. Each checks its arguments as the public method
+does, with the group count as a constant, and stays small enough for HotSpot to
+inline at a caller that binds the pattern as a constant, calling the class's
+own static attempt and search methods. The class adds no fields and holds the
+pattern's `TrinoCompiledPattern`, plan, literals, and runs as class data.
 
-`TrinoRegexpMatcher` is sealed, permitting one nested subclass that runs the
-generated `find` into its own offset array. Without the option it is never
-loaded, so the existing matcher keeps its single implementation.
+`TrinoRegexpMatcher` is sealed. Its nested `CompiledScanMatcher` runs the
+generated class's package-private `find` hook into its own offset array.
+Without the option it is never loaded, so the matcher keeps the
+implementations it has without generated code.
 
 Set the system property `io.airlift.regulator.scan-kernel.dump-directory` to a
 directory to write each generated class file there before it is defined.
@@ -865,12 +872,13 @@ against a build without it on the same hosts:
 - A constant pattern bound as a handle: `BenchmarkTrinoScanKernelDispatch`
   defines a hidden caller per pattern that invokes an operation handle as a
   class-data constant. `INTERPRETER` binds the public method to the pattern,
-  and `GENERATED` binds its generated handle, for `contains`, `count`,
+  and `GENERATED` binds the same method to a pattern compiled with the option,
+  which is an instance of its generated class, for `contains`, `count`,
   `extract`, and `position` on four `OPTIONAL_MIXED` patterns, an
   `UNANCHORED_MIXED` pattern, and the short `URL_SHORT` rows. `ISOLATED` runs
   the target alone; `INTERLEAVED` first trains every pattern of the target's
-  workload. The generated API is resolved reflectively, so the same source runs
-  on a build without the option with `-p executor=INTERPRETER`.
+  workload. The option is resolved reflectively, so the same source runs on a
+  build without it with `-p executor=INTERPRETER`.
 - Compiled patterns through the public API at shared call sites:
   `BenchmarkTrinoScanPlan` and `BenchmarkTrinoScanProfiles` with
   `generateBytecode=true`, where twelve compiled patterns share each call site.
@@ -915,10 +923,9 @@ the default compile, interprets the scan plan. The regular engine comes from
 plan, so the operation takes the regular engine route through `TrinoRegexp`'s
 own dispatch. Both make the public `TrinoRegexp` call. The compiled pattern
 comes from `setGenerateBytecode(true)` and is const-bound the way an engine
-like Trino binds it: a per-pattern hidden class invokes the operation's
-generated handle, such as `generatedReplace()`, held as a class-data constant.
-The handle returns the public method's result and accepts its arguments,
-except that extract and extract-all bind the group when the handle is created
+like Trino binds it: a per-pattern hidden class invokes the public operation
+bound to the pattern, and holds the bound operation handle as a class-data
+constant. Extract and extract-all bind the group when the handle is created
 and take only the source when called. Only the `*Generated` benchmark methods
 take the states that compile generated bytecode, so the other variants'
 processes load no generated class. The `*RegularEngine` methods likewise take

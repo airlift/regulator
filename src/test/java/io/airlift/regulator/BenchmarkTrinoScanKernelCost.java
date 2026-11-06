@@ -64,13 +64,13 @@ public final class BenchmarkTrinoScanKernelCost
 
         System.gc();
         Usage before = Usage.current();
-        List<CompiledTrinoScan> scans = new ArrayList<>(count);
+        List<TrinoRegexp.CompiledScanTrinoRegexp> patterns = new ArrayList<>(count);
         long codeBytes = 0;
         long classfileBytes = 0;
         long start = System.nanoTime();
         for (ScanKernelGenerator.TrinoRoutes route : routes) {
-            ScanKernelGenerator.ReportedTrinoKernel generated = ScanKernelGenerator.generateCompiledTrinoScanForDiagnostics(route);
-            scans.add(generated.compiled().scan());
+            ScanKernelGenerator.ReportedTrinoPattern generated = ScanKernelGenerator.generateCompiledTrinoPatternForDiagnostics(route);
+            patterns.add(generated.pattern());
             for (CompilationReport.ClassInfo classInfo : generated.report().classes()) {
                 classfileBytes += classInfo.classfileBytes();
                 for (CompilationReport.MethodInfo method : classInfo.methods()) {
@@ -84,10 +84,10 @@ public final class BenchmarkTrinoScanKernelCost
         int matches = 0;
         int[] groups = new int[2];
         for (int index = 0; index < count; index++) {
-            CompiledTrinoScan scan = scans.get(index);
+            TrinoRegexp.CompiledScanTrinoRegexp pattern = patterns.get(index);
             Slice input = inputs.get(index);
             for (int call = 0; call < EXERCISE_CALLS; call++) {
-                matches += scan.find(input, 0, groups) ? 1 : 0;
+                matches += pattern.find(input, 0, groups) ? 1 : 0;
             }
         }
         if (matches != count * EXERCISE_CALLS) {

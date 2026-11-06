@@ -13,14 +13,21 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
+import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import org.junit.jupiter.api.Test;
 
 import java.lang.classfile.Attributes;
 import java.lang.classfile.ClassFile;
+import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
+import java.lang.reflect.AccessFlag;
 import java.util.List;
 
 import static io.airlift.regulator.TestScanKernel.classfile;
+import static io.airlift.regulator.TestScanKernel.patternClassfile;
+import static io.airlift.regulator.TestScanPlan.URL;
+import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestHotMethodSize
@@ -74,6 +81,49 @@ public class TestHotMethodSize
                 .as("RegexpMatcher constructor bytecode bytes")
                 .isNotEmpty()
                 .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+    }
+
+    /// Keeps each public entry of a generated pattern class small enough for C2 to inline into a
+    /// caller that holds the pattern as a constant; the attempt loop and searches stay static
+    /// calls. The patterns cover start-anchored and unanchored plans, a search that hands off to
+    /// the ordinary engine, retries, and several groups.
+    @Test
+    public void testGeneratedEntriesFitInlineSize()
+    {
+        for (String expression : List.of(
+                URL,
+                "^https?://[^/]+/",
+                "[?&]([^=]+)=",
+                "([^/]+)/([^!]+)!x",
+                "^((a)?(b)?(c)?(d)?)abcd([^/]+)/$",
+                "^(a)",
+                "x([^/]+)")) {
+            TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setGenerateBytecode(true));
+            assertThat(trino.usesGeneratedBytecode()).as(expression).isTrue();
+            assertEntriesFitInlineSize("Trino " + expression, ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(trino.re2())));
+            Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
+            JavaRegexp java = JavaRegexp.compile(utf8Slice(expression), JavaRegexp.Options.defaults().setGenerateBytecode(true));
+            RustRegexp rust = RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.defaults().setGenerateBytecode(true));
+            for (CompiledPattern pattern : List.of(re2, java, rust)) {
+                String description = pattern.getClass().getSimpleName() + " " + expression;
+                assertThat(pattern.usesGeneratedBytecode()).as(description).isTrue();
+                assertEntriesFitInlineSize(description, patternClassfile(PatternRoutes.of(pattern)));
+            }
+        }
+    }
+
+    private static void assertEntriesFitInlineSize(String description, byte[] classfile)
+    {
+        List<MethodModel> entries = ClassFile.of().parse(classfile).methods().stream()
+                .filter(method -> method.flags().has(AccessFlag.PUBLIC) && !method.flags().has(AccessFlag.STATIC) && !method.methodName().equalsString("<init>"))
+                .toList();
+        assertThat(entries).as("%s entries", description).isNotEmpty();
+        for (MethodModel entry : entries) {
+            assertThat(entry.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0))
+                    .as("%s %s bytecode bytes", description, entry.methodName())
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
     }
 
     private static int codeLength(Class<?> type, String methodName)

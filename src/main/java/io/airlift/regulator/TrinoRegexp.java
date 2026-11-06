@@ -20,12 +20,10 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Function;
 
 import static java.lang.Math.toIntExact;
@@ -124,7 +122,7 @@ public sealed class TrinoRegexp
         this.mayHaveSingleByteRepeatMatcher = false;
     }
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only nested implementations; the non-sealed CompiledScanTrinoRegexp is extended only by its generated hidden class")
     private TrinoRegexp(TrinoCompiledPattern compiledPattern)
     {
         this.re2 = requireNonNull(compiledPattern, "compiledPattern is null");
@@ -260,89 +258,14 @@ public sealed class TrinoRegexp
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
-    /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
-    /// would run its specialized scan runs the generated class, and the `generated`
-    /// accessors return its entries.
+    /// [Options#setGenerateBytecode(boolean)] enables. Such a pattern is an instance of its
+    /// generated class, and each operation that would run its specialized scan runs the
+    /// generated class. A caller that holds the pattern as a constant can bind an operation to
+    /// it, as `docs/reference/REGULATOR_API.md` describes, so that its call site sees one
+    /// generated class.
     public boolean usesGeneratedBytecode()
     {
         return false;
-    }
-
-    /// Returns a handle on the generated code of [#contains(Slice)], of type
-    /// `(Slice)boolean`, or empty when this pattern runs another route for it. Like every
-    /// generated handle, it checks arguments as the operation does, except that it requires
-    /// non-null arguments but does not check them.
-    public Optional<MethodHandle> generatedContains()
-    {
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#count(Slice)], of type
-    /// `(Slice)long`, or empty when this pattern runs another route for it.
-    public Optional<MethodHandle> generatedCount()
-    {
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#position(Slice,long,long)], of type
-    /// `(Slice,long,long)long`, or empty when this pattern runs another route for it.
-    public Optional<MethodHandle> generatedPosition()
-    {
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#extract(Slice,int)] for `group`,
-    /// of type `(Slice)Slice`, or empty when this pattern runs another route for it.
-    ///
-    /// @throws IllegalArgumentException if the pattern has no such group
-    public Optional<MethodHandle> generatedExtract(int group)
-    {
-        validateHandleGroup(group);
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#extractAll(Slice,int)] for
-    /// `group`, of type `(Slice)List`, or empty when this pattern runs another route
-    /// for it.
-    ///
-    /// @throws IllegalArgumentException if the pattern has no such group
-    public Optional<MethodHandle> generatedExtractAll(int group)
-    {
-        validateHandleGroup(group);
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#split(Slice)], of type
-    /// `(Slice)List`, or empty when this pattern runs another route for it.
-    public Optional<MethodHandle> generatedSplit()
-    {
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#replace(Slice,Slice)], of type
-    /// `(Slice,Slice)Slice`, or empty when this pattern runs another route for it.
-    public Optional<MethodHandle> generatedReplace()
-    {
-        return Optional.empty();
-    }
-
-    /// Returns a handle on the generated code of [#replace(Slice,Function)], of type
-    /// `(Slice,Function)Slice`, or empty when this pattern runs another route for it.
-    public Optional<MethodHandle> generatedReplaceWithCallback()
-    {
-        return Optional.empty();
-    }
-
-    /// Rejects a group the pattern does not have, as [#extract(Slice,int)] does, for
-    /// subclasses without a compiled pattern too.
-    final void validateHandleGroup(int group)
-    {
-        if (group < 0) {
-            throw new IllegalArgumentException("group cannot be negative");
-        }
-        if (group > capturingGroupCount()) {
-            throw new IllegalArgumentException("pattern has " + capturingGroupCount() + " groups; cannot access group " + group);
-        }
     }
 
     /// Returns the generated static method holding this pattern's scan attempt loop, with the
@@ -737,7 +660,15 @@ public sealed class TrinoRegexp
 
     final TrinoReplacementPlan newReplacementPlan(Slice source, Slice replacement)
     {
-        return new TrinoReplacementPlan(source, replacement, this);
+        return newReplacementPlan(source, replacement, capturingGroupCount(), namedCapturingGroups());
+    }
+
+    /// Returns a replacement plan that keeps its template cache on this pattern, for the given
+    /// groups of this pattern. A generated class passes them as constants, so its replacement
+    /// reads none of this pattern's fields before the cache.
+    final TrinoReplacementPlan newReplacementPlan(Slice source, Slice replacement, int capturingGroupCount, Map<String, Integer> namedCapturingGroups)
+    {
+        return new TrinoReplacementPlan(source, replacement, capturingGroupCount, namedCapturingGroups, this);
     }
 
     /// Returns the most recently parsed well-formed replacement, or `null`.
@@ -821,13 +752,29 @@ public sealed class TrinoRegexp
 
     final void validateGroup(int group)
     {
+        int capturingGroupCount = re2.capturingGroupCount();
+        if (group < 0 || group > capturingGroupCount) {
+            throw invalidGroup(capturingGroupCount, group);
+        }
+    }
+
+    /// Rejects a group the pattern does not have, as [#validateGroup(int)] does, for
+    /// subclasses without a compiled pattern too.
+    final void validateCapturingGroup(int group)
+    {
+        if (group < 0 || group > capturingGroupCount()) {
+            throw invalidGroup(capturingGroupCount(), group);
+        }
+    }
+
+    /// Returns the exception for `group`, which is negative or above `capturingGroupCount`, as
+    /// [#validateGroup(int)] throws it, for generated extraction entries too.
+    static IllegalArgumentException invalidGroup(int capturingGroupCount, int group)
+    {
         if (group < 0) {
-            throw new IllegalArgumentException("group cannot be negative");
+            return new IllegalArgumentException("group cannot be negative");
         }
-        if (group > re2.capturingGroupCount()) {
-            throw new IllegalArgumentException("pattern has " + re2.capturingGroupCount() +
-                    " groups; cannot access group " + group);
-        }
+        return new IllegalArgumentException("pattern has " + capturingGroupCount + " groups; cannot access group " + group);
     }
 
     private static final class DotStarLiteralTrinoRegexp
@@ -1273,7 +1220,7 @@ public sealed class TrinoRegexp
         @Override
         public Slice extract(Slice source, int group)
         {
-            validateCaptureFreeGroup(group);
+            validateCapturingGroup(group);
             requireNonNull(source, "source is null");
             long span = spanMatcher.findSpan(source, 0);
             return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
@@ -1282,7 +1229,7 @@ public sealed class TrinoRegexp
         @Override
         public List<Slice> extractAll(Slice source, int group)
         {
-            validateCaptureFreeGroup(group);
+            validateCapturingGroup(group);
             requireNonNull(source, "source is null");
             List<Slice> matches = new ArrayList<>();
             LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
@@ -1374,16 +1321,6 @@ public sealed class TrinoRegexp
             }
             output.writeBytes(source, previousEnd, source.length() - previousEnd);
             return output.slice();
-        }
-
-        private static void validateCaptureFreeGroup(int group)
-        {
-            if (group < 0) {
-                throw new IllegalArgumentException("group cannot be negative");
-            }
-            if (group > 0) {
-                throw new IllegalArgumentException("pattern has 0 groups; cannot access group " + group);
-            }
         }
     }
 
@@ -1500,7 +1437,7 @@ public sealed class TrinoRegexp
         @Override
         public Slice extract(Slice source, int group)
         {
-            validateHandleGroup(group);
+            validateCapturingGroup(group);
             requireNonNull(source, "source is null");
             long span = spanMatcher.findSpan(source, 0, source.length());
             return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
@@ -1509,7 +1446,7 @@ public sealed class TrinoRegexp
         @Override
         public List<Slice> extractAll(Slice source, int group)
         {
-            validateHandleGroup(group);
+            validateCapturingGroup(group);
             requireNonNull(source, "source is null");
             List<Slice> matches = new ArrayList<>();
             int searchStart = 0;
@@ -1931,26 +1868,21 @@ public sealed class TrinoRegexp
         }
     }
 
-    /// A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each
+    /// A Trino pattern whose case-sensitive scan plan was compiled to its own hidden class,
+    /// which extends this class, so the pattern a caller holds is an instance of that class. Each
     /// operation keeps the route it has without the class, decided once when the pattern compiles:
-    /// one that would run the plan calls the generated class once, and any other runs the inherited
-    /// Java route. Short boolean calls that the interpreter hands to the ordinary engine to avoid
-    /// its operation dispatch also stay on the generated class. Callers that never enable
-    /// [Options#setGenerateBytecode(boolean)] never load this class.
-    private static final class CompiledScanTrinoRegexp
+    /// the generated class declares each operation that would run the plan, and any other runs the
+    /// inherited Java route. Short boolean calls that the interpreter hands to the ordinary engine
+    /// to avoid its operation dispatch also stay on the generated class. The generated class adds
+    /// no state. Callers that never enable [Options#setGenerateBytecode(boolean)] never load this
+    /// class.
+    abstract static non-sealed class CompiledScanTrinoRegexp
             extends TrinoRegexp
     {
-        // Whether contains reaches the plan rather than a retained literal kernel.
-        private final boolean contains;
-        private final ScanKernelGenerator.CompiledTrinoKernel generated;
-        private final CompiledTrinoScan scan;
-
-        private CompiledScanTrinoRegexp(TrinoCompiledPattern re2, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
+        /// Wraps the compiled engine `re2`. Only the generated subclass calls this.
+        CompiledScanTrinoRegexp(TrinoCompiledPattern re2)
         {
             super(re2);
-            this.contains = contains;
-            this.generated = generated;
-            this.scan = generated.scan();
         }
 
         /// Returns a Trino pattern over the compiled engine `re2` with a generated class, or `null`
@@ -1962,9 +1894,8 @@ public sealed class TrinoRegexp
             if (routes == null) {
                 return null;
             }
-            ScanKernelGenerator.CompiledTrinoKernel generated;
             try {
-                generated = ScanKernelGenerator.generateCompiledTrinoScan(routes);
+                return ScanKernelGenerator.generateCompiledTrinoPattern(routes);
             }
             catch (RuntimeException | LinkageError ignored) {
                 // Linking the generator fails here only if a consumer excluded the classfile
@@ -1972,8 +1903,13 @@ public sealed class TrinoRegexp
                 // interpreted.
                 return null;
             }
-            return new CompiledScanTrinoRegexp(re2, routes.contains(), generated);
         }
+
+        /// Finds the first match at or after byte offset `start`, writing the start and end of
+        /// group zero and of each group that fits to `groups`. A matcher's finds run this hook. A
+        /// scan plan never matches empty, so a matcher resumes each find at the previous match
+        /// end.
+        abstract boolean find(Slice source, int start, int[] groups);
 
         @Override
         public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
@@ -1982,7 +1918,7 @@ public sealed class TrinoRegexp
             if (retainedCapturingGroupCount < 0 || retainedCapturingGroupCount > capturingGroupCount()) {
                 throw new IllegalArgumentException("capturingGroupCount out of range: " + retainedCapturingGroupCount);
             }
-            return TrinoRegexpMatcher.compiledScan(scan, source, retainedCapturingGroupCount);
+            return TrinoRegexpMatcher.compiledScan(this, source, retainedCapturingGroupCount);
         }
 
         @Override
@@ -1992,122 +1928,9 @@ public sealed class TrinoRegexp
         }
 
         @Override
-        public Optional<MethodHandle> generatedContains()
-        {
-            return Optional.ofNullable(generated.contains());
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedCount()
-        {
-            return Optional.of(generated.count());
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedPosition()
-        {
-            return Optional.of(generated.position());
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedExtract(int group)
-        {
-            validateGroup(group);
-            return Optional.of(MethodHandles.insertArguments(generated.extract(), 1, group));
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedExtractAll(int group)
-        {
-            validateGroup(group);
-            return Optional.of(MethodHandles.insertArguments(generated.extractAll(), 1, group));
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedSplit()
-        {
-            return Optional.of(generated.split());
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedReplace()
-        {
-            return Optional.of(MethodHandles.insertArguments(generated.replace(), 0, this));
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedReplaceWithCallback()
-        {
-            return Optional.of(generated.replaceWithCallback());
-        }
-
-        @Override
         MethodHandle attemptHandleForDiagnostics()
         {
-            return ScanKernelGenerator.attemptHandleForDiagnostics(scan, re2().caseSensitiveScanPlan());
-        }
-
-        @Override
-        public boolean contains(Slice source)
-        {
-            if (!contains) {
-                return super.contains(source);
-            }
-            requireNonNull(source, "source is null");
-            return scan.contains(source);
-        }
-
-        @Override
-        public long count(Slice source)
-        {
-            requireNonNull(source, "source is null");
-            return scan.count(source);
-        }
-
-        @Override
-        public long position(Slice source, long start, long occurrence)
-        {
-            requireNonNull(source, "source is null");
-            return scan.position(source, start, occurrence);
-        }
-
-        @Override
-        public Slice extract(Slice source, int group)
-        {
-            validateGroup(group);
-            requireNonNull(source, "source is null");
-            return scan.extract(source, group);
-        }
-
-        @Override
-        public List<Slice> extractAll(Slice source, int group)
-        {
-            validateGroup(group);
-            requireNonNull(source, "source is null");
-            return scan.extractAll(source, group);
-        }
-
-        @Override
-        public List<Slice> split(Slice source)
-        {
-            requireNonNull(source, "source is null");
-            return scan.split(source);
-        }
-
-        @Override
-        public Slice replace(Slice source, Slice replacement)
-        {
-            requireNonNull(source, "source is null");
-            requireNonNull(replacement, "replacement is null");
-            return scan.replace(this, source, replacement);
-        }
-
-        @Override
-        public Slice replace(Slice source, Function<List<Slice>, Slice> replacement)
-        {
-            requireNonNull(source, "source is null");
-            requireNonNull(replacement, "replacement is null");
-            return scan.replace(source, replacement);
+            return ScanKernelGenerator.attemptHandleForDiagnostics(getClass(), re2().caseSensitiveScanPlan());
         }
     }
 

@@ -58,7 +58,6 @@ public class TestOptionalScanKernel
                     .doesNotContain("io.airlift.regulator.ScanKernelGenerator")
                     .doesNotContain("io.airlift.regulator.ScanKernelSupport ")
                     .doesNotContain("io.airlift.regulator.VectorScanKernelSupport ")
-                    .doesNotContain("CompiledTrinoScan")
                     .doesNotContain("io.airlift.regulator.TrinoLikeKernelGenerator")
                     .doesNotContain("io.airlift.regulator.TrinoLikeKernelSupport ")
                     .doesNotContain("CompiledTrinoLike")

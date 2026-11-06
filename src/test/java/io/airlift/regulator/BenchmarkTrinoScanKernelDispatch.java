@@ -42,7 +42,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
@@ -55,9 +54,9 @@ import static java.lang.constant.ConstantDescs.CD_String;
 import static java.lang.constant.ConstantDescs.CD_int;
 
 /// Measures one constant pattern the way a query engine binds it: a per-pattern hidden class that
-/// invokes an operation handle held as a class-data constant. `INTERPRETER` binds the public
-/// operation to the pattern, which is the constant-pattern path without generated code;
-/// `GENERATED` binds the handle of the pattern's generated class. The `boundCaller`
+/// invokes an operation handle held as a class-data constant. Both executors bind the public
+/// operation to the pattern; under `GENERATED` the pattern is an instance of its generated
+/// class, so the bound handle reaches the generated code. The `boundCaller`
 /// method runs the bound handle under either executor. The `publicApi` method runs the same
 /// operation through the public API, choosing the operation and extract group on every row, so
 /// compare it across executors rather than against `boundCaller`.
@@ -67,8 +66,8 @@ import static java.lang.constant.ConstantDescs.CD_int;
 /// `ISOLATED` runs only the target pattern; `INTERLEAVED` first trains every pattern of
 /// the target's workload through shared code and through their own callers.
 ///
-/// The generated API is resolved reflectively, so this source also runs against a build without
-/// it when given `-p executor=INTERPRETER`.
+/// The generation option is resolved reflectively, so this source also runs against a build
+/// without it when given `-p executor=INTERPRETER`.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -247,26 +246,24 @@ public class BenchmarkTrinoScanKernelDispatch
     }
 
     /// Returns the handle a caller binds for `operation`: the public method bound to the
-    /// pattern, or the pattern's generated handle. The caller supplies the extract group of the
-    /// public method and the start and occurrence of position.
+    /// pattern. A generated pattern is an instance of its own class, so the same binding reaches
+    /// its generated code. When `generated` is true, the pattern's class must declare the
+    /// operation rather than inherit the interpreter's. The caller supplies the extract group
+    /// and the start and occurrence of position.
     static MethodHandle handle(TrinoRegexp pattern, String operation, boolean generated)
             throws ReflectiveOperationException
     {
-        if (!generated) {
-            MethodType type = switch (operation) {
-                case "contains" -> MethodType.methodType(boolean.class, Slice.class);
-                case "count" -> MethodType.methodType(long.class, Slice.class);
-                case "extract" -> MethodType.methodType(Slice.class, Slice.class, int.class);
-                case "position" -> MethodType.methodType(long.class, Slice.class, long.class, long.class);
-                default -> throw new IllegalArgumentException("unknown operation: " + operation);
-            };
-            return MethodHandles.publicLookup().findVirtual(TrinoRegexp.class, operation, type).bindTo(pattern);
+        MethodType type = switch (operation) {
+            case "contains" -> MethodType.methodType(boolean.class, Slice.class);
+            case "count" -> MethodType.methodType(long.class, Slice.class);
+            case "extract" -> MethodType.methodType(Slice.class, Slice.class, int.class);
+            case "position" -> MethodType.methodType(long.class, Slice.class, long.class, long.class);
+            default -> throw new IllegalArgumentException("unknown operation: " + operation);
+        };
+        if (generated && pattern.getClass().getMethod(operation, type.parameterArray()).getDeclaringClass() != pattern.getClass()) {
+            throw new IllegalStateException("Pattern runs " + operation + " without generated code: " + pattern.pattern().toStringUtf8());
         }
-        String accessor = "generated" + Character.toUpperCase(operation.charAt(0)) + operation.substring(1);
-        Optional<?> handle = operation.equals("extract")
-                ? (Optional<?>) TrinoRegexp.class.getMethod(accessor, int.class).invoke(pattern, group(pattern))
-                : (Optional<?>) TrinoRegexp.class.getMethod(accessor).invoke(pattern);
-        return (MethodHandle) handle.orElseThrow(() -> new IllegalStateException("Pattern runs " + operation + " without generated code"));
+        return MethodHandles.publicLookup().findVirtual(TrinoRegexp.class, operation, type).bindTo(pattern);
     }
 
     /// Defines a hidden class whose `batch(Slice[], int)` adds up [#BATCH] results of
