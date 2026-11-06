@@ -2491,6 +2491,7 @@ abstract sealed class CompiledPattern
             MatchWorkspaces workspaces)
     {
         requireNonNull(text, "text is null");
+        int[] searchGroups = groups;
         if (groups != null) {
             if ((groups.length % 2) != 0) {
                 throw new IllegalArgumentException("groups length must be even: " + groups.length);
@@ -2499,17 +2500,24 @@ abstract sealed class CompiledPattern
                 throw new IllegalArgumentException("groups must include group 0 start/end");
             }
             Arrays.fill(groups, -1);
+            int patternSlotCount = 2 * (capturingGroupCount + 1);
+            if (groups.length > patternSlotCount) {
+                // The engines pick their route by the buffer's length, and some size their capture
+                // state by it, so a buffer past the pattern's groups would track slots no
+                // instruction writes and could turn OnePass away: on small patterns that cost 584
+                // to 1,120 bytes per call, where this copy of the pattern's slots costs 24 to 40.
+                // No engine writes the pairs past the pattern's slots, and callers read them, so
+                // those pairs keep the -1 of the fill above: a path that skips that fill must still
+                // set them to -1.
+                searchGroups = new int[patternSlotCount];
+                Arrays.fill(searchGroups, -1);
+            }
         }
-        return matchInternal(
-                partialProg,
-                text,
-                contextStart,
-                contextEnd,
-                start,
-                end,
-                anchor,
-                groups,
-                workspaces);
+        boolean matched = matchInternal(partialProg, text, contextStart, contextEnd, start, end, anchor, searchGroups, workspaces);
+        if (searchGroups != groups) {
+            System.arraycopy(searchGroups, 0, groups, 0, searchGroups.length);
+        }
+        return matched;
     }
 
     /// Returns whether a matcher region must read a CR before its start: the JDK's $ and \Z refuse

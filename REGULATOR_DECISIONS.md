@@ -1563,9 +1563,9 @@ failure. This prevents a later search from observing partially live capture
 threads or queue state.
 
 The low-level `Re2.findInto`, `lookingAtInto`, and `matchesInto` APIs remain
-stateless and allocation-free. They do not acquire hidden shared state or a
-reusable workspace. This separates the ordinary Java matcher lifecycle from the
-caller-managed low-level contract.
+stateless: they acquire no hidden shared state or reusable workspace, and
+allocate their search scratch per call. This separates the ordinary Java matcher
+lifecycle from the caller-managed low-level contract.
 
 ## Allocation-Free Matcher Regions
 
