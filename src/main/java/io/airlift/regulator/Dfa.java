@@ -288,6 +288,108 @@ final class Dfa
         return (int) (-2L - result);
     }
 
+    /// Runs [#searchReverseCandidate] of `reverseProg` over `[start, literalStart)` and, when it
+    /// finds a match start, [#searchAnchoredWithStop(Prog,Slice,int,int,int,int)] of `forwardProg`
+    /// from there to `end`, under one reader registration for both DFAs. Returns the match's Slice
+    /// offsets packed as `start << 32 | end`, [#SEARCH_NO_MATCH] when the reverse search finds no
+    /// start, the forward search's stop for [#anchoredStopPosition(long)], or [#SEARCH_FAILED] when
+    /// the caller must run the two searches separately: either needs a cache write, quits, fails,
+    /// or falls back. The pair never takes the exclusive path; the separate searches do.
+    @SuppressWarnings("UnusedException")
+    static long searchReverseThenAnchoredWithStop(
+            Prog reverseProg,
+            Prog forwardProg,
+            Slice context,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int literalStart,
+            int end,
+            int maximumReverseBytes)
+    {
+        // The separate searches handle every case their preambles treat specially.
+        if (contextStart < 0 || contextEnd < contextStart || contextEnd > context.length() ||
+                start < contextStart || literalStart < start || end < literalStart || end > contextEnd || maximumReverseBytes <= 0 ||
+                !reverseProg.reversed() || reverseProg.start() == 0 || reverseProg.anchorStart() || reverseProg.anchorEnd() ||
+                !reverseProg.didFlatten() || reverseProg.bytemapRange() == 0 ||
+                forwardProg.reversed() || forwardProg.start() == 0) {
+            return SEARCH_FAILED;
+        }
+        // A reversed and a forward program never share a DFA, so the pair names two DFAs.
+        DfaInstance reverseDfa = reverseProg.getCachedDfa(DfaInstance.Kind.LONGEST_MATCH);
+        DfaInstance forwardDfa = forwardProg.getCachedDfa(DfaInstance.Kind.FIRST_MATCH);
+        if (reverseDfa == null || !reverseDfa.ok() || forwardDfa == null || !forwardDfa.ok()) {
+            return SEARCH_FAILED;
+        }
+        int contextOffset = context.byteArrayOffset();
+        ReaderSlot readerSlot = DfaInstance.beginPairSearch(reverseDfa, forwardDfa);
+        try {
+            return searchReverseThenAnchoredWithStop(
+                    reverseDfa,
+                    forwardDfa,
+                    context.byteArray(),
+                    contextOffset,
+                    contextOffset + contextStart,
+                    contextOffset + contextEnd,
+                    contextOffset + start,
+                    contextOffset + literalStart,
+                    contextOffset + end,
+                    maximumReverseBytes);
+        }
+        catch (RetrySearchException | StartStateAllocationException | QuitSearchException ignored) {
+            return SEARCH_FAILED;
+        }
+        finally {
+            DfaInstance.endPairSearch(readerSlot);
+        }
+    }
+
+    // The bodies of the reverse candidate search, as the general search runs it for a reversed
+    // program with no anchors, and of the anchored search with stop.
+    private static long searchReverseThenAnchoredWithStop(
+            DfaInstance reverseDfa,
+            DfaInstance forwardDfa,
+            byte[] bytes,
+            int contextOffset,
+            int contextBegin,
+            int contextEnd,
+            int textBegin,
+            int literalBegin,
+            int textEnd,
+            int maximumReverseBytes)
+    {
+        StateData startData = reverseDfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, literalBegin, true, false);
+        if (startData.offset() == T_DEAD) {
+            return SEARCH_NO_MATCH;
+        }
+        if (startData.offset() == T_FULL_MATCH) {
+            return SEARCH_FAILED;
+        }
+        long reverse = searchBackward(
+                reverseDfa,
+                bytes,
+                textBegin,
+                literalBegin,
+                contextBegin,
+                startData.offset(),
+                (startData.flag() & FLAG_MATCH) != 0,
+                false,
+                false,
+                maximumReverseBytes);
+        if (reverse < 0) {
+            return reverse == SEARCH_NO_MATCH ? SEARCH_NO_MATCH : SEARCH_FAILED;
+        }
+        int matchBegin = textBegin + (int) reverse;
+        long forward = searchAnchoredWithStop(forwardDfa, bytes, contextBegin, contextEnd, matchBegin, textEnd);
+        if (forward >= 0) {
+            return ((long) (matchBegin - contextOffset) << 32) | (forward - contextOffset);
+        }
+        if (forward == SEARCH_FAILED) {
+            return SEARCH_FAILED;
+        }
+        return anchoredStopResult(anchoredStopPosition(forward) - contextOffset);
+    }
+
     // Like searchAnchoredCandidate, with four differences: the window may end before the context,
     // so the last step reads the byte after the window; a match at the start is accepted; there is
     // no work budget, since the caller bounds the work by never confirming a candidate inside a
@@ -4199,7 +4301,7 @@ final class Dfa
                 ReaderSlot readerSlot = reference.get();
                 if (readerSlot != null) {
                     liveReferences++;
-                    if (readerSlot.activeDfaId != 0) {
+                    if (readerSlot.activeDfaId != 0 || readerSlot.pairedDfaId != 0) {
                         activeReaders++;
                     }
                 }
@@ -4281,7 +4383,7 @@ final class Dfa
             boolean hasActiveReader = false;
             for (ReaderSlotReference reference : references) {
                 ReaderSlot readerSlot = reference.get();
-                if (readerSlot != null && readerSlot.activeDfaId == dfa.readerRegistryId) {
+                if (readerSlot != null && (readerSlot.activeDfaId == dfa.readerRegistryId || readerSlot.pairedDfaId == dfa.readerRegistryId)) {
                     hasActiveReader = true;
                     break;
                 }
@@ -4303,6 +4405,8 @@ final class Dfa
     private static final class ReaderSlot
     {
         private volatile long activeDfaId;
+        // The second DFA of a pair search, and zero outside one. Single-DFA searches never write it.
+        private volatile long pairedDfaId;
 
         // Reader slots are written on every search, so adjacent slots must not share a cache line.
         private long padding0;
@@ -4311,7 +4415,6 @@ final class Dfa
         private long padding3;
         private long padding4;
         private long padding5;
-        private long padding6;
     }
 
     private static final class ReaderSlotReference
@@ -6743,6 +6846,40 @@ final class Dfa
             else {
                 readerSlot.activeDfaId = 0;
             }
+        }
+
+        // Registers one reader for two DFAs, as beginSearch registers a reader for one. Every
+        // access to the IDs and writer flags is volatile, so they fall in one total order: a writer
+        // that sets its flag and then reads both IDs either sees this reader's ID for its DFA, and
+        // waits, or this reader's recheck after storing both IDs sees the flag, and backs off. The
+        // slot holds one search at a time, so a thread calls this only outside any other search.
+        static ReaderSlot beginPairSearch(DfaInstance first, DfaInstance second)
+        {
+            ReaderSlot readerSlot = THREAD_READER_SLOT.get();
+            while (true) {
+                int spinCount = 0;
+                while (first.hasPendingCacheMutation || second.hasPendingCacheMutation) {
+                    if (spinCount++ < 1_000) {
+                        Thread.onSpinWait();
+                    }
+                    else {
+                        LockSupport.parkNanos(1_000);
+                    }
+                }
+                readerSlot.activeDfaId = first.readerRegistryId;
+                readerSlot.pairedDfaId = second.readerRegistryId;
+                if (!first.hasPendingCacheMutation && !second.hasPendingCacheMutation) {
+                    return readerSlot;
+                }
+                readerSlot.activeDfaId = 0;
+                readerSlot.pairedDfaId = 0;
+            }
+        }
+
+        static void endPairSearch(ReaderSlot readerSlot)
+        {
+            readerSlot.activeDfaId = 0;
+            readerSlot.pairedDfaId = 0;
         }
 
         long cacheVersion()

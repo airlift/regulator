@@ -690,6 +690,9 @@ Compiled `Re2` instances are safe to share across threads:
 
 - searches register in padded thread-local reader slots before accessing a DFA
   cache and unregister when the search ends
+- a reader slot names up to two DFAs, so the inner literal search registers its
+  reverse prefix search and forward confirmation once as a pair, and writers
+  wait on a slot that names their DFA in either place
 - the global weak reader registry is locked only when a thread first registers
   or stale references are drained; stale-heavy drains replace the backing set so
   a short-lived thread wave does not retain its peak hash table

@@ -286,6 +286,32 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testWarmCandidateConfirmsInOnePass()
+    {
+        // Once both DFAs hold a candidate's states, the single pass over them confirms it and
+        // returns what the reverse and forward searches give one at a time.
+        Re2 pattern = Re2.compile(utf8Slice("\\w+://[^\\s/]+"));
+        InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
+        assertThat(search).isNotNull();
+        Prog reversePrefixProgram = search.reversePrefixProgramForDiagnostics();
+        Prog forwardProgram = search.forwardProgramForDiagnostics();
+        String scheme = "https";
+        String url = scheme + "://example.com";
+        Slice text = utf8Slice(FILLER + " " + url + " ");
+        int matchStart = FILLER.length() + 1;
+        int literalStart = matchStart + scheme.length();
+        long span = ((long) matchStart << 32) | (matchStart + url.length());
+        // The first search adds the candidate's states to both DFAs.
+        assertThat(search.search(text, 0, text.length(), 0, text.length())).isEqualTo(span);
+
+        long reverse = Dfa.searchReverseCandidate(reversePrefixProgram, text, 0, text.length(), 0, literalStart, Integer.MAX_VALUE);
+        long forward = Dfa.searchAnchoredWithStop(forwardProgram, text, 0, text.length(), (int) reverse, text.length());
+        assertThat((reverse << 32) | forward).isEqualTo(span);
+        long pair = Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, 0, text.length(), 0, literalStart, text.length(), Integer.MAX_VALUE);
+        assertThat(pair).isEqualTo(span);
+    }
+
+    @Test
     public void testShortWindowWithoutLiteralSkipsOrdinaryEngine()
     {
         // Under the minimum skip, a window that holds the literal runs the ordinary engine, and
