@@ -133,6 +133,9 @@ public class TestRe2ScanPlan
             // vector scan must take the unsigned minimum of their XORs to find the é.
             new PlanCase("[aé]([0-9]*)!", "-".repeat(100) + "é12!" + "-".repeat(40)),
             new PlanCase("[sS\\x{17F}]([a-z]+)=", HexFormat.of().parseHex("c5c5bf613d")),
+            // Led by a run of exactly one character, whose attempts at ASCII candidates start after
+            // it, and whose attempts at lead bytes read the whole character.
+            new PlanCase("([sS\\x{17F}][a-z]*)=", "ſa sb ſc="),
             new PlanCase("key=([^;]+);", HexFormat.of().parseHex("6b783be2e284aa65793d763b6b65793d773b")),
             new PlanCase("([^/\\x{85}]+)/", "a\u0085b/c/"));
 
@@ -161,6 +164,7 @@ public class TestRe2ScanPlan
 
     @Test
     public void testPublicCallsBypassTheSemanticProgram()
+            throws ReflectiveOperationException
     {
         Re2 pattern = Re2.compile(utf8Slice("^https?://([^/]+)"));
         assertThat(pattern.usesScanPlanForDiagnostics()).isTrue();
@@ -189,6 +193,32 @@ public class TestRe2ScanPlan
             disableOrdinaryEngine(handoff);
             assertThat(handoff.find(handoffSource)).as(options.name()).isFalse();
             assertThat(handoff.count(handoffSource)).as(options.name()).isZero();
+        }
+
+        // Boolean find of an unanchored plan with capture saves runs its save-free boolean plan,
+        // so it answers with the full plan's operations disabled.
+        Re2 keyValue = Re2.compile(utf8Slice("([a-z][a-z0-9]*)==([^ ]+)"));
+        ScanPlan keyValuePlan = keyValue.caseSensitiveScanPlan();
+        assertThat(keyValuePlan.booleanPlan().operationsForDiagnostics()).isEqualTo("RUN,RUN,LITERAL,RE2_RUN");
+        disableOrdinaryEngine(keyValue);
+        disableOperations(keyValuePlan);
+        assertThat(keyValue.find(utf8Slice("x ab==1"))).isTrue();
+
+        // An attempt at an ASCII candidate skips the leading one-character run, both in a search
+        // alone and in one that hands dense failures to the ordinary engine. Putting the boolean
+        // plan's == literal in place of its leading run makes the candidate scan find each '=',
+        // where a full attempt runs the literal. No full attempt matches "===1", which has no
+        // letter, so boolean find reports a match only if the attempt at the first '=' skips the
+        // leading operation and continues at the second '='.
+        for (String expression : List.of("([a-z][a-z0-9]*)==([^ ]+)", "([a-z][a-z0-9]*)==([0-9]+)")) {
+            Re2 leadingRun = Re2.compile(utf8Slice(expression));
+            assertThat(leadingRun.usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(expression).isEqualTo(expression.endsWith("([0-9]+)"));
+            ScanPlan booleanPlan = leadingRun.caseSensitiveScanPlan().booleanPlan();
+            assertThat(booleanPlan.operationsForDiagnostics()).as(expression).startsWith("RUN,RUN,LITERAL,");
+            disableOrdinaryEngine(leadingRun);
+            Object[] operations = operations(booleanPlan);
+            operations[0] = operations[2];
+            assertThat(leadingRun.find(utf8Slice("===1"))).as(expression).isTrue();
         }
     }
 
@@ -320,6 +350,11 @@ public class TestRe2ScanPlan
         for (String expression : List.of("([0-9][0-9é]*)=x", "(?i)([0-9][0-9é]*)=x")) {
             assertThat(plan(expression).candidateAttemptsForDiagnostics(utf8Slice("123é=y 456é=x"))).as(expression).isEqualTo(2);
         }
+        // An attempt at a candidate the scan found at a lead byte runs the leading one-character
+        // run, which reads the whole long s, rather than skipping one byte of it.
+        ScanPlan leadingCharacter = plan("([sS\\x{17F}][a-z]*)=").booleanPlan();
+        assertThat(leadingCharacter.operationsForDiagnostics()).isEqualTo("RE2_SET_RUN,RUN,LITERAL");
+        assertThat(leadingCharacter.unanchoredAttemptForDiagnostics(utf8Slice("ſa="), 0, false, false, null)).isEqualTo(4);
     }
 
     @Test
@@ -596,14 +631,32 @@ public class TestRe2ScanPlan
                 .collect(toSet());
     }
 
-    /// Makes every search of the pattern's interpreted plan throw. A generated class holds the
-    /// operations it needs, so it still answers.
+    /// Makes every search of the pattern's interpreted plan and its boolean plan throw. A
+    /// generated class holds the operations it needs, so it still answers.
     static void disableInterpretedPlan(CompiledPattern pattern)
+            throws ReflectiveOperationException
+    {
+        ScanPlan plan = pattern.caseSensitiveScanPlan();
+        disableOperations(plan);
+        if (plan.booleanPlan() != plan) {
+            disableOperations(plan.booleanPlan());
+        }
+    }
+
+    /// Makes every search of `plan` throw, leaving any separate boolean plan intact.
+    private static void disableOperations(ScanPlan plan)
+            throws ReflectiveOperationException
+    {
+        Arrays.fill(operations(plan), null);
+    }
+
+    /// Returns the operation array of `plan`, which its executors read on every call.
+    private static Object[] operations(ScanPlan plan)
             throws ReflectiveOperationException
     {
         Field steps = ScanPlan.class.getDeclaredField("steps");
         steps.setAccessible(true);
-        Arrays.fill((Object[]) steps.get(pattern.caseSensitiveScanPlan()), null);
+        return (Object[]) steps.get(plan);
     }
 
     private static byte[] concat(byte[]... parts)

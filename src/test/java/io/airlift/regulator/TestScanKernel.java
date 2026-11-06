@@ -845,7 +845,7 @@ public class TestScanKernel
                         int[] expectedGroups = groups(groupsLength);
                         assertThat((long) actual.invokeExact(bytes, offset, offset + length, offset + start, fullMatch, actualGroups))
                                 .as("%s, attempt at %s", description, start)
-                                .isEqualTo(expected.unanchoredAttemptForDiagnostics(source, start, fullMatch, expectedGroups));
+                                .isEqualTo(expected.unanchoredAttemptForDiagnostics(source, start, true, fullMatch, expectedGroups));
                         assertThat(actualGroups).as("%s, attempt at %s", description, start).isEqualTo(expectedGroups);
                     }
                     continue;

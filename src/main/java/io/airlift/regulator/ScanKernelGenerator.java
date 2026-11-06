@@ -292,7 +292,8 @@ final class ScanKernelGenerator
     }
 
     /// Returns the attempt loop of `patternClass`, a class generated for `plan`, with the
-    /// signature of the plan executor it replaces.
+    /// signature of the plan executor it replaces, less the unanchored executor's `fullAttempt`:
+    /// a generated attempt always runs every operation.
     static MethodHandle attemptHandleForDiagnostics(Class<?> patternClass, ScanPlan plan)
     {
         Attempt attempt = Attempt.of(plan);
