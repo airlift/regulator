@@ -78,7 +78,9 @@ final class Dfa
     private static final long ABSOLUTE_POINTER_DEAD_TAG = 2;
     private static final long ABSOLUTE_POINTER_FULL_MATCH_TAG = 3;
     private static final long ABSOLUTE_POINTER_RETRY_OBJECT = Long.MIN_VALUE + 2;
-    private static final int MAX_CANDIDATE_START_TRANSITIONS = 128;
+    static final int MAX_CANDIDATE_START_TRANSITIONS = 128;
+    // A shorter unmatched check costs less to repeat than giving up the cursor for the rest of the reset.
+    static final int MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES = 16;
     // A shorter window costs the literal cursor more to set up than the matcher's other routes.
     static final int MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES = 64;
     private static final int CANDIDATE_NO_MATCH = -1;
@@ -392,11 +394,15 @@ final class Dfa
         return anchoredStopResult(anchoredStopPosition(forward) - contextOffset);
     }
 
-    // Like searchAnchoredCandidate, with four differences: the window may end before the context,
-    // so the last step reads the byte after the window; a match at the start is accepted; there is
-    // no work budget, since the caller bounds the work by never confirming a candidate inside a
-    // span an earlier confirmation already read; and a transition back into the current state
-    // keeps its row.
+    // Shares searchAnchoredCandidate's anchored traversal: step the cached DFA from the start
+    // position, record the last match boundary, and stop when the state dies or the text ends. It
+    // differs: the window may end before the context, so the last step reads the byte after the
+    // window; a match at the start is accepted; there is no work budget or transition cap, since
+    // the caller bounds the work by never confirming a candidate inside a span an earlier
+    // confirmation already read; and a matching transition back into the current state keeps its
+    // row, where the candidate check scans cached matching self-loop transitions within the
+    // remaining limits instead. The fallback after a long check that reaches the end of the text
+    // unmatched is the candidate check's alone.
     private static long searchAnchoredWithStop(DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
     {
         StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
@@ -1247,40 +1253,74 @@ final class Dfa
         int transitionCount = 0;
         int lastMatchBoundary = CANDIDATE_NO_MATCH;
 
-        for (int position = candidate; position < contextEnd; position++) {
-            if (transitionCount++ == MAX_CANDIDATE_START_TRANSITIONS || !cursor.consumeWork()) {
-                return CANDIDATE_FALLBACK;
-            }
-
-            int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
-            Object nextReference = getStateReference(stateRefs, byteClass);
-            if (nextReference != null) {
-                stateRefs = (Object[]) nextReference;
-                continue;
-            }
-
-            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
-            int nextState = getTransition(transitions, stateOffset + byteClass);
-            if (nextState == T_UNCOMPUTED) {
-                nextState = dfa.computeTransition(tables, stateOffset, bytes[position] & 0xFF);
-                tables = dfa.tablesAfterWrite(tables);
-                transitions = tables.transitions;
-                if (nextState == Integer.MIN_VALUE) {
+        // The step loop's body never assigns its position, so C2 keeps it a counted loop without a
+        // safepoint poll per step. A matching self-loop breaks out to the scan below, and a fresh
+        // step loop resumes after the run. Keep the outer `position < contextEnd` condition: without
+        // it, C2 no longer counts the step loop.
+        int position = candidate;
+        while (position < contextEnd) {
+            int stepBegin = position;
+            int stepLimit = stepBegin + Math.min(contextEnd - stepBegin, MAX_CANDIDATE_START_TRANSITIONS - transitionCount);
+            for (; position < stepLimit; position++) {
+                if (!cursor.consumeWork()) {
                     return CANDIDATE_FALLBACK;
                 }
+
+                int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
+                Object nextReference = getStateReference(stateRefs, byteClass);
+                if (nextReference != null) {
+                    stateRefs = (Object[]) nextReference;
+                    continue;
+                }
+
+                stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
+                int nextState = getTransition(transitions, stateOffset + byteClass);
+                if (nextState == T_UNCOMPUTED) {
+                    nextState = dfa.computeTransition(tables, stateOffset, bytes[position] & 0xFF);
+                    tables = dfa.tablesAfterWrite(tables);
+                    transitions = tables.transitions;
+                    if (nextState == Integer.MIN_VALUE) {
+                        return CANDIDATE_FALLBACK;
+                    }
+                }
+                if (nextState == T_DEAD) {
+                    return lastMatchBoundary;
+                }
+                if (nextState == T_FULL_MATCH) {
+                    return contextEnd;
+                }
+                if ((nextState & T_MATCH_BIT) != 0) {
+                    lastMatchBoundary = position;
+                    nextState &= ~T_MATCH_BIT;
+                    if (nextState == stateOffset) {
+                        break;
+                    }
+                }
+
+                stateOffset = nextState;
+                stateRefs = dfa.stateReferences(tables, stateOffset);
             }
-            if (nextState == T_DEAD) {
-                return lastMatchBoundary;
-            }
-            if (nextState == T_FULL_MATCH) {
-                return contextEnd;
-            }
-            if ((nextState & T_MATCH_BIT) != 0) {
-                lastMatchBoundary = position;
-                nextState &= ~T_MATCH_BIT;
+            if (position == stepLimit) {
+                transitionCount += position - stepBegin;
+                break;
             }
 
-            stateOffset = nextState;
+            // A matching state that loops on itself extends the match by every byte it loops on, so
+            // scan that run and charge it as the byte loop would: one unit of work and one transition
+            // per byte, within the remaining work and transitions.
+            position++;
+            transitionCount += position - stepBegin;
+            int matchingSelfLoopLimit = position + cursor.workBoundedScanLength(Math.min(contextEnd - position, MAX_CANDIDATE_START_TRANSITIONS - transitionCount));
+            int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position, matchingSelfLoopLimit, stateOffset);
+            if (matchingSelfLoopEnd != position) {
+                if (!cursor.consumeWork(matchingSelfLoopEnd - position)) {
+                    return CANDIDATE_FALLBACK;
+                }
+                dfa.matchingSelfLoopScanCount++;
+                transitionCount += matchingSelfLoopEnd - position;
+                lastMatchBoundary = matchingSelfLoopEnd - 1;
+                position = matchingSelfLoopEnd;
+            }
             stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
@@ -1298,6 +1338,12 @@ final class Dfa
         }
         if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
             return contextEnd;
+        }
+        // Alive at the end of the text without a match, this check read every byte a later
+        // candidate would, so a long one falls back to the matcher's forward search, which reads
+        // those bytes once.
+        if (lastMatchBoundary == CANDIDATE_NO_MATCH && contextEnd - candidate >= MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES) {
+            return CANDIDATE_FALLBACK;
         }
         return lastMatchBoundary;
     }

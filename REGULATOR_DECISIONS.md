@@ -2143,10 +2143,28 @@ Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
 an available start-byte accelerator, and no class counter that finds the
 matches. The route has a linear reset-scoped work budget and a 128-transition
-limit per candidate. Exhausting either limit, encountering an unsupported match
+limit per candidate. A candidate's traversal reads, in one scan, a run of bytes
+on which a matching state loops to itself, and charges one work unit and one
+transition per byte. Exhausting either limit, encountering an unsupported match
 shape, or failing DFA cache mutation falls back to the existing
-forward-plus-reverse matcher path for the rest of that matcher reset. The cursor
-is re-enabled by the next reset.
+forward-plus-reverse matcher path for the rest of that matcher reset. So does a
+traversal of 16 or more bytes that reaches the end of the text with the DFA
+still live and no match: every later candidate lies in text that traversal read,
+so later checks would reread text the forward search reads once. The cursor is
+re-enabled by the next reset.
+
+Against main on r8i, sherlock name-alt4 for RE2 runs about 1.05 times as long,
+and its case-insensitive form about 1.06 times as long as main's fast runs
+(1.02 over all runs; every build runs that row in two speeds there). Both are
+flat on r9g, at 0.997 and 0.993. On x86 the check loop's frame grows from 0x80
+to 0xb0 bytes and its DFA row and position spill to the stack on every step.
+The [divide-free row lookup](#dfa-row-index-without-a-divide) did not cure the
+spill, and neither did detecting the self-loop by row identity, a one-byte peek
+before each scan, moving the scan exit out of line, or both of the last two
+together, so none of those variants was kept. The scan is kept because
+cloud-flare original ReDoS runs at 0.13–0.16 of main for RE2 and Rust, and rsc
+no-exponential at 0.57–0.63, and neither name-alt4 row flips against its
+comparators.
 
 The cursor can also search for a literal behind a leading assertion, as the Rust
 crate does with its prefilter. A program whose assertions the DFA runs, with an
@@ -2157,8 +2175,8 @@ literal. The cursor verifies each occurrence with the same anchored traversal,
 whose start state comes from the byte before the occurrence, so a leading line
 or word assertion is judged as a search that read every byte would judge it.
 This route skips the start-scan productivity check, leaves windows shorter than
-64 bytes to the matcher's other routes, and falls back to the ordinary matcher
-when its work budget runs out. It follows the matcher's DFA quit streak for
+64 bytes to the matcher's other routes, and shares the general route's limits
+and fallbacks. It follows the matcher's DFA quit streak for
 word assertions that quit outside ASCII: a quit counts once and falls back
 without starting the DFA again, a verified match or a proven no-match ends the
 streak, and a matcher at the limit skips the cursor too. Assertions the DFA does
