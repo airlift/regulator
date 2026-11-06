@@ -70,9 +70,9 @@ final class TrinoReplacementPlan
     private int outputPosition;
     private int previousEnd;
 
-    TrinoReplacementPlan(Slice source, Slice replacement, TrinoRegexp templateOwner)
+    TrinoReplacementPlan(Slice source, Slice replacement, int capturingGroupCount, Map<String, Integer> namedCapturingGroups, TrinoRegexp templateOwner)
     {
-        this(source, replacement, templateOwner.capturingGroupCount(), templateOwner.namedCapturingGroups(), MATCH_RECORD_LIMIT, templateOwner);
+        this(source, replacement, capturingGroupCount, namedCapturingGroups, MATCH_RECORD_LIMIT, requireNonNull(templateOwner, "templateOwner is null"));
     }
 
     TrinoReplacementPlan(

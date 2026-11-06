@@ -187,10 +187,10 @@ public sealed class TrinoRegexpMatcher
     }
 
     /// Returns a matcher retaining `retainedCapturingGroupCount` groups whose finds run the
-    /// generated class of a compiled scan.
-    static TrinoRegexpMatcher compiledScan(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+    /// generated class of `pattern`.
+    static TrinoRegexpMatcher compiledScan(TrinoRegexp.CompiledScanTrinoRegexp pattern, Slice input, int retainedCapturingGroupCount)
     {
-        return CompiledScanMatcher.create(scan, input, retainedCapturingGroupCount);
+        return CompiledScanMatcher.create(pattern, input, retainedCapturingGroupCount);
     }
 
     /// Returns a group-zero matcher whose finds search a large literal alternation's automaton.
@@ -209,31 +209,31 @@ public sealed class TrinoRegexpMatcher
         }
     }
 
-    /// A matcher whose finds run a generated [CompiledTrinoScan], with the results and
+    /// A matcher whose finds run the generated class of a pattern, with the results and
     /// exceptions of the interpreted matcher it replaces. A scan plan never matches empty, so each
     /// find resumes at the previous match end.
     private static final class CompiledScanMatcher
             extends TrinoRegexpMatcher
     {
-        private final CompiledTrinoScan scan;
+        private final TrinoRegexp.CompiledScanTrinoRegexp pattern;
         private final int[] groups;
         private Slice input;
         private int nextStart;
         private boolean exhausted;
         private boolean hasMatch;
 
-        private CompiledScanMatcher(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+        private CompiledScanMatcher(TrinoRegexp.CompiledScanTrinoRegexp pattern, Slice input, int retainedCapturingGroupCount)
         {
-            this.scan = requireNonNull(scan, "scan is null");
+            this.pattern = requireNonNull(pattern, "pattern is null");
             this.groups = new int[2 * (retainedCapturingGroupCount + 1)];
             reset(input);
         }
 
         /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this
         /// class.
-        static TrinoRegexpMatcher create(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+        static TrinoRegexpMatcher create(TrinoRegexp.CompiledScanTrinoRegexp pattern, Slice input, int retainedCapturingGroupCount)
         {
-            return new CompiledScanMatcher(scan, input, retainedCapturingGroupCount);
+            return new CompiledScanMatcher(pattern, input, retainedCapturingGroupCount);
         }
 
         @Override
@@ -249,7 +249,7 @@ public sealed class TrinoRegexpMatcher
         @Override
         public boolean find()
         {
-            if (!exhausted && scan.find(input, nextStart, groups)) {
+            if (!exhausted && pattern.find(input, nextStart, groups)) {
                 hasMatch = true;
                 nextStart = groups[1];
                 return true;

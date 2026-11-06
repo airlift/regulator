@@ -39,7 +39,6 @@ import io.airlift.slice.SliceUtf8;
 
 import java.io.IOException;
 import java.lang.constant.ClassDesc;
-import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
@@ -52,8 +51,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +70,6 @@ import static io.airlift.classfile.BytecodeExpressions.getStatic;
 import static io.airlift.classfile.BytecodeExpressions.inlineIf;
 import static io.airlift.classfile.BytecodeExpressions.invokeStatic;
 import static io.airlift.classfile.BytecodeExpressions.newArray;
-import static io.airlift.classfile.DescriptorUtils.methodType;
 import static io.airlift.classfile.Parameter.arg;
 import static io.airlift.regulator.ScanPlan.RETRY_OPERATION_BITS;
 import static io.airlift.regulator.ScanPlan.RETRY_OPERATION_MASK;
@@ -87,9 +83,9 @@ import static java.util.Objects.requireNonNull;
 /// package. The attempt loop becomes straight-line code with a label per operation, with the plan's
 /// literals, slots, and branch targets as constants; retries keep the interpreter's stack encoding
 /// in locals and resume through a switch over the saved operation index. Around it, the class
-/// holds the candidate search of an unanchored plan and a public static entry for each Trino
-/// operation the pattern routes to the plan. The class implements [CompiledTrinoScan] by
-/// delegating to those entries, so a caller can also bind an entry directly.
+/// holds the candidate search of an unanchored plan. The class of a Trino pattern extends
+/// [TrinoRegexp.CompiledScanTrinoRegexp] and declares a public entry for each operation the
+/// pattern routes to the plan, so the pattern a caller holds is an instance of it.
 ///
 /// An RE2, Java, or Rust pattern, compiled in the RE2 dialect, gets a smaller class from the same
 /// attempt loop: a pattern class, which extends its language's `CompiledScan…` class, such as
@@ -105,6 +101,9 @@ final class ScanKernelGenerator
     private static final String DUMP_DIRECTORY_PROPERTY = "io.airlift.regulator.scan-kernel.dump-directory";
 
     private static final String DUMP_DIRECTORY = System.getProperty(DUMP_DIRECTORY_PROPERTY);
+    // The type of the constructor of TrinoRegexp.CompiledScanTrinoRegexp and of its generated
+    // subclass, which takes the compiled engine.
+    private static final MethodType TRINO_CONSTRUCTOR_TYPE = MethodType.methodType(void.class, TrinoCompiledPattern.class);
     // Step.matches compares literals of up to this many bytes with two overlapping reads.
     private static final int INLINE_LITERAL_BYTES = 2 * Long.BYTES;
 
@@ -128,7 +127,7 @@ final class ScanKernelGenerator
             this.classPrefix = classPrefix;
         }
 
-        /// The name of the pattern class that extends or implements `superclass`.
+        /// The name of the pattern class that extends `superclass`.
         String patternClassName(Class<?> superclass)
         {
             return superclass.getPackageName() + "." + classPrefix + superclass.getSimpleName();
@@ -168,12 +167,14 @@ final class ScanKernelGenerator
         }
 
         /// Returns the routes of a pattern compiled to the base [TrinoRegexp], or `null`
-        /// when it has no case-sensitive scan plan or an operation other than `contains`
-        /// would skip it.
+        /// when it has no case-sensitive scan plan, can match empty, or an operation other than
+        /// `contains` would skip it.
         static TrinoRoutes of(TrinoCompiledPattern pattern)
         {
             ScanPlan plan = pattern.caseSensitiveScanPlan();
-            if (plan == null) {
+            // No pattern with a plan can match empty, and the generated entries rely on it, as
+            // each match loop resumes its search at the previous match end.
+            if (plan == null || pattern.canMatchEmpty()) {
                 return null;
             }
             // A pattern with a scan plan has neither a single-byte matcher, which group-zero
@@ -255,84 +256,47 @@ final class ScanKernelGenerator
         }
     }
 
-    /// A generated class for one pattern: its [CompiledTrinoScan] instance and a handle on
-    /// each static entry, with `contains` `null` when the routes do not reach it. The
-    /// replace handle takes the owning [TrinoRegexp] first, and the extraction handles take
-    /// the group last.
-    record CompiledTrinoKernel(
-            CompiledTrinoScan scan,
-            MethodHandle contains,
-            MethodHandle count,
-            MethodHandle position,
-            MethodHandle extract,
-            MethodHandle extractAll,
-            MethodHandle split,
-            MethodHandle replace,
-            MethodHandle replaceWithCallback)
+    /// A generated Trino pattern and the classfile library's report on compiling its class.
+    record ReportedTrinoPattern(TrinoRegexp.CompiledScanTrinoRegexp pattern, CompilationReport report)
     {
-        CompiledTrinoKernel
+        ReportedTrinoPattern
         {
-            requireNonNull(scan, "scan is null");
-            requireNonNull(count, "count is null");
-            requireNonNull(position, "position is null");
-            requireNonNull(extract, "extract is null");
-            requireNonNull(extractAll, "extractAll is null");
-            requireNonNull(split, "split is null");
-            requireNonNull(replace, "replace is null");
-            requireNonNull(replaceWithCallback, "replaceWithCallback is null");
-        }
-    }
-
-    /// A generated class and the classfile library's report on compiling it.
-    record ReportedTrinoKernel(CompiledTrinoKernel compiled, CompilationReport report)
-    {
-        ReportedTrinoKernel
-        {
-            requireNonNull(compiled, "compiled is null");
+            requireNonNull(pattern, "pattern is null");
             requireNonNull(report, "report is null");
         }
     }
 
-    /// Generates and defines the class for a pattern with `routes`. Failures propagate.
-    static CompiledTrinoKernel generateCompiledTrinoScan(TrinoRoutes routes)
+    /// Generates and defines the class of a Trino pattern with `routes`, and returns the pattern
+    /// that is an instance of it, over the routes' compiled engine. The class extends
+    /// [TrinoRegexp.CompiledScanTrinoRegexp], whose constructor takes the compiled engine; the
+    /// generated constructor has the same type and passes its argument to it. Failures propagate.
+    static TrinoRegexp.CompiledScanTrinoRegexp generateCompiledTrinoPattern(TrinoRoutes routes)
     {
-        return generate(routes).compiled();
+        return generate(routes).pattern();
     }
 
-    /// Generates and defines the class for a pattern with `routes` as
-    /// [#generateCompiledTrinoScan] does, also returning the compilation report.
-    static ReportedTrinoKernel generateCompiledTrinoScanForDiagnostics(TrinoRoutes routes)
+    /// Generates and defines the class of a Trino pattern with `routes` as
+    /// [#generateCompiledTrinoPattern] does, also returning the compilation report.
+    static ReportedTrinoPattern generateCompiledTrinoPatternForDiagnostics(TrinoRoutes routes)
     {
         return generate(routes);
     }
 
-    private static ReportedTrinoKernel generate(TrinoRoutes routes)
+    private static ReportedTrinoPattern generate(TrinoRoutes routes)
     {
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
         CompiledUnit unit = compile(definer, ScanEmitter.forTrino(routes));
-        Class<? extends CompiledTrinoScan> scanClass = define(definer, unit, CompiledTrinoScan.class);
-        CompiledTrinoScan scan = newInstance(scanClass, MethodType.methodType(void.class));
-        MethodType extract = MethodType.methodType(Slice.class, Slice.class, int.class);
-        MethodType extractAll = MethodType.methodType(List.class, Slice.class, int.class);
-        CompiledTrinoKernel compiled = new CompiledTrinoKernel(
-                scan,
-                routes.contains() ? findStatic(scanClass, "containsEntry", MethodType.methodType(boolean.class, Slice.class)) : null,
-                findStatic(scanClass, "countEntry", MethodType.methodType(long.class, Slice.class)),
-                findStatic(scanClass, "positionEntry", MethodType.methodType(long.class, Slice.class, long.class, long.class)),
-                findStatic(scanClass, "extractEntry", extract),
-                findStatic(scanClass, "extractAllEntry", extractAll),
-                findStatic(scanClass, "splitEntry", MethodType.methodType(List.class, Slice.class)),
-                findStatic(scanClass, "replaceEntry", MethodType.methodType(Slice.class, TrinoRegexp.class, Slice.class, Slice.class)),
-                findStatic(scanClass, "replaceEntry", MethodType.methodType(Slice.class, Slice.class, Function.class)));
-        return new ReportedTrinoKernel(compiled, unit.report());
+        Class<? extends TrinoRegexp.CompiledScanTrinoRegexp> patternClass = define(definer, unit, TrinoRegexp.CompiledScanTrinoRegexp.class);
+        TrinoRegexp.CompiledScanTrinoRegexp pattern = newInstance(patternClass, TRINO_CONSTRUCTOR_TYPE, routes.pattern());
+        return new ReportedTrinoPattern(pattern, unit.report());
     }
 
-    /// Returns the attempt loop of `scan`, generated for `plan`, with the signature of
-    /// the plan executor it replaces.
-    static MethodHandle attemptHandleForDiagnostics(CompiledTrinoScan scan, ScanPlan plan)
+    /// Returns the attempt loop of `patternClass`, a class generated for `plan`, with the
+    /// signature of the plan executor it replaces.
+    static MethodHandle attemptHandleForDiagnostics(Class<?> patternClass, ScanPlan plan)
     {
         Attempt attempt = Attempt.of(plan);
-        return findStatic(scan.getClass(), attempt.name, attempt.type());
+        return findStatic(patternClass, attempt.name, attempt.type());
     }
 
     /// Returns the class file generated for a pattern with `routes`, without defining it.
@@ -881,23 +845,21 @@ final class ScanKernelGenerator
         }
     }
 
-    /// Emits the class of one pattern. The class of a Trino pattern holds the attempt loop, the
-    /// search driver of an unanchored plan, and a static entry for each operation that reaches the
-    /// plan, named for the operation with an `Entry` suffix; it implements
-    /// [CompiledTrinoScan] with one-line delegates to those entries. The class of an RE2, Java, or
-    /// Rust pattern extends its language's `CompiledScan…` class and holds the attempt loop, the
-    /// searches of an unanchored plan, and an instance body for each full-Slice operation and
-    /// engine hook that reaches the plan, each with its route fixed by the pattern's
-    /// [PatternRoutes]. A plan never matches empty, so every match loop resumes at the previous
-    /// match end, as a matcher does. Scans call the copies in [ScanKernelSupport], not the
-    /// interpreter's helpers; other shared code is reached only through static calls, calls on
-    /// class-data constants, and final engine methods of the pattern itself, including the
+    /// Emits the class of one pattern. The class of a Trino pattern extends
+    /// [TrinoRegexp.CompiledScanTrinoRegexp] and holds the attempt loop, the search driver of an
+    /// unanchored plan, the static `findFrom` over them, and a public instance entry for each
+    /// operation that reaches the plan, which checks its arguments as the operation does. A
+    /// matcher's finds reach `findFrom` through the instance hook `find`. The class of an RE2,
+    /// Java, or Rust pattern extends its language's `CompiledScan…` class and holds the attempt
+    /// loop, the searches of an unanchored plan, and an instance body for each full-Slice
+    /// operation and engine hook that reaches the plan, each with its route fixed by the
+    /// pattern's [PatternRoutes]. A plan never matches empty, so every match loop resumes at the
+    /// previous match end, as a matcher does. Scans call the copies in [ScanKernelSupport], not
+    /// the interpreter's helpers; other shared code is reached only through static calls, calls
+    /// on class-data constants, and final engine methods of the pattern itself, including the
     /// ordinary engine that the generated hook calls for a call off the plan.
     private static final class ScanEmitter
     {
-        // The interface methods a Trino class implements, the same for every pattern.
-        private static final List<InterfaceMethod> TRINO_INTERFACE_METHODS = interfaceMethods(CompiledTrinoScan.class);
-
         // Reflective lookups the emitters would otherwise repeat for every pattern.
         private static final Method LIST_ADD = method(List.class, "add", Object.class);
         private static final Method FUNCTION_APPLY = method(Function.class, "apply", Object.class);
@@ -905,7 +867,7 @@ final class ScanKernelGenerator
         private static final Constructor<?> NEW_ARRAY_LIST = constructor(ArrayList.class);
         private static final Constructor<?> NEW_ARRAY_LIST_WITH_CAPACITY = constructor(ArrayList.class, int.class);
         private static final Constructor<?> NEW_DYNAMIC_SLICE_OUTPUT = constructor(DynamicSliceOutput.class, int.class);
-        private static final Constructor<?> NEW_UNSUPPORTED_OPERATION_EXCEPTION = constructor(UnsupportedOperationException.class, String.class);
+        private static final Method NEW_REPLACEMENT_PLAN = declaredMethod(TrinoRegexp.class, "newReplacementPlan", Slice.class, Slice.class, int.class, Map.class);
 
         // The final engine methods the generated classes call on a pattern.
         private static final Method CONTINUE_SCAN_SEARCH = engineMethod("continueScanSearch");
@@ -925,29 +887,17 @@ final class ScanKernelGenerator
         private final boolean ordinaryHandoff;
         private final Attempt attempt;
         private final boolean anchored;
-        private final Map<String, MethodDefinition> entries = new HashMap<>();
 
         private ClassDefinition definition;
         private MethodDefinition attemptLoop;
         private MethodDefinition search;
         private MethodDefinition regionSearch;
         private MethodDefinition searchBeforeHandoff;
-        private MethodDefinition find;
+        private MethodDefinition findFrom;
 
         /// The context and attempt arguments of a region search. A search without one covers the
         /// whole input, unanchored and without a full-match requirement.
         private record Region(Parameter contextStart, Parameter contextEnd, Parameter anchored, Parameter fullMatch) {}
-
-        /// An interface method: the signature of its delegate and the key of the entry the
-        /// delegate calls, when the class defines that entry.
-        /// A classfile [Parameter] belongs to one method, so each delegate builds its own.
-        private record InterfaceMethod(String name, MethodTypeDesc type, List<String> parameterNames, String key)
-        {
-            private InterfaceMethod
-            {
-                parameterNames = List.copyOf(parameterNames);
-            }
-        }
 
         private ScanEmitter(TrinoRoutes routes, PatternRoutes patternRoutes, ScanPlan plan, boolean ordinaryHandoff, Class<? extends CompiledPattern> superclass)
         {
@@ -1024,11 +974,15 @@ final class ScanKernelGenerator
             return definition.build();
         }
 
+        /// The class of a Trino pattern, with a constructor of the type of its superclass's
+        /// constructor. It declares `contains` only where its routes reach the plan, and every
+        /// other operation that [TrinoRegexp.CompiledScanTrinoRegexp] runs on the plan.
         private ClassModel defineTrino()
         {
-            defineClass(attempt.patternClassName(CompiledTrinoScan.class));
-            definition.addInterface(CompiledTrinoScan.class);
-            definition.defaultConstructor().access(PUBLIC);
+            defineClass(attempt.patternClassName(TrinoRegexp.CompiledScanTrinoRegexp.class));
+            definition.superClass(TrinoRegexp.CompiledScanTrinoRegexp.class);
+            Parameter pattern = arg("pattern", TRINO_CONSTRUCTOR_TYPE.parameterType(0));
+            definition.constructor(pattern).access(PUBLIC).body().invokeSuperConstructor(pattern).ret();
             attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
             if (!anchored) {
                 search = defineSearch();
@@ -1037,6 +991,7 @@ final class ScanKernelGenerator
                 }
             }
             defineFind();
+            defineFindHook();
             if (routes.contains()) {
                 defineContains();
             }
@@ -1047,7 +1002,6 @@ final class ScanKernelGenerator
             defineExtractAll();
             defineReplace();
             defineReplaceWithCallback();
-            defineInterface(TRINO_INTERFACE_METHODS);
             return definition.build();
         }
 
@@ -1242,8 +1196,8 @@ final class ScanKernelGenerator
             Parameter input = arg("input", Slice.class);
             Parameter start = arg("start", int.class);
             Parameter groups = arg("groups", int[].class);
-            find = entry("find", MethodType.methodType(boolean.class, Slice.class, int.class, int[].class), input, start, groups);
-            CodeBlock.Builder body = find.body();
+            findFrom = definition.method("findFrom", boolean.class, input, start, groups).access(PRIVATE, STATIC);
+            CodeBlock.Builder body = findFrom.body();
             if (anchored) {
                 // As a matcher's start-anchored route: only the first search of the input can match.
                 body.append(fill(groups));
@@ -1256,6 +1210,16 @@ final class ScanKernelGenerator
             }
             Variable result = body.declare("result", invokeStatic(search, input, start, groups));
             body.ret(finishSearch(body, input, result, groups, trinoPattern()));
+        }
+
+        /// The instance hook of [TrinoRegexp.CompiledScanTrinoRegexp#find] that a matcher's finds
+        /// run, which calls the static `findFrom`.
+        private void defineFindHook()
+        {
+            Parameter input = arg("input", Slice.class);
+            Parameter start = arg("start", int.class);
+            Parameter groups = arg("groups", int[].class);
+            definition.method("find", boolean.class, input, start, groups).body().ret(invokeStatic(findFrom, input, start, groups));
         }
 
         /// Returns whether an unanchored search that returned `result` matched, continuing
@@ -1276,7 +1240,9 @@ final class ScanKernelGenerator
         private void defineContains()
         {
             Parameter input = arg("input", Slice.class);
-            emitBooleanFind(entry("contains", MethodType.methodType(boolean.class, Slice.class), input).body(), input, trinoPattern());
+            CodeBlock.Builder body = definition.method("contains", boolean.class, input).access(PUBLIC).body();
+            body.append(nullCheck(input, "source is null"));
+            emitBooleanFind(body, input, trinoPattern());
         }
 
         /// Emits code that returns whether `input` holds a match: the attempt of a start-anchored
@@ -1298,7 +1264,9 @@ final class ScanKernelGenerator
         private void defineCount()
         {
             Parameter input = arg("input", Slice.class);
-            emitCount(entry("count", MethodType.methodType(long.class, Slice.class), input).body(), input, routes.count(), trinoPattern());
+            CodeBlock.Builder body = definition.method("count", long.class, input).access(PUBLIC).body();
+            body.append(nullCheck(input, "source is null"));
+            emitCount(body, input, routes.count(), trinoPattern());
         }
 
         // The loop of CompiledPattern.countUnanchoredScanMatches; keep in step.
@@ -1459,7 +1427,8 @@ final class ScanKernelGenerator
             Parameter input = arg("input", Slice.class);
             Parameter start = arg("start", long.class);
             Parameter occurrence = arg("occurrence", long.class);
-            CodeBlock.Builder body = entry("position", MethodType.methodType(long.class, Slice.class, long.class, long.class), input, start, occurrence).body();
+            CodeBlock.Builder body = definition.method("position", long.class, input, start, occurrence).access(PUBLIC).body();
+            body.append(nullCheck(input, "source is null"));
             Variable byteStart = body.declare("byteStart", invokeStatic(TrinoRegexp.class, "positionSearchStart", int.class, input, start, occurrence));
             body.append(IfStatement.builder()
                     .condition(byteStart.lessThan(constantInt(0)))
@@ -1467,7 +1436,7 @@ final class ScanKernelGenerator
                     .build());
             Variable groups = body.declare("groups", newArray(int[].class, 2));
             body.append(IfStatement.builder()
-                    .condition(invokeStatic(find, input, byteStart, groups).not())
+                    .condition(invokeStatic(findFrom, input, byteStart, groups).not())
                     .then(constantLong(-1).ret())
                     .build());
             Variable match = body.declare("match", constantLong(1));
@@ -1476,7 +1445,7 @@ final class ScanKernelGenerator
             body.mark(loop);
             body.append(ifThenJump(match.greaterThanOrEqual(occurrence), done));
             body.append(IfStatement.builder()
-                    .condition(invokeStatic(find, input, groups.getElement(1), groups).not())
+                    .condition(invokeStatic(findFrom, input, groups.getElement(1), groups).not())
                     .then(constantLong(-1).ret())
                     .build());
             body.append(match.set(match.add(constantLong(1))));
@@ -1492,13 +1461,15 @@ final class ScanKernelGenerator
         {
             Parameter input = arg("input", Slice.class);
             Parameter group = arg("group", int.class);
-            CodeBlock.Builder body = entry("extract", MethodType.methodType(Slice.class, Slice.class, int.class), input, group).body();
+            CodeBlock.Builder body = definition.method("extract", Slice.class, input, group).access(PUBLIC).body();
+            body.append(groupCheck(group));
+            body.append(nullCheck(input, "source is null"));
             BytecodeExpression captureLength = anchored
                     ? group.multiply(constantInt(2)).add(constantInt(2))
                     : constantInt(2 * routes.capturingGroupCount() + 2);
             Variable groups = body.declare("groups", newArray(int[].class, inlineIf(group.equal(constantInt(0)), constantInt(2), captureLength)));
             body.append(IfStatement.builder()
-                    .condition(invokeStatic(find, input, constantInt(0), groups).not())
+                    .condition(invokeStatic(findFrom, input, constantInt(0), groups).not())
                     .then(constantNull(Slice.class).ret())
                     .build());
             Variable start = body.declare(int.class, "start");
@@ -1509,7 +1480,9 @@ final class ScanKernelGenerator
         {
             Parameter input = arg("input", Slice.class);
             Parameter group = arg("group", int.class);
-            CodeBlock.Builder body = entry("extractAll", MethodType.methodType(List.class, Slice.class, int.class), input, group).body();
+            CodeBlock.Builder body = definition.method("extractAll", List.class, input, group).access(PUBLIC).body();
+            body.append(groupCheck(group));
+            body.append(nullCheck(input, "source is null"));
             Variable groups = body.declare("groups", newArray(int[].class, inlineIf(
                     group.equal(constantInt(0)),
                     constantInt(2),
@@ -1521,7 +1494,7 @@ final class ScanKernelGenerator
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
-            body.append(ifThenJump(invokeStatic(find, input, start, groups).not(), done));
+            body.append(ifThenJump(invokeStatic(findFrom, input, start, groups).not(), done));
             body.append(matches.invoke(LIST_ADD, groupSlice(body, input, groups, group, groupStart)));
             body.append(start.set(groups.getElement(1)));
             body.jump(loop);
@@ -1532,7 +1505,8 @@ final class ScanKernelGenerator
         private void defineSplit()
         {
             Parameter input = arg("input", Slice.class);
-            CodeBlock.Builder body = entry("split", MethodType.methodType(List.class, Slice.class), input).body();
+            CodeBlock.Builder body = definition.method("split", List.class, input).access(PUBLIC).body();
+            body.append(nullCheck(input, "source is null"));
             Variable groups = body.declare("groups", newArray(int[].class, 2));
             Variable parts = body.declare(List.class, "parts");
             body.append(parts.set(BytecodeExpressions.newInstance(NEW_ARRAY_LIST)));
@@ -1540,7 +1514,7 @@ final class ScanKernelGenerator
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
-            body.append(ifThenJump(invokeStatic(find, input, previousEnd, groups).not(), done));
+            body.append(ifThenJump(invokeStatic(findFrom, input, previousEnd, groups).not(), done));
             body.append(parts.invoke(LIST_ADD, slice(input, previousEnd, groups.getElement(0))));
             body.append(previousEnd.set(groups.getElement(1)));
             body.jump(loop);
@@ -1549,21 +1523,26 @@ final class ScanKernelGenerator
             body.ret(invokeStatic(Collections.class, "unmodifiableList", List.class, parts));
         }
 
-        /// Replacement keeps its plan and template cache on the owning [TrinoRegexp].
+        /// Replacement builds its plan through [TrinoRegexp], which keeps the template cache. The
+        /// pattern's group count and names are constants, computed when the class is generated.
         private void defineReplace()
         {
-            Parameter owner = arg("owner", TrinoRegexp.class);
             Parameter input = arg("input", Slice.class);
             Parameter replacement = arg("replacement", Slice.class);
-            CodeBlock.Builder body = entry("replace", MethodType.methodType(Slice.class, TrinoRegexp.class, Slice.class, Slice.class), owner, input, replacement).body();
-            Variable replacementPlan = body.declare("replacementPlan", owner.invoke("newReplacementPlan", TrinoReplacementPlan.class, input, replacement));
+            MethodDefinition method = definition.method("replace", Slice.class, input, replacement).access(PUBLIC);
+            CodeBlock.Builder body = method.body();
+            body.append(nullCheck(input, "source is null"));
+            body.append(nullCheck(replacement, "replacement is null"));
+            BytecodeExpression namedCapturingGroups = boundConstant(routes.pattern().namedCapturingGroups(), Map.class);
+            BytecodeExpression newReplacementPlan = method.thisVariable().invoke(NEW_REPLACEMENT_PLAN, input, replacement, constantInt(routes.capturingGroupCount()), namedCapturingGroups);
+            Variable replacementPlan = body.declare("replacementPlan", newReplacementPlan);
             Variable maximumGroup = body.declare("maximumGroup", replacementPlan.invoke("maximumCapturingGroup", int.class));
             Variable groups = body.declare("groups", newArray(int[].class, maximumGroup.multiply(constantInt(2)).add(constantInt(2))));
             Variable start = body.declare("start", constantInt(0));
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
             body.mark(loop);
-            body.append(ifThenJump(invokeStatic(find, input, start, groups).not(), done));
+            body.append(ifThenJump(invokeStatic(findFrom, input, start, groups).not(), done));
             body.append(replacementPlan.invoke("addMatch", void.class, groups));
             body.append(start.set(groups.getElement(1)));
             body.jump(loop);
@@ -1575,7 +1554,9 @@ final class ScanKernelGenerator
         {
             Parameter input = arg("input", Slice.class);
             Parameter replacement = arg("replacement", Function.class);
-            CodeBlock.Builder body = entry("replace", MethodType.methodType(Slice.class, Slice.class, Function.class), input, replacement).body();
+            CodeBlock.Builder body = definition.method("replace", Slice.class, input, replacement).access(PUBLIC).body();
+            body.append(nullCheck(input, "source is null"));
+            body.append(nullCheck(replacement, "replacement is null"));
             int groupCount = routes.capturingGroupCount();
             Variable groups = body.declare("groups", newArray(int[].class, 2 * groupCount + 2));
             Variable output = body.declare("output", BytecodeExpressions.newInstance(NEW_DYNAMIC_SLICE_OUTPUT, length(input)));
@@ -1591,7 +1572,7 @@ final class ScanKernelGenerator
             CodeLabel done = body.label("done");
 
             body.mark(loop);
-            body.append(ifThenJump(invokeStatic(find, input, previousEnd, groups).not(), done));
+            body.append(ifThenJump(invokeStatic(findFrom, input, previousEnd, groups).not(), done));
             body.append(matched.set(constantTrue()));
             body.append(writeBytes(output, input, previousEnd, groups.getElement(0)));
             body.append(values.set(BytecodeExpressions.newInstance(NEW_ARRAY_LIST_WITH_CAPACITY, constantInt(groupCount))));
@@ -1621,61 +1602,15 @@ final class ScanKernelGenerator
             body.ret(output.invoke("slice", Slice.class));
         }
 
-        private void defineInterface(List<InterfaceMethod> methods)
+        /// Throws the exception of [TrinoRegexp#validateGroup(int)] when the pattern has no
+        /// group `group`, with the pattern's group count as a constant.
+        private Statement groupCheck(Parameter group)
         {
-            for (InterfaceMethod method : methods) {
-                MethodTypeDesc type = method.type();
-                Parameter[] parameters = new Parameter[type.parameterCount()];
-                for (int index = 0; index < parameters.length; index++) {
-                    parameters[index] = arg(method.parameterNames().get(index), type.parameterType(index));
-                }
-                MethodDefinition delegate = definition.method(method.name(), type.returnType(), parameters)
-                        .access(PUBLIC);
-                MethodDefinition target = entries.get(method.key());
-                if (target == null) {
-                    delegate.body().throwObject(BytecodeExpressions.newInstance(NEW_UNSUPPORTED_OPERATION_EXCEPTION, constantString(method.name())));
-                }
-                else {
-                    delegate.body().ret(invokeStatic(target, parameters));
-                }
-            }
-        }
-
-        /// Returns the methods of `type` in a fixed order, as [#defineInterface] declares their
-        /// delegates.
-        private static List<InterfaceMethod> interfaceMethods(Class<?> type)
-        {
-            Method[] methods = type.getDeclaredMethods();
-            Arrays.sort(methods, Comparator.comparing(Method::toString));
-            List<InterfaceMethod> interfaceMethods = new ArrayList<>(methods.length);
-            for (Method method : methods) {
-                Class<?>[] types = method.getParameterTypes();
-                List<String> parameterNames = new ArrayList<>(types.length);
-                for (int index = 0; index < types.length; index++) {
-                    parameterNames.add("argument" + index);
-                }
-                interfaceMethods.add(new InterfaceMethod(
-                        method.getName(),
-                        methodType(method),
-                        parameterNames,
-                        key(method.getName(), MethodType.methodType(method.getReturnType(), types))));
-            }
-            return List.copyOf(interfaceMethods);
-        }
-
-        /// Defines the public static entry of `operation`, which the interface method of the
-        /// same name and type delegates to.
-        private MethodDefinition entry(String operation, MethodType type, Parameter... parameters)
-        {
-            MethodDefinition method = definition.method(operation + "Entry", type.returnType(), parameters)
-                    .access(PUBLIC, STATIC);
-            entries.put(key(operation, type), method);
-            return method;
-        }
-
-        private static String key(String operation, MethodType type)
-        {
-            return operation + type.toMethodDescriptorString();
+            BytecodeExpression groupCount = constantInt(routes.capturingGroupCount());
+            return IfStatement.builder()
+                    .condition(group.lessThan(constantInt(0)).or(group.greaterThan(groupCount)))
+                    .then(invokeStatic(TrinoRegexp.class, "invalidGroup", IllegalArgumentException.class, groupCount, group).throwObject())
+                    .build();
         }
 
         /// Returns the final engine method named `name`; being final, a call to it on a pattern
@@ -1729,6 +1664,16 @@ final class ScanKernelGenerator
     {
         try {
             return type.getConstructor(parameterTypes);
+        }
+        catch (NoSuchMethodException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static Method declaredMethod(Class<?> type, String name, Class<?>... parameterTypes)
+    {
+        try {
+            return type.getDeclaredMethod(name, parameterTypes);
         }
         catch (NoSuchMethodException e) {
             throw new IllegalStateException(e);

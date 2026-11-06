@@ -35,12 +35,12 @@ import java.lang.classfile.instruction.ConstantInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -59,7 +59,9 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 
 public class TestScanKernel
 {
@@ -89,6 +91,8 @@ public class TestScanKernel
             "JavaRegexp$CompiledScanJavaRegexp.<init>",
             "Re2$CompiledScanRe2.<init>",
             "RustRegexp$CompiledScanRustRegexp.<init>",
+            "TrinoRegexp$CompiledScanTrinoRegexp.<init>",
+            "TrinoRegexp.invalidGroup",
             "TrinoRegexp.newReplacementPlan",
             "TrinoRegexp.positionSearchStart",
             "TrinoReplacementPlan.addMatch",
@@ -158,8 +162,8 @@ public class TestScanKernel
             new Route("^(a)", BOOLEAN_ATTEMPT, false),
             new Route("^(😀)$", BOOLEAN_ATTEMPT, false));
 
-    /// An eligible pattern runs on the generated class, with the attempt of its plan's shape and a
-    /// handle for each operation that reaches the plan, while the same pattern compiled without
+    /// An eligible pattern runs on the generated class, with the attempt of its plan's shape and an
+    /// entry for each operation that reaches the plan, while the same pattern compiled without
     /// the option keeps no generated code. Patterns that have no case-sensitive scan plan or
     /// compile to another subclass keep the class they have without the option.
     @Test
@@ -170,16 +174,18 @@ public class TestScanKernel
             TrinoRegexp generated = generated(expression);
             assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
             assertThat(generated.attemptHandleForDiagnostics().type()).as(expression).isEqualTo(route.attempt());
-            assertThat(generated.generatedContains().isPresent()).as(expression).isEqualTo(route.contains());
-            assertThat(generated.generatedCount()).as(expression).isPresent();
-            assertThat(generated.generatedPosition()).as(expression).isPresent();
-            assertThat(generated.generatedSplit()).as(expression).isPresent();
-            assertThat(generated.generatedReplace()).as(expression).isPresent();
-            assertThat(generated.generatedReplaceWithCallback()).as(expression).isPresent();
-            for (int group = 0; group <= generated.capturingGroupCount(); group++) {
-                assertThat(generated.generatedExtract(group)).as(expression).isPresent();
-                assertThat(generated.generatedExtractAll(group)).as(expression).isPresent();
+            Set<String> entries = new LinkedHashSet<>(List.of(
+                    "count(Slice)",
+                    "position(Slice,long,long)",
+                    "extract(Slice,int)",
+                    "extractAll(Slice,int)",
+                    "split(Slice)",
+                    "replace(Slice,Slice)",
+                    "replace(Slice,Function)"));
+            if (route.contains()) {
+                entries.add("contains(Slice)");
             }
+            assertThat(declaredEntries(generated)).as(expression).containsExactlyInAnyOrderElementsOf(entries);
 
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
             assertThat(interpreted.getClass()).as(expression).isEqualTo(TrinoRegexp.class);
@@ -200,19 +206,63 @@ public class TestScanKernel
     {
         assertThat(regexp.usesGeneratedBytecode()).as(expression).isFalse();
         assertThat(regexp.attemptHandleForDiagnostics()).as(expression).isNull();
-        List<Optional<MethodHandle>> handles = new ArrayList<>(List.of(
-                regexp.generatedContains(),
-                regexp.generatedCount(),
-                regexp.generatedPosition(),
-                regexp.generatedSplit(),
-                regexp.generatedReplace(),
-                regexp.generatedReplaceWithCallback()));
-        for (int group = 0; group <= regexp.capturingGroupCount(); group++) {
-            handles.add(regexp.generatedExtract(group));
-            handles.add(regexp.generatedExtractAll(group));
-        }
-        assertThat(handles).as(expression).allSatisfy(handle -> assertThat(handle).isEmpty());
     }
+
+    /// Returns the public operations that the generated class of `regexp` declares, as each
+    /// name with its parameter types' simple names.
+    private static Set<String> declaredEntries(TrinoRegexp regexp)
+    {
+        return Arrays.stream(regexp.getClass().getDeclaredMethods())
+                .filter(method -> Modifier.isPublic(method.getModifiers()) && !Modifier.isStatic(method.getModifiers()))
+                .map(method -> Arrays.stream(method.getParameterTypes()).map(Class::getSimpleName).collect(joining(",", method.getName() + "(", ")")))
+                .collect(toSet());
+    }
+
+    /// A generated pattern rejects bad arguments with the interpreter's exceptions, checked in
+    /// the interpreter's order: extraction checks the group before the source.
+    @Test
+    public void testArgumentChecks()
+    {
+        for (String expression : List.of(URL, "x([a-z]+)!")) {
+            TrinoRegexp generated = generated(expression);
+            assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
+            TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
+            Slice source = utf8Slice("x");
+            int missingGroup = interpreted.capturingGroupCount() + 1;
+            List<ArgumentCheck> checks = List.of(
+                    new ArgumentCheck("contains(null)", pattern -> pattern.contains(null)),
+                    new ArgumentCheck("count(null)", pattern -> pattern.count(null)),
+                    new ArgumentCheck("position(null, 1, 1)", pattern -> pattern.position(null, 1, 1)),
+                    new ArgumentCheck("position(null, 0, 1)", pattern -> pattern.position(null, 0, 1)),
+                    new ArgumentCheck("position(null, 1, 0)", pattern -> pattern.position(null, 1, 0)),
+                    new ArgumentCheck("position(source, 0, 1)", pattern -> pattern.position(source, 0, 1)),
+                    new ArgumentCheck("position(source, 1, 0)", pattern -> pattern.position(source, 1, 0)),
+                    new ArgumentCheck("extract(null, 1)", pattern -> pattern.extract(null, 1)),
+                    new ArgumentCheck("extract(null, -1)", pattern -> pattern.extract(null, -1)),
+                    new ArgumentCheck("extract(null, missingGroup)", pattern -> pattern.extract(null, missingGroup)),
+                    new ArgumentCheck("extractAll(null, 1)", pattern -> pattern.extractAll(null, 1)),
+                    new ArgumentCheck("extractAll(null, -1)", pattern -> pattern.extractAll(null, -1)),
+                    new ArgumentCheck("extractAll(source, missingGroup)", pattern -> pattern.extractAll(source, missingGroup)),
+                    new ArgumentCheck("split(null)", pattern -> pattern.split(null)),
+                    new ArgumentCheck("replace(null, source)", pattern -> pattern.replace(null, source)),
+                    new ArgumentCheck("replace(source, null template)", pattern -> pattern.replace(source, (Slice) null)),
+                    new ArgumentCheck("replace(null, null template)", pattern -> pattern.replace(null, (Slice) null)),
+                    new ArgumentCheck("replace(null, callback)", pattern -> pattern.replace(null, TestScanPlan::callbackReplacement)),
+                    new ArgumentCheck("replace(source, null callback)", pattern -> pattern.replace(source, (Function<List<Slice>, Slice>) null)),
+                    new ArgumentCheck("replace(null, null callback)", pattern -> pattern.replace(null, (Function<List<Slice>, Slice>) null)));
+            for (ArgumentCheck check : checks) {
+                Throwable expected = catchThrowable(() -> check.call().apply(interpreted));
+                assertThat(expected).as("%s %s", expression, check.description()).isNotNull();
+                assertThat(catchThrowable(() -> check.call().apply(generated)))
+                        .as("%s %s", expression, check.description())
+                        .isInstanceOf(expected.getClass())
+                        .hasMessage(expected.getMessage());
+            }
+        }
+    }
+
+    /// A call with a bad argument, described as written for failure messages.
+    private record ArgumentCheck(String description, Function<TrinoRegexp, Object> call) {}
 
     /// Each pattern exercises one executor route of [#ROUTES] or one operation shape:
     /// literal widths on either side of each comparison, a literal longer than the inline
@@ -508,7 +558,7 @@ public class TestScanKernel
 
     /// Returns the class file of the pattern class generated for an RE2, Java, or Rust pattern
     /// with `routes`.
-    private static byte[] patternClassfile(PatternRoutes routes)
+    static byte[] patternClassfile(PatternRoutes routes)
     {
         return switch (routes.pattern()) {
             case Re2 _ -> ScanKernelGenerator.patternClassfileForDiagnostics(routes, Re2.CompiledScanRe2.class);
@@ -656,12 +706,11 @@ public class TestScanKernel
         return wrappedBuffer(bytes, 3, text.length);
     }
 
-    /// Requires every public operation, every generated handle `actual` has, and its
-    /// matchers with no groups and with every group, to give exactly the result of
-    /// `expected` on each source. Positions start at the first two code points and at the
-    /// end, and replacement templates reference no group, the first, and all of them. With
-    /// `attempts`, the generated attempt must also give the interpreter's raw result at
-    /// every start.
+    /// Requires every public operation of `actual` and its matchers with no groups and with
+    /// every group to give exactly the result of `expected` on each source. Positions start at
+    /// the first two code points and one past the source's byte length, and replacement
+    /// templates reference no group, the first, and all of them. With `attempts`, the generated
+    /// attempt must also give the interpreter's raw result at every start.
     private static void verifySameOperations(String description, TrinoRegexp actual, TrinoRegexp expected, List<Slice> sources, boolean attempts)
             throws Throwable
     {
@@ -672,7 +721,6 @@ public class TestScanKernel
             allGroups.append('$').append(group).append('|');
         }
         List<Slice> replacements = List.of(utf8Slice("<>"), utf8Slice(groupCount == 0 ? "<$0>" : "<$1>"), utf8Slice(allGroups.append('>').toString()));
-        Handles handles = new Handles(actual);
         for (Slice source : sources) {
             String sourceDescription = description + " on " + HexFormat.of().formatHex(source.getBytes());
             assertThat(actual.contains(source)).as(sourceDescription).isEqualTo(expected.contains(source));
@@ -697,7 +745,6 @@ public class TestScanKernel
             for (int retained : new int[] {0, groupCount}) {
                 assertThat(matcherTrace(actual, retained, source)).as(sourceDescription).containsExactlyElementsOf(matcherTrace(expected, retained, source));
             }
-            handles.verify(sourceDescription, expected, source, count, replacements);
             if (attempts) {
                 verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.re2().caseSensitiveScanPlan(), source, groupCount);
             }
@@ -725,73 +772,6 @@ public class TestScanKernel
         }
         catch (Throwable throwable) {
             return throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
-        }
-    }
-
-    /// The generated handles of one pattern, each compared on every source with the public
-    /// operation of the interpreted pattern.
-    private static final class Handles
-    {
-        private final MethodHandle contains;
-        private final MethodHandle count;
-        private final MethodHandle position;
-        private final List<MethodHandle> extract = new ArrayList<>();
-        private final List<MethodHandle> extractAll = new ArrayList<>();
-        private final MethodHandle split;
-        private final MethodHandle replace;
-        private final MethodHandle replaceWithCallback;
-
-        Handles(TrinoRegexp regexp)
-        {
-            contains = regexp.generatedContains().orElse(null);
-            count = regexp.generatedCount().orElse(null);
-            position = regexp.generatedPosition().orElse(null);
-            for (int group = 0; group <= regexp.capturingGroupCount(); group++) {
-                extract.add(regexp.generatedExtract(group).orElse(null));
-                extractAll.add(regexp.generatedExtractAll(group).orElse(null));
-            }
-            split = regexp.generatedSplit().orElse(null);
-            replace = regexp.generatedReplace().orElse(null);
-            replaceWithCallback = regexp.generatedReplaceWithCallback().orElse(null);
-        }
-
-        void verify(String description, TrinoRegexp expected, Slice source, long matches, List<Slice> replacements)
-                throws Throwable
-        {
-            if (contains != null) {
-                assertThat((boolean) contains.invokeExact(source)).as(description).isEqualTo(expected.contains(source));
-            }
-            if (count != null) {
-                assertThat((long) count.invokeExact(source)).as(description).isEqualTo(matches);
-            }
-            if (position != null) {
-                for (long start : positionStarts(source)) {
-                    for (long occurrence = 1; occurrence <= matches + 1; occurrence++) {
-                        assertThat((long) position.invokeExact(source, start, occurrence)).as(description).isEqualTo(expected.position(source, start, occurrence));
-                    }
-                }
-            }
-            for (int group = 0; group < extract.size(); group++) {
-                if (extract.get(group) != null) {
-                    assertThat((Slice) extract.get(group).invokeExact(source)).as(description).isEqualTo(expected.extract(source, group));
-                }
-                if (extractAll.get(group) != null) {
-                    assertThat((List<?>) extractAll.get(group).invokeExact(source)).as(description).isEqualTo(expected.extractAll(source, group));
-                }
-            }
-            if (split != null) {
-                assertThat((List<?>) split.invokeExact(source)).as(description).isEqualTo(expected.split(source));
-            }
-            if (replace != null) {
-                for (Slice replacement : replacements) {
-                    assertThat((Slice) replace.invokeExact(source, replacement)).as(description).isEqualTo(expected.replace(source, replacement));
-                }
-            }
-            if (replaceWithCallback != null) {
-                for (Function<List<Slice>, Slice> callback : CALLBACKS) {
-                    assertThat(replaceOutcome(() -> (Slice) replaceWithCallback.invokeExact(source, callback))).as(description).isEqualTo(replaceOutcome(() -> expected.replace(source, callback)));
-                }
-            }
         }
     }
 

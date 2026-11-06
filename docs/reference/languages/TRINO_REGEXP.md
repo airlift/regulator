@@ -355,12 +355,12 @@ pattern matches:
 - `setByteFrequencies` chooses which literal byte an unanchored search scans
   for; it affects speed, not results. See
   [Byte frequencies](../REGULATOR_API.md#byte-frequencies).
-- `setGenerateBytecode` is experimental and compiles an eligible pattern's
-  case-sensitive scan plan into its own hidden class; it affects speed, not
-  results. `usesGeneratedBytecode()` reports whether the pattern has one, and
-  a caller holding a constant pattern can bind an operation's generated code
-  through its `generated*` accessor, such as `generatedContains()`, which is
-  empty when that operation runs elsewhere. See [Trino adapter](../REGULATOR_API.md#trino-adapter) and
+- `setGenerateBytecode` is opt-in, off by default, and compiles an eligible
+  pattern's case-sensitive scan plan into its own hidden class, which declares
+  each operation that runs on the plan; it affects speed, not results.
+  `usesGeneratedBytecode()` reports whether the pattern has one. A caller
+  holding a constant pattern binds the pattern's public operation to it. See
+  [Trino adapter](../REGULATOR_API.md#trino-adapter) and
   [Generated kernels](../../benchmarks/SCAN_PLAN.md#generated-kernels).
 
 Compilation copies the pattern and snapshots the option values.

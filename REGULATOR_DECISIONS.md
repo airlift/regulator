@@ -2373,23 +2373,28 @@ into its own hidden class. The class holds the plan's attempt loop as
 straight-line code, with literals, their lengths, and branch targets as
 constants; a run step passes its run to a copied run scanner that reads the
 run's bounds and members. The class also holds the candidate search of an
-unanchored plan, with its limits as constants, and a static entry for each
-Trino operation. A hot pattern therefore shares neither the interpreter's
-operation dispatch nor its profiles with other plans. Its results, retries, captures, and search
-handoffs are those of the interpreter, which differential tests check
-operation by operation.
+unanchored plan, with its limits as constants, and a public entry for each
+Trino operation that reaches the plan. A hot pattern therefore shares neither
+the interpreter's operation dispatch nor its profiles with other plans. Its
+results, retries, captures, and search handoffs are those of the interpreter,
+which differential tests check operation by operation.
 
-- An eligible pattern compiles to a private `TrinoRegexp` subclass. Each
-  operation keeps the route it has without the option, decided once when the
-  pattern compiles: an operation that would run the case-sensitive plan runs
-  the generated class, and one that would run other Java, such as a retained
-  literal kernel for `contains`, still runs that Java. Short boolean calls that
-  the interpreter hands to the ordinary engine still run the generated class,
-  which has no operation dispatch for that route to avoid.
+- An eligible pattern compiles to its generated class, which extends a
+  package-private non-sealed `TrinoRegexp` subclass, as the RE2 class extends
+  `CompiledScanRe2`, a subclass of its
+  [scan-plan shape](#generated-re2-scan-kernels). Each operation keeps the
+  route it has without the option, fixed when the class is generated: an
+  operation that would run the case-sensitive plan runs the generated class,
+  and one that would run other Java, such as a retained literal kernel for
+  `contains`, still runs that Java. Short boolean calls that the interpreter
+  hands to the ordinary engine still run the generated class, which has no
+  operation dispatch for that route to avoid.
 - A pattern is eligible when it would compile to the base `TrinoRegexp` class
-  with a case-sensitive plan that every operation but `contains` reaches. Any
-  other pattern, including one with an ASCII-folded plan, compiles exactly as
-  it does without the option.
+  with a case-sensitive plan that every operation but `contains` reaches, and
+  cannot match empty, which no pattern with a plan can: each generated match
+  loop resumes its search at the previous match end. Any other pattern,
+  including one with an ASCII-folded plan, compiles exactly as it does without
+  the option.
 - Generation happens once, when the pattern is compiled, never on first match.
   A pattern whose class cannot be generated or defined is silently
   interpreted; generation never makes compilation fail and has no mandatory
@@ -2407,12 +2412,26 @@ operation by operation.
   interpreted patterns. Code outside the scan loops, such as the
   ordinary-engine handoff and result assembly, and trivial accessors stay
   shared.
-- A caller holding a constant pattern can bind an operation's generated entry
-  directly through the `generated*` accessors, each an `Optional` of a
-  `MethodHandle` that is empty when the operation does not reach the plan.
+- The pattern a caller holds is the generated class, and each operation that
+  reaches the plan is the class's own public entry, with the argument checks of
+  the public method. A caller holding a constant pattern binds the public
+  method to the pattern, and the call reaches that pattern's entry directly,
+  with no dispatch, where C2 can inline it. An earlier design kept a private
+  subclass that called the generated class through an interface held in a
+  field; HotSpot does not fold final fields of ordinary classes, so that call
+  shared one profile across patterns, went megamorphic with more than two of
+  them, and never inlined, and public `generated*` accessors returned the
+  entries as method handles to work around it.
+- Per-pattern state an entry reads on its hot path is a class-data constant of
+  the generated class, never a field of the hand-written base, for the same
+  reason. Base fields are read only on cold paths, such as the ordinary-engine
+  handoff, and for the replacement-template cache, which is mutable.
+- Each public entry stays within HotSpot's 325-byte inline size, calling the
+  class's own static attempt and search methods, which may be too large to
+  inline but are direct calls.
 - `TrinoRegexpMatcher` is sealed rather than final, so the matcher of a
-  compiled pattern can run its generated search. Callers still cannot extend
-  it.
+  compiled pattern can run its generated search through a package-private
+  hook of the generated class. Callers still cannot extend it.
 - The class is defined in Regulator's package through a hidden-class lookup,
   so it reaches package-private helpers without widening the public API, and
   becomes unreachable with its pattern.
@@ -2435,8 +2454,9 @@ generator of [Generated Trino Scan Kernels](#generated-trino-scan-kernels),
 under its rules: generation happens once at compilation, a pattern whose class
 cannot be generated or defined is silently interpreted, nothing generated
 loads without the option, generated code calls its own copies of the
-interpreter's helpers, and the class is defined in Regulator's package and is
-not charged to the memory budget. RE2 runs and delimited captures call copies
+interpreter's helpers, per-pattern state on an entry's hot path is class data,
+each public entry stays within HotSpot's inline size, and the class is defined
+in Regulator's package and is not charged to the memory budget. RE2 runs and delimited captures call copies
 of the RE2 run reader and its vector stop scan, and runs of some non-ASCII
 characters also call a copy of their member reader, so a generated plan
 reports what the ordinary engine reports on every input, malformed UTF-8
