@@ -1364,6 +1364,22 @@ the contains search's comparison budget, after which KMP finishes the search.
 Front/back byte selection keeps preprocessing bounded and the integrated scanner
 compact.
 
+Each pass of the vector scan counts the whole vectors left, runs a loop that
+only tests each one for a candidate, and verifies candidates after it breaks, so
+C2 compiles the test loop as an innermost counted loop; on r9g it is unrolled
+four times with one safepoint poll per unrolled block. The earlier scan verified
+inside its vector loop. With JDK 25 the counted loop took 0.50x to 0.60x the
+earlier scan's time for literal rows on r9g, and about 0.8x on r8i and on r9g
+with `-XX:UseSVE=0`; RE2 counting `The` over rebar's sherlock text went from
+1.39x to 0.75x native RE2's time. The larger scan no longer fits C2's 325-byte
+inline limit and runs out of line from Prog; these figures measure the whole
+out-of-line scan, and `TestHotMethodSize` caps its size. The counted loop is
+accepted at 1.13x to 1.16x for Cyrillic sherlock on r8i in all four languages,
+1.03x to 1.05x for RE2's `the-lower` row on r9g, and 1.03x to 1.04x for
+`no-match-uncommon` with the Rust and RE2 front ends on r8i. The likely cause,
+inferred but not measured, is that the dense candidates of Cyrillic text make
+the scan leave and re-enter its test loop at nearly every vector.
+
 ## Candidate Masks on SVE
 
 Several vector scans build a candidate mask from more than one byte compare.
@@ -1398,6 +1414,17 @@ offers, was mixed there: 0.85x for sherlock but 1.09x for 1 KiB `USER` probes.
 So x86 keeps compare and AND, written in line in each scan: the same compare
 and AND moved into a helper that C2 inlined took 1.07x for `aqj` on r8i with
 JDK 25.
+
+The literal prefix scan's counted loop, described under
+[Literal Prefix Vector Scan](#literal-prefix-vector-scan), keeps the platform
+choice. With JDK 25 its XOR form took 1.10x to 1.13x the compare-and-AND form's
+time on r9g with `-XX:UseSVE=0` (`aqj`, `zqj`, sherlock, and
+`no-match-common`) and 1.06x for Cyrillic sherlock on r8i. On r9g the XOR
+difference stays a vector until the scan compares it with zero. A form that
+returned the mask from a helper had that helper left out of line at one of its
+two call sites, boxed a mask on every search, and took 1.62x for `zqj` on r9g
+with JDK 25. A vector returned from a helper left out of line is boxed the same
+way, so the scan's helper keeps a single call site.
 
 The folded prefix scan compares and ANDs on every platform. Its loaded bytes
 are ORed with `0x20` first at letter probes, and the XOR form took 1.06x for

@@ -160,6 +160,20 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
+    /// Caps the literal prefix scan at the size it was measured at. It is larger than
+    /// FreqInlineSize and runs out of line from Prog, a trade-off accepted on measurement;
+    /// growing it further changes code that was measured only at this size. Keep every vector and
+    /// mask inside the method or in helpers C2 inlines at each call site: one returned from a
+    /// helper that C2 left out of line was boxed on every search.
+    @Test
+    public void testPrefixScanStaysWithinMeasuredSize()
+    {
+        assertThat(codeLength(VectorPrefixScanner.class, "find"))
+                .as("VectorPrefixScanner.find bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(469);
+    }
+
     private static int codeLength(Class<?> type, String methodName)
     {
         List<Integer> lengths = codeLengths(type, methodName);
