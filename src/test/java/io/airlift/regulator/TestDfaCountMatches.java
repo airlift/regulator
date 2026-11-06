@@ -928,6 +928,44 @@ public class TestDfaCountMatches
         assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 3 : 0);
     }
 
+    @Test
+    public void testCountsShareByteScanSamplingAcrossCalls()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        Slice source = utf8Slice("abc-123.".repeat(3 * 8_192));
+        Prog program = compile(expression);
+        Dfa.CountByteScanSampling sampling = new Dfa.CountByteScanSampling();
+
+        // Each call stops at its first match end, as a fallback count does when the next literal
+        // is far. Calls that start within 64 KiB of the first sample reuse its outcomes, and the
+        // first call past that span samples again.
+        long count = 0;
+        int position = 0;
+        int checksAfterFirstCall = 0;
+        while (position < source.length()) {
+            int checksBeforeCall = sampling.byteScanCheckCount();
+            long counted = Dfa.countMatches(program, source, position, Prog.MatchKind.FIRST_MATCH, _ -> false, sampling);
+            assertThat(counted).isNotNegative();
+            assertThat(Dfa.countStopCount(counted)).isLessThanOrEqualTo(1);
+            assertThat(Dfa.countStopPosition(counted)).isGreaterThan(position);
+            if (position == 0) {
+                checksAfterFirstCall = sampling.byteScanCheckCount();
+                assertThat(checksAfterFirstCall).isPositive();
+            }
+            else if (position < Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES) {
+                assertThat(sampling.byteScanCheckCount()).as("position=%s", position).isEqualTo(checksAfterFirstCall);
+            }
+            else if (checksBeforeCall == checksAfterFirstCall) {
+                assertThat(sampling.byteScanCheckCount()).as("position=%s", position).isGreaterThan(checksAfterFirstCall);
+            }
+            count += Dfa.countStopCount(counted);
+            position = Dfa.countStopPosition(counted);
+        }
+        assertThat(count)
+                .isEqualTo(trinoMatcherCount(expression, source))
+                .isEqualTo(3 * 8_192);
+    }
+
     private static void assertSelfLoopScanCount(String expression, Slice source, long expected, int expectedScanCount)
     {
         assertSelfLoopScanCount(expression, source, expected, scanCount -> assertThat(scanCount)
