@@ -77,8 +77,17 @@ abstract sealed class CompiledPattern
         DISABLED,
     }
 
-    // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
+    // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk. A
+    // 64-byte input still takes the table here, unlike MINIMUM_LONG_SEARCH_BYTES below: these
+    // full-Slice byte-table routes were measured that way before the shared hand-off existed.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
+    // The length at which a search that has a scalar table route and a vector-skipping route
+    // hands off between them: with fewer bytes left than this it reads the table, and with at
+    // least this many it takes the route whose vector scan skips the bytes no match can start at,
+    // or must stop at. On BenchmarkPatternDispatch's 16- to 64-byte rows the table routes won,
+    // and on its 1024-byte rows each lost to the vector scan it had replaced; each gate names its
+    // own measurement. A vector call's setup costs more than it saves on fewer bytes.
+    static final int MINIMUM_LONG_SEARCH_BYTES = 64;
     // Boolean matches of a plan that allows it run on the ordinary engine up to this input
     // length. The forked OPTIONALS and OPTIONAL_RETRY plans lost to the ordinary engine on every
     // target host on rows of up to 40 bytes, and won on Graviton and broke even on Intel at 64
@@ -648,6 +657,18 @@ abstract sealed class CompiledPattern
         LiteralSetSpanMatcher literalSet = compilerDialect != Compiler.Dialect.TRINO && !longestMatch
                 ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory())
                 : null;
+        // The root's skip only speeds up the set's search, so it yields to the forward DFAs: a
+        // set whose skip would leave the first-match or longest-match DFA too little to
+        // initialize drops it and is admitted as it was before it. The rule applies whether or
+        // not the DFA would initialize beside the set without it, since the skip changes no
+        // result. Prog.leavesDfaMinimum is not enough here: its minimum leaves out the start-byte
+        // tables the constructor builds for a forward program, 272 bytes per DFA for a 256-entry
+        // candidate table, so a skip it admitted could still cost a DFA. A set without the skip
+        // has nothing to drop, so it skips the check, which builds those tables to measure them.
+        if (literalSet instanceof LiteralSetSpanMatcher.RootSkippingMatcher && !(semanticProgram.leavesDfaInitialization(literalSet.estimatedRetainedSize(), Dfa.DfaInstance.Kind.FIRST_MATCH) &&
+                semanticProgram.leavesDfaInitialization(literalSet.estimatedRetainedSize(), Dfa.DfaInstance.Kind.LONGEST_MATCH))) {
+            literalSet = literalSet.withoutRootSkipping();
+        }
         if (literalSet != null && literalSet.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSet.estimatedRetainedSize());
             booleanPlans = booleanPlans.withLiteralSet(literalSet);

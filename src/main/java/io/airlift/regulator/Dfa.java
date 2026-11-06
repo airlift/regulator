@@ -84,7 +84,8 @@ final class Dfa
     private static final int CANDIDATE_NO_MATCH = -1;
     private static final int CANDIDATE_FALLBACK = -2;
     private static final int PREFIX_SCAN = -1;
-    private static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
+    // The scan set of a start byte set that only the nibble tables of [#findByteSet] take.
+    static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
     private static final int START_LITERAL_FILTER_MARKER = Integer.MIN_VALUE + 1;
     // Start byte sets at least this probable in English text stop often enough that checking
     // three bytes of each literal pays. Rarer sets keep their single-byte scanners, which cost
@@ -139,8 +140,6 @@ final class Dfa
     private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
     private static final long COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE = Long.MIN_VALUE + 2;
-    private static final int COUNT_SELF_LOOP_SHORT_SCAN_BYTES = 16;
-    private static final int COUNT_SELF_LOOP_SHORT_SCAN_LIMIT = 4;
     private static final int COUNT_SELF_LOOP_NOT_APPLICABLE_LIMIT = 8;
     // A four-byte UTF-8 character inside a matching loop ends in the loop's unflagged copy, which
     // needs one more byte to return to the matching loop.
@@ -1545,9 +1544,9 @@ final class Dfa
             if ((exitByteSet & SELF_LOOP_EXIT_BYTE_SET_MATCHING) != 0 && exitPosition > position) {
                 lastMatchBoundary = exitPosition - 1;
             }
-            shortScanCount = exitPosition - position < COUNT_SELF_LOOP_SHORT_SCAN_BYTES ? shortScanCount + 1 : 0;
+            shortScanCount = VectorByteSetScanner.shortScanCount(shortScanCount, exitPosition - position);
             position = exitPosition;
-            if (position == contextEnd || shortScanCount == COUNT_SELF_LOOP_SHORT_SCAN_LIMIT) {
+            if (position == contextEnd || shortScanCount == VectorByteSetScanner.SHORT_SCAN_LIMIT) {
                 break;
             }
 
@@ -3564,29 +3563,45 @@ final class Dfa
         if (VectorSupport.isAvailable() && length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
             if (byteScanSet == MIXED_BYTE_SET_MARKER) {
                 dfa.mixedByteSetScanCount++;
-                return VectorByteSetScanner.findNibbleTable(data, offset, length, dfa.startByteNibbleTables);
             }
-            int candidateCount = byteScanSet >>> 24;
-            if (candidateCount > 3) {
+            else if (byteScanSet >>> 24 > 3) {
                 dfa.contiguousRangeScanCount++;
-                return VectorByteSetScanner.findRange(
-                        data,
-                        offset,
-                        length,
-                        byteScanSet & 0xFF,
-                        (byteScanSet >>> 8) & 0xFF);
             }
-            dfa.smallByteSetScanCount++;
-            return VectorByteSetScanner.find(
+            else {
+                dfa.smallByteSetScanCount++;
+            }
+            return findByteSet(data, offset, length, byteScanSet, dfa.startByteNibbleTables);
+        }
+        return findByteCandidate(candidates, data, offset, length);
+    }
+
+    /// Returns the position of the first byte of `data[offset, offset + length)` in the byte set
+    /// that `byteScanSet`, from [#buildStartByteScanSet(byte[])] or [#MIXED_BYTE_SET_MARKER] for
+    /// `nibbleTables`, selects, or `-1`. It runs the set's vector scan: the nibble tables of a
+    /// mixed set, a contiguous range of four to 64 bytes, or two or three bytes. The forward DFA's
+    /// start-byte skip and the literal set's root skip both call it, with the Vector API only.
+    static int findByteSet(byte[] data, int offset, int length, int byteScanSet, byte[] nibbleTables)
+    {
+        if (byteScanSet == MIXED_BYTE_SET_MARKER) {
+            return VectorByteSetScanner.findNibbleTable(data, offset, length, nibbleTables);
+        }
+        int candidateCount = byteScanSet >>> 24;
+        if (candidateCount > 3) {
+            return VectorByteSetScanner.findRange(
                     data,
                     offset,
                     length,
-                    (byte) byteScanSet,
-                    (byte) (byteScanSet >>> 8),
-                    (byte) (byteScanSet >>> 16),
-                    candidateCount);
+                    byteScanSet & 0xFF,
+                    (byteScanSet >>> 8) & 0xFF);
         }
-        return findByteCandidate(candidates, data, offset, length);
+        return VectorByteSetScanner.find(
+                data,
+                offset,
+                length,
+                (byte) byteScanSet,
+                (byte) (byteScanSet >>> 8),
+                (byte) (byteScanSet >>> 16),
+                candidateCount);
     }
 
     private static int findByteCandidate(byte[] candidates, byte[] data, int offset, int length)
@@ -3621,7 +3636,10 @@ final class Dfa
         return candidateCount == 2 || candidateCount == 3 ? smallByteSet | (candidateCount << 24) : 0;
     }
 
-    private static int buildStartByteScanSet(byte[] candidates)
+    /// Returns the scan set of the bytes `candidates` marks for [#findByteSet]: two or three
+    /// bytes, or a contiguous range of four to 64, with the count in the high byte; or `0` for any
+    /// other set, which the nibble tables may take instead.
+    static int buildStartByteScanSet(byte[] candidates)
     {
         int smallByteSet = buildSmallByteSet(candidates);
         if (smallByteSet != 0 || candidates == null) {
