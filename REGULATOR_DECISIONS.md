@@ -893,9 +893,17 @@ When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
 matchers Trino uses. Trino's subtypes call these matchers directly because
 routing through the compiled pattern's dispatch measured about 9% more per
-call on Graviton. The literal-alternation matcher restarts its trie at every
-input byte it does not skip, so it takes only alternatives of at most 64 bytes;
-a longer literal keeps the general engine, whose DFA scans each byte once. The
+call on Graviton. A group-zero `RegexpMatcher.find()` of such a pattern, or of
+a [large literal alternation](#large-literal-alternations), searches the same
+matcher in every language, while Trino's span subtypes iterate theirs directly,
+and reports the leftmost-first span lying entirely in the matcher's region, as
+the general engine does: a region end that cuts `abc` of `abc|x|ab` leaves
+`ab`. Compilation resolves the matcher; a pattern with a single-byte table or
+a class counter finds on that instead.
+
+The literal-alternation matcher restarts its trie at every input byte it does
+not skip, so it takes only alternatives of at most 64 bytes; a longer literal
+keeps the general engine, whose DFA scans each byte once. The
 longest literal among the measured rows is 35 bytes, in rebar's Russian
 Sherlock names. When its literals admit a [start literal
 filter](#start-literal-filter), inputs of at least 64 bytes may skip to the
@@ -1386,10 +1394,12 @@ samples the filter's stops with the DFA's start-scan productivity check. When
 they are dense, as on a log of near misses such as `ERxO` under
 `ERROR|WARN|FATAL`, which the filter passes and the trie rejects, the search
 reads the root table for the next 64 KiB and then samples again; otherwise it
-keeps the filter for those 64 KiB. A count, a Trino matcher's repeated finds,
-and each call of Trino's position, extract-all, split, and replace carry that
-choice from one match to the next, so they sample at most once per 64 KiB
-rather than once per match.
+keeps the filter for those 64 KiB. A count, a matcher's repeated finds in any
+language, and each call of Trino's position, extract-all, split, and replace
+carry that choice from one match to the next, so they sample at most once per
+64 KiB rather than once per match. Each matcher carries the choice in a cursor
+of its own, reset with the matcher, since the compiled pattern and its span
+matcher are shared between threads.
 
 When the first sample of an input finds the stops dense, RE2, Java, and Rust
 boolean find and count do not read the root table: they hand the input to the
@@ -1400,7 +1410,8 @@ DFA within what remains of the budget, which the matcher's size has already
 reduced. Only the first sample hands off: the general engine searches the whole
 input, so a later hand-off would repeat what the matcher has read, and a later
 dense sample keeps the root table. Trino's literal-alternation pattern holds no
-general engine, so it reads the root table on a dense first sample as well.
+general engine, so it reads the root table on a dense first sample as well, and
+so does a matcher's find in every language, which keeps the matcher's route.
 
 This follows the Rust regex crate's packed Teddy prefilter, which the crate
 treats as fast only when every literal has at least three bytes. It is a
@@ -1665,9 +1676,10 @@ NFA, which re-added a root alternation of about 4,000 branches at every byte.
 
 Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
-trie. RE2, Java, and Rust search the automaton for `RegexpMatcher.find()` and,
-when the general engine would otherwise answer, for full-Slice boolean `find`
-and count, as they search the trie of a smaller alternation; `matches`,
+trie. RE2, Java, and Rust search the automaton for a group-zero
+`RegexpMatcher.find()`, within the matcher's region, and, when the general
+engine would otherwise answer, for full-Slice boolean `find` and count, as
+they search the trie of a smaller alternation; `matches`,
 `lookingAt`, anchored, and capture operations keep the program. Trino checks the
 automaton against the forward-DFA budget before compiling a program, while the
 other languages charge it to that budget. The compile applies the same rule in

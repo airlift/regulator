@@ -73,7 +73,9 @@ public class TestLiteralAlternationSpanMatcher
                 "βeta|γamma|alpha",
                 "alpha|βeta|終端",
                 // The first alternative wins over a longer later one at the same start.
-                "xa|b|xab");
+                "xa|b|xab",
+                // A region end that cuts abc leaves the later ab.
+                "abc|x|ab");
         List<Slice> inputs = List.of(
                 utf8Slice(""),
                 utf8Slice("ordinary text"),
@@ -81,6 +83,7 @@ public class TestLiteralAlternationSpanMatcher
                 utf8Slice("xxfar then foo"),
                 utf8Slice("xxβeta終端alpha"),
                 utf8Slice("xab xa b xxab ÿþ"),
+                utf8Slice("abcab xabc"),
                 wrappedBuffer(new byte[] {(byte) 0xFF, 'E', 'R', 'R', 'O', 'R'}),
                 wrappedBuffer("\u00FFFATAL\u00CEWARN\u00CE\u00CE\u00B2eta\u00E7\u00B5ERROR\u00FF\u00FE".getBytes(ISO_8859_1)));
 
@@ -122,6 +125,15 @@ public class TestLiteralAlternationSpanMatcher
                         assertThat(span)
                                 .as("pattern %s input %s start %s", expression, input, start)
                                 .isEqualTo(Dfa.SEARCH_NO_MATCH);
+                    }
+                    // A region search reports the general engine's first match in the region.
+                    for (int end = start; end <= input.length(); end++) {
+                        long expected = matcher.reset(input, start, end).find()
+                                ? ((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL)
+                                : Dfa.SEARCH_NO_MATCH;
+                        assertThat(scanner.findSpan(input, start, end, null))
+                                .as("pattern %s input %s region %s-%s", expression, input, start, end)
+                                .isEqualTo(expected);
                     }
                 }
             }
@@ -266,6 +278,14 @@ public class TestLiteralAlternationSpanMatcher
                             : Dfa.SEARCH_NO_MATCH;
                     assertThat(trinoScanner.findSpan(input, start, input.length()))
                             .as("pattern %s input %s start %s", expression, input.toStringUtf8(), start)
+                            .isEqualTo(expected);
+                    // A region that ends halfway to the input end cuts the matches that cross it.
+                    int end = start + (input.length() - start) / 2;
+                    expected = generalMatcher.reset(input, start, end).find()
+                            ? ((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL)
+                            : Dfa.SEARCH_NO_MATCH;
+                    assertThat(trinoScanner.findSpan(input, start, end))
+                            .as("pattern %s input %s region %s-%s", expression, input.toStringUtf8(), start, end)
                             .isEqualTo(expected);
                 }
             }
@@ -500,6 +520,58 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     @Test
+    public void testMatchersOwnTheirCursors()
+    {
+        // Near misses with an ERROR every 10,007 bytes take the root-table route for 64 KiB, and
+        // log lines of a few KiB take the start literal filter's route, where the Vector API
+        // builds a filter. Two matchers of one compiled pattern interleave their finds over the
+        // two inputs, so a route shared between them would carry the near misses' route end past
+        // the log's end; each matcher's spans are the general engine's. Then the first matcher,
+        // reset onto a shorter input of at least 64 bytes, forgets its route.
+        byte[] nearMisses = nearMisses(4 * RECHECK_BYTES);
+        for (int position = 5_000; position + 5 <= nearMisses.length; position += 10_007) {
+            System.arraycopy("ERROR".getBytes(UTF_8), 0, nearMisses, position, 5);
+        }
+        Slice dense = wrappedBuffer(nearMisses);
+        // Its last match leaves more than 64 bytes, so the search after it chooses a route.
+        Slice log = utf8Slice(logLines(3_500));
+        // The search after its last match has more than 64 bytes left, so it chooses a route.
+        Slice shorter = utf8Slice("WARN " + " ".repeat(90) + "FATAL ERROR" + " ".repeat(80));
+        for (CompiledPattern pattern : re2JavaAndRustPatterns("ERROR|WARN|FATAL").values()) {
+            String expression = pattern.pattern().toStringUtf8();
+            LiteralAlternationSpanMatcher scanner = pattern.literalAlternationSpanMatcherForDiagnostics();
+            assertThat(scanner.usesStartLiteralFilter(log.length())).as(expression).isEqualTo(VectorSupport.isAvailable());
+            RegexpMatcher denseMatcher = pattern.matcher(dense, 0);
+            RegexpMatcher logMatcher = pattern.matcher(log, 0);
+            assertThat(denseMatcher.spanSearchForDiagnostics()).as(expression).isSameAs(scanner);
+            List<String> expectedDense = findSpans(pattern.genericGroupZeroMatcherForDiagnostics(dense));
+            List<String> expectedLog = findSpans(pattern.genericGroupZeroMatcherForDiagnostics(log));
+            assertThat(expectedDense).as(expression).hasSizeGreaterThan(20);
+            assertThat(expectedLog).as(expression).hasSizeGreaterThan(2);
+            List<String> denseSpans = new ArrayList<>();
+            List<String> logSpans = new ArrayList<>();
+            boolean denseFound = true;
+            boolean logFound = true;
+            while (denseFound || logFound) {
+                denseFound = denseFound && denseMatcher.find();
+                if (denseFound) {
+                    denseSpans.add(denseMatcher.start() + "-" + denseMatcher.end());
+                }
+                logFound = logFound && logMatcher.find();
+                if (logFound) {
+                    logSpans.add(logMatcher.start() + "-" + logMatcher.end());
+                }
+            }
+            assertThat(denseSpans).as(expression).isEqualTo(expectedDense);
+            assertThat(logSpans).as(expression).isEqualTo(expectedLog);
+
+            denseMatcher.reset(dense);
+            assertThat(denseMatcher.find()).as(expression).isTrue();
+            assertThat(findSpans(denseMatcher.reset(shorter))).as(expression).containsExactly("0-4", "95-100", "101-106");
+        }
+    }
+
+    @Test
     public void testLogSamplesOncePerRecheck()
     {
         // Log lines with an occasional WARN or ERROR keep the filter. A count and a Trino
@@ -707,11 +779,11 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(pattern.find(input)).as(expression).isTrue();
         long count = pattern.count(input);
         RegexpMatcher matcher = pattern.matcher(input);
-        assertThat(matcher.literalSetEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.spanSearchForDiagnostics()).isSameAs(pattern.literalSetSpanMatcher());
         assertThat(matcher.find()).isTrue();
         assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(expression).isNull();
         assertThat(count).as(expression).isEqualTo(generalEngineCount(pattern, input));
-        assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).literalSetEnabledForDiagnostics()).isFalse();
+        assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).isNull();
         assertFindAgreement(pattern, input);
     }
 

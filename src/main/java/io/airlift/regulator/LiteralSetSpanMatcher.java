@@ -45,6 +45,7 @@ import static java.util.Objects.requireNonNull;
 /// a state's edges are contiguous and edge `e` leads to state `e + 1`. The root keeps a dense
 /// 256-entry row whose missing bytes stay at the root.
 final class LiteralSetSpanMatcher
+        implements GroupZeroSpanSearch
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSetSpanMatcher.class);
     private static final int ROOT = 0;

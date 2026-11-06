@@ -23,6 +23,7 @@ import java.util.List;
 import static java.util.Objects.requireNonNull;
 
 final class FixedWidthByteSpanMatcher
+        implements GroupZeroSpanSearch
 {
     private static final int MAXIMUM_WIDTH = 64;
     private static final int MAXIMUM_ANALYSIS_DEPTH = 256;
@@ -210,6 +211,8 @@ final class FixedWidthByteSpanMatcher
         return count;
     }
 
+    /// Returns the span of the first match at or after `start` in `input`, or
+    /// [Dfa#SEARCH_NO_MATCH].
     long findSpan(Slice input, int start)
     {
         requireNonNull(input, "input is null");
@@ -234,6 +237,16 @@ final class FixedWidthByteSpanMatcher
             candidatePosition = found + 1;
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// Returns the span of the first match lying entirely in `[start, end)` of `input`, or
+    /// [Dfa#SEARCH_NO_MATCH]; the caller checks that `0 <= start <= end <= input.length()`. A
+    /// region that ends before the input searches a view of the input that ends with it, so the
+    /// candidate byte's search stops at the region end; a full-input region searches the input
+    /// itself.
+    long findSpan(Slice input, int start, int end)
+    {
+        return findSpan(end == input.length() ? input : input.slice(0, end), start);
     }
 
     private boolean matches(Slice input, int start)

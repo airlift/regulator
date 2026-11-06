@@ -188,7 +188,8 @@ public class TestBenchmarkPatternDispatch
     }
 
     /// Requires `compiled` to take the full-Slice `find` route that `target` names, and its
-    /// benchmark matcher `matcher` the matcher route LITERAL_SET or SINGLE_BYTE names.
+    /// benchmark matcher `matcher` the matcher route that LITERAL_ALTERNATION, LITERAL_SET,
+    /// FIXED_WIDTH, or SINGLE_BYTE names.
     private static void assertRoute(String target, CompiledPattern compiled, RegexpMatcher matcher, String description)
     {
         Shape expected = switch (target) {
@@ -228,9 +229,17 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isTrue();
                 assertThat(matcher.singleByteMatcherEnabledForDiagnostics()).as(description).isTrue();
             }
+            case "LITERAL_ALTERNATION" -> {
+                assertThat(compiled.literalAlternationSpanMatcherForDiagnostics()).as(description).isNotNull();
+                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.literalAlternationSpanMatcherForDiagnostics());
+            }
             case "LITERAL_SET" -> {
                 assertThat(compiled.literalSetSpanMatcher()).as(description).isNotNull();
-                assertThat(matcher.literalSetEnabledForDiagnostics()).as(description).isTrue();
+                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.literalSetSpanMatcher());
+            }
+            case "FIXED_WIDTH" -> {
+                assertThat(compiled.hasRetainedFixedWidthByteSpanMatcher()).as(description).isTrue();
+                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createFixedWidthByteSpanMatcher());
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);

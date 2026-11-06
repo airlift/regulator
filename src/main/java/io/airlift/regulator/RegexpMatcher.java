@@ -40,9 +40,9 @@ public final class RegexpMatcher
     // The pattern's single-byte table, which a group-zero find runs in place of the program. See
     // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
-    // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
-    // of the program. See CompiledPattern.literalSetSpanMatcher.
-    private final LiteralSetSpanMatcher literalSet;
+    // The pattern's literal-alternation, literal-set, or fixed-width span search, which find()
+    // runs in place of the program. See CompiledPattern.groupZeroSpanSearch.
+    private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
     private final Dfa.CandidateStartCursor candidateStartCursor;
     private final boolean enableGroupZeroForwardCursor;
@@ -81,6 +81,10 @@ public final class RegexpMatcher
     // already counted toward the streak.
     private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
+    // The route a literal-alternation span search carries between finds of the current region,
+    // created on the first such find and reset with the search state. Each matcher owns its own,
+    // since the shared span search holds no search state.
+    private LiteralAlternationSpanMatcher.Cursor literalAlternationCursor;
 
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
@@ -93,7 +97,7 @@ public final class RegexpMatcher
     }
 
     /// `enableSpecializedGroupZeroRoutes` false turns off the group-zero forward cursor, the class
-    /// counter, and the literal set search of [#find()], for comparisons.
+    /// counter, and the span search of [#find()], for comparisons.
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
@@ -102,9 +106,10 @@ public final class RegexpMatcher
         this.namedCapturingGroups = retainedNamedCapturingGroups(pattern, capturingGroupCount);
         this.latin1 = (pattern.flags() & Regexp.LATIN1) != 0;
         this.singleByteMatcher = capturingGroupCount == 0 ? singleByteMatcher : null;
-        this.literalSet = enableSpecializedGroupZeroRoutes && this.singleByteMatcher == null ? pattern.literalSetSpanMatcher() : null;
+        // Compilation leaves no span search beside a single-byte table or a class counter.
+        this.spanSearch = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.groupZeroSpanSearch() : null;
         this.characterClassCounter = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
-        this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && this.literalSet == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
+        this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && spanSearch == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 this.singleByteMatcher == null &&
                 characterClassCounter == null &&
@@ -180,6 +185,10 @@ public final class RegexpMatcher
         else {
             groupZeroForwardCursorInitialized = false;
         }
+        // A route end carried past a new input's or region's end would read outside it.
+        if (literalAlternationCursor != null) {
+            literalAlternationCursor.reset();
+        }
         nextFindStart = 0;
         retryStart = 0;
         previousMatchEnd = -1;
@@ -198,8 +207,8 @@ public final class RegexpMatcher
         if (startAnchoredScanPlan != null) {
             return findWithStartAnchoredScanPlan();
         }
-        if (literalSet != null) {
-            return findLiteralSet();
+        if (spanSearch != null) {
+            return findSpanSearch();
         }
         if (rustSearch) {
             return findRust();
@@ -207,12 +216,27 @@ public final class RegexpMatcher
         return findGeneral();
     }
 
-    /// The literals match no empty string and read no context outside the region, so every
-    /// language's search, a Rust one over a partial region included, is the automaton's search
-    /// of the rest of the region.
-    private boolean findLiteralSet()
+    /// A span search's patterns have no assertions, match no empty string, and read no context
+    /// outside the region, so every language's search, a Rust one over a partial region included,
+    /// is the span search of the rest of the region. No Java `$` reads a CR before the region.
+    ///
+    /// The search is dispatched on its final class rather than through an interface method: each
+    /// instanceof test is one class compare, and each of the three calls binds statically to one
+    /// class, so each call site stays monomorphic and inlinable whatever mix of patterns the
+    /// process runs, where one interface call site would turn megamorphic once it saw all three.
+    private boolean findSpanSearch()
     {
-        long span = literalSet.findSpan(input, regionStart + nextFindStart, regionEnd);
+        int start = regionStart + nextFindStart;
+        long span;
+        if (spanSearch instanceof LiteralAlternationSpanMatcher literalAlternation) {
+            span = literalAlternation.findSpan(input, start, regionEnd, literalAlternationCursor());
+        }
+        else if (spanSearch instanceof LiteralSetSpanMatcher literalSet) {
+            span = literalSet.findSpan(input, start, regionEnd);
+        }
+        else {
+            span = ((FixedWidthByteSpanMatcher) spanSearch).findSpan(input, start, regionEnd);
+        }
         if (span < 0) {
             return failFind();
         }
@@ -692,6 +716,14 @@ public final class RegexpMatcher
         return bitStateWorkspace;
     }
 
+    private LiteralAlternationSpanMatcher.Cursor literalAlternationCursor()
+    {
+        if (literalAlternationCursor == null) {
+            literalAlternationCursor = new LiteralAlternationSpanMatcher.Cursor();
+        }
+        return literalAlternationCursor;
+    }
+
     Nfa.Workspace nfaWorkspace()
     {
         if (nfaWorkspace == null) {
@@ -755,9 +787,9 @@ public final class RegexpMatcher
         return startAnchoredScanPlan != null;
     }
 
-    boolean literalSetEnabledForDiagnostics()
+    GroupZeroSpanSearch spanSearchForDiagnostics()
     {
-        return literalSet != null;
+        return spanSearch;
     }
 
     boolean singleByteMatcherEnabledForDiagnostics()

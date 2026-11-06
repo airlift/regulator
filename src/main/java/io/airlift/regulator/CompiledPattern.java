@@ -1086,12 +1086,34 @@ abstract sealed class CompiledPattern
         return booleanPlans.literalAlternationMatcher();
     }
 
-    /// Returns the matcher that [RegexpMatcher#find()] searches for an alternation of more than
+    /// Returns the automaton of an alternation of more than
     /// [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`. Full-Slice
-    /// find and count search it too where the general engine would otherwise answer them.
+    /// find and count search it where the general engine would otherwise answer them, and
+    /// [RegexpMatcher#find()] through [#groupZeroSpanSearch()].
     LiteralSetSpanMatcher literalSetSpanMatcher()
     {
         return booleanPlans.literalSet();
+    }
+
+    /// Returns the span search that a group-zero [RegexpMatcher#find()] runs in place of the
+    /// program, or `null`: the pattern's literal-alternation matcher, literal set, or
+    /// fixed-width matcher, in that order, the same one full-Slice find and count search. It
+    /// reads only what compilation fixed, so a pattern stores no route of its own, and a pattern
+    /// with a single-byte table or a class counter, which answer the find themselves, has none.
+    /// The span search is immutable and shared; a matcher keeps any search state it carries
+    /// between finds.
+    GroupZeroSpanSearch groupZeroSpanSearch()
+    {
+        if (singleByteMatcher != null || matcherClassCounter != null || usesCompactBoundedCharacterClassForDiagnostics()) {
+            return null;
+        }
+        if (booleanPlans.literalAlternationMatcher() != null) {
+            return booleanPlans.literalAlternationMatcher();
+        }
+        if (booleanPlans.literalSet() != null) {
+            return booleanPlans.literalSet();
+        }
+        return booleanPlans.fixedWidthByteMatcher();
     }
 
     boolean hasExactLiteralSpan()

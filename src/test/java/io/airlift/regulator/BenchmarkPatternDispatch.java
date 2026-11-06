@@ -53,9 +53,9 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// one target per common route of full-Slice `find` without a plan: EXACT_LITERAL searches for an
 /// exact literal; CONTAINS for a literal between optional gaps; CHARACTER_CLASS runs a class repeat
 /// on the class counter; LITERAL_ALTERNATION runs a small literal alternation on the
-/// literal-alternation span matcher; GENERAL has no plan and no literal or class shortcut, so it
-/// runs the ordinary DFA search; FIXED_WIDTH runs a fixed-width class sequence on the fixed-width
-/// byte span matcher; BYTE_TABLE runs a one-byte member run on the single-byte table for SHORT rows
+/// literal-alternation span matcher, as a matcher's `find` does; GENERAL has no plan and no
+/// literal or class shortcut, so it runs the ordinary DFA search; FIXED_WIDTH runs a fixed-width
+/// class sequence on the fixed-width byte span matcher, as a matcher's `find` does; BYTE_TABLE runs a one-byte member run on the single-byte table for SHORT rows
 /// in RE2 and Java, and on the ordinary search for LONG rows and in Rust, whose `\s` is Unicode;
 /// and ANCHORED_LITERAL compares a literal prefix. FOLDED_PLAN is an ASCII-folded scan plan, which
 /// has no generated class. FOLDED_PAIR_SEQUENCE is a control: a class sequence whose first class

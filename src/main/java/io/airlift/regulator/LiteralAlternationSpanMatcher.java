@@ -32,6 +32,7 @@ import static java.util.Objects.requireNonNull;
 /// which serves short Trino patterns. [LiteralSetSpanMatcher] searches a larger alternation,
 /// whose literals this class's analysis also extracts.
 final class LiteralAlternationSpanMatcher
+        implements GroupZeroSpanSearch
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.class);
     static final int MAXIMUM_ALTERNATIVES = 64;
@@ -422,33 +423,46 @@ final class LiteralAlternationSpanMatcher
 
     long findSpan(Slice input, int start)
     {
-        return findSpan(input, start, null, false);
+        return findSpan(input, start, input.length(), null, false);
     }
 
     /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH]. A
     /// `cursor`, which may be null, carries the route from one search of `input` to the next.
     long findSpan(Slice input, int start, Cursor cursor)
     {
-        return findSpan(input, start, cursor, false);
+        return findSpan(input, start, input.length(), cursor, false);
+    }
+
+    /// Returns the span of the first match lying entirely in `[start, end)` of `input`, or
+    /// [Dfa#SEARCH_NO_MATCH]; the caller checks that `0 <= start <= end <= input.length()`. The
+    /// trie walk stops at `end`, so where a preferred alternative would run past it, a shorter
+    /// one that ends within it matches, as the general engine reports for the region: `ab` of
+    /// `abc|x|ab` in a region ending after `ab`. A `cursor`, which may be null, carries the route
+    /// from one search of the region to the next.
+    long findSpan(Slice input, int start, int end, Cursor cursor)
+    {
+        return findSpan(input, start, end, cursor, false);
     }
 
     /// Returns [#findSpan(Slice,int,Cursor)] from the start of `input` without a cursor, or
     /// [#DECLINED] when the filter's stops are dense at the start.
     long findSpanOrDecline(Slice input)
     {
-        return findSpan(input, 0, null, true);
+        return findSpan(input, 0, input.length(), null, true);
     }
 
-    private long findSpan(Slice input, int start, Cursor cursor, boolean declinesDenseStart)
+    // The search reads nothing at or past `end`: the routes, the filter's scan, and the trie walk
+    // all stop at it, as they stop at the input end of a full-input search.
+    private long findSpan(Slice input, int start, int end, Cursor cursor, boolean declinesDenseStart)
     {
         requireNonNull(input, "input is null");
-        if (start < 0 || start > input.length()) {
+        if (start < 0 || start > end) {
             return Dfa.SEARCH_NO_MATCH;
         }
 
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
-        int inputEnd = inputOffset + input.length();
+        int inputEnd = inputOffset + end;
         int firstPosition = inputOffset + start;
         // With fewer than MINIMUM_START_LITERAL_FILTER_BYTES left, every route reads the root table
         // to the input end: the filter loop needs that many bytes left, the productivity sample and
@@ -680,8 +694,10 @@ final class LiteralAlternationSpanMatcher
     /// The route one search of an input chose and the position it holds to, which a matcher's
     /// next search of the same input continues instead of sampling the filter again, as the
     /// DFA's group-zero cursor keeps its scan rejection. Positions are relative to the input.
-    /// A new cursor is reset; a caller must [#reset()] it before searching a different input,
-    /// since a route end carried past that input's end would read outside it.
+    /// A new cursor is reset; a caller must [#reset()] it before searching a different input or
+    /// region, since a route end carried past that input's or region's end would read outside
+    /// it. The cursor is mutable, so each matcher owns its own, and the shared span matcher holds
+    /// none.
     static final class Cursor
     {
         private int routeEnd;
