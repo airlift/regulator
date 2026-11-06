@@ -3151,6 +3151,7 @@ final class Prog
         markSuccessors(rootIdsByInstruction, predecessorLists, reachable, stack);
         int successorRootCount = rootIdsByInstruction.size();
         // Second pass: mark dominator roots.
+        long dominatorEdgesScanned = 0;
         if (!skipDominatorPass) {
             int[] sortedRootInstructionIds = new int[rootIdsByInstruction.size()];
             for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
@@ -3160,7 +3161,8 @@ final class Prog
             for (int rootIndex = sortedRootInstructionIds.length - 1; rootIndex > 0; rootIndex--) {
                 int id = sortedRootInstructionIds[rootIndex];
                 if (id != startUnanchored() && id != start()) {
-                    markDominator(id, rootIdsByInstruction, predecessorLists, reachable, stack);
+                    dominatorEdgesScanned += markDominator(
+                            id, rootIdsByInstruction, predecessorLists, reachable, stack);
                 }
             }
         }
@@ -3241,12 +3243,14 @@ final class Prog
         }
         return new FlattenStructure(
                 successorRootCount,
-                finalRootCount);
+                finalRootCount,
+                dominatorEdgesScanned);
     }
 
     record FlattenStructure(
             int successorRootCount,
-            int finalRootCount) {}
+            int finalRootCount,
+            long dominatorEdgesScanned) {}
 
     // The base action encoding remains compatible with RE2's onepass.cc layout.
     private static final int ONEPASS_INDEX_SHIFT = 16; // bits below next-state index
@@ -3760,7 +3764,8 @@ final class Prog
         }
     }
 
-    private void markDominator(
+    /// Returns the number of predecessor edges scanned, which [#flattenForTesting()] reports.
+    private int markDominator(
             int rootInstructionId,
             SparseIntArray rootIdsByInstruction,
             PredecessorLists predecessorLists,
@@ -3800,19 +3805,27 @@ final class Prog
             }
         }
 
+        int predecessorEdges = 0;
         for (int reachableIndex = 0; reachableIndex < reachable.size(); reachableIndex++) {
             int id = reachable.denseAt(reachableIndex);
+            if (rootIdsByInstruction.hasIndex(id)) {
+                // id is already a "root", so its predecessors cannot change anything.
+                // Rescanning a shared root with many predecessors from every tree that reaches it
+                // is quadratic.
+                continue;
+            }
             for (int edge = predecessorLists.firstEdge(id); edge >= 0; edge = predecessorLists.nextEdge(edge)) {
+                predecessorEdges++;
                 int predecessorInstructionId = predecessorLists.predecessorInstructionId(edge);
                 if (!reachable.contains(predecessorInstructionId)) {
                     // id has a predecessor that cannot be reached from root!
                     // Therefore, id must be a "root" too - mark it as such.
-                    if (!rootIdsByInstruction.hasIndex(id)) {
-                        rootIdsByInstruction.setNew(id, rootIdsByInstruction.size());
-                    }
+                    rootIdsByInstruction.setNew(id, rootIdsByInstruction.size());
+                    break;
                 }
             }
         }
+        return predecessorEdges;
     }
 
     private void emitList(
