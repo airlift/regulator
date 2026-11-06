@@ -901,6 +901,25 @@ the general engine does: a region end that cuts `abc` of `abc|x|ab` leaves
 `ab`. Compilation resolves the matcher; a pattern with a single-byte table or
 a class counter finds on that instead.
 
+The count of a `.*literal.*` pattern whose dots match any character but a line
+feed, and a group-zero `RegexpMatcher.find()` of it within the matcher's
+region, run the dot-star literal matcher in RE2, Java, and Rust, as Trino's
+dot-star subtype does for its span operations: the literal's first occurrence,
+found with the pattern's contains search, widened over the characters the dots
+match on each side. The dots read characters as the compiled byte ranges of
+`[^\n]` do, which depend only on the pattern's encoding, so compilation picks a
+table of character widths and the walk has no language branch. In UTF-8 the
+class holds all of U+0080 through U+10FFFF, whose byte ranges accept overlong
+three- and four-byte forms, encoded surrogates, and values above U+10FFFF, and
+reject bare continuation bytes, C0, C1, F5–FF, and cut-short sequences; RE2's
+Latin-1 option and Rust's bytes API with `(?-u)` read each byte as a character.
+Java's default dot also stops at `\r`, U+0085, U+2028, and U+2029, and Rust's
+Unicode dot in bytes mode at the surrogates, so the analysis takes neither for
+such a pattern; Java's `(?d)` dot is `[^\n]` and takes the matcher. Trino's
+dot-star spans previously ended at any byte sequence that is not well-formed
+UTF-8; they now read malformed input as Trino's ordinary engine does, which its
+garbage-in, garbage-out contract leaves unspecified either way.
+
 The literal-alternation matcher restarts its trie at every input byte it does
 not skip, so it takes only alternatives of at most 64 bytes; a longer literal
 keeps the general engine, whose DFA scans each byte once. The

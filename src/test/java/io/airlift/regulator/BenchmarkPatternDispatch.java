@@ -68,8 +68,9 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// span matcher, which RE2, Java, and Rust search with the literal set's automaton for full-Slice
 /// `find` and `count` and a matcher's `find`. SINGLE_BYTE is the one-byte exact literal `,`, which
 /// the single-byte table supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line
-/// feed, unlike CONTAINS's `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose
-/// dot stops at more line terminators, runs the ordinary search. TestBenchmarkPatternDispatch
+/// feed, unlike CONTAINS's `(?s)`; RE2 and Rust search it as a contained literal and count and
+/// iterate its spans on the dot-star literal matcher, while Java, whose dot stops at more line
+/// terminators, runs the ordinary search. TestBenchmarkPatternDispatch
 /// checks each route in RE2, Java, and Rust, but not Trino's. SHORT rows are 16 to 64 bytes and
 /// LONG rows 1024 bytes, padded in the host run of the anchored URL pattern, after the text of
 /// ANCHORED_LITERAL, whose search reads only its start, and before the text of the others. LONG
