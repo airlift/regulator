@@ -369,6 +369,22 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testTerminalFinalLineDollarCandidateSearchEligibility()
+    {
+        assertThat(TrinoRegexp.compile(utf8Slice("([a-z]+)$")).re2().hasLoweredCandidateSearch()).isTrue();
+
+        // A start-anchored pattern, such as the Unicode character data line benchmark, matches only
+        // at the search start, so no find moves the start to a candidate, also when the program
+        // has the anchoring literal stripped as a required prefix.
+        String fields = "([A-Z0-9]+);([^;]+);([^;]+);([0-9]+);([^;]+);([^;]*);([0-9]*);([0-9]*);([-0-9/]*);([YN]);([^;]*);([^;]*);([^;]*);([^;]*);([^;]*)$";
+        for (String pattern : List.of("^" + fields, "^U\\+" + fields)) {
+            TrinoCompiledPattern compiled = TrinoRegexp.compile(utf8Slice(pattern)).re2();
+            assertThat(compiled.booleanProgramForDiagnostics()).as(pattern).isNotNull();
+            assertThat(compiled.hasLoweredCandidateSearch()).as(pattern).isFalse();
+        }
+    }
+
+    @Test
     public void testLoweredProgramMemoryFallback()
     {
         Slice patternSlice = utf8Slice("(?:a+?){2,}$");

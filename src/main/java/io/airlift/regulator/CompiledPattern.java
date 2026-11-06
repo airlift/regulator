@@ -2020,7 +2020,13 @@ abstract sealed class CompiledPattern
 
     boolean hasLoweredCandidateSearch()
     {
-        return booleanPlans.loweredProgram() != null;
+        // For an unanchored pattern, the candidate start narrows the window BitState scans to at
+        // most LOWERED_CANDIDATE_SEARCH_BYTES before the end. A start-anchored pattern, including
+        // one whose anchoring literal was stripped as a required prefix, matches only at the
+        // search start, so a candidate start never narrows its search.
+        return booleanPlans.loweredProgram() != null &&
+                requiredPrefix == null &&
+                !partialProg.anchorStart();
     }
 
     boolean hasDirectLoweredGroupZeroSearch()
