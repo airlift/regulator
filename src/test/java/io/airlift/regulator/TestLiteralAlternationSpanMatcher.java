@@ -494,8 +494,8 @@ public class TestLiteralAlternationSpanMatcher
 
         // The root's skip never costs a forward DFA. Under the least budget at which a forward
         // DFA initializes beside the set without it, it still does. The longest-match compile
-        // charges no set, so its program's DFA memory, less the set without its skip, is what
-        // the DFA has beside that set.
+        // charges no set, so its program's DFA memory, with its required bytes' charge added
+        // back, less the set without its skip, is what the DFA has beside that set.
         String fiveLeadingByteDictionary = IntStream.range(0, 70)
                 .mapToObj(index -> "pqrst".charAt(index % 5) + Integer.toString(index, 3) + (index % 2 == 0 ? "q" : ""))
                 .collect(Collectors.joining("|"));
@@ -508,8 +508,10 @@ public class TestLiteralAlternationSpanMatcher
         for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
             // A forward DFA's budget is half the program's DFA memory.
             long dfaMemory = 2 * leastValue(1, budget -> new Dfa.DfaInstance(program, kind, budget).ok());
-            long edgeMemory = leastValue(dfaMemory, budget -> Re2.compile(utf8Slice(fiveLeadingByteDictionary), Re2.Options.defaults().setMaxMemory(budget).setLongestMatch(true))
-                    .forwardProgramForDiagnostics().dfaMemory() - tablelessSetSize >= dfaMemory);
+            long edgeMemory = leastValue(dfaMemory, budget -> {
+                Re2 longest = Re2.compile(utf8Slice(fiveLeadingByteDictionary), Re2.Options.defaults().setMaxMemory(budget).setLongestMatch(true));
+                return longest.forwardProgramForDiagnostics().dfaMemory() + longest.requiredBytesRetainedSizeForDiagnostics() - tablelessSetSize >= dfaMemory;
+            });
             for (long budget : List.of(edgeMemory - 1, edgeMemory)) {
                 Re2 pattern = Re2.compile(utf8Slice(fiveLeadingByteDictionary), Re2.Options.defaults().setMaxMemory(budget));
                 assertThat(pattern.literalSetSpanMatcher()).as("%s at %s", kind, budget).isNotNull();

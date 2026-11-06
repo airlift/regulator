@@ -310,22 +310,60 @@ public class TestDfaCandidateStartCursor
     {
         // The cursor serves only first-match searches, so a longest-match compile keeps no literal,
         // and its forward DFA allowance is the first-match compile's before the literal's charge.
-        // The literal is kept only where that charge leaves both forward DFAs their minimum.
+        // The literal is kept only where that charge leaves both forward DFAs their minimum. The
+        // required bytes are reserved after it, and only where each forward DFA that initializes
+        // without them still does, so the sweep passes budgets that keep them and budgets that
+        // drop them.
         Slice expression = utf8("(?m)^ab|ab$");
         Re2 pattern = Re2.compile(expression);
         Prog program = pattern.forwardProgramForDiagnostics();
         long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
+        long requiredBytesSize = pattern.requiredBytesRetainedSizeForDiagnostics();
         assertThat(pattern.booleanProgramForDiagnostics()).isNull();
+        assertThat(requiredBytesSize).isPositive();
         List<Boolean> outcomes = new ArrayList<>();
+        List<Boolean> requiredBytesOutcomes = new ArrayList<>();
         for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
-            Prog longest = Re2.compile(expression, Re2.Options.defaults().setLongestMatch(true).setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
-            Prog firstMatch = Re2.compile(expression, Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
-            boolean keeps = (longest.dfaMemory() - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(longest, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            Re2 longestPattern = Re2.compile(expression, Re2.Options.defaults().setLongestMatch(true).setMaxMemory(maxMemory));
+            Prog longest = longestPattern.forwardProgramForDiagnostics();
+            Re2 firstMatchPattern = Re2.compile(expression, Re2.Options.defaults().setMaxMemory(maxMemory));
+            Prog firstMatch = firstMatchPattern.forwardProgramForDiagnostics();
+            long allowance = longest.dfaMemory() + longestPattern.requiredBytesRetainedSizeForDiagnostics();
+            boolean keeps = (allowance - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(longest, Dfa.DfaInstance.Kind.LONGEST_MATCH);
             assertThat(firstMatch.transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
-            assertThat(longest.dfaMemory() - firstMatch.dfaMemory()).as("reservation at %s", maxMemory).isEqualTo(keeps ? reservation : 0);
+            assertThat(allowance - firstMatch.dfaMemory() - firstMatchPattern.requiredBytesRetainedSizeForDiagnostics())
+                    .as("reservation at %s", maxMemory)
+                    .isEqualTo(keeps ? reservation : 0);
+            requiredBytesOutcomes.add(assertRequiredBytesKeepDfaInitialization(longestPattern, requiredBytesSize, "longest-match at " + maxMemory));
+            requiredBytesOutcomes.add(assertRequiredBytesKeepDfaInitialization(firstMatchPattern, requiredBytesSize, "first-match at " + maxMemory));
             outcomes.add(keeps);
         }
         assertThat(outcomes).contains(false, true);
+        assertThat(requiredBytesOutcomes).contains(false, true);
+    }
+
+    // Asserts that the pattern keeps its required bytes exactly where reserving
+    // `requiredBytesSize` from the allowance it had before their charge leaves each forward DFA
+    // that initialized able to, and that each such DFA initializes with what every charge leaves.
+    // Returns whether the pattern keeps them.
+    private static boolean assertRequiredBytesKeepDfaInitialization(Re2 pattern, long requiredBytesSize, String description)
+    {
+        Prog program = pattern.forwardProgramForDiagnostics();
+        long allowance = program.dfaMemory() + pattern.requiredBytesRetainedSizeForDiagnostics();
+        boolean keeps = true;
+        for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+            if (initializes(program, kind, allowance / 2)) {
+                assertThat(program.getCachedDfa(kind)).as("%s %s", kind, description).isNotNull();
+                keeps &= initializes(program, kind, (allowance - requiredBytesSize) / 2);
+            }
+        }
+        assertThat(pattern.requiredBytesForDiagnostics() != null).as("required bytes %s", description).isEqualTo(keeps);
+        return keeps;
+    }
+
+    private static boolean initializes(Prog program, Dfa.DfaInstance.Kind kind, long maxMemory)
+    {
+        return maxMemory > 0 && new Dfa.DfaInstance(program, kind, maxMemory).ok();
     }
 
     private static void assertLiteralCandidateAgrees(String expression, Slice input)

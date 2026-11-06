@@ -690,6 +690,9 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - A direct BitState capture search also stays within the forward share:
   compilation lowers the program's BitState text limit until the search fits.
   See [Bounded Direct BitState Capture](#bounded-direct-bitstate-capture).
+- An optional plan or fact, which only saves work, reserves memory only when the
+  allowance covers it; otherwise the pattern compiles without it, with the same
+  results, and never throws.
 
 `maxMemory` is a planning budget, not an eager allocation or a byte-exact JVM
 heap limit. The default is demand-driven, so simple patterns retain only the
@@ -1157,11 +1160,12 @@ short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
 another's branch profile. Only a pattern that cannot match empty takes a shape
 other than the engine. With compressed references, the `Re2` layout is 104
-bytes, including one reference each for the shared single-byte table and the
-[matcher counter](#bounded-character-class-counting), and the base pattern's
-per-pattern ordinary-engine flags. The scan-plan shape's three facts fit in its
-padding, so its layout is also 104 bytes. A pattern with a scan plan
-takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
+bytes, including references to the shared single-byte table, the
+[matcher counter](#bounded-character-class-counting), and the
+[required bytes](#short-window-required-bytes-reject), plus the base pattern's
+per-pattern ordinary-engine flags. The scan-plan shape's three facts do not fit
+in the base pattern's padding, so its layout is 112 bytes. A pattern with a
+scan plan takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
 prefix, equality, and final-line equality kernels, and its `matches` and
 `lookingAt` keep their literal kernels, which answer without reading past the
 literal. Its other boolean calls run the plan, apart from the short-input and
@@ -1315,6 +1319,112 @@ fork, and on r8i, which keeps that form, 0.70x the inlined scan's time. On
 r9g's XOR form, the row takes 17.6 us in all four languages. A form that kept
 the earlier loop and moved its scalar tail into the method only to keep it out
 of line ran at 42 us on r9g.
+
+## Short-Window Required Bytes Reject
+
+A line-by-line search whose pattern needs a rare literal or byte, such as
+ruff's `# noqa` comment pattern or an alternation of URIs and email addresses,
+ran the inner literal search or the forward DFA over every line, although only
+the few lines that hold that literal or byte can match. Each compiled pattern
+therefore keeps at most one fact about the bytes every match holds, and a
+search window shorter than 256 bytes that lacks them reports no match before
+any engine runs.
+
+The fact takes one of two shapes:
+
+- A literal of at least two bytes that every match consumes. It starts at the
+  first element of the normalized top-level concatenation, groups looked
+  through as for the inner literal search, where one begins: an ASCII literal
+  element, or a run of ASCII literal and case-pair elements whose exact bytes
+  before its first case-insensitive letter number at least two.
+  Case-insensitive letters compare through a mask. A literal that starts with a
+  case-insensitive letter, as in `\s+(?i:noqa)`, is not used; whether its
+  masked scan repays itself is unmeasured.
+- Otherwise, unless the pattern has an inner literal search or a prefix scan
+  (either already rejects such a window), up to three ASCII bytes of which
+  every match holds one, such as `/` and `@` for
+  `[a-z]+://\S+|[^ @]+@[^ @]+`. An alternation takes the union of its branches'
+  bytes, and a concatenation the bytes of its element that is rarest in English
+  text. A case-insensitive letter gives no byte: one byte cannot cover both
+  cases, and some letters, such as `k` with the Kelvin sign, also match a
+  non-ASCII form.
+
+The literal scan tests the literal's first and last bytes on each 8-byte word,
+the last word overlapping the one before it, and verifies each candidate whole;
+fewer than 8 candidate starts are compared byte by byte. When the first byte's
+English-text probability is under 0.5%, the last byte's word is loaded only for
+a word that holds the first byte. A common first byte keeps both tests on every
+word: the same gate on the `c` of `coding` mispredicted and cost 14 to 15% on
+that row.
+The one-of-bytes scan loads each word once and tests it against all three
+bytes.
+
+Windows of 256 bytes or more skip the check. Most lines of a line search are
+shorter, and there the scan costs less than the find and engine setup it saves.
+A window that holds the bytes is scanned twice, once by the check and once by
+the engine, and on a long window the second scan is no longer small beside the
+setup. A pattern whose every match spans at least 256 bytes, counting a
+required prefix, keeps no fact: no window the check would read can hold a
+match.
+
+Two hooks run the check, both before any engine setup: the matcher's general
+find route, on the rest of its region right after the minimum-length check,
+and the engine shape's full-Slice `find`, after the one-load reject of a
+start-anchored program's impossible first byte, which costs less. Shapes whose
+full-Slice `find` takes its own route, such as literal kernels and scan plans,
+do not check there. A
+hook inside the ordinary engine would still pay the find and engine prologue:
+on r8i the uri-or-email row took 0.445 of the base's time with the early hooks
+and 0.551 with the check in the engine.
+
+The [short-window inner literal check](#short-window-inner-literal-check)
+found that a separate short-window literal scan cost more on short lines than
+sharing the inner literal search's own. This check is not a second route for
+that search: it rejects a window before the engine starts, and a window that
+holds the literal still runs the engine, which scans for it again. That second
+scan is the cost to watch, on the rows that decision names: Holmes
+`around-holmes-english` on r9g, Rust `reallyreallyhard0-32`, Everyday email
+reused contains on r8i, and lh3lh3 date.
+
+The fact only saves work, so its memory gives way. It is reserved after
+compilation's routes, from the program that holds the forward DFA allowance
+(the lowered boolean program where there is one). It is kept only if every
+first-match and longest-match DFA that could initialize before the charge,
+start-byte tables included, still can. Trino's ordered-literal matcher, which
+its frontend reserves later, takes its memory first, with the fact's memory
+handed back, and the fact stays only where the same rule holds after both
+charges. The charge follows the
+[rule for optional plans and facts](#memory-budgets-and-dfa-caching): when the
+allowance cannot cover the fact, the pattern compiles without the check, with
+the same results.
+
+Measured against the base without the check (bulk rows, time as a fraction of
+the base's, r9g / r8i, two hosts each):
+
+| Row | RE2 | Java | Trino | Rust |
+|---|---|---|---|---|
+| `curated/04-ruff-noqa/real` | 0.57 / 0.56 | 0.56 / 0.57 | 0.68 / 0.68 | 0.55 / 0.55 |
+| `curated/04-ruff-noqa/tweaked` | 0.45 / 0.43 | 0.45 / 0.41 | 0.64 / 0.54 | 0.44 / 0.43 |
+| `wild/ruff/noqa` | 0.55 / 0.55 | | | 0.56 / 0.54 |
+| `wild/ruff/unnecessary-coding-comment` | 0.65 / 0.59 | | | 0.64 / 0.64 |
+| `lh3lh3-reb/uri-or-email` | 0.34 / 0.43 | 0.35 / 0.42 | 0.38 / 0.47 | 0.36 / 0.45 |
+| `lh3lh3-reb/uri` | 0.61 / 0.68 | 1.00 / 1.00 | 1.00 / 1.01 | 0.61 / 0.63 |
+| `wild/ruff/space-around-operator`, no fact | 0.99 / 0.98 | | | 1.01 / 1.02 |
+| `rsc/reallyreallyhard0-32` | 1.12 / 1.12 | 1.10 / 1.12 | 1.07 / 1.11 | 1.10 / 1.12 |
+
+`reallyreallyhard0-32` is a 47-byte row that holds the literal, so it pays the
+double scan. `around-holmes-english` counts one match in 613,357 bytes of text:
+the full-text find skips the check, and only the find after the match runs it,
+over the 35-byte tail, which it rejects before the engine. On the base before
+long inner literal searches moved to the fused pair scan, the row went from 70
+to 117 µs on r9g in Java, and in Trino on one of two hosts, and was flat or
+faster on r8i: the matcher's larger find could stop HotSpot from inlining the
+inner literal search and its word-at-a-time loop into it, the mode RE2 and Rust
+already ran in at 117 µs. That mode is gone: where vector support is available,
+a search that long now takes the pair scan, which runs out of line in every
+language, as the
+[short-window inner literal check](#short-window-inner-literal-check) records.
+The row has not been remeasured with this check since.
 
 ## Trino LIKE Frontend
 
@@ -3144,7 +3254,7 @@ plans; the last bullets record the rules and measurements specific to each.
   is non-sealed so that the hidden class extends it. The pattern a caller holds
   is the generated class, and a caller's call site that sees one pattern binds
   its entries directly; callers still cannot extend the pattern classes. The
-  generated class adds no fields, so it keeps the scan-plan shape's 104-byte
+  generated class adds no fields, so it keeps the scan-plan shape's 112-byte
   layout.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
   stays interpreted, as in Trino. Unlike Trino, a count that skips the plan

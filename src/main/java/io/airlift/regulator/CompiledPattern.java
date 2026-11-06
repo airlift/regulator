@@ -214,7 +214,8 @@ abstract sealed class CompiledPattern
             boolean ordinaryShortBooleanMatch,
             boolean singleAttemptCount,
             boolean literalKernelFind,
-            boolean literalSetCount)
+            boolean literalSetCount,
+            RequiredBytes requiredBytes)
     {
         Analysis
         {
@@ -263,6 +264,10 @@ abstract sealed class CompiledPattern
     // The single-byte table of a one-byte pattern, which route selection builds when its memory
     // fits, or null. Group-zero matchers, the byte-table shape, and Trino share it.
     private final SingleByteMatcher singleByteMatcher;
+    // The bytes every match holds, checked on a short window before any engine runs, or null.
+    // Not final only so that a frontend route can take back their memory before the frontend's
+    // pattern, whose final field publishes this one, is constructed.
+    private RequiredBytes requiredBytes;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
@@ -291,6 +296,7 @@ abstract sealed class CompiledPattern
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
         this.hasAnchoredSubmatchRoute = !clearsGroupsBeforeMatch && takesAnchoredSubmatchRoute();
         this.matcherClassCounter = analysis.matcherClassCounter();
+        this.requiredBytes = analysis.requiredBytes();
         this.singleByteMatcher = analysis.singleByteMatcher();
         this.capturingGroupCount = analysis.capturingGroupCount();
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
@@ -350,6 +356,7 @@ abstract sealed class CompiledPattern
         this.reverseProgComputed = pattern.reverseProgComputed;
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
         this.matcherClassCounter = pattern.matcherClassCounter;
+        this.requiredBytes = pattern.requiredBytes;
         this.singleByteMatcher = pattern.singleByteMatcher;
     }
 
@@ -418,6 +425,7 @@ abstract sealed class CompiledPattern
                         booleanPlans,
                         0,
                         Map.of(),
+                        null,
                         null);
             }
         }
@@ -497,7 +505,8 @@ abstract sealed class CompiledPattern
                     booleanPlans,
                     0,
                     Map.of(),
-                    compactBoundedCharacterClass);
+                    compactBoundedCharacterClass,
+                    null);
         }
 
         Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
@@ -619,6 +628,9 @@ abstract sealed class CompiledPattern
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }
         }
+        // The bytes every match holds, for the short-window check, come from the semantic
+        // expression: the lowered expression adds only an optional final LF and an end assertion.
+        RequiredBytes requiredBytes = RequiredBytes.analyze(normalizedSuffixRegexp, MatchLength.minimum(expressionAnalysis.length().encoded()), booleanPlans.innerLiteralSearch() != null || semanticProgram.canPrefixAccel());
         // A call-free first-and-last-byte search for contains and dot-star spans, in every
         // language. Unlike Slice.indexOf, it bounds the bytes its failed candidates compare, so
         // long partial matches of a long literal do not cost the input times the literal. A Trino
@@ -729,12 +741,14 @@ abstract sealed class CompiledPattern
                 booleanPlans,
                 capturingGroupCount,
                 parsed.capturingGroupNames(),
-                null);
+                null,
+                requiredBytes);
     }
 
     /// Returns the analysis of a pattern with its shape and routes selected. Selection reserves the
     /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
-    /// budget, before any DFA can snapshot it, and builds the table.
+    /// budget, and of the required bytes from the program that holds the forward DFA budget,
+    /// before any DFA can snapshot it, and builds the table.
     private static Analysis selectRoutes(
             int flags,
             long maxMemory,
@@ -753,7 +767,8 @@ abstract sealed class CompiledPattern
             BooleanPlans booleanPlans,
             int capturingGroupCount,
             Map<Integer, String> capturingGroupNames,
-            BoundedCharacterClassCounter compactBoundedCharacterClass)
+            BoundedCharacterClassCounter compactBoundedCharacterClass,
+            RequiredBytes requiredBytes)
     {
         // The shape full-Slice find takes, in the order each route was added. A pattern whose find
         // runs the ordinary engine on the forward program alone is general, and only a general
@@ -802,6 +817,16 @@ abstract sealed class CompiledPattern
                 shape = Shape.BYTE_TABLE;
                 general = false;
             }
+        }
+        // The required bytes only save work, so they give way. They are reserved after the
+        // routes above, from the program that holds the forward DFA budget, the lowered program
+        // where there is one, and only where each forward DFA that could initialize still can;
+        // otherwise the pattern keeps no check. A frontend route reserved later, Trino's
+        // ordered-literal matcher, is charged ahead of them, and they are judged again after it.
+        RequiredBytes reservedRequiredBytes = null;
+        Prog requiredBytesProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
+        if (requiredBytes != null && tryReserveBesideForwardDfas(requiredBytesProgram, requiredBytes.estimatedRetainedSize())) {
+            reservedRequiredBytes = requiredBytes;
         }
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
@@ -877,7 +902,8 @@ abstract sealed class CompiledPattern
                 ordinaryShortMatch,
                 singleAttemptCount,
                 literalKernelFind,
-                literalSetCount);
+                literalSetCount,
+                reservedRequiredBytes);
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
@@ -1218,15 +1244,29 @@ abstract sealed class CompiledPattern
         return OrderedLiteralMatcher.analyze(expressionAnalysis);
     }
 
+    /// Reserves `retainedSize` bytes of the forward DFA budget for a frontend route, or returns
+    /// false and changes nothing. A frontend calls this for a route it prefers to the
+    /// short-window check, before it constructs the pattern whose final field publishes this one.
+    /// The route is charged first, against the allowance with the required bytes' memory handed
+    /// back. The required bytes are then judged again by the rule that admitted them: they stay
+    /// only if every forward DFA that initializes after the route's charge still does after
+    /// theirs.
     boolean tryReserveForwardDfaMemory(long retainedSize)
     {
-        if (retainedSize <= 0 ||
-                booleanPlans.loweredProgram() != null ||
-                booleanPlans.taggedAlternationProgram() != null ||
-                retainedSize > partialProg.dfaMemory()) {
+        if (retainedSize <= 0 || booleanPlans.loweredProgram() != null || booleanPlans.taggedAlternationProgram() != null) {
             return false;
         }
-        partialProg.setDfaMemory(partialProg.dfaMemory() - retainedSize);
+        // Without a lowered program, which the route also requires, the required bytes were
+        // reserved from partialProg.
+        long released = requiredBytes == null ? 0 : requiredBytes.estimatedRetainedSize();
+        long dfaMemory = partialProg.dfaMemory() + released;
+        if (retainedSize > dfaMemory) {
+            return false;
+        }
+        partialProg.setDfaMemory(dfaMemory - retainedSize);
+        if (requiredBytes != null && !tryReserveBesideForwardDfas(partialProg, released)) {
+            requiredBytes = null;
+        }
         return true;
     }
 
@@ -1333,6 +1373,16 @@ abstract sealed class CompiledPattern
         return booleanPlans.innerLiteralSearch();
     }
 
+    RequiredBytes requiredBytesForDiagnostics()
+    {
+        return requiredBytes;
+    }
+
+    long requiredBytesRetainedSizeForDiagnostics()
+    {
+        return requiredBytes == null ? 0 : requiredBytes.estimatedRetainedSize();
+    }
+
     BooleanPlanKind findPlanForDiagnostics()
     {
         return booleanPlans.find();
@@ -1404,6 +1454,16 @@ abstract sealed class CompiledPattern
         return MatchLength.minimum(matchLength);
     }
 
+    /// Whether `[start, end)` of `input` is shorter than [RequiredBytes#SHORT_WINDOW_LIMIT] and
+    /// lacks the bytes every match holds, so it holds no match. Searches check this before any
+    /// engine runs: a line search's many short lines that cannot match then skip the find and
+    /// engine setup as well as the engine's scan.
+    final boolean shortWindowLacksRequiredBytes(Slice input, int start, int end)
+    {
+        RequiredBytes bytes = requiredBytes;
+        return bytes != null && end - start < RequiredBytes.SHORT_WINDOW_LIMIT && !bytes.occursIn(input, start, end);
+    }
+
     boolean canUseDirectBitStateCapture(Prog prog, int searchLength, int captureCount)
     {
         return !longestMatch &&
@@ -1434,17 +1494,39 @@ abstract sealed class CompiledPattern
         return findOnEngine(input);
     }
 
-    /// The full-Slice find of the ordinary engine: the nullable-start shortcut, then an ordinary
-    /// search of the lowered boolean program where there is one, or else of the forward program.
+    /// The full-Slice find of the ordinary engine: the short-window rejects, the nullable-start
+    /// shortcut, then an ordinary search of the lowered boolean program where there is one, or
+    /// else of the forward program.
     private boolean findOnEngine(Slice input)
     {
         requireNonNull(input, "input is null");
+        Prog loweredProgram = booleanPlans.loweredProgram();
+        Prog program = loweredProgram != null ? loweredProgram : partialProg;
+        int length = input.length();
+        RequiredBytes bytes = requiredBytes;
+        if (bytes != null && length < RequiredBytes.SHORT_WINDOW_LIMIT) {
+            // The engine's one-load reject of a start-anchored program's impossible first byte
+            // costs less than the required bytes scan, so it goes first. A required prefix moves
+            // the program's start past the input's first byte, so it takes no part.
+            if (requiredPrefix == null && length > 0 && program.anchorStart()) {
+                byte[] anchoredStartBytes = program.anchoredStartBytes();
+                if (anchoredStartBytes != null && anchoredStartBytes[input.byteArray()[input.byteArrayOffset()] & 0xFF] == 0) {
+                    return false;
+                }
+            }
+            // The length reject costs less still, and comes before the scan, as in a matcher's
+            // find.
+            if (length < minimumMatchLength()) {
+                return false;
+            }
+            if (!bytes.occursIn(input, 0, length)) {
+                return false;
+            }
+        }
         if (canReturnEmptyAtStartForBooleanMatch(input, 0)) {
             return true;
         }
-        Prog loweredProgram = booleanPlans.loweredProgram();
-        int length = input.length();
-        return matchOnOrdinaryEngine(loweredProgram != null ? loweredProgram : partialProg, input, 0, length, 0, length, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
+        return matchOnOrdinaryEngine(program, input, 0, length, 0, length, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
     }
 
     /// Searches all of `input` on the ordinary engine without reporting positions.

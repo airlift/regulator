@@ -5231,6 +5231,9 @@ final class Dfa
         // Like upstream, a DFA initializes only when its state budget holds this many of its
         // largest possible states.
         private static final int MINIMUM_INITIAL_STATES = 20;
+        // The most a forward DFA charges for its start-byte tables: the candidates, one entry per
+        // byte value, and the nibble tables or the literal filter, which exclude each other.
+        static final long MAXIMUM_START_BYTE_TABLES_MEMORY = 16L + 256 + Math.max(16L + VectorByteSetScanner.NIBBLE_TABLES_LENGTH, StartLiteralFilter.MAXIMUM_RETAINED_SIZE);
 
         private static final VarHandle TABLES;
 
@@ -5570,6 +5573,22 @@ final class Dfa
         {
             int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;
             return estimateStateSize(prog.bytemapRange() + 1, prog.listCount() + nmark + manyMatchSeparator);
+        }
+
+        /// Whether the constructor initializes a DFA of `kind` over `prog` with `budget`. The
+        /// minimum leaves out the start-byte tables, so the exact memory lies between the minimum
+        /// and the minimum plus the most those tables can charge. Only between those bounds does
+        /// [#initializationMemory(Prog,Kind)], which builds the tables, decide.
+        static boolean initializes(Prog prog, Kind kind, long budget)
+        {
+            long minimumMemory = minimumMemory(prog, kind);
+            if (budget < minimumMemory) {
+                return false;
+            }
+            if (budget >= minimumMemory + MAXIMUM_START_BYTE_TABLES_MEMORY) {
+                return true;
+            }
+            return budget >= initializationMemory(prog, kind);
         }
 
         boolean canStartByteAcceleration()

@@ -2122,9 +2122,9 @@ final class Prog
     /// Whether taking `reservation` bytes from the DFA memory budget leaves the DFA of `kind` at
     /// least the memory its constructor charges to initialize, the start-byte tables of a forward
     /// program included. [#leavesDfaMinimum(long)] compares against a lower bound that leaves
-    /// those tables out. This builds them to measure them. A program whose assertions the DFA
-    /// cannot run builds no DFA, so for it this returns true whenever the reservation fits the
-    /// DFA memory budget.
+    /// those tables out. This builds them to measure them only when the budget lies within their
+    /// largest charge above that bound. A program whose assertions the DFA cannot run builds no
+    /// DFA, so for it this returns true whenever the reservation fits the DFA memory budget.
     boolean leavesDfaInitialization(long reservation, Dfa.DfaInstance.Kind kind)
     {
         if (reservation > dfaMemory) {
@@ -2133,7 +2133,7 @@ final class Prog
         if (hasDfaUnsupportedAssertions()) {
             return true;
         }
-        return dfaBudget(dfaMemory - reservation, kind) >= Dfa.DfaInstance.initializationMemory(this, kind);
+        return Dfa.DfaInstance.initializes(this, kind, dfaBudget(dfaMemory - reservation, kind));
     }
 
     private long dfaBudget(long memory, Dfa.DfaInstance.Kind kind)

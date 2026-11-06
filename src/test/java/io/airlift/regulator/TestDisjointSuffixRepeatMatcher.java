@@ -154,7 +154,7 @@ public class TestDisjointSuffixRepeatMatcher
         Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
         DisjointSuffixRepeatMatcher plan = DisjointSuffixRepeatMatcher.analyze(parsed.regexp());
         Re2 compiled = Re2.compileParsed(utf8Slice(expression), parsed, JavaRegexp.Options.defaults().parseFlags(), maxMemory);
-        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize());
+        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize() - compiled.requiredBytesRetainedSizeForDiagnostics());
     }
 
     private static DisjointSuffixRepeatMatcher analyze(String expression)

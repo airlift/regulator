@@ -50,6 +50,11 @@ final class StartLiteralFilter
     // Each nibble table's 16 entries are repeated to the widest vector's 64 bytes, so one load of
     // the preferred species reads a table.
     static final int NIBBLE_TABLE_BYTES = 64;
+    /// The most [#estimatedRetainedSize] returns: the scanner width, which pads the values, is at
+    /// most [#MAXIMUM_GROUPS].
+    static final long MAXIMUM_RETAINED_SIZE = INSTANCE_SIZE +
+            SizeOf.sizeOfByteArray(MAXIMUM_GROUPS * FILTER_POSITIONS) +
+            SizeOf.sizeOfByteArray(FILTER_POSITIONS * 2 * NIBBLE_TABLE_BYTES);
 
     private final int firstOffset;
     private final int secondOffset;
