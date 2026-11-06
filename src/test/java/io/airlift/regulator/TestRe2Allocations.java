@@ -675,6 +675,77 @@ public class TestRe2Allocations
     }
 
     @Test
+    public void testOversizedCallerBufferTracksOnlyPatternGroups()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // The capture engines sized their state by the caller's buffer, so about 200,000 extra pairs
+        // past the pattern's one group cost megabytes of capture slots on every search.
+        Re2 pattern = Re2.compile(Slices.utf8Slice("((?:a|ab)*b)"));
+        Slice source = Slices.utf8Slice("xxaabxx");
+        int[] groups = new int[400_002];
+
+        for (int iteration = 0; iteration < 20; iteration++) {
+            assertThat(pattern.findInto(source, groups)).isTrue();
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(100, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 100; iteration++) {
+                if (pattern.findInto(source, groups)) {
+                    matchCount++;
+                }
+            }
+            return matchCount;
+        });
+
+        int[] expected = new int[groups.length];
+        Arrays.fill(expected, -1);
+        expected[0] = 2;
+        expected[1] = 5;
+        expected[2] = 2;
+        expected[3] = 5;
+        assertThat(groups).containsExactly(expected);
+        // The ceiling covers the scratch that the stateless BitState search allocates on each call.
+        assertThat(allocatedBytes / 100).isLessThanOrEqualTo(2_048);
+
+        // The engines pick their route by the buffer's length, so a buffer past the pattern's groups
+        // turned OnePass away, and each search allocated another engine's scratch. The copy of the
+        // pattern's six slots takes 40 bytes.
+        Re2 onePass = Re2.compile(Slices.utf8Slice("([a-z]+)-([0-9]+)"));
+        assertThat(onePass.forwardProgramForDiagnostics().isOnePass()).isTrue();
+        Slice onePassSource = Slices.utf8Slice("..abc-123..");
+        int[] onePassGroups = new int[128];
+
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(onePass.findInto(onePassSource, onePassGroups)).isTrue();
+        }
+
+        long onePassAllocatedBytes = minimumAllocatedBytes(10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                if (onePass.findInto(onePassSource, onePassGroups)) {
+                    matchCount++;
+                }
+            }
+            return matchCount;
+        });
+
+        int[] onePassExpected = new int[onePassGroups.length];
+        Arrays.fill(onePassExpected, -1);
+        onePassExpected[0] = 2;
+        onePassExpected[1] = 9;
+        onePassExpected[2] = 2;
+        onePassExpected[3] = 5;
+        onePassExpected[4] = 6;
+        onePassExpected[5] = 9;
+        assertThat(onePassGroups).containsExactly(onePassExpected);
+        assertThat(onePassAllocatedBytes / 10_000).isLessThanOrEqualTo(64);
+    }
+
+    @Test
     public void testMatcherBitStateCaptureAllocatesOnlyInvocationState()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();

@@ -290,7 +290,7 @@ the compiled `pattern`:
 | Match at the beginning | `pattern.lookingAt(input)` | None |
 | Match complete input | `pattern.matches(input)` | None |
 | Repeated matching | `pattern.matcher(input)` | One reusable buffer and workspaces |
-| Caller-owned captures | `pattern.findInto(input, groups)` | None |
+| Caller-owned captures | `pattern.findInto(input, groups)` | None for a buffer of the pattern's size |
 | Immutable result | `pattern.findResult(input)` | One capture array |
 
 The `lookingAtInto`, `matchesInto`, `lookingAtResult`, and `matchesResult`
