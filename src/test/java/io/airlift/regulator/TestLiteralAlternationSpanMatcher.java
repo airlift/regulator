@@ -416,24 +416,25 @@ public class TestLiteralAlternationSpanMatcher
                     : Dfa.SEARCH_NO_MATCH;
             assertThat(scanner.findSpan(input, start)).as("start %s", start).isEqualTo(expected);
         }
-        // A scanner the random starts did not use counts only the cursor walk's and the count's
-        // root-table positions.
+        // A scanner the random starts did not use counts only the cursor walk's filter stops, and
+        // the walk and the count each read the root table in their own diagnostics.
         LiteralAlternationSpanMatcher walkScanner = scanner("ERROR|WARN|FATAL");
+        LiteralAlternationSpanMatcher.RouteDiagnostics walkDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
         LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
         matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
-        long span = walkScanner.findSpan(input, 0, cursor);
+        long span = walkScanner.findSpanForDiagnostics(input, 0, cursor, walkDiagnostics);
         long expectedCount = 0;
         while (matcher.find()) {
             assertThat(span).isEqualTo(((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL));
             expectedCount++;
-            span = walkScanner.findSpan(input, (int) span, cursor);
+            span = walkScanner.findSpanForDiagnostics(input, (int) span, cursor, walkDiagnostics);
         }
         assertThat(span).isEqualTo(Dfa.SEARCH_NO_MATCH);
         assertThat(walkScanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
-        long walkRootTablePositions = walkScanner.rootTablePositionCountForDiagnostics();
-        assertThat(walkRootTablePositions).isGreaterThan(RECHECK_BYTES / 2);
-        assertThat(walkScanner.count(input)).isEqualTo(expectedCount);
-        assertThat(walkScanner.rootTablePositionCountForDiagnostics() - walkRootTablePositions).isGreaterThan(RECHECK_BYTES / 2);
+        assertThat(walkDiagnostics.rootTablePositionCount()).isGreaterThan(RECHECK_BYTES / 2);
+        LiteralAlternationSpanMatcher.RouteDiagnostics countDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        assertThat(walkScanner.countForDiagnostics(input, countDiagnostics)).isEqualTo(expectedCount);
+        assertThat(countDiagnostics.rootTablePositionCount()).isGreaterThan(RECHECK_BYTES / 2);
         assertThat(pattern.count(input)).isEqualTo(expectedCount);
         assertThat(TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL")).count(input)).isEqualTo(expectedCount);
     }
@@ -460,13 +461,14 @@ public class TestLiteralAlternationSpanMatcher
         // Each of the four 64 KiB routes samples the filter's stops once, finds them dense, and
         // reads the root table, so the vector scan makes no stop. The root table alone reads each
         // position once. Without the Vector API there is no filter to sample.
-        assertThat(scanner.count(input)).isZero();
+        LiteralAlternationSpanMatcher.RouteDiagnostics diagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        assertThat(scanner.countForDiagnostics(input, diagnostics)).isZero();
         assertThat(scanner.filterStopCountForDiagnostics()).isZero();
-        assertThat(scanner.rootTablePositionCountForDiagnostics()).isEqualTo(length);
-        assertThat(scanner.sampledPositionCountForDiagnostics()).isEqualTo(VectorSupport.isAvailable() ? 4L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
-        assertThat(scanner.findSpan(input, 0)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(diagnostics.rootTablePositionCount()).isEqualTo(length);
+        assertThat(diagnostics.sampledPositionCount()).isEqualTo(VectorSupport.isAvailable() ? 4L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
+        assertThat(scanner.findSpanForDiagnostics(input, 0, null, diagnostics)).isEqualTo(Dfa.SEARCH_NO_MATCH);
         assertThat(scanner.filterStopCountForDiagnostics()).isZero();
-        assertThat(scanner.rootTablePositionCountForDiagnostics()).isEqualTo(2L * length);
+        assertThat(diagnostics.rootTablePositionCount()).isEqualTo(2L * length);
     }
 
     @Test
@@ -484,32 +486,38 @@ public class TestLiteralAlternationSpanMatcher
     @Test
     public void testSparseLogSamplesOnce()
     {
-        // Log lines with an occasional WARN or ERROR keep the filter. A count and a Trino
-        // matcher's finds sample once for their first route; later routes whose stops stayed
-        // sparse hold the filter without sampling again.
+        // Log lines with an occasional WARN or ERROR keep the filter. A count and finds that
+        // carry a cursor, as a Trino matcher's do, sample once for their first route; later
+        // routes whose stops stayed sparse hold the filter without sampling again.
         Slice logInput = utf8Slice(logLines(2 * RECHECK_BYTES + 1024));
         long expectedCount = generalEngineCount(Re2.compile(utf8Slice("ERROR|WARN|FATAL")), logInput);
         assertThat(expectedCount).isGreaterThan(100);
         long sampledPositions = VectorSupport.isAvailable() ? Dfa.BYTE_SCAN_SAMPLE_SIZE : 0;
         LiteralAlternationSpanMatcher logScanner = scanner("ERROR|WARN|FATAL");
-        assertThat(logScanner.count(logInput)).isEqualTo(expectedCount);
+        LiteralAlternationSpanMatcher.RouteDiagnostics countDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        assertThat(logScanner.countForDiagnostics(logInput, countDiagnostics)).isEqualTo(expectedCount);
         assertThat(logScanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
-        assertThat(logScanner.rootTablePositionCountForDiagnostics() < 64).isEqualTo(VectorSupport.isAvailable());
-        assertThat(logScanner.sampledPositionCountForDiagnostics()).isEqualTo(sampledPositions);
+        assertThat(countDiagnostics.rootTablePositionCount() < 64).isEqualTo(VectorSupport.isAvailable());
+        assertThat(countDiagnostics.sampledPositionCount()).isEqualTo(sampledPositions);
+
+        LiteralAlternationSpanMatcher.RouteDiagnostics findDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
+        long finds = 0;
+        for (long span = logScanner.findSpanForDiagnostics(logInput, 0, cursor, findDiagnostics); span >= 0; span = logScanner.findSpanForDiagnostics(logInput, (int) span, cursor, findDiagnostics)) {
+            finds++;
+        }
+        assertThat(finds).isEqualTo(expectedCount);
+        assertThat(findDiagnostics.sampledPositionCount()).isEqualTo(sampledPositions);
 
         TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL"));
+        assertThat(trinoPattern.literalAlternationSpanMatcher()).isNotNull();
         TrinoRegexpMatcher matcher = trinoPattern.matcher(logInput);
         long matches = 0;
         while (matcher.find()) {
             matches++;
         }
         assertThat(matches).isEqualTo(expectedCount);
-        LiteralAlternationSpanMatcher trinoScanner = trinoPattern.literalAlternationSpanMatcher();
-        assertThat(trinoScanner.sampledPositionCountForDiagnostics()).isEqualTo(sampledPositions);
-
-        // Trino's other multi-match operations carry the route the same way within each call.
         assertThat(trinoPattern.extractAll(logInput, 0)).hasSize(toIntExact(expectedCount));
-        assertThat(trinoScanner.sampledPositionCountForDiagnostics()).isEqualTo(2 * sampledPositions);
     }
 
     @Test
@@ -568,14 +576,19 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(reference.matchInto(input, CompiledPattern.Anchor.UNANCHORED, null)).isTrue();
         assertThat(pattern.countMatches(input)).isEqualTo(dfaCount);
         assertThat(pattern.find(input)).isTrue();
-        // With the Vector API each call samples the filter's stops once and declines, so the
-        // matcher reads no position; without it there is no filter, and the matcher keeps both.
         assertThat(scanner.filterStopCountForDiagnostics()).isZero();
-        assertThat(scanner.rootTablePositionCountForDiagnostics() == 0).isEqualTo(VectorSupport.isAvailable());
-        assertThat(scanner.sampledPositionCountForDiagnostics()).isEqualTo(VectorSupport.isAvailable() ? 2L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
         if (VectorSupport.isAvailable()) {
             assertThat(dfaScanCounters(pattern)).isNotEmpty().isEqualTo(dfaScanCounters(reference));
         }
+        // With the Vector API the count and find the pattern runs each sample the filter's stops
+        // once and decline, so the matcher reads no position; without it there is no filter, and
+        // the matcher keeps both.
+        LiteralAlternationSpanMatcher.RouteDiagnostics diagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        assertThat(scanner.countOrDeclineForDiagnostics(input, diagnostics)).isEqualTo(VectorSupport.isAvailable() ? LiteralAlternationSpanMatcher.DECLINED : dfaCount);
+        assertThat(scanner.findSpanOrDeclineForDiagnostics(input, diagnostics) == LiteralAlternationSpanMatcher.DECLINED).isEqualTo(VectorSupport.isAvailable());
+        assertThat(scanner.filterStopCountForDiagnostics()).isZero();
+        assertThat(diagnostics.rootTablePositionCount() == 0).isEqualTo(VectorSupport.isAvailable());
+        assertThat(diagnostics.sampledPositionCount()).isEqualTo(VectorSupport.isAvailable() ? 2L * Dfa.BYTE_SCAN_SAMPLE_SIZE : 0);
 
         // Only the check at the start hands off. Here it samples three windows of sparse log lines
         // and one of near misses, so the matcher keeps the input. The sparse log routes keep the
@@ -585,11 +598,12 @@ public class TestLiteralAlternationSpanMatcher
         int nearMissBytes = 3 * RECHECK_BYTES - 4 * 1024;
         Slice mixed = utf8Slice("WARN disk usage above threshold on node 7\n".repeat(logLines) + nearMissText(nearMissBytes));
         List<String> dfaCounters = dfaScanCounters(pattern);
-        long rootTablePositions = scanner.rootTablePositionCountForDiagnostics();
         assertThat(pattern.count(mixed)).isEqualTo(logLines);
         assertThat(dfaScanCounters(pattern)).isEqualTo(dfaCounters);
         assertThat(scanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
-        assertThat(scanner.rootTablePositionCountForDiagnostics() - rootTablePositions).isGreaterThanOrEqualTo(RECHECK_BYTES);
+        LiteralAlternationSpanMatcher.RouteDiagnostics mixedDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+        assertThat(scanner.countOrDeclineForDiagnostics(mixed, mixedDiagnostics)).isEqualTo(logLines);
+        assertThat(mixedDiagnostics.rootTablePositionCount()).isGreaterThanOrEqualTo(RECHECK_BYTES);
 
         // Find follows the same rule: in the same layout without matches, the later dense checks
         // read the root table rather than hand off.

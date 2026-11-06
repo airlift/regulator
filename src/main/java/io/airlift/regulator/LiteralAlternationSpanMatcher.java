@@ -86,9 +86,6 @@ final class LiteralAlternationSpanMatcher
     // synchronization like the DFA's scan counters, so it is approximate when searches share the
     // matcher.
     private long filterStopCount;
-    // Observability, updated without synchronization as the DFA's scan counters are.
-    private long rootTablePositionCount;
-    private long sampledPositionCount;
 
     private LiteralAlternationSpanMatcher(
             short[] rootStateByLeadingByte,
@@ -270,21 +267,6 @@ final class LiteralAlternationSpanMatcher
         return filterStopCount;
     }
 
-    /// The positions the scalar root-table loop read in searches and counts that began with at
-    /// least 64 bytes left. Shorter ones always read the root table, and count nothing. Filter
-    /// stops compare the literals instead, and [#filterStopCountForDiagnostics()] counts them.
-    long rootTablePositionCountForDiagnostics()
-    {
-        return rootTablePositionCount;
-    }
-
-    /// The positions the start-scan productivity checks could read, at most
-    /// [Dfa#BYTE_SCAN_SAMPLE_SIZE] for each check.
-    long sampledPositionCountForDiagnostics()
-    {
-        return sampledPositionCount;
-    }
-
     /// Expands `expression` into the literals of a large set for [LiteralSetSpanMatcher], in
     /// leftmost-first priority order, or returns `null`.
     static List<byte[]> extractLiteralSet(Regexp expression)
@@ -416,16 +398,29 @@ final class LiteralAlternationSpanMatcher
     /// each search resumes where the previous match ended, on the route the previous one chose.
     long count(Slice input)
     {
-        return count(input, false);
+        return count(input, false, null);
     }
 
     /// Returns [#count(Slice)], or [#DECLINED] when the filter's stops are dense at the start.
     long countOrDecline(Slice input)
     {
-        return count(input, true);
+        return count(input, true, null);
     }
 
-    private long count(Slice input, boolean declinesDenseStart)
+    /// Returns [#count(Slice)], adding the routes it reads to `diagnostics`.
+    long countForDiagnostics(Slice input, RouteDiagnostics diagnostics)
+    {
+        return count(input, false, requireNonNull(diagnostics, "diagnostics is null"));
+    }
+
+    /// Returns [#countOrDecline(Slice)], adding the routes it reads to `diagnostics`.
+    long countOrDeclineForDiagnostics(Slice input, RouteDiagnostics diagnostics)
+    {
+        return count(input, true, requireNonNull(diagnostics, "diagnostics is null"));
+    }
+
+    // A null `diagnostics`, as every production search passes, counts nothing.
+    private long count(Slice input, boolean declinesDenseStart, RouteDiagnostics diagnostics)
     {
         requireNonNull(input, "input is null");
         byte[] bytes = input.byteArray();
@@ -451,7 +446,7 @@ final class LiteralAlternationSpanMatcher
         while (position < inputEnd) {
             if (position >= routeEnd) {
                 if (position == inputOffset || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
-                    readsRootTable = readsRootTable(bytes, position, inputEnd);
+                    readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                 }
                 if (declinesDenseStart && position == inputOffset && readsRootTable && startLiteralFilter != null) {
                     return DECLINED;
@@ -459,7 +454,7 @@ final class LiteralAlternationSpanMatcher
                 routeEnd = routeEnd(position, inputEnd);
                 filterStopCountAtRouteStart = filterStopCount;
             }
-            long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
+            long span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
             if (span < 0) {
                 position = routeEnd;
                 continue;
@@ -472,24 +467,37 @@ final class LiteralAlternationSpanMatcher
 
     long findSpan(Slice input, int start)
     {
-        return findSpan(input, start, null, false);
+        return findSpan(input, start, null, false, null);
     }
 
     /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH]. A
     /// `cursor`, which may be null, carries the route from one search of `input` to the next.
     long findSpan(Slice input, int start, Cursor cursor)
     {
-        return findSpan(input, start, cursor, false);
+        return findSpan(input, start, cursor, false, null);
     }
 
     /// Returns [#findSpan(Slice,int,Cursor)] from the start of `input` without a cursor, or
     /// [#DECLINED] when the filter's stops are dense at the start.
     long findSpanOrDecline(Slice input)
     {
-        return findSpan(input, 0, null, true);
+        return findSpan(input, 0, null, true, null);
     }
 
-    private long findSpan(Slice input, int start, Cursor cursor, boolean declinesDenseStart)
+    /// Returns [#findSpan(Slice,int,Cursor)], adding the routes it reads to `diagnostics`.
+    long findSpanForDiagnostics(Slice input, int start, Cursor cursor, RouteDiagnostics diagnostics)
+    {
+        return findSpan(input, start, cursor, false, requireNonNull(diagnostics, "diagnostics is null"));
+    }
+
+    /// Returns [#findSpanOrDecline(Slice)], adding the routes it reads to `diagnostics`.
+    long findSpanOrDeclineForDiagnostics(Slice input, RouteDiagnostics diagnostics)
+    {
+        return findSpan(input, 0, null, true, requireNonNull(diagnostics, "diagnostics is null"));
+    }
+
+    // A null `diagnostics`, as every production search passes, counts nothing.
+    private long findSpan(Slice input, int start, Cursor cursor, boolean declinesDenseStart, RouteDiagnostics diagnostics)
     {
         requireNonNull(input, "input is null");
         if (start < 0 || start > input.length()) {
@@ -517,7 +525,7 @@ final class LiteralAlternationSpanMatcher
         while (position < inputEnd) {
             if (position >= routeEnd) {
                 if (!routeChosen || !holdsFilterRoute(readsRootTable, filterStopCountAtRouteStart)) {
-                    readsRootTable = readsRootTable(bytes, position, inputEnd);
+                    readsRootTable = readsRootTable(bytes, position, inputEnd, diagnostics);
                 }
                 if (declinesDenseStart && position == firstPosition && readsRootTable && startLiteralFilter != null) {
                     return DECLINED;
@@ -526,7 +534,7 @@ final class LiteralAlternationSpanMatcher
                 filterStopCountAtRouteStart = filterStopCount;
                 routeChosen = true;
             }
-            span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd);
+            span = findSpanInRoute(bytes, position, routeEnd, readsRootTable, inputOffset, inputEnd, diagnostics);
             if (span >= 0) {
                 break;
             }
@@ -558,7 +566,7 @@ final class LiteralAlternationSpanMatcher
     // the filter passes and the literal compare rejects, such as ERxO under ERROR|WARN|FATAL
     // every fifth byte, make frequent filter stops, and restarting the vector scan at each costs
     // more than one root-table lookup per byte.
-    private boolean readsRootTable(byte[] bytes, int position, int inputEnd)
+    private boolean readsRootTable(byte[] bytes, int position, int inputEnd, RouteDiagnostics diagnostics)
     {
         if (startLiteralFilter == null) {
             return true;
@@ -566,8 +574,10 @@ final class LiteralAlternationSpanMatcher
         if (inputEnd - position < Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
             return false;
         }
-        // Each check reads at most this many positions.
-        sampledPositionCount += Dfa.BYTE_SCAN_SAMPLE_SIZE;
+        if (diagnostics != null) {
+            // Each check reads at most this many positions.
+            diagnostics.sampledPositionCount += Dfa.BYTE_SCAN_SAMPLE_SIZE;
+        }
         return !Dfa.isByteCandidateScanProductive(
                 null,
                 startLiteralFilter,
@@ -595,7 +605,7 @@ final class LiteralAlternationSpanMatcher
     // which keeps the root-table trie walk at this one call site: C2 inlined a copy at each of two
     // sites, which grew this method past its inline size limit, and its callers then called it
     // rather than inlining it.
-    private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd)
+    private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd, RouteDiagnostics diagnostics)
     {
         // The filter accepts every position where a literal starts, so the positions it skips
         // hold no match, and comparing the literals at each stop decides it. Every literal reaches
@@ -615,9 +625,11 @@ final class LiteralAlternationSpanMatcher
                     ? findSpanAtStop(bytes, position, inputOffset, inputEnd)
                     : findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
             if (!filterStop) {
-                // The filter's scan can stop past the route end, leaving the root table nothing to read.
-                int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
-                rootTablePositionCount += readEnd - position;
+                if (diagnostics != null) {
+                    // The filter's scan can stop past the route end, leaving the root table nothing to read.
+                    int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
+                    diagnostics.rootTablePositionCount += readEnd - position;
+                }
                 return span;
             }
             if (span >= 0) {
@@ -765,6 +777,30 @@ final class LiteralAlternationSpanMatcher
             }
             literals.addAll(childAlternatives);
             return literals;
+        }
+    }
+
+    /// Counts the routes each search passed this object reads, for tests to check. Production
+    /// searches pass none, so their hot loops write neither count into the shared matcher.
+    static final class RouteDiagnostics
+    {
+        private long rootTablePositionCount;
+        private long sampledPositionCount;
+
+        /// The positions the scalar root-table loop read in searches and counts that began with
+        /// at least 64 bytes left. Shorter ones always read the root table, and count nothing.
+        /// Filter stops compare the literals instead, and
+        /// [LiteralAlternationSpanMatcher#filterStopCountForDiagnostics()] counts them.
+        long rootTablePositionCount()
+        {
+            return rootTablePositionCount;
+        }
+
+        /// The positions the start-scan productivity checks could read, at most
+        /// [Dfa#BYTE_SCAN_SAMPLE_SIZE] for each check.
+        long sampledPositionCount()
+        {
+            return sampledPositionCount;
         }
     }
 
