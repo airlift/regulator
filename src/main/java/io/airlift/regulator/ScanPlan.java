@@ -141,8 +141,11 @@ final class ScanPlan
     // suffix, so a capture-free partial match is proven once the run's minimum is present.
     private final boolean[] booleanTails;
     // The plan that boolean calls of this plan run, or this plan. A start-anchored plan with a
-    // fork keeps capture saves that compaction would remove, and a call that reports no positions
-    // would still dispatch each one, so its boolean plan has the same operations without them.
+    // fork keeps capture saves that compaction would remove. That plan, and an unanchored plan
+    // with capture saves, would still dispatch each save on a call that reports no positions, so
+    // its boolean plan has the same operations without them. The boolean plan makes the same
+    // attempts from the same candidates and reaches the same run ends, so its resume positions
+    // after failures and its work budget match the plan's.
     // Boolean entry points run that plan with the same executors, so no method that reports
     // positions changes: choosing an operation array inside the shared executors slowed capture
     // calls.
@@ -161,6 +164,12 @@ final class ScanPlan
     // The operation whose run end becomes the next candidate after a failed attempt. See
     // findFailureResumeOperation.
     private final int failureResumeOperation;
+    // Set when the first operation of an unanchored plan is a run of exactly one character that
+    // writes no group and is not a boolean tail. The candidate scan finds exactly the member bytes
+    // of that run, and an ASCII member byte is a whole member character, so an attempt at an ASCII
+    // candidate starts after that character at the second operation. A candidate at a lead byte
+    // still runs the leading operation, which reads the character by the run's encodings.
+    private final boolean asciiCandidateCompletesLeadingRun;
     // Set when an unanchored search starts with a case-sensitive literal of two or more bytes.
     // Such a search checks the whole literal at each probe-byte candidate in its own loop, so
     // the candidate loop of every other plan has no whole-literal check.
@@ -210,6 +219,8 @@ final class ScanPlan
         this.leadingOperation = findLeadingOperation(this.steps);
         this.requiredLiteralOperation = anchoredStart ? -1 : findRequiredLiteralOperation(this.steps, leadingOperation);
         this.failureResumeOperation = findFailureResumeOperation(this.steps, leadingOperation);
+        Step first = this.steps[0];
+        this.asciiCandidateCompletesLeadingRun = !anchoredStart && isSingleCharacterRun(first) && first.slot <= 0 && !booleanTails[0];
         Step leading = this.steps[leadingOperation];
         this.wholeLiteralCandidates = !anchoredStart && leading.kind == Kind.LITERAL && leading.literal.length > 1;
         this.leadingProbeOffset = wholeLiteralCandidates ? byteFrequencies.probeOffset(leading.literal) : 0;
@@ -218,7 +229,7 @@ final class ScanPlan
         boolean anchoredFork = anchoredStart && hasFork(this.steps);
         this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails) && (re2Characters || consumesOnlyAscii(this.steps));
         this.workBudgetBytes = workBudgetBytes;
-        this.booleanPlan = anchoredFork && hasSave(this.steps)
+        this.booleanPlan = (anchoredFork || !anchoredStart) && hasSave(this.steps)
                 ? new ScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
                 : this;
     }
@@ -226,6 +237,11 @@ final class ScanPlan
     static boolean isRun(Step step)
     {
         return step.kind == Kind.RUN || step.kind == Kind.RE2_RUN || step.kind == Kind.RE2_SET_RUN;
+    }
+
+    private static boolean isSingleCharacterRun(Step step)
+    {
+        return isRun(step) && step.run.minimum() == 1 && !step.run.isVariable();
     }
 
     private static int findLeadingOperation(Step[] steps)
@@ -312,7 +328,7 @@ final class ScanPlan
     private static int findFailureResumeOperation(Step[] steps, int leadingOperation)
     {
         Step leading = steps[leadingOperation];
-        if (!isRun(leading) || leading.run.minimum() != 1 || leading.run.isVariable()) {
+        if (!isSingleCharacterRun(leading)) {
             return leadingOperation;
         }
         for (int index = leadingOperation + 1; index < steps.length; index++) {
@@ -504,7 +520,8 @@ final class ScanPlan
     }
 
     /// Returns the plan whose executors answer a call of this plan that reports no positions:
-    /// for a start-anchored plan with a fork, the same operations without capture saves.
+    /// for an unanchored plan with capture saves, or a start-anchored plan with a fork, the same
+    /// operations without capture saves.
     ScanPlan booleanPlan()
     {
         return booleanPlan;
@@ -685,7 +702,7 @@ final class ScanPlan
             attempts++;
             long result = usesAsciiFoldedExecutor
                     ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
-                    : matchUnanchoredAt(bytes, base, end, candidate, false, null);
+                    : matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
             if (result >= 0) {
                 break;
             }
@@ -702,16 +719,17 @@ final class ScanPlan
         int end = offset + input.length();
         long result = usesAsciiFoldedExecutor
                 ? matchAsciiFoldedUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null)
-                : matchUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null);
+                : matchUnanchoredAt(input.byteArray(), offset, end, offset + start, true, false, null);
         return result < 0 ? -1 : (int) result - offset;
     }
 
     /// Returns the raw result of one case-sensitive unanchored attempt at `start`: the match
-    /// end within the backing array, or the encoded failure.
-    long unanchoredAttemptForDiagnostics(Slice input, int start, boolean fullMatch, int[] groups)
+    /// end within the backing array, or the encoded failure. Without `fullAttempt`, the attempt
+    /// assumes the candidate scan found `start`, as a search's attempts do.
+    long unanchoredAttemptForDiagnostics(Slice input, int start, boolean fullAttempt, boolean fullMatch, int[] groups)
     {
         int offset = input.byteArrayOffset();
-        return matchUnanchoredAt(input.byteArray(), offset, offset + input.length(), offset + start, fullMatch, groups);
+        return matchUnanchoredAt(input.byteArray(), offset, offset + input.length(), offset + start, fullAttempt, fullMatch, groups);
     }
 
     @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds use separate executors; kept identical to the measured ordinary switch")
@@ -1456,7 +1474,8 @@ final class ScanPlan
                     break;
                 }
             }
-            long result = matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+            // An anchored attempt's start was not found by the candidate scan.
+            long result = matchUnanchoredAt(bytes, base, end, candidate, anchored, fullMatch, groups);
             if (result >= 0) {
                 return (int) result - offset;
             }
@@ -1562,7 +1581,7 @@ final class ScanPlan
             }
             long result = asciiFolded
                     ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups)
-                    : matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+                    : matchUnanchoredAt(bytes, base, end, candidate, false, fullMatch, groups);
             if (result >= 0) {
                 return (int) result - offset;
             }
@@ -1617,7 +1636,7 @@ final class ScanPlan
             }
             long result = asciiFolded
                     ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
-                    : matchUnanchoredAt(bytes, base, end, candidate, false, null);
+                    : matchUnanchoredAt(bytes, base, end, candidate, false, false, null);
             if (result >= 0) {
                 return (int) result - offset;
             }
@@ -1784,21 +1803,30 @@ final class ScanPlan
         return candidate + 1;
     }
 
-    // The unanchored executors run only plans without a start anchor, which compaction never
-    // rewrites into delimited captures or tails.
+    /// Runs one attempt at `matchStart`. With `fullAttempt`, the attempt runs every operation.
+    /// Without it, the leading operation's candidate scan found `matchStart`, which precedes
+    /// `end`, and an attempt at an ASCII candidate skips a leading one-character run (see
+    /// `asciiCandidateCompletesLeadingRun`). The unanchored executors run only plans without a
+    /// start anchor, which compaction never rewrites into delimited captures or tails.
     @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; delimited captures and tails occur only in start-anchored plans")
     @SuppressWarnings("MissingCasesInEnumSwitch")
-    private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
+    private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullAttempt, boolean fullMatch, int[] groups)
     {
         if (groups != null) {
             Arrays.fill(groups, -1);
         }
         int cursor = matchStart;
         int operation = 0;
+        if (!fullAttempt && asciiCandidateCompletesLeadingRun && bytes[matchStart] >= 0) {
+            cursor++;
+            operation = 1;
+        }
         int retries = 0;
-        int resumeRunEnd = matchStart;
+        // After a skipped leading run, the failure resume and scanned extent start where the run
+        // would have left them.
+        int resumeRunEnd = failureResumeOperation == 0 ? cursor : matchStart;
         // The furthest byte any unbounded scan of this attempt reached, across retries.
-        int scanned = matchStart;
+        int scanned = cursor;
         long retryPositionsLow = 0;
         long retryPositionsHigh = 0;
         int retryOperations = 0;

@@ -1038,6 +1038,42 @@ public class TestScanPlan
     }
 
     @Test
+    public void testAttemptStartsAfterCandidateCharacter()
+    {
+        // Boolean find of an unanchored plan with capture saves runs its boolean plan, the same
+        // operations without the saves.
+        String keyValue = "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)";
+        ScanPlan plan = requireNonNull(analyze(keyValue));
+        assertThat(plan.operationsForDiagnostics()).isEqualTo("SAVE,RUN,RUN,SAVE,LITERAL,SAVE,RUN,SAVE");
+        ScanPlan booleanPlan = plan.booleanPlan();
+        assertThat(booleanPlan.operationsForDiagnostics()).isEqualTo("RUN,RUN,LITERAL,RUN");
+
+        // The boolean plan leads with a run of exactly one character. Passing fullAttempt=false
+        // deliberately treats the '#' as an ASCII candidate the scan already checked against that
+        // run, so the attempt starts at the second operation; passing true checks the '#' and
+        // rejects it. The capture plan leads with a save, so its attempt checks the '#' anyway.
+        Slice input = utf8Slice("#a=1");
+        assertThat(booleanPlan.unanchoredAttemptForDiagnostics(input, 0, false, false, null)).isEqualTo(4);
+        assertThat(booleanPlan.unanchoredAttemptForDiagnostics(input, 0, true, false, null)).isNegative();
+        assertThat(plan.unanchoredAttemptForDiagnostics(input, 0, false, false, null)).isNegative();
+
+        // A failed attempt that starts after the leading character reports the full attempt's
+        // resume position and scanned extent: the end of the second run, a superset of the
+        // leading one, or the position after the leading character when no such run follows.
+        Slice failed = utf8Slice("request id=abc-123");
+        assertThat(booleanPlan.unanchoredAttemptForDiagnostics(failed, 0, false, false, null))
+                .isEqualTo(plan.unanchoredAttemptForDiagnostics(failed, 0, true, false, null))
+                .isEqualTo(~((7L << 32) | 7));
+        ScanPlan leadingResume = requireNonNull(analyze("[a-z]([0-9]+)="));
+        Slice digitsMissing = utf8Slice("ab=");
+        assertThat(leadingResume.unanchoredAttemptForDiagnostics(digitsMissing, 0, false, false, null))
+                .isEqualTo(leadingResume.unanchoredAttemptForDiagnostics(digitsMissing, 0, true, false, null))
+                .isEqualTo(~((1L << 32) | 1));
+        verifyAgainstJoni(keyValue, List.of("#a=1", "standalone", "status=200", "request id=abc-123", "completed elapsed_ms=42", "status=", "city=東京", "é=1 x=y"));
+        verifyAgainstJoni("[a-z]([0-9]+)=", List.of("ab=", "a1b=", "ab2= c=", "é1="));
+    }
+
+    @Test
     public void testFailedAttemptResumeRequiresAdjacentUnboundedSuperset()
     {
         // In each shape an attempt that starts inside the second run can reach a different
@@ -2275,7 +2311,8 @@ public class TestScanPlan
         }
 
         // Boolean find and count that reach a forked start-anchored plan run its boolean plan, the
-        // same operations without the capture saves. A plan without a fork is its own.
+        // same operations without the capture saves. A start-anchored plan without a fork is its
+        // own.
         ScanPlan forked = requireNonNull(analyze("^(a)?(b)?abcd([0-9]+)/$"));
         List<String> operations = List.of(forked.operationsForDiagnostics().split(","));
         assertThat(operations).contains("FORK", "SAVE");

@@ -2358,6 +2358,19 @@ and keep each search linear in its input:
   attempt as a boolean `find` keeps the RE2 `RETRY_64` `count` win, 0.77, 0.76,
   and 0.93 times, and makes RE2 `ANCHORED_HOST` and `ANCHORED_QUERY` `count`
   take 0.95 to 0.97 times.
+- An unanchored plan with capture saves keeps a boolean plan too, which only
+  full-Slice boolean `find` runs; the unanchored count loop keeps the full
+  plan. Its attempts start from the same candidates and reach the same run
+  ends, so resume positions after failures and the work budget are unchanged.
+  When an unanchored plan starts with a run of exactly one character that
+  writes no group and is not a boolean tail, the interpreter's case-sensitive
+  executor starts an attempt at an ASCII candidate after that character,
+  because the candidate scan finds exactly the run's member bytes; a lead-byte
+  candidate still runs the run, and the ASCII-folded executor and generated
+  kernels run every operation. In `BenchmarkLanguageComparison`, `keyValue`
+  `reusedContains` takes 0.715 times its earlier time on R9g and 0.634 times on
+  R8i. The one control that moved, `quotedField` `reusedCount` on R8i, took
+  1.025 times, an accepted marginal cost of about 0.75 ns per call.
 
 On malformed input, a search that hands off may report the ordinary engine's
 match instead of the plan's. Every operation applies the same budget from the
@@ -2390,8 +2403,9 @@ operation, and every `UNANCHORED_SET` operation except `count`, which was
 unchanged. The protected controls stayed stable except for one accepted cost:
 unanchored byte-set plans make short key-value `contains` calls, such as
 `([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)` over `status=200`, take 1.08 to 1.16 times
-the ordinary engine's time on R9g and R8i. This is accepted because those calls
-remain about ten times faster than Joni.
+the ordinary engine's time on R9g and R8i. This was accepted because those calls
+remain about ten times faster than Joni. The boolean plan for unanchored plans
+with capture saves, recorded in the bullets above, supersedes this cost.
 
 Rejected development alternatives are recorded to prevent repeating them
 without new evidence:
@@ -2838,9 +2852,9 @@ plans; the last bullets record the rules and measurements specific to each.
   count that skips the plan does not exclude a pattern, because only the calls
   that reach the plan change.
 - Short boolean calls that the interpreter hands to the DFA stay on the
-  generated class, as in Trino. Boolean calls of a start-anchored plan run its
-  full plan rather than the save-free boolean plan: a capture save without
-  groups is one null check in generated code, not an operation dispatch.
+  generated class, as in Trino. Boolean calls of a plan run its full plan
+  rather than the save-free boolean plan: a capture save without groups is one
+  null check in generated code, not an operation dispatch.
 - No language exposes generated method handles; only
   `usesGeneratedBytecode()` is public. A caller holding a constant pattern
   binds the public method to the pattern, which reaches the generated entry.

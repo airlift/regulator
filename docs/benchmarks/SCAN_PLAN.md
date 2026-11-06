@@ -266,6 +266,24 @@ as a boolean `find` keeps the RE2 `RETRY_64` `count` win, 0.77, 0.76, and 0.93
 times, and makes RE2 `ANCHORED_HOST` and `ANCHORED_QUERY` `count` take 0.95 to
 0.97 times.
 
+An unanchored plan with capture saves keeps a boolean plan too, which only
+full-Slice boolean `find` runs; the unanchored count loop reports match ends and
+keeps the full plan. The boolean plan makes the same attempts from the same
+candidates and reaches the same run ends, so its resume positions after failures
+and its work budget match the full plan's. When the first operation of an
+unanchored plan is a run of exactly one character that writes no group and is
+not a boolean tail, the interpreter's case-sensitive executor starts an attempt
+at an ASCII candidate after that character, at the second operation, with the
+run end and scanned extent the run would leave. The candidate scan finds exactly
+the run's member bytes, and an ASCII member byte is a whole member character. A
+candidate at a lead byte still runs the leading run, which reads the character
+by the run's encodings, and the ASCII-folded executor and the generated kernels
+run every operation. On `status=200`, a key-value `contains` attempt dispatches
+3 operations instead of 7. In `BenchmarkLanguageComparison`, `keyValue`
+`reusedContains` takes 0.715 times its earlier time on R9g and 0.634 times on
+R8i; the one control that moved, `quotedField` `reusedCount` on R8i, took 1.025
+times, an accepted marginal cost of about 0.75 ns per call.
+
 An expression without an end assertion omits the end operation. The partial
 executor reports its cursor after the last operation for `find` and `lookingAt`;
 `matches` accepts it only at the logical input end. Partial and unanchored plans
@@ -857,8 +875,9 @@ start-anchored first search uses its own engine hook, which a start-anchored
 plan's class also overrides. A search that hands off
 continues on the ordinary engine through final engine methods, as an
 interpreted one does. Short boolean calls that the interpreter sends to the
-DFA, and boolean calls that the interpreter runs on a start-anchored plan's
-save-free boolean plan, run the generated full plan.
+DFA, and boolean calls that the interpreter runs on a plan's save-free boolean
+plan, run the generated full plan. Its attempts run every operation, including
+a leading one-character run that the interpreter skips at an ASCII candidate.
 
 ### Benchmarks
 
