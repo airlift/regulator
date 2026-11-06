@@ -234,7 +234,9 @@ public class TestRe2BooleanPlans
         Set<String> overrides = switch (expected) {
             case ENGINE -> throw new IllegalArgumentException("the engine shape has no shape class");
             case EXACT_LITERAL -> Set.of("find", "countMatches", "matches", "lookingAt");
-            case LITERAL_KERNEL -> Set.of("find", "matches", "lookingAt");
+            // A literal kernel counts a dot-star literal's spans; Trino counts them on its own
+            // dot-star subtype, so its literal-kernel class counts on the engine.
+            case LITERAL_KERNEL -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "matches", "lookingAt") : Set.of("find", "countMatches", "matches", "lookingAt");
             case LITERAL_ALTERNATION, FIXED_WIDTH, BYTE_TABLE -> Set.of("find", "countMatches");
             case CLASS_RUN -> Set.of("find", "countMatches", "matchInternal");
             case SCAN_PLAN -> Set.of("find", "countMatches", "matches", "lookingAt", "matchInternal");
