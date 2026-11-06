@@ -37,6 +37,9 @@ public final class RegexpMatcher
     private final int[] groups;
     private final Map<String, Integer> namedCapturingGroups;
     private final boolean latin1;
+    // The pattern's single-byte table, which a group-zero find runs in place of the program on
+    // fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
+    // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
     // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
     // of the program. See CompiledPattern.literalSetSpanMatcher.
@@ -83,11 +86,6 @@ public final class RegexpMatcher
     private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
-    RegexpMatcher(CompiledPattern pattern, Slice input)
-    {
-        this(pattern, input, null);
-    }
-
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
         this(pattern, input, singleByteMatcher, pattern.capturingGroupCount());
@@ -112,7 +110,6 @@ public final class RegexpMatcher
         this.characterClassCounter = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
         this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && this.literalSet == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
-                this.singleByteMatcher == null &&
                 characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
@@ -304,7 +301,10 @@ public final class RegexpMatcher
             return findNextAfterCarriageReturn();
         }
 
-        if (singleByteMatcher != null) {
+        // The table reads every byte, so a search with at least MINIMUM_LONG_SEARCH_BYTES left
+        // takes the group-zero forward cursor, whose vector byte scan, which the table had
+        // replaced, skips about 1013 bytes of each 1024-byte benchmark row the table read whole.
+        if (singleByteMatcher != null && regionEnd - (regionStart + nextFindStart) < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
             int matchStart = singleByteMatcher.find(input, regionStart + nextFindStart, regionEnd);
             if (matchStart < 0) {
                 return failFind();
@@ -790,6 +790,11 @@ public final class RegexpMatcher
     boolean literalSetEnabledForDiagnostics()
     {
         return literalSet != null;
+    }
+
+    SingleByteMatcher singleByteMatcherForDiagnostics()
+    {
+        return singleByteMatcher;
     }
 
     int groupZeroForwardProductivityCheckCountForDiagnostics()

@@ -67,8 +67,9 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// LITERAL_SET alternates 100 words, over the limit of 64 literals of the literal-alternation span
 /// matcher: full-Slice `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers
 /// find it with the literal set's automaton, skipping the bytes that lead no word with a vector
-/// scan on LONG rows. SINGLE_BYTE is the one-byte exact literal `,`, which the single-byte table
-/// supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
+/// scan on LONG rows. SINGLE_BYTE is the one-byte exact literal `,`, which a matcher's `find` reads
+/// with the single-byte table on SHORT rows and with the group-zero forward cursor's vector scan on
+/// LONG rows. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
 /// `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose dot stops at more line
 /// terminators, runs the ordinary search. TestBenchmarkPatternDispatch checks each route in RE2,
 /// Java, and Rust, and in Trino only that FOLDED_PAIR_SEQUENCE takes no fixed-width route. SHORT
@@ -77,8 +78,8 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// text of the others. LONG inputs contain padding, but anchored URL rows 4–6 reject before
 /// reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s` without its
 /// literal, so its SHORT rows find the literal within their first 64 bytes and its LONG rows only
-/// after them, the two sides of the inner literal search's 64-byte minimum skip. Each target's
-/// rows mix matching and non-matching log lines, requests, URLs, or prose.
+/// after them, the two sides of the inner literal search's 64-byte minimum skip. Each target's rows
+/// mix matching and non-matching log lines, requests, URLs, or prose.
 ///
 /// Where a route above names no language, it is the route of RE2, Java, and Rust. Trino compiles
 /// most targets to its own subtypes instead, such as its ordered-literal matcher for

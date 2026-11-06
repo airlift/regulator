@@ -100,4 +100,25 @@ final class TestingPatternShapes
         }
         assertThat(pattern.isReverseProgramComputed()).as(label).isFalse();
     }
+
+    /// Requires `pattern` to have built a forward DFA, as a search on the general engine's cursors
+    /// does.
+    static void assertProgramSearch(CompiledPattern pattern, String label)
+    {
+        assertThat(Dfa.DfaInstance.Kind.values())
+                .as("%s DFAs", label)
+                .anySatisfy(kind -> assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(kind)).isNotNull());
+    }
+
+    /// Requires `pattern` to have built no program search when `shortSearch`, as a search that
+    /// runs a table or span route in its place does, and otherwise a forward DFA.
+    static void assertProgramSearchUnless(boolean shortSearch, CompiledPattern pattern, String label)
+    {
+        if (shortSearch) {
+            assertNoProgramSearch(pattern, label);
+        }
+        else {
+            assertProgramSearch(pattern, label);
+        }
+    }
 }

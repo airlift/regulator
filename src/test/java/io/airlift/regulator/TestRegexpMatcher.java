@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+import static io.airlift.regulator.TestingPatternShapes.assertProgramSearchUnless;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -295,7 +296,7 @@ public class TestRegexpMatcher
     public void testGroupZeroMatcherUsesSingleByteMatcher()
     {
         Re2 pattern = Re2.compile(Slices.utf8Slice("([,;])"));
-        SingleByteMatcher byteMatcher = pattern.createSingleByteMatcher();
+        SingleByteMatcher byteMatcher = pattern.sharedSingleByteMatcher();
         assertThat(byteMatcher).isNotNull();
 
         RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("a,b;c"), byteMatcher);
@@ -711,13 +712,62 @@ public class TestRegexpMatcher
     {
         Slice input = Slices.utf8Slice("x,a,y");
         Re2 pattern = Re2.compile(Slices.utf8Slice("([,;])"));
-        RegexpMatcher matcher = pattern.groupZeroMatcher(input, pattern.createSingleByteMatcher())
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, pattern.sharedSingleByteMatcher())
                 .reset(input, 2, 4);
 
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(3);
         assertThat(matcher.end()).isEqualTo(4);
         assertThat(matcher.find()).isFalse();
+    }
+
+    @Test
+    public void testSingleByteTableHandsOffToForwardCursor()
+    {
+        // A find with fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes left reads the
+        // single-byte table, which builds no program search, and one with at least that many runs
+        // the group-zero forward cursor, whose byte scan the table replaced, on the program's DFA.
+        // Each find starts partway into a 1024-byte input, so the bytes left decide, not the
+        // input length, and the find that resumes after the match has 9 left. These finds prove
+        // the hand-off to a program search. Each pass compiles its patterns afresh, so a DFA that
+        // an earlier pass built cannot stand in for this pass's search.
+        byte[] bytes = "x".repeat(1024).getBytes(US_ASCII);
+        bytes[1014] = ',';
+        Slice input = Slices.wrappedBuffer(bytes);
+        for (int remaining : List.of(63, 64, 65)) {
+            for (CompiledPattern pattern : List.of(
+                    Re2.compile(Slices.utf8Slice("[,;]")),
+                    JavaRegexp.compile(Slices.utf8Slice("[,;]")),
+                    RustRegexp.compile(Slices.utf8Slice("[,;]")),
+                    TrinoRegexp.compile(Slices.utf8Slice("[,;]")).re2())) {
+                String label = pattern.getClass().getSimpleName() + " " + remaining;
+                RegexpMatcher matcher = pattern.matcher(input, 0);
+                assertThat(matcher.singleByteMatcherForDiagnostics()).as(label).isNotNull();
+                assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).as(label).isTrue();
+                assertThat(matcher.find(input.length() - remaining)).as(label).isTrue();
+                assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(1014, 1015);
+                assertThat(matcher.find()).as(label).isFalse();
+                assertProgramSearchUnless(remaining < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, pattern, label);
+            }
+        }
+
+        // A find with the comma near the end of an input longer than the forward cursor's
+        // productivity check distance proves that cursor runs: its byte scan checks the scan's
+        // productivity once, where any other program search makes no check.
+        byte[] longBytes = "x".repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES + 1024).getBytes(US_ASCII);
+        longBytes[longBytes.length - 10] = ',';
+        Slice longInput = Slices.wrappedBuffer(longBytes);
+        for (CompiledPattern pattern : List.of(
+                Re2.compile(Slices.utf8Slice("[,;]")),
+                JavaRegexp.compile(Slices.utf8Slice("[,;]")),
+                RustRegexp.compile(Slices.utf8Slice("[,;]")),
+                TrinoRegexp.compile(Slices.utf8Slice("[,;]")).re2())) {
+            String label = pattern.getClass().getSimpleName();
+            RegexpMatcher matcher = pattern.matcher(longInput, 0);
+            assertThat(matcher.find(0)).as(label).isTrue();
+            assertThat(matcher.start()).as(label).isEqualTo(longBytes.length - 10);
+            assertThat(matcher.groupZeroForwardProductivityCheckCountForDiagnostics()).as(label).isPositive();
+        }
     }
 
     @Test

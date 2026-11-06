@@ -138,8 +138,9 @@ over a partial region; see [RE2 patterns](#re2-patterns), and a Java matcher
 region whose `$` reads a CR before it, which runs on the NFA). Its matchers
 therefore call the plan entry directly, as does `extract` of a capture group,
 which also skips building a matcher. This removes the shared path's out-of-line
-calls from the capture path. Matchers given a single-byte matcher, ranged
-`matches` and `lookingAt`, and unanchored plans keep shared capture matching;
+calls from the capture path. Route selection gives a pattern with a scan plan
+no single-byte table, so no matcher searches one ahead of the plan. Ranged
+`matches` and `lookingAt` and unanchored plans keep shared capture matching;
 full-Slice `matches` and `lookingAt` reach the plan through the shape class's
 own routes rather than the hook.
 
@@ -778,11 +779,11 @@ compile time. `contains` runs the generated class when full-Slice `find` runs
 the plan, and otherwise keeps its retained literal kernel. Every other
 operation and every matcher runs the generated class. Short boolean calls that
 the interpreter hands to the ordinary engine also run the generated class,
-which has no operation dispatch for that route to avoid. A pattern with a
-single-byte matcher, which group-zero operations ask before the plan, or with
-a count that skips the plan, is not eligible. Such a pattern has no scan plan
-today, so the check only keeps a future change from routing it to generated
-code.
+which has no operation dispatch for that route to avoid. Route selection gives
+a pattern with a scan plan no single-byte table, which group-zero operations
+would ask before the plan. A pattern whose count skips the plan is not
+eligible; no such pattern has a scan plan today, so the check only keeps a
+future change from routing it to generated code.
 
 ### Generated class
 
