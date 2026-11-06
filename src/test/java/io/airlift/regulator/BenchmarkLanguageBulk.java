@@ -79,7 +79,8 @@ public class BenchmarkLanguageBulk
         private Object pattern;
         private RegexpMatcher sliceMatcher;
         private java.util.regex.Matcher jdkMatcher;
-        private List<Source> sources;
+        private Operation operation;
+        private Source[] sources;
 
         @Setup
         public void setup()
@@ -108,11 +109,18 @@ public class BenchmarkLanguageBulk
             System.err.println("phase=compile");
             pattern = compilePattern();
             if (input.model().equals("compile")) {
-                sources = List.of();
+                sources = new Source[0];
                 return;
             }
-            boolean captures = input.model().endsWith("captures");
-            sliceMatcher = input.model().equals("grep") ? null : switch (pattern) {
+            operation = switch (input.model()) {
+                case "grep" -> Operation.FIND;
+                case "count" -> Operation.COUNT;
+                case "count-spans" -> Operation.SPANS;
+                case "count-captures", "grep-captures" -> Operation.CAPTURES;
+                default -> throw new IllegalArgumentException("unknown model: " + input.model());
+            };
+            boolean captures = operation == Operation.CAPTURES;
+            sliceMatcher = operation == Operation.FIND ? null : switch (pattern) {
                 case Re2 re2 -> captures ? re2.matcher(EMPTY_SLICE) : re2.matcher(EMPTY_SLICE, 0);
                 case JavaRegexp java -> captures ? java.matcher(EMPTY_SLICE) : java.matcher(EMPTY_SLICE, 0);
                 case RustRegexp rust -> captures ? rust.matcher(EMPTY_SLICE) : rust.matcher(EMPTY_SLICE, 0);
@@ -122,10 +130,12 @@ public class BenchmarkLanguageBulk
                 jdkMatcher = jdk.matcher("");
             }
             List<Slice> bytes = input.model().startsWith("grep") ? lines(input.haystack()) : List.of(input.haystack());
-            sources = new ArrayList<>();
+            List<Source> sourceList = new ArrayList<>();
             for (Slice source : bytes) {
-                sources.add(new Source(source, engine.equals("jdk") ? decode(source) : null));
+                sourceList.add(new Source(source, engine.equals("jdk") ? decode(source) : null));
             }
+            // An array, so the timed per-source loop steps no iterator.
+            sources = sourceList.toArray(Source[]::new);
         }
 
         Object compilePattern()
@@ -159,77 +169,100 @@ public class BenchmarkLanguageBulk
             };
         }
 
+        // Chooses the loop once per invocation, so no model check runs per source or per
+        // match, where it would be timed as matching.
         long execute()
         {
-            long result = 0;
-            for (Source source : sources) {
-                if (input.model().equals("grep") && pattern instanceof Re2 re2) {
-                    result += re2.find(source.bytes) ? 1 : 0;
-                }
-                else if (input.model().equals("grep") && pattern instanceof JavaRegexp java) {
-                    result += java.find(source.bytes) ? 1 : 0;
-                }
-                else if (input.model().equals("grep") && pattern instanceof RustRegexp rust) {
-                    result += rust.find(source.bytes) ? 1 : 0;
-                }
-                else if (input.model().equals("count") && pattern instanceof Re2 re2) {
-                    result += re2.count(source.bytes);
-                }
-                else if (input.model().equals("count") && pattern instanceof JavaRegexp java) {
-                    result += java.count(source.bytes);
-                }
-                else if (input.model().equals("count") && pattern instanceof RustRegexp rust) {
-                    result += rust.count(source.bytes);
-                }
-                else if (pattern instanceof TrinoRegexp trino) {
-                    result += switch (input.model()) {
-                        case "count" -> trino.count(source.bytes);
-                        case "grep" -> trino.contains(source.bytes) ? 1 : 0;
-                        case "count-spans", "count-captures", "grep-captures" -> trinoResult(trino, source.bytes, input.model());
-                        default -> throw new IllegalArgumentException("unknown model: " + input.model());
-                    };
-                }
-                else if (sliceMatcher != null) {
-                    sliceMatcher.reset(source.bytes);
-                    while (sliceMatcher.find()) {
-                        if (input.model().equals("count-spans")) {
-                            result += sliceMatcher.end() - sliceMatcher.start();
-                        }
-                        else if (input.model().endsWith("captures")) {
-                            for (int group = 0; group <= sliceMatcher.groupCount(); group++) {
-                                result += sliceMatcher.matched(group) ? 1 : 0;
-                            }
-                        }
-                        else {
-                            result++;
-                        }
-                    }
-                }
-                else if (jdkMatcher != null) {
-                    jdkMatcher.reset(source.text);
-                    if (input.model().equals("grep")) {
-                        result += jdkMatcher.find() ? 1 : 0;
-                        continue;
-                    }
-                    while (jdkMatcher.find()) {
-                        if (input.model().equals("count-spans")) {
-                            result += source.byteOffset(jdkMatcher.end()) - source.byteOffset(jdkMatcher.start());
-                        }
-                        else if (input.model().endsWith("captures")) {
-                            for (int group = 0; group <= jdkMatcher.groupCount(); group++) {
-                                result += jdkMatcher.start(group) >= 0 ? 1 : 0;
-                            }
-                        }
-                        else {
-                            result++;
-                        }
-                    }
-                }
-                else {
-                    result += joniResult((Regex) pattern, source.bytes, input.model());
-                }
+            if (operation == null) {
+                throw new IllegalArgumentException("execute requires a matching workload, not compile");
             }
-            return result;
+            return switch (pattern) {
+                case Re2 re2 -> switch (operation) {
+                    case FIND -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += re2.find(source.bytes) ? 1 : 0;
+                        }
+                        yield result;
+                    }
+                    case COUNT -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += re2.count(source.bytes);
+                        }
+                        yield result;
+                    }
+                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case CAPTURES -> matcherCaptures(sliceMatcher, sources);
+                };
+                case JavaRegexp java -> switch (operation) {
+                    case FIND -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += java.find(source.bytes) ? 1 : 0;
+                        }
+                        yield result;
+                    }
+                    case COUNT -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += java.count(source.bytes);
+                        }
+                        yield result;
+                    }
+                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case CAPTURES -> matcherCaptures(sliceMatcher, sources);
+                };
+                case RustRegexp rust -> switch (operation) {
+                    case FIND -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += rust.find(source.bytes) ? 1 : 0;
+                        }
+                        yield result;
+                    }
+                    case COUNT -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += rust.count(source.bytes);
+                        }
+                        yield result;
+                    }
+                    case SPANS -> matcherSpans(sliceMatcher, sources);
+                    case CAPTURES -> matcherCaptures(sliceMatcher, sources);
+                };
+                case TrinoRegexp trino -> switch (operation) {
+                    case FIND -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += trino.contains(source.bytes) ? 1 : 0;
+                        }
+                        yield result;
+                    }
+                    case COUNT -> {
+                        long result = 0;
+                        for (Source source : sources) {
+                            result += trino.count(source.bytes);
+                        }
+                        yield result;
+                    }
+                    case SPANS -> trinoSpans(trino, sources);
+                    case CAPTURES -> trinoCaptures(trino, sources);
+                };
+                case Pattern _ -> switch (operation) {
+                    case FIND -> jdkFind(jdkMatcher, sources);
+                    case COUNT -> jdkCount(jdkMatcher, sources);
+                    case SPANS -> jdkSpans(jdkMatcher, sources);
+                    case CAPTURES -> jdkCaptures(jdkMatcher, sources);
+                };
+                case Regex joni -> switch (operation) {
+                    case FIND -> joniFind(joni, sources);
+                    case COUNT -> joniCount(joni, sources);
+                    case SPANS -> joniSpans(joni, sources);
+                    case CAPTURES -> joniCaptures(joni, sources);
+                };
+                default -> throw new IllegalStateException("unhandled compiled pattern: " + pattern.getClass().getName());
+            };
         }
 
         void trace(BufferedWriter writer)
@@ -318,6 +351,15 @@ public class BenchmarkLanguageBulk
         }
     }
 
+    /// What one workload model does with each source.
+    private enum Operation
+    {
+        FIND,
+        COUNT,
+        SPANS,
+        CAPTURES,
+    }
+
     private static final class Source
     {
         private final Slice bytes;
@@ -400,49 +442,166 @@ public class BenchmarkLanguageBulk
         return lines;
     }
 
-    private static long trinoResult(TrinoRegexp pattern, Slice source, String model)
+    private static long matcherSpans(RegexpMatcher matcher, Source[] sources)
     {
-        boolean captures = model.endsWith("captures");
-        // Both Trino and Joni construct one matcher per source inside timing and reuse it for
-        // every match in that source. Only capture workloads retain explicit groups.
-        TrinoRegexpMatcher matcher = pattern.matcher(source, captures ? pattern.capturingGroupCount() : 0);
         long result = 0;
-        while (matcher.find()) {
-            if (captures) {
-                for (int group = 0; group <= matcher.groupCount(); group++) {
-                    result += matcher.matched(group) ? 1 : 0;
-                }
-            }
-            else {
+        for (Source source : sources) {
+            matcher.reset(source.bytes);
+            while (matcher.find()) {
                 result += matcher.end() - matcher.start();
             }
         }
         return result;
     }
 
-    private static long joniResult(Regex pattern, Slice source, String model)
+    private static long matcherCaptures(RegexpMatcher matcher, Source[] sources)
     {
-        int base = source.byteArrayOffset();
-        io.airlift.joni.Matcher matcher = pattern.matcher(source.byteArray(), base, base + source.length());
         long result = 0;
-        int next = 0;
-        while (next <= source.length() && matcher.search(base + next, base + source.length(), Option.DEFAULT) >= 0) {
-            if (model.equals("grep")) {
-                return 1;
+        for (Source source : sources) {
+            matcher.reset(source.bytes);
+            while (matcher.find()) {
+                for (int group = 0; group <= matcher.groupCount(); group++) {
+                    result += matcher.matched(group) ? 1 : 0;
+                }
             }
-            if (model.equals("count-spans")) {
+        }
+        return result;
+    }
+
+    // Trino and Joni construct one matcher per source inside timing and reuse it for every
+    // match in that source. Trino retains explicit groups only for capture workloads.
+    private static long trinoSpans(TrinoRegexp pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            TrinoRegexpMatcher matcher = pattern.matcher(source.bytes, 0);
+            while (matcher.find()) {
+                result += matcher.end() - matcher.start();
+            }
+        }
+        return result;
+    }
+
+    private static long trinoCaptures(TrinoRegexp pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            TrinoRegexpMatcher matcher = pattern.matcher(source.bytes, pattern.capturingGroupCount());
+            while (matcher.find()) {
+                for (int group = 0; group <= matcher.groupCount(); group++) {
+                    result += matcher.matched(group) ? 1 : 0;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static long jdkFind(java.util.regex.Matcher matcher, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            result += matcher.reset(source.text).find() ? 1 : 0;
+        }
+        return result;
+    }
+
+    private static long jdkCount(java.util.regex.Matcher matcher, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            matcher.reset(source.text);
+            while (matcher.find()) {
+                result++;
+            }
+        }
+        return result;
+    }
+
+    private static long jdkSpans(java.util.regex.Matcher matcher, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            matcher.reset(source.text);
+            while (matcher.find()) {
+                result += source.byteOffset(matcher.end()) - source.byteOffset(matcher.start());
+            }
+        }
+        return result;
+    }
+
+    private static long jdkCaptures(java.util.regex.Matcher matcher, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            matcher.reset(source.text);
+            while (matcher.find()) {
+                for (int group = 0; group <= matcher.groupCount(); group++) {
+                    result += matcher.start(group) >= 0 ? 1 : 0;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static long joniFind(Regex pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            Slice bytes = source.bytes;
+            int base = bytes.byteArrayOffset();
+            io.airlift.joni.Matcher matcher = pattern.matcher(bytes.byteArray(), base, base + bytes.length());
+            result += matcher.search(base, base + bytes.length(), Option.DEFAULT) >= 0 ? 1 : 0;
+        }
+        return result;
+    }
+
+    private static long joniCount(Regex pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            Slice bytes = source.bytes;
+            int base = bytes.byteArrayOffset();
+            io.airlift.joni.Matcher matcher = pattern.matcher(bytes.byteArray(), base, base + bytes.length());
+            int next = 0;
+            while (next <= bytes.length() && matcher.search(base + next, base + bytes.length(), Option.DEFAULT) >= 0) {
+                result++;
+                next = nextStart(bytes, matcher.getBegin(), matcher.getEnd());
+            }
+        }
+        return result;
+    }
+
+    private static long joniSpans(Regex pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            Slice bytes = source.bytes;
+            int base = bytes.byteArrayOffset();
+            io.airlift.joni.Matcher matcher = pattern.matcher(bytes.byteArray(), base, base + bytes.length());
+            int next = 0;
+            while (next <= bytes.length() && matcher.search(base + next, base + bytes.length(), Option.DEFAULT) >= 0) {
                 result += matcher.getEnd() - matcher.getBegin();
+                next = nextStart(bytes, matcher.getBegin(), matcher.getEnd());
             }
-            else if (model.endsWith("captures")) {
+        }
+        return result;
+    }
+
+    private static long joniCaptures(Regex pattern, Source[] sources)
+    {
+        long result = 0;
+        for (Source source : sources) {
+            Slice bytes = source.bytes;
+            int base = bytes.byteArrayOffset();
+            io.airlift.joni.Matcher matcher = pattern.matcher(bytes.byteArray(), base, base + bytes.length());
+            int next = 0;
+            while (next <= bytes.length() && matcher.search(base + next, base + bytes.length(), Option.DEFAULT) >= 0) {
                 Region region = matcher.getEagerRegion();
                 for (int group = 0; group < region.numRegs; group++) {
                     result += region.beg[group] >= 0 ? 1 : 0;
                 }
+                next = nextStart(bytes, matcher.getBegin(), matcher.getEnd());
             }
-            else {
-                result++;
-            }
-            next = nextStart(source, matcher.getBegin(), matcher.getEnd());
         }
         return result;
     }

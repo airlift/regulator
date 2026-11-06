@@ -33,11 +33,14 @@ struct Re2Engine {
 
     static int64_t execute(const Inputs& inputs, const RE2& pattern, const std::vector<absl::string_view>& sources,
                            std::vector<absl::string_view>& groups, bool trace) {
+        // The model is read once per call, never per source or per match.
         bool captures = inputs.captures();
+        bool grep = inputs.model == "grep";
+        bool spans = inputs.model == "count-spans";
         int64_t result = 0;
         for (absl::string_view source : sources) {
             if (trace) std::cout << "source\n";
-            if (inputs.model == "grep") {
+            if (grep) {
                 bool found = pattern.Match(source, 0, source.size(), RE2::UNANCHORED, nullptr, 0);
                 result += found;
                 if (trace) std::cout << (found ? "1\n" : "0\n");
@@ -48,7 +51,7 @@ struct Re2Engine {
                 if (captures) {
                     for (absl::string_view group : groups) result += group.data() != nullptr;
                 }
-                else if (inputs.model == "count-spans") result += groups[0].size();
+                else if (spans) result += groups[0].size();
                 else ++result;
                 if (trace) {
                     for (absl::string_view group : groups) write_group(source, group);
