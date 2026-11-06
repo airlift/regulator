@@ -2394,6 +2394,17 @@ measurements specific to each language.
   - On R8i with generation off, `BenchmarkTrinoScanPlan` `RETRY_256`,
     `RETRY_128`, and `OPTIONAL_MIXED` took 2.4 to 5.8 ns longer in some
     measurements and were within noise in others.
+- An RE2 run's vector stop scan finds a stop with one signed compare per block,
+  on every platform. It stops at non-ASCII bytes and at up to four ASCII bytes
+  the run excludes, so a byte XORed with an excluded byte is zero where the two
+  are equal and negative where the byte is non-ASCII. The unsigned minimum of
+  those XORs keeps both properties, and a stop is a lane below 1, or below 0
+  for a run that excludes no ASCII byte. This replaces a compare for non-ASCII
+  bytes and one per excluded byte, joined by ORs. Against that form, on R9g
+  `BenchmarkRe2ScanPlan` `LONG_SET` takes 0.39 times the time and `LONG_PATH`
+  0.67 to 0.68, with `-XX:UseSVE=0` 0.95 and 0.90, and on R8i 0.76 to 0.78 and
+  0.87 to 0.88. Generated kernels move the same way, and the `URL`,
+  `URL_MALFORMED`, and `ANCHORED_HOST` rows stay within 0.95 to 1.01.
 - The short boolean route to the DFA described in
   [Trino Specialized Byte Scans](#trino-specialized-byte-scans) applies to an
   RE2 plan whatever bytes it consumes, because an RE2 plan agrees with the
