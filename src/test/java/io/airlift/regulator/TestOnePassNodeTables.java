@@ -72,13 +72,13 @@ public class TestOnePassNodeTables
         assertThat(OnePass.search(program, utf8Slice(text.substring(0, text.length() - 1) + "!"), true, Prog.MatchKind.FULL_MATCH, groups)).isFalse();
     }
 
-    // More states than twice the initial capacity proves two growths; the retained action table
+    // More states than twice the initial capacity proves two growths; the retained step table
     // holds exactly the final states.
     private static void assertNodeTablesGrewTwice(Prog program)
     {
         int initialNodeCapacity = Prog.onePassInitialNodeCapacity(program.bytemapRange());
         assertThat(program.onePassStateCount()).isGreaterThan(2 * initialNodeCapacity);
-        assertThat(program.onePassAction()).hasSize(program.onePassStateCount() * program.bytemapRange());
+        assertThat(program.onePassStep()).hasSize(program.onePassStateCount() * program.bytemapRange());
     }
 
     private static Prog compile(String pattern)

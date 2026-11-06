@@ -29,8 +29,8 @@ import static org.assertj.core.api.Assertions.within;
 // Ported from upstream RE2: re2/testing/compile_test.cc.
 public class TestUpstreamCompileMemoryBudget
 {
-    // Each one-pass action retains the action and its next-state offset.
-    private static final int ONEPASS_ACTION_BYTES = 2 * Integer.BYTES;
+    // Each one-pass action retains one step: the action packed with its next-state offset.
+    private static final int ONEPASS_ACTION_BYTES = Long.BYTES;
 
     @Test
     public void testInsufficientMemoryBudgetOneByteFails()

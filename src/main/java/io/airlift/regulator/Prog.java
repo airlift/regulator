@@ -360,11 +360,11 @@ final class Prog
     private boolean onePassPrepared;
     private int onePassStateCount;
     private int[] onePassMatchCond;
-    private int[] onePassAction; // flattened [stateCount * bytemapRange] actions, encoded like upstream
-    // Parallel to onePassAction: each action's next state times bytemapRange, the offset of that
-    // state's actions, so the loops chain one load and one add per byte instead of a shift and a
-    // multiply.
-    private int[] onePassNextOffset;
+    // Flattened [stateCount * bytemapRange] steps. The low 32 bits hold the action, encoded like
+    // upstream; the high 32 bits hold its next state times bytemapRange, the offset of that state's
+    // steps, so one load gives the action and the offset, and the loops chain a load, a shift and
+    // an add per byte instead of a multiply.
+    private long[] onePassStep;
     // Only programs exceeding upstream's capture-bit capacity allocate these parallel masks.
     private long[] onePassMatchCapture;
     private long[] onePassActionCapture;
@@ -675,14 +675,9 @@ final class Prog
         return onePassMatchCond;
     }
 
-    public int[] onePassAction()
+    long[] onePassStep()
     {
-        return onePassAction;
-    }
-
-    int[] onePassNextOffset()
-    {
-        return onePassNextOffset;
+        return onePassStep;
     }
 
     long prefixShiftsMemory()
@@ -3378,8 +3373,8 @@ final class Prog
     // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
     private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
     private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
-    // The bytes each action retains: the action and its next-state offset.
-    private static final int ONEPASS_ACTION_BYTES = 2 * Integer.BYTES;
+    // The bytes each action retains: one step, the action packed with its next-state offset.
+    private static final int ONEPASS_ACTION_BYTES = Long.BYTES;
     // Action entries allocated before one-pass analysis starts growing node storage.
     private static final int ONEPASS_INITIAL_ACTIONS = 8192;
 
@@ -3470,7 +3465,7 @@ final class Prog
         // being one-pass usually do so after a few nodes. Storage doubles on overflow, capped at
         // the bound rather than the node limit, so no step allocates more than doubling to the
         // limit would, and a one-pass program ends exactly at the bound with no trimming copy;
-        // only the next-state offsets are then built from the finished actions. Small tables are
+        // only the step table is then packed from the finished actions, once. Small tables are
         // allocated at their bound, because growing them costs more than zeroing them.
         int byteClassCount = bytemapRange();
         int nodeCapacity = Math.min(nodeBound, onePassInitialNodeCapacity(byteClassCount));
@@ -3722,12 +3717,13 @@ final class Prog
         }
         onePassStateCount = allocatedNodeCount;
         onePassMatchCond = nodeMatchCondition;
-        onePassAction = nodeAction;
-        int[] nextOffset = new int[nodeAction.length];
+        // Each step packs the action's next-state row offset above the action; see onePassStep.
+        long[] step = new long[nodeAction.length];
         for (int index = 0; index < nodeAction.length; index++) {
-            nextOffset[index] = (nodeAction[index] >>> ONEPASS_INDEX_SHIFT) * byteClassCount;
+            int nextOffset = (nodeAction[index] >>> ONEPASS_INDEX_SHIFT) * byteClassCount;
+            step[index] = ((long) nextOffset << 32) | (nodeAction[index] & 0xFFFF_FFFFL);
         }
-        onePassNextOffset = nextOffset;
+        onePassStep = step;
         onePassMatchCapture = nodeMatchCapture;
         onePassActionCapture = nodeActionCapture;
         onePassMatchAssertions = nodeMatchAssertions;

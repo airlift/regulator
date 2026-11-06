@@ -149,8 +149,7 @@ final class OnePass
         byte[] bytes = context.byteArray();
         byte[] bytemap = prog.bytemapArray();
         int[] stateMatchCond = prog.onePassMatchCond();
-        int[] stateAction = prog.onePassAction();
-        int[] stateNextOffset = prog.onePassNextOffset();
+        long[] stateStep = prog.onePassStep();
         int[] actionAssertions = prog.onePassActionAssertions();
         int[] matchAssertions = prog.onePassMatchAssertions();
 
@@ -171,12 +170,13 @@ final class OnePass
 
                 int matchCond = nextMatchCond;
                 int actionIndex = stateOffset + cls;
-                int cond = stateAction[actionIndex];
+                long step = stateStep[actionIndex];
+                int cond = (int) step;
 
                 // Determine whether we can reach the next state.
                 if ((cond & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, cond, stateOffset + cls, context, position)) {
                     state = cond >>> INDEX_SHIFT;
-                    stateOffset = stateNextOffset[actionIndex];
+                    stateOffset = (int) (step >>> 32);
                     nextMatchCond = stateMatchCond[state];
                 }
                 else {
@@ -270,8 +270,7 @@ final class OnePass
         byte[] bytes = context.byteArray();
         byte[] bytemap = prog.bytemapArray();
         int[] stateMatchCondition = prog.onePassMatchCond();
-        int[] stateAction = prog.onePassAction();
-        int[] stateNextOffset = prog.onePassNextOffset();
+        long[] stateStep = prog.onePassStep();
         int[] actionAssertions = prog.onePassActionAssertions();
         int[] matchAssertions = prog.onePassMatchAssertions();
 
@@ -285,11 +284,12 @@ final class OnePass
             int byteClass = bytemap[bytes[position] & 0xFF] & 0xFF;
             int matchCondition = nextMatchCondition;
             int actionIndex = stateOffset + byteClass;
-            int condition = stateAction[actionIndex];
+            long step = stateStep[actionIndex];
+            int condition = (int) step;
 
             if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, stateOffset + byteClass, context, position)) {
                 state = condition >>> INDEX_SHIFT;
-                stateOffset = stateNextOffset[actionIndex];
+                stateOffset = (int) (step >>> 32);
                 nextMatchCondition = stateMatchCondition[state];
             }
             else {
@@ -341,8 +341,7 @@ final class OnePass
         byte[] bytes = context.byteArray();
         byte[] bytemap = prog.bytemapArray();
         int[] stateMatchCondition = prog.onePassMatchCond();
-        int[] stateAction = prog.onePassAction();
-        int[] stateNextOffset = prog.onePassNextOffset();
+        long[] stateStep = prog.onePassStep();
         int[] actionAssertions = prog.onePassActionAssertions();
         int[] matchAssertions = prog.onePassMatchAssertions();
 
@@ -361,11 +360,12 @@ final class OnePass
             int byteClass = bytemap[bytes[position] & 0xFF] & 0xFF;
             int matchCondition = nextMatchCondition;
             int actionIndex = stateOffset + byteClass;
-            int condition = stateAction[actionIndex];
+            long step = stateStep[actionIndex];
+            int condition = (int) step;
 
             if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, stateOffset + byteClass, context, position)) {
                 state = condition >>> INDEX_SHIFT;
-                stateOffset = stateNextOffset[actionIndex];
+                stateOffset = (int) (step >>> 32);
                 nextMatchCondition = stateMatchCondition[state];
             }
             else {
@@ -433,8 +433,7 @@ final class OnePass
         byte[] bytes = context.byteArray();
         byte[] bytemap = prog.bytemapArray();
         int[] stateMatchCondition = prog.onePassMatchCond();
-        int[] stateAction = prog.onePassAction();
-        int[] stateNextOffset = prog.onePassNextOffset();
+        long[] stateStep = prog.onePassStep();
         int[] actionAssertions = prog.onePassActionAssertions();
         int[] matchAssertions = prog.onePassMatchAssertions();
         long[] stateMatchCapture = prog.onePassMatchCapture();
@@ -453,13 +452,14 @@ final class OnePass
             int stateOffset = 0;
             for (; position < textEnd; position++) {
                 int actionIndex = stateOffset + (bytemap[bytes[position] & 0xFF] & 0xFF);
-                int condition = stateAction[actionIndex];
+                long step = stateStep[actionIndex];
+                int condition = (int) step;
                 if ((condition & EMPTY_ALL_FLAGS) != 0 && !satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
                     state = -1;
                     break;
                 }
                 state = condition >>> INDEX_SHIFT;
-                stateOffset = stateNextOffset[actionIndex];
+                stateOffset = (int) (step >>> 32);
                 long captureMask = stateActionCapture[actionIndex];
                 if (captureMask != 0) {
                     applyExtendedCaptures(captureMask, position, captures);
@@ -492,12 +492,13 @@ final class OnePass
                 int actionIndex = stateOffset + byteClass;
                 int matchCondition = nextMatchCondition;
                 long matchCaptureMask = stateMatchCapture[state];
-                int condition = stateAction[actionIndex];
+                long step = stateStep[actionIndex];
+                int condition = (int) step;
                 long captureMask = stateActionCapture[actionIndex];
 
                 if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
                     state = condition >>> INDEX_SHIFT;
-                    stateOffset = stateNextOffset[actionIndex];
+                    stateOffset = (int) (step >>> 32);
                     nextMatchCondition = stateMatchCondition[state];
                 }
                 else {

@@ -1792,11 +1792,12 @@ than the extended one.
 
 ## OnePass Next-State Offsets
 
-Upstream turns each OnePass action's next node into the offset of that node's
-row with a multiply on every byte, a serial chain that bounds one-pass speed.
-Compilation additionally stores each action's next-state row offset in a table
-parallel to the actions, so the loops chain one load and one add per byte. The
-actions keep upstream's encoding.
+Upstream turns each OnePass action's next state into the next state's row offset
+with a multiply on every byte, a serial chain that bounds one-pass speed.
+Compilation packs each action with its next state's row offset into one 64-bit
+step: the low half holds the action in upstream's encoding and the high half the
+offset, so one load gives both and the loops chain a load, a shift and an add per
+byte; the multiply leaves the chain.
 
 Upstream's limit still decides which programs are one-pass: tables of upstream's
 size, with four-byte actions, must fit in a quarter of the DFA budget. The tables
