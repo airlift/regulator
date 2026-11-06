@@ -522,7 +522,7 @@ abstract sealed class CompiledPattern
             placeholderProgram.setDfaMemory(0);
             BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
             Prog partialProgram = placeholderProgram;
-            if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
+            if (RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
                     Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
                     Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);

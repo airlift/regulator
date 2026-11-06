@@ -747,8 +747,7 @@ through one volatile field:
   select paired rows or the pointer table
 - writers hold the DFA's cache mutation lock: an exclusive search fills empty
   slots of the current generation in place, and growth, paired rows, and the
-  native pointer table publish a new root that shares the arrays they leave
-  unchanged
+  pointer table publish a new root that shares the arrays they leave unchanged
 - a reset publishes a fresh generation whose Java tables restart at the cache's
   initial capacity and never writes the superseded one, so a search that began
   before the reset can continue reading unchanged tables, whose states are
@@ -777,9 +776,12 @@ Readers need no cache-generation validation, for these reasons:
   root was published, visible with the root.
 - Each slot of a generation is written at most once: for example, a transition
   goes from uncomputed to its value, a state, a state's object row (its
-  reference array), or a start state from null to its value, and a native entry
-  from zero to an address. A racy read sees the slot empty or final, and
-  references and ints do not tear.
+  reference array), or a start state from null to its value, and a pointer
+  table entry from zero to a row's address or offset. A racy read sees the slot
+  empty or final, and references and ints do not tear. Pointer table entries
+  are 64-bit and use plain access; see
+  [Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
+  for why they do not tear either.
 - Every racy reference read on a reader path is null- and bounds-checked, and an
   empty or out-of-range slot means "not computed": the reader retries as an
   exclusive search. Object rows are shared between a root and its grown
@@ -788,14 +790,16 @@ Readers need no cache-generation validation, for these reasons:
   root.
 - An exclusive search reloads the root after each step that can publish one, so
   its writes land in the current generation.
-- Every new segment is zeroed and backfilled before it is published, so a native
-  entry is zero, a dead or full-match tag, or a possibly tagged address of a row
-  in the same segment. The native loop therefore follows entries without
-  per-edge capacity checks. Its caller checks the start row against the
-  segment of the same root, and the row where the loop exits is checked against
-  the reader's root like any other state offset. Each segment comes from an
-  automatic arena (`Arena.ofAuto`) that the reader's root keeps reachable, and
-  a reachability fence holds it for the native loop.
+- Every new pointer table is zeroed and backfilled before it is published, so
+  an entry is zero, a dead or full-match tag, or a possibly tagged address or
+  offset of a row in the same table. The pointer loop therefore follows entries
+  without per-edge capacity checks; a heap table's segment access still checks
+  its bounds. Its caller checks the start row against the table of the same
+  root, and the row where the loop exits is checked against the reader's root
+  like any other state offset. A native table comes from an automatic arena
+  (`Arena.ofAuto`) that the reader's root keeps reachable, and a reachability
+  fence holds it for the pointer loop; a heap table's array is reachable from
+  the same root.
 
 A reset or a growth leaves the superseded generation reachable only from the
 roots of searches still in flight, and that generation is not charged against
@@ -821,21 +825,23 @@ registration this design removes; as with the member table under
 [Trino Specialized Byte Scans](#trino-specialized-byte-scans), bounded memory
 the DFA does not retain needs no charge of its own.
 
-Native pointer segments that a reset or growth supersedes are likewise no longer
-published, though in-flight searches may still hold them. The DFA counts each
+A heap pointer table that a reset or growth supersedes is ordinary garbage, like
+the superseded Java tables, and is neither counted nor capped. Native pointer
+segments that a reset or growth supersedes are likewise no longer published,
+though in-flight searches may still hold them. The DFA counts each
 one until the collector finds it unreachable, and the JDK frees it later on its
 common cleaner. The DFA allocates a new segment only while the counted
 superseded segments, with the one it replaces, total at most twice the new one.
 Its counted native memory, live and superseded, therefore stays within three
 times its newest segment, as
-[Bounded Native-Memory DFA Transition Table](#bounded-native-memory-dfa-transition-table)
+[Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
 describes; the memory actually held exceeds that only by segments the common
 cleaner has not yet freed. The superseded part is native memory no longer
 published and awaiting collection, not memory the DFA retains beyond its share.
 Allocating a segment can stall only when direct memory as a whole, other users
 included, fills `MaxDirectMemorySize`; the JDK then forces a collection and
 retries before failing. A reset restarts the Java tables at their initial
-capacity, while the native segment keeps its size, so a busy DFA grows its Java
+capacity, while the pointer table keeps its size, so a busy DFA grows its Java
 tables again after each reset.
 
 Decided (Dain, 2026-11-06): copy-on-reset applies in every memory mode, and
@@ -894,13 +900,14 @@ allows the new cache generation to be evaluated again.
 A DFA finds a state's row from its offset with a shift and a multiply. Each DFA
 precomputes the shift of the row width's power-of-two factor and the inverse of
 its odd part, which is exact because every state offset is a multiple of the row
-width. The signed divide this replaces ran on every byte of a dense match in
-safe memory mode, without `--enable-native-access`, where each match transition
-takes the sidecar step: `.*` count-spans took about 634k such steps per
-operation.
+width. The signed divide this replaces ran on every byte of a dense match on
+object rows, where each match transition takes the sidecar step: `.*`
+count-spans took about 634k such steps per operation.
 
-The change trades a safe-mode gain for a small native-mode cost. On AWS r9g and
-r8i with JDK 25, against main:
+The change trades an object-row gain for a small pointer-table cost. The
+original comparison predates the heap pointer table, so safe memory mode,
+without `--enable-native-access`, measured object rows, and native mode measured
+the native pointer table. On AWS r9g and r8i with JDK 25, against main:
 
 - Safe mode is faster: everything-greedy count-spans by 10–11% on r9g and 20% on
   r8i, and any-one count by 2–3% on r9g and 7–8% on r8i.
@@ -909,12 +916,12 @@ r8i with JDK 25, against main:
   Rust quotes (1.062) and Rust capitals (1.037) on r8i. Measured on the same
   rows, the divide removal alone accounts for 1.023–1.053, and the inner literal
   pair registration alone stayed within 0.977–1.016.
-- No added work explains those costs. In native mode the row index runs only at
-  DFA entry and match restarts, under 16k times per operation, and no changed
-  method crosses an inline limit. The only differences between the builds are
-  layout: the DFA instance grows 8 bytes, which shifts field offsets, and one
-  cold-call stub grows from 192 to 256 bytes. Rust the-lower moves the other way
-  on r8i (0.932).
+- No added work explains those costs. With a pointer table the row index runs
+  only at DFA entry and match restarts, under 16k times per operation, and no
+  changed method crosses an inline limit. The only differences between the
+  builds are layout: the DFA instance grows 8 bytes, which shifts field offsets,
+  and one cold-call stub grows from 192 to 256 bytes. Rust the-lower moves the
+  other way on r8i (0.932).
 
 The trade-off is decided: the divide removal is kept (Dain, 2026-11-06).
 
@@ -965,18 +972,18 @@ current state, position, and match boundary; a later walk that reaches a dead
 or full-match state ends the search instead. The paired and pointer hand-offs
 need at least 256 bytes remaining, and a shorter remainder continues through
 the compact loop. Without a pending match the search continues through the
-absolute-pointer loop when a pointer table exists or can be allocated, and
-through the paired loop when the DFA already holds or has requested paired rows
-or no pointer table can be allocated, such as without native access. With a
-pending first match it chooses the same way between the absolute-pointer loop
-and the paired after-match loop. Paired rows prevent the pointer table from
-being allocated. The scan computes every transition of the states it visits,
-which adds self-loops the text never exercised. Previously, a hand-off without a
-pending match requested paired rows, which then blocked the pointer table, and
-Russian literal alternations, whose letters all start with one of two lead
-bytes, stopped the scan after a few short skips and ran the paired or compact
-loop, about 1.35 times slower on r9g than the pointer loop the ordinary route
-used before the scan existed. A requested pointer table is allocated when the
+pointer loop when a pointer table exists or can be allocated, and through the
+paired loop when the DFA already holds or has requested paired rows or no
+pointer table can be allocated, such as for an unlimited DFA. With a pending
+first match it chooses the same way between the pointer loop and the paired
+after-match loop. Paired rows prevent the pointer table from being allocated.
+The scan computes every transition of the states it visits, which adds
+self-loops the text never exercised. Previously, a hand-off without a pending
+match requested paired rows, which then blocked the pointer table, and Russian
+literal alternations, whose letters all start with one of two lead bytes,
+stopped the scan after a few short skips and ran the paired or compact loop,
+about 1.35 times slower on r9g than the pointer loop the ordinary route used
+before the scan existed. A requested pointer table is allocated when the
 exclusive search that requests it ends, not during that search, which continues
 through the compact loop. The compact loop leaves its fast path on every match
 transition, and every transition out of a matching loop is one, so a matching
@@ -1140,14 +1147,16 @@ case-insensitive literal count win: `02-literal-alternate sherlock-casei-en`
 takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
 `tom-sawyer-huckle-fin-insensitive` 0.481x / 0.656x.
 
-## Bounded Native-Memory DFA Transition Table
+## Bounded DFA Pointer Transition Table
 
-Eligible forward one-byte DFA searches may use a private native-memory table of
-64-bit absolute-pointer transition entries after the existing paired-table
-selection does not produce a usable route. This is internal memory only: it
-does not execute native code, load a JNI library, create a file, or expose a
-native pointer through the public API. Long searches request it immediately
-when pairing is unavailable.
+Eligible forward one-byte DFA searches may use a private table of 64-bit
+pointer transition entries after the existing paired-table selection does not
+produce a usable route. With native access the table is native memory whose
+entries are the absolute addresses of rows; without it the table is a Java
+`long[]` whose entries are the byte offsets of rows in the array. Neither form
+executes native code, loads a JNI library, creates a file, or exposes a pointer
+through the public API. Long searches request it immediately when pairing is
+unavailable.
 Short searches request it after 16 repeated calls, so one isolated short search
 does not prevent the same DFA instance from later selecting a paired table. The
 observation count is only a performance hint; races can change promotion timing
@@ -1160,61 +1169,72 @@ never computes a transition from retrying every search exclusively. A
 finite-budget DFA initially allocates a small row-rounded table and
 geometrically enlarges it as the graph grows. Each allocation is limited so that
 the remaining budget can still hold the minimum Java state behind every
-additional native row. The integer and object transition tables remain
-authoritative, and every zero native entry delegates to the unchanged object
+additional pointer row. The integer and object transition tables remain
+authoritative, and every zero entry delegates to the unchanged object
 continuation.
 
-Native access is optional. The restricted everything segment is initialized
-only when the containing module has native access enabled; otherwise no native
-allocation, warning, or initialization failure occurs. The owning automatic
-arena is reachable through each raw traversal. Allocation, backfill,
-incremental writes, publication, and reset use the existing exclusive DFA cache
-mutation protocol.
+One process-wide choice, fixed when the DFA class initializes, selects the
+form: native memory when the containing module has native access enabled, the
+Java heap otherwise. A DFA never mixes forms, so each pointer loop reads one
+kind of segment in a process, and a failed native allocation falls back to
+object rows, never to a heap table. The restricted everything segment that
+native entries are read through is initialized only with native access;
+otherwise no native allocation, warning, or initialization failure occurs. A
+heap table is read through its array's heap segment, whose base address is
+zero, so the same loops and tags serve both forms; offset zero is a reserved
+row before the first state, so zero still means uncomputed. A heap segment
+access checks its bounds, so a wrong entry would throw rather than read outside
+the array. A native table's automatic arena is reachable through each raw
+traversal, and a heap table's array through the root that holds it.
+Allocation, backfill, incremental writes, publication, and reset use the
+existing exclusive DFA cache mutation protocol.
 
-The current allocation is charged to the `DfaInstance` budget. Growth copies
-and rebases the table into a new segment and publishes it with a new cache
+The current allocation is charged to the `DfaInstance` budget: a native table
+its bytes, a heap table the real size of its array, header included. Growth
+copies and rebases the table into a new one and publishes it with a new cache
 generation, as [Shared DFA Concurrency](#shared-dfa-concurrency) describes; a
-reader still using the old generation keeps the superseded automatic arena
-reachable until it returns. A reset publishes an empty segment of the same size
-and keeps its charge, unless the cap below withholds it. The DFA counts each
-superseded segment's bytes until the collector finds it unreachable; the JDK
-frees the segment later, on its common cleaner. The count is released when the
-cap check next runs, so it may briefly over-count. A growth at most doubles the
-segment, and the budget can clamp it to less; a reset adds a whole segment; so
-without a cap, superseded segments could accumulate without bound within one
-collection cycle. A reset or growth therefore allocates a new segment only
-while the counted superseded segments, including the one it replaces, total at
-most twice the new one. This cap, not the growth factor, keeps a DFA's counted
-native memory, live and superseded, within three times its newest segment,
-which its allowance bounds; the native memory actually held exceeds that only
-by segments the common cleaner has not yet freed. A growth allocates its
-segment after its Java arrays and state, and a reset after its Java tables, so
-only small objects follow the segment. If allocating one of those objects
-throws `OutOfMemoryError`, the new segment is abandoned uncounted; the
-collection that precedes that error makes any earlier abandoned segment
-collectable.
+reader still using the old generation keeps the superseded table reachable
+until it returns. A reset publishes an empty table of the same size and keeps
+its charge, unless the cap below or a failed allocation withholds it. A
+superseded heap table is ordinary garbage, like the superseded Java tables, and
+is neither counted nor capped. The DFA counts each superseded native segment's
+bytes until the collector finds it unreachable; the JDK frees the segment later,
+on its common cleaner. The count is released when the cap check next runs, so it
+may briefly over-count. A growth at most doubles the segment, and the budget can
+clamp it to less; a reset adds a whole segment; so without a cap, superseded
+segments could accumulate without bound within one collection cycle. A reset
+or growth therefore allocates a new native segment only while the counted
+superseded segments, including the one it replaces, total at most twice the new
+one. This cap, not the growth factor, keeps a DFA's counted native memory, live
+and superseded, within three times its newest segment, which its allowance
+bounds; the native memory actually held exceeds that only by segments the
+common cleaner has not yet freed. A growth allocates its table after its Java
+arrays and state, and a reset after its Java tables, so only small objects
+follow the table. If allocating one of those objects throws
+`OutOfMemoryError`, the new table is abandoned uncounted; the collection that
+precedes that error makes any earlier abandoned segment collectable.
 
-When a new segment cannot be allocated, because superseded segments fill the
-cap or native allocation fails, the tables are published without the pointer
+When a new table cannot be allocated, because superseded native segments fill
+the cap or the allocation fails, the tables are published without the pointer
 table, any charge it held is returned, and searches use object rows. This
-applies to a reset, a growth, and the table's first allocation. The table stays
-requested (it is not given up as it is for a DFA that cannot hold it), a warm
-cache may stay on object rows until its next exclusive search or reset, and
-paired transitions stay disabled, because the condition is transient. A later
-exclusive search allocates the table again, sized for the current graph, once
-collection brings the superseded segments under the cap. After a failed
-allocation, none is attempted again until the next reset, so a native-memory
-shortage costs at most one failed allocation, and the JDK's forced collection
-and retries, per reset.
-Failure to fund the next geometric expansion from the budget remains ordinary
-DFA budget exhaustion and follows the existing reset and matcher-fallback
-policy. Apart from a withheld table, once an instance selects this native
-table, it does not switch to object rows as the DFA grows, with one exception.
+applies to a reset, a growth, and the table's first allocation, in both forms.
+The table stays requested (it is not given up as it is for a DFA that cannot
+hold it), a warm cache may stay on object rows until its next exclusive search
+or reset, and paired transitions stay disabled, because the condition is
+transient. After a cap withhold, a later exclusive search allocates the table
+again, sized for the current graph, once collection brings the superseded
+segments under the cap. After a failed allocation, none is attempted again until
+the next reset, so a memory shortage costs at most one failed allocation, and
+the JDK's forced collection and retries, per reset. Failure to fund the next
+geometric expansion from the budget remains ordinary DFA budget exhaustion and
+follows the existing reset and matcher-fallback policy. Apart from a withheld
+table, once an instance selects this pointer table, it does not switch to object
+rows as the DFA grows, with one exception.
 
 The table's per-state charge leaves room for fewer states per reset than object
-rows, and whether a reset keeps or withholds the table depends on whether a
-collection has already found the superseded segments, so the same search could
-reset often enough to fall back with the table and keep going without it.
+rows, and whether a reset keeps or withholds a native table depends on whether
+a collection has already found the superseded segments, so the same search
+could reset often enough to fall back with the table and keep going without it.
 Two rules give up for resetting too often: a search whose reset follows the
 previous one too closely, and a count that resets twice during a rejected byte
 scan, which then leaves later counts and group-zero finds to the other engines.
@@ -1251,11 +1271,13 @@ that gave it back falls back anyway. That later slowdown is accepted in place
 of an NFA fallback now.
 
 Where those object-row resets begin still follows the history before the
-release, and that history depends on collection timing: the cap can withhold the
-table at one reset and keep it at the next, so the release, and the resets after
-it, land at different input positions. A search or count right at a threshold
-can therefore fall back in one run and not in another. Results are identical
-either way; the residual changes only which engine runs at a threshold. The
+release. A heap table is never capped, so unless a heap allocation fails, that
+history, and the release, are the same every run. With a native table that
+history depends on collection timing: the cap can withhold the table at one
+reset and keep it at the next, so the release, and the resets after it, land at
+different input positions. A search or count right at a threshold can therefore
+fall back in one run and not in another. Results are identical either way; the
+residual changes only which engine runs at a threshold. The
 `([a-q][^u-z]{23}x)` sequence at a 16 MiB budget is the known example: whether
 the collector has run decides whether the count's next two-reset check finds
 more or less than the byte scan's 64 KiB minimum remaining, so later counts and
@@ -1265,25 +1287,85 @@ timing, which changes the superseded cap that copy-on-reset's native memory
 bound rests on; that is left to a separate change.
 
 Explicitly unlimited DFAs remain object-based because they have no finite
-native-allocation budget. Paired transitions remain disabled across later
+allocation budget. Paired transitions remain disabled across later
 resets because pairing was evaluated first.
 
-Every native-table row and entry is eight-byte aligned. Computed match, dead, and
-full-match transitions use the otherwise-zero low address bits as tags; zero
-continues to mean uncomputed. This lets the pointer loop preserve a match
-boundary and finish computed terminal edges without converting the address back
-to an integer row or entering the generic continuation. Normal pointers remain
-aligned, and uncomputed or out-of-capacity entries still delegate to the
-authoritative Java transition table. The tags add no allocation or memory-budget
-charge and are written and backfilled under the same cache mutation protocol as
-normal pointer entries.
+Every table row and entry is eight-byte aligned. Computed match, dead, and
+full-match transitions use the otherwise-zero low bits of a row's address or
+offset as tags; zero continues to mean uncomputed. This lets the pointer loop
+preserve a match boundary and finish computed terminal edges without converting
+the entry back to an integer row or entering the generic continuation. Normal
+entries remain aligned, and uncomputed or out-of-capacity entries still
+delegate to the authoritative Java transition table. The tags add no
+allocation or memory-budget charge and are written and backfilled under the
+same cache mutation protocol as normal pointer entries.
 
-The JDK 25 C2/AArch64 loop emits an extra dependent address operation and
-retains an everything-segment range comparison that x86 C2 eliminates. The
-native table remains the selected one-byte DFA representation when native access is
-available because it removes Java object-row traversal while preserving bounded
-memory accounting. The final report must characterize this architecture-specific
-difference explicitly.
+Entries of both forms are read and written with plain access. Java lets a plain
+`long` access tear, but each entry is written once, from zero to its final
+value, every entry is eight-byte aligned, and 64-bit HotSpot reads and writes
+an aligned `long` in one access, on the heap as in native memory; the table
+relies on that. Opaque access would rule out tearing by specification, but with
+JDK 25 C2 on AArch64 it kept the heap segment's field loads, liveness checks,
+and alignment check inside the per-byte loop, about eight extra loads per byte.
+With plain access C2 hoists them, and the bounds check is one predicted compare
+off the load chain.
+
+The JDK 25 C2/AArch64 native loop emits an extra dependent address operation
+and retains an everything-segment range comparison that x86 C2 eliminates. The
+native table remains the form when native access is available, because native
+memory can hold absolute addresses, which put no base add on the per-byte
+chain. The final report must characterize this architecture-specific difference
+explicitly.
+
+Without native access the DFA previously ran on object rows only. Each byte
+loaded a compressed reference, decoded it, and checked the array's type, and
+every match byte left the loop for the generic continuation. Flat tables had
+lost to object rows before 1.0. A flat `int[]` table indexed by state and
+class, and later a generic flat `int[]` path, were about 20–30% slower on the
+Hard and Parens rows; pre-scaled byte offsets read through a var handle were
+10–14% slower; and on AWS Intel and Graviton hosts, exact-stride `int[]` rows,
+power-of-two state numbers, pre-shifted indexes, and 32- and 64-bit relative
+offsets in native memory or direct buffers were neutral to slower. Each put a
+row-index multiply, sign extension, or base add on the per-byte dependency
+chain, while an object row's loaded reference is already the next row. Only
+absolute addresses beat object rows: the native table ran at 0.71–0.78 times
+object-row time on both hosts, while pre-scaled byte offsets in native memory
+took 1.196 times as long as absolute addresses, which is why native entries are
+addresses. After 1.0, walking the `int[]` transitions directly in three loops
+was rejected because one row took 1.27 times as long on both platforms. The heap
+table is the one form not measured then. Its entries are offsets because heap
+arrays move and have no stable address, so it still adds a base, which JDK 25 C2
+on AArch64 folds with the class scale into one extended add before the load. Its
+tags keep match bytes in the loop, where object rows leave it. The Hard and
+Parens rows barely exercised match bytes.
+
+Decided (Dain, 2026-11-06): without native access, the DFA uses the same
+tagged pointer table on the Java heap, reversing the earlier decision that kept
+the table native-only. The AWS r9g and r8i comparison against object rows, in
+both memory modes, passed the project's performance gate with the one accepted
+loss below. With a table in both modes, a pattern counted by the compact
+character-class counter may also keep its optional count DFA without native
+access, which it previously kept only with it.
+
+A/B result (AWS r9g and r8i, JDK 25, two hosts per platform and two rounds, JMH
+average time; each figure is the time with this change divided by the time
+without it, given as r9g / r8i): in safe mode, against object rows, the heap
+table ran at 0.32 / 0.33 on `everything-greedy`, 0.65 / 0.74–0.75 on `any-one`,
+0.74–0.75 / 0.77–0.78 on `03-date`, 0.81 / 0.91 on RE2 email `reusedContains`,
+0.86 / 1.00 on `tom-sawyer-huckle-fin-prefix-short`, and 0.95–0.96 / 0.96–1.00
+on `word-ending-n`. In native mode every row stayed within 0.97–1.01, except
+Trino and Java `word-ending-n` on r9g at 0.82, the gain from the first
+allocation's wait described above. The heap table took 0.99–1.15 / 0.99–1.40
+times as long as the native table, the most on
+`tom-sawyer-huckle-fin-prefix-short`. One row lost: RE2 ipv4 `reusedContains`
+ran at 0.99 / 1.07 in safe mode, about 2 ns more per call on r8i on all four
+host-rounds. Its cause was not found: the first allocation's wait alone leaves
+the row unchanged, and an earlier build of the same table ran 0.995 there. It is
+accepted as a marginal cost on a row that already lost to RE2 C++ on r8i in safe
+mode, so it changes no comparison. An earlier run of the same table, before the
+wait was added, projected each row's 2.0 comparator ratio through its measured
+change: of 328 row, platform and mode pairs, none went from winning to losing,
+and 34, across 28 rows and all in safe mode, went from losing to winning.
 
 ## Boolean Partial-Match Specializations
 
