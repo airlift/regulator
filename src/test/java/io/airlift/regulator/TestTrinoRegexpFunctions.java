@@ -34,6 +34,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -352,6 +353,23 @@ public class TestTrinoRegexpFunctions
         assertThat(fallback.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
         assertThat(fallback.count(source)).isEqualTo(1);
         assertThat(fallback.extract(source)).isEqualTo(utf8(literal + "yyb\nb"));
+
+        // No Trino pattern takes the ordered-literal find plan of the other languages, whose gaps
+        // must read any bytes, so the subtype's reservation is its only ordered-literal
+        // reservation. Each pattern takes the subtype from the smallest budget that compiles, and
+        // neither it nor the patterns above has the plan.
+        List<TrinoRegexp> compiledPatterns = new ArrayList<>(List.of(smallest, fallback));
+        for (String expression : List.of("a(?s:.*)b(?s:.*)c", "(?s)a.*b.*c")) {
+            TrinoRegexp orderedLiterals = compileAtSmallestBudget(utf8(expression));
+            assertThat(orderedLiterals.usesOrderedLiteralMatcherForDiagnostics()).as(expression).isTrue();
+            assertThat(orderedLiterals.contains(utf8("xxfirst-a-second-b-third-cyy"))).as(expression).isTrue();
+            compiledPatterns.add(orderedLiterals);
+        }
+        for (TrinoRegexp compiled : compiledPatterns) {
+            String label = compiled.re2().pattern().toStringUtf8();
+            assertThat(compiled.re2().findPlanForDiagnostics()).as(label).isNotEqualTo(ORDERED_LITERALS);
+            assertThat(compiled.re2().orderedLiteralMatcherForDiagnostics()).as(label).isNull();
+        }
     }
 
     @Test
