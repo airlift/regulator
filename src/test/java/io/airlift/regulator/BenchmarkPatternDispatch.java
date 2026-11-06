@@ -65,19 +65,20 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// fixed-width subtype runs the fixed-width matcher, which checks every `s`. ORDERED_LITERALS finds
 /// three literals in order with any text between them and runs the ordinary search today.
 /// LITERAL_SET alternates 100 words, over the limit of 64 literals of the literal-alternation span
-/// matcher: full-Slice `find` runs the ordinary search today, and RE2, Java, and Rust matchers find
-/// it with the literal set's automaton. SINGLE_BYTE is the one-byte exact literal `,`, which
-/// the single-byte table supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line
-/// feed, unlike CONTAINS's `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose
-/// dot stops at more line terminators, runs the ordinary search. TestBenchmarkPatternDispatch
-/// checks each route in RE2, Java, and Rust, and in Trino only that FOLDED_PAIR_SEQUENCE takes no
-/// fixed-width route. SHORT rows are 16 to 64 bytes and LONG rows 1024 bytes, padded in the host
-/// run of the anchored URL pattern, after the text of ANCHORED_LITERAL, whose search reads only its
-/// start, and before the text of the others. LONG inputs contain padding, but anchored URL rows 4–6
-/// reject before reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s`
-/// without its literal, so its SHORT rows find the literal within their first 64 bytes and its LONG
-/// rows only after them, the two sides of the inner literal search's 64-byte minimum skip. Each
-/// target's rows mix matching and non-matching log lines, requests, URLs, or prose.
+/// matcher: full-Slice `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers
+/// find it with the literal set's automaton, skipping the bytes that lead no word with a vector
+/// scan on LONG rows. SINGLE_BYTE is the one-byte exact literal `,`, which the single-byte table
+/// supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
+/// `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose dot stops at more line
+/// terminators, runs the ordinary search. TestBenchmarkPatternDispatch checks each route in RE2,
+/// Java, and Rust, and in Trino only that FOLDED_PAIR_SEQUENCE takes no fixed-width route. SHORT
+/// rows are 16 to 64 bytes and LONG rows 1024 bytes, padded in the host run of the anchored URL
+/// pattern, after the text of ANCHORED_LITERAL, whose search reads only its start, and before the
+/// text of the others. LONG inputs contain padding, but anchored URL rows 4–6 reject before
+/// reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s` without its
+/// literal, so its SHORT rows find the literal within their first 64 bytes and its LONG rows only
+/// after them, the two sides of the inner literal search's 64-byte minimum skip. Each target's
+/// rows mix matching and non-matching log lines, requests, URLs, or prose.
 ///
 /// Where a route above names no language, it is the route of RE2, Java, and Rust. Trino compiles
 /// most targets to its own subtypes instead, such as its ordered-literal matcher for

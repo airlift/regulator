@@ -152,7 +152,9 @@ abstract sealed class CompiledPattern
         EXACT_LITERAL,
         // A pattern whose find uses a literal kernel: contains, prefix, suffix, or equality.
         LITERAL_KERNEL,
-        // An alternation of short literals, found by the literal-alternation span matcher.
+        // An alternation of literals: short literals found by the literal-alternation span matcher,
+        // or more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES found by the literal set
+        // where the forward DFA that full-Slice find runs cannot initialize.
         LITERAL_ALTERNATION,
         // A fixed-width pattern, found by the fixed-width byte span matcher.
         FIXED_WIDTH,
@@ -184,6 +186,8 @@ abstract sealed class CompiledPattern
     ///         plan counts with one boolean attempt
     /// @param literalKernelFind whether a [Shape#SCAN_PLAN] pattern's full-Slice find
     ///         runs the literal kernel of its find plan rather than the plan
+    /// @param literalSetCount whether a [Shape#LITERAL_ALTERNATION] pattern's count runs on its
+    ///         literal set rather than the DFA count
     record Analysis(
             int flags,
             long maxMemory,
@@ -209,7 +213,8 @@ abstract sealed class CompiledPattern
             boolean retainedClassCountDfa,
             boolean ordinaryShortBooleanMatch,
             boolean singleAttemptCount,
-            boolean literalKernelFind)
+            boolean literalKernelFind,
+            boolean literalSetCount)
     {
         Analysis
         {
@@ -652,11 +657,13 @@ abstract sealed class CompiledPattern
             }
         }
         // The regex crate's Aho-Corasick route for large literal alternations, which the forward
-        // DFA's candidate starts and the reverse DFA do not scale to. Trino routes every literal
-        // alternation itself, and the automaton reports leftmost-first matches only.
-        LiteralSetSpanMatcher literalSet = compilerDialect != Compiler.Dialect.TRINO && !longestMatch
-                ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory())
-                : null;
+        // DFA's candidate starts and the reverse DFA do not scale to. The automaton reports
+        // leftmost-first matches only, so RE2's longest-match mode keeps the program. No Trino
+        // analysis carries a set: TrinoRegexp.compile takes every set that fits its forward
+        // budget before it compiles a program, and this analysis is bounded by the program's DFA
+        // budget, which is that forward budget less the program, so a set Trino declined is
+        // declined here too.
+        LiteralSetSpanMatcher literalSet = !longestMatch ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory()) : null;
         // The root's skip only speeds up the set's search, so it yields to the forward DFAs: a
         // set whose skip would leave the first-match or longest-match DFA too little to
         // initialize drops it and is admitted as it was before it. The rule applies whether or
@@ -793,6 +800,7 @@ abstract sealed class CompiledPattern
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
         boolean literalKernelFind = false;
+        boolean literalSetCount = false;
         ScanPlan scanPlan = booleanPlans.scanPlan();
         if (scanPlan != null) {
             if (scanPlan.isAnchoredStart()) {
@@ -816,7 +824,12 @@ abstract sealed class CompiledPattern
             shape = Shape.SCAN_PLAN;
         }
         // A retained span or byte-run matcher answers full-Slice find only in place of the
-        // general engine.
+        // general engine. The literal set answers full-Slice find and count only where the
+        // forward DFA each would run on cannot initialize: on text where most bytes lead a
+        // literal, the set's walk takes several steps per byte to the DFA's one. A boolean find's
+        // earliest-match search runs the longest-match DFA and count the first-match DFA, which
+        // needs no more memory, so a set whose count cannot run on the DFA cannot find on it
+        // either. A DFA count that bails returns no count, and the matcher counts on the set.
         else if (general) {
             if (booleanPlans.literalAlternationMatcher() != null) {
                 shape = Shape.LITERAL_ALTERNATION;
@@ -826,6 +839,10 @@ abstract sealed class CompiledPattern
             }
             else if (booleanPlans.byteRunMatcher() != null) {
                 shape = Shape.BYTE_TABLE;
+            }
+            else if (booleanPlans.literalSet() != null && !partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+                shape = Shape.LITERAL_ALTERNATION;
+                literalSetCount = !partialProg.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH);
             }
         }
         return new Analysis(
@@ -853,7 +870,8 @@ abstract sealed class CompiledPattern
                 retainedClassCountDfa,
                 ordinaryShortMatch,
                 singleAttemptCount,
-                literalKernelFind);
+                literalKernelFind,
+                literalSetCount);
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
@@ -1116,6 +1134,12 @@ abstract sealed class CompiledPattern
         return false;
     }
 
+    /// Returns whether a [Shape#LITERAL_ALTERNATION] pattern's count runs on its literal set.
+    boolean countsOnLiteralSetForDiagnostics()
+    {
+        return false;
+    }
+
     boolean usesTaggedAlternationForDiagnostics()
     {
         return booleanPlans.taggedAlternationProgram() != null;
@@ -1165,7 +1189,9 @@ abstract sealed class CompiledPattern
     }
 
     /// Returns the matcher that [RegexpMatcher#find()] searches for an alternation of more than
-    /// [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`.
+    /// [LiteralAlternationSpanMatcher#MAXIMUM_ALTERNATIVES] literals, or `null`. Full-Slice
+    /// find and count search it too where the general engine would otherwise answer them on a
+    /// forward DFA that cannot initialize.
     LiteralSetSpanMatcher literalSetSpanMatcher()
     {
         return booleanPlans.literalSet();
@@ -1448,14 +1474,21 @@ abstract sealed class CompiledPattern
         };
     }
 
-    /// The full-Slice find of the literal-alternation span matcher. A long input whose filter
-    /// stops are dense from its start runs the ordinary engine, whose DFA reads each byte once, as
-    /// it would without the matcher. A decline reuses the compiled program and may build the DFA
-    /// within what remains of the budget, which the matcher's size has already reduced.
+    /// The full-Slice find of a literal alternation. A short alternation searches the
+    /// literal-alternation span matcher, and a long input whose filter stops are dense from its
+    /// start runs the ordinary engine, whose DFA reads each byte once, as it would without the
+    /// matcher. A decline reuses the compiled program and may build the DFA within what remains
+    /// of the budget, which the matcher's size has already reduced. An alternation of more
+    /// literals takes this shape only where the DFA cannot initialize, and searches the literal
+    /// set.
     final boolean findOnLiteralAlternation(Slice input)
     {
         requireNonNull(input, "input is null");
-        long span = booleanPlans.literalAlternationMatcher().findSpanOrDecline(input);
+        LiteralAlternationSpanMatcher matcher = booleanPlans.literalAlternationMatcher();
+        if (matcher == null) {
+            return booleanPlans.literalSet().findSpan(input, 0, input.length()) >= 0;
+        }
+        long span = matcher.findSpanOrDecline(input);
         if (span == LiteralAlternationSpanMatcher.DECLINED) {
             return findOnForwardProgram(input);
         }
@@ -2197,13 +2230,20 @@ abstract sealed class CompiledPattern
         return count;
     }
 
-    /// The count of the literal-alternation span matcher. A declined count runs the DFA count,
-    /// the route the ordinary count takes for this pattern without the matcher: no
-    /// disjoint-suffix or class-counter route can be built beside a literal alternation.
-    final long countOnLiteralAlternation(Slice text)
+    /// The count of a literal alternation. A short alternation counts on the literal-alternation
+    /// span matcher, and a declined count runs the DFA count, the route the ordinary count takes
+    /// for this pattern without the matcher: no disjoint-suffix or class-counter route can be
+    /// built beside a literal alternation. An alternation of more literals counts on the literal
+    /// set where `literalSetCount` says its first-match DFA cannot initialize, and otherwise
+    /// takes the ordinary count.
+    final long countOnLiteralAlternation(Slice text, boolean literalSetCount)
     {
         requireNonNull(text, "text is null");
-        long count = booleanPlans.literalAlternationMatcher().countOrDecline(text);
+        LiteralAlternationSpanMatcher matcher = booleanPlans.literalAlternationMatcher();
+        if (matcher == null) {
+            return literalSetCount ? booleanPlans.literalSet().count(text) : countOnEngine(text);
+        }
+        long count = matcher.countOrDecline(text);
         return count != LiteralAlternationSpanMatcher.DECLINED ? count : countDfaMatches(text);
     }
 
@@ -3446,8 +3486,9 @@ abstract sealed class CompiledPattern
             // DFAs; null leaves them on Slice.indexOf. Exact-literal spans never use it.
             LiteralSearchKernel literalSearch,
             // Searches an alternation of more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES
-            // literals for the RE2, Java, and Rust RegexpMatcher.find() group-zero spans; every
-            // other operation keeps the program.
+            // literals for the RE2, Java, and Rust RegexpMatcher.find() group-zero spans, and for
+            // full-Slice boolean find and count where their forward DFA cannot initialize; null
+            // leaves them on the program.
             LiteralSetSpanMatcher literalSet,
             InnerLiteralSearch innerLiteralSearch,
             // Answer full-Slice boolean find and count of a pattern that would otherwise run the

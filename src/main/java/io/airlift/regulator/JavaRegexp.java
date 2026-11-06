@@ -352,9 +352,12 @@ public sealed class JavaRegexp
     static final class LiteralAlternationJavaRegexp
             extends JavaRegexp
     {
+        private final boolean literalSetCount;
+
         private LiteralAlternationJavaRegexp(Analysis analysis)
         {
             super(analysis);
+            this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
@@ -366,7 +369,13 @@ public sealed class JavaRegexp
         @Override
         long countMatches(Slice text)
         {
-            return countOnLiteralAlternation(text);
+            return countOnLiteralAlternation(text, literalSetCount);
+        }
+
+        @Override
+        boolean countsOnLiteralSetForDiagnostics()
+        {
+            return literalSetCount;
         }
     }
 

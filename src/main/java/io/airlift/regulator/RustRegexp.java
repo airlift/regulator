@@ -576,9 +576,12 @@ public sealed class RustRegexp
     static final class LiteralAlternationRustRegexp
             extends RustRegexp
     {
+        private final boolean literalSetCount;
+
         private LiteralAlternationRustRegexp(Analysis analysis)
         {
             super(analysis);
+            this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
@@ -590,7 +593,13 @@ public sealed class RustRegexp
         @Override
         long countMatches(Slice text)
         {
-            return countOnLiteralAlternation(text);
+            return countOnLiteralAlternation(text, literalSetCount);
+        }
+
+        @Override
+        boolean countsOnLiteralSetForDiagnostics()
+        {
+            return literalSetCount;
         }
     }
 

@@ -2250,13 +2250,21 @@ NFA, which re-added a root alternation of about 4,000 branches at every byte.
 
 Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
-trie. RE2, Java, and Rust route only `RegexpMatcher.find()`; count, boolean,
-anchored, and capture operations keep the program. Smaller alternations keep the
-Trino trie where it is eligible; RE2, Java, and Rust search the same trie for
-full-Slice boolean `find` and count when the general engine would otherwise
-answer, and run their other operations on the program. Trino checks the
-automaton against the forward-DFA budget, while RE2, Java, and Rust charge it to
-that budget.
+trie. RE2, Java, and Rust search the automaton for `RegexpMatcher.find()`;
+`matches`, `lookingAt`, anchored, and capture operations keep the program.
+Full-Slice boolean `find` and count keep the forward DFA wherever it initializes
+beside the automaton: on text where most bytes lead a literal, the automaton's
+walk takes several steps per byte, its root lookup, edge scan, and failure
+steps, to the DFA's one, and measured 1.94x to 2.47x slower on r9g and 3.16x to
+3.72x on r8i. Where the DFA cannot initialize, the automaton answers in its
+place. A boolean `find` runs the longest-match DFA and a count the first-match
+DFA, which needs less memory, so `english-10` under the default budget finds on
+the automaton and counts on the DFA. A DFA count that gives up returns no count,
+and the matcher counts on the automaton. Trino checks the automaton against the
+forward-DFA budget before compiling a program, while the other languages charge
+it to that budget. The compile applies the same rule in every language, but a
+Trino pattern never reaches it with an automaton that fits: the program's DFA
+budget is smaller than the forward budget Trino checked.
 
 At the root, with the Vector API and at least 64 bytes left, the automaton skips
 the bytes that lead no literal with a vector scan for its leading bytes; walking
