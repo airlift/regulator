@@ -19,16 +19,16 @@ import io.airlift.slice.Slice;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.lang.ref.PhantomReference;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.IntPredicate;
 
@@ -101,6 +101,7 @@ final class Dfa
     private static final long STATE_DATA_BYTES = instanceSize(StateData.class);
     private static final long STATE_KEY_BYTES = instanceSize(StateKey.class);
     private static final long STATE_CACHE_BYTES = instanceSize(StateCache.class);
+    private static final long CACHE_TABLES_BYTES = instanceSize(CacheTables.class);
     // One conservatively aligned plan record and its 256-byte membership array.
     private static final long FIXED_DISTANCE_BYTE_CANDIDATE_MEMORY = 32L + 16 + 256;
     private static final Prog.FixedDistanceByteCandidates NO_FIXED_DISTANCE_BYTE_CANDIDATES =
@@ -115,11 +116,6 @@ final class Dfa
     private static final StartStateAllocationException START_STATE_ALLOCATION_FAILED = new StartStateAllocationException();
     @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final TestingFailureError TESTING_FAILURE = new TestingFailureError();
-    private static final ReferenceQueue<ReaderSlot> STALE_READER_SLOTS = new ReferenceQueue<>();
-    private static final Object READER_SLOTS_LOCK = new Object();
-    private static HashSet<ReaderSlotReference> readerSlots = new HashSet<>();
-    private static final ThreadLocal<ReaderSlot> THREAD_READER_SLOT = ThreadLocal.withInitial(Dfa::registerReaderSlot);
-    private static final AtomicLong NEXT_DFA_ID = new AtomicLong();
     private static final NativeReaderProbe NATIVE_READER_PROBE = Boolean.getBoolean("io.airlift.regulator.dfa.native-reader-probe")
             ? new NativeReaderProbe()
             : null;
@@ -240,7 +236,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
                 dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -249,6 +245,7 @@ final class Dfa
             try {
                 long result = searchAnchoredWithStop(
                         dfa,
+                        tables,
                         context.byteArray(),
                         contextOffset + contextStart,
                         contextOffset + contextEnd,
@@ -272,7 +269,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                dfa.endSearch(exclusiveSearch, readerSlot);
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -291,11 +288,11 @@ final class Dfa
 
     /// Runs [#searchReverseCandidate] of `reverseProg` over `[start, literalStart)` and, when it
     /// finds a match start, [#searchAnchoredWithStop(Prog,Slice,int,int,int,int)] of `forwardProg`
-    /// from there to `end`, under one reader registration for both DFAs. Returns the match's Slice
-    /// offsets packed as `start << 32 | end`, [#SEARCH_NO_MATCH] when the reverse search finds no
-    /// start, the forward search's stop for [#anchoredStopPosition(long)], or [#SEARCH_FAILED] when
-    /// the caller must run the two searches separately: either needs a cache write, quits, fails,
-    /// or falls back. The pair never takes the exclusive path; the separate searches do.
+    /// from there to `end`, using one captured cache root per DFA, without the exclusive lock.
+    /// Returns the match's Slice offsets packed as `start << 32 | end`, [#SEARCH_NO_MATCH] when the
+    /// reverse search finds no start, the forward search's stop for [#anchoredStopPosition(long)],
+    /// or [#SEARCH_FAILED] when the caller must run the two searches separately: either needs a
+    /// cache write, quits, fails, or falls back. The pair never takes the exclusive path; the separate searches do.
     @SuppressWarnings("UnusedException")
     static long searchReverseThenAnchoredWithStop(
             Prog reverseProg,
@@ -316,18 +313,21 @@ final class Dfa
                 forwardProg.reversed() || forwardProg.start() == 0) {
             return SEARCH_FAILED;
         }
-        // A reversed and a forward program never share a DFA, so the pair names two DFAs.
         DfaInstance reverseDfa = reverseProg.getCachedDfa(DfaInstance.Kind.LONGEST_MATCH);
         DfaInstance forwardDfa = forwardProg.getCachedDfa(DfaInstance.Kind.FIRST_MATCH);
         if (reverseDfa == null || !reverseDfa.ok() || forwardDfa == null || !forwardDfa.ok()) {
             return SEARCH_FAILED;
         }
         int contextOffset = context.byteArrayOffset();
-        ReaderSlot readerSlot = DfaInstance.beginPairSearch(reverseDfa, forwardDfa);
+        // Reader searches, so there is nothing to end.
+        CacheTables reverseTables = reverseDfa.beginSearch(false);
+        CacheTables forwardTables = forwardDfa.beginSearch(false);
         try {
             return searchReverseThenAnchoredWithStop(
                     reverseDfa,
+                    reverseTables,
                     forwardDfa,
+                    forwardTables,
                     context.byteArray(),
                     contextOffset,
                     contextOffset + contextStart,
@@ -340,16 +340,17 @@ final class Dfa
         catch (RetrySearchException | StartStateAllocationException | QuitSearchException ignored) {
             return SEARCH_FAILED;
         }
-        finally {
-            DfaInstance.endPairSearch(readerSlot);
-        }
     }
 
     // The bodies of the reverse candidate search, as the general search runs it for a reversed
-    // program with no anchors, and of the anchored search with stop.
+    // program with no anchors, and of the anchored search with stop. On this path neither search
+    // writes a cache, since the pair never runs exclusive, so each reads only the tables its caller
+    // loaded.
     private static long searchReverseThenAnchoredWithStop(
             DfaInstance reverseDfa,
+            CacheTables reverseTables,
             DfaInstance forwardDfa,
+            CacheTables forwardTables,
             byte[] bytes,
             int contextOffset,
             int contextBegin,
@@ -359,7 +360,7 @@ final class Dfa
             int textEnd,
             int maximumReverseBytes)
     {
-        StateData startData = reverseDfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, literalBegin, true, false);
+        StateData startData = reverseDfa.analyzeStart(reverseTables, bytes, contextBegin, contextEnd, textBegin, literalBegin, true, false);
         if (startData.offset() == T_DEAD) {
             return SEARCH_NO_MATCH;
         }
@@ -368,6 +369,7 @@ final class Dfa
         }
         long reverse = searchBackward(
                 reverseDfa,
+                reverseTables,
                 bytes,
                 textBegin,
                 literalBegin,
@@ -381,7 +383,7 @@ final class Dfa
             return reverse == SEARCH_NO_MATCH ? SEARCH_NO_MATCH : SEARCH_FAILED;
         }
         int matchBegin = textBegin + (int) reverse;
-        long forward = searchAnchoredWithStop(forwardDfa, bytes, contextBegin, contextEnd, matchBegin, textEnd);
+        long forward = searchAnchoredWithStop(forwardDfa, forwardTables, bytes, contextBegin, contextEnd, matchBegin, textEnd);
         if (forward >= 0) {
             return ((long) (matchBegin - contextOffset) << 32) | (forward - contextOffset);
         }
@@ -396,9 +398,10 @@ final class Dfa
     // no work budget, since the caller bounds the work by never confirming a candidate inside a
     // span an earlier confirmation already read; and a transition back into the current state
     // keeps its row.
-    private static long searchAnchoredWithStop(DfaInstance dfa, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
+    private static long searchAnchoredWithStop(DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
     {
-        StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
+        tables = dfa.tablesAfterWrite(tables);
         if (startData.offset() == T_DEAD) {
             return anchoredStopResult(textBegin);
         }
@@ -407,25 +410,26 @@ final class Dfa
         }
 
         int stateOffset = startData.offset();
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
-        Object[] stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         int lastMatchBoundary = (startData.flag() & FLAG_MATCH) != 0 ? textBegin : -1;
 
         for (int position = textBegin; position < textEnd; position++) {
             int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
-            Object nextReference = getStateReference(stateReferences, byteClass);
+            Object nextReference = getStateReference(stateRefs, byteClass);
             if (nextReference != null) {
-                stateReferences = (Object[]) nextReference;
+                stateRefs = (Object[]) nextReference;
                 continue;
             }
 
-            stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             int nextState = getTransition(transitions, stateOffset + byteClass);
             if (nextState == T_UNCOMPUTED) {
-                nextState = dfa.computeTransition(stateOffset, bytes[position] & 0xFF);
-                transitions = dfa.transitions;
+                nextState = dfa.computeTransition(tables, stateOffset, bytes[position] & 0xFF);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
                 if (nextState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -447,15 +451,15 @@ final class Dfa
             }
 
             stateOffset = nextState;
-            stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+            stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
         // Cached object transitions advance the row reference without updating the offset.
-        stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+        stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
         int lastByte = textEnd == contextEnd ? BYTE_END_TEXT : bytes[textEnd] & 0xFF;
         int finalState = getTransition(transitions, stateOffset + dfa.byteMap(lastByte));
         if (finalState == T_UNCOMPUTED) {
-            finalState = dfa.computeTransition(stateOffset, lastByte);
+            finalState = dfa.computeTransition(tables, stateOffset, lastByte);
             if (finalState == Integer.MIN_VALUE) {
                 return SEARCH_FAILED;
             }
@@ -556,14 +560,15 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
                 dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
                 continue;
             }
             try {
-                StateData startData = dfa.analyzeStart(context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchoredEffective, runForward);
+                StateData startData = dfa.analyzeStart(tables, context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchoredEffective, runForward);
+                tables = dfa.tablesAfterWrite(tables);
                 if (startData.offset() == T_DEAD) {
                     return SEARCH_NO_MATCH;
                 }
@@ -600,11 +605,12 @@ final class Dfa
                             maximumReverseBytes == 0 &&
                             !endMatch &&
                             !wantEarliestMatch &&
-                            (textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES || dfa.shouldUseAbsolutePointersForShortSearch())) {
-                        dfa.requestAbsolutePointerTransitions();
+                            (textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES || dfa.shouldUseAbsolutePointersForShortSearch(tables))) {
+                        tables = dfa.requestAbsolutePointerTransitions(tables);
                     }
                     return searchBackward(
                             dfa,
+                            tables,
                             bytes,
                             textBegin,
                             textEnd,
@@ -616,11 +622,12 @@ final class Dfa
                             maximumReverseBytes);
                 }
                 if (canSingleBytePrefixAccel) {
-                    return searchForwardPrefixAccelSingleByte(dfa, prog, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
+                    return searchForwardPrefixAccelSingleByte(dfa, tables, prog, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
                 }
                 if (canPrefixAccel) {
                     return searchForwardScanAcceleration(
                             dfa,
+                            tables,
                             prog,
                             bytes,
                             textBegin,
@@ -635,7 +642,7 @@ final class Dfa
                             PREFIX_SCAN);
                 }
                 if (canAnchoredLongPrefixIntPath) {
-                    return searchForwardAnchoredLongPrefixInt(dfa, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
+                    return searchForwardAnchoredLongPrefixInt(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, endMatch, wantEarliestMatch);
                 }
                 boolean fixedDistanceScanRejected = false;
                 if (fixedDistanceCandidates != null &&
@@ -654,6 +661,7 @@ final class Dfa
                                 textEnd);
                         return searchForwardScanAcceleration(
                                 dfa,
+                                tables,
                                 prog,
                                 bytes,
                                 textBegin,
@@ -670,10 +678,10 @@ final class Dfa
                 }
                 if (!startIsMatch &&
                         textEnd - textBegin < MIN_PAIRED_SEARCH_BYTES &&
-                        dfa.shouldUseAbsolutePointersForShortSearch()) {
-                    dfa.requestAbsolutePointerTransitions();
-                    if (dfa.hasAbsolutePointerTransitions(startOffset)) {
-                        return searchForward(dfa, bytes, textBegin, textEnd, ctxEnd, startOffset, false, false, endMatch, wantEarliestMatch);
+                        dfa.shouldUseAbsolutePointersForShortSearch(tables)) {
+                    tables = dfa.requestAbsolutePointerTransitions(tables);
+                    if (dfa.hasAbsolutePointerTransitions(tables, startOffset)) {
+                        return searchForward(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, false, false, endMatch, wantEarliestMatch);
                     }
                 }
                 if (canUseStartByteAcceleration(dfa, anchoredEffective, true, startData.flag())) {
@@ -690,6 +698,7 @@ final class Dfa
                                 textEnd);
                         return searchForwardScanAcceleration(
                                 dfa,
+                                tables,
                                 prog,
                                 bytes,
                                 textBegin,
@@ -708,12 +717,12 @@ final class Dfa
                     dfa.byteScanFallbackCount++;
                 }
                 if (!startIsMatch && textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
-                    dfa.requestPairedTransitions();
-                    if (dfa.hasPairedTransitions(startOffset)) {
-                        return searchForwardPairs(dfa, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch);
+                    tables = dfa.requestPairedTransitions(tables);
+                    if (dfa.hasPairedTransitions(tables, startOffset)) {
+                        return searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, textEnd, ctxEnd, startOffset, endMatch, wantEarliestMatch);
                     }
                 }
-                return searchForward(dfa, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch);
+                return searchForward(dfa, tables, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
@@ -725,7 +734,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                dfa.endSearch(exclusiveSearch, readerSlot);
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -846,7 +855,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
                 dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -857,6 +866,7 @@ final class Dfa
                 while (textBegin <= contextEnd) {
                     long matchEnd = searchForwardForCount(
                             dfa,
+                            tables,
                             prog,
                             bytes,
                             contextBegin,
@@ -866,6 +876,8 @@ final class Dfa
                             startByteScanSet,
                             resampleStartByteScanSet,
                             searchSampling);
+                    // Reload, so a long exclusive count does not keep superseded tables reachable.
+                    tables = dfa.tablesAfterWrite(tables);
                     if (matchEnd == SEARCH_FAILED) {
                         dfa.recordCountSearchBailedWhenSlow();
                         return COUNT_UNSUPPORTED;
@@ -904,7 +916,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                dfa.endSearch(exclusiveSearch, readerSlot);
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -976,7 +988,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = cursor.dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = cursor.dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = cursor.dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && cursor.dfa.cacheVersion() != observedCacheVersion) {
                 cursor.dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -986,6 +998,7 @@ final class Dfa
                 return searchForwardForCount(
                         cursor,
                         cursor.dfa,
+                        tables,
                         cursor.prog,
                         context.byteArray(),
                         contextBegin,
@@ -1003,7 +1016,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                cursor.dfa.endSearch(exclusiveSearch, readerSlot);
+                cursor.dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -1036,7 +1049,7 @@ final class Dfa
         return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch());
     }
 
-    // PERFORMANCE-SENSITIVE HOT LOOP: this cursor amortizes reader registration and
+    // PERFORMANCE-SENSITIVE HOT LOOP: this cursor amortizes per-search setup and
     // boundary discovery across dense repeated matches. Keep candidate scanning and
     // anchored verification in this concrete loop, and preserve the linear work budget.
     static long searchCandidateBoundary(
@@ -1079,7 +1092,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = cursor.dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = cursor.dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = cursor.dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && cursor.dfa.cacheVersion() != observedCacheVersion) {
                 cursor.dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -1087,8 +1100,8 @@ final class Dfa
             }
             try {
                 long result = searchesLiteral
-                        ? searchLiteralCandidateBoundary(cursor, bytes, contextBegin, contextLimit, searchBegin)
-                        : searchCandidateBoundary(cursor, bytes, contextBegin, contextLimit, searchBegin);
+                        ? searchLiteralCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin)
+                        : searchCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
                 if (result == CANDIDATE_SEARCH_FALLBACK) {
                     cursor.disabled = true;
                     cursor.fallbackCount++;
@@ -1117,13 +1130,14 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                cursor.dfa.endSearch(exclusiveSearch, readerSlot);
+                cursor.dfa.endSearch(exclusiveSearch);
             }
         }
     }
 
     private static long searchCandidateBoundary(
             CandidateStartCursor cursor,
+            CacheTables tables,
             byte[] bytes,
             int contextBegin,
             int contextEnd,
@@ -1147,7 +1161,8 @@ final class Dfa
                 return CANDIDATE_SEARCH_FALLBACK;
             }
 
-            int matchEnd = searchAnchoredCandidate(cursor, bytes, contextBegin, contextEnd, candidate);
+            int matchEnd = searchAnchoredCandidate(cursor, tables, bytes, contextBegin, contextEnd, candidate);
+            tables = cursor.dfa.tablesAfterWrite(tables);
             if (matchEnd == CANDIDATE_FALLBACK) {
                 return CANDIDATE_SEARCH_FALLBACK;
             }
@@ -1168,6 +1183,7 @@ final class Dfa
     // leading assertion as a search that read every byte would. Work is charged as above.
     private static long searchLiteralCandidateBoundary(
             CandidateStartCursor cursor,
+            CacheTables tables,
             byte[] bytes,
             int contextBegin,
             int contextEnd,
@@ -1191,7 +1207,8 @@ final class Dfa
                 return CANDIDATE_SEARCH_FALLBACK;
             }
 
-            int matchEnd = searchAnchoredCandidate(cursor, bytes, contextBegin, contextEnd, candidate);
+            int matchEnd = searchAnchoredCandidate(cursor, tables, bytes, contextBegin, contextEnd, candidate);
+            tables = cursor.dfa.tablesAfterWrite(tables);
             if (matchEnd == CANDIDATE_FALLBACK) {
                 return CANDIDATE_SEARCH_FALLBACK;
             }
@@ -1207,13 +1224,15 @@ final class Dfa
 
     private static int searchAnchoredCandidate(
             CandidateStartCursor cursor,
+            CacheTables tables,
             byte[] bytes,
             int contextBegin,
             int contextEnd,
             int candidate)
     {
         DfaInstance dfa = cursor.dfa;
-        StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, candidate, contextEnd, true, true);
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, candidate, contextEnd, true, true);
+        tables = dfa.tablesAfterWrite(tables);
         if (startData.offset() == T_DEAD) {
             return CANDIDATE_NO_MATCH;
         }
@@ -1222,10 +1241,10 @@ final class Dfa
         }
 
         int stateOffset = startData.offset();
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
-        Object[] stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         int transitionCount = 0;
         int lastMatchBoundary = CANDIDATE_NO_MATCH;
 
@@ -1235,17 +1254,18 @@ final class Dfa
             }
 
             int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
-            Object nextReference = getStateReference(stateReferences, byteClass);
+            Object nextReference = getStateReference(stateRefs, byteClass);
             if (nextReference != null) {
-                stateReferences = (Object[]) nextReference;
+                stateRefs = (Object[]) nextReference;
                 continue;
             }
 
-            stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             int nextState = getTransition(transitions, stateOffset + byteClass);
             if (nextState == T_UNCOMPUTED) {
-                nextState = dfa.computeTransition(stateOffset, bytes[position] & 0xFF);
-                transitions = dfa.transitions;
+                nextState = dfa.computeTransition(tables, stateOffset, bytes[position] & 0xFF);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
                 if (nextState == Integer.MIN_VALUE) {
                     return CANDIDATE_FALLBACK;
                 }
@@ -1262,17 +1282,17 @@ final class Dfa
             }
 
             stateOffset = nextState;
-            stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+            stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
         // Cached object transitions advance the row reference without updating the offset.
-        stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
+        stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
         if (transitionCount == MAX_CANDIDATE_START_TRANSITIONS || !cursor.consumeWork()) {
             return CANDIDATE_FALLBACK;
         }
         int finalState = getTransition(transitions, stateOffset + dfa.bytemapRange);
         if (finalState == T_UNCOMPUTED) {
-            finalState = dfa.computeTransition(stateOffset, BYTE_END_TEXT);
+            finalState = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
             if (finalState == Integer.MIN_VALUE) {
                 return CANDIDATE_FALLBACK;
             }
@@ -1288,6 +1308,7 @@ final class Dfa
     // the cursor's generated code measurably regresses short repeated boundary operations.
     private static long searchForwardForCount(
             DfaInstance dfa,
+            CacheTables tables,
             Prog prog,
             byte[] bytes,
             int contextBegin,
@@ -1303,7 +1324,8 @@ final class Dfa
         }
 
         boolean endMatch = prog.anchorEnd();
-        StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true);
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true);
+        tables = dfa.tablesAfterWrite(tables);
         if (startData.offset() == T_DEAD) {
             return SEARCH_NO_MATCH;
         }
@@ -1320,11 +1342,12 @@ final class Dfa
         boolean canPrefixAccel = prog.canPrefixAccel() && (startData.flag() & FLAG_EMPTY_MASK) == 0;
         if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
             return searchForwardPrefixAccelSingleByte(
-                    dfa, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
+                    dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
         }
         if (canPrefixAccel) {
             return searchForwardScanAcceleration(
                     dfa,
+                    tables,
                     prog,
                     bytes,
                     textBegin,
@@ -1357,6 +1380,7 @@ final class Dfa
                         contextEnd);
                 return searchForwardScanAcceleration(
                         dfa,
+                        tables,
                         prog,
                         bytes,
                         textBegin,
@@ -1391,6 +1415,7 @@ final class Dfa
                 }
                 long result = searchForwardScanAcceleration(
                         dfa,
+                        tables,
                         prog,
                         bytes,
                         textBegin,
@@ -1415,30 +1440,32 @@ final class Dfa
 
         if (!startIsMatch &&
                 contextEnd - textBegin < MIN_PAIRED_SEARCH_BYTES &&
-                dfa.shouldUseAbsolutePointersForShortSearch()) {
-            dfa.requestAbsolutePointerTransitions();
+                dfa.shouldUseAbsolutePointersForShortSearch(tables)) {
+            tables = dfa.requestAbsolutePointerTransitions(tables);
         }
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             // The racy cutoff only selects whether the equivalent ordinary route runs directly.
             if (!endMatch &&
                     VectorSupport.isAvailable() &&
                     dfa.countSelfLoopNotApplicableCount < COUNT_SELF_LOOP_NOT_APPLICABLE_LIMIT) {
-                long result = searchForwardCountSelfLoopScan(dfa, bytes, textBegin, contextEnd, startOffset);
+                long result = searchForwardCountSelfLoopScan(dfa, tables, bytes, textBegin, contextEnd, startOffset);
                 if (result != COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE) {
                     return countMatchResult(result, byteScanRejected);
                 }
+                // An exclusive scan may have published grown tables whose states lie beyond these.
+                tables = dfa.tablesAfterWrite(tables);
                 // Request first: the request can retry this search, which must be counted once.
                 // The unconditional request that follows is then a no-op.
-                dfa.requestPairedTransitions();
+                tables = dfa.requestPairedTransitions(tables);
                 dfa.countSelfLoopNotApplicableCount++;
             }
-            dfa.requestPairedTransitions();
-            if (dfa.hasPairedTransitions(startOffset)) {
-                long result = searchForwardPairs(dfa, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
+            tables = dfa.requestPairedTransitions(tables);
+            if (dfa.hasPairedTransitions(tables, startOffset)) {
+                long result = searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
                 return countMatchResult(result, byteScanRejected);
             }
         }
-        long result = searchForward(dfa, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
+        long result = searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
         return countMatchResult(result, byteScanRejected);
     }
 
@@ -1451,6 +1478,7 @@ final class Dfa
     // repeated short scans show that exits are dense.
     private static long searchForwardCountSelfLoopScan(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int contextEnd,
@@ -1460,13 +1488,14 @@ final class Dfa
         int position = textBegin;
         int stateOffset = startOffset;
         int lastMatchBoundary = -1;
-        int exitByteSet = dfa.countSelfLoopExitByteSet(stateOffset);
+        int exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+        tables = dfa.tablesAfterWrite(tables);
         for (int step = 0; exitByteSet == 0; step++) {
             if (step == COUNT_SELF_LOOP_MAX_STEPS || position == contextEnd) {
                 return COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE;
             }
             // Uncomputed, dead, and full-match sentinels are negative and use the ordinary routes.
-            int nextState = getTransition(dfa.transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
+            int nextState = getTransition(tables.transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
             if (nextState < 0) {
                 return COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE;
             }
@@ -1476,7 +1505,8 @@ final class Dfa
             }
             position++;
             stateOffset = nextState;
-            exitByteSet = dfa.countSelfLoopExitByteSet(stateOffset);
+            exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+            tables = dfa.tablesAfterWrite(tables);
         }
 
         // The guard skips writing a shared field that is already zero.
@@ -1526,7 +1556,7 @@ final class Dfa
                 if (step == COUNT_SELF_LOOP_MAX_STEPS || position == contextEnd) {
                     break scan;
                 }
-                int nextState = getTransition(dfa.transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
+                int nextState = getTransition(tables.transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
                 if (nextState == T_UNCOMPUTED) {
                     break scan;
                 }
@@ -1543,7 +1573,8 @@ final class Dfa
                 position++;
                 stateOffset = nextState;
                 if (position < contextEnd) {
-                    exitByteSet = dfa.countSelfLoopExitByteSet(stateOffset);
+                    exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+                    tables = dfa.tablesAfterWrite(tables);
                 }
             }
         }
@@ -1554,18 +1585,18 @@ final class Dfa
         // so a paired request from here selects rows the text never exercised, and those rows
         // block the pointer table, the faster loop on dense multibyte text.
         if (lastMatchBoundary < 0 && contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            if (!dfa.hasAbsolutePointerTransitions(stateOffset) && !countHandoffKeepsPairedRows(dfa)) {
-                dfa.requestAbsolutePointerTransitions();
+            if (!dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
+                tables = dfa.requestAbsolutePointerTransitions(tables);
             }
-            if (dfa.hasAbsolutePointerTransitions(stateOffset)) {
+            if (dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
                 dfa.countSelfLoopNoMatchPointerHandOffCount++;
-                return searchForwardAbsolutePointers(dfa, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
+                return searchForwardAbsolutePointers(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
             }
-            if (countHandoffKeepsPairedRows(dfa)) {
-                dfa.requestPairedTransitions();
-                if (dfa.hasPairedTransitions(stateOffset)) {
+            if (countHandoffKeepsPairedRows(dfa, tables)) {
+                tables = dfa.requestPairedTransitions(tables);
+                if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     // Measure from the search start so the short-search hint sees the whole search.
-                    return searchForwardPairs(dfa, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+                    return searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
                 }
             }
         }
@@ -1577,13 +1608,14 @@ final class Dfa
         if (lastMatchBoundary >= 0 &&
                 dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
                 contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            if (!dfa.hasAbsolutePointerTransitions(stateOffset) && !countHandoffKeepsPairedRows(dfa)) {
-                dfa.requestAbsolutePointerTransitions();
+            if (!dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
+                tables = dfa.requestAbsolutePointerTransitions(tables);
             }
-            if (dfa.hasAbsolutePointerTransitions(stateOffset)) {
+            if (dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
                 dfa.countSelfLoopMatchHandOffCount++;
                 return searchForwardAbsolutePointers(
                         dfa,
+                        tables,
                         bytes,
                         textBegin,
                         position,
@@ -1594,12 +1626,13 @@ final class Dfa
                         false,
                         false);
             }
-            if (countHandoffKeepsPairedRows(dfa)) {
-                dfa.requestPairedTransitions();
-                if (dfa.hasPairedTransitions(stateOffset)) {
+            if (countHandoffKeepsPairedRows(dfa, tables)) {
+                tables = dfa.requestPairedTransitions(tables);
+                if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     dfa.countSelfLoopMatchHandOffCount++;
                     return searchForwardPairsFromState(
                             dfa,
+                            tables,
                             bytes,
                             textBegin,
                             position,
@@ -1614,6 +1647,7 @@ final class Dfa
         }
         return searchForwardContinuation(
                 dfa,
+                tables,
                 bytes,
                 textBegin,
                 position,
@@ -1627,11 +1661,11 @@ final class Dfa
     }
 
     // Whether a count self-loop scan hands off to paired rows rather than the absolute-pointer
-    // loop: the DFA cannot allocate a pointer table, or it holds or has requested paired rows,
-    // which block one.
-    private static boolean countHandoffKeepsPairedRows(DfaInstance dfa)
+    // loop: the DFA cannot allocate a pointer table or has requested paired rows, or these tables
+    // hold paired rows, which block one.
+    private static boolean countHandoffKeepsPairedRows(DfaInstance dfa, CacheTables tables)
     {
-        return dfa.absolutePointerTransitionsUnavailable || dfa.pairedTransitionsRequested || dfa.pairedStateRefArrays != null;
+        return dfa.absolutePointerTransitionsUnavailable || dfa.pairedTransitionsRequested || tables.pairedStateRefArrays != null;
     }
 
     private static long countMatchResult(long result, boolean byteScanRejected)
@@ -1645,6 +1679,7 @@ final class Dfa
     private static long searchForwardForCount(
             GroupZeroForwardCursor cursor,
             DfaInstance dfa,
+            CacheTables tables,
             Prog prog,
             byte[] bytes,
             int contextBegin,
@@ -1657,7 +1692,8 @@ final class Dfa
         }
 
         boolean endMatch = prog.anchorEnd();
-        StateData startData = dfa.analyzeStart(bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true);
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, contextEnd, false, true);
+        tables = dfa.tablesAfterWrite(tables);
         if (startData.offset() == T_DEAD) {
             return SEARCH_NO_MATCH;
         }
@@ -1674,11 +1710,12 @@ final class Dfa
         boolean canPrefixAccel = prog.canPrefixAccel() && (startData.flag() & FLAG_EMPTY_MASK) == 0;
         if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
             return searchForwardPrefixAccelSingleByte(
-                    dfa, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
+                    dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
         }
         if (canPrefixAccel) {
             return searchForwardScanAcceleration(
                     dfa,
+                    tables,
                     prog,
                     bytes,
                     textBegin,
@@ -1719,6 +1756,7 @@ final class Dfa
                         contextEnd);
                 return searchForwardScanAcceleration(
                         dfa,
+                        tables,
                         prog,
                         bytes,
                         textBegin,
@@ -1749,6 +1787,7 @@ final class Dfa
                         contextEnd);
                 return searchForwardScanAcceleration(
                         dfa,
+                        tables,
                         prog,
                         bytes,
                         textBegin,
@@ -1769,16 +1808,16 @@ final class Dfa
 
         if (!startIsMatch &&
                 contextEnd - textBegin < MIN_PAIRED_SEARCH_BYTES &&
-                dfa.shouldUseAbsolutePointersForShortSearch()) {
-            dfa.requestAbsolutePointerTransitions();
+                dfa.shouldUseAbsolutePointersForShortSearch(tables)) {
+            tables = dfa.requestAbsolutePointerTransitions(tables);
         }
         if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
-            dfa.requestPairedTransitions();
-            if (dfa.hasPairedTransitions(startOffset)) {
-                return searchForwardPairs(dfa, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
+            tables = dfa.requestPairedTransitions(tables);
+            if (dfa.hasPairedTransitions(tables, startOffset)) {
+                return searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
             }
         }
-        return searchForward(dfa, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
+        return searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
     }
 
     static boolean canUseStartByteAcceleration(DfaInstance dfa, boolean anchored, boolean runForward, int startFlags)
@@ -1978,7 +2017,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
                 dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -1987,7 +2026,10 @@ final class Dfa
             try {
                 int textBegin = text.byteArrayOffset();
                 int textEnd = textBegin + text.length();
-                StateData start = dfa.analyzeStart(text, textBegin, textEnd, true, true);
+                // Clear what an earlier attempt recorded before it retried.
+                matches.clear();
+                StateData start = dfa.analyzeStart(tables, text, textBegin, textEnd, true, true);
+                tables = dfa.tablesAfterWrite(tables);
                 if (start.offset() == T_DEAD) {
                     return ManyMatchResult.NO_MATCH;
                 }
@@ -2001,26 +2043,30 @@ final class Dfa
 
                 byte[] bytes = text.byteArray();
                 int position = textBegin;
-                int[] transitions = dfa.transitions;
+                int[] transitions = tables.transitions;
                 while (position < textEnd) {
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
-                        transition = dfa.computeTransition(stateOffset, inputByte);
-                        transitions = dfa.transitions;
+                        transition = dfa.computeTransition(tables, stateOffset, inputByte);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                     }
                     if (transition == Integer.MIN_VALUE) {
                         StateSaver savedStart = new StateSaver(dfa, startOffset);
                         StateSaver savedState = new StateSaver(dfa, stateOffset);
                         RestoredStates restoredStates = dfa.resetAndRestore(savedStart, savedState);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                         startOffset = restoredStates.startOffset();
                         stateOffset = restoredStates.stateOffset();
                         if (startOffset < 0 || stateOffset < 0) {
                             matches.clear();
                             return ManyMatchResult.RESOURCE_EXHAUSTED;
                         }
-                        transition = dfa.computeTransition(stateOffset, inputByte);
-                        transitions = dfa.transitions;
+                        transition = dfa.computeTransition(tables, stateOffset, inputByte);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                         if (transition == Integer.MIN_VALUE) {
                             matches.clear();
                             return ManyMatchResult.RESOURCE_EXHAUSTED;
@@ -2037,23 +2083,26 @@ final class Dfa
                     stateOffset = transition & ~T_MATCH_BIT;
                     if (stateMatched) {
                         matched = true;
-                        recordMatches(dfa.stateData[dfa.stateIndex(stateOffset)], matches);
+                        recordMatches(dfa.stateData(tables, stateOffset), matches);
                     }
                 }
 
                 int transition = getTransition(transitions, stateOffset + dfa.bytemapRange);
                 if (transition == T_UNCOMPUTED) {
-                    transition = dfa.computeTransition(stateOffset, BYTE_END_TEXT);
+                    transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
+                    tables = dfa.tablesAfterWrite(tables);
                 }
                 if (transition == Integer.MIN_VALUE) {
                     StateSaver savedState = new StateSaver(dfa, stateOffset);
                     RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
+                    tables = dfa.tablesAfterWrite(tables);
                     stateOffset = restoredStates.stateOffset();
                     if (stateOffset < 0) {
                         matches.clear();
                         return ManyMatchResult.RESOURCE_EXHAUSTED;
                     }
-                    transition = dfa.computeTransition(stateOffset, BYTE_END_TEXT);
+                    transition = dfa.computeTransition(tables, stateOffset, BYTE_END_TEXT);
+                    tables = dfa.tablesAfterWrite(tables);
                     if (transition == Integer.MIN_VALUE) {
                         matches.clear();
                         return ManyMatchResult.RESOURCE_EXHAUSTED;
@@ -2062,7 +2111,7 @@ final class Dfa
                 if (transition > 0 && (transition & T_MATCH_BIT) != 0) {
                     matched = true;
                     stateOffset = transition & ~T_MATCH_BIT;
-                    recordMatches(dfa.stateData[dfa.stateIndex(stateOffset)], matches);
+                    recordMatches(dfa.stateData(tables, stateOffset), matches);
                 }
                 return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
             }
@@ -2077,7 +2126,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                dfa.endSearch(exclusiveSearch, readerSlot);
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -2104,7 +2153,7 @@ final class Dfa
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
-            ReaderSlot readerSlot = dfa.beginSearch(exclusiveSearch);
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
             if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
                 dfa.cancelExclusiveSearch();
                 requiresExclusiveSearch = false;
@@ -2117,7 +2166,8 @@ final class Dfa
                 int contextLimit = contextOffset + contextEnd;
                 int textBegin = contextOffset + rangeStart;
                 int textEnd = contextOffset + rangeEnd;
-                StateData start = dfa.analyzeStart(bytes, contextBegin, contextLimit, textBegin, textEnd, true, true);
+                StateData start = dfa.analyzeStart(tables, bytes, contextBegin, contextLimit, textBegin, textEnd, true, true);
+                tables = dfa.tablesAfterWrite(tables);
                 if (start.offset() == T_DEAD) {
                     return -1;
                 }
@@ -2125,25 +2175,29 @@ final class Dfa
                 int startOffset = start.offset();
                 int stateOffset = startOffset;
                 int position = textBegin;
-                int[] transitions = dfa.transitions;
+                int[] transitions = tables.transitions;
                 while (position < textEnd) {
                     int inputByte = bytes[position++] & 0xFF;
                     int transition = getTransition(transitions, stateOffset + (dfa.bytemap[inputByte] & 0xFF));
                     if (transition == T_UNCOMPUTED) {
-                        transition = dfa.computeTransition(stateOffset, inputByte);
-                        transitions = dfa.transitions;
+                        transition = dfa.computeTransition(tables, stateOffset, inputByte);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                     }
                     if (transition == Integer.MIN_VALUE) {
                         StateSaver savedStart = new StateSaver(dfa, startOffset);
                         StateSaver savedState = new StateSaver(dfa, stateOffset);
                         RestoredStates restoredStates = dfa.resetAndRestore(savedStart, savedState);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                         startOffset = restoredStates.startOffset();
                         stateOffset = restoredStates.stateOffset();
                         if (startOffset < 0 || stateOffset < 0) {
                             return -1;
                         }
-                        transition = dfa.computeTransition(stateOffset, inputByte);
-                        transitions = dfa.transitions;
+                        transition = dfa.computeTransition(tables, stateOffset, inputByte);
+                        tables = dfa.tablesAfterWrite(tables);
+                        transitions = tables.transitions;
                         if (transition == Integer.MIN_VALUE) {
                             return -1;
                         }
@@ -2160,16 +2214,19 @@ final class Dfa
                 int boundaryByte = textEnd < contextLimit ? bytes[textEnd] & 0xFF : BYTE_END_TEXT;
                 int transition = getTransition(transitions, stateOffset + dfa.byteMap(boundaryByte));
                 if (transition == T_UNCOMPUTED) {
-                    transition = dfa.computeTransition(stateOffset, boundaryByte);
+                    transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
+                    tables = dfa.tablesAfterWrite(tables);
                 }
                 if (transition == Integer.MIN_VALUE) {
                     StateSaver savedState = new StateSaver(dfa, stateOffset);
                     RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
+                    tables = dfa.tablesAfterWrite(tables);
                     stateOffset = restoredStates.stateOffset();
                     if (stateOffset < 0) {
                         return -1;
                     }
-                    transition = dfa.computeTransition(stateOffset, boundaryByte);
+                    transition = dfa.computeTransition(tables, stateOffset, boundaryByte);
+                    tables = dfa.tablesAfterWrite(tables);
                     if (transition == Integer.MIN_VALUE) {
                         return -1;
                     }
@@ -2178,7 +2235,7 @@ final class Dfa
                     return -1;
                 }
                 stateOffset = transition & ~T_MATCH_BIT;
-                return minimumMatchId(dfa.stateData[dfa.stateIndex(stateOffset)]);
+                return minimumMatchId(dfa.stateData(tables, stateOffset));
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return -1;
@@ -2190,7 +2247,7 @@ final class Dfa
                 requiresExclusiveSearch = true;
             }
             finally {
-                dfa.endSearch(exclusiveSearch, readerSlot);
+                dfa.endSearch(exclusiveSearch);
             }
         }
     }
@@ -2260,6 +2317,7 @@ final class Dfa
     // retain direct path tests and pass focused Intel and Graviton benchmarks.
     private static long searchForward(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int textEnd,
@@ -2273,6 +2331,7 @@ final class Dfa
         if (shouldSampleSelfLoopTransitions(endMatch, textEnd - textBegin, pairedSearch)) {
             return searchForwardSampledSelfLoops(
                     dfa,
+                    tables,
                     bytes,
                     textBegin,
                     textEnd,
@@ -2284,11 +2343,12 @@ final class Dfa
         }
         if (!pairedSearch && !startIsMatch) {
             if (textEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
-                dfa.requestAbsolutePointerTransitions();
+                tables = dfa.requestAbsolutePointerTransitions(tables);
             }
-            if (dfa.hasAbsolutePointerTransitions(startOffset)) {
+            if (dfa.hasAbsolutePointerTransitions(tables, startOffset)) {
                 return searchForwardAbsolutePointers(
                         dfa,
+                        tables,
                         bytes,
                         textBegin,
                         textBegin,
@@ -2302,6 +2362,7 @@ final class Dfa
         }
         return searchForwardContinuation(
                 dfa,
+                tables,
                 bytes,
                 textBegin,
                 textBegin,
@@ -2316,6 +2377,7 @@ final class Dfa
 
     private static long searchForwardAbsolutePointers(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int position,
@@ -2326,7 +2388,7 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        AbsolutePointerTransitions absolutePointers = dfa.absolutePointerTransitions;
+        AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
         long tableAddress = absolutePointers.baseAddress();
         long transitionRowAddress = tableAddress + ((long) startOffset * Long.BYTES);
         boolean matched = initialMatchBoundary >= 0;
@@ -2391,6 +2453,7 @@ final class Dfa
         int stateOffset = toIntExact((transitionRowAddress - tableAddress) / Long.BYTES);
         return searchForwardContinuation(
                 dfa,
+                tables,
                 bytes,
                 resultBegin,
                 position,
@@ -2405,6 +2468,7 @@ final class Dfa
 
     private static long searchForwardSampledSelfLoops(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int textEnd,
@@ -2418,7 +2482,7 @@ final class Dfa
         int nextSize = dfa.nextSize;
         int position = textBegin;
         int sampledSelfLoopCount = 0;
-        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, startOffset);
 
         for (int sampledTransitionCount = 0;
                 position < textEnd && sampledTransitionCount < SELF_LOOP_SAMPLE_SIZE;
@@ -2436,19 +2500,21 @@ final class Dfa
 
         if (position - textBegin == SELF_LOOP_SAMPLE_SIZE &&
                 sampledSelfLoopCount * 100 >= SELF_LOOP_SAMPLE_SIZE * SELF_LOOP_SAMPLE_PERCENTAGE) {
-            long scanResult = scanSelfLoopTransitions(dfa, bytes, position, textEnd, stateRefs);
+            long scanResult = scanSelfLoopTransitions(dfa, tables, bytes, position, textEnd, stateRefs);
+            tables = dfa.tablesAfterWrite(tables);
             position = (int) (scanResult >>> 32);
             startOffset = (int) scanResult;
         }
         else {
-            startOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+            startOffset = rowStateOffset(stateRefs, nextSize, tables.transitions);
         }
 
         if (textEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            dfa.requestAbsolutePointerTransitions();
-            if (dfa.hasAbsolutePointerTransitions(startOffset)) {
+            tables = dfa.requestAbsolutePointerTransitions(tables);
+            if (dfa.hasAbsolutePointerTransitions(tables, startOffset)) {
                 return searchForwardAbsolutePointers(
                         dfa,
+                        tables,
                         bytes,
                         textBegin,
                         position,
@@ -2462,6 +2528,7 @@ final class Dfa
         }
         return searchForwardContinuation(
                 dfa,
+                tables,
                 bytes,
                 textBegin,
                 position,
@@ -2476,6 +2543,7 @@ final class Dfa
 
     private static long searchForwardContinuation(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int position,
@@ -2492,12 +2560,12 @@ final class Dfa
         int resetPosition = -1;
 
         int stateOffset = startOffset;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
 
         if (startIsMatch) {
             matched = true;
@@ -2519,12 +2587,12 @@ final class Dfa
             }
             if (position >= textEnd) {
                 // Recover int offset from stateRefs for end-of-text handling
-                stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+                stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
                 break;
             }
 
             // Inner loop broke on null — consult int[] sidecard for details
-            stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
 
             // Sentinels are negative; matches are positive with T_MATCH_BIT set.
@@ -2540,8 +2608,9 @@ final class Dfa
 
                 // T_UNCOMPUTED: run slow path
                 int inputByte = bytes[position] & 0xFF;
-                nextState = dfa.computeTransition(stateOffset, inputByte);
-                transitions = dfa.transitions;
+                nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
 
                 if (nextState != Integer.MIN_VALUE) {
                     // Slow path succeeded
@@ -2564,7 +2633,7 @@ final class Dfa
                         }
                     }
                     position++;
-                    stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                    stateRefs = dfa.stateReferences(tables, stateOffset);
                     continue;
                 }
 
@@ -2577,14 +2646,16 @@ final class Dfa
                 StateSaver saveStart = new StateSaver(dfa, startOffset);
                 StateSaver saveState = new StateSaver(dfa, stateOffset);
                 RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-                transitions = dfa.transitions;
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
                 startOffset = restoredStates.startOffset();
                 stateOffset = restoredStates.stateOffset();
                 if (startOffset < 0 || stateOffset < 0) {
                     return SEARCH_FAILED;
                 }
-                nextState = dfa.computeTransition(stateOffset, inputByte);
-                transitions = dfa.transitions;
+                nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
                 if (nextState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -2604,7 +2675,7 @@ final class Dfa
                         break;
                     }
                 }
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -2612,7 +2683,7 @@ final class Dfa
             if ((nextState & T_MATCH_BIT) == 0) {
                 stateOffset = nextState;
                 position++;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -2625,7 +2696,7 @@ final class Dfa
                 break scan;
             }
             position++;
-            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+            stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
         // End-of-text transition (skip if scan ended at dead state)
@@ -2642,7 +2713,7 @@ final class Dfa
             }
             int finalState = getTransition(transitions, stateOffset + lastClass);
             if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(stateOffset, lastByte);
+                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -2657,6 +2728,7 @@ final class Dfa
 
     private static long scanSelfLoopTransitions(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int position,
             int textEnd,
@@ -2665,7 +2737,8 @@ final class Dfa
         // A stable self-loop keeps reference decoding and the array type check off the serial
         // transition dependency chain. Keeping this loop separate also preserves the old loop's
         // generated code when sampling rejects this path.
-        int smallExitByteSet = VectorSupport.isAvailable() ? dfa.selfLoopExitByteSet(stateReferences) : 0;
+        int smallExitByteSet = VectorSupport.isAvailable() ? dfa.selfLoopExitByteSet(tables, stateReferences) : 0;
+        tables = dfa.tablesAfterWrite(tables);
         if (smallExitByteSet != 0) {
             int exitPosition = VectorByteSetScanner.find(
                     bytes,
@@ -2676,7 +2749,7 @@ final class Dfa
                     (byte) (smallExitByteSet >>> 16),
                     smallExitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT);
             dfa.selfLoopExitByteScanCount++;
-            int stateOffset = ((StateData) getStateReference(stateReferences, dfa.nextSize)).offset();
+            int stateOffset = rowStateOffset(stateReferences, dfa.nextSize, tables.transitions);
             return ((long) (exitPosition < 0 ? textEnd : exitPosition) << 32) | (stateOffset & 0xFFFF_FFFFL);
         }
 
@@ -2691,7 +2764,7 @@ final class Dfa
             }
             stateReferences = (Object[]) nextReference;
         }
-        int stateOffset = ((StateData) getStateReference(stateReferences, dfa.nextSize)).offset();
+        int stateOffset = rowStateOffset(stateReferences, dfa.nextSize, tables.transitions);
         return ((long) position << 32) | (stateOffset & 0xFFFF_FFFFL);
     }
 
@@ -2704,6 +2777,7 @@ final class Dfa
     // already consumed part of the search.
     static long searchForwardPairs(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int textBegin,
@@ -2713,7 +2787,7 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        Object[][] pairedStateRefArrays = dfa.pairedStateRefArrays;
+        Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
         int pairedClassCount = nextSize * nextSize;
@@ -2727,6 +2801,7 @@ final class Dfa
             if (nextRef == null) {
                 return searchForwardPairsAfterMiss(
                         dfa,
+                        tables,
                         bytes,
                         resultBegin,
                         position,
@@ -2740,8 +2815,9 @@ final class Dfa
             position += 2;
         }
 
+        // Paired rows are complete when published, so their row metadata needs no check.
         int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-        long result = searchForward(dfa, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
+        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
         }
@@ -2750,6 +2826,7 @@ final class Dfa
 
     private static long searchForwardPairsAfterMiss(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int position,
@@ -2767,7 +2844,7 @@ final class Dfa
             int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             byte[] byteMap = dfa.bytemap;
             long pairedTransition = decodePairedTransition(
-                    dfa,
+                    tables,
                     stateOffset,
                     byteMap[bytes[position] & 0xFF] & 0xFF,
                     byteMap[bytes[position + 1] & 0xFF] & 0xFF);
@@ -2775,6 +2852,7 @@ final class Dfa
             if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
                 long result = searchForwardPairsAfterMatch(
                         dfa,
+                        tables,
                         bytes,
                         resultBegin,
                         position,
@@ -2791,7 +2869,7 @@ final class Dfa
         }
 
         int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-        long result = searchForward(dfa, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
+        long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
         }
@@ -2800,6 +2878,7 @@ final class Dfa
 
     private static long searchForwardPairsAfterMatch(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int position,
@@ -2812,6 +2891,7 @@ final class Dfa
         int consumedBytes = (int) pairedTransition;
         return searchForwardPairsFromState(
                 dfa,
+                tables,
                 bytes,
                 resultBegin,
                 position + consumedBytes,
@@ -2827,6 +2907,7 @@ final class Dfa
     // bytes at a time through match transitions. The result is measured from resultBegin.
     private static long searchForwardPairsFromState(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int resultBegin,
             int position,
@@ -2843,17 +2924,18 @@ final class Dfa
         Object[] stateRefs;
 
         while (true) {
-            int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, bytes, position, textEnd, stateOffset);
+            int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position, textEnd, stateOffset);
             if (matchingSelfLoopEnd != position) {
                 dfa.matchingSelfLoopScanCount++;
                 position = matchingSelfLoopEnd;
                 lastMatchBoundary = position - 1;
             }
 
-            stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, dfa.stateIndex(stateOffset));
+            stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
             if (stateRefs == null) {
                 return searchForwardContinuation(
                         dfa,
+                        tables,
                         bytes,
                         resultBegin,
                         position,
@@ -2879,7 +2961,7 @@ final class Dfa
                 }
 
                 stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
-                pairedTransition = decodePairedTransition(dfa, stateOffset, firstClass, secondClass);
+                pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
                 int outcome = (int) pairedTransition;
                 switch (outcome) {
                     case PAIR_MATCH_FIRST, PAIR_MATCH_SECOND -> {}
@@ -2892,10 +2974,11 @@ final class Dfa
                     case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
                         stateOffset = (int) (pairedTransition >>> 32);
                         position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, dfa.stateIndex(stateOffset));
+                        stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
                         if (stateRefs == null) {
                             return searchForwardContinuation(
                                     dfa,
+                                    tables,
                                     bytes,
                                     resultBegin,
                                     position,
@@ -2913,6 +2996,7 @@ final class Dfa
                     case PAIR_UNCOMPUTED -> {
                         return searchForwardContinuation(
                                 dfa,
+                                tables,
                                 bytes,
                                 resultBegin,
                                 position,
@@ -2939,6 +3023,7 @@ final class Dfa
             stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             return searchForwardContinuation(
                     dfa,
+                    tables,
                     bytes,
                     resultBegin,
                     position,
@@ -2954,13 +3039,14 @@ final class Dfa
 
     private static int scanMatchingSelfLoopTransitions(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int position,
             int textEnd,
             int stateOffset)
     {
         int matchingSelfLoop = stateOffset | T_MATCH_BIT;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         for (; position < textEnd; position++) {
             if (getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF)) != matchingSelfLoop) {
@@ -2972,13 +3058,14 @@ final class Dfa
 
     private static int scanMatchingSelfLoopTransitionsBackward(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int scanBegin,
             int position,
             int stateOffset)
     {
         int matchingSelfLoop = stateOffset | T_MATCH_BIT;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         for (; position > scanBegin; position--) {
             if (getTransition(transitions, stateOffset + (byteMap[bytes[position - 1] & 0xFF] & 0xFF)) != matchingSelfLoop) {
@@ -2988,9 +3075,9 @@ final class Dfa
         return position;
     }
 
-    private static long decodePairedTransition(DfaInstance dfa, int stateOffset, int firstClass, int secondClass)
+    private static long decodePairedTransition(CacheTables tables, int stateOffset, int firstClass, int secondClass)
     {
-        int firstTransition = getTransition(dfa.transitions, stateOffset + firstClass);
+        int firstTransition = getTransition(tables.transitions, stateOffset + firstClass);
         if (firstTransition == T_UNCOMPUTED) {
             return PAIR_UNCOMPUTED;
         }
@@ -3004,7 +3091,7 @@ final class Dfa
             return encodePairedTransition(firstTransition & ~T_MATCH_BIT, PAIR_MATCH_FIRST);
         }
 
-        int secondTransition = getTransition(dfa.transitions, firstTransition + secondClass);
+        int secondTransition = getTransition(tables.transitions, firstTransition + secondClass);
         if (secondTransition == T_UNCOMPUTED) {
             return encodePairedTransition(firstTransition, PAIR_NORMAL_FIRST);
         }
@@ -3027,6 +3114,7 @@ final class Dfa
 
     private static long searchForwardPrefixAccelSingleByte(
             DfaInstance dfa,
+            CacheTables tables,
             Prog prog,
             byte[] bytes,
             int textBegin,
@@ -3043,7 +3131,7 @@ final class Dfa
         int resetPosition = -1;
 
         int stateOffset = startOffset;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         boolean deadState = false;
 
@@ -3106,8 +3194,9 @@ final class Dfa
             }
 
             int inputByte = bytes[position] & 0xFF;
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
 
             if (nextState != Integer.MIN_VALUE) {
                 if (nextState == T_DEAD) {
@@ -3140,14 +3229,16 @@ final class Dfa
             StateSaver saveStart = new StateSaver(dfa, startOffset);
             StateSaver saveState = new StateSaver(dfa, stateOffset);
             RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            transitions = dfa.transitions;
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             startOffset = restoredStates.startOffset();
             stateOffset = restoredStates.stateOffset();
             if (startOffset < 0 || stateOffset < 0) {
                 return SEARCH_FAILED;
             }
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             if (nextState == Integer.MIN_VALUE) {
                 return SEARCH_FAILED;
             }
@@ -3182,7 +3273,7 @@ final class Dfa
             }
             int finalState = getTransition(transitions, stateOffset + lastClass);
             if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(stateOffset, lastByte);
+                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -3197,6 +3288,7 @@ final class Dfa
 
     private static long searchForwardScanAcceleration(
             DfaInstance dfa,
+            CacheTables tables,
             Prog prog,
             byte[] bytes,
             int textBegin,
@@ -3216,12 +3308,12 @@ final class Dfa
         int resetPosition = -1;
 
         int stateOffset = startOffset;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         Object[] startRefs = stateRefs;
 
         // Generic scan acceleration for sparse start bytes, start literal filters and literal
@@ -3280,6 +3372,7 @@ final class Dfa
                         dfa.fixedDistanceShortSkipFallbackCount++;
                         return searchForwardContinuation(
                                 dfa,
+                                tables,
                                 bytes,
                                 textBegin,
                                 position,
@@ -3311,18 +3404,18 @@ final class Dfa
                 stateRefs = (Object[]) nextRef;
             }
             if (position >= textEnd) {
-                stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+                stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
                 break;
             }
 
             // Inner loop broke on null — consult int[] sidecard
-            stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
 
             // Normal non-match transition back to the start state.
             if (nextState > 0 && (nextState & T_MATCH_BIT) == 0) {
                 stateOffset = nextState;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 position++;
                 continue; // -> prefix accel at top of outer loop
             }
@@ -3337,7 +3430,7 @@ final class Dfa
                     break scan;
                 }
                 position++;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -3353,8 +3446,9 @@ final class Dfa
 
             // T_UNCOMPUTED: run slow path
             int inputByte = bytes[position] & 0xFF;
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
 
             if (nextState != Integer.MIN_VALUE) {
                 if (nextState == T_DEAD) {
@@ -3376,8 +3470,8 @@ final class Dfa
                     }
                 }
                 position++;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
-                startRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
+                startRefs = dfa.stateReferences(tables, startOffset);
                 continue;
             }
 
@@ -3390,14 +3484,16 @@ final class Dfa
             StateSaver saveStart = new StateSaver(dfa, startOffset);
             StateSaver saveState = new StateSaver(dfa, stateOffset);
             RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            transitions = dfa.transitions;
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             startOffset = restoredStates.startOffset();
             stateOffset = restoredStates.stateOffset();
             if (startOffset < 0 || stateOffset < 0) {
                 return SEARCH_FAILED;
             }
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             if (nextState == Integer.MIN_VALUE) {
                 return SEARCH_FAILED;
             }
@@ -3417,8 +3513,8 @@ final class Dfa
                     break;
                 }
             }
-            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
-            startRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
+            stateRefs = dfa.stateReferences(tables, stateOffset);
+            startRefs = dfa.stateReferences(tables, startOffset);
             // The restored start state is new, so its references are already null.
         }
 
@@ -3436,7 +3532,7 @@ final class Dfa
             }
             int finalState = getTransition(transitions, stateOffset + lastClass);
             if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(stateOffset, lastByte);
+                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -3601,6 +3697,7 @@ final class Dfa
 
     private static long searchForwardAnchoredLongPrefixInt(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int textEnd,
@@ -3616,7 +3713,7 @@ final class Dfa
         int resetPosition = -1;
 
         int stateOffset = startOffset;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         boolean deadState = false;
 
@@ -3663,8 +3760,9 @@ final class Dfa
             }
 
             int inputByte = bytes[position] & 0xFF;
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
 
             if (nextState != Integer.MIN_VALUE) {
                 if (nextState == T_DEAD) {
@@ -3697,14 +3795,16 @@ final class Dfa
             StateSaver saveStart = new StateSaver(dfa, startOffset);
             StateSaver saveState = new StateSaver(dfa, stateOffset);
             RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            transitions = dfa.transitions;
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             startOffset = restoredStates.startOffset();
             stateOffset = restoredStates.stateOffset();
             if (startOffset < 0 || stateOffset < 0) {
                 return SEARCH_FAILED;
             }
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             if (nextState == Integer.MIN_VALUE) {
                 return SEARCH_FAILED;
             }
@@ -3739,7 +3839,7 @@ final class Dfa
             }
             int finalState = getTransition(transitions, stateOffset + lastClass);
             if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(stateOffset, lastByte);
+                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -3754,6 +3854,7 @@ final class Dfa
 
     private static long searchBackward(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int textEnd,
@@ -3764,8 +3865,8 @@ final class Dfa
             boolean wantEarliestMatch,
             int maximumBytes)
     {
-        if (!startIsMatch && maximumBytes == 0 && !endMatch && !wantEarliestMatch && dfa.hasAbsolutePointerTransitions(startOffset)) {
-            long result = searchBackwardAbsolutePointers(dfa, bytes, textBegin, textEnd, ctxBegin, startOffset);
+        if (!startIsMatch && maximumBytes == 0 && !endMatch && !wantEarliestMatch && dfa.hasAbsolutePointerTransitions(tables, startOffset)) {
+            long result = searchBackwardAbsolutePointers(dfa, tables, bytes, textBegin, textEnd, ctxBegin, startOffset);
             if (result != ABSOLUTE_POINTER_RETRY_OBJECT) {
                 dfa.absolutePointerBackwardSearchCount++;
                 return result;
@@ -3780,12 +3881,12 @@ final class Dfa
         int resetPosition = -1;
 
         int stateOffset = startOffset;
-        int[] transitions = dfa.transitions;
+        int[] transitions = tables.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
 
         if (startIsMatch) {
             matched = true;
@@ -3806,12 +3907,12 @@ final class Dfa
                 stateRefs = (Object[]) nextRef;
             }
             if (position <= scanBegin) {
-                stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+                stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
                 break;
             }
 
             // Inner loop broke on null — consult int[] sidecard
-            stateOffset = ((StateData) getStateReference(stateRefs, nextSize)).offset();
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
             int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position - 1] & 0xFF] & 0xFF));
 
             // Match state handling (positive with T_MATCH_BIT)
@@ -3825,14 +3926,14 @@ final class Dfa
                 }
                 position--;
                 if (dfa.prog.canMatchEmpty()) {
-                    int matchingSelfLoopBegin = scanMatchingSelfLoopTransitionsBackward(dfa, bytes, scanBegin, position, stateOffset);
+                    int matchingSelfLoopBegin = scanMatchingSelfLoopTransitionsBackward(dfa, tables, bytes, scanBegin, position, stateOffset);
                     if (matchingSelfLoopBegin != position) {
                         dfa.matchingSelfLoopScanCount++;
                         position = matchingSelfLoopBegin;
                         lastMatchBoundary = position + 1;
                     }
                 }
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -3840,7 +3941,7 @@ final class Dfa
             if (nextState > 0) {
                 stateOffset = nextState;
                 position--;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -3859,8 +3960,9 @@ final class Dfa
 
             // T_UNCOMPUTED: run slow path
             int inputByte = bytes[position - 1] & 0xFF;
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
 
             if (nextState != Integer.MIN_VALUE) {
                 if (nextState == T_DEAD) {
@@ -3885,7 +3987,7 @@ final class Dfa
                     }
                 }
                 position--;
-                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                stateRefs = dfa.stateReferences(tables, stateOffset);
                 continue;
             }
 
@@ -3898,14 +4000,16 @@ final class Dfa
             StateSaver saveStart = new StateSaver(dfa, startOffset);
             StateSaver saveState = new StateSaver(dfa, stateOffset);
             RestoredStates restoredStates = dfa.resetAndRestore(saveStart, saveState);
-            transitions = dfa.transitions;
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             startOffset = restoredStates.startOffset();
             stateOffset = restoredStates.stateOffset();
             if (startOffset < 0 || stateOffset < 0) {
                 return SEARCH_FAILED;
             }
-            nextState = dfa.computeTransition(stateOffset, inputByte);
-            transitions = dfa.transitions;
+            nextState = dfa.computeTransition(tables, stateOffset, inputByte);
+            tables = dfa.tablesAfterWrite(tables);
+            transitions = tables.transitions;
             if (nextState == Integer.MIN_VALUE) {
                 return SEARCH_FAILED;
             }
@@ -3928,7 +4032,7 @@ final class Dfa
                     break;
                 }
             }
-            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+            stateRefs = dfa.stateReferences(tables, stateOffset);
         }
 
         if (bounded && !deadState && position <= scanBegin) {
@@ -3949,7 +4053,7 @@ final class Dfa
             }
             int finalState = getTransition(transitions, stateOffset + lastClass);
             if (finalState == T_UNCOMPUTED) {
-                finalState = dfa.computeTransition(stateOffset, lastByte);
+                finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
                     return SEARCH_FAILED;
                 }
@@ -3964,13 +4068,14 @@ final class Dfa
 
     private static long searchBackwardAbsolutePointers(
             DfaInstance dfa,
+            CacheTables tables,
             byte[] bytes,
             int textBegin,
             int textEnd,
             int ctxBegin,
             int startOffset)
     {
-        AbsolutePointerTransitions absolutePointers = dfa.absolutePointerTransitions;
+        AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
         long tableAddress = absolutePointers.baseAddress();
         long transitionRowAddress = tableAddress + ((long) startOffset * Long.BYTES);
         int position = textEnd;
@@ -4148,7 +4253,7 @@ final class Dfa
         };
     }
 
-    private static final class RetrySearchException
+    static final class RetrySearchException
             extends RuntimeException
     {
         private RetrySearchException()
@@ -4193,10 +4298,198 @@ final class Dfa
             int entryCapacity,
             long allocatedBytes) {}
 
+    // The enlarged pointer table a growth will allocate, and the charge it adds. An
+    // `allocatedBytes` of zero means the superseded-segment cap is full: the table is withheld
+    // rather than enlarged, and `memoryDelta` refunds the current segment's charge.
+    private record AbsolutePointerGrowthSize(int entryCapacity, long allocatedBytes, long memoryDelta)
+    {
+        boolean withheld()
+        {
+            return allocatedBytes == 0;
+        }
+    }
+
+    // A growth whose transitions are null withholds the table instead: the enlarged segment was
+    // not allocated, and the delta refunds the current segment's charge. `allocationFailed` tells
+    // a failed allocation from a full cap.
     private record AbsolutePointerGrowth(
             AbsolutePointerTransitions transitions,
             int transitionCount,
-            long memoryDelta) {}
+            long memoryDelta,
+            boolean allocationFailed) {}
+
+    // A pointer table a reset or growth superseded, enqueued when the collector finds the table
+    // unreachable. Its DFA links it until then, so it stays reachable, and releases its bytes from
+    // the DFA's count when it next checks the cap. The native memory itself is freed by the
+    // automatic arena's cleaner in the JDK; this reference releases only the DFA's count of it.
+    private static final class SupersededAbsolutePointerReference
+            extends PhantomReference<AbsolutePointerTransitions>
+    {
+        private final long allocatedBytes;
+        private SupersededAbsolutePointerReference previous;
+        private SupersededAbsolutePointerReference next;
+
+        private SupersededAbsolutePointerReference(AbsolutePointerTransitions absolutePointers, ReferenceQueue<AbsolutePointerTransitions> queue)
+        {
+            super(absolutePointers, queue);
+            this.allocatedBytes = absolutePointers.allocatedBytes();
+        }
+    }
+
+    /// One generation of a DFA cache, published whole. A search reads the tables it began with and
+    /// never sees them cleared: a reset publishes fresh tables and leaves these to their readers.
+    /// Growth, paired rows, and the pointer table publish new tables that share the arrays they
+    /// leave unchanged, and the writer fills slots of the current tables in place. Each slot is
+    /// written at most once, so a reader sees it empty or final, and publication through the
+    /// volatile field makes every array, and every slot written before it, visible with the tables.
+    static final class CacheTables
+    {
+        // Flat transition table (hot path)
+        final int[] transitions;
+        // State metadata (cold path)
+        final StateData[] stateData;
+        final Object[][] stateRefArrays;  // parallel to stateData[], indexed by stateIndex
+        // Zero is unknown, -1 is rejected, and accepted entries pack up to three exits below a
+        // three-bit count. Bit 27 marks a matching self-loop, whose transitions carry the match bit.
+        // Bit 28 marks a row where every byte 0x80..0xFF exits; the packed exits are then ASCII only.
+        final int[] selfLoopExitByteSets;
+        // Start state caches
+        final StateData[][] startBeginText;
+        final StateData[][] startBeginLine;
+        final StateData[][] startTrinoLine;
+        final StateData[][] startAfterWord;
+        final StateData[][] startAfterNonWord;
+        // Only programs with Rust CRLF anchors have the first, and only programs with a word
+        // assertion that decodes the text have the second.
+        final StateData[][] startAfterCarriageReturn;
+        final StateData[][] startAfterNonAscii;
+        // Indexed by stateIndex and sized at the last rebuild; unselected rows are null. Built
+        // whole before publication and never written after.
+        final Object[][] pairedStateRefArrays;
+        final AbsolutePointerTransitions absolutePointerTransitions;
+
+        private CacheTables(
+                int[] transitions,
+                StateData[] stateData,
+                Object[][] stateRefArrays,
+                int[] selfLoopExitByteSets,
+                StateData[][] startBeginText,
+                StateData[][] startBeginLine,
+                StateData[][] startTrinoLine,
+                StateData[][] startAfterWord,
+                StateData[][] startAfterNonWord,
+                StateData[][] startAfterCarriageReturn,
+                StateData[][] startAfterNonAscii,
+                Object[][] pairedStateRefArrays,
+                AbsolutePointerTransitions absolutePointerTransitions)
+        {
+            this.transitions = transitions;
+            this.stateData = stateData;
+            this.stateRefArrays = stateRefArrays;
+            this.selfLoopExitByteSets = selfLoopExitByteSets;
+            this.startBeginText = startBeginText;
+            this.startBeginLine = startBeginLine;
+            this.startTrinoLine = startTrinoLine;
+            this.startAfterWord = startAfterWord;
+            this.startAfterNonWord = startAfterNonWord;
+            this.startAfterCarriageReturn = startAfterCarriageReturn;
+            this.startAfterNonAscii = startAfterNonAscii;
+            this.pairedStateRefArrays = pairedStateRefArrays;
+            this.absolutePointerTransitions = absolutePointerTransitions;
+        }
+
+        // Empty tables sized for `stateCapacity` states: no states, start states, paired rows, or
+        // pointer table.
+        private static CacheTables create(
+                int stateCapacity,
+                int nextSize,
+                boolean trinoLineStarts,
+                boolean carriageReturnStarts,
+                boolean nonAsciiStarts)
+        {
+            int[] transitions = new int[stateCapacity * nextSize];
+            Arrays.fill(transitions, T_UNCOMPUTED);
+            return new CacheTables(
+                    transitions,
+                    new StateData[stateCapacity],
+                    new Object[stateCapacity][],
+                    new int[stateCapacity],
+                    new StateData[2][2],
+                    new StateData[2][2],
+                    trinoLineStarts ? new StateData[2][2] : null,
+                    new StateData[2][2],
+                    new StateData[2][2],
+                    carriageReturnStarts ? new StateData[2][2] : null,
+                    nonAsciiStarts ? new StateData[2][2] : null,
+                    null,
+                    null);
+        }
+
+        private CacheTables withStates(int[] transitions, StateData[] stateData, Object[][] stateRefArrays, int[] selfLoopExitByteSets)
+        {
+            return new CacheTables(
+                    transitions,
+                    stateData,
+                    stateRefArrays,
+                    selfLoopExitByteSets,
+                    startBeginText,
+                    startBeginLine,
+                    startTrinoLine,
+                    startAfterWord,
+                    startAfterNonWord,
+                    startAfterCarriageReturn,
+                    startAfterNonAscii,
+                    pairedStateRefArrays,
+                    absolutePointerTransitions);
+        }
+
+        private CacheTables withPairedStateRefArrays(Object[][] pairedStateRefArrays)
+        {
+            return new CacheTables(
+                    transitions,
+                    stateData,
+                    stateRefArrays,
+                    selfLoopExitByteSets,
+                    startBeginText,
+                    startBeginLine,
+                    startTrinoLine,
+                    startAfterWord,
+                    startAfterNonWord,
+                    startAfterCarriageReturn,
+                    startAfterNonAscii,
+                    pairedStateRefArrays,
+                    absolutePointerTransitions);
+        }
+
+        private CacheTables withAbsolutePointerTransitions(AbsolutePointerTransitions absolutePointerTransitions)
+        {
+            return new CacheTables(
+                    transitions,
+                    stateData,
+                    stateRefArrays,
+                    selfLoopExitByteSets,
+                    startBeginText,
+                    startBeginLine,
+                    startTrinoLine,
+                    startAfterWord,
+                    startAfterNonWord,
+                    startAfterCarriageReturn,
+                    startAfterNonAscii,
+                    pairedStateRefArrays,
+                    absolutePointerTransitions);
+        }
+    }
+
+    // The offset of the state an object row belongs to. Grown tables share rows with the tables
+    // they replace, so a row reached through older tables may belong to a state beyond their
+    // `transitions`; a row read before its sentinel is visible has none. Either retries.
+    static int rowStateOffset(Object[] stateReferences, int nextSize, int[] transitions)
+    {
+        if (!(getStateReference(stateReferences, nextSize) instanceof StateData state) || state.offset() >= transitions.length) {
+            throw RETRY_SEARCH;
+        }
+        return state.offset();
+    }
 
     @SuppressWarnings("restricted")
     private static final class AbsoluteAddressSpace
@@ -4285,74 +4578,6 @@ final class Dfa
         requireNonNull(NATIVE_READER_PROBE, "native reader probe is disabled").release();
     }
 
-    private static ReaderSlot registerReaderSlot()
-    {
-        synchronized (READER_SLOTS_LOCK) {
-            removeStaleReaderSlotsLocked();
-            ReaderSlot readerSlot = new ReaderSlot();
-            readerSlots.add(new ReaderSlotReference(readerSlot));
-            return readerSlot;
-        }
-    }
-
-    private static int removeStaleReaderSlots()
-    {
-        synchronized (READER_SLOTS_LOCK) {
-            return removeStaleReaderSlotsLocked();
-        }
-    }
-
-    private static int removeStaleReaderSlotsLocked()
-    {
-        int removedReferences = 0;
-        ReaderSlotReference staleReference;
-        while ((staleReference = (ReaderSlotReference) STALE_READER_SLOTS.poll()) != null) {
-            readerSlots.remove(staleReference);
-            removedReferences++;
-        }
-
-        // Hash-based collections retain their peak table after removals. Reader registration is
-        // a once-per-thread cold path, so compact a stale-heavy registry instead of retaining a
-        // virtual-thread wave's high-water table for the lifetime of the class loader.
-        if (removedReferences > 0 && (readerSlots.isEmpty() || removedReferences > readerSlots.size())) {
-            readerSlots = new HashSet<>(readerSlots);
-        }
-        return removedReferences;
-    }
-
-    static int drainStaleReaderSlots()
-    {
-        return removeStaleReaderSlots();
-    }
-
-    static ReaderRegistrySnapshot readerRegistrySnapshot()
-    {
-        synchronized (READER_SLOTS_LOCK) {
-            int liveReferences = 0;
-            int activeReaders = 0;
-            for (ReaderSlotReference reference : readerSlots) {
-                ReaderSlot readerSlot = reference.get();
-                if (readerSlot != null) {
-                    liveReferences++;
-                    if (readerSlot.activeDfaId != 0 || readerSlot.pairedDfaId != 0) {
-                        activeReaders++;
-                    }
-                }
-            }
-            int references = readerSlots.size();
-            return new ReaderRegistrySnapshot(references, liveReferences, references - liveReferences, activeReaders);
-        }
-    }
-
-    static Object readerRegistryRoot()
-    {
-        synchronized (READER_SLOTS_LOCK) {
-            return readerSlots;
-        }
-    }
-
-    record ReaderRegistrySnapshot(int references, int liveReferences, int staleReferences, int activeReaders) {}
-
     record CacheSnapshot(
             int stateCount,
             int cacheEntries,
@@ -4404,63 +4629,8 @@ final class Dfa
             long absolutePointerMemory,
             int absolutePointerTransitionCount) {}
 
-    private static void awaitNoReaders(DfaInstance dfa)
-    {
-        ReaderSlotReference[] references;
-        synchronized (READER_SLOTS_LOCK) {
-            removeStaleReaderSlotsLocked();
-            references = readerSlots.toArray(ReaderSlotReference[]::new);
-        }
-        int spinCount = 0;
-        while (true) {
-            boolean hasActiveReader = false;
-            for (ReaderSlotReference reference : references) {
-                ReaderSlot readerSlot = reference.get();
-                if (readerSlot != null && (readerSlot.activeDfaId == dfa.readerRegistryId || readerSlot.pairedDfaId == dfa.readerRegistryId)) {
-                    hasActiveReader = true;
-                    break;
-                }
-            }
-            if (!hasActiveReader) {
-                return;
-            }
-            if (spinCount++ < 1_000) {
-                Thread.onSpinWait();
-            }
-            else {
-                LockSupport.parkNanos(1_000);
-            }
-        }
-    }
-
-    @SuppressWarnings("UnusedVariable")
-    @SuppressFBWarnings(value = "UUF_UNUSED_FIELD", justification = "Padding prevents false sharing between reader slots")
-    private static final class ReaderSlot
-    {
-        private volatile long activeDfaId;
-        // The second DFA of a pair search, and zero outside one. Single-DFA searches never write it.
-        private volatile long pairedDfaId;
-
-        // Reader slots are written on every search, so adjacent slots must not share a cache line.
-        private long padding0;
-        private long padding1;
-        private long padding2;
-        private long padding3;
-        private long padding4;
-        private long padding5;
-    }
-
-    private static final class ReaderSlotReference
-            extends WeakReference<ReaderSlot>
-    {
-        private ReaderSlotReference(ReaderSlot readerSlot)
-        {
-            super(readerSlot, STALE_READER_SLOTS);
-        }
-    }
-
     /// Cold-path state metadata. Replaces the old per-state object with next[] array.
-    /// The actual transitions live in the flat `DfaInstance.transitions[]` table.
+    /// The actual transitions live in the flat `CacheTables.transitions` table.
     record StateData(int[] inst, int flag, int offset) {}
 
     private record RestoredStates(int startOffset, int stateOffset) {}
@@ -4725,7 +4895,8 @@ final class Dfa
                 this.sentinelOffset = stateOffset;
             }
             else {
-                StateData sd = dfa.stateData[dfa.stateIndex(stateOffset)];
+                // Saved only by an exclusive search, from the current tables.
+                StateData sd = dfa.tables.stateData[dfa.stateIndex(stateOffset)];
                 this.inst = sd.inst().clone();
                 this.flag = sd.flag();
                 this.sentinelOffset = 0;
@@ -5043,11 +5214,28 @@ final class Dfa
         // largest possible states.
         private static final int MINIMUM_INITIAL_STATES = 20;
 
+        private static final VarHandle TABLES;
+
+        static {
+            try {
+                TABLES = MethodHandles.lookup().findVarHandle(DfaInstance.class, "tables", CacheTables.class);
+            }
+            catch (ReflectiveOperationException e) {
+                throw new ExceptionInInitializerError(e);
+            }
+        }
+
         enum TestingFailurePoint
         {
             EXCLUSIVE_ADMISSION,
             EXCLUSIVE_TEARDOWN,
             NATIVE_TRANSITION_GROWTH,
+            // Fails a growth's pointer table allocation as a native memory shortage does, without
+            // throwing.
+            NATIVE_TRANSITION_GROWTH_ALLOCATION,
+            // Fails the reset's pointer table allocation as a native memory shortage does, without
+            // throwing.
+            NATIVE_TRANSITION_RESET,
             TRANSITION_ARRAY_GROWTH,
             STATE_DATA_ARRAY_GROWTH,
             STATE_REFERENCE_ARRAY_GROWTH,
@@ -5057,7 +5245,6 @@ final class Dfa
         }
 
         private final Prog prog;
-        private final long readerRegistryId = NEXT_DFA_ID.incrementAndGet();
         final byte[] bytemap;
         private final byte[] startByteCandidates;
         private final int startByteScanSet;
@@ -5095,27 +5282,20 @@ final class Dfa
         private final boolean initFailed;
         private final int maxTransitionsLength;
 
+        // Only the holder of this lock writes the cache or publishes its tables.
         private final ReentrantLock cacheMutationLock = new ReentrantLock();
-        private volatile boolean hasPendingCacheMutation;
         private volatile long cacheVersion;
 
         private WorkQueue q0;
         private WorkQueue q1;
         private final int[] stack;
 
-        // Flat transition table (hot path)
-        volatile int[] transitions;
+        // The current cache generation. A reader search reads it once and reads only those tables;
+        // an exclusive search rereads it after each write that can publish (see `tablesAfterWrite`).
+        private volatile CacheTables tables;
+        // The state capacity of the tables a reset publishes.
+        private final int initialStateCapacity;
         int nextFreeOffset;
-
-        // State metadata (cold path)
-        volatile StateData[] stateData;
-        volatile Object[][] stateRefArrays;  // parallel to stateData[], indexed by stateIndex
-        // Zero is unknown, -1 is rejected, and accepted entries pack up to three exits below a
-        // three-bit count. Bit 27 marks a matching self-loop, whose transitions carry the match bit.
-        // Bit 28 marks a row where every byte 0x80..0xFF exits; the packed exits are then ASCII only.
-        volatile int[] selfLoopExitByteSets;
-        // Indexed by stateIndex and sized at the last rebuild; unselected rows are null.
-        volatile Object[][] pairedStateRefArrays;
         private long pairedTransitionMemory;
         private volatile boolean pairedTransitionsRequested;
         private boolean pairedTransitionsRejected;
@@ -5125,9 +5305,22 @@ final class Dfa
         private long cacheContentVersion;
         private long pairedContentVersion = -1;
         private int shortPairedSearchCount;
-        private volatile AbsolutePointerTransitions absolutePointerTransitions;
         private boolean absolutePointerTransitionsRequested;
         private boolean absolutePointerTransitionsUnavailable;
+        // The requested pointer table is absent from the current tables: superseded segments still
+        // await collection, or its native memory could not be allocated. It stays requested, and
+        // paired rows stay disabled, until an exclusive search allocates it again, so a warm cache
+        // may run on object rows until its next exclusive search or reset.
+        private boolean absolutePointerTransitionsWithheld;
+        // A pointer table allocation has failed since the last reset; none is attempted again until
+        // the next one.
+        private boolean absolutePointerTransitionAllocationFailed;
+        // Pointer tables a reset or growth superseded, linked until the collector finds them
+        // unreachable and enqueues them, and their native bytes not yet released from the count.
+        // The list and count are guarded by the cache mutation lock.
+        private final ReferenceQueue<AbsolutePointerTransitions> unreachableAbsolutePointerTables = new ReferenceQueue<>();
+        private SupersededAbsolutePointerReference supersededAbsolutePointerReferences;
+        private long supersededAbsolutePointerMemory;
         private int shortAbsolutePointerSearchCount;
         private volatile int absolutePointerTransitionCount;
         private int absolutePointerBackwardSearchCount;
@@ -5139,17 +5332,6 @@ final class Dfa
 
         // Cache: StateKey -> StateData
         private final StateCache cache = new StateCache();
-
-        // Start state caches
-        private final StateData[][] startBeginText = new StateData[2][2];
-        private final StateData[][] startBeginLine = new StateData[2][2];
-        private final StateData[][] startTrinoLine;
-        private final StateData[][] startAfterWord = new StateData[2][2];
-        private final StateData[][] startAfterNonWord = new StateData[2][2];
-        // Only programs with Rust CRLF anchors allocate the first, and only programs with a word
-        // assertion that decodes the text allocate the second.
-        private final StateData[][] startAfterCarriageReturn;
-        private final StateData[][] startAfterNonAscii;
 
         // Observability
         private volatile int resetCount;
@@ -5182,15 +5364,12 @@ final class Dfa
             this.trinoLineFlag = prog.reversed()
                     ? prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_END_LINE
                     : prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_BEGIN_LINE;
-            this.startTrinoLine = trinoLineFlag == 0 || prog.reversed() ? null : new StateData[2][2];
             int textDependentAssertions = prog.textDependentAssertions();
             this.hasCrlfLineAssertions = (textDependentAssertions & EmptyOp.RUST_CRLF_LINE) != 0;
             this.crlfFirstByte = prog.reversed() ? '\n' : '\r';
             this.crlfSecondByte = prog.reversed() ? '\r' : '\n';
             this.hasRustWordAssertions = (textDependentAssertions & EmptyOp.RUST_WORD_ASSERTIONS) != 0;
             this.quitsOnNonAscii = prog.dfaQuitsOnNonAscii();
-            this.startAfterCarriageReturn = hasCrlfLineAssertions ? new StateData[2][2] : null;
-            this.startAfterNonAscii = quitsOnNonAscii ? new StateData[2][2] : null;
 
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
@@ -5218,12 +5397,8 @@ final class Dfa
                 this.availableStateMemory = Long.MAX_VALUE;
                 this.initFailed = false;
                 this.maxTransitionsLength = MAX_TRANSITIONS_LENGTH;
-                int initialCapacity = Math.max(prog.size(), 16);
-                this.transitions = new int[initialCapacity * nextSize];
-                Arrays.fill(this.transitions, T_UNCOMPUTED);
-                this.stateData = new StateData[initialCapacity];
-                this.stateRefArrays = new Object[initialCapacity][];
-                this.selfLoopExitByteSets = new int[initialCapacity];
+                this.initialStateCapacity = Math.max(prog.size(), 16);
+                this.tables = newCacheTables(initialStateCapacity);
                 this.retainedStateMemory = stateBackingMemory();
                 this.nextFreeOffset = nextSize; // skip offset 0 (reserved)
                 this.stateCount = 0;
@@ -5247,10 +5422,8 @@ final class Dfa
                 this.stateBudget = 0;
                 this.availableStateMemory = 0;
                 this.maxTransitionsLength = 0;
-                this.transitions = new int[0];
-                this.stateData = new StateData[0];
-                this.stateRefArrays = new Object[0][];
-                this.selfLoopExitByteSets = new int[0];
+                this.initialStateCapacity = 0;
+                this.tables = newCacheTables(0);
                 return;
             }
 
@@ -5265,10 +5438,8 @@ final class Dfa
             if (stateBudget / largestStateSize < MINIMUM_INITIAL_STATES) {
                 this.initFailed = true;
                 this.maxTransitionsLength = 0;
-                this.transitions = new int[0];
-                this.stateData = new StateData[0];
-                this.stateRefArrays = new Object[0][];
-                this.selfLoopExitByteSets = new int[0];
+                this.initialStateCapacity = 0;
+                this.tables = newCacheTables(0);
                 return;
             }
 
@@ -5276,16 +5447,39 @@ final class Dfa
             long maxStateCount = stateBudget / estimateStateSize(0);
             long maxTransitionStateCount = MAX_TRANSITIONS_LENGTH / nextSize;
             this.maxTransitionsLength = (int) (Math.min(maxStateCount + 1, maxTransitionStateCount) * nextSize);
-            int initialCapacity = Math.max(Math.min(prog.size(), maxTransitionsLength / nextSize), 16);
-            this.transitions = new int[initialCapacity * nextSize];
-            Arrays.fill(this.transitions, T_UNCOMPUTED);
-            this.stateData = new StateData[initialCapacity];
-            this.stateRefArrays = new Object[initialCapacity][];
-            this.selfLoopExitByteSets = new int[initialCapacity];
+            this.initialStateCapacity = Math.max(Math.min(prog.size(), maxTransitionsLength / nextSize), 16);
+            this.tables = newCacheTables(initialStateCapacity);
             this.retainedStateMemory = stateBackingMemory();
             this.availableStateMemory = memoryBudget - retainedStateMemory;
             this.nextFreeOffset = nextSize;
             this.stateCount = 0;
+        }
+
+        private CacheTables newCacheTables(int stateCapacity)
+        {
+            return CacheTables.create(
+                    stateCapacity,
+                    nextSize,
+                    trinoLineFlag != 0 && !prog.reversed(),
+                    hasCrlfLineAssertions,
+                    quitsOnNonAscii);
+        }
+
+        CacheTables cacheTablesForTesting()
+        {
+            return tables;
+        }
+
+        // The tables an exclusive search reads after a call that may have published new ones.
+        // Readers never publish, so they keep the tables they began with and skip the lock check
+        // unless a writer published meanwhile. The plain read costs a reader no fence.
+        CacheTables tablesAfterWrite(CacheTables searchTables)
+        {
+            CacheTables published = (CacheTables) TABLES.get(this);
+            if (published == searchTables || !cacheMutationLock.isHeldByCurrentThread()) {
+                return searchTables;
+            }
+            return published;
         }
 
         /// Returns the least `maxMemory` with which the constructor initializes a DFA of `kind` over
@@ -5307,6 +5501,8 @@ final class Dfa
             overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
             overhead += (prog.size() + (long) nmark) * 8L * 2;
             overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            // The current cache root; the arrays it holds are charged as state memory.
+            overhead += CACHE_TABLES_BYTES;
             return overhead;
         }
 
@@ -5482,10 +5678,10 @@ final class Dfa
             return fixedDistanceShortSkipFallbackCount;
         }
 
-        private int selfLoopExitByteSet(Object[] stateReferences)
+        private int selfLoopExitByteSet(CacheTables tables, Object[] stateReferences)
         {
-            int stateOffset = ((StateData) getStateReference(stateReferences, nextSize)).offset();
-            int exitByteSet = countSelfLoopExitByteSet(stateOffset);
+            int stateOffset = rowStateOffset(stateReferences, nextSize, tables.transitions);
+            int exitByteSet = countSelfLoopExitByteSet(tables, stateOffset);
             // The object-row scan only follows plain self-loops with at most three exit bytes.
             return (exitByteSet & (SELF_LOOP_EXIT_BYTE_SET_MATCHING | SELF_LOOP_EXIT_BYTE_SET_HIGH)) != 0 ? 0 : exitByteSet;
         }
@@ -5494,34 +5690,42 @@ final class Dfa
         // one to three bytes, or every high byte plus zero to three ASCII bytes. Accepted matching
         // self-loops carry SELF_LOOP_EXIT_BYTE_SET_MATCHING, and all-high exits carry
         // SELF_LOOP_EXIT_BYTE_SET_HIGH. UTF-8 dot loops exit on every lead and invalid byte.
-        private int countSelfLoopExitByteSet(int stateOffset)
+        private int countSelfLoopExitByteSet(CacheTables tables, int stateOffset)
         {
             int stateIndex = stateIndex(stateOffset);
-            int exitByteSet = selfLoopExitByteSets[stateIndex];
+            int exitByteSet = tables.selfLoopExitByteSets[stateIndex];
             if (exitByteSet != 0) {
-                return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
+                return acceptedSelfLoopExitByteSet(exitByteSet);
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
             }
+            // Tables from before a growth may lack an entry the current ones hold.
+            CacheTables currentTables = tablesAfterWrite(tables);
+            exitByteSet = currentTables.selfLoopExitByteSets[stateIndex];
+            if (exitByteSet != 0) {
+                return acceptedSelfLoopExitByteSet(exitByteSet);
+            }
 
-            int stateFlag = stateData[stateIndex].flag();
+            int stateFlag = currentTables.stateData[stateIndex].flag();
             for (int value = 0; value < 256; value++) {
                 // A byte the DFA quits on stays uncomputed, so it leaves the self-loop, and a search
                 // that reaches it quits there.
                 if (quitsOnNonAscii && quits(stateFlag, value)) {
                     continue;
                 }
-                if (computeTransition(stateOffset, value) == Integer.MIN_VALUE) {
-                    selfLoopExitByteSets[stateIndex] = SELF_LOOP_EXIT_BYTE_SET_REJECTED;
+                int nextState = computeTransition(currentTables, stateOffset, value);
+                currentTables = tablesAfterWrite(currentTables);
+                if (nextState == Integer.MIN_VALUE) {
+                    currentTables.selfLoopExitByteSets[stateIndex] = SELF_LOOP_EXIT_BYTE_SET_REJECTED;
                     return 0;
                 }
             }
 
             // Transitions into a state carry the match bit exactly when that state is a match state.
-            boolean matching = (stateData[stateIndex].flag() & FLAG_MATCH) != 0;
+            boolean matching = (currentTables.stateData[stateIndex].flag() & FLAG_MATCH) != 0;
             int selfLoop = matching ? stateOffset | T_MATCH_BIT : stateOffset;
-            int[] transitions = this.transitions;
+            int[] transitions = currentTables.transitions;
             boolean highExits = true;
             for (int value = 0x80; value < 256 && highExits; value++) {
                 highExits = getTransition(transitions, stateOffset + (bytemap[value] & 0xFF)) != selfLoop;
@@ -5547,7 +5751,12 @@ final class Dfa
                     (matching ? SELF_LOOP_EXIT_BYTE_SET_MATCHING : 0) |
                     (highExits ? SELF_LOOP_EXIT_BYTE_SET_HIGH : 0)
                     : SELF_LOOP_EXIT_BYTE_SET_REJECTED;
-            selfLoopExitByteSets[stateIndex] = exitByteSet;
+            currentTables.selfLoopExitByteSets[stateIndex] = exitByteSet;
+            return acceptedSelfLoopExitByteSet(exitByteSet);
+        }
+
+        private static int acceptedSelfLoopExitByteSet(int exitByteSet)
+        {
             return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
         }
 
@@ -5558,27 +5767,28 @@ final class Dfa
 
         CacheSnapshot cacheSnapshot()
         {
+            CacheTables tables = this.tables;
             int populatedStateData = 0;
-            for (StateData state : stateData) {
+            for (StateData state : tables.stateData) {
                 if (state != null) {
                     populatedStateData++;
                 }
             }
 
             int populatedStateReferences = 0;
-            for (Object[] stateReferences : stateRefArrays) {
+            for (Object[] stateReferences : tables.stateRefArrays) {
                 if (stateReferences != null) {
                     populatedStateReferences++;
                 }
             }
 
-            int populatedStartStates = countPopulatedStartStates(startBeginText) +
-                    countPopulatedStartStates(startBeginLine) +
-                    (startTrinoLine == null ? 0 : countPopulatedStartStates(startTrinoLine)) +
-                    countPopulatedStartStates(startAfterWord) +
-                    countPopulatedStartStates(startAfterNonWord) +
-                    (startAfterCarriageReturn == null ? 0 : countPopulatedStartStates(startAfterCarriageReturn)) +
-                    (startAfterNonAscii == null ? 0 : countPopulatedStartStates(startAfterNonAscii));
+            int populatedStartStates = countPopulatedStartStates(tables.startBeginText) +
+                    countPopulatedStartStates(tables.startBeginLine) +
+                    (tables.startTrinoLine == null ? 0 : countPopulatedStartStates(tables.startTrinoLine)) +
+                    countPopulatedStartStates(tables.startAfterWord) +
+                    countPopulatedStartStates(tables.startAfterNonWord) +
+                    (tables.startAfterCarriageReturn == null ? 0 : countPopulatedStartStates(tables.startAfterCarriageReturn)) +
+                    (tables.startAfterNonAscii == null ? 0 : countPopulatedStartStates(tables.startAfterNonAscii));
 
             return new CacheSnapshot(
                     stateCount,
@@ -5591,19 +5801,22 @@ final class Dfa
                     fixedDistanceByteCandidateMemory,
                     availableStateMemory,
                     stateBudget,
-                    transitions.length,
-                    stateData.length,
-                    stateRefArrays.length,
+                    tables.transitions.length,
+                    tables.stateData.length,
+                    tables.stateRefArrays.length,
                     resetCount);
         }
 
         StateMemorySnapshot stateMemorySnapshot()
         {
-            long transitionBytes = sizeOfIntArray(transitions.length);
+            CacheTables tables = this.tables;
+            StateData[] stateData = tables.stateData;
+            Object[][] stateRefArrays = tables.stateRefArrays;
+            long transitionBytes = sizeOfIntArray(tables.transitions.length);
             long stateDataArrayBytes = sizeOfObjectArray(stateData.length);
             long stateReferenceArrayBytes = sizeOfObjectArray(stateRefArrays.length);
-            long selfLoopExitByteSetBytes = sizeOfIntArray(selfLoopExitByteSets.length);
-            long optionalStartStateCacheBytes = optionalStartStateCacheMemory();
+            long selfLoopExitByteSetBytes = sizeOfIntArray(tables.selfLoopExitByteSets.length);
+            long optionalStartStateCacheBytes = optionalStartStateCacheMemory(tables);
             long stateReferenceRowBytes = 0;
             long instructionBytes = 0;
             int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
@@ -5676,6 +5889,8 @@ final class Dfa
                 return null;
             }
             beginStateAllocationForTesting();
+            CacheTables tables = this.tables;
+            int[] transitions = tables.transitions;
             long stateMemory = stateObjectMemory(instructions.length);
             long newTransitionsLength = transitions.length;
             if (nextFreeOffset + nextSize > transitions.length) {
@@ -5685,27 +5900,26 @@ final class Dfa
                 }
                 int newStateCount = toIntExact(newTransitionsLength / nextSize);
                 stateMemory += sizeOfIntArray(toIntExact(newTransitionsLength)) - sizeOfIntArray(transitions.length);
-                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(stateData.length);
-                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(stateRefArrays.length);
-                stateMemory += sizeOfIntArray(newStateCount) - sizeOfIntArray(selfLoopExitByteSets.length);
+                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateData.length);
+                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateRefArrays.length);
+                stateMemory += sizeOfIntArray(newStateCount) - sizeOfIntArray(tables.selfLoopExitByteSets.length);
             }
 
             int newCacheTableCapacity = cache.capacityAfterInsert();
             stateMemory += sizeOfObjectArray(Math.multiplyExact(newCacheTableCapacity, 2)) - cache.tableBytes();
 
-            AbsolutePointerGrowth absolutePointerGrowth = null;
-            AbsolutePointerTransitions existingPointers = absolutePointerTransitions;
+            AbsolutePointerGrowthSize absolutePointerGrowthSize = null;
+            AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers != null && nextFreeOffset + nextSize > existingPointers.entryCapacity()) {
-                absolutePointerGrowth = prepareAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory);
-                if (absolutePointerGrowth == null) {
+                absolutePointerGrowthSize = sizeAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory);
+                if (absolutePointerGrowthSize == null) {
                     return null;
                 }
-                endTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
             }
-            long absolutePointerMemory = absolutePointerGrowth == null ? 0 : absolutePointerGrowth.memoryDelta();
+            long absolutePointerMemory = absolutePointerGrowthSize == null ? 0 : absolutePointerGrowthSize.memoryDelta();
             boolean releasePairedTransitions = false;
             if (availableStateMemory - absolutePointerMemory < stateMemory) {
-                releasePairedTransitions = pairedStateRefArrays != null &&
+                releasePairedTransitions = tables.pairedStateRefArrays != null &&
                         availableStateMemory + pairedTransitionMemory - absolutePointerMemory >= stateMemory;
                 if (!releasePairedTransitions) {
                     return null;
@@ -5713,9 +5927,9 @@ final class Dfa
             }
 
             int[] newTransitions = transitions;
-            StateData[] newStateData = stateData;
-            Object[][] newStateRefArrays = stateRefArrays;
-            int[] newSelfLoopExitByteSets = selfLoopExitByteSets;
+            StateData[] newStateData = tables.stateData;
+            Object[][] newStateRefArrays = tables.stateRefArrays;
+            int[] newSelfLoopExitByteSets = tables.selfLoopExitByteSets;
             if (newTransitionsLength != transitions.length) {
                 int oldLength = transitions.length;
                 beginTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
@@ -5724,13 +5938,13 @@ final class Dfa
                 endTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
                 int newStateCount = toIntExact(newTransitionsLength / nextSize);
                 beginTestingFailurePoint(TestingFailurePoint.STATE_DATA_ARRAY_GROWTH);
-                newStateData = Arrays.copyOf(stateData, newStateCount);
+                newStateData = Arrays.copyOf(tables.stateData, newStateCount);
                 endTestingFailurePoint(TestingFailurePoint.STATE_DATA_ARRAY_GROWTH);
                 beginTestingFailurePoint(TestingFailurePoint.STATE_REFERENCE_ARRAY_GROWTH);
-                newStateRefArrays = Arrays.copyOf(stateRefArrays, newStateCount);
+                newStateRefArrays = Arrays.copyOf(tables.stateRefArrays, newStateCount);
                 endTestingFailurePoint(TestingFailurePoint.STATE_REFERENCE_ARRAY_GROWTH);
                 beginTestingFailurePoint(TestingFailurePoint.SELF_LOOP_ARRAY_GROWTH);
-                newSelfLoopExitByteSets = Arrays.copyOf(selfLoopExitByteSets, newStateCount);
+                newSelfLoopExitByteSets = Arrays.copyOf(tables.selfLoopExitByteSets, newStateCount);
                 endTestingFailurePoint(TestingFailurePoint.SELF_LOOP_ARRAY_GROWTH);
             }
 
@@ -5742,25 +5956,52 @@ final class Dfa
             StateCache.PreparedInsertion cacheInsertion = cache.prepareInsert(key, state, newCacheTableCapacity);
             beginTestingFailurePoint(TestingFailurePoint.STATE_CACHE_INSERTION);
             endTestingFailurePoint(TestingFailurePoint.STATE_CACHE_INSERTION);
+            AbsolutePointerGrowth absolutePointerGrowth = null;
+            if (absolutePointerGrowthSize != null) {
+                absolutePointerGrowth = allocateAbsolutePointerTransitionGrowth(absolutePointerGrowthSize, existingPointers, transitions);
+                endTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
+            }
 
+            // Every allocation precedes the first write to the DFA, so a failure that propagates
+            // leaves the cache and its charges as they were; a failed pointer-table allocation
+            // withholds that table. The enlarged pointer segment is allocated last, after the Java
+            // arrays and state; only small objects (new `CacheTables` and the superseded reference)
+            // follow it, and an error in them abandons the segment uncounted.
+            CacheTables newTables = tables;
             if (releasePairedTransitions) {
-                pairedStateRefArrays = null;
+                newTables = newTables.withPairedStateRefArrays(null);
+            }
+            if (absolutePointerGrowth != null) {
+                newTables = newTables.withAbsolutePointerTransitions(absolutePointerGrowth.transitions());
+            }
+            if (newTransitions != transitions) {
+                newTables = newTables.withStates(newTransitions, newStateData, newStateRefArrays, newSelfLoopExitByteSets);
+            }
+            if (absolutePointerGrowth != null) {
+                supersedeAbsolutePointerTransitions(existingPointers);
+            }
+
+            // The new state's slots are empty in every published table, so they are filled in place;
+            // grown arrays are filled before their tables are published.
+            int stateIndex = stateIndex(nextFreeOffset);
+            newStateData[stateIndex] = state;
+            newStateRefArrays[stateIndex] = stateReferences;
+            if (releasePairedTransitions) {
                 availableStateMemory += pairedTransitionMemory;
                 pairedTransitionMemory = 0;
                 pairedContentVersion = -1;
             }
             if (absolutePointerGrowth != null) {
                 absolutePointerTransitionCount = absolutePointerGrowth.transitionCount();
-                absolutePointerTransitions = absolutePointerGrowth.transitions();
                 availableStateMemory -= absolutePointerGrowth.memoryDelta();
+                if (absolutePointerGrowth.transitions() == null) {
+                    absolutePointerTransitionsWithheld = true;
+                    absolutePointerTransitionAllocationFailed |= absolutePointerGrowth.allocationFailed();
+                }
             }
-            transitions = newTransitions;
-            stateData = newStateData;
-            stateRefArrays = newStateRefArrays;
-            selfLoopExitByteSets = newSelfLoopExitByteSets;
-            int stateIndex = stateIndex(nextFreeOffset);
-            stateData[stateIndex] = state;
-            stateRefArrays[stateIndex] = stateReferences;
+            if (newTables != tables) {
+                this.tables = newTables;
+            }
             nextFreeOffset += nextSize;
             stateCount++;
             availableStateMemory -= stateMemory;
@@ -5770,9 +6011,9 @@ final class Dfa
             return state;
         }
 
-        boolean hasPairedTransitions(int stateOffset)
+        boolean hasPairedTransitions(CacheTables tables, int stateOffset)
         {
-            Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
+            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             int stateIndex = stateIndex(stateOffset);
             return pairedStateRefArrays != null &&
                     stateIndex < pairedStateRefArrays.length &&
@@ -5799,29 +6040,35 @@ final class Dfa
             pairedTransitionsRequested = false;
         }
 
-        void requestPairedTransitions()
+        // Returns the tables the search reads next: these, or the current ones after a release.
+        CacheTables requestPairedTransitions(CacheTables tables)
         {
             if (pairedTransitionsRequested) {
-                return;
+                return tables;
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
             }
             if (pairedTransitionsRejected) {
                 releaseRejectedPairedTransitions();
-                return;
+                return this.tables;
             }
             pairedTransitionsRequested = true;
+            return tables;
         }
 
-        void requestAbsolutePointerTransitions()
+        // Returns the tables the search reads next: these, or the current ones when the request is
+        // recorded under the lock.
+        CacheTables requestAbsolutePointerTransitions(CacheTables tables)
         {
-            if (absolutePointerTransitions != null || absolutePointerTransitionsUnavailable) {
-                return;
+            // A withheld table is already requested, and the exclusive path allocates it again, so a
+            // reader continues on object rows instead of retrying.
+            if (tables.absolutePointerTransitions != null || absolutePointerTransitionsUnavailable || absolutePointerTransitionsWithheld) {
+                return tables;
             }
             if (!nativeAccessEnabled() || kind == Kind.MANY_MATCH || stateBudget == Long.MAX_VALUE) {
                 absolutePointerTransitionsUnavailable = true;
-                return;
+                return tables;
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
@@ -5832,6 +6079,7 @@ final class Dfa
                 releaseRejectedPairedTransitions();
             }
             absolutePointerTransitionsRequested = true;
+            return this.tables;
         }
 
         private void releaseRejectedPairedTransitions()
@@ -5842,40 +6090,40 @@ final class Dfa
             pairedTransitionsRequested = true;
         }
 
-        boolean shouldUseAbsolutePointersForShortSearch()
+        boolean shouldUseAbsolutePointersForShortSearch(CacheTables tables)
         {
-            if (absolutePointerTransitions != null) {
+            if (tables.absolutePointerTransitions != null) {
                 return true;
             }
-            if (absolutePointerTransitionsUnavailable || pairedTransitionsRequested) {
+            if (absolutePointerTransitionsUnavailable || absolutePointerTransitionsWithheld || pairedTransitionsRequested) {
                 return false;
             }
             // This racy hint changes only when the equivalent pointer route is selected.
             return++shortAbsolutePointerSearchCount >= SHORT_ABSOLUTE_POINTER_SEARCH_LIMIT;
         }
 
-        boolean hasAbsolutePointerTransitions(int stateOffset)
+        boolean hasAbsolutePointerTransitions(CacheTables tables, int stateOffset)
         {
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             return absolutePointers != null &&
                     stateOffset + nextSize <= absolutePointers.entryCapacity();
         }
 
         long absolutePointerTransitionMemory()
         {
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             return absolutePointers == null ? 0 : absolutePointers.allocatedBytes();
         }
 
         long absolutePointerTransitionBaseAddress()
         {
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             return absolutePointers == null ? 0 : absolutePointers.baseAddress();
         }
 
         WeakReference<Object> absolutePointerOwnerReferenceForTesting()
         {
-            return new WeakReference<>(absolutePointerTransitions);
+            return new WeakReference<>(tables.absolutePointerTransitions);
         }
 
         int absolutePointerTransitionCount()
@@ -5890,7 +6138,25 @@ final class Dfa
 
         boolean absolutePointerTransitionsAvailable()
         {
-            return absolutePointerTransitions != null;
+            return tables.absolutePointerTransitions != null;
+        }
+
+        // The table is given up for good; a withheld table is neither available nor unavailable.
+        boolean absolutePointerTransitionsUnavailable()
+        {
+            return absolutePointerTransitionsUnavailable;
+        }
+
+        long supersededAbsolutePointerMemory()
+        {
+            cacheMutationLock.lock();
+            try {
+                releaseUnreachableAbsolutePointerTables();
+                return supersededAbsolutePointerMemory;
+            }
+            finally {
+                cacheMutationLock.unlock();
+            }
         }
 
         long pairedTransitionMemory()
@@ -5900,7 +6166,7 @@ final class Dfa
 
         int pairedTransitionRowCount()
         {
-            Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
+            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return 0;
             }
@@ -5916,7 +6182,7 @@ final class Dfa
 
         int pairedTransitionCount()
         {
-            Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
+            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return 0;
             }
@@ -5939,7 +6205,7 @@ final class Dfa
         int selfLoopTransitionCount()
         {
             int transitionCount = 0;
-            Object[][] stateRefArrays = this.stateRefArrays;
+            Object[][] stateRefArrays = tables.stateRefArrays;
             for (Object[] stateRefs : stateRefArrays) {
                 if (stateRefs == null) {
                     continue;
@@ -5958,7 +6224,8 @@ final class Dfa
             if (kind != Kind.FIRST_MATCH) {
                 return 0;
             }
-            Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
+            CacheTables tables = this.tables;
+            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return 0;
             }
@@ -5971,7 +6238,7 @@ final class Dfa
                 int stateOffset = ((StateData) pairedStateRefs[nextSize * nextSize]).offset();
                 for (int firstClass = 0; firstClass < nextSize; firstClass++) {
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
-                        int outcome = (int) decodePairedTransition(this, stateOffset, firstClass, secondClass);
+                        int outcome = (int) decodePairedTransition(tables, stateOffset, firstClass, secondClass);
                         if (outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) {
                             continuationCount++;
                         }
@@ -6016,7 +6283,8 @@ final class Dfa
             if (kind != Kind.FIRST_MATCH) {
                 return 0;
             }
-            Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
+            CacheTables tables = this.tables;
+            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
             if (pairedStateRefArrays == null) {
                 return 0;
             }
@@ -6029,10 +6297,10 @@ final class Dfa
                 int stateOffset = ((StateData) pairedStateRefs[nextSize * nextSize]).offset();
                 for (int firstClass = 0; firstClass < nextSize; firstClass++) {
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
-                        long pairedTransition = decodePairedTransition(this, stateOffset, firstClass, secondClass);
+                        long pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
                         int outcome = (int) pairedTransition;
                         if ((outcome == PAIR_MATCH_FIRST || outcome == PAIR_MATCH_SECOND) &&
-                                !hasPairedTransitions((int) (pairedTransition >>> 32))) {
+                                !hasPairedTransitions(tables, (int) (pairedTransition >>> 32))) {
                             continuationCount++;
                         }
                     }
@@ -6058,7 +6326,7 @@ final class Dfa
 
         long estimatedPairedTransitionMemory()
         {
-            int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
+            int stateLimit = Math.min(nextFreeOffset / nextSize, tables.stateData.length);
             return pairedOuterMemory(stateLimit) + (long) stateCount * pairedRowMemory();
         }
 
@@ -6084,6 +6352,9 @@ final class Dfa
                 return;
             }
 
+            CacheTables tables = this.tables;
+            StateData[] stateData = tables.stateData;
+            Object[][] stateRefArrays = tables.stateRefArrays;
             int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
             int pairedClassCount = nextSize * nextSize;
             long outerMemory = pairedOuterMemory(stateLimit);
@@ -6098,7 +6369,7 @@ final class Dfa
             if (!completeTable && outerMemory + (2 * rowMemory) > MAX_PARTIAL_PAIRED_TRANSITION_MEMORY) {
                 return;
             }
-            boolean[] selectedRows = selectPairedRows(stateLimit, maximumRows);
+            boolean[] selectedRows = selectPairedRows(tables, stateLimit, maximumRows);
             int selectedRowCount = 0;
             for (boolean selected : selectedRows) {
                 if (selected) {
@@ -6155,17 +6426,25 @@ final class Dfa
                 return;
             }
 
+            // Allocate the new tables before charging, so a failed allocation leaves the charge
+            // unchanged; the rows are complete before the tables publish them.
+            CacheTables pairedTables = tables.withPairedStateRefArrays(pairedRows);
             availableStateMemory -= memory;
             pairedTransitionMemory = memory;
-            pairedStateRefArrays = pairedRows;
+            this.tables = pairedTables;
         }
 
+        // Allocates the requested pointer table, or allocates a withheld one again. Sizing that does
+        // not fit the budget makes the table unavailable when it is first requested; a withheld table
+        // was already requested and waits for a reset to free budget instead.
         private void allocateAbsolutePointerTransitions()
         {
+            CacheTables tables = this.tables;
             if (!absolutePointerTransitionsRequested ||
-                    absolutePointerTransitions != null ||
+                    tables.absolutePointerTransitions != null ||
                     absolutePointerTransitionsUnavailable ||
-                    pairedStateRefArrays != null) {
+                    absolutePointerTransitionAllocationFailed ||
+                    tables.pairedStateRefArrays != null) {
                 return;
             }
 
@@ -6188,53 +6467,51 @@ final class Dfa
                 allocatedBytes = Math.multiplyExact(rowCapacity, rowBytes);
             }
             catch (ArithmeticException ignored) {
-                absolutePointerTransitionsUnavailable = true;
+                if (!absolutePointerTransitionsWithheld) {
+                    absolutePointerTransitionsUnavailable = true;
+                }
                 return;
             }
             if (rowCapacity < 2 ||
                     rowCapacity > Integer.MAX_VALUE ||
                     allocatedBytes > availableStateMemory ||
                     nextFreeOffset > rowCapacity * nextSize) {
-                absolutePointerTransitionsUnavailable = true;
+                if (!absolutePointerTransitionsWithheld) {
+                    absolutePointerTransitionsUnavailable = true;
+                }
                 return;
             }
 
-            Arena arena;
-            MemorySegment segment;
-            try {
-                arena = Arena.ofAuto();
-                segment = arena.allocate(allocatedBytes, Long.BYTES);
-                segment.fill((byte) 0);
+            AbsolutePointerTransitions absolutePointers = null;
+            if (supersededAbsolutePointerMemoryAllows(allocatedBytes, 0)) {
+                absolutePointers = allocateAbsolutePointerTable(allocatedBytes, toIntExact(rowCapacity * nextSize));
+                absolutePointerTransitionAllocationFailed = absolutePointers == null;
             }
-            catch (RuntimeException | OutOfMemoryError ignored) {
-                absolutePointerTransitionsUnavailable = true;
+            if (absolutePointers == null) {
+                absolutePointerTransitionsWithheld = true;
+                pairedTransitionsDisabled = true;
                 return;
             }
-            AbsolutePointerTransitions absolutePointers = new AbsolutePointerTransitions(
-                    arena,
-                    segment,
-                    segment.address(),
-                    toIntExact(rowCapacity * nextSize),
-                    allocatedBytes);
-            int transitionCount = backfillAbsolutePointerTransitions(absolutePointers);
+            int transitionCount = backfillAbsolutePointerTransitions(tables.transitions, absolutePointers);
+            CacheTables pointerTables = tables.withAbsolutePointerTransitions(absolutePointers);
 
             availableStateMemory -= allocatedBytes;
             absolutePointerTransitionCount = transitionCount;
-            absolutePointerTransitions = absolutePointers;
+            this.tables = pointerTables;
+            absolutePointerTransitionsWithheld = false;
             pairedTransitionsDisabled = true;
         }
 
-        private AbsolutePointerGrowth prepareAbsolutePointerTransitionGrowth(int requiredEntryCapacity, long reservedStateMemory)
+        // Returns the growth's size and charge, so the budget check sees it before the Java
+        // allocations; a zero-byte size withholds the table when superseded segments fill their cap;
+        // null means the budget cannot hold the growth.
+        private AbsolutePointerGrowthSize sizeAbsolutePointerTransitionGrowth(int requiredEntryCapacity, long reservedStateMemory)
         {
-            AbsolutePointerTransitions existingPointers = absolutePointerTransitions;
+            AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers == null || requiredEntryCapacity <= existingPointers.entryCapacity()) {
                 throw new IllegalStateException("native transition growth is not required");
             }
 
-            beginTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
-
-            // State allocation runs with exclusive cache access, so the native table can be
-            // geometrically enlarged and rebased without an active reader retaining its address.
             long rowBytes;
             long requiredRowCount;
             long rowCapacity;
@@ -6265,6 +6542,94 @@ final class Dfa
                 return null;
             }
 
+            // When superseded segments fill their cap, the growth withholds the table and the state is
+            // allocated on object rows.
+            if (!supersededAbsolutePointerMemoryAllows(allocatedBytes, existingPointers.allocatedBytes())) {
+                return new AbsolutePointerGrowthSize(0, 0, -existingPointers.allocatedBytes());
+            }
+            return new AbsolutePointerGrowthSize(
+                    toIntExact(rowCapacity * nextSize),
+                    allocatedBytes,
+                    allocatedBytes - existingPointers.allocatedBytes());
+        }
+
+        // Allocates and backfills the segment a growth was sized for, or withholds the table. A
+        // withheld table refunds the current segment's charge, which leaves more budget than the
+        // sized charge the growth was checked against. The enlarged table is rebased into a new
+        // segment and published with new tables; a search reading older tables keeps the superseded
+        // segment reachable until it returns.
+        private AbsolutePointerGrowth allocateAbsolutePointerTransitionGrowth(
+                AbsolutePointerGrowthSize size,
+                AbsolutePointerTransitions existingPointers,
+                int[] transitions)
+        {
+            beginTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
+            if (size.withheld()) {
+                return new AbsolutePointerGrowth(null, 0, size.memoryDelta(), false);
+            }
+            AbsolutePointerTransitions expandedPointers = consumeTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH_ALLOCATION)
+                    ? null
+                    : allocateAbsolutePointerTable(size.allocatedBytes(), size.entryCapacity());
+            if (expandedPointers == null) {
+                return new AbsolutePointerGrowth(null, 0, -existingPointers.allocatedBytes(), true);
+            }
+            // The current transitions hold every computed entry: a grown array copies them and adds
+            // only uncomputed ones.
+            int transitionCount = backfillAbsolutePointerTransitions(transitions, expandedPointers);
+            return new AbsolutePointerGrowth(expandedPointers, transitionCount, size.memoryDelta(), false);
+        }
+
+        // Whether a new pointer table of `allocatedBytes` may be allocated while one of
+        // `replacedBytes` is superseded. Superseded segments are freed only by the garbage collector,
+        // which nothing here can wait for, so the counted ones may total at most twice the new one,
+        // counting the one it replaces: with the new one, this DFA's counted native memory stays
+        // within three times the newest segment. A segment is counted until the collector finds it
+        // unreachable, and the JDK frees it later on its common cleaner, so the native memory
+        // actually held stays within that bound only up to the cleaner's backlog. The count is
+        // released here, so it may briefly over-count.
+        private boolean supersededAbsolutePointerMemoryAllows(long allocatedBytes, long replacedBytes)
+        {
+            releaseUnreachableAbsolutePointerTables();
+            return supersededAbsolutePointerMemory + replacedBytes <= 2 * allocatedBytes;
+        }
+
+        // Counts a pointer table that is no longer in the current tables until the collector finds it
+        // unreachable. The reference is the only allocation, so a failed one leaves the count as it was.
+        private void supersedeAbsolutePointerTransitions(AbsolutePointerTransitions absolutePointers)
+        {
+            SupersededAbsolutePointerReference reference = new SupersededAbsolutePointerReference(absolutePointers, unreachableAbsolutePointerTables);
+            reference.next = supersededAbsolutePointerReferences;
+            if (supersededAbsolutePointerReferences != null) {
+                supersededAbsolutePointerReferences.previous = reference;
+            }
+            supersededAbsolutePointerReferences = reference;
+            supersededAbsolutePointerMemory += reference.allocatedBytes;
+        }
+
+        // Releases the count of each superseded pointer table the collector has found unreachable,
+        // and unlinks its reference. Runs only under the cache mutation lock, never on a search path.
+        private void releaseUnreachableAbsolutePointerTables()
+        {
+            SupersededAbsolutePointerReference reference;
+            while ((reference = (SupersededAbsolutePointerReference) unreachableAbsolutePointerTables.poll()) != null) {
+                if (reference.previous == null) {
+                    supersededAbsolutePointerReferences = reference.next;
+                }
+                else {
+                    reference.previous.next = reference.next;
+                }
+                if (reference.next != null) {
+                    reference.next.previous = reference.previous;
+                }
+                reference.previous = null;
+                reference.next = null;
+                supersededAbsolutePointerMemory -= reference.allocatedBytes;
+            }
+        }
+
+        // A zeroed pointer table, or null when its native memory cannot be allocated.
+        private static AbsolutePointerTransitions allocateAbsolutePointerTable(long allocatedBytes, int entryCapacity)
+        {
             Arena arena;
             MemorySegment segment;
             try {
@@ -6275,21 +6640,10 @@ final class Dfa
             catch (RuntimeException | OutOfMemoryError ignored) {
                 return null;
             }
-
-            AbsolutePointerTransitions expandedPointers = new AbsolutePointerTransitions(
-                    arena,
-                    segment,
-                    segment.address(),
-                    toIntExact(rowCapacity * nextSize),
-                    allocatedBytes);
-            int transitionCount = backfillAbsolutePointerTransitions(expandedPointers);
-            return new AbsolutePointerGrowth(
-                    expandedPointers,
-                    transitionCount,
-                    allocatedBytes - existingPointers.allocatedBytes());
+            return new AbsolutePointerTransitions(arena, segment, segment.address(), entryCapacity, allocatedBytes);
         }
 
-        private int backfillAbsolutePointerTransitions(AbsolutePointerTransitions absolutePointers)
+        private int backfillAbsolutePointerTransitions(int[] transitions, AbsolutePointerTransitions absolutePointers)
         {
             int transitionCount = 0;
             int transitionLimit = Math.min(nextFreeOffset, absolutePointers.entryCapacity());
@@ -6336,29 +6690,29 @@ final class Dfa
             return true;
         }
 
-        private boolean[] selectPairedRows(int stateLimit, int maximumRows)
+        private boolean[] selectPairedRows(CacheTables tables, int stateLimit, int maximumRows)
         {
             pairedRowSelectionCount++;
             boolean[] selected = new boolean[stateLimit];
             int selectedCount = 0;
 
-            selectedCount = selectCachedStartRows(selected, startBeginText[1], maximumRows, selectedCount);
-            selectedCount = selectCachedStartRows(selected, startBeginLine[1], maximumRows, selectedCount);
-            if (startTrinoLine != null) {
-                selectedCount = selectCachedStartRows(selected, startTrinoLine[1], maximumRows, selectedCount);
+            selectedCount = selectCachedStartRows(selected, tables.startBeginText[1], maximumRows, selectedCount);
+            selectedCount = selectCachedStartRows(selected, tables.startBeginLine[1], maximumRows, selectedCount);
+            if (tables.startTrinoLine != null) {
+                selectedCount = selectCachedStartRows(selected, tables.startTrinoLine[1], maximumRows, selectedCount);
             }
-            selectedCount = selectCachedStartRows(selected, startAfterWord[1], maximumRows, selectedCount);
-            selectedCount = selectCachedStartRows(selected, startAfterNonWord[1], maximumRows, selectedCount);
-            if (startAfterCarriageReturn != null) {
-                selectedCount = selectCachedStartRows(selected, startAfterCarriageReturn[1], maximumRows, selectedCount);
+            selectedCount = selectCachedStartRows(selected, tables.startAfterWord[1], maximumRows, selectedCount);
+            selectedCount = selectCachedStartRows(selected, tables.startAfterNonWord[1], maximumRows, selectedCount);
+            if (tables.startAfterCarriageReturn != null) {
+                selectedCount = selectCachedStartRows(selected, tables.startAfterCarriageReturn[1], maximumRows, selectedCount);
             }
-            if (startAfterNonAscii != null) {
-                selectedCount = selectCachedStartRows(selected, startAfterNonAscii[1], maximumRows, selectedCount);
+            if (tables.startAfterNonAscii != null) {
+                selectedCount = selectCachedStartRows(selected, tables.startAfterNonAscii[1], maximumRows, selectedCount);
             }
 
             int[] selfLoopCounts = new int[stateLimit];
             for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                Object[] state = stateRefArrays[stateIndex];
+                Object[] state = tables.stateRefArrays[stateIndex];
                 if (state == null) {
                     continue;
                 }
@@ -6384,7 +6738,7 @@ final class Dfa
             // the cache-footprint regression this cap prevents.
             if (maximumRows >= stateCount) {
                 for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
-                    if (stateData[stateIndex] != null) {
+                    if (tables.stateData[stateIndex] != null) {
                         selected[stateIndex] = true;
                     }
                 }
@@ -6420,7 +6774,10 @@ final class Dfa
 
         private void clearPairedTransitions()
         {
-            pairedStateRefArrays = null;
+            CacheTables tables = this.tables;
+            if (tables.pairedStateRefArrays != null) {
+                this.tables = tables.withPairedStateRefArrays(null);
+            }
             availableStateMemory += pairedTransitionMemory;
             pairedTransitionMemory = 0;
             pairedContentVersion = -1;
@@ -6431,80 +6788,29 @@ final class Dfa
             return (value + 7) & ~7L;
         }
 
-        StateData analyzeStart(Slice context, int textBegin, int textEnd, boolean anchored, boolean runForward)
+        StateData analyzeStart(CacheTables tables, Slice context, int textBegin, int textEnd, boolean anchored, boolean runForward)
         {
             int ctxBegin = context.byteArrayOffset();
             int ctxEnd = ctxBegin + context.length();
-            return analyzeStart(context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchored, runForward);
+            return analyzeStart(tables, context.byteArray(), ctxBegin, ctxEnd, textBegin, textEnd, anchored, runForward);
         }
 
-        StateData analyzeStart(byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean anchored, boolean runForward)
+        /// Returns the start state for a search over `[textBegin, textEnd)`, building it when missing.
+        /// `tables` is the caller's root; a write lands in the current tables, so an exclusive
+        /// caller reloads with `tablesAfterWrite`.
+        StateData analyzeStart(CacheTables tables, byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean anchored, boolean runForward)
         {
-            int flags;
+            // An exclusive search that reset the cache in an earlier step still holds the tables
+            // it began with, and must not start in them.
+            tables = tablesAfterWrite(tables);
+            // The cache slot depends only on the position and the bytes around the start; the
+            // empty-width flags are needed only to build a missing start state.
             int dirIndex = runForward ? 1 : 0;
             int anchorIndex = anchored ? 1 : 0;
-            StateData[] startCache;
-            if (runForward) {
-                if (textBegin == ctxBegin) {
-                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | trinoLineFlag | crlfStartFlags(-1);
-                    startCache = startBeginText[dirIndex];
-                }
-                else if (bytes[textBegin - 1] == '\n') {
-                    flags = EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
-                    if (textBegin < ctxEnd && trinoLineFlag != 0) {
-                        flags |= trinoLineFlag;
-                        startCache = startTrinoLine[dirIndex];
-                    }
-                    else {
-                        startCache = startBeginLine[dirIndex];
-                    }
-                }
-                else if (isWordChar(bytes[textBegin - 1] & 0xFF)) {
-                    flags = FLAG_LAST_WORD;
-                    startCache = startAfterWord[dirIndex];
-                }
-                else if (bytes[textBegin - 1] == '\r' && startAfterCarriageReturn != null) {
-                    flags = crlfStartFlags('\r');
-                    startCache = startAfterCarriageReturn[dirIndex];
-                }
-                else if (bytes[textBegin - 1] < 0 && startAfterNonAscii != null) {
-                    flags = FLAG_LAST_NON_ASCII;
-                    startCache = startAfterNonAscii[dirIndex];
-                }
-                else {
-                    flags = 0;
-                    startCache = startAfterNonWord[dirIndex];
-                }
-            }
-            else {
-                if (textEnd == ctxEnd) {
-                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags(-1);
-                    startCache = startBeginText[dirIndex];
-                }
-                else if (bytes[textEnd] == '\n') {
-                    flags = EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
-                    startCache = startBeginLine[dirIndex];
-                }
-                else if (isWordChar(bytes[textEnd] & 0xFF)) {
-                    flags = FLAG_LAST_WORD;
-                    startCache = startAfterWord[dirIndex];
-                }
-                else if (bytes[textEnd] == '\r' && startAfterCarriageReturn != null) {
-                    flags = crlfStartFlags('\r');
-                    startCache = startAfterCarriageReturn[dirIndex];
-                }
-                else if (bytes[textEnd] < 0 && startAfterNonAscii != null) {
-                    flags = FLAG_LAST_NON_ASCII;
-                    startCache = startAfterNonAscii[dirIndex];
-                }
-                else {
-                    flags = 0;
-                    startCache = startAfterNonWord[dirIndex];
-                }
-            }
-
-            StateData existing = (StateData) getStateReference(startCache, anchorIndex);
-            if (existing != null) {
+            StateData existing = (StateData) getStateReference(startCache(tables, bytes, ctxBegin, ctxEnd, textBegin, textEnd, runForward)[dirIndex], anchorIndex);
+            // Grown tables share the start caches, so a start state cached since these tables were
+            // replaced may lie beyond them.
+            if (existing != null && existing.offset() < tables.transitions.length) {
                 return existing;
             }
 
@@ -6512,6 +6818,7 @@ final class Dfa
                 throw RETRY_SEARCH;
             }
 
+            int flags = startFlags(bytes, ctxBegin, ctxEnd, textBegin, textEnd, runForward);
             q0.clear();
             addToQueue(q0, anchored ? prog.start() : prog.startUnanchored(), flags);
             StateData start = workQueueToCachedState(q0, flags);
@@ -6522,8 +6829,87 @@ final class Dfa
                     throw START_STATE_ALLOCATION_FAILED;
                 }
             }
-            setStateReference(startCache, anchorIndex, start);
+            // The reset above may have published new tables; store the start state in the current ones.
+            setStateReference(startCache(this.tables, bytes, ctxBegin, ctxEnd, textBegin, textEnd, runForward)[dirIndex], anchorIndex, start);
             return start;
+        }
+
+        private StateData[][] startCache(CacheTables tables, byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean runForward)
+        {
+            if (runForward) {
+                if (textBegin == ctxBegin) {
+                    return tables.startBeginText;
+                }
+                if (bytes[textBegin - 1] == '\n') {
+                    return textBegin < ctxEnd && trinoLineFlag != 0 ? tables.startTrinoLine : tables.startBeginLine;
+                }
+                if (isWordChar(bytes[textBegin - 1] & 0xFF)) {
+                    return tables.startAfterWord;
+                }
+                if (bytes[textBegin - 1] == '\r' && hasCrlfLineAssertions) {
+                    return tables.startAfterCarriageReturn;
+                }
+                if (bytes[textBegin - 1] < 0 && quitsOnNonAscii) {
+                    return tables.startAfterNonAscii;
+                }
+                return tables.startAfterNonWord;
+            }
+            if (textEnd == ctxEnd) {
+                return tables.startBeginText;
+            }
+            if (bytes[textEnd] == '\n') {
+                return tables.startBeginLine;
+            }
+            if (isWordChar(bytes[textEnd] & 0xFF)) {
+                return tables.startAfterWord;
+            }
+            if (bytes[textEnd] == '\r' && hasCrlfLineAssertions) {
+                return tables.startAfterCarriageReturn;
+            }
+            if (bytes[textEnd] < 0 && quitsOnNonAscii) {
+                return tables.startAfterNonAscii;
+            }
+            return tables.startAfterNonWord;
+        }
+
+        // The empty-width flags at a search start; keep these branches aligned with `startCache`.
+        private int startFlags(byte[] bytes, int ctxBegin, int ctxEnd, int textBegin, int textEnd, boolean runForward)
+        {
+            if (runForward) {
+                if (textBegin == ctxBegin) {
+                    return EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | trinoLineFlag | crlfStartFlags(-1);
+                }
+                if (bytes[textBegin - 1] == '\n') {
+                    int flags = EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
+                    return textBegin < ctxEnd && trinoLineFlag != 0 ? flags | trinoLineFlag : flags;
+                }
+                if (isWordChar(bytes[textBegin - 1] & 0xFF)) {
+                    return FLAG_LAST_WORD;
+                }
+                if (bytes[textBegin - 1] == '\r' && hasCrlfLineAssertions) {
+                    return crlfStartFlags('\r');
+                }
+                if (bytes[textBegin - 1] < 0 && quitsOnNonAscii) {
+                    return FLAG_LAST_NON_ASCII;
+                }
+                return 0;
+            }
+            if (textEnd == ctxEnd) {
+                return EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags(-1);
+            }
+            if (bytes[textEnd] == '\n') {
+                return EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
+            }
+            if (isWordChar(bytes[textEnd] & 0xFF)) {
+                return FLAG_LAST_WORD;
+            }
+            if (bytes[textEnd] == '\r' && hasCrlfLineAssertions) {
+                return crlfStartFlags('\r');
+            }
+            if (bytes[textEnd] < 0 && quitsOnNonAscii) {
+                return FLAG_LAST_NON_ASCII;
+            }
+            return 0;
         }
 
         // The Rust CRLF flags for a search that starts after `previousByte`, or at the start of the
@@ -6538,6 +6924,39 @@ final class Dfa
                 return FLAG_CRLF_BEGIN_LINE;
             }
             return previousByte == crlfFirstByte ? FLAG_HALF_CRLF : 0;
+        }
+
+        // The row of the state at `stateOffset`, read racily. A row the writer has not yet made
+        // visible, or an offset beyond these tables, read from a row or start cache they share with
+        // grown tables, retries.
+        Object[] stateReferences(CacheTables tables, int stateOffset)
+        {
+            int stateIndex = stateIndex(stateOffset);
+            Object[][] stateRefArrays = tables.stateRefArrays;
+            if (stateIndex >= stateRefArrays.length) {
+                throw RETRY_SEARCH;
+            }
+            Object[] stateReferences = stateRefArrays[stateIndex];
+            if (stateReferences == null) {
+                throw RETRY_SEARCH;
+            }
+            return stateReferences;
+        }
+
+        // The metadata of the state at an offset read from `tables`, read racily. A state the
+        // writer has not yet made visible, or an offset beyond these tables, retries.
+        private StateData stateData(CacheTables tables, int stateOffset)
+        {
+            int stateIndex = stateIndex(stateOffset);
+            StateData[] stateData = tables.stateData;
+            if (stateIndex >= stateData.length) {
+                throw RETRY_SEARCH;
+            }
+            StateData state = stateData[stateIndex];
+            if (state == null) {
+                throw RETRY_SEARCH;
+            }
+            return state;
         }
 
         /// Returns the row of the state at `stateOffset`, an untagged offset of a real state,
@@ -6579,17 +6998,19 @@ final class Dfa
         /// Compute and store the transition for the given state and byte.
         /// Returns the transition value (with possible T_MATCH_BIT), T_DEAD, or T_FULL_MATCH.
         /// Returns Integer.MIN_VALUE if allocation fails (cache exhaustion).
-        int computeTransition(int stateOffset, int c)
+        /// `tables` is the caller's root; a write lands in the current tables, so an exclusive
+        /// caller reloads with `tablesAfterWrite`.
+        int computeTransition(CacheTables tables, int stateOffset, int c)
         {
             int cls = byteMap(c);
-            int existing = getTransition(transitions, stateOffset + cls);
+            int existing = getTransition(tables.transitions, stateOffset + cls);
             if (existing != T_UNCOMPUTED) {
                 return existing;
             }
 
             // A quit reads only the source state, so it is reported before taking exclusive
             // access and is never cached; every later search over the byte reaches it again.
-            if (quitsOnNonAscii && quits(stateData[stateIndex(stateOffset)].flag(), c)) {
+            if (quitsOnNonAscii && quits(stateData(tables, stateOffset).flag(), c)) {
                 throw QUIT_SEARCH;
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
@@ -6614,7 +7035,14 @@ final class Dfa
 
         private int computeTransitionLocked(int stateOffset, int c, int cls)
         {
-            StateData state = stateData[stateIndex(stateOffset)];
+            // An exclusive search may find a transition uncomputed in older tables that the current
+            // tables already hold; slots are written once, so the current value is final.
+            CacheTables tables = this.tables;
+            int existing = getTransition(tables.transitions, stateOffset + cls);
+            if (existing != T_UNCOMPUTED) {
+                return existing;
+            }
+            StateData state = tables.stateData[stateIndex(stateOffset)];
 
             // Convert state into work queue
             stateToWorkQueue(state, q0);
@@ -6718,14 +7146,17 @@ final class Dfa
             if (transValue > 0 && (ns.flag() & FLAG_MATCH) != 0) {
                 transValue |= T_MATCH_BIT;
             }
-            setTransition(transitions, stateOffset + cls, transValue);
+            // Allocating the target state may have published grown tables.
+            tables = this.tables;
+            setTransition(tables.transitions, stateOffset + cls, transValue);
 
             // Populate Object[] ref for normal non-match transitions (inner loop fast path).
             // Sentinels and match states are left as null — inner loop breaks on null.
             if (transValue > 0 && (transValue & T_MATCH_BIT) == 0) {
+                Object[][] stateRefArrays = tables.stateRefArrays;
                 setStateReference(stateRefArrays[stateIndex(stateOffset)], cls, stateRefArrays[stateIndex(transValue)]);
             }
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             if (absolutePointers != null &&
                     stateOffset + cls < absolutePointers.entryCapacity() &&
                     setAbsolutePointerTransition(absolutePointers, stateOffset + cls, transValue, nextSize)) {
@@ -6876,104 +7307,48 @@ final class Dfa
         @SuppressFBWarnings(
                 value = "UL_UNRELEASED_LOCK",
                 justification = "Successful exclusive admission deliberately transfers lock ownership to endSearch")
-        ReaderSlot beginSearch(boolean exclusiveSearch)
+        CacheTables beginSearch(boolean exclusiveSearch)
         {
             if (exclusiveSearch) {
                 cacheMutationLock.lock();
                 boolean admitted = false;
                 try {
-                    hasPendingCacheMutation = true;
                     failForTesting(TestingFailurePoint.EXCLUSIVE_ADMISSION);
-                    awaitNoReaders(this);
                     admitted = true;
-                    return null;
+                    return tables;
                 }
                 finally {
                     if (!admitted) {
-                        hasPendingCacheMutation = false;
                         cacheMutationLock.unlock();
                     }
                 }
             }
 
-            // Readers publish this DFA's ID and then recheck the writer flag. A writer first
-            // blocks new readers and then waits for every published ID to clear, so it has
-            // exclusive access before replacing arrays or publishing plain transition writes.
-            ReaderSlot readerSlot = THREAD_READER_SLOT.get();
-            while (true) {
-                int spinCount = 0;
-                while (hasPendingCacheMutation) {
-                    if (spinCount++ < 1_000) {
-                        Thread.onSpinWait();
-                    }
-                    else {
-                        LockSupport.parkNanos(1_000);
-                    }
-                }
-                readerSlot.activeDfaId = readerRegistryId;
-                if (!hasPendingCacheMutation) {
-                    return readerSlot;
-                }
-                readerSlot.activeDfaId = 0;
-            }
+            // A reader takes no lock and waits for no writer; its only stores are racy hints. Writers
+            // never clear or recycle the tables it reads; they only fill empty slots, which the reader
+            // checks.
+            return tables;
         }
 
-        void endSearch(boolean exclusiveSearch, ReaderSlot readerSlot)
+        void endSearch(boolean exclusiveSearch)
         {
-            if (exclusiveSearch) {
-                try {
-                    failForTesting(TestingFailurePoint.EXCLUSIVE_TEARDOWN);
-                    if (pairedTransitionsRequested &&
-                            !pairedTransitionsDisabled &&
-                            pairedContentVersion != cacheContentVersion) {
-                        rebuildPairedTransitions();
-                        pairedContentVersion = cacheContentVersion;
-                    }
-                    allocateAbsolutePointerTransitions();
-                }
-                finally {
-                    cacheVersion++;
-                    hasPendingCacheMutation = false;
-                    cacheMutationLock.unlock();
-                }
+            if (!exclusiveSearch) {
+                return;
             }
-            else {
-                readerSlot.activeDfaId = 0;
-            }
-        }
-
-        // Registers one reader for two DFAs, as beginSearch registers a reader for one. Every
-        // access to the IDs and writer flags is volatile, so they fall in one total order: a writer
-        // that sets its flag and then reads both IDs either sees this reader's ID for its DFA, and
-        // waits, or this reader's recheck after storing both IDs sees the flag, and backs off. The
-        // slot holds one search at a time, so a thread calls this only outside any other search.
-        static ReaderSlot beginPairSearch(DfaInstance first, DfaInstance second)
-        {
-            ReaderSlot readerSlot = THREAD_READER_SLOT.get();
-            while (true) {
-                int spinCount = 0;
-                while (first.hasPendingCacheMutation || second.hasPendingCacheMutation) {
-                    if (spinCount++ < 1_000) {
-                        Thread.onSpinWait();
-                    }
-                    else {
-                        LockSupport.parkNanos(1_000);
-                    }
+            try {
+                failForTesting(TestingFailurePoint.EXCLUSIVE_TEARDOWN);
+                if (pairedTransitionsRequested &&
+                        !pairedTransitionsDisabled &&
+                        pairedContentVersion != cacheContentVersion) {
+                    rebuildPairedTransitions();
+                    pairedContentVersion = cacheContentVersion;
                 }
-                readerSlot.activeDfaId = first.readerRegistryId;
-                readerSlot.pairedDfaId = second.readerRegistryId;
-                if (!first.hasPendingCacheMutation && !second.hasPendingCacheMutation) {
-                    return readerSlot;
-                }
-                readerSlot.activeDfaId = 0;
-                readerSlot.pairedDfaId = 0;
+                allocateAbsolutePointerTransitions();
             }
-        }
-
-        static void endPairSearch(ReaderSlot readerSlot)
-        {
-            readerSlot.activeDfaId = 0;
-            readerSlot.pairedDfaId = 0;
+            finally {
+                cacheVersion++;
+                cacheMutationLock.unlock();
+            }
         }
 
         long cacheVersion()
@@ -6983,7 +7358,6 @@ final class Dfa
 
         void cancelExclusiveSearch()
         {
-            hasPendingCacheMutation = false;
             cacheMutationLock.unlock();
         }
 
@@ -7011,12 +7385,13 @@ final class Dfa
 
         FailureAtomicitySnapshot failureAtomicitySnapshot()
         {
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
+            CacheTables tables = this.tables;
+            AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             return new FailureAtomicitySnapshot(
-                    transitions.length,
-                    stateData.length,
-                    stateRefArrays.length,
-                    selfLoopExitByteSets.length,
+                    tables.transitions.length,
+                    tables.stateData.length,
+                    tables.stateRefArrays.length,
+                    tables.selfLoopExitByteSets.length,
                     nextFreeOffset,
                     stateCount,
                     cache.size(),
@@ -7025,7 +7400,7 @@ final class Dfa
                     cacheContentVersion,
                     availableStateMemory,
                     retainedStateMemory,
-                    pairedStateRefArrays,
+                    tables.pairedStateRefArrays,
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
                     pairedContentVersion,
@@ -7033,11 +7408,6 @@ final class Dfa
                     absolutePointers == null ? 0 : absolutePointers.entryCapacity(),
                     absolutePointers == null ? 0 : absolutePointers.allocatedBytes(),
                     absolutePointerTransitionCount);
-        }
-
-        boolean hasPendingCacheMutationForTesting()
-        {
-            return hasPendingCacheMutation;
         }
 
         boolean cacheMutationLockedForTesting()
@@ -7065,7 +7435,7 @@ final class Dfa
                      SELF_LOOP_ARRAY_GROWTH,
                      STATE_REFERENCE_ROW_ALLOCATION,
                      STATE_CACHE_INSERTION -> true;
-                case EXCLUSIVE_ADMISSION, EXCLUSIVE_TEARDOWN -> false;
+                case EXCLUSIVE_ADMISSION, EXCLUSIVE_TEARDOWN, NATIVE_TRANSITION_GROWTH_ALLOCATION, NATIVE_TRANSITION_RESET -> false;
             }) {
                 testingSnapshotBeforeFailure = failureAtomicitySnapshot();
             }
@@ -7078,10 +7448,18 @@ final class Dfa
 
         private void failForTesting(TestingFailurePoint failurePoint)
         {
-            if (testingFailurePoint == failurePoint) {
-                testingFailurePoint = null;
+            if (consumeTestingFailurePoint(failurePoint)) {
                 throw TESTING_FAILURE;
             }
+        }
+
+        private boolean consumeTestingFailurePoint(TestingFailurePoint failurePoint)
+        {
+            if (testingFailurePoint != failurePoint) {
+                return false;
+            }
+            testingFailurePoint = null;
+            return true;
         }
 
         RestoredStates resetAndRestore(StateSaver start, StateSaver state)
@@ -7121,18 +7499,19 @@ final class Dfa
 
         private long stateBackingMemory()
         {
-            return sizeOfIntArray(transitions.length) +
-                    sizeOfObjectArray(stateData.length) +
-                    sizeOfObjectArray(stateRefArrays.length) +
-                    sizeOfIntArray(selfLoopExitByteSets.length) +
-                    optionalStartStateCacheMemory() +
+            CacheTables tables = this.tables;
+            return sizeOfIntArray(tables.transitions.length) +
+                    sizeOfObjectArray(tables.stateData.length) +
+                    sizeOfObjectArray(tables.stateRefArrays.length) +
+                    sizeOfIntArray(tables.selfLoopExitByteSets.length) +
+                    optionalStartStateCacheMemory(tables) +
                     STATE_CACHE_BYTES +
                     cache.tableBytes();
         }
 
-        private long optionalStartStateCacheMemory()
+        private static long optionalStartStateCacheMemory(CacheTables tables)
         {
-            return startStateCacheMemory(startTrinoLine) + startStateCacheMemory(startAfterCarriageReturn) + startStateCacheMemory(startAfterNonAscii);
+            return startStateCacheMemory(tables.startTrinoLine) + startStateCacheMemory(tables.startAfterCarriageReturn) + startStateCacheMemory(tables.startAfterNonAscii);
         }
 
         private static long startStateCacheMemory(StateData[][] startCache)
@@ -7147,44 +7526,56 @@ final class Dfa
             return memory;
         }
 
+        // Publishes empty tables at the initial capacity. Searches still reading the superseded
+        // tables keep them, unchanged, until they finish; the superseded tables are no longer
+        // charged. A pointer table moves to a new segment of the same size, or is withheld when
+        // superseded segments fill their cap or the segment cannot be allocated.
         private void resetCache()
         {
-            clearPairedTransitions();
+            // Every allocation precedes the first write to the DFA, so a failure that propagates
+            // leaves the cache as it was; a failed pointer-table allocation withholds that table.
+            // The pointer segment is allocated after the Java tables; only small objects (new
+            // `CacheTables` and the superseded reference) follow it, and an error in them abandons
+            // the segment uncounted.
+            CacheTables resetTables = newCacheTables(initialStateCapacity);
+            AbsolutePointerTransitions supersededPointers = tables.absolutePointerTransitions;
+            AbsolutePointerTransitions absolutePointers = null;
+            boolean allocationFailed = false;
+            if (supersededPointers != null) {
+                long allocatedBytes = supersededPointers.allocatedBytes();
+                if (consumeTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_RESET)) {
+                    allocationFailed = true;
+                }
+                else if (supersededAbsolutePointerMemoryAllows(allocatedBytes, allocatedBytes)) {
+                    absolutePointers = allocateAbsolutePointerTable(allocatedBytes, supersededPointers.entryCapacity());
+                    allocationFailed = absolutePointers == null;
+                }
+            }
+            if (absolutePointers != null) {
+                resetTables = resetTables.withAbsolutePointerTransitions(absolutePointers);
+            }
+            if (supersededPointers != null) {
+                supersedeAbsolutePointerTransitions(supersededPointers);
+            }
+
+            // The reset tables have no paired rows; the available memory is recomputed below.
+            pairedTransitionMemory = 0;
+            pairedContentVersion = -1;
             pairedTransitionsRejected = false;
-            pairedTransitionsDisabled = absolutePointerTransitions != null;
             shortPairedSearchCount = 0;
             shortAbsolutePointerSearchCount = 0;
             countSelfLoopNotApplicableCount = 0;
-            for (int i = 0; i < 2; i++) {
-                for (int j = 0; j < 2; j++) {
-                    startBeginText[i][j] = null;
-                    startBeginLine[i][j] = null;
-                    if (startTrinoLine != null) {
-                        startTrinoLine[i][j] = null;
-                    }
-                    startAfterWord[i][j] = null;
-                    startAfterNonWord[i][j] = null;
-                    if (startAfterCarriageReturn != null) {
-                        startAfterCarriageReturn[i][j] = null;
-                    }
-                    if (startAfterNonAscii != null) {
-                        startAfterNonAscii[i][j] = null;
-                    }
-                }
-            }
 
             cache.clear();
 
-            Arrays.fill(transitions, 0, nextFreeOffset, T_UNCOMPUTED);
-            int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
-            Arrays.fill(stateData, 0, stateLimit, null);
-            Arrays.fill(stateRefArrays, 0, stateLimit, null);
-            Arrays.fill(selfLoopExitByteSets, 0, stateLimit, 0);
-            AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
-            if (absolutePointers != null) {
-                absolutePointers.segment().fill((byte) 0);
-                absolutePointerTransitionCount = 0;
+            // A failed allocation, including this reset's, is retried only after a later reset.
+            absolutePointerTransitionAllocationFailed = allocationFailed;
+            if (supersededPointers != null) {
+                absolutePointerTransitionsWithheld = absolutePointers == null;
             }
+            pairedTransitionsDisabled = absolutePointers != null || absolutePointerTransitionsWithheld;
+            tables = resetTables;
+            absolutePointerTransitionCount = 0;
             nextFreeOffset = nextSize;
             stateCount = 0;
             cacheContentVersion++;
@@ -7205,14 +7596,11 @@ final class Dfa
         {
             cacheMutationLock.lock();
             try {
-                hasPendingCacheMutation = true;
-                awaitNoReaders(this);
                 countSearchBailedWhenSlow = false;
                 resetCache();
             }
             finally {
                 cacheVersion++;
-                hasPendingCacheMutation = false;
                 cacheMutationLock.unlock();
             }
         }

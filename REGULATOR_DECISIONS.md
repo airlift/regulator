@@ -638,9 +638,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
   leaves out a forward DFA's start-byte tables, so a DFA can still fail to
   initialize; its program remembers that allowance and does not build it again.
 - DFA construction derives retained array and object sizes from the running VM.
-  Expanded backing arrays and hash-table capacity remain charged after reset;
-  only unreachable per-state objects return to the budget. A full cache resets,
-  and repeated reset thrashing falls back to the NFA.
+  A reset publishes Java state and transition arrays at their initial capacity,
+  so expanded tables and per-state objects return to the budget; the state hash table keeps its
+  capacity and its charge. A full cache resets, and repeated reset thrashing
+  falls back to the NFA.
 - A capture NFA search has its own allowance, the forward share, beside the DFA
   caches'. A search tracks K slots, the caller's, up to the slots through the
   highest surviving CAPTURE, and reports the slots past that unset: a trailing
@@ -681,30 +682,117 @@ text, so the pair scan rejects little that a first-byte scan would not.
 `maxMemory` is a planning budget, not an eager allocation or a byte-exact JVM
 heap limit. The default is demand-driven, so simple patterns retain only the
 storage they use. Object headers, collector metadata, and allocator behavior are
-VM-specific; the cache model accounts for reachable Java objects but does not
+VM-specific; the cache model accounts for retained Java objects but does not
 promise exact process-memory equality.
 
 ## Shared DFA Concurrency
 
-Compiled `Re2` instances are safe to share across threads:
+Compiled `Re2` instances are safe to share across threads. Each DFA publishes
+its cache as one generation of tables, one root object whose fields are final,
+through one volatile field:
 
-- searches register in padded thread-local reader slots before accessing a DFA
-  cache and unregister when the search ends
-- a reader slot names up to two DFAs, so the inner literal search registers its
-  reverse prefix search and forward confirmation once as a pair, and writers
-  wait on a slot that names their DFA in either place
-- the global weak reader registry is locked only when a thread first registers
-  or stale references are drained; stale-heavy drains replace the backing set so
-  a short-lived thread wave does not retain its peak hash table
-- warm transition reads are plain loads with no lock or acquire operation in the
-  per-byte loop
-- cold construction and reset block new readers, wait for active readers to
-  quiesce, and replace cache storage under an exclusive mutation lock
-- cache generations prevent queued builders from repeating work already
-  published by another thread
+- a reader search loads the root once when it starts and reads only through it;
+  it takes no lock and never waits for a writer; its only stores are racy
+  performance hints that need no ordering, such as the counters and flags that
+  select paired rows or the pointer table
+- writers hold the DFA's cache mutation lock: an exclusive search fills empty
+  slots of the current generation in place, and growth, paired rows, and the
+  native pointer table publish a new root that shares the arrays they leave
+  unchanged
+- a reset publishes a fresh generation whose Java tables restart at the cache's
+  initial capacity and never writes the superseded one, so a search that began
+  before the reset can continue reading unchanged tables, whose states are
+  still correct states of the same program; a missing entry follows the normal
+  exclusive retry
+- writers never wait for readers, and a reader never retries because a writer
+  ran: it retries as an exclusive search only when a cache entry it needs is
+  missing, or to request paired rows or the pointer table, which only an
+  exclusive search selects
+- the inner literal search runs its reverse prefix search and forward
+  confirmation in one pass over one captured root per DFA; when the pass cannot
+  finish, for example at a missing transition, the two searches run separately
+- cache versions prevent queued builders from repeating work already published
+  by another thread
 
-This preserves upstream's separation between transition access and cache
-lifetime synchronization without placing a read lock in Java's hot loop.
+Upstream holds a shared cache lock for each search and takes it exclusively to
+reset. Regulator keeps transition reads lock-free in the per-byte loop and
+replaces the shared lock with publication, because any per-search reader
+registration, upstream's shared lock included, costs a store-load fence, about
+10 ns per search on Graviton.
+
+Readers need no cache-generation validation, for these reasons:
+
+- The root's final fields make every array, and every slot written before the
+  root was published, visible with the root.
+- Each slot of a generation is written at most once: for example, a transition
+  goes from uncomputed to its value, a state, a state's object row (its
+  reference array), or a start state from null to its value, and a native entry
+  from zero to an address. A racy read sees the slot empty or final, and
+  references and ints do not tear.
+- Every racy reference read on a reader path is null- and bounds-checked, and an
+  empty or out-of-range slot means "not computed": the reader retries as an
+  exclusive search. Object rows are shared between a root and its grown
+  successor, so a row reached through an older root can name a state beyond
+  that root's arrays; the reader checks the row's state offset against its own
+  root.
+- An exclusive search reloads the root after each step that can publish one, so
+  its writes land in the current generation.
+- Every new segment is zeroed and backfilled before it is published, so a native
+  entry is zero, a dead or full-match tag, or a possibly tagged address of a row
+  in the same segment. The native loop therefore follows entries without
+  per-edge capacity checks. Its caller checks the start row against the
+  segment of the same root, and the row where the loop exits is checked against
+  the reader's root like any other state offset. Each segment comes from an
+  automatic arena (`Arena.ofAuto`) that the reader's root keeps reachable, and
+  a reachability fence holds it for the native loop.
+
+A reset or a growth leaves the superseded generation reachable only from the
+roots of searches still in flight, and that generation is not charged against
+the DFA's allowance. A reader holds the one root it began with. An exclusive
+search reloads the root after each step that can publish one, but each frame of
+its call chain keeps the root it passed down until that step returns, and a
+fused count keeps the root it began with for the whole current attempt.
+
+- The call depth is fixed: the roots one search holds are those of its active
+  frames, and the code fixes the depth of the search call chain.
+- The root count is fixed: each frame holds at most one root of each DFA it
+  reads, so a search holds roots of one DFA, or of two when the inner literal
+  pass reads the reverse prefix DFA and the forward confirmation DFA, never a
+  number proportional to its matches or resets.
+
+Each root reaches at most one allowance of Java memory plus the paired rows it
+carried. Releasing paired rows refunds their charge, and states built afterward
+fill arrays an older root still shares, so a root that carried paired rows can
+reach one allowance plus those rows, at most 64 KiB. A superseded root becomes
+eligible for collection once no search retains it. A charge would require
+knowing when the last reader of a generation finishes, which is the reader
+registration this design removes; as with the member table under
+[Trino Specialized Byte Scans](#trino-specialized-byte-scans), bounded memory
+the DFA does not retain needs no charge of its own.
+
+Native pointer segments that a reset or growth supersedes are likewise no longer
+published, though in-flight searches may still hold them. The DFA counts each
+one until the collector finds it unreachable, and the JDK frees it later on its
+common cleaner. The DFA allocates a new segment only while the counted
+superseded segments, with the one it replaces, total at most twice the new one.
+Its counted native memory, live and superseded, therefore stays within three
+times its newest segment, as
+[Bounded Native-Memory DFA Transition Table](#bounded-native-memory-dfa-transition-table)
+describes; the memory actually held exceeds that only by segments the common
+cleaner has not yet freed. The superseded part is native memory no longer
+published and awaiting collection, not memory the DFA retains beyond its share.
+Allocating a segment can stall only when direct memory as a whole, other users
+included, fills `MaxDirectMemorySize`; the JDK then forces a collection and
+retries before failing. A reset restarts the Java tables at their initial
+capacity, while the native segment keeps its size, so a busy DFA grows its Java
+tables again after each reset.
+
+Decided (Dain, 2026-11-06): copy-on-reset applies in every memory mode, and
+the counted bound above is the native-memory bound. Live native memory can run
+ahead of the count while the JDK's common cleaner catches up, measured at 5.1
+times the newest segment under a reset storm and 5.9 times in a probe that
+starves the collector; that lag is accepted. A shared arena that bounds live
+native memory strictly remains the fallback design.
 
 ## Bounded Paired DFA Transitions
 
@@ -978,16 +1066,45 @@ arena is reachable through each raw traversal. Allocation, backfill,
 incremental writes, publication, and reset use the existing exclusive DFA cache
 mutation protocol.
 
-The current allocation is permanently charged to the `DfaInstance` budget.
-Growth occurs only under the existing exclusive cache-mutation protocol, so the
-table may be copied and rebased without an active reader retaining the old
-address. The retired automatic arena then becomes unreachable, and geometric
-growth bounds the sum of unreclaimed prior allocations below twice the current
-allocation. Reset clears and reuses the current segment without returning its
-charge. Once an instance selects this native table, it does not switch to
-object rows as the DFA grows. Failure to fund the next geometric expansion is
-ordinary DFA budget exhaustion and follows the existing reset and
-matcher-fallback policy.
+The current allocation is charged to the `DfaInstance` budget. Growth copies
+and rebases the table into a new segment and publishes it with a new cache
+generation, as [Shared DFA Concurrency](#shared-dfa-concurrency) describes; a
+reader still using the old generation keeps the superseded automatic arena
+reachable until it returns. A reset publishes an empty segment of the same size
+and keeps its charge, unless the cap below withholds it. The DFA counts each
+superseded segment's bytes until the collector finds it unreachable; the JDK
+frees the segment later, on its common cleaner. The count is released when the
+cap check next runs, so it may briefly over-count. A growth at most doubles the
+segment, and the budget can clamp it to less; a reset adds a whole segment; so
+without a cap, superseded segments could accumulate without bound within one
+collection cycle. A reset or growth therefore allocates a new segment only
+while the counted superseded segments, including the one it replaces, total at
+most twice the new one. This cap, not the growth factor, keeps a DFA's counted
+native memory, live and superseded, within three times its newest segment,
+which its allowance bounds; the native memory actually held exceeds that only
+by segments the common cleaner has not yet freed. A growth allocates its
+segment after its Java arrays and state, and a reset after its Java tables, so
+only small objects follow the segment. If allocating one of those objects
+throws `OutOfMemoryError`, the new segment is abandoned uncounted; the
+collection that precedes that error makes any earlier abandoned segment
+collectable.
+
+When a new segment cannot be allocated, because superseded segments fill the
+cap or native allocation fails, the tables are published without the pointer
+table, any charge it held is returned, and searches use object rows. This
+applies to a reset, a growth, and the table's first allocation. The table stays
+requested (it is not given up as it is for a DFA that cannot hold it), a warm
+cache may stay on object rows until its next exclusive search or reset, and
+paired transitions stay disabled, because the condition is transient. A later
+exclusive search allocates the table again, sized for the current graph, once
+collection brings the superseded segments under the cap. After a failed
+allocation, none is attempted again until the next reset, so a native-memory
+shortage costs at most one failed allocation, and the JDK's forced collection
+and retries, per reset.
+Failure to fund the next geometric expansion from the budget remains ordinary
+DFA budget exhaustion and follows the existing reset and matcher-fallback
+policy. Apart from a withheld table, once an instance selects this native
+table, it does not switch to object rows as the DFA grows.
 Explicitly unlimited DFAs remain object-based because they have no finite
 native-allocation budget. Paired transitions remain disabled across later
 resets because pairing was evaluated first.
@@ -999,7 +1116,7 @@ boundary and finish computed terminal edges without converting the address back
 to an integer row or entering the generic continuation. Normal pointers remain
 aligned, and uncomputed or out-of-capacity entries still delegate to the
 authoritative Java transition table. The tags add no allocation or memory-budget
-charge and are cleared and backfilled under the same cache mutation protocol as
+charge and are written and backfilled under the same cache mutation protocol as
 normal pointer entries.
 
 The JDK 25 C2/AArch64 loop emits an extra dependent address operation and

@@ -258,7 +258,10 @@ Native access lets eligible forward DFA searches use a small internal
 native-memory allocation containing DFA transition entries. Each entry is eight
 bytes. Its initial row-rounded capacity is based on the DFA graph already built;
 it grows geometrically when useful, remains charged to the existing DFA budget,
-and is reclaimed with the compiled pattern.
+and is reclaimed with the compiled pattern. A segment that a reset or growth
+replaces is freed once in-flight searches finish and the collector finds it
+unreachable, and under memory pressure the table can be withheld, leaving
+searches on the pure-Java path until it is allocated again.
 
 This uses native memory, not native code, a JNI library, or a file. The API
 never exposes native pointers. Patterns, inputs, captures, and results remain

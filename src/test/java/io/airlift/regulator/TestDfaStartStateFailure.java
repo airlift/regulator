@@ -193,13 +193,13 @@ public class TestDfaStartStateFailure
             assertThat(reset.isDone()).isFalse();
 
             dfa.failStateAllocationsForTesting(1);
-            Dfa.StateData start = dfa.analyzeStart(input, 0, input.length(), true, true);
+            Dfa.StateData start = dfa.analyzeStart(dfa.cacheTablesForTesting(), input, 0, input.length(), true, true);
             assertThat(start.offset()).isPositive();
             assertThat(reset.isDone()).isFalse();
         }
         finally {
             // Release before waiting for the reset worker, including on an assertion failure.
-            dfa.endSearch(true, null);
+            dfa.endSearch(true);
         }
         reset.get(10, TimeUnit.SECONDS);
 

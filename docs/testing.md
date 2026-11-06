@@ -43,6 +43,8 @@ does not establish performance. Changes to engine routing, retained data shape,
 or protected matching loops require the benchmark evidence defined in
 [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md).
 
+`TestDfaCopyOnResetStress` runs for `-Dregulator.stress.seconds=N` seconds (default 5).
+
 CI runs the complete suite on Java 25 and the current feature release with
 native access both disabled and enabled. To reproduce the native-access mode
 locally:

@@ -116,7 +116,7 @@ public class BenchmarkDfaSelfLoopExitScan
 
     boolean hasExpectedExitByteSet()
     {
-        for (int exitByteSet : dfa.selfLoopExitByteSets) {
+        for (int exitByteSet : dfa.cacheTablesForTesting().selfLoopExitByteSets) {
             if (exitByteSet >>> 24 == exitByteCount) {
                 return true;
             }
