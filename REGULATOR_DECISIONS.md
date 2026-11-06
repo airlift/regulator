@@ -1247,7 +1247,9 @@ not an invalid sequence that the rule reads as U+FFFD.
 Exact, prefix, and suffix literals of 1-16 UTF-8 bytes use precomputed
 overlapping word comparisons. Longer literals retain Slice equality. Check
 input length first, then the short comparator, then the ordinary strategy
-switch. Complex plans keep their interface call in a separate helper. Measured
+switch. The short comparator reads the input without the slice's bounds
+checks, so the length check must come first: the minimum size includes the
+literal. Complex plans keep their interface call in a separate helper. Measured
 with the comparison words in a separate short-literal object, this shape
 reduced `matches()` from 270 to 187 bytecode bytes, with a 78-byte helper; it
 changes compilation boundaries, not complex matching algorithms. The literal's
@@ -1258,9 +1260,12 @@ Focused Java 25 qualification on C8i, C8g, and C9g compared isolated callers,
 constant-pattern generated callers with mixed shared profiles, and callers
 that rotate patterns. Against the short-kernel prototype, the selected shape
 saves 1.08-1.45 ns, or 20-24%, on six-byte suffixes in the interleaved matching
-profile. Exact costs 0.01-0.06 ns and prefix costs 0.11-0.24 ns. These short
-cases remain faster than Trino. The original Intel literal-gap benchmark
-recovers from 3044 to 2801 ns, close to the 2776 ns pre-kernel control.
+profile. Exact costs 0.01-0.06 ns and prefix costs 0.11-0.24 ns. In that
+qualification these short cases remained faster than Trino. The interpreted
+TPC-H part-type rows, such as `PROMO%` and `%BRASS`, beat Trino on Graviton
+only once the comparator read the input without per-read bounds checks. The
+original Intel literal-gap benchmark recovers from 3044 to 2801 ns, close to
+the 2776 ns pre-kernel control.
 
 Accepted costs versus the prototype include C8g ordered matching, 4158 to
 4331 ns, and interleaved gap matching, 4220 to 4352 ns. These are +4.2% and
