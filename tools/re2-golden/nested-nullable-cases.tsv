@@ -1,0 +1,498 @@
+# id	pattern hex	text hex	start	end	anchor	encoding	longest	groups
+# (?:a?|b?)*
+nested_nullable_00_empty	283f3a613f7c623f292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_00_a	283f3a613f7c623f292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_00_b	283f3a613f7c623f292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_00_ab	283f3a613f7c623f292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_00_ba	283f3a613f7c623f292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_00_bbb	283f3a613f7c623f292a	626262	0	3	unanchored	utf8	false	1
+# (?:(a?)|b?)+
+nested_nullable_01_empty	283f3a28613f297c623f292b	-	0	0	unanchored	utf8	false	2
+nested_nullable_01_a	283f3a28613f297c623f292b	61	0	1	unanchored	utf8	false	2
+nested_nullable_01_b	283f3a28613f297c623f292b	62	0	1	unanchored	utf8	false	2
+nested_nullable_01_ab	283f3a28613f297c623f292b	6162	0	2	unanchored	utf8	false	2
+nested_nullable_01_ba	283f3a28613f297c623f292b	6261	0	2	unanchored	utf8	false	2
+nested_nullable_01_bbb	283f3a28613f297c623f292b	626262	0	3	unanchored	utf8	false	2
+# (a?|(b?))?
+nested_nullable_02_empty	28613f7c28623f29293f	-	0	0	unanchored	utf8	false	3
+nested_nullable_02_a	28613f7c28623f29293f	61	0	1	unanchored	utf8	false	3
+nested_nullable_02_b	28613f7c28623f29293f	62	0	1	unanchored	utf8	false	3
+nested_nullable_02_ab	28613f7c28623f29293f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_02_ba	28613f7c28623f29293f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_02_bbb	28613f7c28623f29293f	626262	0	3	unanchored	utf8	false	3
+# ((a?)|(b?)){0,2}
+nested_nullable_03_empty	2828613f297c28623f29297b302c327d	-	0	0	unanchored	utf8	false	4
+nested_nullable_03_a	2828613f297c28623f29297b302c327d	61	0	1	unanchored	utf8	false	4
+nested_nullable_03_b	2828613f297c28623f29297b302c327d	62	0	1	unanchored	utf8	false	4
+nested_nullable_03_ab	2828613f297c28623f29297b302c327d	6162	0	2	unanchored	utf8	false	4
+nested_nullable_03_ba	2828613f297c28623f29297b302c327d	6261	0	2	unanchored	utf8	false	4
+nested_nullable_03_bbb	2828613f297c28623f29297b302c327d	626262	0	3	unanchored	utf8	false	4
+# (?:a|){0,3}
+nested_nullable_04_empty	283f3a617c297b302c337d	-	0	0	unanchored	utf8	false	1
+nested_nullable_04_a	283f3a617c297b302c337d	61	0	1	unanchored	utf8	false	1
+nested_nullable_04_b	283f3a617c297b302c337d	62	0	1	unanchored	utf8	false	1
+nested_nullable_04_ab	283f3a617c297b302c337d	6162	0	2	unanchored	utf8	false	1
+nested_nullable_04_ba	283f3a617c297b302c337d	6261	0	2	unanchored	utf8	false	1
+nested_nullable_04_bbb	283f3a617c297b302c337d	626262	0	3	unanchored	utf8	false	1
+# (?:(a)|){2}
+nested_nullable_05_empty	283f3a2861297c297b327d	-	0	0	unanchored	utf8	false	2
+nested_nullable_05_a	283f3a2861297c297b327d	61	0	1	unanchored	utf8	false	2
+nested_nullable_05_b	283f3a2861297c297b327d	62	0	1	unanchored	utf8	false	2
+nested_nullable_05_ab	283f3a2861297c297b327d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_05_ba	283f3a2861297c297b327d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_05_bbb	283f3a2861297c297b327d	626262	0	3	unanchored	utf8	false	2
+# (|b){3}
+nested_nullable_06_empty	287c62297b337d	-	0	0	unanchored	utf8	false	2
+nested_nullable_06_a	287c62297b337d	61	0	1	unanchored	utf8	false	2
+nested_nullable_06_b	287c62297b337d	62	0	1	unanchored	utf8	false	2
+nested_nullable_06_ab	287c62297b337d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_06_ba	287c62297b337d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_06_bbb	287c62297b337d	626262	0	3	unanchored	utf8	false	2
+# (|(b)){9}
+nested_nullable_07_empty	287c286229297b397d	-	0	0	unanchored	utf8	false	3
+nested_nullable_07_a	287c286229297b397d	61	0	1	unanchored	utf8	false	3
+nested_nullable_07_b	287c286229297b397d	62	0	1	unanchored	utf8	false	3
+nested_nullable_07_ab	287c286229297b397d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_07_ba	287c286229297b397d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_07_bbb	287c286229297b397d	626262	0	3	unanchored	utf8	false	3
+# (?:a*|b){1,3}
+nested_nullable_08_empty	283f3a612a7c62297b312c337d	-	0	0	unanchored	utf8	false	1
+nested_nullable_08_a	283f3a612a7c62297b312c337d	61	0	1	unanchored	utf8	false	1
+nested_nullable_08_b	283f3a612a7c62297b312c337d	62	0	1	unanchored	utf8	false	1
+nested_nullable_08_ab	283f3a612a7c62297b312c337d	6162	0	2	unanchored	utf8	false	1
+nested_nullable_08_ba	283f3a612a7c62297b312c337d	6261	0	2	unanchored	utf8	false	1
+nested_nullable_08_bbb	283f3a612a7c62297b312c337d	626262	0	3	unanchored	utf8	false	1
+# (?:(a*)|b){2,3}
+nested_nullable_09_empty	283f3a28612a297c62297b322c337d	-	0	0	unanchored	utf8	false	2
+nested_nullable_09_a	283f3a28612a297c62297b322c337d	61	0	1	unanchored	utf8	false	2
+nested_nullable_09_b	283f3a28612a297c62297b322c337d	62	0	1	unanchored	utf8	false	2
+nested_nullable_09_ab	283f3a28612a297c62297b322c337d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_09_ba	283f3a28612a297c62297b322c337d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_09_bbb	283f3a28612a297c62297b322c337d	626262	0	3	unanchored	utf8	false	2
+# (a*|(b))*?
+nested_nullable_10_empty	28612a7c286229292a3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_10_a	28612a7c286229292a3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_10_b	28612a7c286229292a3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_10_ab	28612a7c286229292a3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_10_ba	28612a7c286229292a3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_10_bbb	28612a7c286229292a3f	626262	0	3	unanchored	utf8	false	3
+# ((?:))+?
+nested_nullable_11_empty	28283f3a29292b3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_11_a	28283f3a29292b3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_11_b	28283f3a29292b3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_11_ab	28283f3a29292b3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_11_ba	28283f3a29292b3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_11_bbb	28283f3a29292b3f	626262	0	3	unanchored	utf8	false	2
+# (?:())??
+nested_nullable_12_empty	283f3a2829293f3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_12_a	283f3a2829293f3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_12_b	283f3a2829293f3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_12_ab	283f3a2829293f3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_12_ba	283f3a2829293f3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_12_bbb	283f3a2829293f3f	626262	0	3	unanchored	utf8	false	2
+# (?:a?|b?){0,2}?
+nested_nullable_13_empty	283f3a613f7c623f297b302c327d3f	-	0	0	unanchored	utf8	false	1
+nested_nullable_13_a	283f3a613f7c623f297b302c327d3f	61	0	1	unanchored	utf8	false	1
+nested_nullable_13_b	283f3a613f7c623f297b302c327d3f	62	0	1	unanchored	utf8	false	1
+nested_nullable_13_ab	283f3a613f7c623f297b302c327d3f	6162	0	2	unanchored	utf8	false	1
+nested_nullable_13_ba	283f3a613f7c623f297b302c327d3f	6261	0	2	unanchored	utf8	false	1
+nested_nullable_13_bbb	283f3a613f7c623f297b302c327d3f	626262	0	3	unanchored	utf8	false	1
+# ((a?)|b?){0,3}?
+nested_nullable_14_empty	2828613f297c623f297b302c337d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_14_a	2828613f297c623f297b302c337d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_14_b	2828613f297c623f297b302c337d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_14_ab	2828613f297c623f297b302c337d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_14_ba	2828613f297c623f297b302c337d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_14_bbb	2828613f297c623f297b302c337d3f	626262	0	3	unanchored	utf8	false	3
+# (a?|(b?)){2}?
+nested_nullable_15_empty	28613f7c28623f29297b327d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_15_a	28613f7c28623f29297b327d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_15_b	28613f7c28623f29297b327d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_15_ab	28613f7c28623f29297b327d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_15_ba	28613f7c28623f29297b327d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_15_bbb	28613f7c28623f29297b327d3f	626262	0	3	unanchored	utf8	false	3
+# (?:(a?)|(b?)){3}?
+nested_nullable_16_empty	283f3a28613f297c28623f29297b337d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_16_a	283f3a28613f297c28623f29297b337d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_16_b	283f3a28613f297c28623f29297b337d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_16_ab	283f3a28613f297c28623f29297b337d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_16_ba	283f3a28613f297c28623f29297b337d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_16_bbb	283f3a28613f297c28623f29297b337d3f	626262	0	3	unanchored	utf8	false	3
+# (?:a|){9}?
+nested_nullable_17_empty	283f3a617c297b397d3f	-	0	0	unanchored	utf8	false	1
+nested_nullable_17_a	283f3a617c297b397d3f	61	0	1	unanchored	utf8	false	1
+nested_nullable_17_b	283f3a617c297b397d3f	62	0	1	unanchored	utf8	false	1
+nested_nullable_17_ab	283f3a617c297b397d3f	6162	0	2	unanchored	utf8	false	1
+nested_nullable_17_ba	283f3a617c297b397d3f	6261	0	2	unanchored	utf8	false	1
+nested_nullable_17_bbb	283f3a617c297b397d3f	626262	0	3	unanchored	utf8	false	1
+# ((a)|){1,3}?
+nested_nullable_18_empty	282861297c297b312c337d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_18_a	282861297c297b312c337d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_18_b	282861297c297b312c337d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_18_ab	282861297c297b312c337d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_18_ba	282861297c297b312c337d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_18_bbb	282861297c297b312c337d3f	626262	0	3	unanchored	utf8	false	3
+# (|b){2,3}?
+nested_nullable_19_empty	287c62297b322c337d3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_19_a	287c62297b322c337d3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_19_b	287c62297b322c337d3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_19_ab	287c62297b322c337d3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_19_ba	287c62297b322c337d3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_19_bbb	287c62297b322c337d3f	626262	0	3	unanchored	utf8	false	2
+# (?:((a?)|(b?))+){3}
+nested_nullable_20_empty	283f3a2828613f297c28623f29292b297b337d	-	0	0	unanchored	utf8	false	4
+nested_nullable_20_a	283f3a2828613f297c28623f29292b297b337d	61	0	1	unanchored	utf8	false	4
+nested_nullable_20_b	283f3a2828613f297c28623f29292b297b337d	62	0	1	unanchored	utf8	false	4
+nested_nullable_20_ab	283f3a2828613f297c28623f29292b297b337d	6162	0	2	unanchored	utf8	false	4
+nested_nullable_20_ba	283f3a2828613f297c28623f29292b297b337d	6261	0	2	unanchored	utf8	false	4
+nested_nullable_20_bbb	283f3a2828613f297c28623f29292b297b337d	626262	0	3	unanchored	utf8	false	4
+# (?:(?:a*|b)?){2,3}
+nested_nullable_21_empty	283f3a283f3a612a7c62293f297b322c337d	-	0	0	unanchored	utf8	false	1
+nested_nullable_21_a	283f3a283f3a612a7c62293f297b322c337d	61	0	1	unanchored	utf8	false	1
+nested_nullable_21_b	283f3a283f3a612a7c62293f297b322c337d	62	0	1	unanchored	utf8	false	1
+nested_nullable_21_ab	283f3a283f3a612a7c62293f297b322c337d	6162	0	2	unanchored	utf8	false	1
+nested_nullable_21_ba	283f3a283f3a612a7c62293f297b322c337d	6261	0	2	unanchored	utf8	false	1
+nested_nullable_21_bbb	283f3a283f3a612a7c62293f297b322c337d	626262	0	3	unanchored	utf8	false	1
+# ((a?|b?){0,2})??
+nested_nullable_22_empty	2828613f7c623f297b302c327d293f3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_22_a	2828613f7c623f297b302c327d293f3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_22_b	2828613f7c623f297b302c327d293f3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_22_ab	2828613f7c623f297b302c327d293f3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_22_ba	2828613f7c623f297b302c327d293f3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_22_bbb	2828613f7c623f297b302c327d293f3f	626262	0	3	unanchored	utf8	false	3
+# ((?:(a)|){0,3}){2}?
+nested_nullable_23_empty	28283f3a2861297c297b302c337d297b327d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_23_a	28283f3a2861297c297b302c337d297b327d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_23_b	28283f3a2861297c297b302c337d297b327d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_23_ab	28283f3a2861297c297b302c337d297b327d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_23_ba	28283f3a2861297c297b302c337d297b327d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_23_bbb	28283f3a2861297c297b302c337d297b327d3f	626262	0	3	unanchored	utf8	false	3
+# (?:(a*|(b)){2}){1,3}?
+nested_nullable_24_empty	283f3a28612a7c286229297b327d297b312c337d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_24_a	283f3a28612a7c286229297b327d297b312c337d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_24_b	283f3a28612a7c286229297b327d297b312c337d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_24_ab	283f3a28612a7c286229297b327d297b312c337d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_24_ba	283f3a28612a7c286229297b327d297b312c337d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_24_bbb	283f3a28612a7c286229297b327d297b312c337d3f	626262	0	3	unanchored	utf8	false	3
+# (?:(?:a?|(b?)){3})+
+nested_nullable_25_empty	283f3a283f3a613f7c28623f29297b337d292b	-	0	0	unanchored	utf8	false	2
+nested_nullable_25_a	283f3a283f3a613f7c28623f29297b337d292b	61	0	1	unanchored	utf8	false	2
+nested_nullable_25_b	283f3a283f3a613f7c28623f29297b337d292b	62	0	1	unanchored	utf8	false	2
+nested_nullable_25_ab	283f3a283f3a613f7c28623f29297b337d292b	6162	0	2	unanchored	utf8	false	2
+nested_nullable_25_ba	283f3a283f3a613f7c28623f29297b337d292b	6261	0	2	unanchored	utf8	false	2
+nested_nullable_25_bbb	283f3a283f3a613f7c28623f29297b337d292b	626262	0	3	unanchored	utf8	false	2
+# ((|(b)){9}){0,3}
+nested_nullable_26_empty	28287c286229297b397d297b302c337d	-	0	0	unanchored	utf8	false	4
+nested_nullable_26_a	28287c286229297b397d297b302c337d	61	0	1	unanchored	utf8	false	4
+nested_nullable_26_b	28287c286229297b397d297b302c337d	62	0	1	unanchored	utf8	false	4
+nested_nullable_26_ab	28287c286229297b397d297b302c337d	6162	0	2	unanchored	utf8	false	4
+nested_nullable_26_ba	28287c286229297b397d297b302c337d	6261	0	2	unanchored	utf8	false	4
+nested_nullable_26_bbb	28287c286229297b397d297b302c337d	626262	0	3	unanchored	utf8	false	4
+# ((?:()){1,3}){9}
+nested_nullable_27_empty	28283f3a2829297b312c337d297b397d	-	0	0	unanchored	utf8	false	3
+nested_nullable_27_a	28283f3a2829297b312c337d297b397d	61	0	1	unanchored	utf8	false	3
+nested_nullable_27_b	28283f3a2829297b312c337d297b397d	62	0	1	unanchored	utf8	false	3
+nested_nullable_27_ab	28283f3a2829297b312c337d297b397d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_27_ba	28283f3a2829297b312c337d297b397d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_27_bbb	28283f3a2829297b312c337d297b397d	626262	0	3	unanchored	utf8	false	3
+# (?:(a|){2,3})*?
+nested_nullable_28_empty	283f3a28617c297b322c337d292a3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_28_a	283f3a28617c297b322c337d292a3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_28_b	283f3a28617c297b322c337d292a3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_28_ab	283f3a28617c297b322c337d292a3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_28_ba	283f3a28617c297b322c337d292a3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_28_bbb	283f3a28617c297b322c337d292a3f	626262	0	3	unanchored	utf8	false	2
+# (?:(?:(a*)|b)*?){0,2}?
+nested_nullable_29_empty	283f3a283f3a28612a297c62292a3f297b302c327d3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_29_a	283f3a283f3a28612a297c62292a3f297b302c327d3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_29_b	283f3a283f3a28612a297c62292a3f297b302c327d3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_29_ab	283f3a283f3a28612a297c62292a3f297b302c327d3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_29_ba	283f3a283f3a28612a297c62292a3f297b302c327d3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_29_bbb	283f3a283f3a28612a297c62292a3f297b302c327d3f	626262	0	3	unanchored	utf8	false	2
+# (((a?)|b?)+?){3}?
+nested_nullable_30_empty	282828613f297c623f292b3f297b337d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_30_a	282828613f297c623f292b3f297b337d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_30_b	282828613f297c623f292b3f297b337d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_30_ab	282828613f297c623f292b3f297b337d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_30_ba	282828613f297c623f292b3f297b337d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_30_bbb	282828613f297c623f292b3f297b337d3f	626262	0	3	unanchored	utf8	false	4
+# ((?:|b)??){2,3}?
+nested_nullable_31_empty	28283f3a7c62293f3f297b322c337d3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_31_a	28283f3a7c62293f3f297b322c337d3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_31_b	28283f3a7c62293f3f297b322c337d3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_31_ab	28283f3a7c62293f3f297b322c337d3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_31_ba	28283f3a7c62293f3f297b322c337d3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_31_bbb	28283f3a7c62293f3f297b322c337d3f	626262	0	3	unanchored	utf8	false	2
+# (?:((?:)){0,2}?)?
+nested_nullable_32_empty	283f3a28283f3a29297b302c327d3f293f	-	0	0	unanchored	utf8	false	2
+nested_nullable_32_a	283f3a28283f3a29297b302c327d3f293f	61	0	1	unanchored	utf8	false	2
+nested_nullable_32_b	283f3a28283f3a29297b302c327d3f293f	62	0	1	unanchored	utf8	false	2
+nested_nullable_32_ab	283f3a28283f3a29297b302c327d3f293f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_32_ba	283f3a28283f3a29297b302c327d3f293f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_32_bbb	283f3a28283f3a29297b302c327d3f293f	626262	0	3	unanchored	utf8	false	2
+# (?:(?:(a?)|(b?)){0,3}?){2}
+nested_nullable_33_empty	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	-	0	0	unanchored	utf8	false	3
+nested_nullable_33_a	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	61	0	1	unanchored	utf8	false	3
+nested_nullable_33_b	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	62	0	1	unanchored	utf8	false	3
+nested_nullable_33_ab	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_33_ba	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_33_bbb	283f3a283f3a28613f297c28623f29297b302c337d3f297b327d	626262	0	3	unanchored	utf8	false	3
+# ((a*|b){2}?){1,3}
+nested_nullable_34_empty	2828612a7c62297b327d3f297b312c337d	-	0	0	unanchored	utf8	false	3
+nested_nullable_34_a	2828612a7c62297b327d3f297b312c337d	61	0	1	unanchored	utf8	false	3
+nested_nullable_34_b	2828612a7c62297b327d3f297b312c337d	62	0	1	unanchored	utf8	false	3
+nested_nullable_34_ab	2828612a7c62297b327d3f297b312c337d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_34_ba	2828612a7c62297b327d3f297b312c337d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_34_bbb	2828612a7c62297b327d3f297b312c337d	626262	0	3	unanchored	utf8	false	3
+# ((?:a?|b?){3}?)+?
+nested_nullable_35_empty	28283f3a613f7c623f297b337d3f292b3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_35_a	28283f3a613f7c623f297b337d3f292b3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_35_b	28283f3a613f7c623f297b337d3f292b3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_35_ab	28283f3a613f7c623f297b337d3f292b3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_35_ba	28283f3a613f7c623f297b337d3f292b3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_35_bbb	28283f3a613f7c623f297b337d3f292b3f	626262	0	3	unanchored	utf8	false	2
+# (?:((a)|){9}?){0,3}?
+nested_nullable_36_empty	283f3a282861297c297b397d3f297b302c337d3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_36_a	283f3a282861297c297b397d3f297b302c337d3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_36_b	283f3a282861297c297b397d3f297b302c337d3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_36_ab	283f3a282861297c297b397d3f297b302c337d3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_36_ba	283f3a282861297c297b397d3f297b302c337d3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_36_bbb	283f3a282861297c297b397d3f297b302c337d3f	626262	0	3	unanchored	utf8	false	3
+# (?:(?:a*|(b)){1,3}?){9}?
+nested_nullable_37_empty	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_37_a	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_37_b	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_37_ab	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_37_ba	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_37_bbb	283f3a283f3a612a7c286229297b312c337d3f297b397d3f	626262	0	3	unanchored	utf8	false	2
+# ((a?|(b?)){2,3}?)*
+nested_nullable_38_empty	2828613f7c28623f29297b322c337d3f292a	-	0	0	unanchored	utf8	false	4
+nested_nullable_38_a	2828613f7c28623f29297b322c337d3f292a	61	0	1	unanchored	utf8	false	4
+nested_nullable_38_b	2828613f7c28623f29297b322c337d3f292a	62	0	1	unanchored	utf8	false	4
+nested_nullable_38_ab	2828613f7c28623f29297b322c337d3f292a	6162	0	2	unanchored	utf8	false	4
+nested_nullable_38_ba	2828613f7c28623f29297b322c337d3f292a	6261	0	2	unanchored	utf8	false	4
+nested_nullable_38_bbb	2828613f7c28623f29297b322c337d3f292a	626262	0	3	unanchored	utf8	false	4
+# ((?:|(b))*){0,2}
+nested_nullable_39_empty	28283f3a7c286229292a297b302c327d	-	0	0	unanchored	utf8	false	3
+nested_nullable_39_a	28283f3a7c286229292a297b302c327d	61	0	1	unanchored	utf8	false	3
+nested_nullable_39_b	28283f3a7c286229292a297b302c327d	62	0	1	unanchored	utf8	false	3
+nested_nullable_39_ab	28283f3a7c286229292a297b302c327d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_39_ba	28283f3a7c286229292a297b302c327d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_39_bbb	28283f3a7c286229292a297b302c327d	626262	0	3	unanchored	utf8	false	3
+# (?:(?:(?:a?|b?)*){9})*
+nested_nullable_40_empty	283f3a283f3a283f3a613f7c623f292a297b397d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_40_a	283f3a283f3a283f3a613f7c623f292a297b397d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_40_b	283f3a283f3a283f3a613f7c623f292a297b397d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_40_ab	283f3a283f3a283f3a613f7c623f292a297b397d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_40_ba	283f3a283f3a283f3a613f7c623f292a297b397d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_40_bbb	283f3a283f3a283f3a613f7c623f292a297b397d292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*?){9})*
+nested_nullable_41_empty	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_41_a	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_41_b	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_41_ab	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_41_ba	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_41_bbb	283f3a283f3a283f3a613f7c623f292a3f297b397d292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*){9})*?
+nested_nullable_42_empty	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	-	0	0	unanchored	utf8	false	1
+nested_nullable_42_a	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	61	0	1	unanchored	utf8	false	1
+nested_nullable_42_b	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	62	0	1	unanchored	utf8	false	1
+nested_nullable_42_ab	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	6162	0	2	unanchored	utf8	false	1
+nested_nullable_42_ba	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	6261	0	2	unanchored	utf8	false	1
+nested_nullable_42_bbb	283f3a283f3a283f3a613f7c623f292a297b397d292a3f	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*){3})*
+nested_nullable_43_empty	283f3a283f3a283f3a613f7c623f292a297b337d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_43_a	283f3a283f3a283f3a613f7c623f292a297b337d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_43_b	283f3a283f3a283f3a613f7c623f292a297b337d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_43_ab	283f3a283f3a283f3a613f7c623f292a297b337d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_43_ba	283f3a283f3a283f3a613f7c623f292a297b337d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_43_bbb	283f3a283f3a283f3a613f7c623f292a297b337d292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)+){9})*
+nested_nullable_44_empty	283f3a283f3a283f3a613f7c623f292b297b397d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_44_a	283f3a283f3a283f3a613f7c623f292b297b397d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_44_b	283f3a283f3a283f3a613f7c623f292b297b397d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_44_ab	283f3a283f3a283f3a613f7c623f292b297b397d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_44_ba	283f3a283f3a283f3a613f7c623f292b297b397d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_44_bbb	283f3a283f3a283f3a613f7c623f292b297b397d292a	626262	0	3	unanchored	utf8	false	1
+# (?:((?:(a?)|b?)*){9})*
+nested_nullable_45_empty	283f3a28283f3a28613f297c623f292a297b397d292a	-	0	0	unanchored	utf8	false	3
+nested_nullable_45_a	283f3a28283f3a28613f297c623f292a297b397d292a	61	0	1	unanchored	utf8	false	3
+nested_nullable_45_b	283f3a28283f3a28613f297c623f292a297b397d292a	62	0	1	unanchored	utf8	false	3
+nested_nullable_45_ab	283f3a28283f3a28613f297c623f292a297b397d292a	6162	0	2	unanchored	utf8	false	3
+nested_nullable_45_ba	283f3a28283f3a28613f297c623f292a297b397d292a	6261	0	2	unanchored	utf8	false	3
+nested_nullable_45_bbb	283f3a28283f3a28613f297c623f292a297b397d292a	626262	0	3	unanchored	utf8	false	3
+# (?:(?:(?:a|)*){9})*
+nested_nullable_46_empty	283f3a283f3a283f3a617c292a297b397d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_46_a	283f3a283f3a283f3a617c292a297b397d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_46_b	283f3a283f3a283f3a617c292a297b397d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_46_ab	283f3a283f3a283f3a617c292a297b397d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_46_ba	283f3a283f3a283f3a617c292a297b397d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_46_bbb	283f3a283f3a283f3a617c292a297b397d292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:|b)*){9})*
+nested_nullable_47_empty	283f3a283f3a283f3a7c62292a297b397d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_47_a	283f3a283f3a283f3a7c62292a297b397d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_47_b	283f3a283f3a283f3a7c62292a297b397d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_47_ab	283f3a283f3a283f3a7c62292a297b397d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_47_ba	283f3a283f3a283f3a7c62292a297b397d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_47_bbb	283f3a283f3a283f3a7c62292a297b397d292a	626262	0	3	unanchored	utf8	false	1
+# (?:((?:(a)|)?){9})??
+nested_nullable_48_empty	283f3a28283f3a2861297c293f297b397d293f3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_48_a	283f3a28283f3a2861297c293f297b397d293f3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_48_b	283f3a28283f3a2861297c293f297b397d293f3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_48_ab	283f3a28283f3a2861297c293f297b397d293f3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_48_ba	283f3a28283f3a2861297c293f297b397d293f3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_48_bbb	283f3a28283f3a2861297c293f297b397d293f3f	626262	0	3	unanchored	utf8	false	3
+# (?:((a*|(b)){0,2})*?){2,3}?
+nested_nullable_49_empty	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_49_a	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_49_b	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_49_ab	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_49_ba	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_49_bbb	283f3a2828612a7c286229297b302c327d292a3f297b322c337d3f	626262	0	3	unanchored	utf8	false	4
+# (?:(?:(?:a?|(b?)){0,3}){0,2}?){3}
+nested_nullable_50_empty	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	-	0	0	unanchored	utf8	false	2
+nested_nullable_50_a	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	61	0	1	unanchored	utf8	false	2
+nested_nullable_50_b	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	62	0	1	unanchored	utf8	false	2
+nested_nullable_50_ab	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_50_ba	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_50_bbb	283f3a283f3a283f3a613f7c28623f29297b302c337d297b302c327d3f297b337d	626262	0	3	unanchored	utf8	false	2
+# ((?:(|(b)){2}){3}?){0,2}?
+nested_nullable_51_empty	28283f3a287c286229297b327d297b337d3f297b302c327d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_51_a	28283f3a287c286229297b327d297b337d3f297b302c327d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_51_b	28283f3a287c286229297b327d297b337d3f297b302c327d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_51_ab	28283f3a287c286229297b327d297b337d3f297b302c327d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_51_ba	28283f3a287c286229297b327d297b337d3f297b302c327d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_51_bbb	28283f3a287c286229297b327d297b337d3f297b302c327d3f	626262	0	3	unanchored	utf8	false	4
+# (((?:()){3}){2,3}?)*
+nested_nullable_52_empty	2828283f3a2829297b337d297b322c337d3f292a	-	0	0	unanchored	utf8	false	4
+nested_nullable_52_a	2828283f3a2829297b337d297b322c337d3f292a	61	0	1	unanchored	utf8	false	4
+nested_nullable_52_b	2828283f3a2829297b337d297b322c337d3f292a	62	0	1	unanchored	utf8	false	4
+nested_nullable_52_ab	2828283f3a2829297b337d297b322c337d3f292a	6162	0	2	unanchored	utf8	false	4
+nested_nullable_52_ba	2828283f3a2829297b337d297b322c337d3f292a	6261	0	2	unanchored	utf8	false	4
+nested_nullable_52_bbb	2828283f3a2829297b337d297b322c337d3f292a	626262	0	3	unanchored	utf8	false	4
+# (((a|){9})?){9}
+nested_nullable_53_empty	282828617c297b397d293f297b397d	-	0	0	unanchored	utf8	false	4
+nested_nullable_53_a	282828617c297b397d293f297b397d	61	0	1	unanchored	utf8	false	4
+nested_nullable_53_b	282828617c297b397d293f297b397d	62	0	1	unanchored	utf8	false	4
+nested_nullable_53_ab	282828617c297b397d293f297b397d	6162	0	2	unanchored	utf8	false	4
+nested_nullable_53_ba	282828617c297b397d293f297b397d	6261	0	2	unanchored	utf8	false	4
+nested_nullable_53_bbb	282828617c297b397d293f297b397d	626262	0	3	unanchored	utf8	false	4
+# (?:(?:(?:(a*)|b){1,3}){2}){0,3}?
+nested_nullable_54_empty	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	-	0	0	unanchored	utf8	false	2
+nested_nullable_54_a	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	61	0	1	unanchored	utf8	false	2
+nested_nullable_54_b	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	62	0	1	unanchored	utf8	false	2
+nested_nullable_54_ab	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	6162	0	2	unanchored	utf8	false	2
+nested_nullable_54_ba	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	6261	0	2	unanchored	utf8	false	2
+nested_nullable_54_bbb	283f3a283f3a283f3a28612a297c62297b312c337d297b327d297b302c337d3f	626262	0	3	unanchored	utf8	false	2
+# (?:(?:((a?)|b?){2,3}){1,3})+
+nested_nullable_55_empty	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	-	0	0	unanchored	utf8	false	3
+nested_nullable_55_a	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	61	0	1	unanchored	utf8	false	3
+nested_nullable_55_b	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	62	0	1	unanchored	utf8	false	3
+nested_nullable_55_ab	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	6162	0	2	unanchored	utf8	false	3
+nested_nullable_55_ba	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	6261	0	2	unanchored	utf8	false	3
+nested_nullable_55_bbb	283f3a283f3a2828613f297c623f297b322c337d297b312c337d292b	626262	0	3	unanchored	utf8	false	3
+# (?:((?:|b)*?)+?){1,3}
+nested_nullable_56_empty	283f3a28283f3a7c62292a3f292b3f297b312c337d	-	0	0	unanchored	utf8	false	2
+nested_nullable_56_a	283f3a28283f3a7c62292a3f292b3f297b312c337d	61	0	1	unanchored	utf8	false	2
+nested_nullable_56_b	283f3a28283f3a7c62292a3f292b3f297b312c337d	62	0	1	unanchored	utf8	false	2
+nested_nullable_56_ab	283f3a28283f3a7c62292a3f292b3f297b312c337d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_56_ba	283f3a28283f3a7c62292a3f292b3f297b312c337d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_56_bbb	283f3a28283f3a7c62292a3f292b3f297b312c337d	626262	0	3	unanchored	utf8	false	2
+# ((((?:))+?){0,3}?){2}?
+nested_nullable_57_empty	282828283f3a29292b3f297b302c337d3f297b327d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_57_a	282828283f3a29292b3f297b302c337d3f297b327d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_57_b	282828283f3a29292b3f297b302c337d3f297b327d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_57_ab	282828283f3a29292b3f297b302c337d3f297b327d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_57_ba	282828283f3a29292b3f297b302c337d3f297b327d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_57_bbb	282828283f3a29292b3f297b302c337d3f297b327d3f	626262	0	3	unanchored	utf8	false	4
+# (?:((?:(|(b)){0,2}){1,3}){0,2}?){1,3}?
+nested_nullable_58_empty	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_58_a	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_58_b	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_58_ab	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_58_ba	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_58_bbb	283f3a28283f3a287c286229297b302c327d297b312c337d297b302c327d3f297b312c337d3f	626262	0	3	unanchored	utf8	false	4
+# (?:((?:(?:()){0,3})+?)*){9}
+nested_nullable_59_empty	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	-	0	0	unanchored	utf8	false	3
+nested_nullable_59_a	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	61	0	1	unanchored	utf8	false	3
+nested_nullable_59_b	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	62	0	1	unanchored	utf8	false	3
+nested_nullable_59_ab	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_59_ba	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_59_bbb	283f3a28283f3a283f3a2829297b302c337d292b3f292a297b397d	626262	0	3	unanchored	utf8	false	3
+# (?:(((a|){2}){0,3}?){9}){3}?
+nested_nullable_60_empty	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_60_a	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_60_b	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_60_ab	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_60_ba	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_60_bbb	283f3a282828617c297b327d297b302c337d3f297b397d297b337d3f	626262	0	3	unanchored	utf8	false	4
+# (?:(?:((?:(a*)|b){3}){9}?){0,3}?){2}
+nested_nullable_61_empty	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	-	0	0	unanchored	utf8	false	3
+nested_nullable_61_a	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	61	0	1	unanchored	utf8	false	3
+nested_nullable_61_b	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	62	0	1	unanchored	utf8	false	3
+nested_nullable_61_ab	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	6162	0	2	unanchored	utf8	false	3
+nested_nullable_61_ba	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	6261	0	2	unanchored	utf8	false	3
+nested_nullable_61_bbb	283f3a283f3a28283f3a28612a297c62297b337d297b397d3f297b302c337d3f297b327d	626262	0	3	unanchored	utf8	false	3
+# ((?:(?:((a?)|b?){9})*)+){0,3}?
+nested_nullable_62_empty	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	-	0	0	unanchored	utf8	false	4
+nested_nullable_62_a	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	61	0	1	unanchored	utf8	false	4
+nested_nullable_62_b	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	62	0	1	unanchored	utf8	false	4
+nested_nullable_62_ab	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	6162	0	2	unanchored	utf8	false	4
+nested_nullable_62_ba	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	6261	0	2	unanchored	utf8	false	4
+nested_nullable_62_bbb	28283f3a283f3a2828613f297c623f297b397d292a292b297b302c337d3f	626262	0	3	unanchored	utf8	false	4
+# ((?:(?:(?:|b){1,3}){0,2}){1,3}){0,2}
+nested_nullable_63_empty	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	-	0	0	unanchored	utf8	false	2
+nested_nullable_63_a	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	61	0	1	unanchored	utf8	false	2
+nested_nullable_63_b	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	62	0	1	unanchored	utf8	false	2
+nested_nullable_63_ab	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	6162	0	2	unanchored	utf8	false	2
+nested_nullable_63_ba	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	6261	0	2	unanchored	utf8	false	2
+nested_nullable_63_bbb	28283f3a283f3a283f3a7c62297b312c337d297b302c327d297b312c337d297b302c327d	626262	0	3	unanchored	utf8	false	2
+# (((((?:)){2,3}){3}){2}?)??
+nested_nullable_64_empty	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	-	0	0	unanchored	utf8	false	5
+nested_nullable_64_a	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	61	0	1	unanchored	utf8	false	5
+nested_nullable_64_b	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	62	0	1	unanchored	utf8	false	5
+nested_nullable_64_ab	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	6162	0	2	unanchored	utf8	false	5
+nested_nullable_64_ba	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	6261	0	2	unanchored	utf8	false	5
+nested_nullable_64_bbb	28282828283f3a29297b322c337d297b337d297b327d3f293f3f	626262	0	3	unanchored	utf8	false	5
+# ((((?:(a?)|(b?))*?){2,3})?)+
+nested_nullable_65_empty	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	-	0	0	unanchored	utf8	false	6
+nested_nullable_65_a	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	61	0	1	unanchored	utf8	false	6
+nested_nullable_65_b	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	62	0	1	unanchored	utf8	false	6
+nested_nullable_65_ab	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	6162	0	2	unanchored	utf8	false	6
+nested_nullable_65_ba	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	6261	0	2	unanchored	utf8	false	6
+nested_nullable_65_bbb	282828283f3a28613f297c28623f29292a3f297b322c337d293f292b	626262	0	3	unanchored	utf8	false	6
+# (?:((?:(a*|b)+?)??){2,3})*?
+nested_nullable_66_empty	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	-	0	0	unanchored	utf8	false	3
+nested_nullable_66_a	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	61	0	1	unanchored	utf8	false	3
+nested_nullable_66_b	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	62	0	1	unanchored	utf8	false	3
+nested_nullable_66_ab	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	6162	0	2	unanchored	utf8	false	3
+nested_nullable_66_ba	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	6261	0	2	unanchored	utf8	false	3
+nested_nullable_66_bbb	283f3a28283f3a28612a7c62292b3f293f3f297b322c337d292a3f	626262	0	3	unanchored	utf8	false	3
+# (?:(?:(?:(?:a?|b?)??){2}?){3}?){2,3}?
+nested_nullable_67_empty	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	-	0	0	unanchored	utf8	false	1
+nested_nullable_67_a	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	61	0	1	unanchored	utf8	false	1
+nested_nullable_67_b	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	62	0	1	unanchored	utf8	false	1
+nested_nullable_67_ab	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	6162	0	2	unanchored	utf8	false	1
+nested_nullable_67_ba	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	6261	0	2	unanchored	utf8	false	1
+nested_nullable_67_bbb	283f3a283f3a283f3a283f3a613f7c623f293f3f297b327d3f297b337d3f297b322c337d3f	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*){6})*
+nested_nullable_68_empty	283f3a283f3a283f3a613f7c623f292a297b367d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_68_a	283f3a283f3a283f3a613f7c623f292a297b367d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_68_b	283f3a283f3a283f3a613f7c623f292a297b367d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_68_ab	283f3a283f3a283f3a613f7c623f292a297b367d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_68_ba	283f3a283f3a283f3a613f7c623f292a297b367d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_68_bbb	283f3a283f3a283f3a613f7c623f292a297b367d292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*){6}?)*
+nested_nullable_69_empty	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_69_a	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_69_b	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_69_ab	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_69_ba	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_69_bbb	283f3a283f3a283f3a613f7c623f292a297b367d3f292a	626262	0	3	unanchored	utf8	false	1
+# (?:(?:(?:a?|b?)*){0,5})*
+nested_nullable_70_empty	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	-	0	0	unanchored	utf8	false	1
+nested_nullable_70_a	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	61	0	1	unanchored	utf8	false	1
+nested_nullable_70_b	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	62	0	1	unanchored	utf8	false	1
+nested_nullable_70_ab	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	6162	0	2	unanchored	utf8	false	1
+nested_nullable_70_ba	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	6261	0	2	unanchored	utf8	false	1
+nested_nullable_70_bbb	283f3a283f3a283f3a613f7c623f292a297b302c357d292a	626262	0	3	unanchored	utf8	false	1
