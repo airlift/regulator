@@ -855,6 +855,15 @@ span, so a scalar choice is checked again when a later search reaches the
 start-byte scan. Dense input rejects every such sample and keeps the scalar
 scan.
 
+A count of every match settles a borderline first sample, 4 to 7 candidates in
+64 bytes, with a second sample of 256 bytes in 16 windows at the same density
+threshold. Start bytes such as digits cluster: on the mariomka ip row the
+64-byte sample landed on a timestamp and kept the scalar scan for all 6.8 MB,
+although only 1.6% of its bytes are digits. A clearly dense first sample skips
+the wider one, since dense text pays for every sampled byte, and a count that
+stops at a match end keeps the 64-byte decision, because it samples at every
+call.
+
 ## Bounded Native-Memory DFA Transition Table
 
 Eligible forward one-byte DFA searches may use a private native-memory table of

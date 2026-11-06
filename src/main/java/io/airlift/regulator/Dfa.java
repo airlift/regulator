@@ -59,6 +59,12 @@ final class Dfa
     private static final int BYTE_SCAN_SAMPLE_WINDOWS = 4;
     static final int BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT = 8;
     private static final int SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT = 4;
+    // A count of every match settles a borderline start sample, from 4 to 7 candidates in 64 bytes,
+    // with 256 bytes in 16 windows at the same density.
+    private static final int COUNT_START_BORDERLINE_CANDIDATE_LIMIT = 2 * SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT;
+    private static final int COUNT_START_SAMPLE_SIZE = 256;
+    private static final int COUNT_START_SAMPLE_WINDOWS = 16;
+    private static final int COUNT_START_SAMPLE_CANDIDATE_LIMIT = SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT * COUNT_START_SAMPLE_SIZE / BYTE_SCAN_SAMPLE_SIZE;
     private static final boolean BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED = true;
     private static final int MIN_SELF_LOOP_SAMPLE_SEARCH_BYTES = 64 * 1024;
     private static final int SELF_LOOP_SAMPLE_SIZE = 64;
@@ -142,6 +148,7 @@ final class Dfa
     // A four-byte UTF-8 character inside a matching loop ends in the loop's unflagged copy, which
     // needs one more byte to return to the matching loop.
     private static final int COUNT_SELF_LOOP_MAX_STEPS = 5;
+    private static final IntPredicate COUNT_EVERY_MATCH = Dfa::countEveryMatch;
 
     // Like upstream dfa_should_bail_when_slow. When true (default), the DFA
     // returns SEARCH_FAILED if it detects cache thrashing. Tests can set this
@@ -616,7 +623,7 @@ final class Dfa
 
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
     {
-        long result = countMatches(prog, context, 0, matchKind, Dfa::countEveryMatch);
+        long result = countMatches(prog, context, 0, matchKind, COUNT_EVERY_MATCH);
         return result < 0 ? result : countStopCount(result);
     }
 
@@ -685,16 +692,15 @@ final class Dfa
         // 4 KiB remaining; below that the check reports the span as productive without sampling,
         // which would promote the vector scan for dense input. Prefix acceleration returns before
         // the start-byte scan, so the selection is made only when it can be read. A start literal
-        // filter is kept without sampling.
+        // filter is kept without sampling. A count of every match, the three-argument form's
+        // `COUNT_EVERY_MATCH`, settles a borderline first sample with a wider one; any other
+        // predicate keeps the 64-byte decision.
         int startByteScanSet = 0;
         boolean resampleStartByteScanSet = false;
         if (dfa.canStartByteAcceleration() && !prog.canPrefixAccel()) {
-            startByteScanSet = selectByteScanSet(
-                    dfa.startByteScanSet,
-                    dfa.startByteCandidates,
-                    bytes,
-                    textBegin,
-                    contextEnd);
+            startByteScanSet = continueCounting == COUNT_EVERY_MATCH
+                    ? selectEveryMatchCountByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd)
+                    : selectByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd);
             resampleStartByteScanSet = startByteScanSet == 0 && dfa.startByteScanSet != 0;
         }
         // The self-loop cutoff applies to one count call; a new text may reach an eligible loop.
@@ -1680,6 +1686,45 @@ final class Dfa
             return 0;
         }
         return byteScanSet;
+    }
+
+    // A vector choice made at the count start is kept for the whole count. Start bytes such as
+    // digits cluster, and a 64-byte sample can land on one cluster and keep a sparse text on the
+    // scalar scan for every byte, so a count of every match settles a borderline sample with a
+    // wider one. A clearly dense sample keeps the scalar scan without it, since dense text pays
+    // every extra sampled byte.
+    private static int selectEveryMatchCountByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
+    {
+        int selected = selectByteScanSet(byteScanSet, candidates, bytes, position, textEnd);
+        if (selected != 0 ||
+                byteScanSet == 0 ||
+                !isByteCandidateScanProductive(
+                        candidates,
+                        null,
+                        bytes,
+                        position,
+                        textEnd,
+                        MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES,
+                        COUNT_START_BORDERLINE_CANDIDATE_LIMIT)) {
+            return selected;
+        }
+        return countStartSampleCandidates(candidates, bytes, position, textEnd) < COUNT_START_SAMPLE_CANDIDATE_LIMIT ? byteScanSet : 0;
+    }
+
+    private static int countStartSampleCandidates(byte[] candidates, byte[] bytes, int position, int textEnd)
+    {
+        int windowSize = COUNT_START_SAMPLE_SIZE / COUNT_START_SAMPLE_WINDOWS;
+        int windowRange = textEnd - position - windowSize;
+        int candidateCount = 0;
+        for (int window = 0; window < COUNT_START_SAMPLE_WINDOWS; window++) {
+            int windowStart = position + (int) (((long) windowRange * window) / (COUNT_START_SAMPLE_WINDOWS - 1));
+            for (int samplePosition = windowStart; samplePosition < windowStart + windowSize; samplePosition++) {
+                if (candidates[bytes[samplePosition] & 0xFF] != 0 && ++candidateCount >= COUNT_START_SAMPLE_CANDIDATE_LIMIT) {
+                    return candidateCount;
+                }
+            }
+        }
+        return candidateCount;
     }
 
     private static boolean isByteCandidateScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)

@@ -804,15 +804,15 @@ public class TestDfaCountMatches
         byte[] bytes = new byte[32_768 + 16];
         Arrays.fill(bytes, (byte) 'a');
         Arrays.fill(bytes, 7, 7 + 32_768, (byte) '.');
-        System.arraycopy("abcd-1".getBytes(US_ASCII), 0, bytes, 7, 6);
-        Slice[] sources = {Slices.wrappedBuffer(bytes, 7, 32_768), utf8Slice("abcd-1" + ".".repeat(32_762))};
+        System.arraycopy("abcdefghijkl-1".getBytes(US_ASCII), 0, bytes, 7, 14);
+        Slice[] sources = {Slices.wrappedBuffer(bytes, 7, 32_768), utf8Slice("abcdefghijkl-1" + ".".repeat(32_754))};
         for (Slice source : sources) {
             Prog program = compile(expression);
             Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
-            // The sample from the text start lands on the candidates of the first match and
-            // selects the scalar scan. The sample after that match sees only filler, so the rest
-            // of the count uses the range scanner.
+            // The sample from the text start lands on the twelve candidates of the first match,
+            // dense enough that no wider sample is taken, and selects the scalar scan. The sample
+            // after that match sees only filler, so the rest of the count uses the range scanner.
             for (int iteration = 0; iteration < 3; iteration++) {
                 int rangeScanCount = dfa.contiguousRangeScanCount();
                 assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
@@ -824,13 +824,33 @@ public class TestDfaCountMatches
     }
 
     @Test
+    public void testEveryMatchCountSettlesBorderlineStartSample()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        Slice source = utf8Slice("abcd-1" + ".".repeat(32_762));
+        Prog program = compile(expression);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+        // The 64-byte sample from the text start holds four candidates, a borderline density.
+        // The wider sample holds only those four candidates in 256 bytes, below its limit of 16,
+        // so the search that finds the match and the one after it use the range scanner.
+        for (int iteration = 0; iteration < 3; iteration++) {
+            int rangeScanCount = dfa.contiguousRangeScanCount();
+            assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
+                    .isEqualTo(trinoMatcherCount(expression, source))
+                    .isEqualTo(1);
+            assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 2 : 0);
+        }
+    }
+
+    @Test
     public void testStartByteScanSetPromotionThreshold()
     {
         String expression = "([a-z]+)-([0-9]+)";
         // The sample from the text start selects the scalar scan. Resampling after the first
         // match requires 4 KiB remaining, so only the longer filler promotes the range scanner.
         for (int fillerLength : new int[] {4_095, 4_096}) {
-            Slice source = utf8Slice("abcd-1" + ".".repeat(fillerLength));
+            Slice source = utf8Slice("abcdefghijkl-1" + ".".repeat(fillerLength));
             Prog program = compile(expression);
             Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
@@ -874,11 +894,12 @@ public class TestDfaCountMatches
     public void testStartByteScanSetNotSampledForFixedDistanceSearches()
     {
         String expression = "[a-z]:[0-9]+";
-        // The dense prefix selects the scalar scan. Searches with at least 4 KiB remaining use the
-        // fixed-distance scan for the colon, so they must not sample start-byte density. A sample
-        // after a late prefix match would see only filler and promote the range scanner for the
-        // final span, which is shorter than 4 KiB and reaches the start-byte scan without sampling.
-        Slice source = utf8Slice("a:1.".repeat(64) + ".".repeat(8_000) + "b:2" + ".".repeat(2_000));
+        // The prefix, dense enough that no wider sample is taken, selects the scalar scan. Searches
+        // with at least 4 KiB remaining use the fixed-distance scan for the colon, so they must
+        // not sample start-byte density. A sample after a late prefix match would see only filler
+        // and promote the range scanner for the final span, which is shorter than 4 KiB and
+        // reaches the start-byte scan without sampling.
+        Slice source = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "b:2" + ".".repeat(2_000));
         Prog program = compile(expression);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
@@ -902,7 +923,7 @@ public class TestDfaCountMatches
         // second search promotes the selection. That search needs a new transition after two
         // digits and retries exclusively, losing the promotion; the retry samples again, and the
         // final span keeps the promoted range scanner.
-        Slice source = utf8Slice("abcd-1" + ".".repeat(16_000) + "ab-12" + ".".repeat(16_000));
+        Slice source = utf8Slice("abcdefghijkl-1" + ".".repeat(16_000) + "ab-12" + ".".repeat(16_000));
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
         assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(VectorSupport.isAvailable() ? 3 : 0);
     }
