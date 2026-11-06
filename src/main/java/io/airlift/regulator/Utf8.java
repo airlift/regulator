@@ -146,7 +146,8 @@ final class Utf8
     /// overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
     /// rejects bare continuation bytes, C0, C1, F5-FF, and sequences that a non-continuation byte
     /// or `end` cuts short.
-    /// Copied as `ScanKernelSupport.re2CharacterWidth`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2CharacterWidth` and as the width table of
+    /// `DotStarLiteralSpanMatcher`; keep the copies in step.
     static int re2CharacterWidth(byte[] bytes, int index, int end)
     {
         int b0 = bytes[index] & 0xFF;

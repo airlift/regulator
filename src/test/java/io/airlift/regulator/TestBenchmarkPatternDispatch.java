@@ -186,7 +186,7 @@ public class TestBenchmarkPatternDispatch
 
     /// Requires `compiled` to take the full-Slice `find` route that `target` names, and its
     /// benchmark matcher `matcher` the matcher route that LITERAL_ALTERNATION, LITERAL_SET,
-    /// FIXED_WIDTH, or SINGLE_BYTE names.
+    /// FIXED_WIDTH, SINGLE_BYTE, or DOT_STAR_LITERAL names.
     private static void assertRoute(String target, CompiledPattern compiled, RegexpMatcher matcher, String description)
     {
         Shape expected = switch (target) {
@@ -222,7 +222,18 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
                 assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();
             }
-            case "DOT_STAR_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
+            case "DOT_STAR_LITERAL" -> {
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
+                // RE2 and Rust count the literal kernel's dot-star spans, and the matcher finds them.
+                if (compiled instanceof JavaRegexp) {
+                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNull();
+                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isNull();
+                }
+                else {
+                    assertThat(compiled.createDotStarLiteralSpanMatcher()).as(description).isNotNull();
+                    assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createDotStarLiteralSpanMatcher());
+                }
+            }
             case "SINGLE_BYTE" -> {
                 assertThat(compiled.sharedSingleByteMatcher()).as(description).isNotNull();
                 assertThat(matcher.singleByteMatcherForDiagnostics()).as(description).isSameAs(compiled.sharedSingleByteMatcher());

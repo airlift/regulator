@@ -401,7 +401,8 @@ public class TestTrinoRegexpFunctions
     {
         Slice pattern = utf8(".*literal.*");
         // The compile builds no scan plan for this pattern, so its program and DFA allowance
-        // differ from the plain program's only by the charges of the search and the required bytes.
+        // differ from the plain program's only by the charges of the search, the dot-star matcher
+        // and the required bytes.
         long defaultMaxMemory = TrinoRegexp.Options.defaults().maxMemory();
         Prog control = Compiler.compile(TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(), false, defaultMaxMemory - defaultMaxMemory / 3);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
@@ -412,7 +413,9 @@ public class TestTrinoRegexpFunctions
         assertThat(regexp.re2().forwardProgramForDiagnostics().size()).isEqualTo(control.size());
         assertThat(regexp.re2().requiredBytesForDiagnostics()).isNotNull();
         assertThat(control.dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
-                .isEqualTo(search.estimatedRetainedSize() + regexp.re2().requiredBytesRetainedSizeForDiagnostics());
+                .isEqualTo(search.estimatedRetainedSize() +
+                        regexp.re2().createDotStarLiteralSpanMatcher().estimatedRetainedSize() +
+                        regexp.re2().requiredBytesRetainedSizeForDiagnostics());
 
         // As for the ordered literal matcher, a short pattern that does not grow when flattened
         // keeps the search at the smallest budget that fits it.
