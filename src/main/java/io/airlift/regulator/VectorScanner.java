@@ -97,25 +97,18 @@ final class VectorScanner
         return end;
     }
 
-    // findRe2RunStop for two to four needles. The guards on the first two needles always hold
-    // here; they stay because this is the shape that was measured. Copied as
-    // VectorScanKernelSupport.findRe2SetStop; keep the copy in step.
+    // findRe2RunStop for two to four needles. Copied as VectorScanKernelSupport.findRe2SetStop;
+    // keep the copy in step.
     private static int findRe2SetStop(byte[] input, int cursor, int end, byte[] needles)
     {
         int count = needles.length;
-        ByteVector first = ByteVector.broadcast(SPECIES, count > 0 ? needles[0] : 0);
-        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : 0);
+        ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        ByteVector second = ByteVector.broadcast(SPECIES, needles[1]);
         ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : 0);
         ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : 0);
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
-            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0);
-            if (count > 0) {
-                stops = stops.or(bytes.compare(VectorOperators.EQ, first));
-            }
-            if (count > 1) {
-                stops = stops.or(bytes.compare(VectorOperators.EQ, second));
-            }
+            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0).or(bytes.compare(VectorOperators.EQ, first)).or(bytes.compare(VectorOperators.EQ, second));
             if (count > 2) {
                 stops = stops.or(bytes.compare(VectorOperators.EQ, third));
             }
