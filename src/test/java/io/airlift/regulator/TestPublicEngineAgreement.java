@@ -20,7 +20,13 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
+import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -66,6 +72,60 @@ public class TestPublicEngineAgreement
             }
         }
         assertThat(failures).isEmpty();
+    }
+
+    @Test
+    public void testSpanSearchRegions()
+    {
+        // A group-zero matcher of a literal alternation, a literal set, or a fixed-width pattern
+        // finds on the pattern's span search in every language, and its spans are the generic
+        // matcher's in every region of a Slice view that begins inside its byte array: regions
+        // whose end cuts a match, which leaves `ab` of `abc|x|ab` and `abc|ab` and no fixed-width
+        // match, and regions that start inside a match.
+        String literalSet = IntStream.range(0, 65).mapToObj(index -> "w" + index + "q").collect(Collectors.joining("|")) + "|abc|ab";
+        Map<String, Class<? extends GroupZeroSpanSearch>> expressions = Map.of(
+                "abc|x|ab|ERROR|βeta", LiteralAlternationSpanMatcher.class,
+                literalSet, LiteralSetSpanMatcher.class,
+                "[0-9]{2}-[0-9]{2}", FixedWidthByteSpanMatcher.class);
+        // Malformed UTF-8 at the #, between sentinel bytes outside the view.
+        byte[] bytes = utf8Slice("!!abcab ERRORβeta w7q12-3456-78 w64qabéERRO#12-34abc?").getBytes();
+        bytes[bytes.length - 10] = (byte) 0xFF;
+        Slice input = wrappedBuffer(bytes, 2, bytes.length - 3);
+        for (Map.Entry<String, Class<? extends GroupZeroSpanSearch>> entry : expressions.entrySet()) {
+            String expression = entry.getKey();
+            List<CompiledPattern> patterns = List.of(
+                    Re2.compile(utf8Slice(expression)),
+                    JavaRegexp.compile(utf8Slice(expression)),
+                    RustRegexp.compile(utf8Slice(expression)),
+                    RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
+            for (CompiledPattern pattern : patterns) {
+                String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8();
+                assertThat(pattern.groupZeroSpanSearch()).as(label).isInstanceOf(entry.getValue());
+                assertThat(pattern.matcher(input).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
+                assertThat(pattern.matcher(input, 0).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
+                assertThat(findSpans(pattern.matcher(input))).as(label).isNotEmpty();
+                assertNoProgramSearch(pattern, label);
+                assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).as(label).isNull();
+                RegexpMatcher matcher = pattern.matcher(input, 0);
+                RegexpMatcher generic = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+                    for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                        assertThat(findSpans(matcher.reset(input, regionStart, regionEnd)))
+                                .as("%s region %s-%s", label, regionStart, regionEnd)
+                                .isEqualTo(findSpans(generic.reset(input, regionStart, regionEnd)));
+                    }
+                }
+            }
+        }
+    }
+
+    private static List<String> findSpans(RegexpMatcher matcher)
+    {
+        List<String> spans = new ArrayList<>();
+        while (matcher.find()) {
+            spans.add(matcher.start() + "-" + matcher.end());
+        }
+        return spans;
     }
 
     private static Slice bytes(String hex)

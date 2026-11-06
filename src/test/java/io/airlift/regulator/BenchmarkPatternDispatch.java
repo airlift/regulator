@@ -53,12 +53,14 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// one target per common route of full-Slice `find` without a plan: EXACT_LITERAL searches for an
 /// exact literal; CONTAINS for a literal between optional gaps; CHARACTER_CLASS runs a class repeat
 /// on the class counter; LITERAL_ALTERNATION runs a small literal alternation on the
-/// literal-alternation span matcher; GENERAL has no plan and no literal or class shortcut, so it
-/// runs the ordinary DFA search; FIXED_WIDTH runs a fixed-width class sequence on the fixed-width
-/// byte span matcher; BYTE_TABLE runs a one-byte member run on the single-byte table for SHORT rows
-/// in RE2 and Java, and on the ordinary search for LONG rows and in Rust, whose `\s` is Unicode;
-/// and ANCHORED_LITERAL compares a literal prefix. FOLDED_PLAN is an ASCII-folded scan plan, which
-/// has no generated class. FOLDED_PAIR_SEQUENCE is a control: a class sequence whose first class
+/// literal-alternation span matcher, as a matcher's `find` does with fewer than 64 bytes left,
+/// while one with at least 64, on LONG rows, runs the DFA's candidate cursor; GENERAL has no plan
+/// and no literal or class shortcut, so it runs the ordinary DFA search; FIXED_WIDTH runs a
+/// fixed-width class sequence on the fixed-width byte span matcher, as a matcher's `find` does;
+/// BYTE_TABLE runs a one-byte member run on the single-byte table for SHORT rows in RE2 and Java,
+/// and on the ordinary search for LONG rows and in Rust, whose `\s` is Unicode; and
+/// ANCHORED_LITERAL compares a literal prefix. FOLDED_PLAN is an ASCII-folded scan plan, which has
+/// no generated class. FOLDED_PAIR_SEQUENCE is a control: a class sequence whose first class
 /// simplifies to a case-folded literal, so it takes no fixed-width route in any language, Trino
 /// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
 /// literal, `[a-z]shing`: RE2, Java, and Rust keep the DFA's inner literal search, while Trino's
@@ -94,10 +96,12 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// are `JavaRegexp` sites. One loop calling the languages through a shared interface would add the
 /// many-receiver call site that this benchmark measures. `iterate` counts the matches of each row
 /// with a find loop of the language's public matcher, which retains only group zero; each pattern
-/// has one matcher, created at setup and reset to each row, so the loop allocates nothing. Trino's
-/// `find` is its `contains`. Trino has no whole-input or anchored-prefix match, so its `matches`
-/// and `lookingAt` throw `UnsupportedOperationException`, and its training calls only `contains`,
-/// `count`, and its matcher.
+/// has one matcher, created at setup and reset to each row, so the loop allocates nothing once a
+/// literal alternation's first long search has created the matcher's DFA candidate cursor, which
+/// only literals that differ in length have. Trino's `find` is its `contains`. Trino has no
+/// whole-input or anchored-prefix match, so its `matches` and `lookingAt` throw
+/// `UnsupportedOperationException`, and its training calls only `contains`, `count`, and its
+/// matcher.
 ///
 /// With `polluted=false`, setup compiles only the target, so no other pattern has run or loaded a
 /// generated class: the run is the one-pattern baseline. With `polluted=true`, setup also compiles

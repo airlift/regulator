@@ -28,11 +28,12 @@ import static io.airlift.regulator.Regexp.LATIN1;
 import static java.util.Objects.requireNonNull;
 
 /// Finds the leftmost-first match of an alternation of at most [#MAXIMUM_ALTERNATIVES] literal
-/// strings, such as `ERROR|WARN|FATAL`, which serves short Trino patterns. It walks a trie at
-/// each position it reads through its root table, and compares the literals that begin with
-/// the byte at each start literal filter stop. [LiteralSetSpanMatcher] searches a larger
+/// strings, such as `ERROR|WARN|FATAL`, which serves short patterns in every language. It walks
+/// a trie at each position it reads through its root table, and compares the literals that begin
+/// with the byte at each start literal filter stop. [LiteralSetSpanMatcher] searches a larger
 /// alternation, whose literals this class's analysis also extracts.
 final class LiteralAlternationSpanMatcher
+        implements GroupZeroSpanSearch
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.class);
     static final int MAXIMUM_ALTERNATIVES = 64;
@@ -467,46 +468,59 @@ final class LiteralAlternationSpanMatcher
 
     long findSpan(Slice input, int start)
     {
-        return findSpan(input, start, null, false, null);
+        return findSpan(input, start, input.length(), null, false, null);
     }
 
     /// Returns the span of the first match at or after `start`, or [Dfa#SEARCH_NO_MATCH]. A
     /// `cursor`, which may be null, carries the route from one search of `input` to the next.
     long findSpan(Slice input, int start, Cursor cursor)
     {
-        return findSpan(input, start, cursor, false, null);
+        return findSpan(input, start, input.length(), cursor, false, null);
+    }
+
+    /// Returns the span of the first match lying entirely in `[start, end)` of `input`, or
+    /// [Dfa#SEARCH_NO_MATCH]; the caller checks that `0 <= start <= end <= input.length()`. The
+    /// trie walk stops at `end`, so where a preferred alternative would run past it, a shorter
+    /// one that ends within it matches, as the general engine reports for the region: `ab` of
+    /// `abc|x|ab` in a region ending after `ab`.
+    long findSpan(Slice input, int start, int end)
+    {
+        return findSpan(input, start, end, null, false, null);
     }
 
     /// Returns [#findSpan(Slice,int,Cursor)] from the start of `input` without a cursor, or
     /// [#DECLINED] when the filter's stops are dense at the start.
     long findSpanOrDecline(Slice input)
     {
-        return findSpan(input, 0, null, true, null);
+        return findSpan(input, 0, input.length(), null, true, null);
     }
 
     /// Returns [#findSpan(Slice,int,Cursor)], adding the routes it reads to `diagnostics`.
     long findSpanForDiagnostics(Slice input, int start, Cursor cursor, RouteDiagnostics diagnostics)
     {
-        return findSpan(input, start, cursor, false, requireNonNull(diagnostics, "diagnostics is null"));
+        return findSpan(input, start, input.length(), cursor, false, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
     /// Returns [#findSpanOrDecline(Slice)], adding the routes it reads to `diagnostics`.
     long findSpanOrDeclineForDiagnostics(Slice input, RouteDiagnostics diagnostics)
     {
-        return findSpan(input, 0, null, true, requireNonNull(diagnostics, "diagnostics is null"));
+        return findSpan(input, 0, input.length(), null, true, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
-    // A null `diagnostics`, as every production search passes, counts nothing.
-    private long findSpan(Slice input, int start, Cursor cursor, boolean declinesDenseStart, RouteDiagnostics diagnostics)
+    // The search reads nothing at or past `end`, so `inputEnd` below is the region end: the
+    // routes, the filter's scan, and the trie walk all stop at it, as they stop at the input end
+    // of a full-input search. A null `diagnostics`, as every production search passes, counts
+    // nothing.
+    private long findSpan(Slice input, int start, int end, Cursor cursor, boolean declinesDenseStart, RouteDiagnostics diagnostics)
     {
         requireNonNull(input, "input is null");
-        if (start < 0 || start > input.length()) {
+        if (start < 0 || start > end) {
             return Dfa.SEARCH_NO_MATCH;
         }
 
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
-        int inputEnd = inputOffset + input.length();
+        int inputEnd = inputOffset + end;
         int firstPosition = inputOffset + start;
         // With fewer than MINIMUM_START_LITERAL_FILTER_BYTES left, every route reads the root table
         // to the input end: the filter loop needs that many bytes left, the productivity sample and
@@ -804,13 +818,15 @@ final class LiteralAlternationSpanMatcher
         }
     }
 
-    /// The route one search of an input chose and the position it holds to, which a matcher's
-    /// next search of the same input continues instead of sampling the filter again, as the
-    /// DFA's group-zero cursor keeps its scan rejection. It also carries the filter stop count when
-    /// the route began, which decides whether the next route keeps the filter without sampling.
-    /// Positions are relative to the input.
-    /// A new cursor is reset; a caller must [#reset()] it before searching a different input,
-    /// since a route end carried past that input's end would read outside it.
+    /// The route one search of an input chose and the position it holds to, which the next
+    /// search of the same input continues instead of sampling the filter again, as the DFA's
+    /// group-zero cursor keeps its scan rejection. It also carries the filter stop count when the
+    /// route began, which decides whether the next route keeps the filter without sampling.
+    /// Positions are relative to the input. Its callers search whole inputs: Trino's matcher
+    /// across its finds, and Trino's operations that find repeatedly within one call. A new cursor
+    /// is reset; a caller must [#reset()] it before searching a different input, since a route end
+    /// carried past that input's end would read outside it. The cursor is mutable, so each caller
+    /// owns its own, and the shared span matcher holds none.
     static final class Cursor
     {
         private int routeEnd;

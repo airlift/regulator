@@ -77,7 +77,9 @@ public class TestLiteralAlternationSpanMatcher
                 "βeta|γamma|alpha",
                 "alpha|βeta|終端",
                 // The first alternative wins over a longer later one at the same start.
-                "xa|b|xab");
+                "xa|b|xab",
+                // A region end that cuts abc leaves the later ab.
+                "abc|x|ab");
         List<Slice> inputs = List.of(
                 utf8Slice(""),
                 utf8Slice("ordinary text"),
@@ -85,6 +87,7 @@ public class TestLiteralAlternationSpanMatcher
                 utf8Slice("xxfar then foo"),
                 utf8Slice("xxβeta終端alpha"),
                 utf8Slice("xab xa b xxab ÿþ"),
+                utf8Slice("abcab xabc"),
                 wrappedBuffer(new byte[] {(byte) 0xFF, 'E', 'R', 'R', 'O', 'R'}),
                 wrappedBuffer("\u00FFFATAL\u00CEWARN\u00CE\u00CE\u00B2eta\u00E7\u00B5ERROR\u00FF\u00FE".getBytes(ISO_8859_1)));
 
@@ -126,6 +129,11 @@ public class TestLiteralAlternationSpanMatcher
                         assertThat(span)
                                 .as("pattern %s input %s start %s", expression, input, start)
                                 .isEqualTo(Dfa.SEARCH_NO_MATCH);
+                    }
+                    // A region search reports the general engine's first match in the region.
+                    for (int end = start; end <= input.length(); end++) {
+                        long expected = matcher.reset(input, start, end).find() ? ((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL) : Dfa.SEARCH_NO_MATCH;
+                        assertThat(scanner.findSpan(input, start, end)).as("pattern %s input %s region %s-%s", expression, input, start, end).isEqualTo(expected);
                     }
                 }
             }
@@ -213,11 +221,11 @@ public class TestLiteralAlternationSpanMatcher
 
         // Longest-match search keeps the program, so its forward budget is the uncharged control.
         Re2 longestMatch = Re2.compile(dictionary, Re2.Options.defaults().setLongestMatch(true));
-        assertThat(longestMatch.literalSetSpanMatcher()).isNull();
+        assertThat(longestMatch.literalSetSpanMatcherForDiagnostics()).isNull();
         assertThat(patterns.getFirst().forwardProgramForDiagnostics().dfaMemory())
-                .isEqualTo(longestMatch.forwardProgramForDiagnostics().dfaMemory() - patterns.getFirst().literalSetSpanMatcher().estimatedRetainedSize());
-        assertThat(Re2.compile(utf8Slice(words(64))).literalSetSpanMatcher()).isNull();
-        assertThat(Re2.compile(utf8Slice("(" + words(65) + ")")).literalSetSpanMatcher()).isNull();
+                .isEqualTo(longestMatch.forwardProgramForDiagnostics().dfaMemory() - patterns.getFirst().literalSetSpanMatcherForDiagnostics().estimatedRetainedSize());
+        assertThat(Re2.compile(utf8Slice(words(64))).literalSetSpanMatcherForDiagnostics()).isNull();
+        assertThat(Re2.compile(utf8Slice("(" + words(65) + ")")).literalSetSpanMatcherForDiagnostics()).isNull();
 
         // The set answers full-Slice find and count only where the forward DFA each runs cannot
         // initialize beside it. Find's earliest-match search runs the longest-match DFA, which
@@ -235,16 +243,16 @@ public class TestLiteralAlternationSpanMatcher
             long countEdge = leastValue(dfaMemory, budget -> compileWithMaxMemory(expression, budget).forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH) != null);
             long findEdge = leastValue(countEdge, budget -> compileWithMaxMemory(expression, budget).forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null);
             long skipEdge = VectorSupport.isAvailable()
-                    ? leastValue(findEdge, budget -> compileWithMaxMemory(expression, budget).literalSetSpanMatcher().rootByteScanSetForDiagnostics() != 0)
+                    ? leastValue(findEdge, budget -> compileWithMaxMemory(expression, budget).literalSetSpanMatcherForDiagnostics().rootByteScanSetForDiagnostics() != 0)
                     : findEdge;
             int scanSet = literalSet(expression).rootByteScanSetForDiagnostics();
             for (long budget : List.of(countEdge - 1, countEdge, findEdge - 1, findEdge, skipEdge - 1, skipEdge)) {
                 Re2 pattern = compileWithMaxMemory(expression, budget);
                 String label = expression.substring(0, 20) + " at " + budget;
-                assertThat(pattern.literalSetSpanMatcher()).as(label).isNotNull();
+                assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(label).isNotNull();
                 assertThat(shape(pattern)).as(label).isEqualTo(budget >= findEdge ? CompiledPattern.Shape.ENGINE : CompiledPattern.Shape.LITERAL_ALTERNATION);
                 assertThat(pattern.countsOnLiteralSetForDiagnostics()).as(label).isEqualTo(budget < countEdge);
-                assertThat(pattern.literalSetSpanMatcher().rootByteScanSetForDiagnostics()).as(label).isEqualTo(budget >= skipEdge ? scanSet : 0);
+                assertThat(pattern.literalSetSpanMatcherForDiagnostics().rootByteScanSetForDiagnostics()).as(label).isEqualTo(budget >= skipEdge ? scanSet : 0);
                 assertThat(pattern.find(wordsInput)).as(label).isTrue();
                 assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null).as(label).isEqualTo(budget >= findEdge);
                 assertThat(pattern.countMatches(wordsInput)).as(label).isEqualTo(3);
@@ -277,7 +285,7 @@ public class TestLiteralAlternationSpanMatcher
             }
             String expression = String.join("|", literals);
             Re2 pattern = Re2.compile(utf8Slice(expression));
-            assertThat(pattern.literalSetSpanMatcher()).as(expression).isNotNull();
+            assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(expression).isNotNull();
             LiteralSetSpanMatcher trinoScanner = literalSet(expression);
 
             for (int inputIndex = 0; inputIndex < 5; inputIndex++) {
@@ -291,6 +299,10 @@ public class TestLiteralAlternationSpanMatcher
                     assertThat(trinoScanner.findSpan(input, start, input.length()))
                             .as("pattern %s input %s start %s", expression, input.toStringUtf8(), start)
                             .isEqualTo(expected);
+                    // A region that ends halfway to the input end cuts the matches that cross it.
+                    int end = start + (input.length() - start) / 2;
+                    expected = generalMatcher.reset(input, start, end).find() ? ((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL) : Dfa.SEARCH_NO_MATCH;
+                    assertThat(trinoScanner.findSpan(input, start, end)).as("pattern %s input %s region %s-%s", expression, input.toStringUtf8(), start, end).isEqualTo(expected);
                 }
             }
         }
@@ -512,7 +524,7 @@ public class TestLiteralAlternationSpanMatcher
                     .forwardProgramForDiagnostics().dfaMemory() - tablelessSetSize >= dfaMemory);
             for (long budget : List.of(edgeMemory - 1, edgeMemory)) {
                 Re2 pattern = Re2.compile(utf8Slice(fiveLeadingByteDictionary), Re2.Options.defaults().setMaxMemory(budget));
-                assertThat(pattern.literalSetSpanMatcher()).as("%s at %s", kind, budget).isNotNull();
+                assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as("%s at %s", kind, budget).isNotNull();
                 assertThat(pattern.forwardProgramForDiagnostics().getCachedDfa(kind) != null).as("%s at %s", kind, budget).isEqualTo(budget == edgeMemory);
             }
         }
@@ -695,6 +707,63 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(matcher.reset(utf8Slice("xxxx")).find()).isFalse();
         assertThat(matcher.reset(utf8Slice("xxWARN")).find()).isTrue();
         assertThat(List.of(matcher.start(), matcher.end())).containsExactly(2, 6);
+    }
+
+    @Test
+    public void testMatchersOwnTheirCandidateCursors()
+    {
+        // Every find below, the one after each input's last match included, has more than
+        // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES left, so a matcher hands it from the span
+        // search to its own DFA candidate cursor. On near misses with an ERROR every 10,007 bytes
+        // the cursor's productivity check rejects the start-byte scan and turns the cursor off for
+        // the rest of the input, while on log lines of a few KiB it routes the finds. Two matchers
+        // of one compiled pattern interleave their finds over the two inputs, so a cursor shared
+        // between them would carry one input's verdict into the other's search; each matcher's
+        // spans are the general engine's. Then the first matcher, reset onto a shorter input,
+        // turns its cursor back on.
+        byte[] nearMisses = nearMisses(4 * RECHECK_BYTES);
+        for (int position = 5_000; position + 5 <= nearMisses.length; position += 10_007) {
+            System.arraycopy("ERROR".getBytes(UTF_8), 0, nearMisses, position, 5);
+        }
+        Slice dense = wrappedBuffer(nearMisses);
+        Slice log = utf8Slice(logLines(3_500));
+        Slice shorter = utf8Slice("WARN " + " ".repeat(90) + "FATAL ERROR" + " ".repeat(80));
+        for (CompiledPattern pattern : re2JavaAndRustPatterns("ERROR|WARN|FATAL").values()) {
+            String expression = pattern.pattern().toStringUtf8();
+            LiteralAlternationSpanMatcher scanner = pattern.literalAlternationSpanMatcherForDiagnostics();
+            RegexpMatcher denseMatcher = pattern.matcher(dense, 0);
+            RegexpMatcher logMatcher = pattern.matcher(log, 0);
+            assertThat(denseMatcher.spanSearchForDiagnostics()).as(expression).isSameAs(scanner);
+            List<String> expectedDense = findSpans(pattern.genericGroupZeroMatcherForDiagnostics(dense));
+            List<String> expectedLog = findSpans(pattern.genericGroupZeroMatcherForDiagnostics(log));
+            assertThat(expectedDense).as(expression).hasSizeGreaterThan(20);
+            assertThat(expectedLog).as(expression).hasSizeGreaterThan(2);
+            List<String> denseSpans = new ArrayList<>();
+            List<String> logSpans = new ArrayList<>();
+            boolean denseFound = true;
+            boolean logFound = true;
+            while (denseFound || logFound) {
+                denseFound = denseFound && denseMatcher.find();
+                if (denseFound) {
+                    denseSpans.add(denseMatcher.start() + "-" + denseMatcher.end());
+                }
+                logFound = logFound && logMatcher.find();
+                if (logFound) {
+                    logSpans.add(logMatcher.start() + "-" + logMatcher.end());
+                }
+            }
+            assertThat(denseSpans).as(expression).isEqualTo(expectedDense);
+            assertThat(logSpans).as(expression).isEqualTo(expectedLog);
+            assertThat(denseMatcher.candidateStartProductivityRejectionCountForDiagnostics()).as(expression).isPositive();
+            assertThat(denseMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isZero();
+            assertThat(logMatcher.candidateStartProductivityRejectionCountForDiagnostics()).as(expression).isZero();
+            assertThat(logMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isPositive();
+
+            denseMatcher.reset(dense);
+            assertThat(denseMatcher.find()).as(expression).isTrue();
+            assertThat(findSpans(denseMatcher.reset(shorter))).as(expression).containsExactly("0-4", "95-100", "101-106");
+            assertThat(denseMatcher.candidateStartRouteCountForDiagnostics()).as(expression).isPositive();
+        }
     }
 
     @Test
@@ -950,10 +1019,10 @@ public class TestLiteralAlternationSpanMatcher
     private static void assertLiteralSetFind(CompiledPattern pattern, Slice input)
     {
         String expression = pattern.pattern().toStringUtf8();
-        assertThat(pattern.literalSetSpanMatcher()).as(expression).isNotNull();
+        assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(expression).isNotNull();
         assertThat(shape(pattern)).as(expression).isEqualTo(CompiledPattern.Shape.ENGINE);
         RegexpMatcher matcher = pattern.matcher(input);
-        assertThat(matcher.literalSetEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.spanSearchForDiagnostics()).isSameAs(pattern.literalSetSpanMatcherForDiagnostics());
         assertThat(matcher.find()).isTrue();
         assertNoProgramSearch(pattern, expression);
         assertThat(pattern.find(input)).as(expression).isTrue();
@@ -961,7 +1030,7 @@ public class TestLiteralAlternationSpanMatcher
         long count = pattern.count(input);
         assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(expression).isNotNull();
         assertThat(count).as(expression).isEqualTo(generalEngineCount(pattern, input));
-        assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).literalSetEnabledForDiagnostics()).isFalse();
+        assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).isNull();
         assertFindAgreement(pattern, input);
     }
 

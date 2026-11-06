@@ -1185,14 +1185,29 @@ When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
 matchers Trino uses. Trino's subtypes call these matchers directly because
 routing through the compiled pattern's dispatch measured about 9% more per
-call on Graviton. The literal-alternation matcher's root-table route restarts
-its trie at every input byte, and a filter stop compares the literals that
-begin with its byte, so it takes only alternatives of at most 64 bytes; a
-longer literal keeps the general engine, whose DFA scans each byte once. The
-longest literal among the measured rows is 35 bytes, in rebar's Russian
-Sherlock names. When its literals admit a [start literal
-filter](#start-literal-filter), inputs of at least 64 bytes may skip to the
-positions the filter accepts, unless the filter's stops are dense.
+call on Graviton. A group-zero `RegexpMatcher.find()` of such a pattern, or of
+a [large literal alternation](#large-literal-alternations), searches the same
+matcher in every language, while Trino's span subtypes iterate theirs directly.
+A literal alternation's matcher searches the trie only while fewer than 64
+bytes are left, and a longer search takes the program's search, whose
+start-byte scan the trie replaced: the DFA's candidate cursor, which the matcher
+creates on its first long search, where the literals differ in length, and the
+group-zero forward cursor where they share one. On 1 KiB rows of
+`ERROR|WARN|FATAL`, a matcher's finds without that hand-off took 2.0x the time
+on r9g and 4.4–4.6x on r8i, while 16 to 64 byte rows measured flat. The search
+reports the leftmost-first span lying entirely in the matcher's region, as the
+general engine does: a region end that cuts `abc` of `abc|x|ab` leaves `ab`.
+Compilation resolves the matcher; a pattern with a single-byte table or a class
+counter finds on that instead.
+
+The literal-alternation matcher's root-table route restarts its trie at every
+input byte, and a filter stop compares the literals that begin with its byte,
+so it takes only alternatives of at most 64 bytes; a longer literal keeps the
+general engine, whose DFA scans each byte once. The longest literal among the
+measured rows is 35 bytes, in rebar's Russian Sherlock names. When its literals
+admit a [start literal filter](#start-literal-filter), inputs of at least 64
+bytes may skip to the positions the filter accepts, unless the filter's stops
+are dense.
 
 The fixed-width matcher checks every occurrence of one byte, such as the `s` of
 `[a-z]shing`, which English text holds far more often than `shing`. RE2, Java,
@@ -1900,11 +1915,18 @@ filter route whose stops stayed below one per 16 bytes, half the density the
 sample calls dense, keeps the filter for the next 64 KiB without sampling
 again: each sample reads windows spread over the rest of the input, often cold,
 and sampling at every route was 3-7% of the time of the Tom Sawyer and
-Huckleberry Finn row. A count, a Trino matcher's repeated finds, and each call
-of Trino's position, extract-all, split, and replace carry the route from one
-match to the next, so they sample at most once per 64 KiB rather than once per
-match, and only once when the first sample keeps the filter and every route's
-stops stay below one per 16 bytes.
+Huckleberry Finn row. A count in every language, a Trino matcher's repeated
+finds, and each call of Trino's position, extract-all, split, and replace carry
+the route from one match to the next, so they sample at most once per 64 KiB
+rather than once per match, and only once when the first sample keeps the
+filter and every route's stops stay below one per 16 bytes. A Trino matcher
+carries the route in a route cursor of its own, reset with the matcher, since
+the compiled pattern and its span matcher are shared between threads. An RE2,
+Java, or Rust matcher never takes the filter: a find with at least 64 bytes
+left hands off to the program's search, as the [literal-alternation
+matcher](#boolean-partial-match-specializations) records, and a shorter one
+reads the root table, so it carries no route cursor. The DFA candidate cursor
+such a matcher creates for its long finds is a different cursor.
 
 When the first sample of an input finds the stops dense, RE2, Java, and Rust
 boolean find and count do not read the root table: they hand the input to the
@@ -2252,21 +2274,22 @@ NFA, which re-added a root alternation of about 4,000 branches at every byte.
 
 Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
-trie. RE2, Java, and Rust search the automaton for `RegexpMatcher.find()`;
-`matches`, `lookingAt`, anchored, and capture operations keep the program.
-Full-Slice boolean `find` and count keep the forward DFA wherever it initializes
-beside the automaton: on text where most bytes lead a literal, the automaton's
-walk takes several steps per byte, its root lookup, edge scan, and failure
-steps, to the DFA's one, and measured 1.94x to 2.47x slower on r9g and 3.16x to
-3.72x on r8i. Where the DFA cannot initialize, the automaton answers in its
-place. A boolean `find` runs the longest-match DFA and a count the first-match
-DFA, which needs less memory, so `english-10` under the default budget finds on
-the automaton and counts on the DFA. A DFA count that gives up returns no count,
-and the matcher counts on the automaton. Trino checks the automaton against the
-forward-DFA budget before compiling a program, while the other languages charge
-it to that budget. The compile applies the same rule in every language, but a
-Trino pattern never reaches it with an automaton that fits: the program's DFA
-budget is smaller than the forward budget Trino checked.
+trie. RE2, Java, and Rust search the automaton for a group-zero
+`RegexpMatcher.find()`, within the matcher's region; `matches`, `lookingAt`,
+anchored, and capture operations keep the program. Full-Slice boolean `find` and
+count keep the forward DFA wherever it initializes beside the automaton: on text
+where most bytes lead a literal, the automaton's walk takes several steps per
+byte, its root lookup, edge scan, and failure steps, to the DFA's one, and
+measured 1.94x to 2.47x slower on r9g and 3.16x to 3.72x on r8i. Where the DFA
+cannot initialize, the automaton answers in its place. A boolean `find` runs the
+longest-match DFA and a count the first-match DFA, which needs less memory, so
+`english-10` under the default budget finds on the automaton and counts on the
+DFA. A DFA count that gives up returns no count, and the matcher counts on the
+automaton. Trino checks the automaton against the forward-DFA budget before
+compiling a program, while the other languages charge it to that budget. The
+compile applies the same rule in every language, but a Trino pattern never
+reaches it with an automaton that fits: the program's DFA budget is smaller than
+the forward budget Trino checked.
 
 At the root, with the Vector API and at least 64 bytes left, the automaton skips
 the bytes that lead no literal with a vector scan for its leading bytes; walking

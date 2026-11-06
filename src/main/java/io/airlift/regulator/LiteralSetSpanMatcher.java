@@ -58,6 +58,7 @@ import static java.util.Objects.requireNonNull;
 /// them, and the skip costs nothing where it is not built. No method is overridden: the
 /// searches reach the skip's scan set by testing `this` against the subclass.
 sealed class LiteralSetSpanMatcher
+        implements GroupZeroSpanSearch
         permits LiteralSetSpanMatcher.RootSkippingMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSetSpanMatcher.class);
