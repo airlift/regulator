@@ -1334,16 +1334,18 @@ compact.
 
 ## Candidate Masks on SVE
 
-Three vector scans build a candidate mask from bytes that must all match: the
-literal prefix scan's first and last bytes, the scan plan's contains search,
-and the two three-byte groups of the [start literal filter](#start-literal-filter)'s
-two-literal check. Where C2 compiles vector code with SVE and a 16-byte
-preferred byte vector, as on r9g (Graviton5), each loaded vector is XORed with
-its probe byte, the differences are ORed, and one compare with zero gives the
-mask; the start literal filter first takes the unsigned minimum of its two
-groups' differences. Everywhere else each byte is compared and the masks are
-ANDed. The JVM's `UseSVE` flag is read once, through the HotSpot diagnostic
-MXBean, on aarch64 only; if the flag cannot be read, the scans compare and AND.
+Several vector scans build a candidate mask from more than one byte compare.
+Three need every byte to match: the literal prefix scan's first and last bytes,
+the scan plan's contains search, and the two three-byte groups of the
+[start literal filter](#start-literal-filter)'s two-literal check; a later
+paragraph covers scans that stop at any of several bytes. Where C2 compiles
+vector code with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5),
+each loaded vector is XORed with its probe byte, the differences are ORed, and
+one compare with zero gives the mask; the start literal filter first takes the
+unsigned minimum of its two groups' differences. Everywhere else these three
+compare each byte and AND the masks. The JVM's `UseSVE` flag is read once,
+through the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be
+read, the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -1371,9 +1373,26 @@ case-insensitive sherlock on r9g with JDK 25. SVE with other preferred widths,
 such as 32 bytes on Graviton3, is unmeasured and keeps compare and AND; the
 scans with fixed 16-byte vectors follow the same preferred-width key.
 
-Both forms find the same candidates. The x86 CI builds run compare and AND, and
-the arm64 CI build runs the suite with the XOR form and fails if it is not
-selected.
+The two- and three-byte scans of the
+[small candidate-byte vector scan](#small-candidate-byte-vector-scan), and the
+scan plans' byte run stop over one to four bytes, take the same form under the
+same key: each block is XORed with each byte, and the unsigned minimum of the
+differences is compared once with zero, where the other form compares each byte
+and ORs the masks. Callers choose between the two forms, so each compiles on its
+own within C2's inlining limit. On r9g the XOR form took 0.91x to 0.92x the
+compare-and-OR form's time for rebar's `imported/leipzig/huck-saw`, 0.76x for
+`imported/sherlock/name-alt5`, and 0.46x for `BenchmarkTrinoScanPlan`
+`LONG_SET`, on JDK 25 and 27. With `-XX:UseSVE=0` it took 1.05x for `huck-saw`
+and 1.12x for `LONG_SET`, so NEON keeps compare and OR. On r8i it was mixed:
+1.04x to 1.05x for `huck-saw` and 1.06x to 1.09x for `BenchmarkTrinoScanPlan`
+`LONG_RETRY`, but 0.85x to 0.87x for `LONG_SET`, so x86 keeps compare and OR.
+RE2 run stops differ: their one compare also replaces the compare for non-ASCII
+bytes, and that form wins on every platform, as
+[RE2 Scan Plans](#re2-scan-plans) records.
+
+In each scan both forms find the same candidates. The x86 CI builds run the
+compare forms, and the arm64 CI build runs the suite with the XOR forms and
+fails if they are not selected.
 
 ## Literal Probe Byte Selection
 

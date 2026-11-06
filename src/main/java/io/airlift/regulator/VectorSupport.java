@@ -32,11 +32,12 @@ final class VectorSupport
             .isPresent() && PreferredSpecies.hasSupportedLength();
 
     // Whether C2 compiles this JVM's vector code with SVE and a 16-byte preferred byte vector, as
-    // on r9g. There, the multi-byte candidate scans XOR each probe byte, OR the results, and
-    // compare once with zero, because SVE compares and the AND that joins their masks are
-    // predicate operations. NEON, x86, and other SVE widths compare each byte and AND the masks.
-    // "Candidate Masks on SVE" in REGULATOR_DECISIONS.md records why and the measurements. C2
-    // folds this constant, so each scan compiles one form.
+    // on r9g. There, the scans "Candidate Masks on SVE" in REGULATOR_DECISIONS.md names XOR each
+    // byte with each probe, join the differences with OR or an unsigned minimum, and compare once
+    // with zero, because SVE compares and the AND or OR that joins their masks are predicate
+    // operations. NEON, x86, and other SVE widths compare each byte and join the masks. That
+    // section records why and the measurements; RE2 run stops take their XOR form on every
+    // platform. C2 folds this constant, so each scan compiles one form.
     static final boolean SVE_128 = sve128();
 
     private VectorSupport() {}
@@ -56,8 +57,8 @@ final class VectorSupport
         }
         catch (RuntimeException | LinkageError ignored) {
             // A management failure, such as the IllegalAccessError in a shaded named module that
-            // does not read `jdk.management`, falls back to the compare and AND scans rather than
-            // failing this class's initialization.
+            // does not read `jdk.management`, falls back to the compare forms rather than failing
+            // this class's initialization.
             return false;
         }
     }

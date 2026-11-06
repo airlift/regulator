@@ -440,7 +440,9 @@ final class ScanKernelSupport
                 return run.isInverted() ? end : cursor;
             }
             if (VectorSupport.isAvailable()) {
-                return VectorScanKernelSupport.findRunStop(input, cursor, end, needles, run.isInverted(), members);
+                return VectorSupport.SVE_128
+                        ? VectorScanKernelSupport.findRunStopSve(input, cursor, end, needles, run.isInverted(), members)
+                        : VectorScanKernelSupport.findRunStop(input, cursor, end, needles, run.isInverted(), members);
             }
         }
         for (; cursor < end; cursor++) {

@@ -33,14 +33,15 @@ final class VectorByteSetScanner
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
-    // and benchmark evidence. Candidate count is always one, two, or three.
+    // and benchmark evidence. Candidate count is always one, two, or three; two
+    // and three take the XOR form under VectorSupport.SVE_128.
     // Copied as VectorScanKernelSupport.findByteSet; keep the copy in step.
     static int find(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
     {
         return switch (candidateCount) {
             case 1 -> findOne(data, offset, length, first);
-            case 2 -> findTwo(data, offset, length, first, second);
-            case 3 -> findThree(data, offset, length, first, second, third);
+            case 2 -> VectorSupport.SVE_128 ? findTwoSve(data, offset, length, first, second) : findTwo(data, offset, length, first, second);
+            case 3 -> VectorSupport.SVE_128 ? findThreeSve(data, offset, length, first, second, third) : findThree(data, offset, length, first, second, third);
             default -> throw new IllegalArgumentException("candidateCount must be one, two, or three");
         };
     }
@@ -356,7 +357,8 @@ final class VectorByteSetScanner
         return -1;
     }
 
-    // Copied as VectorScanKernelSupport.findTwo; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findTwo; keep the copy in step. The SVE form is
+    // findTwoSve; keep the two in step.
     private static int findTwo(byte[] data, int offset, int length, byte first, byte second)
     {
         ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
@@ -382,7 +384,36 @@ final class VectorByteSetScanner
         return -1;
     }
 
-    // Copied as VectorScanKernelSupport.findThree; keep the copy in step.
+    // findTwo in the form VectorSupport.SVE_128 selects: XOR with each candidate, UMIN, and one
+    // compare with zero. Copied as VectorScanKernelSupport.findTwoSve; keep the copy in step.
+    private static int findTwoSve(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value == first || value == second) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    // Copied as VectorScanKernelSupport.findThree; keep the copy in step. The SVE form is
+    // findThreeSve; keep the two in step.
     private static int findThree(byte[] data, int offset, int length, byte first, byte second, byte third)
     {
         ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
@@ -395,6 +426,36 @@ final class VectorByteSetScanner
             VectorMask<Byte> matches = values.compare(VectorOperators.EQ, firstVector)
                     .or(values.compare(VectorOperators.EQ, secondVector))
                     .or(values.compare(VectorOperators.EQ, thirdVector));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value == first || value == second || value == third) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    // findThree in the form VectorSupport.SVE_128 selects: XOR with each candidate, UMIN, and one
+    // compare with zero. Copied as VectorScanKernelSupport.findThreeSve; keep the copy in step.
+    private static int findThreeSve(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(SPECIES, third);
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, thirdVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
