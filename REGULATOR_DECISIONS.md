@@ -1609,9 +1609,15 @@ DFA's start-scan productivity check. When they are dense, as on a log of near
 misses such as `ERxO` under `ERROR|WARN|FATAL`, which the filter passes and the
 literal compare rejects, the search reads the root table for the next 64 KiB
 and then samples again; otherwise it keeps the filter for those 64 KiB. A
-count, a Trino matcher's repeated finds, and each call of Trino's position,
-extract-all, split, and replace carry that choice from one match to the next,
-so they sample at most once per 64 KiB rather than once per match.
+filter route whose stops stayed below one per 16 bytes, half the density the
+sample calls dense, keeps the filter for the next 64 KiB without sampling
+again: each sample reads windows spread over the rest of the input, often cold,
+and sampling at every route was 3-7% of the time of the Tom Sawyer and
+Huckleberry Finn row. A count, a Trino matcher's repeated finds, and each call
+of Trino's position, extract-all, split, and replace carry the route from one
+match to the next, so they sample at most once per 64 KiB rather than once per
+match, and only once when the first sample keeps the filter and every route's
+stops stay below one per 16 bytes.
 
 When the first sample of an input finds the stops dense, RE2, Java, and Rust
 boolean find and count do not read the root table: they hand the input to the

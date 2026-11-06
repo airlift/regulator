@@ -397,13 +397,12 @@ public class TestLiteralAlternationSpanMatcher
             }
         }
 
-        // Sparse log lines, then near misses with a literal at random places, so searches sample
-        // sparse stops in the log and dense ones in the near misses, and switch between the
-        // filter and the root table at the 64 KiB rechecks. Spans from random starts, every match
-        // in turn, and the counts agree with the general engine.
-        StringBuilder mixed = new StringBuilder(logLines(RECHECK_BYTES));
+        // Sparse log lines, then near misses with a literal at random places. The log routes hold
+        // the filter, and the dense near misses send a later route to the root table. Spans from
+        // random starts, every match in turn, and the counts agree with the general engine.
+        StringBuilder mixed = new StringBuilder(logLines(2 * RECHECK_BYTES));
         String[] literals = {"ERROR", "WARN", "FATAL"};
-        while (mixed.length() < 5 * RECHECK_BYTES / 2) {
+        while (mixed.length() < 9 * RECHECK_BYTES / 2) {
             mixed.append(random.nextInt(64) == 0 ? literals[random.nextInt(literals.length)] : "ERxO WAxN FAxA ");
         }
         Slice input = utf8Slice(mixed.toString());
@@ -417,19 +416,24 @@ public class TestLiteralAlternationSpanMatcher
                     : Dfa.SEARCH_NO_MATCH;
             assertThat(scanner.findSpan(input, start)).as("start %s", start).isEqualTo(expected);
         }
+        // A scanner the random starts did not use counts only the cursor walk's and the count's
+        // root-table positions.
+        LiteralAlternationSpanMatcher walkScanner = scanner("ERROR|WARN|FATAL");
         LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
         matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
-        long span = scanner.findSpan(input, 0, cursor);
+        long span = walkScanner.findSpan(input, 0, cursor);
         long expectedCount = 0;
         while (matcher.find()) {
             assertThat(span).isEqualTo(((long) matcher.start() << 32) | (matcher.end() & 0xFFFF_FFFFL));
             expectedCount++;
-            span = scanner.findSpan(input, (int) span, cursor);
+            span = walkScanner.findSpan(input, (int) span, cursor);
         }
         assertThat(span).isEqualTo(Dfa.SEARCH_NO_MATCH);
-        assertThat(scanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
-        assertThat(scanner.rootTablePositionCountForDiagnostics()).isGreaterThan(RECHECK_BYTES / 2);
-        assertThat(scanner.count(input)).isEqualTo(expectedCount);
+        assertThat(walkScanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
+        long walkRootTablePositions = walkScanner.rootTablePositionCountForDiagnostics();
+        assertThat(walkRootTablePositions).isGreaterThan(RECHECK_BYTES / 2);
+        assertThat(walkScanner.count(input)).isEqualTo(expectedCount);
+        assertThat(walkScanner.rootTablePositionCountForDiagnostics() - walkRootTablePositions).isGreaterThan(RECHECK_BYTES / 2);
         assertThat(pattern.count(input)).isEqualTo(expectedCount);
         assertThat(TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL")).count(input)).isEqualTo(expectedCount);
     }
@@ -478,14 +482,15 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     @Test
-    public void testLogSamplesOncePerRecheck()
+    public void testSparseLogSamplesOnce()
     {
         // Log lines with an occasional WARN or ERROR keep the filter. A count and a Trino
-        // matcher's finds sample once per 64 KiB route that has 64 KiB left, not once per match.
+        // matcher's finds sample once for their first route; later routes whose stops stayed
+        // sparse hold the filter without sampling again.
         Slice logInput = utf8Slice(logLines(2 * RECHECK_BYTES + 1024));
         long expectedCount = generalEngineCount(Re2.compile(utf8Slice("ERROR|WARN|FATAL")), logInput);
         assertThat(expectedCount).isGreaterThan(100);
-        long sampledPositions = VectorSupport.isAvailable() ? (logInput.length() / RECHECK_BYTES) * (long) Dfa.BYTE_SCAN_SAMPLE_SIZE : 0;
+        long sampledPositions = VectorSupport.isAvailable() ? Dfa.BYTE_SCAN_SAMPLE_SIZE : 0;
         LiteralAlternationSpanMatcher logScanner = scanner("ERROR|WARN|FATAL");
         assertThat(logScanner.count(logInput)).isEqualTo(expectedCount);
         assertThat(logScanner.filterStopCountForDiagnostics() > 0).isEqualTo(VectorSupport.isAvailable());
@@ -573,8 +578,9 @@ public class TestLiteralAlternationSpanMatcher
         }
 
         // Only the check at the start hands off. Here it samples three windows of sparse log lines
-        // and one of near misses, so the matcher keeps the input and reads the root table where a
-        // later check samples mostly near misses.
+        // and one of near misses, so the matcher keeps the input. The sparse log routes keep the
+        // filter into the near misses, and the next check, which samples only near misses, reads
+        // the root table.
         int logLines = 9_362;
         int nearMissBytes = 3 * RECHECK_BYTES - 4 * 1024;
         Slice mixed = utf8Slice("WARN disk usage above threshold on node 7\n".repeat(logLines) + nearMissText(nearMissBytes));

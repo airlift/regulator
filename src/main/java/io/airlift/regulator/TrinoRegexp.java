@@ -1205,7 +1205,8 @@ public sealed class TrinoRegexp
             }
 
             // One cursor carries the filter route from match to match, so the density check
-            // samples once per 64 KiB rather than once per match.
+            // samples at most once per 64 KiB rather than once per match, and only once while the
+            // filter routes stay sparse.
             LiteralAlternationSpanMatcher.Cursor cursor = new LiteralAlternationSpanMatcher.Cursor();
             long span = spanMatcher.findSpan(source, byteStart, cursor);
             for (long match = 1; match < occurrence && span >= 0; match++) {
