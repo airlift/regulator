@@ -21,10 +21,8 @@ import io.airlift.regulator.TrinoLikeParser.ZeroOrMore;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
-import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.OptionalInt;
 
 import static java.util.Objects.requireNonNull;
@@ -159,7 +157,7 @@ public sealed class TrinoLikePattern
     private final long shortLiteralFirst;
     private final long shortLiteralLast;
 
-    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a nested non-sealed class, which only its generated hidden class extends")
     private TrinoLikePattern(
             Slice pattern,
             int minimumSize,
@@ -443,20 +441,14 @@ public sealed class TrinoLikePattern
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
-    /// [Options#setGenerateBytecode(boolean)] enables. [#matches(Slice)] of such a
-    /// pattern runs the generated class, and [#generatedMatches()] returns its entry.
+    /// [Options#setGenerateBytecode(boolean)] enables. Such a pattern is an instance of its
+    /// generated class, whose [#matches(Slice)] replaces the interpreted plan. A caller that
+    /// holds the pattern as a constant can bind [#matches(Slice)] to it, as
+    /// `docs/reference/REGULATOR_API.md` describes, so that its call site sees one generated
+    /// class.
     public boolean usesGeneratedBytecode()
     {
         return false;
-    }
-
-    /// Returns a handle on the generated code of [#matches(Slice)], of type
-    /// `(Slice)boolean`, or empty when this pattern is interpreted. The handle checks its
-    /// argument as [#matches(Slice)] does, except that it requires a non-null input but does
-    /// not check it.
-    public Optional<MethodHandle> generatedMatches()
-    {
-        return Optional.empty();
     }
 
     TrinoLikeKernelGenerator.Kernel kernelForDiagnostics()
@@ -615,20 +607,18 @@ public sealed class TrinoLikePattern
         }
     }
 
-    /// A pattern compiled to its own hidden class, which [#matches(Slice)] calls instead of
-    /// the interpreted plan. Callers that never enable [Options#setGenerateBytecode(boolean)]
-    /// never load this class.
-    private static final class CompiledTrinoLikePattern
+    /// A pattern compiled to its own hidden class, which extends this class, so the pattern a
+    /// caller holds is an instance of that class. The generated class declares
+    /// [#matches(Slice)] in place of the interpreted plan and adds no instance fields. Callers
+    /// that never enable [Options#setGenerateBytecode(boolean)] never load this class.
+    abstract static non-sealed class CompiledTrinoLikePattern
             extends TrinoLikePattern
     {
-        private final TrinoLikeKernelGenerator.CompiledLike generated;
-        private final CompiledTrinoLike like;
-
-        private CompiledTrinoLikePattern(TrinoLikePattern pattern, TrinoLikeKernelGenerator.CompiledLike generated)
+        /// Copies `pattern`, which the caller then discards. Only the generated subclass calls
+        /// this.
+        CompiledTrinoLikePattern(TrinoLikePattern pattern)
         {
             super(pattern);
-            this.generated = generated;
-            this.like = generated.like();
         }
 
         /// Returns `pattern` with a generated class, generated as on aarch64 when
@@ -637,9 +627,8 @@ public sealed class TrinoLikePattern
         /// of the base class from loading this class.
         static TrinoLikePattern create(TrinoLikePattern pattern, boolean aarch64)
         {
-            TrinoLikeKernelGenerator.CompiledLike generated;
             try {
-                generated = TrinoLikeKernelGenerator.generate(kernel(pattern), aarch64);
+                return TrinoLikeKernelGenerator.generate(pattern, aarch64);
             }
             catch (RuntimeException | LinkageError ignored) {
                 // Linking the generator fails here only if a consumer excluded the classfile
@@ -647,10 +636,6 @@ public sealed class TrinoLikePattern
                 // interpreted.
                 return null;
             }
-            if (generated == null) {
-                return null;
-            }
-            return new CompiledTrinoLikePattern(pattern, generated);
         }
 
         static TrinoLikeKernelGenerator.Kernel kernel(TrinoLikePattern pattern)
@@ -680,22 +665,9 @@ public sealed class TrinoLikePattern
         }
 
         @Override
-        public boolean matches(Slice input)
-        {
-            requireNonNull(input, "input is null");
-            return like.matches(input);
-        }
-
-        @Override
         public boolean usesGeneratedBytecode()
         {
             return true;
-        }
-
-        @Override
-        public Optional<MethodHandle> generatedMatches()
-        {
-            return Optional.of(generated.matches());
         }
     }
 }

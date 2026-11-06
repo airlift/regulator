@@ -33,8 +33,8 @@ Treat these as performance-sensitive unless analysis proves otherwise:
   the operation entries they declare, the scan helper copies they call, the
   code that emits them, and the `TrinoRegexp` and `CompiledPattern` calls that
   the generated pattern classes override or call
-- generated Trino LIKE kernels, the helper copies they call, and the code that
-  emits them
+- generated Trino LIKE pattern classes, the helper copies they call, and the
+  code that emits them
 
 Comments in these paths explain where performance depends on generated code.
 Do not extract helpers, introduce polymorphism, reorder loads, add logging, or

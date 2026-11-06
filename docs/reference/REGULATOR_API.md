@@ -190,9 +190,9 @@ own hidden class. Results are unchanged; `usesGeneratedBytecode()` reports
 whether the pattern has such a class. A pattern that is not eligible, or whose
 class cannot be generated, compiles as it does without the option.
 
-`Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are sealed classes that
-callers cannot extend, and `compile` may return a subclass of the class it is
-called on, such as a pattern's generated class.
+`Re2`, `TrinoRegexp`, `JavaRegexp`, `RustRegexp`, and `TrinoLikePattern` are
+sealed classes that callers cannot extend, and `compile` may return a subclass
+of the class it is called on, such as a pattern's generated class.
 
 ## Runtime acceleration
 
@@ -468,14 +468,11 @@ no captures, partial-input matching, match-result object, replacement grammar,
 or conversion to the RE2 language.
 
 `TrinoLikePattern.Options.setGenerateBytecode(true)`, passed to
-`compile(pattern, options)`, is an experimental option, off by default, that
+`compile(pattern, options)`, is an option, off by default, that
 compiles the pattern into its own hidden class. Results are unchanged;
 `usesGeneratedBytecode()` reports whether the pattern has such a class, which it
 lacks only when the class cannot be generated or would be too large for HotSpot
-to compile. A caller holding a constant pattern can bind the generated code
-directly through `generatedMatches()`, an `Optional` of a `(Slice)boolean`
-`MethodHandle` that is empty for an interpreted pattern. The handle requires a
-non-null input but does not check it.
+to compile.
 
 ## Trino adapter
 

@@ -24,11 +24,7 @@ import java.lang.classfile.MethodModel;
 import java.lang.classfile.Opcode;
 import java.lang.classfile.instruction.FieldInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -61,7 +57,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestTrinoLikeKernel
 {
     private static final TrinoLikePattern.Options GENERATED = TrinoLikePattern.Options.defaults().setGenerateBytecode(true);
-    private static final MethodType MATCHES = MethodType.methodType(boolean.class, Slice.class);
     // Every method of another class in this package that generated classes and their helpers
     // call. Generated code calls copies of the interpreter's helpers, because C2 compiles a
     // shared helper from the generated callers' profiles and the interpreter can then no longer
@@ -73,7 +68,8 @@ public class TestTrinoLikeKernel
             "TrinoLikeKernelSupport.nonAsciiCodePoint",
             "TrinoLikeKernelSupport.readInt",
             "TrinoLikeKernelSupport.readLong",
-            "TrinoLikeKernelSupport.readShort");
+            "TrinoLikeKernelSupport.readShort",
+            "TrinoLikePattern$CompiledTrinoLikePattern.<init>");
     private static final List<String> SYMBOLS = List.of("a", "b", "c", "x", "_", "%", "é", "€", "😀", "\u0000");
     private static final List<byte[]> MALFORMED_SEQUENCES = List.of(
             bytes(0xFF),
@@ -87,15 +83,15 @@ public class TestTrinoLikeKernel
     /// Patterns of every plan, with literals on either side of each inline comparison width, a
     /// literal longer than the inline comparisons, contained literals of one and of several bytes,
     /// gaps short enough to unroll and longer ones, and wildcards with and without non-ASCII code
-    /// points. Each runs on a generated class whose handle has the type and result of
-    /// [TrinoLikePattern#matches(Slice)], and the same pattern compiled without the option
-    /// keeps no generated code. In this package, the generated classes and the helpers they call
-    /// invoke only [#GENERATED_CODE_CALLS]. Each runs with both emitter variants, and each
-    /// search of a literal of two or more bytes verifies its candidates in a separate method and
-    /// reads its broadcasts from fields only as on aarch64.
+    /// points. Each generated class declares its own `matches`, which gives the interpreted
+    /// [TrinoLikePattern#matches(Slice)] result, and the same pattern compiled without the
+    /// option keeps no generated code. In this package, the generated classes and the helpers
+    /// they call invoke only [#GENERATED_CODE_CALLS]. Each runs with both emitter variants, and
+    /// each search of a literal of two or more bytes verifies its candidates in a separate method
+    /// and reads its broadcasts from fields only as on aarch64.
     @Test
     public void testEveryPlanShape()
-            throws Throwable
+            throws NoSuchMethodException
     {
         record Shape(String pattern, TrinoLikePattern.Plan plan) {}
 
@@ -142,7 +138,6 @@ public class TestTrinoLikeKernel
             TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
             assertThat(interpreted.planForDiagnostics()).as(pattern).isEqualTo(shape.plan());
             assertThat(interpreted.usesGeneratedBytecode()).as(pattern).isFalse();
-            assertThat(interpreted.generatedMatches()).as(pattern).isEmpty();
 
             List<Slice> sources = sources(random, pattern, 200);
             for (boolean aarch64 : new boolean[] {false, true}) {
@@ -150,15 +145,14 @@ public class TestTrinoLikeKernel
                 TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
                 assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
                 assertThat(generated.pattern()).as(pattern).isEqualTo(utf8Slice(pattern));
-                MethodHandle handle = generated.generatedMatches().orElseThrow();
-                assertThat(handle.type()).as(pattern).isEqualTo(MATCHES);
+                assertThat(generated.getClass().getMethod("matches", Slice.class).getDeclaringClass()).as(pattern).isEqualTo(generated.getClass());
                 byte[] classfile = TrinoLikeKernelGenerator.classfileForDiagnostics(generated.kernelForDiagnostics(), aarch64);
                 invoked.addAll(invokedMethods(classfile));
                 int patternSplitSearches = assertSplitSearches(pattern, classfile, generated.kernelForDiagnostics(), aarch64);
                 splitSearches += patternSplitSearches;
                 // The defined class declares broadcast fields exactly when the options ask for
                 // aarch64 searches.
-                Field[] fields = MethodHandles.reflectAs(Method.class, handle).getDeclaringClass().getDeclaredFields();
+                Field[] fields = generated.getClass().getDeclaredFields();
                 assertThat(Arrays.stream(fields).anyMatch(field -> field.getName().startsWith("broadcast")))
                         .as("%s aarch64=%s", pattern, aarch64)
                         .isEqualTo(aarch64 && patternSplitSearches > 0);
@@ -170,19 +164,15 @@ public class TestTrinoLikeKernel
                 .containsExactlyInAnyOrderElementsOf(GENERATED_CODE_CALLS);
     }
 
-    /// A generated pattern rejects a `null` input as the interpreter does; its handle checks
-    /// nothing more than the input it reads.
+    /// A generated pattern rejects a `null` input as the interpreter does.
     @Test
     public void testNullInput()
     {
         TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice("%a_b%"), GENERATED);
+        assertThat(generated.usesGeneratedBytecode()).isTrue();
         assertThatThrownBy(() -> generated.matches(null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("input is null");
-        MethodHandle handle = generated.generatedMatches().orElseThrow();
-        assertThatThrownBy(() -> {
-            boolean _ = (boolean) handle.invokeExact((Slice) null);
-        }).isInstanceOf(NullPointerException.class);
     }
 
     /// A wildcard automaton of more positions than one word holds carries its states between
@@ -190,7 +180,6 @@ public class TestTrinoLikeKernel
     /// that match any character on either side of each boundary.
     @Test
     public void testMultiWordWildcard()
-            throws Throwable
     {
         Random random = new Random(64);
         for (String pattern : List.of(
@@ -219,7 +208,6 @@ public class TestTrinoLikeKernel
     /// the literal. Each runs with both emitter variants.
     @Test
     public void testCandidateBudgetSwitchesToKmp()
-            throws Throwable
     {
         record Search(String pattern, List<String> tails) {}
 
@@ -259,14 +247,12 @@ public class TestTrinoLikeKernel
     /// while a smaller pattern of the same shape has a class.
     @Test
     public void testHugeMethodFallsBackToInterpreter()
-            throws Throwable
     {
         String large = wildcardOfDistinctCodePoints(0x4E00, 1_000);
         TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(large));
         assertThat(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(interpreted.kernelForDiagnostics(), AARCH64)).isGreaterThan(HUGE_METHOD_LIMIT);
         TrinoLikePattern fallback = TrinoLikePattern.compile(utf8Slice(large), GENERATED);
         assertThat(fallback.usesGeneratedBytecode()).isFalse();
-        assertThat(fallback.generatedMatches()).isEmpty();
         assertThat(fallback.matches(utf8Slice("x" + large.substring(2)))).isTrue();
 
         String small = wildcardOfDistinctCodePoints(0x4E00, 200);
@@ -406,17 +392,13 @@ public class TestTrinoLikeKernel
         return method.code().orElseThrow().elementStream();
     }
 
-    /// Requires the generated pattern and its handle to give the interpreted result on each
-    /// source.
+    /// Requires the generated pattern to give the interpreted result on each source.
     private static void verifySameMatches(String pattern, TrinoLikePattern generated, TrinoLikePattern interpreted, List<Slice> sources)
-            throws Throwable
     {
-        MethodHandle handle = generated.generatedMatches().orElseThrow();
         for (Slice source : sources) {
             String description = pattern + " on " + HexFormat.of().formatHex(source.getBytes());
             boolean expected = interpreted.matches(source);
             assertThat(generated.matches(source)).as(description).isEqualTo(expected);
-            assertThat((boolean) handle.invokeExact(source)).as(description).isEqualTo(expected);
         }
     }
 
