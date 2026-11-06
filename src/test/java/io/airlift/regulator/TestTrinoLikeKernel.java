@@ -243,6 +243,77 @@ public class TestTrinoLikeKernel
         }
     }
 
+    /// Short sources of every length up to 40 leave every remainder after the searches' word
+    /// loops, so the one-byte and the first-and-last-byte searches finish with every overlapping
+    /// final word and every one-at-a-time tail. Each source holds the literal once at each
+    /// position in turn, at each pair of positions for `%x%x%`, or nowhere, and appears as an
+    /// exact-length array, where a read outside it throws, and as a view whose neighbors are copies
+    /// of the literal, where a read outside it can find a match the source does not hold. The
+    /// second search of `%x%x%` starts just after the first `x`. Each runs with both emitter
+    /// variants.
+    @Test
+    public void testShortSearchTails()
+    {
+        record Search(String pattern, TrinoLikePattern.Plan plan, String literal, int occurrences) {}
+
+        for (Search search : List.of(
+                new Search("%x%", CONTAINS, "x", 1),
+                new Search("%needle%", CONTAINS, "needle", 1),
+                new Search("%x%x%", ORDERED_LITERALS, "x", 2))) {
+            String pattern = search.pattern();
+            byte[] literal = search.literal().getBytes(UTF_8);
+            TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
+            assertThat(interpreted.planForDiagnostics()).as(pattern).isEqualTo(search.plan());
+            List<Slice> sources = new ArrayList<>();
+            for (int length = 0; length <= 40; length++) {
+                List<int[]> placements = new ArrayList<>();
+                placements.add(new int[0]);
+                for (int first = 0; first <= length - literal.length; first++) {
+                    placements.add(new int[] {first});
+                    for (int second = first + literal.length; search.occurrences() > 1 && second <= length - literal.length; second++) {
+                        placements.add(new int[] {first, second});
+                    }
+                }
+                for (int[] positions : placements) {
+                    byte[] text = new byte[length];
+                    Arrays.fill(text, (byte) '-');
+                    for (int position : positions) {
+                        System.arraycopy(literal, 0, text, position, literal.length);
+                    }
+                    for (Slice source : List.of(wrappedBuffer(text), view(text, literal))) {
+                        assertThat(interpreted.matches(source))
+                                .as("%s on %s", pattern, HexFormat.of().formatHex(source.getBytes()))
+                                .isEqualTo(positions.length >= search.occurrences());
+                        sources.add(source);
+                    }
+                }
+            }
+            for (boolean aarch64 : new boolean[] {false, true}) {
+                TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(true).setAarch64ForTesting(aarch64);
+                TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
+                assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
+                verifySameMatches(pattern, generated, interpreted, sources);
+            }
+        }
+
+        // In "-------a`bab" the final word of the `%ab%` search flags a false candidate at 8, a
+        // borrow above the partial match at 7, before the match at 10; verification rejects it
+        // and goes on.
+        String pattern = "%ab%";
+        byte[] falseCandidate = "-------a`bab".getBytes(UTF_8);
+        List<Slice> sources = List.of(wrappedBuffer(falseCandidate), view(falseCandidate, "ab".getBytes(UTF_8)));
+        TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
+        for (Slice source : sources) {
+            assertThat(interpreted.matches(source)).as(pattern).isTrue();
+        }
+        for (boolean aarch64 : new boolean[] {false, true}) {
+            TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(true).setAarch64ForTesting(aarch64);
+            TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
+            assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
+            verifySameMatches(pattern, generated, interpreted, sources);
+        }
+    }
+
     /// A pattern whose class would have a method longer than HotSpot compiles stays interpreted,
     /// while a smaller pattern of the same shape has a class.
     @Test
@@ -455,6 +526,20 @@ public class TestTrinoLikeKernel
         Arrays.fill(bytes, (byte) 0x80);
         System.arraycopy(text, 0, bytes, 3, text.length);
         return wrappedBuffer(bytes, 3, text.length);
+    }
+
+    /// Returns a view of `text` at a non-zero offset of a larger array whose neighbors are
+    /// copies of `neighbor`: the bytes before the view end with it and the bytes after begin with it.
+    private static Slice view(byte[] text, byte[] neighbor)
+    {
+        int padding = 2 * Long.BYTES;
+        byte[] bytes = new byte[padding + text.length + padding];
+        for (int index = 0; index < padding; index++) {
+            bytes[padding - 1 - index] = neighbor[neighbor.length - 1 - index % neighbor.length];
+            bytes[padding + text.length + index] = neighbor[index % neighbor.length];
+        }
+        System.arraycopy(text, 0, bytes, padding, text.length);
+        return wrappedBuffer(bytes, padding, text.length);
     }
 
     private static byte[] bytes(int... values)

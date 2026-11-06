@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 
 import static java.nio.charset.StandardCharsets.US_ASCII;
@@ -59,6 +60,48 @@ public class TestLiteralSearchKernel
         assertThat(kernel.findSingleByte(input, 16, input.length() - 16)).isEqualTo(16);
         assertThat(kernel.findSingleByte(input, 17, input.length() - 17)).isEqualTo(40);
         assertThat(kernel.findSingleByte(input, 17, 23)).isNegative();
+    }
+
+    /// Ranges of every length up to 40 leave every remainder after the word loops, so the scans
+    /// finish with every overlapping final word and every one-at-a-time tail, and each range holds
+    /// the literal once at each position in turn, or nowhere. Each range is searched as an
+    /// exact-length array, where a read outside it throws, and as a view whose neighbors are copies
+    /// of the literal, where a read outside it can find a match the range does not hold.
+    @Test
+    public void testShortRangeTails()
+    {
+        for (String literalText : List.of("a", "ab", "abc", "abcdefghij")) {
+            byte[] literal = literalText.getBytes(US_ASCII);
+            LiteralSearchKernel kernel = new LiteralSearchKernel(Slices.wrappedBuffer(literal));
+            for (int length = 0; length <= 40; length++) {
+                for (int match = -1; match <= Math.max(-1, length - literal.length); match++) {
+                    byte[] text = new byte[length];
+                    Arrays.fill(text, (byte) 'x');
+                    if (match >= 0) {
+                        System.arraycopy(literal, 0, text, match, literal.length);
+                    }
+                    for (Slice input : List.of(Slices.wrappedBuffer(text), view(text, literal))) {
+                        String description = "literal %s, length %s, match %s, array offset %s".formatted(literalText, length, match, input.byteArrayOffset());
+                        if (literal.length == 1) {
+                            assertThat(kernel.findSingleByte(input, 0, length)).as(description).isEqualTo(match);
+                        }
+                        else {
+                            assertThat(kernel.findContains(input, 0, length)).as(description).isEqualTo(match);
+                            assertThat(kernel.findContains(input.byteArray(), input.byteArrayOffset(), length))
+                                    .as(description)
+                                    .isEqualTo(match < 0 ? -1 : input.byteArrayOffset() + match);
+                        }
+                    }
+                }
+            }
+        }
+
+        // In "-------a`bab" the final word flags a false candidate at 8, a borrow above the partial
+        // match at 7, before the match at 10; verification rejects it and goes on.
+        byte[] falseCandidate = "-------a`bab".getBytes(US_ASCII);
+        for (Slice input : List.of(Slices.wrappedBuffer(falseCandidate), offsetSlice(falseCandidate))) {
+            assertSearch(kernel('a', 'b'), input, 0, input.length(), -1, 10);
+        }
     }
 
     @Test
@@ -231,6 +274,20 @@ public class TestLiteralSearchKernel
             bytes[index] = (byte) literal[index];
         }
         return new LiteralSearchKernel(Slices.wrappedBuffer(bytes));
+    }
+
+    /// Returns a view of `text` at a non-zero offset of a larger array whose neighbors are
+    /// copies of `neighbor`: the bytes before the view end with it and the bytes after begin with it.
+    private static Slice view(byte[] text, byte[] neighbor)
+    {
+        int padding = 2 * Long.BYTES;
+        byte[] bytes = new byte[padding + text.length + padding];
+        for (int index = 0; index < padding; index++) {
+            bytes[padding - 1 - index] = neighbor[neighbor.length - 1 - index % neighbor.length];
+            bytes[padding + text.length + index] = neighbor[index % neighbor.length];
+        }
+        System.arraycopy(text, 0, bytes, padding, text.length);
+        return Slices.wrappedBuffer(bytes).slice(padding, text.length);
     }
 
     private static Slice offsetSlice(byte[] value)

@@ -108,9 +108,11 @@ final class LiteralSearchKernel
     }
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher and LiteralGapMatcher call it for such
-    /// literals and [#findContains(Slice,int,int)] for longer ones. TrinoLikeKernelGenerator emits a
-    /// copy of its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
+    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher, LiteralGapMatcher, and
+    /// InnerLiteralSearch call it for such literals and [#findContains(Slice,int,int)] for longer
+    /// ones. It scans two words at a time and finishes the range with [#findSingleByteTail].
+    /// TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
+    /// LIKE pattern; keep the copy in step.
     int findSingleByte(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
@@ -136,6 +138,41 @@ final class LiteralSearchKernel
                 return position + Long.BYTES + (Long.numberOfTrailingZeros(secondMatches) >>> 3) - inputOffset;
             }
         }
+        return findSingleByteTail(inputBytes, inputOffset, position, searchEnd, length);
+    }
+
+    /// Returns the Slice-relative offset of the first occurrence of the one-byte literal in the up
+    /// to 15 bytes from `position` to `searchEnd` that [#findSingleByte] leaves, or `-1`;
+    /// `length` is the length of the whole range. A range of at least eight bytes finishes with up
+    /// to two more words, the last ending at the range end, where it can overlap bytes already
+    /// searched, as memchr ends with an overlapping vector; a shorter range checks its bytes one at
+    /// a time. On short rows a byte loop over the bytes the word loop leaves, its trip count varying
+    /// with every row, costs more than the words. Callers inline findSingleByte only while it fits
+    /// C2's 325-byte FreqInlineSize, so the finish lives in its own method.
+    /// TrinoLikeKernelGenerator emits a copy of this finish; keep the copy in step.
+    private int findSingleByteTail(byte[] inputBytes, int inputOffset, int position, int searchEnd, int length)
+    {
+        if (length >= Long.BYTES) {
+            // Up to 15 bytes remain. Search a word at the position when more than eight remain, then
+            // the word ending at the range end, which starts at or after the range start because the
+            // range holds at least eight bytes. The bytes it shares with words already searched hold
+            // no match, and the mask sets false bits only above a true match, so its lowest set bit
+            // is the first match.
+            if (searchEnd - position > Long.BYTES) {
+                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, position)) ^ frontBroadcast);
+                if (matches != 0) {
+                    return position + (Long.numberOfTrailingZeros(matches) >>> 3) - inputOffset;
+                }
+            }
+            if (position < searchEnd) {
+                int lastWord = searchEnd - Long.BYTES;
+                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, lastWord)) ^ frontBroadcast);
+                if (matches != 0) {
+                    return lastWord + (Long.numberOfTrailingZeros(matches) >>> 3) - inputOffset;
+                }
+            }
+            return -1;
+        }
         for (; position < searchEnd; position++) {
             if (inputBytes[position] == literal[0]) {
                 return position - inputOffset;
@@ -146,10 +183,10 @@ final class LiteralSearchKernel
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
-    /// Trino dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal, and the
-    /// other languages' contains of a literal longer than [#CANDIDATE_COMPARISON_BUDGET] call it
-    /// for such literals. Its word scan makes no call until it finds a possible candidate, and a
-    /// separate method verifies the candidates.
+    /// Trino dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal,
+    /// InnerLiteralSearch, and the other languages' contains of a literal longer than
+    /// [#CANDIDATE_COMPARISON_BUDGET] call it for such literals. Its word scan makes no call until
+    /// it finds a possible candidate, and a separate method verifies the candidates.
     int findContains(Slice input, int offset, int length)
     {
         if (literal.length > length) {
@@ -211,8 +248,11 @@ final class LiteralSearchKernel
     /// Skips to the first word, or tail position, holding a possible candidate, and returns
     /// [#verifyContainsCandidates] from there, or -1. The word loop makes no call until it
     /// finds a possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it,
-    /// and it reads LOW_BITS from [#lowBits]. TrinoLikeKernelGenerator emits a copy of this
-    /// scan; keep the copies in step.
+    /// and it reads LOW_BITS from [#lowBits]. After at least one word, the scan finishes with one
+    /// word ending at the last candidate, which can overlap candidates already scanned, rather than
+    /// a loop over up to seven candidates, whose trip count varies with every row; a search of
+    /// fewer than eight candidates checks them one at a time. TrinoLikeKernelGenerator emits a
+    /// copy of this scan; keep the copies in step.
     private int skipToContainsCandidate(byte[] input, int searchStart, int searchEnd)
     {
         int backOffset = literal.length - 1;
@@ -231,6 +271,25 @@ final class LiteralSearchKernel
         }
 
         int candidateEnd = searchEnd - backOffset;
+        if (position > searchStart) {
+            // The word loop scanned at least one word, so at least eight candidates exist, and the
+            // word ending at the last candidate starts at or after the range start; its back read
+            // ends at the range end. Up to seven candidates remain. The word sets no mask bit on the
+            // candidates it shares with words already scanned: those words set none there, and a
+            // borrow chain in this word starts no lower than in theirs. It can set a false bit on a
+            // new candidate just above an overlap byte that equals the literal's first byte;
+            // verification rejects it, and the comparison counts toward
+            // [#CANDIDATE_COMPARISON_BUDGET], which can only bring the KMP handoff earlier.
+            if (position < candidateEnd) {
+                int lastWord = candidateEnd - Long.BYTES;
+                long frontDifference = ((long) LONG_HANDLE.get(input, lastWord)) ^ front;
+                long backDifference = ((long) LONG_HANDLE.get(input, lastWord + backOffset)) ^ back;
+                if ((((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS) != 0) {
+                    return verifyContainsCandidates(input, searchStart, lastWord, searchEnd);
+                }
+            }
+            return -1;
+        }
         byte first = literal[0];
         byte last = literal[backOffset];
         for (; position < candidateEnd; position++) {
