@@ -1474,21 +1474,21 @@ compare the results with the NFA or the general engine.
 ## Bounded Character-Class Counting
 
 Counting a complete, unanchored, non-nullable greedy repetition of one character
-class scans decoded input once instead of running a complete matcher for every
+class scans the input once instead of running a complete matcher for every
 result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
-A Unicode class's exact membership bitset ends at its last member, up to 136 KiB
-for a class that reaches U+10FFFF; an ASCII-only class in any language, or a
-Latin-1 or Rust byte-mode class, uses 32 bytes. A class of every non-ASCII
-character, such as a negated ASCII class or a dot that matches newline, keeps
-16 bytes for its ASCII members and holds everything past them. The general
-counter is built lazily by a single writer and retained by the compiled
-pattern; a class repeat instead reuses its matcher counter, described below,
-when one was retained. The lazily built counter's size is independent of
-`maxMemory`, the planning budget that charges the program 120 and then 113
-bytes per instruction and leaves the DFA caches the rest, and it does not
-scale with the expression or configured budget.
+A Unicode class's exact membership bitset ends at its last member or at U+07FF,
+whichever is later, up to 136 KiB for a class that reaches U+10FFFF; an
+ASCII-only class in any language, or a Latin-1 or Rust byte-mode class, uses 32
+bytes. A class of every non-ASCII character, such as a negated ASCII class or a
+dot that matches newline, keeps 256 bytes through U+07FF and holds everything
+past them. The general counter is built lazily by a single writer and retained
+by the compiled pattern; a class repeat instead reuses its matcher counter,
+described below, when one was retained. The lazily built counter's size is
+independent of `maxMemory`, the planning budget that charges the program 120
+and then 113 bytes per instruction and leaves the DFA caches the rest, and it
+does not scale with the expression or configured budget.
 Unsupported shapes continue through the ordinary DFA or matcher path. A
 Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
 that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
@@ -1499,6 +1499,19 @@ point; a byte class reads bytes undecoded, so it counts malformed bytes like any
 others. An ASCII-only class also reads bytes undecoded, since every byte of a
 non-ASCII character, malformed or not, is at least 0x80 and matches none of its
 members.
+
+The count reads runs without branching on membership, which mispredicts at
+nearly every word boundary of ordinary text. A byte class updates its run
+arithmetically, byte by byte; on Graviton that beat reading memberships into a
+block mask. UTF-8 text of ASCII and two-byte characters checks 32 bytes at a
+time and reads a 32- or 64-byte block's memberships into a mask, which is why
+such a bitset reaches U+07FF. Other text decodes character by character with
+the branching run partition, in stretches that double from 32 bytes to 1 KiB
+while checks fail, and then in a loop of its own. Checking before every 32
+decoded bytes made CJK counts 1.33x slower on r9g and 1.64x on r8i, and on Intel
+a decode loop inside the block loop and a branch-free partition each cost
+another 10 to 15%. Letter-run counts take 0.55 to 0.62 of the previous time on
+r9g and 0.47 to 0.49 on r8i.
 
 Two counters are instead built at compile time and charged against the pattern's
 memory budget. The compact counter serves a large Unicode class repeated many
