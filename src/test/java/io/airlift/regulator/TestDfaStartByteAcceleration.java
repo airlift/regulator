@@ -127,7 +127,9 @@ public class TestDfaStartByteAcceleration
     public void testSmallStartByteSetsMatchScalarReference()
     {
         Random random = new Random(91);
-        for (String candidates : List.of("xy", "xyz")) {
+        // The last two sets hold Ã, whose lead byte C3 differs in sign from ASCII bytes, so the
+        // two- and three-byte vector scans must take the unsigned minimum of their XORs.
+        for (String candidates : List.of("xy", "xyz", "x\u00C3", "xy\u00C3")) {
             String pattern = "[" + candidates + "][0-9]{4}";
             Dfa.DfaInstance dfa = firstMatchDfa(pattern);
             for (int iteration = 0; iteration < 1_000; iteration++) {

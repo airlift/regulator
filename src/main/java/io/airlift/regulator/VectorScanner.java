@@ -34,7 +34,8 @@ final class VectorScanner
     /// Returns the first byte at or after `cursor` outside `members`, or `end`
     /// when none remains. `needles` holds one to four bytes: the members, or the
     /// non-members when `inverted`.
-    /// Copied as `VectorScanKernelSupport.findRunStop`; keep the copy in step.
+    /// Copied as `VectorScanKernelSupport.findRunStop`; keep the copy in step. The SVE form is
+    /// [#findRunStopSve]; keep the two in step.
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -54,6 +55,42 @@ final class VectorScanner
             if (count > 3) {
                 matches = matches.or(bytes.compare(VectorOperators.EQ, fourth));
             }
+            VectorMask<Byte> stops = inverted ? matches : matches.not();
+            if (stops.anyTrue()) {
+                return cursor + stops.firstTrue();
+            }
+        }
+        for (; cursor < end; cursor++) {
+            if (!members[input[cursor] & 0xFF]) {
+                return cursor;
+            }
+        }
+        return end;
+    }
+
+    /// [#findRunStop] in the form [VectorSupport#SVE_128] selects: XOR with each needle, UMIN,
+    /// and one compare with zero. Callers choose it, which keeps `findRunStop` within C2's
+    /// inlining limit. Copied as `VectorScanKernelSupport.findRunStopSve`; keep the copy in step.
+    static int findRunStopSve(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
+    {
+        int count = needles.length;
+        ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : needles[0]);
+        ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : needles[0]);
+        ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : needles[0]);
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            ByteVector difference = bytes.lanewise(VectorOperators.XOR, first);
+            if (count > 1) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, second));
+            }
+            if (count > 2) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, third));
+            }
+            if (count > 3) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, fourth));
+            }
+            VectorMask<Byte> matches = difference.compare(VectorOperators.EQ, (byte) 0);
             VectorMask<Byte> stops = inverted ? matches : matches.not();
             if (stops.anyTrue()) {
                 return cursor + stops.firstTrue();

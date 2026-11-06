@@ -669,7 +669,9 @@ final class ScanPlanRun
             // Small sets and their complements share the same equality scans. Keep larger
             // sets on a scalar table until measurements justify another vector operation.
             if (VectorSupport.isAvailable()) {
-                return VectorScanner.findRunStop(input, cursor, end, needles, inverted, members);
+                return VectorSupport.SVE_128
+                        ? VectorScanner.findRunStopSve(input, cursor, end, needles, inverted, members)
+                        : VectorScanner.findRunStop(input, cursor, end, needles, inverted, members);
             }
         }
         for (; cursor < end; cursor++) {

@@ -129,6 +129,9 @@ public class TestRe2ScanPlan
             // before a member with that lead, fails and resumes past it, and a run of every ASCII
             // byte but its delimiter stops at U+0085.
             new PlanCase("[éè]([a-z]+)=", "àa=é=èab="),
+            // The set's candidates, a and é's lead byte C3, differ in sign as bytes, so a two-byte
+            // vector scan must take the unsigned minimum of their XORs to find the é.
+            new PlanCase("[aé]([0-9]*)!", "-".repeat(100) + "é12!" + "-".repeat(40)),
             new PlanCase("[sS\\x{17F}]([a-z]+)=", HexFormat.of().parseHex("c5c5bf613d")),
             new PlanCase("key=([^;]+);", HexFormat.of().parseHex("6b783be2e284aa65793d763b6b65793d773b")),
             new PlanCase("([^/\\x{85}]+)/", "a\u0085b/c/"));

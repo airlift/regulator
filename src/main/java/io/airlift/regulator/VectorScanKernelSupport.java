@@ -71,6 +71,40 @@ final class VectorScanKernelSupport
         return end;
     }
 
+    /// A copy of `VectorScanner.findRunStopSve`.
+    static int findRunStopSve(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
+    {
+        int count = needles.length;
+        ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : needles[0]);
+        ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : needles[0]);
+        ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : needles[0]);
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            ByteVector difference = bytes.lanewise(VectorOperators.XOR, first);
+            if (count > 1) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, second));
+            }
+            if (count > 2) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, third));
+            }
+            if (count > 3) {
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, fourth));
+            }
+            VectorMask<Byte> matches = difference.compare(VectorOperators.EQ, (byte) 0);
+            VectorMask<Byte> stops = inverted ? matches : matches.not();
+            if (stops.anyTrue()) {
+                return cursor + stops.firstTrue();
+            }
+        }
+        for (; cursor < end; cursor++) {
+            if (!members[input[cursor] & 0xFF]) {
+                return cursor;
+            }
+        }
+        return end;
+    }
+
     /// A copy of `VectorScanner.findRe2RunStop`.
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
@@ -232,8 +266,8 @@ final class VectorScanKernelSupport
     {
         return switch (candidateCount) {
             case 1 -> findOne(data, offset, length, first);
-            case 2 -> findTwo(data, offset, length, first, second);
-            case 3 -> findThree(data, offset, length, first, second, third);
+            case 2 -> VectorSupport.SVE_128 ? findTwoSve(data, offset, length, first, second) : findTwo(data, offset, length, first, second);
+            case 3 -> VectorSupport.SVE_128 ? findThreeSve(data, offset, length, first, second, third) : findThree(data, offset, length, first, second, third);
             default -> throw new IllegalArgumentException("candidateCount must be one, two, or three");
         };
     }
@@ -342,6 +376,33 @@ final class VectorScanKernelSupport
         return -1;
     }
 
+    // A copy of VectorByteSetScanner.findTwoSve.
+    private static int findTwoSve(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(BYTE_SET_SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(BYTE_SET_SPECIES, second);
+        int vectorEnd = offset + BYTE_SET_SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += BYTE_SET_SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(BYTE_SET_SPECIES, data, position);
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value == first || value == second) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
     // A copy of VectorByteSetScanner.findThree.
     private static int findThree(byte[] data, int offset, int length, byte first, byte second, byte third)
     {
@@ -355,6 +416,35 @@ final class VectorScanKernelSupport
             VectorMask<Byte> matches = values.compare(VectorOperators.EQ, firstVector)
                     .or(values.compare(VectorOperators.EQ, secondVector))
                     .or(values.compare(VectorOperators.EQ, thirdVector));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value == first || value == second || value == third) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    // A copy of VectorByteSetScanner.findThreeSve.
+    private static int findThreeSve(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(BYTE_SET_SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(BYTE_SET_SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(BYTE_SET_SPECIES, third);
+        int vectorEnd = offset + BYTE_SET_SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += BYTE_SET_SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(BYTE_SET_SPECIES, data, position);
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, thirdVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
