@@ -37,6 +37,42 @@ public class TestDfaAnchoredSearch
     }
 
     @Test
+    public void testAnchoredSearchWithStopScansMatchingSelfLoop()
+    {
+        // Object rows hold no match transitions, so the confirmation scans the rest of a matching
+        // self-loop, such as the run of \w+, on the int table.
+        Prog prog = Compiler.compile(RegexpParser.parse(Slices.utf8Slice("\\w+"), Regexp.LIKE_PERL).regexp(), false, 0);
+        Slice text = Slices.utf8Slice("x".repeat(10_000) + " ");
+
+        assertThat(Dfa.searchAnchoredWithStop(prog, text, 0, text.length(), 0, text.length())).isEqualTo(10_000);
+        assertThat(prog.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+    }
+
+    @Test
+    public void testAnchoredSearchWithStopContinuesAfterCacheGrowth()
+    {
+        // The warm-ups fill the cache tables to just below their next growth. The long `x` run then
+        // passes the matching loop's stepped prefix, so the scan computes the loop's exit-byte set;
+        // the loop leaves on too many bytes for a vector scan, so the set is rejected and the run
+        // keeps stepping, but computing it added transitions that grew the tables. The confirmation
+        // then continues through states allocated after that growth, so it must read the grown
+        // tables.
+        Prog prog = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|abx*![A-Z]+|abx*\\B)")).forwardProgramForDiagnostics();
+        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
+            Slice input = utf8Slice(warm);
+            Dfa.searchAnchoredWithStop(prog, input, 0, input.length(), 0, input.length());
+        }
+        Dfa.DfaInstance dfa = prog.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int transitionsLength = dfa.cacheTablesForTesting().transitions.length;
+        int matchingSelfLoopScanCount = dfa.matchingSelfLoopScanCount();
+
+        Slice text = utf8Slice("ab" + "x".repeat(300) + "!AAA");
+        assertThat(Dfa.searchAnchoredWithStop(prog, text, 0, text.length(), 0, text.length())).isEqualTo(306);
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(transitionsLength);
+        assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingSelfLoopScanCount);
+    }
+
+    @Test
     public void testConfirmationWithStopCrossesLongSelfLoops()
     {
         // The host, path, query, and fragment loops of this URI pattern are matching self-loops:
