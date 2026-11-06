@@ -90,17 +90,19 @@ final class VectorByteSetScanner
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Finds the first position where one of the filter's literals
     // matches at all three of its positions. Each vector step loads three vectors. For two
-    // groups, it ORs each once with its position's mask and compares both groups against those
-    // three; for more, it looks up every group's bit by nibble.
+    // groups, it ORs each once with its position's mask and checks both groups against those
+    // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance; for more, it
+    // looks up every group's bit by nibble.
     static int findLiteralSet(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         return switch (filter.values().length / 3) {
-            case 2 -> findTwoLiterals(data, offset, length, filter);
+            case 2 -> VectorSupport.SVE_128 ? findTwoLiteralsSve(data, offset, length, filter) : findTwoLiterals(data, offset, length, filter);
             case 4, 8 -> findLiteralNibbles(data, offset, length, filter);
             default -> throw new IllegalArgumentException("literal filter width must be two, four, or eight");
         };
     }
 
+    // The SVE form is findTwoLiteralsSve; keep the two in step.
     private static int findTwoLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         byte[] values = filter.values();
@@ -126,6 +128,40 @@ final class VectorByteSetScanner
             ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
             VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
                     .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    // findTwoLiterals in the form VectorSupport.SVE_128 selects. It is a separate method because
+    // both forms in one body would exceed C2's 325-byte limit for inlining a hot method. Keep the
+    // two in step.
+    private static int findTwoLiteralsSve(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        ByteVector firstMask = ByteVector.broadcast(SPECIES, filter.firstMask());
+        ByteVector secondMask = ByteVector.broadcast(SPECIES, filter.secondMask());
+        ByteVector thirdMask = ByteVector.broadcast(SPECIES, filter.thirdMask());
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
+            VectorMask<Byte> matches = sveTwoLiteralMatches(first, second, third, firstValue0, secondValue0, thirdValue0, firstValue1, secondValue1, thirdValue1);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
@@ -171,6 +207,39 @@ final class VectorByteSetScanner
             }
         }
         return filter.find(data, position, end - position);
+    }
+
+    /// Returns the lanes where `first`, `second`, and `third` equal either group of values, by
+    /// XOR, OR, UMIN, and one compare with zero; see [VectorSupport#SVE_128].
+    private static VectorMask<Byte> sveTwoLiteralMatches(
+            ByteVector first,
+            ByteVector second,
+            ByteVector third,
+            ByteVector firstValue0,
+            ByteVector secondValue0,
+            ByteVector thirdValue0,
+            ByteVector firstValue1,
+            ByteVector secondValue1,
+            ByteVector thirdValue1)
+    {
+        // A lane of a group's difference is zero only where all three bytes match it, so the
+        // smaller difference is zero where either group matches.
+        return literalDifference(first, second, third, firstValue0, secondValue0, thirdValue0)
+                .lanewise(VectorOperators.UMIN, literalDifference(first, second, third, firstValue1, secondValue1, thirdValue1))
+                .compare(VectorOperators.EQ, (byte) 0);
+    }
+
+    private static ByteVector literalDifference(
+            ByteVector first,
+            ByteVector second,
+            ByteVector third,
+            ByteVector firstValue,
+            ByteVector secondValue,
+            ByteVector thirdValue)
+    {
+        return first.lanewise(VectorOperators.XOR, firstValue)
+                .or(second.lanewise(VectorOperators.XOR, secondValue))
+                .or(third.lanewise(VectorOperators.XOR, thirdValue));
     }
 
     private static VectorMask<Byte> literalMatches(

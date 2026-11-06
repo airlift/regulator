@@ -1326,6 +1326,49 @@ the contains search's comparison budget, after which KMP finishes the search.
 Front/back byte selection keeps preprocessing bounded and the integrated scanner
 compact.
 
+## Candidate Masks on SVE
+
+Three vector scans build a candidate mask from bytes that must all match: the
+literal prefix scan's first and last bytes, the scan plan's contains search,
+and the two three-byte groups of the [start literal filter](#start-literal-filter)'s
+two-literal check. Where C2 compiles vector code with SVE and a 16-byte
+preferred byte vector, as on r9g (Graviton5), each loaded vector is XORed with
+its probe byte, the differences are ORed, and one compare with zero gives the
+mask; the start literal filter first takes the unsigned minimum of its two
+groups' differences. Everywhere else each byte is compared and the masks are
+ANDed. The JVM's `UseSVE` flag is read once, through the HotSpot diagnostic
+MXBean, on aarch64 only; if the flag cannot be read, the scans compare and AND.
+
+This is a measured platform difference. SVE compares, and the AND that joins
+their masks, are predicate operations, and on r9g they compete for execution
+pipes with other scalar work, which on JDK 26 and later includes two
+extended-register address adds per vector (JDK-8354282). The XOR form leaves
+one predicate operation per vector. On r9g with JDK 25 it took 0.82x the
+compare-and-AND form's time for `aqj` over rebar's sherlock text, 0.58x for
+`zqj`, 0.45x for `∞|✓` over the Leipzig text, 0.52x for
+`Tom.{10,25}river|river.{10,25}Tom`, and 0.55x to 0.60x for 64 KiB prefix
+probes. On JDK 27 the same rows took 0.65x, 0.56x, 0.45x, 0.51x, and 0.57x to
+0.62x.
+
+NEON has no predicates. With `-XX:UseSVE=0` the XOR form took 1.07x for `aqj`,
+1.12x for `zqj`, and 1.05x for the Tom and river alternation, so NEON hosts keep
+compare and AND. On r8i, AVX-512 compares into mask registers and ANDs them in
+one `kandq`. A second compare masked by the first, the other form the Vector API
+offers, was mixed there: 0.85x for sherlock but 1.09x for 1 KiB `USER` probes.
+So x86 keeps compare and AND, written in line in each scan: the same compare
+and AND moved into a helper that C2 inlined took 1.07x for `aqj` on r8i with
+JDK 25.
+
+The folded prefix scan compares and ANDs on every platform. Its loaded bytes
+are ORed with `0x20` first at letter probes, and the XOR form took 1.06x for
+case-insensitive sherlock on r9g with JDK 25. SVE with other preferred widths,
+such as 32 bytes on Graviton3, is unmeasured and keeps compare and AND; the
+scans with fixed 16-byte vectors follow the same preferred-width key.
+
+Both forms find the same candidates. The x86 CI builds run compare and AND, and
+the arm64 CI build runs the suite with the XOR form and fails if it is not
+selected.
+
 ## Literal Probe Byte Selection
 
 Like upstream, a case-sensitive literal prefix scan searches for the literal's

@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestFusedPrefixAcceleration
 {
@@ -130,6 +131,18 @@ public class TestFusedPrefixAcceleration
         // its run of 13 sits 200 bytes before the tail's run, which supplies their last bytes.
         assertCandidateWorkBound(50, "a".repeat(7) + "x".repeat(9) + "a".repeat(6), 0, Prog.PrefixAccelStrategy.FUSED_SWAR, 17);
         assertCandidateWorkBound(100, "x".repeat(824) + "a".repeat(13) + "x".repeat(187) + "a".repeat(14), 0, vectorStrategy, 1_034);
+    }
+
+    @Test
+    public void testExpectedCandidateMaskForm()
+    {
+        // The arm64 CI build, whose runner has SVE with 16-byte vectors, sets this property, so
+        // CI fails if VectorSupport there stops selecting the SVE form.
+        String expected = System.getProperty("regulator.expectSve128");
+        assumeTrue(expected != null, "requires regulator.expectSve128");
+        assertThat(VectorSupport.SVE_128)
+                .as("SVE_128 on %s with %s preferred byte lanes", System.getProperty("os.arch"), ByteVector.SPECIES_PREFERRED.length())
+                .isEqualTo(Boolean.parseBoolean(expected));
     }
 
     @Test
