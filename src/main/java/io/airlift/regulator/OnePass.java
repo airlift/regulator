@@ -432,11 +432,8 @@ final class OnePass
 
         byte[] bytes = context.byteArray();
         byte[] bytemap = prog.bytemapArray();
-        int[] stateMatchCondition = prog.onePassMatchCond();
         long[] stateStep = prog.onePassStep();
         int[] actionAssertions = prog.onePassActionAssertions();
-        int[] matchAssertions = prog.onePassMatchAssertions();
-        long[] stateMatchCapture = prog.onePassMatchCapture();
         long[] stateActionCapture = prog.onePassActionCapture();
 
         int state = 0;
@@ -448,13 +445,38 @@ final class OnePass
 
         if (matchKind == Prog.MatchKind.FULL_MATCH) {
             // Only an end-of-input match can satisfy a full match, so the loop carries no match
-            // bookkeeping: it loads no match condition or match capture per byte.
+            // bookkeeping: it loads no match condition or match capture per byte, and reads the
+            // match tables only after the loop, so they do not compete for its registers.
+            // The inner byte loop makes no out-of-line calls (the capture helper inlines): a call
+            // would make C2 keep the loop's tables on the stack and reload them on every byte. An
+            // action with assertions leaves the inner loop, is checked in the outer loop, and the
+            // inner loop resumes after it.
             int stateOffset = 0;
-            for (; position < textEnd; position++) {
+            while (position < textEnd) {
+                do {
+                    int actionIndex = stateOffset + (bytemap[bytes[position] & 0xFF] & 0xFF);
+                    long step = stateStep[actionIndex];
+                    if (((int) step & EMPTY_ALL_FLAGS) != 0) {
+                        break;
+                    }
+                    state = (int) step >>> INDEX_SHIFT;
+                    stateOffset = (int) (step >>> 32);
+                    long captureMask = stateActionCapture[actionIndex];
+                    if (captureMask != 0) {
+                        applyExtendedCaptures(captureMask, position, captures);
+                    }
+                    position++;
+                }
+                while (position < textEnd);
+                if (position == textEnd) {
+                    break;
+                }
+                // Reload the action rather than carry it out of the loop: a value live after the
+                // loop is one more register the loop cannot use, and x86 has too few to spare.
                 int actionIndex = stateOffset + (bytemap[bytes[position] & 0xFF] & 0xFF);
                 long step = stateStep[actionIndex];
                 int condition = (int) step;
-                if ((condition & EMPTY_ALL_FLAGS) != 0 && !satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
+                if (!satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
                     state = -1;
                     break;
                 }
@@ -464,12 +486,13 @@ final class OnePass
                 if (captureMask != 0) {
                     applyExtendedCaptures(captureMask, position, captures);
                 }
+                position++;
             }
             if (state >= 0) {
-                int matchCondition = stateMatchCondition[state];
+                int matchCondition = prog.onePassMatchCond()[state];
                 if (matchCondition != IMPOSSIBLE &&
-                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
-                    applyExtendedCaptures(stateMatchCapture[state], position, captures);
+                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(prog.onePassMatchAssertions(), matchCondition, context, position))) {
+                    applyExtendedCaptures(prog.onePassMatchCapture()[state], position, captures);
                     if (captures != matchCaptures || captureFinalization == CaptureFinalization.DIRECT_REBASE) {
                         for (int captureSlot = 2; captureSlot < captureSlotCount; captureSlot++) {
                             matchCaptures[captureSlot] = captures[captureSlot];
@@ -482,6 +505,9 @@ final class OnePass
             return finishExtendedCaptures(matched, useCallerCaptures, submatch, captureFinalization, matchCaptures, matchCount, textBegin);
         }
 
+        int[] stateMatchCondition = prog.onePassMatchCond();
+        int[] matchAssertions = prog.onePassMatchAssertions();
+        long[] stateMatchCapture = prog.onePassMatchCapture();
         int nextMatchCondition = stateMatchCondition[state];
         int stateOffset = 0;
 
