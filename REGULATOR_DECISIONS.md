@@ -748,6 +748,35 @@ performance hint shared by concurrent readers; races may change when rejection
 occurs but cannot change matching behavior. A cache reset clears the hint and
 allows the new cache generation to be evaluated again.
 
+## DFA Row Index Without A Divide
+
+A DFA finds a state's row from its offset with a shift and a multiply. Each DFA
+precomputes the shift of the row width's power-of-two factor and the inverse of
+its odd part, which is exact because every state offset is a multiple of the row
+width. The signed divide this replaces ran on every byte of a dense match in
+safe memory mode, without `--enable-native-access`, where each match transition
+takes the sidecar step: `.*` count-spans took about 634k such steps per
+operation.
+
+The change trades a safe-mode gain for a small native-mode cost. On AWS r9g and
+r8i with JDK 25, against main:
+
+- Safe mode is faster: everything-greedy count-spans by 10–11% on r9g and 20% on
+  r8i, and any-one count by 2–3% on r9g and 7–8% on r8i.
+- Native mode is 4–6% slower on six rows: Rust twain-insensitive (1.049) and
+  Rust the-lower (1.038) on r9g, and Java quotes (1.038), RE2 quotes (1.041),
+  Rust quotes (1.062) and Rust capitals (1.037) on r8i. Measured on the same
+  rows, the divide removal alone accounts for 1.023–1.053, and the inner literal
+  pair registration alone stayed within 0.977–1.016.
+- No added work explains those costs. In native mode the row index runs only at
+  DFA entry and match restarts, under 16k times per operation, and no changed
+  method crosses an inline limit. The only differences between the builds are
+  layout: the DFA instance grows 8 bytes, which shifts field offsets, and one
+  cold-call stub grows from 192 to 256 bytes. Rust the-lower moves the other way
+  on r8i (0.932).
+
+The trade-off is decided: the divide removal is kept (Dain, 2026-11-06).
+
 ## Count Self-Loop Exit-Byte Scan
 
 Fused DFA counting may skip the interior of a self-loop state with a Vector

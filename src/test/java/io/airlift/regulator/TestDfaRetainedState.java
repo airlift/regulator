@@ -165,6 +165,25 @@ public class TestDfaRetainedState
                 .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
     }
 
+    @Test
+    public void testStateIndexInvertsStateOffset()
+    {
+        // A row holds one entry per byte class, 1 to 256 classes, plus the end-of-text entry.
+        for (int nextSize = 2; nextSize <= 257; nextSize++) {
+            int shift = Integer.numberOfTrailingZeros(nextSize);
+            int multiplier = Dfa.DfaInstance.stateIndexMultiplier(nextSize);
+            int maximumStateIndex = Integer.MAX_VALUE / nextSize;
+            for (int stateIndex = 0; stateIndex < maximumStateIndex; stateIndex += Math.max(1, stateIndex / 64)) {
+                assertThat(Dfa.DfaInstance.stateIndex(stateIndex * nextSize, shift, multiplier))
+                        .as("row width %s", nextSize)
+                        .isEqualTo(stateIndex);
+            }
+            assertThat(Dfa.DfaInstance.stateIndex(maximumStateIndex * nextSize, shift, multiplier))
+                    .as("row width %s", nextSize)
+                    .isEqualTo(maximumStateIndex);
+        }
+    }
+
     private static Dfa.DfaInstance compileDfa(String expression, long memoryBudget)
     {
         return compileProgram(expression, memoryBudget).getCachedDfa(LONGEST_MATCH);
