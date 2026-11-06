@@ -90,10 +90,12 @@ final class VectorByteSetScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Finds the first position where one of the filter's literals
-    // matches at all three of its positions. Each vector step loads three vectors. For two
-    // groups, it ORs each once with its position's mask and checks both groups against those
-    // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance; for more, it
-    // looks up every group's bit by nibble.
+    // matches at all three of its positions. For two groups, each vector step loads three
+    // vectors, ORs each once with its position's mask, and checks both groups against those
+    // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance. For more, each
+    // step loads one vector, at the third position, looks up every group's bit for all three
+    // positions by nibble, and shifts the first two positions' bits into place from the previous
+    // step's; the high nibbles take the shift VectorSupport.SHIFT_NIBBLES_AS_SHORTS selects.
     static int findLiteralSet(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         return switch (filter.values().length / 3) {
@@ -174,7 +176,7 @@ final class VectorByteSetScanner
     // grow with the number of groups. A lane keeps a group's bit only where the group accepts all
     // three bytes, so a nonzero lane is exactly a position the filter accepts. The lookups are
     // selectFrom, not rearrange: converting the indexes to a shuffle adds index-wrapping code
-    // before every table lookup on aarch64.
+    // before every table lookup on aarch64. The one load per step follows the Rust crate's Teddy.
     private static int findLiteralNibbles(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         byte[] tables = filter.nibbleTables();
@@ -188,24 +190,49 @@ final class VectorByteSetScanner
         int firstOffset = filter.firstOffset();
         int secondOffset = filter.secondOffset();
         int thirdOffset = filter.thirdOffset();
+        int lanes = SPECIES.length();
         int end = offset + length;
         // The third position of the last vector's last lane must lie before the end.
-        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int vectorEnd = end - thirdOffset - lanes;
         int position = offset;
-        for (; position <= vectorEnd; position += SPECIES.length()) {
-            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset);
-            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset);
+        if (position > vectorEnd) {
+            return filter.find(data, offset, length);
+        }
+        // Lane j of a step's bits is for the byte at the step's third position plus j. The first
+        // and second positions' bytes for the same start lie fewer than
+        // StartLiteralFilter.PATH_POSITIONS lanes earlier, so their bits come from this step's and
+        // the previous step's. Before the first step, the previous step's lanes that are used come
+        // from a load at the first position, moved up so each byte sits in the lane the previous
+        // step's load would give it.
+        int firstOrigin = lanes - (thirdOffset - firstOffset);
+        int secondOrigin = lanes - (thirdOffset - secondOffset);
+        // Written out here and in the loop rather than called: on 64-byte vectors the slices'
+        // force-inlined code uses up C2's inlining node budget, and a helper call it then refuses
+        // boxes its vectors.
+        ByteVector previous = ByteVector.fromArray(SPECIES, data, position + firstOffset).unslice(firstOrigin);
+        ByteVector previousLow = previous.and((byte) 0x0F);
+        ByteVector previousHigh = VectorSupport.SHIFT_NIBBLES_AS_SHORTS
+                ? previous.reinterpretAsShorts().lanewise(VectorOperators.LSHR, 4).reinterpretAsBytes().and((byte) 0x0F)
+                : previous.lanewise(VectorOperators.LSHR, 4);
+        ByteVector previousFirstBits = previousLow.selectFrom(firstLow).and(previousHigh.selectFrom(firstHigh));
+        ByteVector previousSecondBits = previousLow.selectFrom(secondLow).and(previousHigh.selectFrom(secondHigh));
+        for (; position <= vectorEnd; position += lanes) {
             ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset);
-            ByteVector groupBits = first.and((byte) 0x0F).selectFrom(firstLow)
-                    .and(first.lanewise(VectorOperators.LSHR, 4).selectFrom(firstHigh))
-                    .and(second.and((byte) 0x0F).selectFrom(secondLow))
-                    .and(second.lanewise(VectorOperators.LSHR, 4).selectFrom(secondHigh))
-                    .and(third.and((byte) 0x0F).selectFrom(thirdLow))
-                    .and(third.lanewise(VectorOperators.LSHR, 4).selectFrom(thirdHigh));
+            ByteVector low = third.and((byte) 0x0F);
+            ByteVector high = VectorSupport.SHIFT_NIBBLES_AS_SHORTS
+                    ? third.reinterpretAsShorts().lanewise(VectorOperators.LSHR, 4).reinterpretAsBytes().and((byte) 0x0F)
+                    : third.lanewise(VectorOperators.LSHR, 4);
+            ByteVector firstBits = low.selectFrom(firstLow).and(high.selectFrom(firstHigh));
+            ByteVector secondBits = low.selectFrom(secondLow).and(high.selectFrom(secondHigh));
+            ByteVector groupBits = low.selectFrom(thirdLow).and(high.selectFrom(thirdHigh))
+                    .and(previousFirstBits.slice(firstOrigin, firstBits))
+                    .and(previousSecondBits.slice(secondOrigin, secondBits));
             VectorMask<Byte> matches = groupBits.compare(VectorOperators.NE, (byte) 0);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
+            previousFirstBits = firstBits;
+            previousSecondBits = secondBits;
         }
         return filter.find(data, position, end - position);
     }

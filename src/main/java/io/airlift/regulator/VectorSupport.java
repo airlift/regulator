@@ -18,8 +18,9 @@ import jdk.incubator.vector.ByteVector;
 
 import java.lang.management.ManagementFactory;
 
-/// Reports whether the vector scanners can run, and which candidate-mask form their multi-byte
-/// scans take ([#SVE_128]). They need the optional `jdk.incubator.vector`
+/// Reports whether the vector scanners can run, which candidate-mask form their multi-byte
+/// scans take ([#SVE_128]), and how the start literal filter's nibble scan shifts
+/// ([#SHIFT_NIBBLES_AS_SHORTS]). They need the optional `jdk.incubator.vector`
 /// module and a preferred byte vector of 16 to 64 lanes. With fewer lanes, the lookup wraps the
 /// 16-entry nibble tables; with more, the replicated tables hold only 64 bytes, and
 /// `VectorMask.toLong()` throws for masks wider than 64 lanes. Other JVMs use the scalar or SWAR
@@ -40,11 +41,26 @@ final class VectorSupport
     // platform. C2 folds this constant, so each scan compiles one form.
     static final boolean SVE_128 = sve128();
 
+    // Whether the start literal filter's nibble scan takes each byte's high nibble with a 16-bit
+    // lane shift and an AND of 0x0F, rather than a byte lane shift. Only on x86, which has no
+    // byte lane shift: C2 widens, shifts, and narrows a byte shift, six more uops per shift on
+    // r8i, where rows the scan serves took 0.58x to 0.90x the byte shift's time in the 16-bit
+    // form. aarch64 shifts bytes in one instruction, so there the extra AND only costs: 1.09x to
+    // 1.16x on r9g. Other platforms were not measured and keep the byte shift. "Start Literal
+    // Filter" in REGULATOR_DECISIONS.md records the measurements. C2 folds this constant, so the
+    // scan compiles one form.
+    static final boolean SHIFT_NIBBLES_AS_SHORTS = isX86(System.getProperty("os.arch"));
+
     private VectorSupport() {}
 
     static boolean isAvailable()
     {
         return AVAILABLE;
+    }
+
+    private static boolean isX86(String arch)
+    {
+        return "amd64".equals(arch) || "x86_64".equals(arch);
     }
 
     private static boolean sve128()
