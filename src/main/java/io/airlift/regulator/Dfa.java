@@ -409,7 +409,7 @@ final class Dfa
         int[] transitions = dfa.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
-        Object[] stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+        Object[] stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         int lastMatchBoundary = (startData.flag() & FLAG_MATCH) != 0 ? textBegin : -1;
 
         for (int position = textBegin; position < textEnd; position++) {
@@ -446,7 +446,7 @@ final class Dfa
             }
 
             stateOffset = nextState;
-            stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+            stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         }
 
         // Cached object transitions advance the row reference without updating the offset.
@@ -1212,7 +1212,7 @@ final class Dfa
         int[] transitions = dfa.transitions;
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
-        Object[] stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+        Object[] stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         int transitionCount = 0;
         int lastMatchBoundary = CANDIDATE_NO_MATCH;
 
@@ -1249,7 +1249,7 @@ final class Dfa
             }
 
             stateOffset = nextState;
-            stateReferences = dfa.stateRefArrays[stateOffset / nextSize];
+            stateReferences = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         }
 
         // Cached object transitions advance the row reference without updating the offset.
@@ -2024,7 +2024,7 @@ final class Dfa
                     stateOffset = transition & ~T_MATCH_BIT;
                     if (stateMatched) {
                         matched = true;
-                        recordMatches(dfa.stateData[stateOffset / dfa.nextSize], matches);
+                        recordMatches(dfa.stateData[dfa.stateIndex(stateOffset)], matches);
                     }
                 }
 
@@ -2049,7 +2049,7 @@ final class Dfa
                 if (transition > 0 && (transition & T_MATCH_BIT) != 0) {
                     matched = true;
                     stateOffset = transition & ~T_MATCH_BIT;
-                    recordMatches(dfa.stateData[stateOffset / dfa.nextSize], matches);
+                    recordMatches(dfa.stateData[dfa.stateIndex(stateOffset)], matches);
                 }
                 return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
             }
@@ -2165,7 +2165,7 @@ final class Dfa
                     return -1;
                 }
                 stateOffset = transition & ~T_MATCH_BIT;
-                return minimumMatchId(dfa.stateData[stateOffset / dfa.nextSize]);
+                return minimumMatchId(dfa.stateData[dfa.stateIndex(stateOffset)]);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return -1;
@@ -2405,7 +2405,7 @@ final class Dfa
         int nextSize = dfa.nextSize;
         int position = textBegin;
         int sampledSelfLoopCount = 0;
-        Object[] stateRefs = dfa.stateRefArrays[startOffset / nextSize];
+        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
 
         for (int sampledTransitionCount = 0;
                 position < textEnd && sampledTransitionCount < SELF_LOOP_SAMPLE_SIZE;
@@ -2484,7 +2484,7 @@ final class Dfa
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
 
         if (startIsMatch) {
             matched = true;
@@ -2551,7 +2551,7 @@ final class Dfa
                         }
                     }
                     position++;
-                    stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                    stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                     continue;
                 }
 
@@ -2591,7 +2591,7 @@ final class Dfa
                         break;
                     }
                 }
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -2599,7 +2599,7 @@ final class Dfa
             if ((nextState & T_MATCH_BIT) == 0) {
                 stateOffset = nextState;
                 position++;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -2612,7 +2612,7 @@ final class Dfa
                 break scan;
             }
             position++;
-            stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         }
 
         // End-of-text transition (skip if scan ended at dead state)
@@ -2704,7 +2704,7 @@ final class Dfa
         byte[] byteMap = dfa.bytemap;
         int nextSize = dfa.nextSize;
         int pairedClassCount = nextSize * nextSize;
-        Object[] stateRefs = pairedStateRefArrays[startOffset / nextSize];
+        Object[] stateRefs = pairedStateRefArrays[dfa.stateIndex(startOffset)];
         int position = textBegin;
 
         while (position + 1 < textEnd) {
@@ -2837,7 +2837,7 @@ final class Dfa
                 lastMatchBoundary = position - 1;
             }
 
-            stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, stateOffset / nextSize);
+            stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, dfa.stateIndex(stateOffset));
             if (stateRefs == null) {
                 return searchForwardContinuation(
                         dfa,
@@ -2879,7 +2879,7 @@ final class Dfa
                     case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
                         stateOffset = (int) (pairedTransition >>> 32);
                         position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, stateOffset / nextSize);
+                        stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, dfa.stateIndex(stateOffset));
                         if (stateRefs == null) {
                             return searchForwardContinuation(
                                     dfa,
@@ -3208,7 +3208,7 @@ final class Dfa
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         Object[] startRefs = stateRefs;
 
         // Generic scan acceleration for sparse start bytes, start literal filters and literal
@@ -3309,7 +3309,7 @@ final class Dfa
             // Normal non-match transition back to the start state.
             if (nextState > 0 && (nextState & T_MATCH_BIT) == 0) {
                 stateOffset = nextState;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 position++;
                 continue; // -> prefix accel at top of outer loop
             }
@@ -3324,7 +3324,7 @@ final class Dfa
                     break scan;
                 }
                 position++;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -3363,8 +3363,8 @@ final class Dfa
                     }
                 }
                 position++;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
-                startRefs = dfa.stateRefArrays[startOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+                startRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
                 continue;
             }
 
@@ -3404,8 +3404,8 @@ final class Dfa
                     break;
                 }
             }
-            stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
-            startRefs = dfa.stateRefArrays[startOffset / nextSize];
+            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
+            startRefs = dfa.stateRefArrays[dfa.stateIndex(startOffset)];
             // The restored start state is new, so its references are already null.
         }
 
@@ -3752,7 +3752,7 @@ final class Dfa
         int nextSize = dfa.nextSize;
         boolean deadState = false;
 
-        Object[] stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+        Object[] stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
 
         if (startIsMatch) {
             matched = true;
@@ -3799,7 +3799,7 @@ final class Dfa
                         lastMatchBoundary = position + 1;
                     }
                 }
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -3807,7 +3807,7 @@ final class Dfa
             if (nextState > 0) {
                 stateOffset = nextState;
                 position--;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -3852,7 +3852,7 @@ final class Dfa
                     }
                 }
                 position--;
-                stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+                stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
                 continue;
             }
 
@@ -3895,7 +3895,7 @@ final class Dfa
                     break;
                 }
             }
-            stateRefs = dfa.stateRefArrays[stateOffset / nextSize];
+            stateRefs = dfa.stateRefArrays[dfa.stateIndex(stateOffset)];
         }
 
         if (bounded && !deadState && position <= scanBegin) {
@@ -4692,7 +4692,7 @@ final class Dfa
                 this.sentinelOffset = stateOffset;
             }
             else {
-                StateData sd = dfa.stateData[stateOffset / dfa.nextSize];
+                StateData sd = dfa.stateData[dfa.stateIndex(stateOffset)];
                 this.inst = sd.inst().clone();
                 this.flag = sd.flag();
                 this.sentinelOffset = 0;
@@ -5018,6 +5018,8 @@ final class Dfa
         private long fixedDistanceByteCandidateMemory;
         final int bytemapRange;
         final int nextSize;
+        private final int stateIndexShift;
+        private final int stateIndexMultiplier;
         private final Kind kind;
 
         public enum Kind
@@ -5114,6 +5116,8 @@ final class Dfa
             this.bytemapRange = prog.bytemapRange();
             this.kind = requireNonNull(kind, "kind is null");
             this.nextSize = prog.bytemapRange() + 1;
+            this.stateIndexShift = Integer.numberOfTrailingZeros(nextSize);
+            this.stateIndexMultiplier = stateIndexMultiplier(nextSize);
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
             this.trinoLineFlag = prog.reversed()
                     ? prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_END_LINE
@@ -5430,7 +5434,7 @@ final class Dfa
         // SELF_LOOP_EXIT_BYTE_SET_HIGH. UTF-8 dot loops exit on every lead and invalid byte.
         private int countSelfLoopExitByteSet(int stateOffset)
         {
-            int stateIndex = stateOffset / nextSize;
+            int stateIndex = stateIndex(stateOffset);
             int exitByteSet = selfLoopExitByteSets[stateIndex];
             if (exitByteSet != 0) {
                 return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
@@ -5692,7 +5696,7 @@ final class Dfa
             stateData = newStateData;
             stateRefArrays = newStateRefArrays;
             selfLoopExitByteSets = newSelfLoopExitByteSets;
-            int stateIndex = nextFreeOffset / nextSize;
+            int stateIndex = stateIndex(nextFreeOffset);
             stateData[stateIndex] = state;
             stateRefArrays[stateIndex] = stateReferences;
             nextFreeOffset += nextSize;
@@ -5707,7 +5711,7 @@ final class Dfa
         boolean hasPairedTransitions(int stateOffset)
         {
             Object[][] pairedStateRefArrays = this.pairedStateRefArrays;
-            int stateIndex = stateOffset / nextSize;
+            int stateIndex = stateIndex(stateOffset);
             return pairedStateRefArrays != null &&
                     stateIndex < pairedStateRefArrays.length &&
                     pairedStateRefArrays[stateIndex] != null;
@@ -6076,7 +6080,7 @@ final class Dfa
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
                         if (intermediate[secondClass] instanceof Object[] target) {
                             StateData targetData = (StateData) target[nextSize];
-                            Object[] pairedTarget = pairedRows[targetData.offset() / nextSize];
+                            Object[] pairedTarget = pairedRows[stateIndex(targetData.offset())];
                             sourcePairs[(firstClass * nextSize) + secondClass] = pairedTarget;
                             if (pairedTarget != null) {
                                 transitionCount++;
@@ -6332,7 +6336,7 @@ final class Dfa
                 if (startState == null || selectedCount >= maximumRows) {
                     continue;
                 }
-                int stateIndex = startState.offset() / nextSize;
+                int stateIndex = stateIndex(startState.offset());
                 if (!selected[stateIndex]) {
                     selected[stateIndex] = true;
                     selectedCount++;
@@ -6474,6 +6478,34 @@ final class Dfa
             return previousByte == crlfFirstByte ? FLAG_HALF_CRLF : 0;
         }
 
+        /// Returns the row of the state at `stateOffset`, an untagged offset of a real state,
+        /// never a sentinel.
+        int stateIndex(int stateOffset)
+        {
+            return stateIndex(stateOffset, stateIndexShift, stateIndexMultiplier);
+        }
+
+        // Every state offset is an exact multiple of nextSize, so the shift drops only zero bits
+        // and multiplying by the inverse of nextSize's odd part modulo 2^32 gives the exact
+        // quotient. This keeps a signed divide off the per-byte sidecar step of the search loops.
+        static int stateIndex(int stateOffset, int shift, int multiplier)
+        {
+            return (stateOffset >>> shift) * multiplier;
+        }
+
+        /// Returns the inverse modulo 2^32 of the odd part of `nextSize`.
+        static int stateIndexMultiplier(int nextSize)
+        {
+            int oddPart = nextSize >>> Integer.numberOfTrailingZeros(nextSize);
+            // An odd number is its own inverse to three bits, and each Newton step doubles the
+            // correct bits: 3, 6, 12, 24, 48.
+            int inverse = oddPart;
+            for (int step = 0; step < 4; step++) {
+                inverse *= 2 - (oddPart * inverse);
+            }
+            return inverse;
+        }
+
         private int byteMap(int c)
         {
             if (c == BYTE_END_TEXT) {
@@ -6495,7 +6527,7 @@ final class Dfa
 
             // A quit reads only the source state, so it is reported before taking exclusive
             // access and is never cached; every later search over the byte reaches it again.
-            if (quitsOnNonAscii && quits(stateData[stateOffset / nextSize].flag(), c)) {
+            if (quitsOnNonAscii && quits(stateData[stateIndex(stateOffset)].flag(), c)) {
                 throw QUIT_SEARCH;
             }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
@@ -6520,7 +6552,7 @@ final class Dfa
 
         private int computeTransitionLocked(int stateOffset, int c, int cls)
         {
-            StateData state = stateData[stateOffset / nextSize];
+            StateData state = stateData[stateIndex(stateOffset)];
 
             // Convert state into work queue
             stateToWorkQueue(state, q0);
@@ -6629,7 +6661,7 @@ final class Dfa
             // Populate Object[] ref for normal non-match transitions (inner loop fast path).
             // Sentinels and match states are left as null — inner loop breaks on null.
             if (transValue > 0 && (transValue & T_MATCH_BIT) == 0) {
-                setStateReference(stateRefArrays[stateOffset / nextSize], cls, stateRefArrays[transValue / nextSize]);
+                setStateReference(stateRefArrays[stateIndex(stateOffset)], cls, stateRefArrays[stateIndex(transValue)]);
             }
             AbsolutePointerTransitions absolutePointers = absolutePointerTransitions;
             if (absolutePointers != null &&
