@@ -113,10 +113,10 @@ public sealed class TrinoLikePattern
             return generateBytecode;
         }
 
-        /// Experimental. When enabled, compilation generates a hidden class for the pattern, so
-        /// [TrinoLikePattern#matches(Slice)] runs dedicated bytecode instead of the
-        /// interpreted plan. A pattern whose class cannot be generated compiles as it does without
-        /// this option. Disabled by default.
+        /// When enabled, compilation generates a hidden class for the pattern, so
+        /// [TrinoLikePattern#matches(Slice)] runs dedicated bytecode instead of the interpreted
+        /// plan. A pattern whose class cannot be generated compiles as it does without this option.
+        /// Disabled by default.
         ///
         /// @see TrinoLikePattern#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)

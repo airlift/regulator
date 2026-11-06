@@ -86,7 +86,7 @@ public class BenchmarkTrinoScanProfiles
         })
         public String selection;
 
-        // Experimental per-pattern scan kernels; false keeps existing runs on the interpreter.
+        // Per-pattern scan kernels; false keeps existing runs on the interpreter.
         @Param("false")
         public boolean generateBytecode;
 

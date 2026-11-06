@@ -146,12 +146,12 @@ public sealed class Re2
             return generateBytecode;
         }
 
-        /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
-        /// so each operation that would run its specialized scan runs dedicated bytecode instead.
+        /// When enabled, compilation generates a hidden class for an eligible pattern, so each
+        /// operation that would run its specialized scan runs dedicated bytecode instead.
         /// Operations that take another route keep it. Patterns that are not eligible, or whose
         /// class cannot be generated, compile as they do without this option. Latin-1 and
-        /// longest-match patterns have no specialized scan, so they are never eligible. Disabled
-        /// by default.
+        /// longest-match patterns have no specialized scan, so they are never eligible. Disabled by
+        /// default.
         ///
         /// @see Re2#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
