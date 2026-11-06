@@ -32,6 +32,20 @@ final class VectorByteSetScanner
         return SPECIES.length() > 16;
     }
 
+    // Whether a DFA whose start bytes are too rare for the start literal filter should still take
+    // one that holds two literals. Only with 64-byte vectors, as with AVX-512 on r8i, where the
+    // two-literal scan took 0.56x to 0.60x the single-byte scanners' time for huck-saw, 0.85x to
+    // 0.96x for name-alt2 (1.00x in Trino), and 0.87x to 0.94x for name-alt4. On r9g's 16-byte
+    // vectors it won huck-saw (0.84x to 0.91x) but took 1.17x to 1.19x for name-alt2 and 1.19x
+    // for name-alt4 in its SVE XOR form, and 1.22x for both with NEON (1.00x for name-alt2 in
+    // Trino), so 16-byte vectors keep their scanners; 32-byte vectors, as with AVX2 or 256-bit
+    // SVE, were not measured.
+    // "Start Literal Filter" in REGULATOR_DECISIONS.md records the measurements.
+    static boolean shouldFilterRareStartsWithTwoLiterals()
+    {
+        return SPECIES.length() == 64;
+    }
+
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Candidate count is always one, two, or three; two
     // and three take the XOR form under VectorSupport.SVE_128.

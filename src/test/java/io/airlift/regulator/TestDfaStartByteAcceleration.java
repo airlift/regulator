@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import jdk.incubator.vector.ByteVector;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -194,7 +195,6 @@ public class TestDfaStartByteAcceleration
     public void testCorpusMixedStartShapesUseMixedSetScanner()
     {
         for (MixedSetCase testCase : List.of(
-                new MixedSetCase("Tom|Sawyer|Huckleberry|Finn", "Tom"),
                 new MixedSetCase("(\\p{Sm}+)-([0-9]+)", "+-1234"),
                 new MixedSetCase("(\\p{Lu}+)-([0-9]+)", "A-1234"),
                 new MixedSetCase("(\\w+)-([0-9]+)", "A-1"),
@@ -493,11 +493,29 @@ public class TestDfaStartByteAcceleration
         assertThat(Dfa.search(program, Slices.utf8Slice("а".repeat(64 * 1024)), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
         assertThat(dfa.startLiteralFilterScanCount()).isPositive();
         assertThat(dfa.byteScanFallbackCount()).isZero();
-        // Rare start bytes already skip cheaply, two-byte literals leave no third position, and a
-        // one-byte literal followed by a broad class leaves too few narrow positions.
-        assertThat(firstMatchDfa("Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty").startLiteralFilter()).isNull();
+        // Two-byte literals leave no third position, and a one-byte literal followed by a broad
+        // class leaves too few narrow positions.
         assertThat(firstMatchDfa("(?i)ab|cd").startLiteralFilter()).isNull();
         assertThat(firstMatchDfa("(?i)a[a-z]+|b[a-z]+").startLiteralFilter()).isNull();
+    }
+
+    @Test
+    public void testRareLiteralStartsUseStartLiteralFilterOnLongSearches()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        // A rare start set of more than three bytes that is not one range takes the filter, but
+        // only on vector searches; a shorter search stops on the start bytes.
+        Dfa.DfaInstance dfa = firstMatchDfa("Sherlock|Holmes|Watson|Irene|Adler|John|Baker");
+        byte[] text = ("S" + " ".repeat(1023)).getBytes(StandardCharsets.UTF_8);
+        assertThat(dfa.findStartByteCandidate(text, 0, 1023)).isZero();
+        assertThat(dfa.findStartByteCandidate(text, 0, 1024)).isEqualTo(-1);
+        // Other rare start sets take a filter of two literals only with 64-byte vectors, and a
+        // rare small set or range never takes one of more literals.
+        assertThat(firstMatchDfa("Huck[a-zA-Z]+|Saw[a-zA-Z]+").startLiteralFilter() != null)
+                .as("two-literal filter with %s preferred byte lanes", ByteVector.SPECIES_PREFERRED.length())
+                .isEqualTo(ByteVector.SPECIES_PREFERRED.length() == 64);
+        assertThat(firstMatchDfa("Huck|Hill|Saw").startLiteralFilter()).isNull();
+        assertThat(firstMatchDfa("Abcd|Bcde|Cdef|Defg").startLiteralFilter()).isNull();
     }
 
     @Test
@@ -1038,8 +1056,9 @@ public class TestDfaStartByteAcceleration
 
     // The 02-literal-alternate and name-alt rows, folds that add a multibyte path (Kelvin sign
     // for k and long s for s), a Cyrillic literal whose cases differ in a lead-byte bit the
-    // ASCII cases do not, so one position's mask has two bits, and two literals for the narrowest
-    // scanner.
+    // ASCII cases do not, so one position's mask has two bits, two literals for the narrowest
+    // scanner, and a rare start set of mixed bytes, which takes the filter wherever vector
+    // scanning is enabled.
     private static List<String> startLiteralFilterPatterns()
     {
         return List.of(
@@ -1051,7 +1070,8 @@ public class TestDfaStartByteAcceleration
                 "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
                 "(?i)kelvin|sky|kiss",
                 "(?i)Holmes|Watson|рст",
-                "(?i)Holmes|Watson");
+                "(?i)Holmes|Watson",
+                "Sherlock|Holmes|Watson|Irene|Adler|John|Baker");
     }
 
     // Text made of the pattern's literals in random case, prefixes of them of every length, some

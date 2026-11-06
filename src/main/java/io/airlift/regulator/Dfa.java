@@ -86,9 +86,10 @@ final class Dfa
     private static final int PREFIX_SCAN = -1;
     private static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
     private static final int START_LITERAL_FILTER_MARKER = Integer.MIN_VALUE + 1;
-    // A start byte set this common in English text stops often enough that checking three
-    // bytes of each literal pays; rarer sets stay on their single-byte scanners, which are
-    // cheaper per byte. UTF-8 lead bytes rate as common as the most common ASCII byte.
+    // Start byte sets at least this probable in English text stop often enough that checking
+    // three bytes of each literal pays. Rarer sets keep their single-byte scanners, which cost
+    // less per byte, except where buildStartLiteralFilter says. UTF-8 lead bytes rate as common
+    // as the most common ASCII byte.
     private static final double MINIMUM_START_LITERAL_FILTER_START_PROBABILITY = 0.05;
     // Room for the folded first letters of eight literals.
     private static final int MAXIMUM_START_LITERAL_FILTER_START_BYTES = 16;
@@ -3452,10 +3453,16 @@ final class Dfa
     {
         // A filter is built only when the Vector API is available.
         if (byteScanSet == START_LITERAL_FILTER_MARKER) {
-            dfa.startLiteralFilterScanCount++;
             if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
+                dfa.startLiteralFilterScanCount++;
                 return VectorByteSetScanner.findLiteralSet(data, offset, length, dfa.startLiteralFilter);
             }
+            // A filter taken for rare start bytes serves only vector searches; shorter ones check
+            // each input byte against the start byte table rather than three with the filter.
+            if (dfa.startLiteralFilterVectorOnly) {
+                return findByteCandidate(candidates, data, offset, length);
+            }
+            dfa.startLiteralFilterScanCount++;
             return dfa.startLiteralFilter.find(data, offset, length);
         }
         if (VectorSupport.isAvailable() && length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
@@ -3549,7 +3556,12 @@ final class Dfa
     // (?i)Sherlock|Watson or the few UTF-8 lead bytes shared by many Cyrillic or Chinese
     // characters, stop often on their start byte set; three bytes of each literal stop far less
     // often. The estimates use English frequencies whatever the pattern's byte frequencies.
-    private static StartLiteralFilter buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates)
+    // Two kinds of rare start set still take the filter, on vector searches only. A set of more
+    // than three start bytes that is not one range would take the mixed nibble-table scan, and
+    // the filter's three-position scan, at similar vector cost, stops far less often. Other rare
+    // sets keep their cheaper small-set and range scanners, except for a filter of two literals
+    // where VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals says its scan is faster.
+    private static StartLiteralFilterChoice buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates, int startByteScanSet)
     {
         if (startByteCandidates == null) {
             return null;
@@ -3563,7 +3575,10 @@ final class Dfa
                 startByteProbability += byteFrequencies.probability((byte) value);
             }
         }
-        if (startByteCount > MAXIMUM_START_LITERAL_FILTER_START_BYTES || startByteProbability < MINIMUM_START_LITERAL_FILTER_START_PROBABILITY) {
+        boolean rareStartBytes = startByteProbability < MINIMUM_START_LITERAL_FILTER_START_PROBABILITY;
+        boolean mixedStartBytes = startByteCount > 3 && startByteScanSet == 0;
+        boolean needsTwoLiterals = rareStartBytes && !mixedStartBytes;
+        if (startByteCount > MAXIMUM_START_LITERAL_FILTER_START_BYTES || (needsTwoLiterals && !VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals())) {
             return null;
         }
 
@@ -3575,8 +3590,14 @@ final class Dfa
         if (filter == null || filter.density() * START_LITERAL_FILTER_NARROWING_FACTOR > startByteProbability) {
             return null;
         }
-        return filter;
+        if (needsTwoLiterals && filter.values().length / 3 != 2) {
+            return null;
+        }
+        return new StartLiteralFilterChoice(filter, rareStartBytes);
     }
+
+    // A filter taken for rare start bytes serves only vector searches.
+    private record StartLiteralFilterChoice(StartLiteralFilter filter, boolean vectorOnly) {}
 
     private static long searchForwardAnchoredLongPrefixInt(
             DfaInstance dfa,
@@ -5042,6 +5063,7 @@ final class Dfa
         private final int startByteScanSet;
         private final byte[] startByteNibbleTables;
         private final StartLiteralFilter startLiteralFilter;
+        private final boolean startLiteralFilterVectorOnly;
         private final boolean nullableStartByteCandidates;
         private final int trinoLineFlag;
         // Rust CRLF anchors read a CR LF pair in the direction of the search: its first byte is CR
@@ -5176,9 +5198,11 @@ final class Dfa
             this.startByteCandidates = prog.buildStartByteCandidates(stack);
             this.nullableStartByteCandidates = startByteCandidates != null && prog.canMatchEmpty();
             int startByteScanSet = buildStartByteScanSet(startByteCandidates);
-            this.startLiteralFilter = !nullableStartByteCandidates && VectorSupport.isAvailable()
-                    ? buildStartLiteralFilter(prog, stack, startByteCandidates)
+            StartLiteralFilterChoice startLiteralFilterChoice = !nullableStartByteCandidates && VectorSupport.isAvailable()
+                    ? buildStartLiteralFilter(prog, stack, startByteCandidates, startByteScanSet)
                     : null;
+            this.startLiteralFilter = startLiteralFilterChoice == null ? null : startLiteralFilterChoice.filter();
+            this.startLiteralFilterVectorOnly = startLiteralFilterChoice != null && startLiteralFilterChoice.vectorOnly();
             this.startByteNibbleTables = startLiteralFilter == null && startByteScanSet == 0 && !nullableStartByteCandidates && VectorSupport.isAvailable()
                     ? VectorByteSetScanner.buildNibbleTables(startByteCandidates)
                     : null;
