@@ -621,6 +621,7 @@ preliminary dispatch A/B on synthetic rows measured their short `find` at 0.69x
 to 0.71x the time on r9g and 0.62x to 0.71x on r8i, with `matches` and
 `lookingAt` flat. If the full run shows a loss on real short rows, a follow-up
 removes the contains search for that language and restores `Slice.indexOf`.
+Their dot-star spans use the same search, and the same run decides them.
 Alternatives rejected:
 
 - The pair scan for short-row exact-literal spans won only 3% to 4% on r9g and
@@ -1341,6 +1342,33 @@ reports the leftmost-first span lying entirely in the matcher's region, as the
 general engine does: a region end that cuts `abc` of `abc|x|ab` leaves `ab`.
 Compilation resolves the matcher; a pattern with a single-byte table or a class
 counter finds on that instead.
+
+The count of a `.*literal.*` pattern whose dots match any character but a line
+feed, and a group-zero `RegexpMatcher.find()` of it within the matcher's
+region, run the dot-star literal matcher in RE2, Java, and Rust, as Trino's
+dot-star subtype does for its span operations: the literal's first occurrence,
+found with the pattern's contains search, widened over the characters the dots
+match on each side. A count needs only each match's end, so it walks only the
+dots after each literal, and resumes there. Both walks step over ASCII other
+than a line feed without the width table, and a run with at least 64 bytes
+left with the vector scan the DFA count uses to leave a `[^\n]` loop. The dots
+read characters as the compiled byte ranges of `[^\n]` do, which depend only on
+the pattern's encoding, so compilation picks a table of character widths and the
+walk has no language branch. In UTF-8 the class holds all of U+0080 through
+U+10FFFF, whose byte ranges accept overlong three- and four-byte forms, encoded
+surrogates, and values above U+10FFFF, and reject bare continuation bytes, C0,
+C1, F5–FF, and cut-short sequences; RE2's Latin-1 option and Rust's bytes API
+with `(?-u)` read each byte as a character. Java's default dot also stops at
+`\r`, U+0085, U+2028, and U+2029, and Rust's Unicode dot in bytes mode at the
+surrogates, so the analysis takes neither for such a pattern; Java's `(?d)` dot
+is `[^\n]` and takes the matcher. The matcher reserves its own size from the
+forward-DFA budget after the contains search and, in every language, [yields to
+the forward DFAs](#memory-budgets-and-dfa-caching). Release 2.0's Trino dot-star
+subtype reserved nothing and was always built. So at the budgets where it would
+cost a DFA, Trino now runs `.*literal.*` on that DFA rather than the matcher.
+Trino's dot-star spans previously ended at any byte sequence that is not
+well-formed UTF-8; they now read malformed input as Trino's ordinary engine
+does, which its garbage-in, garbage-out contract leaves unspecified either way.
 
 The literal-alternation matcher's root-table route restarts its trie at every
 input byte, and a filter stop compares the literals that begin with its byte,

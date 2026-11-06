@@ -41,9 +41,9 @@ public final class RegexpMatcher
     // fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
     // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
-    // The pattern's literal-alternation, literal-set, or fixed-width span search, which find()
-    // runs in place of the program, a literal alternation's and a short-search fixed-width
-    // matcher's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
+    // The pattern's literal-alternation, literal-set, dot-star literal, or fixed-width span search,
+    // which find() runs in place of the program, a literal alternation's and a short-search
+    // fixed-width matcher's only on fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
     // CompiledPattern.groupZeroSpanSearch.
     private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
@@ -248,6 +248,9 @@ public final class RegexpMatcher
         }
         else if (spanSearch instanceof LiteralSetSpanMatcher literalSet) {
             span = literalSet.findSpan(input, start, regionEnd);
+        }
+        else if (spanSearch instanceof DotStarLiteralSpanMatcher dotStarLiteral) {
+            span = dotStarLiteral.findSpan(input, start, regionEnd);
         }
         else {
             // The short-search matcher leaves a region with at least MINIMUM_LONG_SEARCH_BYTES
