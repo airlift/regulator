@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static java.util.Objects.requireNonNull;
@@ -414,6 +415,12 @@ final class Prog
     private final AtomicReference<Dfa.DfaInstance> dfaFirstMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaLongestMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaManyMatch = new AtomicReference<>();
+    // The budget with which each kind's DFA failed to initialize, or 0. A failed DFA is not
+    // cached, so without this every search at that budget would build it again. Searches share
+    // it without locking, and the race is benign: a search that has not yet seen a recorded
+    // budget builds the failing DFA once more, and only a budget whose DFA failed is ever
+    // recorded, so a DFA that would initialize is never skipped.
+    private final AtomicLongArray failedDfaBudgets = new AtomicLongArray(Dfa.DfaInstance.Kind.values().length);
     // Immutable flattened instruction tables for NFA no-submatch fast path.
     private final AtomicReference<NoSubmatchTables> noSubmatchNfaTables = new AtomicReference<>();
     // Compact immutable instructions built lazily after flattening and shared by capture engines.
@@ -1938,10 +1945,17 @@ final class Prog
         if (budget <= 0) {
             return null;
         }
+        // A DFA that cannot initialize is not cached, so reject it before it builds its work
+        // queues, which are sized by the program and would otherwise be rebuilt by every search.
+        if (budget < Dfa.DfaInstance.minimumMemory(this, kind) || failedDfaBudgets.get(kind.ordinal()) == budget) {
+            return null;
+        }
         Dfa.DfaInstance newDfa = new Dfa.DfaInstance(this, kind, budget);
 
         if (!newDfa.ok()) {
-            // Budget too small to even initialize DFA
+            // The minimum leaves out a forward program's start-byte tables, which only the
+            // constructor builds, so a budget that passes it can still fail here.
+            failedDfaBudgets.set(kind.ordinal(), budget);
             return null;
         }
 

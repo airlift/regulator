@@ -127,6 +127,61 @@ public class TestRe2Allocations
     }
 
     @Test
+    public void testDfaBudgetBelowMinimumDoesNotBuildDfaPerSearch()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // At 3,072 bytes the forward DFA gets less than its minimum. At the first budget that
+        // reaches the minimum, which depends on the VM's layout, it gets its minimum but not its
+        // start-byte tables, so the DFA fails to initialize. Either way counting runs on the NFA.
+        // Building a DFA that could never be cached allocated its work queues on every search,
+        // thousands of bytes per match.
+        Slice pattern = Slices.utf8Slice("(a|b)+c");
+        long windowMaxMemory = 3072;
+        while (!reachesFirstMatchMinimum(Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(windowMaxMemory)).forwardProgramForDiagnostics())) {
+            windowMaxMemory += 8;
+            assertThat(windowMaxMemory).as("maxMemory reaching the DFA minimum").isLessThan(65_536);
+        }
+        Slice source = Slices.utf8Slice("abc ".repeat(1_000));
+        for (long maxMemory : List.of(3072L, windowMaxMemory)) {
+            Re2 re2 = Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
+            TrinoRegexp trino = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+            for (Prog program : List.of(re2.forwardProgramForDiagnostics(), trino.re2().forwardProgramForDiagnostics())) {
+                assertThat(reachesFirstMatchMinimum(program)).isEqualTo(maxMemory == windowMaxMemory);
+                assertThat(new Dfa.DfaInstance(program, Dfa.DfaInstance.Kind.FIRST_MATCH, program.dfaMemory() / 2).ok()).isFalse();
+                if (maxMemory == 3072) {
+                    // Below its minimum, the first lookup rejects the DFA before it builds the
+                    // work queues a failed DFA would rebuild on every search.
+                    long threadId = Thread.currentThread().threadId();
+                    long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                    Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+                    long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+                    assertThat(dfa).isNull();
+                    assertThat(allocatedBytes).as("first DFA lookup").isLessThan(1024);
+                }
+            }
+
+            for (int iteration = 0; iteration < 200; iteration++) {
+                assertThat(re2.count(source)).isEqualTo(1_000);
+                assertThat(trino.count(source)).isEqualTo(1_000);
+            }
+
+            long allocatedBytes = minimumAllocatedBytes(20_000, () -> {
+                long matchCount = 0;
+                for (int iteration = 0; iteration < 10; iteration++) {
+                    matchCount += re2.count(source);
+                    matchCount += trino.count(source);
+                }
+                return matchCount;
+            });
+
+            assertThat(allocatedBytes / 20_000).as("maxMemory %s", maxMemory).isLessThanOrEqualTo(256);
+        }
+    }
+
+    @Test
     public void testTrinoFinalLineBooleanProgramDoesNotAllocate()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
@@ -430,6 +485,11 @@ public class TestRe2Allocations
             }
             return totalLength;
         });
+    }
+
+    private static boolean reachesFirstMatchMinimum(Prog program)
+    {
+        return program.dfaMemory() / 2 >= Dfa.DfaInstance.minimumMemory(program, Dfa.DfaInstance.Kind.FIRST_MATCH);
     }
 
     /// Runs `operations` three times, checks each result, and returns the fewest bytes the
