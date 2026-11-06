@@ -423,15 +423,15 @@ final class Dfa
     }
 
     // Shares searchAnchoredCandidate's anchored traversal: step the cached DFA from the start
-    // position, record the last match boundary, and stop when the state dies or the text ends. It
-    // differs: the window may end before the context, so the last step reads the byte after the
-    // window; a match at the start is accepted; there is no work budget or transition cap, since
-    // the caller bounds the work by never confirming a candidate inside a span an earlier
-    // confirmation already read; and a matching transition back into the current state keeps its
-    // row, where the candidate check instead scans the matching self-loop's run within the remaining
-    // limits, a scan that can compute the loop's exit bytes, taking the cache lock when they are not
-    // cached. The fallback after a long check that reaches the end of the text unmatched is the
-    // candidate check's alone.
+    // position, record the last match boundary, scan the rest of a matching self-loop on the int
+    // table, a scan that can compute the loop's exit bytes, taking the cache lock when they are not
+    // cached, and stop when the state dies or the text ends. It differs: the window may end before
+    // the context, so the last step reads the byte after the window; a match at the start is
+    // accepted; there is no work budget or transition cap, so the self-loop scan runs to the end
+    // of the window, since the caller bounds the work by never confirming a candidate inside a
+    // span an earlier confirmation already read; and any other transition back into the current
+    // state keeps its row. The fallback after a long check that reaches the end of the text
+    // unmatched is the candidate check's alone.
     private static long searchAnchoredWithStop(DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
     {
         StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
@@ -477,9 +477,24 @@ final class Dfa
             if ((nextState & T_MATCH_BIT) != 0) {
                 lastMatchBoundary = position;
                 nextState &= ~T_MATCH_BIT;
+                // Object rows hold no match transitions, so each byte of a matching self-loop,
+                // such as the trailing `\w+` of `\w+\s+Holmes\s+\w+`, would come back here;
+                // scan the rest of the run on the int table instead.
+                if (nextState == stateOffset) {
+                    int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position + 1, textEnd, stateOffset);
+                    // Computing the loop's exit bytes may have published grown tables.
+                    tables = dfa.tablesAfterWrite(tables);
+                    transitions = tables.transitions;
+                    stateRefs = dfa.stateReferences(tables, stateOffset);
+                    if (matchingSelfLoopEnd != position + 1) {
+                        dfa.matchingSelfLoopScanCount++;
+                    }
+                    position = matchingSelfLoopEnd - 1;
+                    lastMatchBoundary = position;
+                    continue;
+                }
             }
-            // Object rows hold no match transitions, so every byte of a matching self-loop takes
-            // this path; staying in the state keeps the current row.
+            // A transition back into the current state keeps the current row.
             if (nextState == stateOffset) {
                 continue;
             }
@@ -4128,7 +4143,14 @@ final class Dfa
                     break scan;
                 }
                 position--;
-                if (dfa.prog.canMatchEmpty()) {
+                // Object rows hold no match transitions, so each byte of a matching self-loop,
+                // such as the reversed `\w+` of `\w+\s+Holmes`, would leave the object loop. In
+                // this longest-match reverse search, a program without a loop, such as the reversed
+                // `\s[a-zA-Z]{0,12}` of `\s[a-zA-Z]{0,12}ing\s`, matches on a self-loop only
+                // through an unanchored search's leading loop, which needs a program that can match
+                // empty. Any other skips the probe, which would find nothing after each of its match
+                // transitions.
+                if (dfa.prog.hasLoop() || dfa.prog.canMatchEmpty()) {
                     int matchingSelfLoopBegin = scanMatchingSelfLoopTransitionsBackward(dfa, tables, bytes, scanBegin, position, stateOffset);
                     if (matchingSelfLoopBegin != position) {
                         dfa.matchingSelfLoopScanCount++;

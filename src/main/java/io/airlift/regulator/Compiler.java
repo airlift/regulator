@@ -204,6 +204,7 @@ final class Compiler
 
         Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding, maxMemory);
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
+        compiler.program.setHasLoop(compiler.compiledLoop);
 
         compiler.program.setAnchorStart(true);
         compiler.program.setAnchorEnd(true);
@@ -268,6 +269,7 @@ final class Compiler
         // Generate fragment for entire regexp.
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
         boolean canMatchEmpty = compiledFragment.nullable;
+        compiler.program.setHasLoop(compiler.compiledLoop);
 
         // Success: append Match at end and record start.
         compiler.reversed = false;
@@ -653,6 +655,9 @@ final class Compiler
         // Trino nullable loops share one clone table, grown by doubling, so its allocation stays
         // proportional to the program however many loops the pattern has.
         private SparseIntArray nullableLoopClones;
+        // Whether the pattern compiled a repetition loop. An unanchored search's leading loop is
+        // not the pattern's, and does not count.
+        private boolean compiledLoop;
 
         boolean reversed;
         boolean setAnchorBoth;
@@ -987,6 +992,7 @@ final class Compiler
 
         private Fragment repeatUnbounded(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
         {
+            compiledLoop = true;
             if (dialect == Dialect.TRINO && fragment.nullable && !nonGreedy) {
                 return trinoGreedyNullableLoop(fragment, zeroIterationsAllowed);
             }
