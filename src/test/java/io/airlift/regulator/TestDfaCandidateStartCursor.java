@@ -184,6 +184,78 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
+    public void testCandidateCursorScansMatchingSelfLoop()
+    {
+        // `[0-9]+` stands in for the cloud-flare ReDoS pattern's leading alternatives. Once `=` is
+        // read, each following ASCII byte but a newline extends the match, and the check scans that
+        // run rather than stepping each byte.
+        for (Re2.Options options : List.of(Re2.Options.defaults(), Re2.Options.latin1())) {
+            Re2 pattern = Re2.compile(utf8("[0-9]+.*=.*"), options);
+            Slice input = utf8("1 x=" + "y".repeat(100));
+            RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
+
+            assertThat(boundaries(matcher)).containsExactly(new Boundary(0, input.length()));
+            assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(1);
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isZero();
+            assertThat(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+        }
+
+        // A run ends at a newline and at a multibyte character.
+        assertCandidateAgrees("[0-9]+.*=.*", "1=" + "y".repeat(50) + "\n2=y");
+        assertCandidateAgrees("[0-9]+.*=.*", "1=" + "y".repeat(50) + "é" + "y".repeat(50));
+
+        // The match [1, 102) ends inside the run, one byte before the newline ends it, so its end
+        // comes from the scan.
+        Re2 wordBounded = assertLiteralCandidateAgrees("\\Bab[a-z]*\\B", utf8("xab" + "y".repeat(100) + "\n"));
+        assertThat(wordBounded.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isEqualTo(1);
+
+        // The scanned run is charged to the work budget, which runs out within it here.
+        Slice workLimitedInput = utf8("aaaaaa\n".repeat(15) + "b=y" + "y".repeat(100));
+        Re2 workLimitedPattern = compile("a.*z|b+=y.*");
+        RegexpMatcher workLimited = workLimitedPattern.groupZeroMatcher(workLimitedInput, null);
+        assertThat(boundaries(workLimited)).containsExactly(new Boundary(105, workLimitedInput.length()));
+        assertThat(workLimited.candidateStartRouteCountForDiagnostics()).isZero();
+        assertThat(workLimited.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
+        assertThat(workLimitedPattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+    }
+
+    @Test
+    public void testCandidateCursorFallsBackAtTransitionLimit()
+    {
+        // A check falls back once it takes the transition limit, whether the step loop or a
+        // matching self-loop's scan reaches it, and one byte short of the limit it returns the
+        // match itself.
+        int limit = Dfa.MAX_CANDIDATE_START_TRANSITIONS;
+        for (Re2.Options options : List.of(Re2.Options.defaults(), Re2.Options.latin1())) {
+            for (int length : List.of(limit - 1, limit, limit + 1)) {
+                assertCandidateTransitionLimit("a+z|b+", "a".repeat(length - 1) + "z", options);
+                assertCandidateTransitionLimit("[0-9]+.*=.*", "1=" + "y".repeat(length - 2), options);
+            }
+            // The self-loop is first seen at the last byte, so its scan is empty.
+            assertCandidateTransitionLimit("[0-9]+.*=.*", "1" + "x".repeat(limit - 4) + "=yy", options);
+        }
+    }
+
+    @Test
+    public void testCandidateCursorFallsBackAfterCheckReadsToEnd()
+    {
+        // A check that reaches the end of the text alive and unmatched has read every later
+        // candidate, so from 16 bytes on, the forward search takes over rather than the cursor
+        // checking them again.
+        Re2 pattern = compile("[0-9]+.*=.*");
+        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8("1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 1)), null);
+
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
+        assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isFalse();
+
+        matcher.reset(utf8("1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 2)));
+        assertThat(matcher.find()).isFalse();
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
+        assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
+    }
+
+    @Test
     public void testCandidateCursorRemainsCorrectWithConcurrentCacheResets()
             throws Exception
     {
@@ -211,6 +283,27 @@ public class TestDfaCandidateStartCursor
             searches.get(10, TimeUnit.SECONDS);
             resets.get(10, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    public void testCandidateCursorReadsGrownTransitionTable()
+    {
+        // A transition computed during a check can grow the transition table, and the check's
+        // later steps must read the new table. This search grows it from a fresh cache, and the
+        // check at the first byte finds the match.
+        Re2 pattern = Re2.compile(utf8("([ab]*a[ab]{9}[zq])"), Re2.Options.defaults().setMaxMemory(16 << 20));
+        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int initialTransitions = dfa.cacheTablesForTesting().transitions.length;
+        String text = "bbbaaabbabaabbbbaabababaababbbbaabaabbbaaaaabbbaabbabbbaababbbabaababaabbbbbbbbbz";
+        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8(text), null);
+
+        assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isZero();
+        assertThat(matcher.end()).isEqualTo(text.length());
+        assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(1);
+        assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isZero();
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(initialTransitions);
     }
 
     @Test
@@ -328,9 +421,24 @@ public class TestDfaCandidateStartCursor
         assertThat(outcomes).contains(false, true);
     }
 
-    private static void assertLiteralCandidateAgrees(String expression, Slice input)
+    private static void assertCandidateTransitionLimit(String expression, String input, Re2.Options options)
     {
-        RegexpMatcher candidate = compile("(" + expression + ")").groupZeroMatcher(input, null);
+        boolean fallsBack = input.length() >= Dfa.MAX_CANDIDATE_START_TRANSITIONS;
+        Re2 pattern = Re2.compile(utf8(expression), options);
+        // The first search fills a fresh cache and the second steps through its cached transitions.
+        for (String cache : List.of("fresh", "warm")) {
+            RegexpMatcher matcher = pattern.groupZeroMatcher(utf8(input), null);
+            String description = expression + " on " + input.length() + " bytes with a " + cache + " cache";
+            assertThat(boundaries(matcher)).as(description).containsExactly(new Boundary(0, input.length()));
+            assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(fallsBack ? 0 : 1);
+            assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(fallsBack ? 1 : 0);
+        }
+    }
+
+    private static Re2 assertLiteralCandidateAgrees(String expression, Slice input)
+    {
+        Re2 pattern = compile("(" + expression + ")");
+        RegexpMatcher candidate = pattern.groupZeroMatcher(input, null);
         List<Boundary> expected = ordinaryBoundaries(expression, input);
 
         String description = expression + " on " + input.toStringUtf8();
@@ -338,6 +446,7 @@ public class TestDfaCandidateStartCursor
         assertThat(boundaries(candidate)).as(description).isEqualTo(expected);
         assertThat(candidate.candidateStartFallbackCountForDiagnostics()).as(description).isZero();
         assertThat(candidate.candidateStartRouteCountForDiagnostics() > 0).as(description).isEqualTo(!expected.isEmpty());
+        return pattern;
     }
 
     // A capturing matcher takes the ordinary path rather than the candidate cursor.
