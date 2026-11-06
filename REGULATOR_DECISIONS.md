@@ -1643,28 +1643,43 @@ r9g, and `sherlock/quotes` 0.71x and 0.98x.
 
 ## Inner Literal Byte Gates
 
-When the element after a literal, or a set whose members share one length, or
-the element before it, is a single ASCII byte class, alone or repeated at least
-once, the inner literal search skips each hit whose neighboring byte lies
-outside that class before either DFA runs. Elements that match only the empty string, such as `\b`, are
-looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules out the `ing`
-of `kingdom`, as the crate's prefilter does by searching `ing\s`. A skipped hit
-leaves the bound on how far back the next reverse search may read where it
-was, since no reverse search ran; raising it, as a DFA rejection does, would
-make the second `ing` of `singing` fall back to the ordinary engine.
+The inner literal search skips a hit before either DFA runs when a byte beside
+it cannot be one of a match. The byte before the hit must be one that can end
+the prefix: one the reverse prefix program can consume first. Taking them from
+the program gates any prefix that cannot match the empty string and has no
+assertion at its end, such as the digits that end the day and month of
+`([0-9][0-9]?)/([0-9][0-9]?)/([0-9][0-9]([0-9][0-9])?)`, or Rust's Unicode
+`\w`, which ends a character of more than one byte with a continuation byte.
+The byte after a literal, or a set whose members share one length, must lie in
+the element after it when that element is a single ASCII byte class, alone or
+repeated at least once; elements that match only the empty string, such as
+`\b`, are looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules
+out the `ing` of `kingdom`, as the crate's prefilter does by searching `ing\s`.
 
-A gate whose class holds the literal's own byte at that edge, of either case
-for a case-insensitive letter, is dropped. It borders runs of its own class,
-as `[a-z]` does before `shing` inside a word, so it passes nearly every hit
-and only adds its test.
+A skipped hit is no candidate. It leaves the bound on how far back the next
+reverse search may read where it was, since no reverse search ran; raising it,
+as a DFA rejection does, would make the second `ing` of `singing` fall back to
+the ordinary engine. Nor does it make the search fall back: the gates are
+checked before the rule that a first candidate near the search start falls
+back, and before the one that a candidate inside text a confirmation read
+does. The near-start check a find loop or count makes skips the same hits, so
+it agrees with the search. Checked after the near-start rule, a slash after
+a letter near the start of a short line sent the line to the ordinary engine
+although no date could end there.
+
+A gate that holds the literal's own byte at that edge, of either case for a
+case-insensitive letter, is dropped. It borders runs of its own bytes, as
+`[a-z]` does before `shing` inside a word, so it passes nearly every hit and
+only adds its test. The gates are held as words in the search itself, so they
+take no memory beyond the instance size the search's budget already charges.
 
 A pattern without a gate keeps the search loop without the check, and a gated
-pattern runs a copy of the loop with it. With the check in one shared loop, the
-ungated `lh3lh3/uri` row took 1.040x its time on r9g, and `lh3lh3/email` 1.035x
-on r8i. Measured 3 hosts a side, the gates take `ing-suffix-limited-space` to
-0.78x on r8i and 0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x,
-`before-after-holmes` to 0.71x and 0.76x, and `mariomka/email` to 0.91x and
-0.90x.
+pattern runs a copy of the loop with it. With the check in one shared loop,
+patterns without a gate measured up to about 4% slower, on lh3lh3 uri
+(Graviton) and lh3lh3 email (Intel) before their prefixes were gated. Measured
+3 hosts a side, the gates take `ing-suffix-limited-space` to 0.78x on r8i and
+0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x, `before-after-holmes` to
+0.71x and 0.76x, and `mariomka/email` to 0.91x and 0.90x.
 
 ## Trino LIKE Frontend
 
