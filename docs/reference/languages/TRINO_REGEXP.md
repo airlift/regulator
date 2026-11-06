@@ -348,8 +348,8 @@ functions take no compile flags, so the options have no syntax settings; inline
 flags such as `(?i)` are written in the pattern. No option changes what a
 pattern matches:
 
-- `setMaxMemory` sets the compiled-program and DFA-cache budget in bytes,
-  96 MiB by default. A budget that is not positive throws
+- `setMaxMemory` sets the compilation, DFA-cache and capture-search budget in
+  bytes, 96 MiB by default. A budget that is not positive throws
   `IllegalArgumentException`, and a pattern that does not fit throws
   `RegexpCompileMemoryLimitException`.
 - `setByteFrequencies` chooses which literal byte an unanchored search scans

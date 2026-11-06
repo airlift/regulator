@@ -641,6 +641,35 @@ text, so the pair scan rejects little that a first-byte scan would not.
   Expanded backing arrays and hash-table capacity remain charged after reset;
   only unreachable per-state objects return to the budget. A full cache resets,
   and repeated reset thrashing falls back to the NFA.
+- A capture NFA search has its own allowance, the forward share, beside the DFA
+  caches'. A search tracks K slots, the caller's, up to the slots through the
+  highest surviving CAPTURE, and reports the slots past that unset: a trailing
+  group the simplifier removes, as in `(a){0}`, has no CAPTURE and costs
+  nothing, while a removed group below a surviving one keeps its slots. A search
+  holds at most T = byte ranges + alternate matches + matches + CAPTUREs + 1
+  threads. A bounded pass takes `(T + 1) × int[K]`, a slot array for each thread
+  and the best match, plus `6 × int[P] + 2 × int[S] + 2 × int[T + 1] +
+  Object[T + 1]` and 448 bytes of objects, including a region's context view,
+  for a program of P instructions and a capture stack of S. The single pass
+  sizes its thread tables by doubling and may keep group-zero queues; a pass
+  over a window also keeps a `long[P]` of instruction words. The allowance
+  bounds what a search holds at once: each bounded pass also allocates a small
+  search object, which is transient.
+- Compilation plans each pattern's capture searches. A search that fits keeps
+  the ordinary single pass. A wider one runs passes that each track group zero
+  and the widest window of other slots that fits, over a copy of the instruction
+  words that renumbers the window's slots and moves every other group's slots
+  past the pass's count. Only slots 0 and 1 and the queue order decide the
+  winning thread, so every pass finds the same match and the windows together
+  report exactly what one pass would. At a maxMemory of 2,651 bytes or more, a
+  window of one group fits every program the flatten charge admits, and a pass
+  of group zero alone is smaller, so planning rejects nothing compilation
+  admits. Below that, a program of at most 11 instructions can in principle fail
+  to compile with a memory-limit exception; none has in over 100,000 swept
+  patterns, and the tightest, which tracks only group zero, fit with 8 bytes to
+  spare.
+  Upstream RE2 and the Rust crate bound neither the capture NFA's threads nor
+  their slots.
 
 `maxMemory` is a planning budget, not an eager allocation or a byte-exact JVM
 heap limit. The default is demand-driven, so simple patterns retain only the

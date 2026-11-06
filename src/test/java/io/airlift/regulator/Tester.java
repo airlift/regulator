@@ -281,6 +281,7 @@ public final class Tester
 
             Result backtrack = config.includeBacktrack() ? runSearch(Engine.BACKTRACK, context, start, end, anchor, submatchCount) : null;
             Result nfa = runSearch(Engine.NFA, context, start, end, anchor, submatchCount);
+            Result nfaInBoundedPasses = runSearch(Engine.NFA_IN_BOUNDED_PASSES, context, start, end, anchor, submatchCount);
             Result bitstate = runSearch(Engine.BITSTATE, context, start, end, anchor, submatchCount);
             Result onepass = config.includeOnePass() ? runSearch(Engine.ONEPASS, context, start, end, anchor, submatchCount) : null;
 
@@ -293,6 +294,7 @@ public final class Tester
             boolean ok = true;
             ok &= compare(baseline, backtrack, Engine.BACKTRACK, submatchCount, start, end, anchor);
             ok &= compare(baseline, nfa, Engine.NFA, submatchCount, start, end, anchor);
+            ok &= compare(baseline, nfaInBoundedPasses, Engine.NFA_IN_BOUNDED_PASSES, submatchCount, start, end, anchor);
             ok &= compare(baseline, bitstate, Engine.BITSTATE, submatchCount, start, end, anchor);
             ok &= compare(baseline, onepass, Engine.ONEPASS, submatchCount, start, end, anchor);
             ok &= compareDfa(baseline, context, start, end, anchor);
@@ -503,24 +505,27 @@ public final class Tester
                 default -> throw new IllegalStateException("unexpected kind: " + kind);
             }
 
+            Prog.MatchKind matchKind = longest ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH;
             boolean matched;
             try {
                 switch (engine) {
                     case BACKTRACK -> matched = Backtrack.search(prog, context, start, end, anchored, longest, result.submatch);
-                    case NFA -> matched = Nfa.search(prog, context, start, end, anchored, (longest ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH), result.submatch);
+                    case NFA -> matched = Nfa.search(prog, context, start, end, anchored, matchKind, result.submatch);
+                    // Passes of group zero and one other group, which must report what one pass does.
+                    case NFA_IN_BOUNDED_PASSES -> matched = Nfa.searchInBoundedPassesForTesting(prog, context, start, end, anchored, matchKind, result.submatch, 4);
                     case BITSTATE -> {
                         if (!prog.canBitState()) {
                             result.skipped = true;
                             return result;
                         }
-                        matched = BitState.search(prog, context, start, end, anchored, (longest ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH), result.submatch);
+                        matched = BitState.search(prog, context, start, end, anchored, matchKind, result.submatch);
                     }
                     case ONEPASS -> {
                         if (!prog.isOnePass() || anchor == Anchor.UNANCHORED || submatchCount > ONEPASS_MAX_SUBMATCH) {
                             result.skipped = true;
                             return result;
                         }
-                        matched = OnePass.search(prog, context, start, end, anchored, (longest ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH), result.submatch);
+                        matched = OnePass.search(prog, context, start, end, anchored, matchKind, result.submatch);
                     }
                     default -> throw new IllegalStateException("unexpected engine: " + engine);
                 }
@@ -552,6 +557,7 @@ public final class Tester
     {
         BACKTRACK,
         NFA,
+        NFA_IN_BOUNDED_PASSES,
         BITSTATE,
         ONEPASS,
         PUBLIC_API,

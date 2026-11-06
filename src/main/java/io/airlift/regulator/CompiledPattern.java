@@ -535,6 +535,8 @@ abstract sealed class CompiledPattern
                 ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect, caseFolding)
                 : null;
         booleanPlans = booleanPlans.withTaggedAlternationProgram(taggedAlternationProgram);
+        // A capture search gets the whole forward share as its own allowance, beside the DFA caches'.
+        Nfa.planCaptureSearches(semanticProgram, forwardMemory, taggedAlternationProgram == null ? null : taggedAlternationProgram.program(), maxMemory);
         WordRunMatcher wordRunMatcher = requiredPrefix == null && loweredBooleanProgram == null
                 ? WordRunMatcher.analyze(entireRegexp, semanticProgram)
                 : null;
@@ -2501,15 +2503,16 @@ abstract sealed class CompiledPattern
             }
             Arrays.fill(groups, -1);
             int patternSlotCount = 2 * (capturingGroupCount + 1);
+            int copySlotCount = Math.min(patternSlotCount, partialProg.captureSlotCount());
             if (groups.length > patternSlotCount) {
                 // The engines pick their route by the buffer's length, and some size their capture
                 // state by it, so a buffer past the pattern's groups would track slots no
                 // instruction writes and could turn OnePass away: on small patterns that cost 584
-                // to 1,120 bytes per call, where this copy of the pattern's slots costs 24 to 40.
-                // No engine writes the pairs past the pattern's slots, and callers read them, so
-                // those pairs keep the -1 of the fill above: a path that skips that fill must still
-                // set them to -1.
-                searchGroups = new int[patternSlotCount];
+                // to 1,120 bytes per call, where this copy of the program's slots costs 24 to 40.
+                // The program's slots leave out trailing groups the simplifier removed. No engine
+                // writes the pairs past them, and callers read them, so those pairs keep the -1 of
+                // the fill above: a path that skips that fill must still set them to -1.
+                searchGroups = new int[copySlotCount];
                 Arrays.fill(searchGroups, -1);
             }
         }

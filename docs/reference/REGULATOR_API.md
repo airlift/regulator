@@ -115,10 +115,12 @@ Re2 pattern = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=(?<value>[0-9]+)"));
 
 Compilation copies the pattern bytes and snapshots the mutable `Re2.Options`.
 The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching, and
-a 96 MiB compiled-program and DFA-cache budget. A non-positive public memory
-budget is rejected. The budget does not include caller-owned input, result
-objects, matcher capture buffers, replacement output, or collections returned
-by aggregate APIs.
+a 96 MiB compilation, DFA-cache and capture-search budget. A non-positive public
+memory budget is rejected. Each capture search in progress also holds at most
+the forward program's two-thirds share of the budget in working memory at once,
+beside what the compiled pattern retains. The budget does not include
+caller-owned input, result objects, matcher capture buffers, replacement output,
+or collections returned by aggregate APIs.
 
 Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a

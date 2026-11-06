@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.Arrays;
+import java.util.List;
 
 import static io.airlift.regulator.CompiledPattern.Anchor.UNANCHORED;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
@@ -77,6 +78,21 @@ public class TestNfaWorkspace
                 workspace)).isFalse();
         assertThat(groups).containsExactly(-1, -1, -1, -1, -1, -1);
         assertThat((int[]) field("threadReferences").get(workspace)).containsOnly(0);
+
+        // Groups the simplifier removed have no CAPTURE, so the search tracks only the program's
+        // six slots. A match still sets every pair of the buffer, including the removed groups'
+        // pairs, which the caller need not fill with -1 beforehand, in one pass and in bounded
+        // passes, which take two passes here.
+        Prog removedGroups = compileProg("(a+)(a*)(?:(b)(c)){0}");
+        assertThat(removedGroups.captureSlotCount()).isEqualTo(6);
+        int[] allGroups = new int[10];
+        Arrays.fill(allGroups, 7);
+        assertThat(Nfa.search(removedGroups, Slices.utf8Slice("aa"), 0, 2, true, Prog.MatchKind.FULL_MATCH, allGroups, workspace)).isTrue();
+        assertThat(allGroups).containsExactly(0, 2, 0, 2, 2, 2, -1, -1, -1, -1);
+        assertThat((int[]) field("match").get(workspace)).hasSize(removedGroups.captureSlotCount());
+        Arrays.fill(allGroups, 7);
+        assertThat(Nfa.searchInBoundedPassesForTesting(removedGroups, Slices.utf8Slice("aa"), 0, 2, true, Prog.MatchKind.FULL_MATCH, allGroups, 4)).isTrue();
+        assertThat(allGroups).containsExactly(0, 2, 0, 2, 2, 2, -1, -1, -1, -1);
     }
 
     @Test
@@ -109,6 +125,18 @@ public class TestNfaWorkspace
         assertThat(field("match").get(workspace)).isSameAs(match);
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(input.length());
+    }
+
+    @Test
+    public void testCaptureThreadsStayWithinBound()
+    {
+        // Bounded passes size their thread tables by Nfa.captureThreadBound up front, so no search
+        // may hold more threads. Twenty (a?) groups hold 60 threads against a bound of 63.
+        assertCaptureThreads("(a?)".repeat(20), "a".repeat(20), 60, 63);
+        assertCaptureThreads("(?:(a)|b)*", "abababab", 4, 7);
+        assertCaptureThreads("((a)|(b))*c", "ababababx", 6, 12);
+        assertCaptureThreads("(?:(a)|(a)|(a))*", "aaaa", 8, 12);
+        assertCaptureThreads("x*(a?)(a?)(a?)(a?)y", "xxxaaaay", 11, 17);
     }
 
     @Test
@@ -156,6 +184,17 @@ public class TestNfaWorkspace
 
         assertThat(Nfa.search(program, input, 0, input.length(), true, Prog.MatchKind.FULL_MATCH, groups, workspace)).isTrue();
         assertThat(groups).containsExactly(0, 3, 0, 3);
+    }
+
+    private static void assertCaptureThreads(String patternText, String text, int threads, int bound)
+    {
+        Prog program = compileProg(patternText);
+        assertThat(Nfa.captureThreadBound(program)).isEqualTo(bound);
+        for (Prog.MatchKind matchKind : List.of(Prog.MatchKind.FIRST_MATCH, Prog.MatchKind.LONGEST_MATCH)) {
+            Nfa.Workspace workspace = new Nfa.Workspace();
+            Nfa.search(program, Slices.utf8Slice(text), 0, text.length(), false, matchKind, new int[42], workspace);
+            assertThat(workspace.captureThreadCountForDiagnostics()).isEqualTo(threads);
+        }
     }
 
     private static Field field(String name)

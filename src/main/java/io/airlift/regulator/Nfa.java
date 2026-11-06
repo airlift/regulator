@@ -24,6 +24,14 @@ final class Nfa
 {
     private Nfa() {}
 
+    private static final int INITIAL_THREAD_CAPACITY = 16;
+    // Bytes the capture search's objects take, with 16-byte headers and 8-byte references.
+    private static final long WORKSPACE_BYTES = 144;
+    private static final long NFA_BYTES = 160;
+    private static final long QUEUE_BYTES = 48;
+    // The Slice view of the context that a region search passes.
+    private static final long SLICE_BYTES = 48;
+
     // PERFORMANCE-SENSITIVE HOT LOOPS: queue representation, loop boundaries, and capture
     // handling have measured effects. Do not perform readability-only refactors in the search
     // implementations below without direct path tests and focused Intel and Graviton benchmarks.
@@ -75,6 +83,21 @@ final class Nfa
             int[] submatch,
             Workspace workspace,
             boolean carriageReturnBeforeContext)
+    {
+        return search(prog, context, start, end, anchored, matchKind, submatch, workspace, carriageReturnBeforeContext, 0);
+    }
+
+    private static boolean search(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] submatch,
+            Workspace workspace,
+            boolean carriageReturnBeforeContext,
+            int passSlotCountForTesting)
     {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
@@ -128,6 +151,120 @@ final class Nfa
         }
 
         try {
+            // Pairs past the program's capture slots belong to groups the simplifier removed, which
+            // no instruction writes. The search tracks only the program's slots, and a match
+            // reports the other pairs unset.
+            int searchSubmatchCount = Math.min(submatchCount, prog.captureSlotCount() / 2);
+            int passSlotCount = passSlotCountForTesting;
+            if (passSlotCount == 0 && 2 * searchSubmatchCount > prog.singlePassCaptureSlots()) {
+                passSlotCount = prog.boundedPassCaptureSlots();
+            }
+            boolean matched;
+            if (passSlotCount != 0) {
+                matched = searchInBoundedPasses(
+                        bytes,
+                        prog,
+                        textBegin,
+                        textEnd,
+                        ctxBegin,
+                        ctxEnd,
+                        submatch,
+                        searchSubmatchCount,
+                        anchored,
+                        longest,
+                        endMatch,
+                        workspace,
+                        carriageReturnBeforeContext,
+                        passSlotCount,
+                        passSlotCountForTesting != 0);
+            }
+            else {
+                NfaImpl nfa = new NfaImpl(
+                        bytes,
+                        prog,
+                        prog.start(),
+                        textBegin,
+                        textEnd,
+                        ctxBegin,
+                        ctxEnd,
+                        searchSubmatchCount,
+                        anchored,
+                        longest,
+                        endMatch,
+                        workspace,
+                        carriageReturnBeforeContext,
+                        prog.getOrCreateCaptureInstructionWords(),
+                        INITIAL_THREAD_CAPACITY);
+                matched = nfa.search();
+                if (matched) {
+                    nfa.writeSubmatch(submatch);
+                }
+                nfa.releaseWorkspace();
+            }
+            if (matched) {
+                Arrays.fill(submatch, 2 * searchSubmatchCount, submatch.length, -1);
+            }
+            return matched;
+        }
+        catch (RuntimeException | Error failure) {
+            if (workspace != null) {
+                workspace.invalidate();
+            }
+            throw failure;
+        }
+    }
+
+    /// Searches as [#search(Prog,Slice,int,int,boolean,Prog.MatchKind,int\[\])] does, but in
+    /// bounded passes of `passSlotCount` slots whatever the program's plan, and fails when a pass
+    /// holds more threads than the program's thread bound or a pass after the first finds a
+    /// different group zero.
+    static boolean searchInBoundedPassesForTesting(Prog prog, Slice context, int start, int end, boolean anchored, Prog.MatchKind matchKind, int[] submatch, int passSlotCount)
+    {
+        if (passSlotCount < 4 || (passSlotCount % 2) != 0) {
+            throw new IllegalArgumentException("passSlotCount must be even and at least four: " + passSlotCount);
+        }
+        return search(prog, context, start, end, anchored, matchKind, submatch, null, false, passSlotCount);
+    }
+
+    // The capture NFA's choice of match is the order of its threads, which is the queue order,
+    // and, in leftmost-longest mode, each thread's slot 0 against the best match's slots 0 and 1;
+    // NfaImpl.step uses no other slot to choose the winning match. A pass that tracks group zero
+    // and a window of the other slots therefore follows the same threads to the same match as a
+    // pass that tracks every slot, and passes over successive windows, with the same text,
+    // context, and flags, together report exactly the slots one pass reports. Upstream's
+    // nsubmatch argument relies on the same property.
+    //
+    // Each pass runs the unchanged search over a copy of the program's packed instruction words
+    // in which CAPTURE keeps slots 0 and 1, numbers the window's slots from 2, and moves every
+    // other slot past the pass's slot count, where the search's slot-count test skips it. One
+    // copy per workspace is rewritten for each pass, and the passes share the workspace's queues,
+    // stacks, and thread arena, whose tables are sized for the program's thread bound up front.
+    // A search that fits one bounded pass keeps the program's own words.
+    private static boolean searchInBoundedPasses(
+            byte[] bytes,
+            Prog prog,
+            int textBegin,
+            int textEnd,
+            int ctxBegin,
+            int ctxEnd,
+            int[] submatch,
+            int submatchCount,
+            boolean anchored,
+            boolean longest,
+            boolean endMatch,
+            Workspace workspace,
+            boolean carriageReturnBeforeContext,
+            int passSlotCount,
+            boolean checkPasses)
+    {
+        // The plan leaves no room for cached group-zero queues beside a bounded pass.
+        if (workspace != null) {
+            workspace.releaseGroupZero();
+        }
+        int threadCapacity = captureThreadBound(prog) + 1;
+        long[] instructionWords = prog.getOrCreateCaptureInstructionWords();
+        int slotCount = 2 * submatchCount;
+        if (slotCount <= passSlotCount) {
             NfaImpl nfa = new NfaImpl(
                     bytes,
                     prog,
@@ -141,7 +278,9 @@ final class Nfa
                     longest,
                     endMatch,
                     workspace,
-                    carriageReturnBeforeContext);
+                    carriageReturnBeforeContext,
+                    instructionWords,
+                    threadCapacity);
             boolean matched = nfa.search();
             if (matched) {
                 nfa.writeSubmatch(submatch);
@@ -149,11 +288,60 @@ final class Nfa
             nfa.releaseWorkspace();
             return matched;
         }
-        catch (RuntimeException | Error failure) {
-            if (workspace != null) {
-                workspace.invalidate();
+
+        // A search without a workspace makes one for its passes.
+        Workspace passWorkspace = (workspace == null) ? new Workspace() : workspace;
+        long[] passInstructionWords = passWorkspace.preparePassInstructionWords(instructionWords.length);
+        int windowSlotCount = passSlotCount - 2;
+        int endSlot;
+        for (int firstSlot = 2; firstSlot < slotCount; firstSlot = endSlot) {
+            endSlot = firstSlot + Math.min(windowSlotCount, slotCount - firstSlot);
+            remapCaptureSlots(instructionWords, passInstructionWords, firstSlot, endSlot);
+            NfaImpl nfa = new NfaImpl(
+                    bytes,
+                    prog,
+                    prog.start(),
+                    textBegin,
+                    textEnd,
+                    ctxBegin,
+                    ctxEnd,
+                    passSlotCount / 2,
+                    anchored,
+                    longest,
+                    endMatch,
+                    passWorkspace,
+                    carriageReturnBeforeContext,
+                    passInstructionWords,
+                    threadCapacity);
+            boolean matched = nfa.search();
+            if (checkPasses && nfa.threadCount >= threadCapacity) {
+                throw new IllegalStateException("capture pass held " + nfa.threadCount + " threads, past the bound " + (threadCapacity - 1));
             }
-            throw failure;
+            if (checkPasses && firstSlot > 2 && !nfa.matchesGroupZero(submatch)) {
+                throw new IllegalStateException("capture pass for slots " + firstSlot + " to " + endSlot + " found a different group zero");
+            }
+            if (!matched) {
+                nfa.releaseWorkspace();
+                return false;
+            }
+            nfa.writeSubmatchWindow(submatch, firstSlot, endSlot);
+            nfa.releaseWorkspace();
+        }
+        return true;
+    }
+
+    private static void remapCaptureSlots(long[] instructionWords, long[] passInstructionWords, int firstSlot, int endSlot)
+    {
+        for (int id = 0; id < instructionWords.length; id++) {
+            long instructionWord = instructionWords[id];
+            if ((instructionWord & 0b111) == NfaImpl.OP_CAPTURE) {
+                int slot = (int) (instructionWord >>> 32);
+                if (slot >= 2) {
+                    int passSlot = (slot >= firstSlot && slot < endSlot) ? slot - firstSlot + 2 : Integer.MAX_VALUE;
+                    instructionWord = (instructionWord & 0xFFFF_FFFFL) | ((long) passSlot << 32);
+                }
+            }
+            passInstructionWords[id] = instructionWord;
         }
     }
 
@@ -325,6 +513,148 @@ final class Nfa
                 prog.getInstCount(InstOp.EMPTY_WIDTH) +
                 prog.getInstCount(InstOp.NOP) + 1;
         return Math.max(8, stackSize);
+    }
+
+    static int groupZeroStackSize(Prog prog)
+    {
+        int stackSize = prog.getInstCount(InstOp.CAPTURE) +
+                prog.getInstCount(InstOp.EMPTY_WIDTH) +
+                prog.getInstCount(InstOp.NOP) + 1;
+        return Math.max(8, stackSize);
+    }
+
+    /// Returns the most capture threads one search holds at once. A queue holds a thread only at
+    /// a byte range, alternate-match, or match entry, so the queue being stepped holds at most
+    /// one thread per such instruction. Every other thread in the queue being filled was
+    /// allocated during the fill: one for the search start, and one at each CAPTURE, which the
+    /// fill visits at most once.
+    static int captureThreadBound(Prog prog)
+    {
+        long bound = (long) prog.getInstCount(InstOp.BYTE_RANGE) + prog.getInstCount(InstOp.ALT_MATCH) + prog.getInstCount(InstOp.MATCH) + prog.getInstCount(InstOp.CAPTURE) + 1;
+        // Callers add one to the bound for the best match's slots, which must not overflow.
+        return (int) Math.min(Integer.MAX_VALUE - 1, bound);
+    }
+
+    /// Plans the capture searches of `prog`, which track at most the program's
+    /// [capture slots][Prog#captureSlotCount], so that a search's capture state stays within
+    /// `allowance` bytes, and stores the plan in `prog`. A search that fits keeps the ordinary
+    /// single pass. A wider one runs bounded passes; see [#searchInBoundedPasses].
+    /// `groupZeroProgram`, when not null, is the other program whose group-zero queues a
+    /// matcher's workspace may cache.
+    static void planCaptureSearches(Prog prog, long allowance, Prog groupZeroProgram, long maxMemory)
+    {
+        int slotCount = prog.captureSlotCount();
+        if (threadSlotBytes(prog, slotCount) + singlePassBytes(prog, groupZeroProgram, false) <= allowance) {
+            return;
+        }
+        if (threadSlotBytes(prog, slotCount) + boundedPassBytes(prog, false) <= allowance) {
+            prog.setCapturePlan(largestSlotCount(prog, singlePassBytes(prog, groupZeroProgram, false), allowance), slotCount);
+            return;
+        }
+        int boundedPassSlots = largestSlotCount(prog, boundedPassBytes(prog, true), allowance);
+        if (boundedPassSlots < 4) {
+            // The compiler admits a flattened program of P instructions only when the forward
+            // share, which is the allowance, holds 512 + 113P bytes. Instruction 0 is FAIL, so
+            // the thread bound is at most P and the stack at most max(8, 2P - 1) slots, and an
+            // int[n] takes at most 20 + 4n bytes. A pass of four slots then takes at most
+            // max(96P + 720, 80P + 784) bytes: 32P + 32 of slots, 448 of objects, 24P + 120 of
+            // queues, max(96, 16P + 32) of stacks, 16P + 72 of thread tables, and 8P + 16 of
+            // rewritten words. That fits the share for P >= 13, and the exact sizes fit at P = 12.
+            // Below that a pass takes at most 1,768 bytes, which the share holds from a maxMemory
+            // of 2,651 bytes, so nothing the compiler admits there reaches this rejection. A
+            // program of two slots needs one pass of them without rewritten words, which is
+            // smaller still, so it reaches this rejection only when that pass does not fit. Below
+            // 2,651 bytes a program of at most 11 instructions can in principle reach it, as its
+            // pass can exceed 512 + 113P bytes by up to 231 bytes. None has in over 100,000
+            // swept patterns; the tightest, which tracks only group zero, fit with 8 bytes to spare.
+            throw new RegexpCompileMemoryLimitException(maxMemory);
+        }
+        prog.setCapturePlan(largestSlotCount(prog, singlePassBytes(prog, groupZeroProgram, true), allowance), boundedPassSlots);
+    }
+
+    // Each live thread, and the best match, holds one int[] of the slots.
+    private static long threadSlotBytes(Prog prog, int slotCount)
+    {
+        return (captureThreadBound(prog) + 1L) * intArrayBytes(slotCount);
+    }
+
+    // The largest even slot count whose threads fit beside `otherBytes`.
+    private static int largestSlotCount(Prog prog, long otherBytes, long allowance)
+    {
+        long threads = captureThreadBound(prog) + 1L;
+        long perThread = (allowance - otherBytes) / threads;
+        if (perThread < intArrayBytes(0)) {
+            return 0;
+        }
+        long slots = (perThread - intArrayBytes(0)) / Integer.BYTES;
+        return (int) Math.min(Integer.MAX_VALUE - 1, slots & ~1L);
+    }
+
+    // The ordinary pass, apart from the threads' slots: thread tables that grow by doubling from
+    // INITIAL_THREAD_CAPACITY, with the outgrown tables live during the last copy, and the
+    // workspace's cached group-zero queues for whichever program it last ran. A matcher's
+    // workspace keeps the tables the search started with until the search ends, so once the
+    // tables double twice those are live beside both; they are at most a quarter of the final
+    // length, which a stateless search, holding no starting tables, overcounts. The plan counts
+    // the memory live at a search's peak, not every array the search allocates on the way.
+    private static long singlePassBytes(Prog prog, Prog groupZeroProgram, boolean rewritesInstructionWords)
+    {
+        long threads = captureThreadBound(prog);
+        long tableLength = INITIAL_THREAD_CAPACITY;
+        while (tableLength <= threads) {
+            tableLength *= 2;
+        }
+        long tables = threadTableBytes(tableLength);
+        if (tableLength > INITIAL_THREAD_CAPACITY) {
+            tables += threadTableBytes(tableLength / 2);
+        }
+        if (tableLength >= 4 * INITIAL_THREAD_CAPACITY) {
+            tables += threadTableBytes(tableLength / 4);
+        }
+        long groupZero = groupZeroBytes(prog);
+        if (groupZeroProgram != null) {
+            groupZero = Math.max(groupZero, groupZeroBytes(groupZeroProgram));
+        }
+        return captureSearchBytes(prog, rewritesInstructionWords) + tables + groupZero;
+    }
+
+    // A bounded pass, apart from the threads' slots: thread tables sized for the thread bound up
+    // front, and no group-zero queues.
+    private static long boundedPassBytes(Prog prog, boolean rewritesInstructionWords)
+    {
+        return captureSearchBytes(prog, rewritesInstructionWords) + threadTableBytes(captureThreadBound(prog) + 1L);
+    }
+
+    // The workspace, the search, a region's context view, its two queues and two stacks, and the
+    // rewritten instruction words when the passes need them.
+    private static long captureSearchBytes(Prog prog, boolean rewritesInstructionWords)
+    {
+        long bytes = WORKSPACE_BYTES + NFA_BYTES + SLICE_BYTES + 2 * (QUEUE_BYTES + 3 * intArrayBytes(prog.size())) + 2 * intArrayBytes(captureStackSize(prog));
+        if (rewritesInstructionWords) {
+            bytes += referenceArrayBytes(prog.size());
+        }
+        return bytes;
+    }
+
+    private static long groupZeroBytes(Prog prog)
+    {
+        return 2 * (QUEUE_BYTES + 3 * intArrayBytes(prog.size())) + intArrayBytes(groupZeroStackSize(prog));
+    }
+
+    private static long threadTableBytes(long length)
+    {
+        return 2 * intArrayBytes(length) + referenceArrayBytes(length);
+    }
+
+    private static long intArrayBytes(long length)
+    {
+        return (16 + 4 * length + 7) & ~7L;
+    }
+
+    // Also the size of a long[] of the same length.
+    private static long referenceArrayBytes(long length)
+    {
+        return 16 + 8 * length;
     }
 
     // Sparse queue specialized for NFA hot loops. Membership is tracked with sparse positions
@@ -962,13 +1292,21 @@ final class Nfa
         private NfaThreadQueue secondGroupZeroQueue;
         private int[] groupZeroAddInstructionIdStack;
         private int groupZeroWorkspaceReuseCount;
+        private long[] passInstructionWords;
 
-        private void prepare(Prog program, int captureSlotCount)
+        private void prepare(Prog program, int captureSlotCount, int threadCapacity)
         {
             if (this.program == program && this.captureSlotCount == captureSlotCount) {
                 firstQueue.clear();
                 secondQueue.clear();
                 Arrays.fill(match, -1);
+                // An ordinary pass with the same slot count may have left tables smaller than a
+                // bounded pass needs.
+                if (threadReferences.length < threadCapacity) {
+                    threadReferences = Arrays.copyOf(threadReferences, threadCapacity);
+                    threadNext = Arrays.copyOf(threadNext, threadCapacity);
+                    threadCaptures = Arrays.copyOf(threadCaptures, threadCapacity);
+                }
                 return;
             }
 
@@ -978,9 +1316,9 @@ final class Nfa
             int stackSize = captureStackSize(program);
             int[] addInstructionIdStack = new int[stackSize];
             int[] addRestoreThreadStack = new int[stackSize];
-            int[] threadReferences = new int[16];
-            int[] threadNext = new int[16];
-            int[][] threadCaptures = new int[16][];
+            int[] threadReferences = new int[threadCapacity];
+            int[] threadNext = new int[threadCapacity];
+            int[][] threadCaptures = new int[threadCapacity][];
             int[] match = new int[captureSlotCount];
             Arrays.fill(match, -1);
 
@@ -1034,6 +1372,30 @@ final class Nfa
             return groupZeroWorkspaceReuseCount;
         }
 
+        /// Returns how many capture threads the workspace's arena holds: the most that were live
+        /// at once in a search since the arena was initialized for this program and slot count.
+        int captureThreadCountForDiagnostics()
+        {
+            return threadCount;
+        }
+
+        private void releaseGroupZero()
+        {
+            groupZeroProgram = null;
+            firstGroupZeroQueue = null;
+            secondGroupZeroQueue = null;
+            groupZeroAddInstructionIdStack = null;
+            groupZeroWorkspaceReuseCount = 0;
+        }
+
+        private long[] preparePassInstructionWords(int programSize)
+        {
+            if (passInstructionWords == null || passInstructionWords.length != programSize) {
+                passInstructionWords = new long[programSize];
+            }
+            return passInstructionWords;
+        }
+
         private void invalidate()
         {
             program = null;
@@ -1048,11 +1410,8 @@ final class Nfa
             match = null;
             threadCount = 0;
             freeList = 0;
-            groupZeroProgram = null;
-            firstGroupZeroQueue = null;
-            secondGroupZeroQueue = null;
-            groupZeroAddInstructionIdStack = null;
-            groupZeroWorkspaceReuseCount = 0;
+            releaseGroupZero();
+            passInstructionWords = null;
         }
     }
 
@@ -1118,11 +1477,13 @@ final class Nfa
                 boolean longest,
                 boolean endMatch,
                 Workspace workspace,
-                boolean carriageReturnBeforeContext)
+                boolean carriageReturnBeforeContext,
+                long[] instructionWords,
+                int threadCapacity)
         {
             this.bytes = requireNonNull(bytes, "bytes is null");
             this.prog = requireNonNull(prog, "prog is null");
-            this.instructionWords = prog.getOrCreateCaptureInstructionWords();
+            this.instructionWords = requireNonNull(instructionWords, "instructionWords is null");
 
             this.start = start;
             this.textBegin = textBegin;
@@ -1149,14 +1510,14 @@ final class Nfa
                 int stackSize = captureStackSize(prog);
                 this.addIdStack = new int[stackSize];
                 this.addRestoreThreadStack = new int[stackSize];
-                this.threadRef = new int[16];
-                this.threadNext = new int[16];
-                this.threadCapture = new int[16][];
+                this.threadRef = new int[threadCapacity];
+                this.threadNext = new int[threadCapacity];
+                this.threadCapture = new int[threadCapacity][];
                 this.threadCount = 0;
                 this.freeList = 0;
             }
             else {
-                workspace.prepare(prog, ncapture);
+                workspace.prepare(prog, ncapture, threadCapacity);
                 this.match = workspace.match;
                 this.q0 = workspace.firstQueue;
                 this.q1 = workspace.secondQueue;
@@ -1273,18 +1634,37 @@ final class Nfa
         private void writeSubmatch(int[] out)
         {
             for (int i = 0; i < submatchCount; i++) {
-                int a = match[2 * i];
-                int b = match[2 * i + 1];
-                int o = 2 * i;
-                if (a < 0 || b < 0) {
-                    out[o] = -1;
-                    out[o + 1] = -1;
-                }
-                else {
-                    out[o] = a - textBegin;
-                    out[o + 1] = b - textBegin;
-                }
+                writePair(out, 2 * i, 2 * i);
             }
+        }
+
+        // Writes group zero and a bounded pass's window of slots [firstSlot, endSlot), which the
+        // pass tracked from slot 2.
+        private void writeSubmatchWindow(int[] out, int firstSlot, int endSlot)
+        {
+            writePair(out, 0, 0);
+            for (int slot = firstSlot; slot < endSlot; slot += 2) {
+                writePair(out, slot, slot - firstSlot + 2);
+            }
+        }
+
+        private void writePair(int[] out, int outSlot, int matchSlot)
+        {
+            int a = match[matchSlot];
+            int b = match[matchSlot + 1];
+            if (a < 0 || b < 0) {
+                out[outSlot] = -1;
+                out[outSlot + 1] = -1;
+            }
+            else {
+                out[outSlot] = a - textBegin;
+                out[outSlot + 1] = b - textBegin;
+            }
+        }
+
+        private boolean matchesGroupZero(int[] out)
+        {
+            return matched && match[0] - textBegin == out[0] && match[1] - textBegin == out[1];
         }
 
         private int step(CaptureThreadQueue runQueue, CaptureThreadQueue nextQueue, int c, int position)

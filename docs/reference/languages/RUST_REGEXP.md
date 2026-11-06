@@ -141,7 +141,7 @@ in byte mode. Names follow `JavaRegexp.Options` where the concept is the same:
 | `setOctal` | `octal` | off |
 | `setBytes` | `regex::bytes::RegexBuilder` in place of `regex::RegexBuilder` | off |
 | `setNestLimit` | `nest_limit` | 250 |
-| `setMaxMemory` | none; replaces `size_limit` and `dfa_size_limit` with Regulator's compilation and DFA-cache budget | 96 MiB |
+| `setMaxMemory` | none; replaces `size_limit` and `dfa_size_limit` with Regulator's compilation, DFA-cache and capture-search budget | 96 MiB |
 | `setByteFrequencies` | none | `ByteFrequencies.uniform()` |
 | `setGenerateBytecode` | none | off |
 

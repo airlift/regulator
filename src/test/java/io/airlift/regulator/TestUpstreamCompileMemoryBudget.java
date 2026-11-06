@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.function.IntFunction;
 
 import static io.airlift.slice.SizeOf.sizeOf;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -222,6 +223,57 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(program.dfaMemory()).isEqualTo((1 << 20) - onePassMemory);
     }
 
+    @Test
+    public void testCaptureSearchPlan()
+    {
+        // A search whose capture threads fit the forward share keeps the ordinary single pass.
+        Prog small = Re2.compile(Slices.utf8Slice("(a+)(b)?")).forwardProgramForDiagnostics();
+        assertThat(small.singlePassCaptureSlots()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(small.boundedPassCaptureSlots()).isEqualTo(Integer.MAX_VALUE);
+
+        // (a?) repeated ten times may hold 33 threads, so a single pass doubles its thread tables
+        // from 16 entries to 64, and a matcher's workspace keeps the 16-entry tables until the
+        // search ends. Counting those beside the 32- and 64-entry tables leaves this budget's
+        // forward share short of a single pass of all 22 slots.
+        Prog doubledTwice = Re2.compile(Slices.utf8Slice("(a?)".repeat(10)), Re2.Options.defaults().setMaxMemory(13_150)).forwardProgramForDiagnostics();
+        assertThat(doubledTwice.singlePassCaptureSlots()).isLessThan(22);
+        assertThat(doubledTwice.boundedPassCaptureSlots()).isEqualTo(22);
+    }
+
+    @Test
+    public void testLargestCaptureProgramsPlanBoundedPasses()
+    {
+        // Nested empty groups make every instruction but FAIL and MATCH a CAPTURE, the most capture
+        // threads and the deepest capture stack a program of their size can have. The most of them
+        // a budget admits still plan bounded passes rather than fail to compile. At the default
+        // budget that is 559,234 instructions, of the 593,879 the flattened charge allows.
+        assertLargestGroupsPlanBoundedPasses(Re2.Options.DEFAULT_MAX_MEMORY, 279_616, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
+        // The smallest budget that admits a CAPTURE, one group around a start anchor.
+        assertLargestGroupsPlanBoundedPasses(1_667, 1, groups -> "(".repeat(groups) + "^" + ")".repeat(groups));
+
+        // The smallest budget that admits any pattern with groups leaves no CAPTURE in the program.
+        // Its searches track only group zero, but even those two slots do not fit a single pass
+        // beside its doubling thread tables and group-zero queues, so they run one bounded pass. It
+        // fits the share with 8 bytes to spare, the tightest fit in a sweep of over 100,000
+        // patterns.
+        assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(1_306)))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        Prog empty = Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(1_307)).forwardProgramForDiagnostics();
+        assertThat(empty.captureSlotCount()).isEqualTo(2);
+        assertThat(empty.singlePassCaptureSlots()).isEqualTo(0);
+        assertThat(empty.boundedPassCaptureSlots()).isEqualTo(2);
+
+        // Below 2,651 bytes the passes are not proven to fit what the flattened charge admits.
+        // Of the programs in that sweep that track more than group zero, this one's pass fits its
+        // share with the least to spare, 40 bytes. Its removed first group leaves the second group
+        // in slots 4 and 5, and those six slots, too many for a single pass, run in one bounded
+        // pass.
+        Prog tightest = Re2.compile(Slices.utf8Slice("(b){0}(^)"), Re2.Options.defaults().setMaxMemory(1_667)).forwardProgramForDiagnostics();
+        assertThat(tightest.captureSlotCount()).isEqualTo(6);
+        assertThat(tightest.singlePassCaptureSlots()).isEqualTo(0);
+        assertThat(tightest.boundedPassCaptureSlots()).isEqualTo(6);
+    }
+
     private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixShiftsMemory)
     {
         int maxMemory = 4096;
@@ -254,6 +306,17 @@ public class TestUpstreamCompileMemoryBudget
             }
         }
         return compiled;
+    }
+
+    private static void assertLargestGroupsPlanBoundedPasses(long maxMemory, int groups, IntFunction<String> pattern)
+    {
+        Prog program = Re2.compile(Slices.utf8Slice(pattern.apply(groups)), Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+        assertThat(program.getInstCount(InstOp.CAPTURE)).isEqualTo(program.size() - 2);
+        assertThat(program.singlePassCaptureSlots()).isLessThan(2 * groups + 2);
+        assertThat(program.boundedPassCaptureSlots()).isGreaterThanOrEqualTo(4);
+        // One more group is past what the forward share admits.
+        assertThatThrownBy(() -> Compiler.compile(parse(pattern.apply(groups + 1)), false, maxMemory - (maxMemory / 3)))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
     }
 
     private static Regexp parse(String pattern)

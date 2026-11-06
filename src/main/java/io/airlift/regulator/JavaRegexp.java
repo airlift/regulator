@@ -104,13 +104,13 @@ public sealed class JavaRegexp
             return this;
         }
 
-        /// Returns the compilation and DFA-cache memory budget in bytes.
+        /// Returns the compilation, DFA-cache and capture-search memory budget in bytes.
         long maxMemory()
         {
             return maxMemory;
         }
 
-        /// Sets the positive compilation and DFA-cache memory budget in bytes.
+        /// Sets the positive compilation, DFA-cache and capture-search memory budget in bytes.
         public Options setMaxMemory(long maxMemory)
         {
             if (maxMemory <= 0) {
