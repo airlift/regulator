@@ -35,6 +35,8 @@ public class TestRequiredBytes
     private static final String NOQA_LITERAL = "# noqa";
     private static final String CODING = "^[ \\t\\f]*#.*?coding[:=][ \\t]*utf-?8";
     private static final String URI_OR_EMAIL = "([a-zA-Z][a-zA-Z0-9]*)://([^ /]+)(/[^ ]*)?|([^ @]+)@([^ @]+)";
+    // The quick form of the aws-keys pattern, whose prefix scan looks for its one-byte prefix A.
+    private static final String AWS_KEY_QUICK = "(?:ASIA|AKIA|AROA|AIDA)[A-Z0-7]{16}";
     // The most budgets past the smallest that compiles to try for one that keeps the required bytes.
     private static final long BUDGET_SEARCH_LIMIT = 4096;
 
@@ -56,6 +58,10 @@ public class TestRequiredBytes
         assertThat(requiredBytes("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo(NOQA_LITERAL);
         assertThat(requiredBytes(CODING)).isEqualTo("coding");
         assertThat(requiredBytes("(?:ab)?cd")).isEqualTo("cd");
+        // A pattern that is a single literal keeps it, exact or case-insensitive after two exact
+        // bytes.
+        assertThat(requiredBytes("abcabd")).isEqualTo("abcabd");
+        assertThat(requiredBytes("(?i)# noqa")).isEqualTo(NOQA_LITERAL);
         // A one-byte literal, or a case-insensitive literal without a two-byte exact head, is not used.
         assertThat(requiredBytes("\\s+(?i:noqa)")).isNull();
         // A pattern with no literal and no byte in every match keeps none.
@@ -65,6 +71,16 @@ public class TestRequiredBytes
         assertThat(requiredBytes(URI_OR_EMAIL)).isEqualTo("one of /@");
         assertThat(requiredBytes("ab|cd|ef")).isEqualTo("one of bcf");
         assertThat(requiredBytes("ab|cd|ef|gh")).isNull();
+        // A prefix scan runs after the find and engine setup the check saves, so a pattern with
+        // one keeps its bytes.
+        assertThat(Re2.compile(utf8Slice(AWS_KEY_QUICK)).forwardProgramForDiagnostics().canPrefixAccel()).isTrue();
+        assertThat(requiredBytes(AWS_KEY_QUICK)).isEqualTo("one of A");
+        // A pattern with a single-byte table keeps none: its group-zero matchers find short
+        // windows on the table.
+        compile(",").forEach((language, pattern) -> {
+            assertThat(pattern.sharedSingleByteMatcher()).as(language).isNotNull();
+            assertThat(pattern.requiredBytesForDiagnostics()).as(language).isNull();
+        });
         // A case-insensitive letter gives no byte: one byte cannot cover both cases, and k also
         // matches the Kelvin sign.
         assertThat(requiredBytes("\\d(?i:k)")).isNull();
@@ -92,7 +108,14 @@ public class TestRequiredBytes
                         "see http://example.com/x", true,
                         "mail me at a@b", true,
                         "nothing to see here, just words", false,
-                        "a colon: but no slashes", false));
+                        "a colon: but no slashes", false),
+                "abcabd", Map.of(
+                        "x abcabd y", true,
+                        "x abcab d y", false),
+                AWS_KEY_QUICK, Map.of(
+                        "key = AKIAIOSFODNN7EXAMPLE", true,
+                        "key = AKIAIOSFODNN8EXAMPLE", false,
+                        "no key on this line", false));
         for (Map.Entry<String, Map<String, Boolean>> testCase : cases.entrySet()) {
             String pattern = testCase.getKey();
             for (Map.Entry<String, CompiledPattern> compiled : compile(pattern).entrySet()) {
