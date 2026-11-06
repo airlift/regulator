@@ -210,17 +210,18 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
-    /// Caps the literal prefix scan at the size it was measured at. It is larger than
-    /// FreqInlineSize and runs out of line from Prog, a trade-off accepted on measurement;
-    /// growing it further changes code that was measured only at this size. Keep every vector and
-    /// mask inside the method or in helpers C2 inlines at each call site: one returned from a
-    /// helper that C2 left out of line was boxed on every search.
+    /// Keeps the literal prefix scan larger than FreqInlineSize, so every caller calls its
+    /// compiled method rather than an inlined copy, as "Literal Prefix Vector Scan" in
+    /// REGULATOR_DECISIONS.md records, and caps it at the size it was measured at: growing it
+    /// further changes code that was measured only at this size. Keep every vector and mask inside
+    /// the method or in helpers C2 inlines at each call site: one returned from a helper that C2
+    /// left out of line was boxed on every search.
     @Test
-    public void testPrefixScanStaysWithinMeasuredSize()
+    public void testPrefixScanStaysOutOfLineAtMeasuredSize()
     {
         assertThat(codeLength(VectorPrefixScanner.class, "find"))
                 .as("VectorPrefixScanner.find bytecode bytes")
-                .isPositive()
+                .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(469);
     }
 
