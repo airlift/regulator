@@ -3258,14 +3258,20 @@ final class Prog
 
     private static final int ONEPASS_MATCH_WINS = 1 << ONEPASS_EMPTY_SHIFT;
     private static final int ONEPASS_IMPOSSIBLE = EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY;
-    // The text-dependent assertions OnePass evaluates: Rust's, and Java's and Trino's word
-    // boundaries. They do not fit in a condition's six empty-width bits. A condition that needs one
+    // The text-dependent assertions OnePass evaluates: Rust's, Java's and Trino's word boundaries,
+    // and Java's and Trino's $ that also matches before a final line terminator (Java's \Z too).
+    // OnePass evaluates each through EmptyOp.contextFlags on the same context BitState and the NFA
+    // read, and a one-pass program has a single path, so Java's priority rules cannot pick another
+    // match. They do not fit in a condition's six empty-width bits. A condition that needs one
     // carries ONEPASS_EXTENDED_ASSERTIONS instead, which sends the search to OnePass.satisfyAction
     // or OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from the parallel assertion
     // arrays. In a program with one of them, every match condition also carries its node
     // index above ONEPASS_INDEX_SHIFT, where an action keeps its next node. The bit is never part
     // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
-    private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
+    private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS |
+            EmptyOp.JAVA_TRINO_WORD_BOUNDARIES |
+            EmptyOp.EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR |
+            EmptyOp.EMPTY_END_TEXT_OR_FINAL_NEWLINE;
     private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
     // Action entries allocated before one-pass analysis starts growing node storage.
     private static final int ONEPASS_INITIAL_ACTIONS = 8192;

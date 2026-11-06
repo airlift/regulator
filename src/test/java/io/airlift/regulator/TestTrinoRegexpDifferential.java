@@ -392,6 +392,44 @@ public class TestTrinoRegexpDifferential
         }
     }
 
+    @Test
+    public void testFinalNewlineAnchorCapturesMatchJoni()
+    {
+        // The capture searches of these patterns, the last the Unicode character data line
+        // benchmark, run on OnePass, which reads a final LF after the position, on inputs ending in
+        // each line terminator. Pinned Joni can miss the empty match of a pattern that matches
+        // empty text when the input ends with a multibyte character, a recorded difference, so
+        // such a pattern skips those inputs.
+        String ucdLine = "0000;<control>;Cc;0;BN;;;;;N;NULL;;;;";
+        Map<String, String> samples = Map.of(
+                "^(a*)(\\n??)$", "a",
+                "^(a*?)(\\n?)$", "a",
+                "^(a+)(\\r??)(\\n??)$", "a",
+                "^([A-Z0-9]+);([^;]+);([^;]+);([0-9]+);([^;]+);([^;]*);([0-9]*);([0-9]*);([-0-9/]*);([YN]);([^;]*);([^;]*);([^;]*);([^;]*);([^;]*)$", ucdLine);
+        List<String> bodies = List.of("", "a", "aa", ";", ucdLine);
+        List<String> ends = List.of("", "\n", "\n\n", "\r\n", "\r", "\r\r", "\n\r", "\u0085", "\u2028", "\u2029");
+        for (Map.Entry<String, String> entry : samples.entrySet()) {
+            String pattern = entry.getKey();
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            RegexpMatcher matcher = regexp.re2().matcher(utf8Slice(entry.getValue() + "\n"));
+            assertThat(matcher.find()).as(pattern).isTrue();
+            assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).as(pattern).isTrue();
+
+            Regex oracle = joniPattern(pattern);
+            boolean matchesEmpty = !joniMatches(oracle, utf8Slice("")).isEmpty();
+            List<Slice> sources = new ArrayList<>();
+            for (String body : bodies) {
+                for (String end : ends) {
+                    String input = body + end;
+                    if (!matchesEmpty || input.isEmpty() || input.codePointBefore(input.length()) < 0x80) {
+                        sources.add(utf8Slice(input));
+                    }
+                }
+            }
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+    }
+
     private static Map<String, Integer> joniNamedGroups(String description, Regex joni)
     {
         Map<String, Integer> namedGroups = new HashMap<>();

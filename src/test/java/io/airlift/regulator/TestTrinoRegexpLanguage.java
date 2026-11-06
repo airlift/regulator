@@ -700,6 +700,28 @@ public class TestTrinoRegexpLanguage
         }
     }
 
+    @Test
+    public void testFinalNewlineAnchorRunsOnOnePass()
+    {
+        // Trino's $ reads a final LF after the position, which OnePass evaluates as BitState does,
+        // over text with CR, LF, and U+0085 and its bytes alone.
+        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) 'A', (byte) ';', (byte) '\r', (byte) '\n', (byte) 0xC2, (byte) 0x85);
+        for (Map.Entry<String, Integer> entry : Map.of("^(a+)$", 4, "^([A-Z]+);([^;]*)$", 6, "^(a*)(\\n??)$", 6, "^(a*?)(\\n?)$", 6).entrySet()) {
+            Prog program = compileTrinoProgram(entry.getKey(), false);
+            assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
+            TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), texts, "Trino");
+        }
+
+        // The capture search of the Unicode character data line benchmark runs on OnePass, not
+        // BitState; simpler start-anchored patterns such as those above take a scan plan instead.
+        String ucd = "^([A-Z0-9]+);([^;]+);([^;]+);([0-9]+);([^;]+);([^;]*);([0-9]*);([0-9]*);([-0-9/]*);([YN]);([^;]*);([^;]*);([^;]*);([^;]*);([^;]*)$";
+        RegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(ucd)).re2().matcher(utf8Slice("0000;<control>;Cc;0;BN;;;;;N;NULL;;;;"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.end()).isEqualTo(37);
+        assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
     // Properties hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558 MODIFIER LETTER
     // ARMENIAN SMALL EH, a letter, and the Seal script, which starts at U+3D000.
     @Test
@@ -1067,7 +1089,7 @@ public class TestTrinoRegexpLanguage
     {
         TrinoCompiledPattern finalLine = TrinoRegexp.compile(utf8Slice("a$")).re2();
         assertThat(finalLine.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
-        assertThat(finalLine.forwardProgramForDiagnostics().isOnePass()).isFalse();
+        assertThat(finalLine.forwardProgramForDiagnostics().isOnePass()).isTrue();
         assertThat(finalLine.reverseProgramSize()).isEqualTo(-1);
 
         TrinoCompiledPattern fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).re2();

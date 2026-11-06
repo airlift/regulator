@@ -180,8 +180,17 @@ public class TestJavaRegexpDifferential
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
         assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).usesScanPlanForDiagnostics()).isTrue();
-        List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
-        for (String pattern : List.of(
+        // These capture searches run on OnePass, which reads the terminator after the position from
+        // the region or, for a ranged call, the whole input.
+        List<String> onePassFinalTerminator = List.of("^(a*)(\\n??)$", "^(a*?)(\\n?)$", "^(a+)(\\r??)(\\n??)$", "(?d)^(a+)(\\r??)(\\n??)$", "^([ab]*)\\Z");
+        for (String pattern : onePassFinalTerminator) {
+            RegexpMatcher matcher = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice("a\r\n"));
+            assertThat(matcher.find()).as(pattern).isTrue();
+            assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).as(pattern).isTrue();
+        }
+        List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n", "a\r\r", "a\n\r", "a\n\n", "a\u0085", "a\u2028", "a\u2029");
+        List<String> patterns = new ArrayList<>(onePassFinalTerminator);
+        patterns.addAll(List.of(
                 "^",
                 "$",
                 "^$",
@@ -209,7 +218,8 @@ public class TestJavaRegexpDifferential
                 "(a)(b)?",
                 "(b?)$",
                 startAnchoredPlan,
-                unanchoredPlan)) {
+                unanchoredPlan));
+        for (String pattern : patterns) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             RegexpMatcher actual = regexp.matcher(utf8Slice(""));

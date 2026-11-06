@@ -280,8 +280,9 @@ report of it:
   [ce189d1](https://github.com/kkos/oniguruma/commit/ce189d190417b783ba0e249eca7cc1875c012861)
   fixed the first two).
 - An expression that can match empty text misses its empty match before `$` or
-  `\z` at the end of an input whose last character is multibyte and longer in
-  bytes than the expression can match, so `q?$` does not match `Ω` (Oniguruma
+  `\z` at the end of an input when its maximum length is at least one byte and
+  shorter than the input's last UTF-8 character, so `q?$` does not match `Ω`,
+  while plain `$` does; modern Joni 2.1.31 keeps the defect (Oniguruma
   [b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092),
   [Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
 - A dotall `.*` that only anchors and boundaries precede makes Joni try only the
