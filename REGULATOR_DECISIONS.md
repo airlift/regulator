@@ -1151,12 +1151,18 @@ when pairing is unavailable.
 Short searches request it after 16 repeated calls, so one isolated short search
 does not prevent the same DFA instance from later selecting a paired table. The
 observation count is only a performance hint; races can change promotion timing
-but not matching behavior. A finite-budget DFA initially allocates a small
-row-rounded table and geometrically enlarges it as the graph grows. Each
-allocation is limited so that the remaining budget can still hold the minimum
-Java state behind every additional native row. The integer and object
-transition tables remain authoritative, and every zero native entry delegates
-to the unchanged object continuation.
+but not matching behavior. A requested table is allocated when the exclusive
+search that requests it ends. The first allocation waits once while the DFA
+could still build paired rows and has computed no transition, so a search that
+ends before computing one, such as a word boundary at a byte-order mark, does
+not decide between paired rows and the table. Waiting only once keeps a DFA that
+never computes a transition from retrying every search exclusively. A
+finite-budget DFA initially allocates a small row-rounded table and
+geometrically enlarges it as the graph grows. Each allocation is limited so that
+the remaining budget can still hold the minimum Java state behind every
+additional native row. The integer and object transition tables remain
+authoritative, and every zero native entry delegates to the unchanged object
+continuation.
 
 Native access is optional. The restricted everything segment is initialized
 only when the containing module has native access enabled; otherwise no native
