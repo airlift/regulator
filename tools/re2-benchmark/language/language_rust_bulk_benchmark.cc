@@ -67,11 +67,14 @@ struct RustEngine {
 
     static int64_t execute(const Inputs& inputs, const Regex& pattern, const std::vector<std::string_view>& sources,
                            CaptureLocations<Api>& groups, bool trace) {
+        // The model is read once per call, never per source or per match.
         bool captures = inputs.captures();
+        bool grep = inputs.model == "grep";
+        bool spans = inputs.model == "count-spans";
         int64_t result = 0;
         for (std::string_view source : sources) {
             if (trace) std::cout << "source\n";
-            if (inputs.model == "grep") {
+            if (grep) {
                 bool found = Api::is_match(pattern.get(), source.data(), source.size());
                 result += found;
                 if (trace) std::cout << (found ? "1\n" : "0\n");
@@ -82,7 +85,7 @@ struct RustEngine {
                 continue;
             }
             if (captures) result += Api::count_captures(pattern.get(), groups.get(), source.data(), source.size());
-            else if (inputs.model == "count-spans") result += Api::count_spans(pattern.get(), source.data(), source.size());
+            else if (spans) result += Api::count_spans(pattern.get(), source.data(), source.size());
             else result += Api::count(pattern.get(), source.data(), source.size());
         }
         return result;

@@ -517,8 +517,10 @@ compilation for compile cases and execution for the other five models.
 
 All adapters split grep inputs before timing, trim a trailing carriage return,
 and avoid a phantom final line. This differs from official Rebar timing, which
-includes line splitting. Trino span/capture workloads use public
-`TrinoRegexp.matcher`, retaining group zero for spans and all groups for captures.
+includes line splitting. Each runner reads the workload's model once per timed
+call, outside its per-line and per-match loops. Trino span/capture workloads use
+public `TrinoRegexp.matcher`, retaining group zero for spans and all groups for
+captures.
 Both Trino and Joni construct a matcher per source inside timing and reuse it
 for every match in that source. Neither constructs extracted-value lists or
 replacement output. Trino's other public operations keep their specialized

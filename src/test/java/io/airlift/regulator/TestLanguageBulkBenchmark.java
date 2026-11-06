@@ -34,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestLanguageBulkBenchmark
 {
     private static final List<String> ENGINES = List.of("re2", "java", "trino", "rust", "jdk", "joni");
+    private static final List<String> NON_RUST_ENGINES = ENGINES.stream().filter(engine -> !engine.equals("rust")).toList();
 
     @TempDir
     Path directory;
@@ -42,10 +43,11 @@ public class TestLanguageBulkBenchmark
     public void testAllModelsAndRepeatedExecution()
             throws Exception
     {
-        check("count", "a+", "a baaa", 2, "source\n0:1:61;\n3:6:616161;\n");
+        check("count", "(a+)", "a baaa", 2, "source\n0:1:61;\n3:6:616161;\n");
         check("count-spans", "é|💰", "x💰é", 6, "source\n1:5:f09f92b0;\n5:7:c3a9;\n");
         check("count-captures", "(a)(b)?()", "a ab", 7, "source\n0:1:61;0:1:61;-;1:1:;\n2:4:6162;2:3:61;3:4:62;4:4:;\n");
         check("grep", "^a$", "a\r\nb\na\r", 2, "source\n1\nsource\n0\nsource\n1\n");
+        check("grep", "a", "aa\nb\n", 1, "source\n1\nsource\n0\n");
         check("grep-captures",
                 "(a)(b)?()",
                 "a\r\nab\n",
@@ -56,10 +58,15 @@ public class TestLanguageBulkBenchmark
                 "aa\nba\n",
                 6,
                 "source\n0:1:61;0:1:61;\n1:2:61;1:2:61;\nsource\n1:2:61;1:2:61;\n");
-        check(ENGINES.stream().filter(engine -> !engine.equals("rust")).toList(), "count", "a*", "ab", 3, "source\n0:1:61;\n1:1:;\n2:2:;\n");
+        check(NON_RUST_ENGINES, "count", "a*", "ab", 3, "source\n0:1:61;\n1:1:;\n2:2:;\n");
         // Rust skips an empty match that ends where the previous match ended.
         check(List.of("rust"), "count", "a*", "ab", 2, "source\n0:1:61;\n2:2:;\n");
         check("count", "a*", "", 1, "source\n0:0:;\n");
+        // Exercise empty matches over a multibyte code point in the count, span and capture loops.
+        check("count", "a*", "é", 2, "source\n0:0:;\n2:2:;\n");
+        check("count-spans", "^|.", "éa", 1, "source\n0:0:;\n2:3:61;\n");
+        check("count-captures", "(x*)", "é", 4, "source\n0:0:;0:0:;\n2:2:;2:2:;\n");
+        check("grep-captures", "(x*)", "é\nb", 8, "source\n0:0:;0:0:;\n2:2:;2:2:;\nsource\n0:0:;0:0:;\n1:1:;1:1:;\n");
         check("grep", ".", "", 0, "");
     }
 
@@ -123,6 +130,11 @@ public class TestLanguageBulkBenchmark
             throws Exception
     {
         check("compile", "a+", "aa", 0, "compiled\n");
+        var data = new BenchmarkLanguageBulk.BenchmarkData();
+        data.engine = "re2";
+        data.workloadFile = input("compile", "a+", "aa").toString();
+        data.setup();
+        assertThatThrownBy(() -> new BenchmarkLanguageBulk().execute(data)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("not compile");
     }
 
     @Test
