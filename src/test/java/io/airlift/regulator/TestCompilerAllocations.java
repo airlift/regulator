@@ -390,7 +390,7 @@ public class TestCompilerAllocations
         assertThat(allocatedBytes).isLessThan(2L * Re2.Options.DEFAULT_MAX_MEMORY);
     }
 
-    private static boolean compressedClassPointers()
+    static boolean compressedClassPointers()
     {
         try {
             return Boolean.parseBoolean(ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class).getVMOption("UseCompressedClassPointers").getValue());

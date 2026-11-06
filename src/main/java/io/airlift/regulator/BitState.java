@@ -22,53 +22,60 @@ import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 final class BitState
 {
     private BitState() {}
 
+    // The deepest job stack on everyday capture searches is about ten jobs, so a search usually
+    // starts with sixteen and grows the stack on a deeper one, within the memory model; see
+    // initialJobCapacity and nextJobCapacity.
+    private static final int INITIAL_JOB_CAPACITY = 16;
     private static final long JOB_BYTES = instanceSize(Job.class);
     // The search, its workspace, and the Slice view of the context that a region search passes.
     private static final long SEARCH_BYTES = (long) instanceSize(BitStateImpl.class) + instanceSize(Workspace.class) + instanceSize(Slice.class);
 
-    static int initialJobCapacity(int programSize)
-    {
-        return Math.max(16, Math.min(64, programSize));
-    }
-
-    /// Returns the longest text, at most `textMaxSize`, whose search keeps its visited bitmap,
-    /// capture slots, job stack, and objects within `allowance` bytes, or -1 when no text fits.
+    /// Returns the jobs a search may push for each position of its text.
     ///
     /// The visited bitmap lets a search enter each list at each position once, across all of its
     /// start positions. An entry walks the list's instructions in order, each at most once: a
     /// popped job resumes the walk past the instruction that pushed it, and ALT_MATCH only jumps
     /// ahead in the list. On that walk a BYTE_RANGE with a hint, or a CAPTURE, EMPTY_WIDTH, or
     /// NOP that is not last, pushes one job, and a CAPTURE pushes one more to undo itself. So a
-    /// start position's stack holds at most its own job and the program's pushes for each of the
-    /// text's positions, and the stack doubles from [#initialJobCapacity] until it holds them.
-    static int maxTextLength(Prog prog, int textMaxSize, long allowance)
+    /// start position's stack holds at most its own job and these pushes for each of the text's
+    /// positions.
+    static int jobsPerPosition(Prog prog)
     {
-        long pushesPerPosition = 0;
+        int jobsPerPosition = 0;
         for (int id = 0; id < prog.size(); id++) {
             Prog.Inst instruction = prog.inst(id);
             switch (instruction.opcode()) {
-                case BYTE_RANGE -> pushesPerPosition += instruction.hint() != 0 ? 1 : 0;
-                case CAPTURE -> pushesPerPosition += instruction.last() ? 1 : 2;
-                case EMPTY_WIDTH, NOP -> pushesPerPosition += instruction.last() ? 0 : 1;
+                case BYTE_RANGE -> jobsPerPosition += instruction.hint() != 0 ? 1 : 0;
+                case CAPTURE -> jobsPerPosition += instruction.last() ? 1 : 2;
+                case EMPTY_WIDTH, NOP -> jobsPerPosition += instruction.last() ? 0 : 1;
                 default -> {}
             }
         }
+        return jobsPerPosition;
+    }
+
+    /// Returns the longest text, at most `textMaxSize`, whose search keeps its visited bitmap,
+    /// capture slots, job stack, and objects within `allowance` bytes, or -1 when no text fits.
+    /// The job stack counts as [#modelJobStackBytes].
+    static int maxTextLength(Prog prog, int textMaxSize, long allowance)
+    {
         // A search tracks at most the program's capture slots, whatever the caller's buffer.
         int slotCount = prog.captureSlotCount();
-        if (searchBytes(prog, pushesPerPosition, slotCount, textMaxSize) <= allowance) {
+        if (searchBytes(prog, slotCount, textMaxSize) <= allowance) {
             return textMaxSize;
         }
         int low = -1;
         int high = textMaxSize;
         while (low < high - 1) {
             int middle = (low + high) >>> 1;
-            if (searchBytes(prog, pushesPerPosition, slotCount, middle) <= allowance) {
+            if (searchBytes(prog, slotCount, middle) <= allowance) {
                 low = middle;
             }
             else {
@@ -78,15 +85,27 @@ final class BitState
         return low;
     }
 
-    private static long searchBytes(Prog prog, long pushesPerPosition, int slotCount, int textLength)
+    static long searchBytes(Prog prog, int slotCount, int textLength)
     {
         long positions = textLength + 1L;
         long visitedWords = (prog.listCount() * positions + 63) / 64;
-        long jobs = 1 + positions * pushesPerPosition;
-        // Each array the stack grows through, and a job for each slot of the last. Unlike the
-        // capture NFA's plan, which counts the memory live at a search's peak, this counts the
-        // search's allocation total, which its allocation test holds to the share with no slack.
-        long capacity = initialJobCapacity(prog.size());
+        long stackBytes = modelJobStackBytes(prog, textLength);
+        if (stackBytes == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        return SEARCH_BYTES + sizeOfLongArray((int) visitedWords) + sizeOfIntArray(slotCount) + stackBytes;
+    }
+
+    /// Returns the job stack bytes that the memory model counts for a search over `textLength`
+    /// bytes: each array of a stack that doubles from [#modelJobCapacity] until it holds the
+    /// search's maximum job count, and a job for each slot of the last. Unlike the capture NFA's
+    /// plan, which counts the memory live at a search's peak, this counts the search's allocation
+    /// total, which its allocation test holds to the share with no slack. The search's own stack
+    /// grows within it; see [#nextJobCapacity].
+    static long modelJobStackBytes(Prog prog, int textLength)
+    {
+        long jobs = maxJobCount(prog, textLength);
+        long capacity = modelJobCapacity(prog.size());
         long stackBytes = sizeOfObjectArray((int) capacity);
         while (capacity < jobs) {
             capacity *= 2;
@@ -95,7 +114,66 @@ final class BitState
             }
             stackBytes += sizeOfObjectArray((int) capacity);
         }
-        return SEARCH_BYTES + sizeOfLongArray((int) visitedWords) + sizeOfIntArray(slotCount) + capacity * JOB_BYTES + stackBytes;
+        return stackBytes + capacity * JOB_BYTES;
+    }
+
+    /// Returns the job stack bytes a fresh search over `textLength` bytes allocates when its
+    /// stack grows to the search's maximum job count.
+    static long jobStackBytesForTesting(Prog prog, int textLength)
+    {
+        long jobs = maxJobCount(prog, textLength);
+        int capacity = initialJobCapacity(prog, textLength);
+        long stackBytes = sizeOfObjectArray(capacity);
+        while (capacity < jobs) {
+            capacity = nextJobCapacity(prog, textLength, capacity);
+            stackBytes += sizeOfObjectArray(capacity);
+        }
+        return stackBytes + capacity * JOB_BYTES;
+    }
+
+    /// Returns the capacity the memory model's job stack starts at, which sets the text limits.
+    static int modelJobCapacity(int programSize)
+    {
+        return Math.max(16, Math.min(64, programSize));
+    }
+
+    /// Returns the capacity a search's job stack starts at: sixteen, or `max(16, maximum)` when
+    /// the search's maximum job count fits the model's first stack. Growing from sixteen to such a
+    /// maximum would allocate the sixteen-job array beside the maximum's, more than the model's one
+    /// array.
+    private static int initialJobCapacity(Prog prog, int textLength)
+    {
+        long maximum = maxJobCount(prog, textLength);
+        return maximum <= modelJobCapacity(prog.size()) ? toIntExact(Math.max(INITIAL_JOB_CAPACITY, maximum)) : INITIAL_JOB_CAPACITY;
+    }
+
+    /// Returns the most jobs a search over `textLength` bytes holds at once; see [#jobsPerPosition].
+    private static long maxJobCount(Prog prog, int textLength)
+    {
+        return 1 + (textLength + 1L) * prog.bitStateJobsPerPosition();
+    }
+
+    /// Returns the length a full job stack of `length` jobs grows to, in a search over
+    /// `textLength` bytes that holds at most `maximum` jobs, its [#maxJobCount], and whose memory
+    /// model starts at `modelCapacity`, its [#modelJobCapacity]. The stack doubles, and takes the
+    /// maximum once the doubled array would pass `(maximum - modelCapacity) / 2`, so it holds at
+    /// most the maximum's jobs, no more than the model's last stack. A stack already full at the
+    /// maximum, which the maximum's bound rules out, still doubles, as the stack did before,
+    /// rather than overrunning its array.
+    private static int nextJobCapacity(Prog prog, int textLength, int length)
+    {
+        long maximum = maxJobCount(prog, textLength);
+        int modelCapacity = modelJobCapacity(prog.size());
+        long doubled = 2L * length;
+        if (length < maximum && doubled > (maximum - modelCapacity) / 2) {
+            // The model's arrays total at least 2 * maximum - modelCapacity slots. Below
+            // modelCapacity + 32 jobs, sixteen jumps straight to the maximum. From there on, the
+            // last doubled array is at most (maximum - modelCapacity) / 2, so with the smaller
+            // arrays before it and the maximum's, the stack's arrays total at most 2 * maximum -
+            // modelCapacity - 16 slots, which leaves 16 slots for the headers of the extra arrays.
+            return toIntExact(maximum);
+        }
+        return toIntExact(doubled);
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOPS: job-stack layout, visited-state checks, and capture
@@ -210,10 +288,10 @@ final class BitState
             return captures;
         }
 
-        private Job[] prepareJobs(int programSize)
+        private Job[] prepareJobs(int initialCapacity)
         {
             if (jobs == null) {
-                jobs = BitStateImpl.createJobs(initialJobCapacity(programSize));
+                jobs = BitStateImpl.createJobs(initialCapacity);
             }
             return jobs;
         }
@@ -296,12 +374,12 @@ final class BitState
                 this.visited = new long[visitedWordCount];
                 this.cap = new int[captureSlotCount];
                 Arrays.fill(this.cap, -1);
-                this.jobs = createJobs(initialJobCapacity(prog.size()));
+                this.jobs = createJobs(initialJobCapacity(prog, textEnd - textBegin));
             }
             else {
                 this.visited = workspace.prepareVisited(visitedWordCount);
                 this.cap = workspace.prepareCaptures(captureSlotCount);
-                this.jobs = workspace.prepareJobs(prog.size());
+                this.jobs = workspace.prepareJobs(initialJobCapacity(prog, textEnd - textBegin));
             }
             this.jobCount = 0;
         }
@@ -381,7 +459,7 @@ final class BitState
         private void growStack()
         {
             int oldLength = jobs.length;
-            jobs = Arrays.copyOf(jobs, oldLength * 2);
+            jobs = Arrays.copyOf(jobs, nextJobCapacity(prog, textEnd - textBegin, oldLength));
             for (int i = oldLength; i < jobs.length; i++) {
                 jobs[i] = new Job();
             }
