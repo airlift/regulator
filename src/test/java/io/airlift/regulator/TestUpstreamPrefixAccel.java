@@ -50,7 +50,7 @@ public class TestUpstreamPrefixAccel
             program.configurePrefixAccel(Slices.wrappedBuffer(literal), false);
 
             for (int iteration = 0; iteration < 1_000; iteration++) {
-                // Half the bytes come from the literal, so first-and-last candidates are dense.
+                // Half the bytes come from the literal, so pair candidates are dense.
                 byte[] data = new byte[random.nextInt(2049) + literal.length + 8];
                 for (int index = 0; index < data.length; index++) {
                     data[index] = random.nextBoolean() ? literal[random.nextInt(literal.length)] : (byte) random.nextInt(256);

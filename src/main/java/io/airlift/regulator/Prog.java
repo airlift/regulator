@@ -409,6 +409,12 @@ final class Prog
     private int prefixProbeOffset;
     private int prefixCheckOffset;
     private long prefixProbeBroadcastMask;
+    // The fused pair scans test the bytes at prefixPairOffset and at the last offset. It is 0,
+    // or, when the prefix starts with a multibyte UTF-8 character that ends before the last
+    // offset, the offset of that character's last byte: a lead byte names little more than the
+    // script, which most letters of a text share, while the character's last byte tells its
+    // letters apart.
+    private int prefixPairOffset;
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
@@ -1166,17 +1172,36 @@ final class Prog
     /// bytes, in the range, or `-1`. Ranges of at least the fused vector scan's minimum take the
     /// vector scan of [PrefixAccelStrategy#FUSED_VECTOR], finished with KMP once its failed
     /// candidates pass the comparison budget, and shorter ones take `literalSearch`, the
-    /// literal's call-free search.
+    /// literal's call-free search. The vector scan recomputes [#pairOffset] on each call, a few
+    /// byte reads against a range of at least 1 KiB, so the literal needs no stored offset.
     static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
     {
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
-            int found = VectorPrefixScanner.find(data, offset, length, literal, 0, literal.length - 1);
+            int found = VectorPrefixScanner.find(data, offset, length, literal, pairOffset(literal), literal.length - 1);
             if (found < -1) {
                 return literalSearch.findKmp(data, -2 - found, offset + length);
             }
             return found;
         }
         return literalSearch.findContains(data, offset, length);
+    }
+
+    /// Returns the offset of the byte that the fused pair scans test together with the last byte
+    /// of `literal`, of at least two bytes: the last byte of a leading multibyte UTF-8 character
+    /// that ends before the literal's last byte, or else 0.
+    static int pairOffset(byte[] literal)
+    {
+        int lead = literal[0] & 0xFF;
+        int width = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+        if (width == 1 || width >= literal.length) {
+            return 0;
+        }
+        for (int index = 1; index < width; index++) {
+            if ((literal[index] & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        return width - 1;
     }
 
     private void updateStartCandidateSkip()
@@ -1408,6 +1433,7 @@ final class Prog
         this.prefixProbeOffset = 0;
         this.prefixCheckOffset = 0;
         this.prefixProbeBroadcastMask = 0;
+        this.prefixPairOffset = 0;
         this.prefixShifts = null;
         this.dfaMemory += prefixShiftsCharge;
         this.prefixShiftsCharge = 0;
@@ -1430,12 +1456,14 @@ final class Prog
         else if (bytes.length != 1) {
             this.prefixSize = bytes.length;
             this.prefixFrontBroadcastMask = (bytes[0] & 0xFFL) * 0x0101010101010101L;
-            // A non-ASCII first byte selects the fused strategies, which keep the first byte.
+            // A non-ASCII first byte keeps the probe at offset 0 and selects the fused strategies,
+            // which pair the byte at prefixPairOffset with the last byte.
             int probeOffset = bytes[0] >= 0 ? byteFrequencies.probeOffset(bytes) : 0;
             int lastOffset = bytes.length - 1;
             this.prefixProbeOffset = probeOffset;
             this.prefixCheckOffset = probeOffset > lastOffset - probeOffset ? 0 : lastOffset;
             this.prefixProbeBroadcastMask = (bytes[probeOffset] & 0xFFL) * 0x0101010101010101L;
+            this.prefixPairOffset = pairOffset(bytes);
             this.prefixShifts = LiteralSearchKernel.computePrefixShifts(bytes);
             // Like the OnePass table, the retained shifts come out of the DFA allowance. A budgeted
             // compile fails when they do not fit, so the clamp only keeps an unbudgeted program's
@@ -1456,9 +1484,11 @@ final class Prog
     ///
     /// Uses different strategies depending on configuration:
     /// - First-byte and last-byte masks for folded prefixes, a vector at a time on long windows
-    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes that probe their
-    ///   first byte, in Vector lanes for long searches and, for a non-ASCII first byte, in SWAR
-    ///   words when the search is short or the Vector API is unavailable
+    /// - Fused pair masks for non-folded multi-byte prefixes whose probe stays at the first byte:
+    ///   the last byte with the first byte or, when the prefix starts with a multibyte UTF-8
+    ///   character that ends before the last byte, with that character's last byte, in Vector
+    ///   lanes for long searches and, for a non-ASCII first byte, in SWAR words when the search
+    ///   is short or the Vector API is unavailable
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
@@ -1489,7 +1519,7 @@ final class Prog
         int end = offset + length;
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
         if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
-            return finishWithKmp(data, end, VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1));
+            return finishWithKmp(data, end, VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixSize - 1));
         }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
             return finishWithKmp(data, end, prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length));
@@ -1544,7 +1574,7 @@ final class Prog
             return -1;
         }
         int found = switch (prefixAccelStrategy(length)) {
-            case FUSED_VECTOR -> VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1);
+            case FUSED_VECTOR -> VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixSize - 1);
             case FUSED_SWAR -> prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
             case REPEATED_BYTE -> prefixProbeOffset != 0 ? prefixAccelProbe(data, offset, length) : continueFrontAndBack(data, offset, offset, offset + length);
         };
@@ -1644,7 +1674,7 @@ final class Prog
         long highBits = 0x8080808080808080L;
         int candidateCount = length - prefixSize + 1;
         int wordEnd = offset + (candidateCount / Long.BYTES) * Long.BYTES;
-        int primaryOffset = 0;
+        int primaryOffset = prefixPairOffset;
         int secondaryOffset = prefixSize - 1;
         long primaryBroadcast = (prefix[primaryOffset] & 0xFFL) * lowBits;
         long secondaryBroadcast = (prefix[secondaryOffset] & 0xFFL) * lowBits;
