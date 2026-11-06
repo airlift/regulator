@@ -608,12 +608,12 @@ text, so the pair scan rejects little that a first-byte scan would not.
   2^24 instructions. Flattening then charges each instruction it emits 113
   bytes, up to 2^28 - 1 instructions, since a packed capture instruction word
   keeps a 28-bit output. The 113 bytes are the object and array slot, a 2-byte
-  list-head entry, and the 31 bytes of no-submatch NFA tables and 8-byte
-  capture word that the first searches build and the program keeps. The
-  56-byte instruction assumes compressed class pointers, which a heap of 32 GB
-  or more keeps; only with them explicitly turned off, deprecated in JDK 25
-  and obsolete in JDK 27, is an instruction 64 bytes and the charges 1 to 3
-  percent short.
+  list-head entry, the 31 bytes of no-submatch NFA tables that the first
+  no-submatch NFA search builds, and the 8-byte capture word that compilation
+  builds, all of which the program keeps. The 56-byte instruction assumes
+  compressed class pointers, which a heap of 32 GB or more keeps; only with
+  them explicitly turned off, deprecated in JDK 25 and obsolete in JDK 27, is
+  an instruction 64 bytes and the charges 1 to 3 percent short.
 - A long leading literal keeps a prefix shift table, configured after
   flattening from what the flatten charge left. A forward program whose table
   does not fit its share fails to compile.

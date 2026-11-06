@@ -113,8 +113,9 @@ public class TestCompilerAllocations
     {
         // Before flattening, an instruction is charged for its object, its array slot and the
         // flattening pass's scratch. Once flattened, it is charged for its object, its array slot,
-        // its list-head entry and the tables the first searches build. The instance size checks
-        // the object, and the flattening and first-search allocations below check the rest.
+        // its list-head entry and the tables the program keeps for searches. The instance size
+        // checks the object, and the allocations of flattening and of building those tables below
+        // check the rest.
         // The 56-byte charge assumes compressed class pointers. Turning them off, which JDK 25 and
         // 26 deprecate, together with compressed references makes an instruction 64 bytes.
         assertThat(instanceSize(Prog.Inst.class)).isLessThanOrEqualTo(compressedClassPointers() ? 56 : 64);

@@ -438,7 +438,8 @@ final class Prog
     private final AtomicLongArray failedDfaBudgets = new AtomicLongArray(Dfa.DfaInstance.Kind.values().length);
     // Immutable flattened instruction tables for NFA no-submatch fast path.
     private final AtomicReference<NoSubmatchTables> noSubmatchNfaTables = new AtomicReference<>();
-    // Compact immutable instructions built lazily after flattening and shared by capture engines.
+    // Compact immutable instructions shared by capture engines. Compilation builds them after
+    // flattening; the getter builds them for programs flattened elsewhere, as tests do.
     private volatile long[] captureInstructionWords;
     // The capture NFA's plan, set once by pattern compilation before the program is published. A
     // program it never plans keeps these defaults and runs every capture search in one pass.

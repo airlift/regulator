@@ -25,17 +25,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestBitStateCaptureInstructionWords
 {
     @Test
-    public void testBitStateCreatesAndReusesPackedInstructions()
+    public void testBitStateReusesCompiledPackedInstructions()
             throws ReflectiveOperationException
     {
+        // Compilation builds the words, which the flatten charge counts, so searches only read them.
         Prog program = compileProg("(a+)(a)");
         Field instructionWordsField = instructionWordsField();
-        assertThat(instructionWordsField.get(program)).isNull();
+        Object instructionWords = instructionWordsField.get(program);
+        assertThat(instructionWords).isInstanceOf(long[].class);
 
         int[] captures = new int[6];
         assertThat(BitState.search(program, Slices.utf8Slice("aa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
-        Object instructionWords = instructionWordsField.get(program);
-        assertThat(instructionWords).isInstanceOf(long[].class);
+        assertThat(instructionWordsField.get(program)).isSameAs(instructionWords);
         assertThat(captures).containsExactly(0, 2, 0, 1, 1, 2);
 
         assertThat(BitState.search(program, Slices.utf8Slice("aaa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
