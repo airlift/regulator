@@ -1958,15 +1958,34 @@ to 0.94x on the letter rows, 3 hosts a side, so `letters-upper` is about 1.00x
 the base. r9g `letters-upper` is flat throughout.
 
 Eligibility is limited to first-match programs without a required prefix,
-anchors, text-dependent assertions, or a class counter that finds the matches.
-Empty matches are still handled by the existing empty-at-start check before the
-cursor runs. DFA allocation failure or cache-search failure falls back to the
-ordinary matcher path, and the cursor uses the same reader and exclusive-cache
-mutation protocol as other DFA searches. It adds no public API and leaves
-longest-match execution unchanged. It also serves an alternation whose every
-branch is one capture group: the tagged program picks the winning branch over
-the cursor's match span, using the matcher region as assertion context like the
-group-zero search, and a declined pick falls back to the ordinary matcher path.
+anchors, text-dependent assertions, a class counter that finds the matches, or a
+word-run plan, which matcher iteration reaches directly. Empty matches are still
+handled by the existing empty-at-start check before the cursor runs. DFA
+allocation failure or cache-search failure falls back to the ordinary matcher
+path, and the cursor uses the same reader and exclusive-cache mutation protocol
+as other DFA searches. It adds no public API and leaves longest-match execution
+unchanged. It also serves an alternation whose every branch is one capture
+group: the tagged program picks the winning branch over the cursor's match span,
+using the matcher region as assertion context like the group-zero search, and a
+declined pick falls back to the ordinary matcher path.
+
+## Word-Run Plan
+
+A pattern that is exactly a word boundary, a greedy run of one ASCII
+word-character class, and the same boundary, such as `\b\w+\b`, skips the
+general engines. A pre-engine plan scans each maximal class run and checks the
+boundary at its two ends. Java, Trino, and Unicode Rust boundaries read the
+surrounding text through the shared context check. The ASCII boundary of RE2 and
+of Rust with Unicode off reads only the byte across the run's end. In UTF-8, a
+case-insensitive RE2 class such as `(?i)[a-z]` stays ineligible, because the
+fold adds the Kelvin sign and the long s. When the plan's memory charge does not
+fit the forward DFA budget, the pattern compiles without the plan instead of
+failing.
+
+Taking the ASCII boundary costs RE2 `\b\w+\b` about 1.06x the base's compile
+time on r9g and 1.10x on r8i, and about 1.04x and 1.02x for a single-use count.
+In return, iterating over dense matches takes 0.37x to 0.49x the base's time in
+RE2 and Unicode-off Rust.
 
 ## Large Literal Alternations
 

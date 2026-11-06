@@ -16,12 +16,15 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Random;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.airlift.regulator.TestScanPlan.disableOrdinaryEngine;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.slice.Slices.wrappedBuffer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestWordRunMatcher
@@ -34,6 +37,33 @@ public class TestWordRunMatcher
         }
         for (String pattern : List.of("(?U)\\b\\w+\\b", "\\b\\w+?\\b", "\\B\\w+\\b", "\\b(\\w+)\\b", "\\b[a-z!]+\\b", "\\b\\w*\\b", "\\b\\w+")) {
             assertThat(analyze(pattern)).as(pattern).isNull();
+        }
+    }
+
+    @Test
+    public void testAsciiBoundaryEligibility()
+    {
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b")) {
+            assertThat(analyze(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL))).as("re2 %s", pattern).isNotNull();
+            for (boolean bytes : new boolean[] {false, true}) {
+                RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes).setUnicode(false);
+                assertThat(analyze(RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit()))).as("rust bytes %s %s", bytes, pattern).isNotNull();
+            }
+        }
+        Slice caseInsensitive = utf8Slice("(?i)\\b[a-z]+\\b");
+        // In UTF-8, RE2's (?i)[a-z] folds to the Kelvin sign and the long s, so only Rust's ASCII fold is a word run.
+        assertThat(analyze(RegexpParser.parse(caseInsensitive, Regexp.LIKE_PERL))).as("re2").isNull();
+        assertThat(analyze(RegexpParser.parse(caseInsensitive, Regexp.LIKE_PERL | Regexp.LATIN1))).as("re2 latin1").isNotNull();
+        for (boolean bytes : new boolean[] {false, true}) {
+            RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes).setUnicode(false);
+            assertThat(analyze(RustRegexpParser.parse(caseInsensitive, options.syntaxFlags(), options.nestLimit()))).as("rust bytes %s", bytes).isNotNull();
+        }
+        for (String pattern : List.of("\\B\\w+\\b", "\\b\\w+?\\b", "\\b(\\w+)\\b", "\\b[a-z!]+\\b")) {
+            assertThat(analyze(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL))).as("re2 %s", pattern).isNull();
+        }
+        RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(true).setUnicode(false);
+        for (String pattern : List.of("\\b{start}\\w+\\b{end}", "\\b{start-half}\\w+\\b{end-half}")) {
+            assertThat(analyze(RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit()))).as("rust %s", pattern).isNull();
         }
     }
 
@@ -65,37 +95,52 @@ public class TestWordRunMatcher
     @Test
     public void testWindowsAgainstSemanticNfa()
     {
+        List<Slice> values = List.of(utf8Slice("éabc def💰ghi"), utf8Slice("foo\u0301 bar"), utf8Slice("ab123cd"), utf8Slice("\u0301abc"), utf8Slice(""));
         for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b")) {
-            ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
-            Prog program = Compiler.compile(parsed.regexp(), false, Re2.Options.DEFAULT_MAX_MEMORY);
-            WordRunMatcher scanner = WordRunMatcher.analyze(parsed.regexp(), program);
-            for (String value : List.of("éabc def💰ghi", "foo\u0301 bar", "ab123cd", "\u0301abc", "")) {
-                Slice backing = utf8Slice("!" + value + "?");
-                Slice text = backing.slice(1, backing.length() - 2);
-                for (int start = 0; start <= text.length(); start++) {
-                    for (int end = start; end <= text.length(); end++) {
-                        for (CompiledPattern.Anchor anchor : CompiledPattern.Anchor.values()) {
-                            int[] offsets = new int[2];
-                            boolean matched = Nfa.search(
-                                    program,
-                                    text,
-                                    start,
-                                    end,
-                                    anchor != CompiledPattern.Anchor.UNANCHORED,
-                                    anchor == CompiledPattern.Anchor.ANCHOR_BOTH ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH,
-                                    offsets);
-                            long span = scanner.search(text, 0, text.length(), start, end, anchor);
-                            assertThat(span != Dfa.SEARCH_NO_MATCH).as("%s %s %s:%s %s", pattern, value, start, end, anchor).isEqualTo(matched);
-                            if (matched) {
-                                // The direct NFA returns offsets relative to its search start.
-                                assertThat((int) (span >>> 32)).isEqualTo(start + offsets[0]);
-                                assertThat((int) span).isEqualTo(start + offsets[1]);
-                            }
-                        }
-                    }
-                }
+            assertWindowsMatchNfa(pattern, JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags()), values);
+        }
+    }
+
+    @Test
+    public void testAsciiBoundaryMatcherIterationTakesPlan()
+    {
+        // Matcher iteration skips the DFA group-zero cursor, and with the ordinary engine
+        // disabled it finds these only through the word-run plan.
+        for (String expression : List.of("\\b\\w+\\b")) {
+            for (CompiledPattern pattern : List.of(Re2.compile(utf8Slice(expression)), RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.defaults().setUnicode(false)))) {
+                String description = pattern.getClass().getSimpleName() + " " + expression;
+                assertThat(pattern.createGroupZeroForwardCursor()).as(description).isNull();
+                disableOrdinaryEngine(pattern);
+                RegexpMatcher matcher = pattern.matcher(utf8Slice("!ab cdef?"));
+                assertThat(matcher.find()).as(description).isTrue();
+                assertThat(matcher.start()).as(description).isEqualTo(1);
+                assertThat(matcher.end()).as(description).isEqualTo(3);
+                assertThat(matcher.find()).as(description).isTrue();
+                assertThat(matcher.start()).as(description).isEqualTo(4);
+                assertThat(matcher.end()).as(description).isEqualTo(8);
+                assertThat(matcher.find()).as(description).isFalse();
             }
         }
+    }
+
+    @Test
+    public void testAsciiBoundaryWindowsAgainstSemanticNfa()
+    {
+        List<Slice> values = List.of(
+                utf8Slice("éabc def💰ghi"),
+                utf8Slice("ab_9 Cd\nxy"),
+                wrappedBuffer(new byte[] {'a', (byte) 0xE9, 'b', ' ', (byte) 0xFF, 'c', 'd', (byte) 0x80}),
+                utf8Slice(""));
+        RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(true).setUnicode(false);
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b")) {
+            assertWindowsMatchNfa(pattern, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL), values);
+            assertWindowsMatchNfa(pattern, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.LATIN1), values);
+            assertWindowsMatchNfa(pattern, RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit()), values);
+        }
+        // In UTF-8, RE2's (?i)[a-z] is not a word run.
+        String caseInsensitive = "(?i)\\b[a-z]+\\b";
+        assertWindowsMatchNfa(caseInsensitive, RegexpParser.parse(utf8Slice(caseInsensitive), Regexp.LIKE_PERL | Regexp.LATIN1), values);
+        assertWindowsMatchNfa(caseInsensitive, RustRegexpParser.parse(utf8Slice(caseInsensitive), options.syntaxFlags(), options.nestLimit()), values);
     }
 
     @Test
@@ -112,7 +157,7 @@ public class TestWordRunMatcher
                     value.append(alphabet[random.nextInt(alphabet.length)]);
                 }
                 String text = value.toString();
-                Slice padded = utf8Slice("!!" + text + "??");
+                Slice padded = utf8Slice("xx" + text + "xx");
                 RegexpMatcher actual = pattern.matcher(padded).reset(padded, 2, padded.length() - 2);
                 Matcher expected = comparator.matcher(text);
                 while (expected.find()) {
@@ -127,9 +172,56 @@ public class TestWordRunMatcher
         }
     }
 
+    private static void assertWindowsMatchNfa(String pattern, ParseResult parsed, List<Slice> values)
+    {
+        Prog program = Compiler.compile(parsed.regexp(), false, Re2.Options.DEFAULT_MAX_MEMORY);
+        WordRunMatcher scanner = WordRunMatcher.analyze(parsed.regexp(), program);
+        assertThat(scanner).as(pattern).isNotNull();
+        for (Slice value : values) {
+            String input = HexFormat.of().formatHex(value.getBytes());
+            Slice backing = padded(value);
+            Slice text = backing.slice(1, backing.length() - 2);
+            for (int start = 0; start <= text.length(); start++) {
+                for (int end = start; end <= text.length(); end++) {
+                    for (CompiledPattern.Anchor anchor : CompiledPattern.Anchor.values()) {
+                        int[] offsets = new int[2];
+                        boolean matched = Nfa.search(
+                                program,
+                                text,
+                                start,
+                                end,
+                                anchor != CompiledPattern.Anchor.UNANCHORED,
+                                anchor == CompiledPattern.Anchor.ANCHOR_BOTH ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH,
+                                offsets);
+                        long span = scanner.search(text, 0, text.length(), start, end, anchor);
+                        assertThat(span != Dfa.SEARCH_NO_MATCH).as("%s %s %s:%s %s", pattern, input, start, end, anchor).isEqualTo(matched);
+                        if (matched) {
+                            // The direct NFA returns offsets relative to its search start.
+                            assertThat((int) (span >>> 32)).as("%s %s %s:%s %s", pattern, input, start, end, anchor).isEqualTo(start + offsets[0]);
+                            assertThat((int) span).as("%s %s %s:%s %s", pattern, input, start, end, anchor).isEqualTo(start + offsets[1]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static Slice padded(Slice value)
+    {
+        byte[] bytes = new byte[value.length() + 2];
+        bytes[0] = 'x';
+        value.getBytes(0, bytes, 1, value.length());
+        bytes[bytes.length - 1] = 'x';
+        return wrappedBuffer(bytes);
+    }
+
     private static WordRunMatcher analyze(String pattern)
     {
-        ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
+        return analyze(JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags()));
+    }
+
+    private static WordRunMatcher analyze(ParseResult parsed)
+    {
         Prog program = Compiler.compile(parsed.regexp(), false, Re2.Options.DEFAULT_MAX_MEMORY);
         return WordRunMatcher.analyze(parsed.regexp(), program);
     }

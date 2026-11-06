@@ -1880,6 +1880,7 @@ abstract sealed class CompiledPattern
     {
         if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||
                 booleanPlans.scanPlan() != null ||
+                booleanPlans.wordRunMatcher() != null ||
                 longestMatch ||
                 requiredPrefix != null ||
                 partialProg.anchorStart() ||
@@ -3241,7 +3242,10 @@ abstract sealed class CompiledPattern
                 return PRE_ENGINE_NO_MATCH;
             }
             if (groupOffsets != null && groupOffsets.length >= 2) {
-                Arrays.fill(groupOffsets, -1);
+                // A caller array that holds only group zero needs no clearing; both slots are written below.
+                if (groupOffsets.length > 2) {
+                    Arrays.fill(groupOffsets, -1);
+                }
                 groupOffsets[0] = (int) (span >>> 32);
                 groupOffsets[1] = (int) span;
             }

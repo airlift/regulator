@@ -19,6 +19,10 @@ import io.airlift.slice.Slice;
 /// Matches a nonempty ASCII word-class run with the original dialect's endpoint assertions.
 final class WordRunMatcher
 {
+    // [0-9A-Za-z_] as bits of the low (0-63) and high (64-127) ASCII halves.
+    private static final long WORD_LOW_MASK = 0x03FF_0000_0000_0000L;
+    private static final long WORD_HIGH_MASK = 0x07FF_FFFE_87FF_FFFEL;
+
     private final long lowMask;
     private final long highMask;
     private final int boundary;
@@ -38,14 +42,23 @@ final class WordRunMatcher
                 expression.child(0).parseFlags() != expression.child(2).parseFlags()) {
             return null;
         }
+        int boundary = program.textDependentAssertions();
+        // An ASCII \b (RE2, Rust with Unicode off) is not text dependent; it compiles to
+        // EMPTY_WORD_BOUNDARY.
+        boolean asciiBoundary = boundary == 0;
+        if (asciiBoundary) {
+            boundary = EmptyOp.EMPTY_WORD_BOUNDARY;
+        }
         Regexp repetition = expression.child(1);
+        // Latin-1 only changes how non-ASCII bytes decode, and matching an ASCII class between
+        // ASCII boundaries does not depend on that decoding.
         if (repetition.op() != RegexpOp.PLUS ||
-                (repetition.parseFlags() & (Regexp.NON_GREEDY | Regexp.LATIN1)) != 0 ||
+                (repetition.parseFlags() & (asciiBoundary ? Regexp.NON_GREEDY : Regexp.NON_GREEDY | Regexp.LATIN1)) != 0 ||
                 repetition.child(0).op() != RegexpOp.CHAR_CLASS) {
             return null;
         }
-        int boundary = program.textDependentAssertions();
-        if (boundary != EmptyOp.EMPTY_JAVA_WORD_BOUNDARY &&
+        if (boundary != EmptyOp.EMPTY_WORD_BOUNDARY &&
+                boundary != EmptyOp.EMPTY_JAVA_WORD_BOUNDARY &&
                 boundary != EmptyOp.EMPTY_JAVA_UNICODE_WORD_BOUNDARY &&
                 boundary != EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY &&
                 boundary != EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY) {
@@ -56,12 +69,14 @@ final class WordRunMatcher
         CharClass characterClass = repetition.child(0).charClass();
         for (int index = 0; index < characterClass.rangeCount(); index++) {
             RuneRange range = characterClass.range(index);
+            // In UTF-8 this also keeps a case-insensitive RE2 class such as (?i)[a-z] off the plan:
+            // its fold adds the Kelvin sign to k and the long s to s. Latin-1 has neither character,
+            // so there the folded class stays ASCII.
             if (range.low() < 0 || range.high() > 127) {
                 return null;
             }
             for (int rune = range.low(); rune <= range.high(); rune++) {
-                if (!((rune >= 'a' && rune <= 'z') || (rune >= 'A' && rune <= 'Z') ||
-                        (rune >= '0' && rune <= '9') || rune == '_')) {
+                if (!isAsciiWord(rune)) {
                     return null;
                 }
                 if (rune < 64) {
@@ -102,8 +117,8 @@ final class WordRunMatcher
 
             // Every interior position is between two word characters. Only the endpoints can
             // satisfy a boundary, including when a narrower class splits a larger word.
-            if ((EmptyOp.contextFlags(bytes, base + contextStart, base + contextEnd, runStart, boundary) & boundary) != 0 &&
-                    (EmptyOp.contextFlags(bytes, base + contextStart, base + contextEnd, position, boundary) & boundary) != 0 &&
+            if (boundaryAt(bytes, base + contextStart, base + contextEnd, runStart, runStart - 1) &&
+                    boundaryAt(bytes, base + contextStart, base + contextEnd, position, position) &&
                     (anchor != CompiledPattern.Anchor.ANCHOR_BOTH || position == limit)) {
                 return ((long) (runStart - base - contextStart) << 32) | ((position - base - contextStart) & 0xFFFF_FFFFL);
             }
@@ -112,6 +127,22 @@ final class WordRunMatcher
             }
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // `neighbor` is the byte across `position` from the run. A run byte is an ASCII word
+    // character, so an ASCII \b holds exactly where the neighbor is outside the text or is not
+    // one; the other dialects' boundaries read more context.
+    private boolean boundaryAt(byte[] bytes, int begin, int end, int position, int neighbor)
+    {
+        if (boundary == EmptyOp.EMPTY_WORD_BOUNDARY) {
+            return neighbor < begin || neighbor >= end || !isAsciiWord(bytes[neighbor]);
+        }
+        return (EmptyOp.contextFlags(bytes, begin, end, position, boundary) & boundary) != 0;
+    }
+
+    private static boolean isAsciiWord(int value)
+    {
+        return value >= 0 && (((value < 64 ? WORD_LOW_MASK : WORD_HIGH_MASK) >>> (value & 63)) & 1) != 0;
     }
 
     private boolean contains(int value)
