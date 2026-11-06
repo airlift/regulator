@@ -63,9 +63,10 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// no generated class. FOLDED_PAIR_SEQUENCE is a control: a class sequence whose first class
 /// simplifies to a case-folded literal, so it takes no fixed-width route in any language, Trino
 /// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
-/// literal, `[a-z]shing`: RE2, Java, and Rust keep the DFA's inner literal search, while Trino's
-/// fixed-width subtype runs the fixed-width matcher, which checks every `s`. ORDERED_LITERALS finds
-/// three literals in order with any text between them and runs the ordinary search today.
+/// literal, `[a-z]shing`: every language, Trino included, keeps the DFA's inner literal search
+/// instead of the fixed-width matcher, which would check every `s`, and runs the matcher only for
+/// counts and matcher finds of fewer than 64 bytes, where the search does not run. ORDERED_LITERALS
+/// finds three literals in order with any text between them and runs the ordinary search today.
 /// LITERAL_SET alternates 100 words, over the limit of 64 literals of the literal-alternation span
 /// matcher: full-Slice `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers
 /// find it with the literal set's automaton, skipping the bytes that lead no word with a vector

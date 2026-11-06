@@ -207,7 +207,7 @@ public class TestBenchmarkPatternDispatch
             // The literal set serves only the matcher's find.
             case "LITERAL_SET" -> ENGINE;
             // An inner literal of two or more bytes keeps the DFA's inner literal search instead
-            // of the fixed-width matcher.
+            // of the fixed-width matcher, which answers only short counts and matcher finds.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;
             default -> throw new IllegalArgumentException("unknown target: " + target);
         };
@@ -245,7 +245,10 @@ public class TestBenchmarkPatternDispatch
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
-            case "INNER_LITERAL_FIXED_WIDTH" -> assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
+            case "INNER_LITERAL_FIXED_WIDTH" -> {
+                assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
+                assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
+            }
             case "GENERAL" -> {
                 assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isFalse();
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNull();

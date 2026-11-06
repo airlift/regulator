@@ -123,11 +123,71 @@ final class InnerLiteralSearch
     /// search, as [#estimatedRetainedSize] reports it, retains at most `retainedMemory`.
     static InnerLiteralSearch analyze(Regexp regexp, Prog forwardProgram, long prefixMemory, long retainedMemory, Compiler.Dialect dialect, CaseFolding caseFolding)
     {
+        if (forwardProgram.anchorStart() || forwardProgram.anchorEnd() || forwardProgram.canPrefixAccel() || forwardProgram.hasDfaUnsupportedAssertions()) {
+            return null;
+        }
+        InnerLiteral innerLiteral = findInnerLiteral(regexp, caseFolding);
+        if (innerLiteral == null) {
+            return null;
+        }
+        byte[] literal = innerLiteral.literal();
+        StartLiteralFilter literalSetFilter = innerLiteral.literalSetFilter();
+        LiteralSearchKernel literalSearch = literal == null ? null : new LiteralSearchKernel(Slices.wrappedBuffer(literal));
+        byte[][] literalSet = literal == null ? innerLiteral.literals() : null;
+        FoldedLiteral foldedLiteral = innerLiteral.foldedLiteral();
+        byte[] foldedBytes = foldedLiteral == null ? null : foldedLiteral.bytes();
+        byte[] foldedMasks = foldedLiteral == null ? null : foldedLiteral.masks();
+        long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter));
+        if (memory <= 0) {
+            // The compiler reads a budget of zero or less as no limit.
+            return null;
+        }
+        Prog reversePrefixProgram;
+        try {
+            reversePrefixProgram = Compiler.compileNormalized(innerLiteral.prefix(), true, memory, dialect, caseFolding);
+        }
+        catch (RegexpCompileException ignored) {
+            // An optional search must not reject a valid semantic program.
+            return null;
+        }
+        // Without its reverse prefix DFA, every search would fall back.
+        if (reversePrefixProgram.hasDfaUnsupportedAssertions() ||
+                reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+            return null;
+        }
+        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, reversePrefixProgram, forwardProgram);
+    }
+
+    /// Returns the shortest literal length [#analyze] would search the normalized `regexp` for:
+    /// the length of its literal, or of the shortest member of its literal set, as
+    /// [#minimumLiteralLength] counts it, or zero when it has none, without a compiled program. It checks on the expression, as the compiler
+    /// does, that no prefix is accelerated. It cannot see what [#analyze] reads from the program
+    /// alone: an anchored or DFA-unsupported assertion, which the caller's expression must not
+    /// hold, and whether the reverse prefix DFA fits its memory.
+    static int predictMinimumLiteralLength(Regexp regexp, CaseFolding caseFolding)
+    {
+        if (regexp.requiredPrefixForAccel(caseFolding) != null) {
+            return 0;
+        }
+        InnerLiteral innerLiteral = findInnerLiteral(regexp, caseFolding);
+        if (innerLiteral == null) {
+            return 0;
+        }
+        FoldedLiteral foldedLiteral = innerLiteral.foldedLiteral();
+        if (foldedLiteral != null) {
+            return foldedLiteral.bytes().length;
+        }
+        return Arrays.stream(innerLiteral.literals()).mapToInt(literal -> literal.length).min().orElseThrow();
+    }
+
+    // The inner literal of the normalized `regexp` and the prefix before it: a single literal, or
+    // the members of a literal set with their filter.
+    private static InnerLiteral findInnerLiteral(Regexp regexp, CaseFolding caseFolding)
+    {
         while (regexp.op() == RegexpOp.CAPTURE) {
             regexp = regexp.child(0);
         }
-        if (regexp.op() != RegexpOp.CONCAT || forwardProgram.anchorStart() || forwardProgram.anchorEnd() ||
-                forwardProgram.canPrefixAccel() || forwardProgram.hasDfaUnsupportedAssertions()) {
+        if (regexp.op() != RegexpOp.CONCAT) {
             return null;
         }
         List<Regexp> children = new ArrayList<>();
@@ -165,32 +225,15 @@ final class InnerLiteralSearch
             if (!hasNoEarlierMatch(prefix, literals, caseFolding)) {
                 return null;
             }
-            LiteralSearchKernel literalSearch = literal == null ? null : new LiteralSearchKernel(Slices.wrappedBuffer(literal));
-            byte[][] literalSet = literal == null ? literals : null;
-            byte[] foldedBytes = foldedLiteral == null ? null : foldedLiteral.bytes();
-            byte[] foldedMasks = foldedLiteral == null ? null : foldedLiteral.masks();
-            long memory = Math.min(prefixMemory, retainedMemory - INSTANCE_SIZE - literalRetainedSize(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter));
-            if (memory <= 0) {
-                // The compiler reads a budget of zero or less as no limit.
-                return null;
-            }
-            Prog reversePrefixProgram;
-            try {
-                reversePrefixProgram = Compiler.compileNormalized(prefix, true, memory, dialect, caseFolding);
-            }
-            catch (RegexpCompileException ignored) {
-                // An optional search must not reject a valid semantic program.
-                return null;
-            }
-            // Without its reverse prefix DFA, every search would fall back.
-            if (reversePrefixProgram.hasDfaUnsupportedAssertions() ||
-                    reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
-                return null;
-            }
-            return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, reversePrefixProgram, forwardProgram);
+            return new InnerLiteral(prefix, literal, literals, literalSetFilter, foldedLiteral);
         }
         return null;
     }
+
+    // `literal` is the single literal, or null for a set, whose filter is `literalSetFilter`;
+    // `literals` holds the single literal or the set's members. A case-insensitive literal's
+    // `literal` is its exact head, and `foldedLiteral` holds the whole literal, or is null.
+    private record InnerLiteral(Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral) {}
 
     // As the crate's top_concat does, a capturing group in the top-level concatenation is looked
     // through, and a concatenation inside it joins the top level, so `(\s*)(# x)` has the inner
