@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -287,6 +288,50 @@ public class TestTaggedAlternationProgram
         finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    public void testCacheResetInsideOneSearch()
+    {
+        // A small budget fills the many-match cache within one long match, so the search resets it,
+        // in the byte loop and at the end of the text, and must go on with the fresh tables,
+        // choosing the branches a default budget chooses.
+        Slice patternText = utf8Slice(largeAlternation("[ab]*a[ab]{12}c", "[ab]*b[ab]{12}d", "[ab]*a[ab]{11}", "[ab]+", "x*"));
+        Re2 reference = Re2.compile(patternText);
+        Re2 small = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(4L << 20));
+        assertThat(small.usesTaggedAlternationForDiagnostics()).isTrue();
+        Dfa.DfaInstance taggedDfa = small.taggedAlternationProgramForDiagnostics().cachedDfaIfPresent(MANY_MATCH);
+
+        Random random = new Random(1);
+        StringBuilder text = new StringBuilder();
+        while (text.length() < 40_000) {
+            for (int run = 20 + random.nextInt(2_000); run > 0; run--) {
+                text.append(random.nextBoolean() ? 'a' : 'b');
+            }
+            text.append("cd ".charAt(random.nextInt(3)));
+        }
+        Slice input = utf8Slice(text.toString());
+
+        int resets = taggedDfa.resetCount();
+        RegexpMatcher matcher = small.matcher(input);
+        assertThat(winningBranches(matcher)).isEqualTo(winningBranches(reference.matcher(input)));
+        assertThat(taggedDfa.resetCount()).isGreaterThan(resets);
+        // Every match chose its branch on the many-match DFA.
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    private static List<String> winningBranches(RegexpMatcher matcher)
+    {
+        List<String> matches = new ArrayList<>();
+        while (matcher.find()) {
+            int group = 1;
+            while (!matcher.matched(group)) {
+                group++;
+            }
+            matches.add(matcher.start() + "-" + matcher.end() + ":" + group);
+        }
+        return matches;
     }
 
     private static void assertNoAuxiliaryProgram(String patternText, long maxMemory)

@@ -341,8 +341,11 @@ equivalence gate.
 
 ## Retained memory
 
-Production accounting uses `SizeOf` and charges all reachable DFA storage to
-the owning budget. Tests cover construction, growth, reset, and compressed and
+Production accounting uses `SizeOf` and charges all DFA storage the DFA retains
+to the owning budget. Tables that a reset or growth superseded, held only by
+in-flight searches, are uncharged, as
+[Shared DFA Concurrency](../../REGULATOR_DECISIONS.md#shared-dfa-concurrency)
+describes. Tests cover construction, growth, reset, and compressed and
 uncompressed reference layouts.
 
 JOL may be used as a temporary diagnostic to check `SizeOf`; it must not become

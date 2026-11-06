@@ -45,7 +45,7 @@ public class TestDfaFailureAtomicity
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
 
     @Test
-    public void testFailedExclusiveAdmissionReopensReaders()
+    public void testFailedExclusiveAdmissionReleasesCacheMutationLock()
             throws Exception
     {
         Fixture fixture = simpleFixture();
@@ -56,13 +56,12 @@ public class TestDfaFailureAtomicity
                 .isInstanceOf(Error.class);
 
         assertThat(fixture.dfa().cacheVersion()).isEqualTo(cacheVersion);
-        assertThat(fixture.dfa().hasPendingCacheMutationForTesting()).isFalse();
         assertThat(fixture.dfa().cacheMutationLockedForTesting()).isFalse();
         assertReusable(fixture);
     }
 
     @Test
-    public void testFailedExclusiveTeardownReopensReaders()
+    public void testFailedExclusiveTeardownReleasesCacheMutationLock()
             throws Exception
     {
         Fixture fixture = simpleFixture();
@@ -70,11 +69,10 @@ public class TestDfaFailureAtomicity
         fixture.dfa().beginSearch(true);
         fixture.dfa().failNextForTesting(EXCLUSIVE_TEARDOWN);
 
-        assertThatThrownBy(() -> fixture.dfa().endSearch(true, null))
+        assertThatThrownBy(() -> fixture.dfa().endSearch(true))
                 .isInstanceOf(Error.class);
 
         assertThat(fixture.dfa().cacheVersion()).isEqualTo(cacheVersion + 1);
-        assertThat(fixture.dfa().hasPendingCacheMutationForTesting()).isFalse();
         assertThat(fixture.dfa().cacheMutationLockedForTesting()).isFalse();
         assertReusable(fixture);
     }
@@ -90,9 +88,8 @@ public class TestDfaFailureAtomicity
         assertThat(fixture.dfa().cacheVersion()).isEqualTo(initialVersion);
 
         fixture.dfa().beginSearch(true);
-        fixture.dfa().endSearch(true, null);
+        fixture.dfa().endSearch(true);
         assertThat(fixture.dfa().cacheVersion()).isEqualTo(initialVersion + 1);
-        assertThat(fixture.dfa().hasPendingCacheMutationForTesting()).isFalse();
         assertThat(fixture.dfa().cacheMutationLockedForTesting()).isFalse();
     }
 
@@ -141,7 +138,6 @@ public class TestDfaFailureAtomicity
                 .as(failurePoint.name())
                 .isNotNull()
                 .isEqualTo(dfa.failureAtomicitySnapshot());
-        assertThat(dfa.hasPendingCacheMutationForTesting()).isFalse();
         assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
 
         assertCompletes(() -> assertThat(pattern.matcher(input).find()).isTrue());

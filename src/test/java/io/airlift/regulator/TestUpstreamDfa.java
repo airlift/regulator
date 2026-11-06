@@ -455,7 +455,7 @@ public class TestUpstreamDfa
 
         dfa.beginSearch(true);
         try {
-            Dfa.StateData start = dfa.analyzeStart(Slices.EMPTY_SLICE, 0, 0, false, true);
+            Dfa.StateData start = dfa.analyzeStart(dfa.cacheTablesForTesting(), Slices.EMPTY_SLICE, 0, 0, false, true);
             if (start.offset() == Dfa.T_DEAD) {
                 return new BuildResult(0, false, "");
             }
@@ -473,7 +473,7 @@ public class TestUpstreamDfa
                         transition = Dfa.T_DEAD;
                     }
                     else {
-                        transition = dfa.computeTransition(stateOffset, inputByClass[byteClass]);
+                        transition = dfa.computeTransition(dfa.cacheTablesForTesting(), stateOffset, inputByClass[byteClass]);
                     }
 
                     if (transition == Integer.MIN_VALUE) {
@@ -504,7 +504,7 @@ public class TestUpstreamDfa
             }
         }
         finally {
-            dfa.endSearch(true, null);
+            dfa.endSearch(true);
         }
         return new BuildResult(stateNumbers.size(), exhausted, dump.toString());
     }
@@ -524,7 +524,7 @@ public class TestUpstreamDfa
         if (stateOffset == Dfa.T_FULL_MATCH) {
             return true;
         }
-        return (dfa.stateData[stateOffset / dfa.nextSize].flag() & Dfa.FLAG_MATCH) != 0;
+        return (dfa.cacheTablesForTesting().stateData[stateOffset / dfa.nextSize].flag() & Dfa.FLAG_MATCH) != 0;
     }
 
     private static void appendStateDump(StringJoiner dump, int[] transitions, boolean match)

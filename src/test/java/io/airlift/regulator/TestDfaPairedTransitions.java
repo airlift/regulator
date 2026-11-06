@@ -65,9 +65,11 @@ public class TestDfaPairedTransitions
 
         int textBegin = matchingInput.byteArrayOffset();
         int textEnd = textBegin + matchingInput.length();
-        Dfa.StateData start = dfa.analyzeStart(matchingInput, textBegin, textEnd, false, true);
+        Dfa.CacheTables tables = dfa.cacheTablesForTesting();
+        Dfa.StateData start = dfa.analyzeStart(tables, matchingInput, textBegin, textEnd, false, true);
         assertThat(Dfa.searchForwardPairs(
                 dfa,
+                tables,
                 matchingInput.byteArray(),
                 textBegin,
                 textBegin,

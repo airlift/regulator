@@ -133,8 +133,8 @@ public class TestDfaConcurrency
         }
     }
 
-    /// An inner literal search runs its reverse prefix search and its forward confirmation under
-    /// one reader registration for both DFAs, so writers resetting either cache must wait for it.
+    /// An inner literal search runs its reverse prefix search and its forward confirmation on the
+    /// tables it began with in both DFAs, while writers reset either cache by publishing fresh ones.
     @Test
     public void testConcurrentInnerLiteralPairReset()
             throws Exception
@@ -212,101 +212,6 @@ public class TestDfaConcurrency
         }
         assertThat(reversePrefixDfa.resetCount()).isGreaterThan(initialReversePrefixResets);
         assertThat(forwardDfa.resetCount()).isGreaterThan(initialForwardResets);
-    }
-
-    @Test
-    public void testInnerLiteralPairExcludesSecondDfaWriter()
-            throws Exception
-    {
-        Re2 pattern = Re2.compile(Slices.utf8Slice("\\w+://[^\\s/]+"));
-        InnerLiteralSearch innerLiteralSearch = pattern.innerLiteralSearchForDiagnostics();
-        assertThat(innerLiteralSearch).isNotNull();
-        Dfa.DfaInstance reversePrefixDfa = innerLiteralSearch.reversePrefixProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
-        Dfa.DfaInstance forwardDfa = innerLiteralSearch.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-
-        // A pair search must never be admitted while a writer holds the second DFA exclusively,
-        // and a writer must never be admitted while a pair search is inside.
-        int readerCount = 4;
-        AtomicBoolean done = new AtomicBoolean();
-        AtomicBoolean writerInside = new AtomicBoolean();
-        AtomicInteger pairsInside = new AtomicInteger();
-        AtomicBoolean overlap = new AtomicBoolean();
-        CountDownLatch readersStarted = new CountDownLatch(readerCount);
-        ExecutorService executor = Executors.newFixedThreadPool(readerCount + 1);
-        try {
-            List<Future<?>> readers = new ArrayList<>();
-            for (int thread = 0; thread < readerCount; thread++) {
-                readers.add(executor.submit(() -> {
-                    boolean started = false;
-                    try {
-                        while (!started || !done.get()) {
-                            var slot = Dfa.DfaInstance.beginPairSearch(reversePrefixDfa, forwardDfa);
-                            try {
-                                pairsInside.incrementAndGet();
-                                if (writerInside.get()) {
-                                    overlap.set(true);
-                                }
-                            }
-                            finally {
-                                pairsInside.decrementAndGet();
-                                Dfa.DfaInstance.endPairSearch(slot);
-                            }
-                            if (!started) {
-                                started = true;
-                                readersStarted.countDown();
-                            }
-                        }
-                    }
-                    finally {
-                        // A reader that fails first still releases the writer, so its own
-                        // failure is what the test reports.
-                        if (!started) {
-                            readersStarted.countDown();
-                        }
-                    }
-                }));
-            }
-            Future<Integer> writer = executor.submit(() -> {
-                int admissions = 0;
-                try {
-                    assertThat(readersStarted.await(10, TimeUnit.SECONDS)).isTrue();
-                    // The racing window is a few instructions wide, so admit writers for a fixed time.
-                    long started = System.nanoTime();
-                    long duration = TimeUnit.SECONDS.toNanos(1);
-                    while (System.nanoTime() - started < duration && !overlap.get()) {
-                        forwardDfa.beginSearch(true);
-                        admissions++;
-                        try {
-                            writerInside.set(true);
-                            // Hold the exclusive admission long enough for a racing pair search to enter.
-                            for (int spin = 0; spin < 64; spin++) {
-                                Thread.onSpinWait();
-                            }
-                            if (pairsInside.get() != 0) {
-                                overlap.set(true);
-                            }
-                        }
-                        finally {
-                            writerInside.set(false);
-                            forwardDfa.cancelExclusiveSearch();
-                        }
-                    }
-                }
-                finally {
-                    done.set(true);
-                }
-                return admissions;
-            });
-            int admissions = writer.get(30, TimeUnit.SECONDS);
-            for (Future<?> reader : readers) {
-                reader.get(30, TimeUnit.SECONDS);
-            }
-            assertThat(admissions).isPositive();
-        }
-        finally {
-            executor.shutdownNow();
-        }
-        assertThat(overlap.get()).isFalse();
     }
 
     @Test

@@ -17,9 +17,14 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Stream;
+
 import static io.airlift.regulator.Dfa.DfaInstance.Kind.LONGEST_MATCH;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDfaRetainedState
 {
@@ -34,7 +39,7 @@ public class TestDfaRetainedState
     }
 
     @Test
-    public void testResetClearsStateRootsAndRetainsStableCapacity()
+    public void testResetPublishesEmptyTablesAndReturnsStateCharge()
     {
         Prog program = compileProgram("0[01]{8}$", 1 << 20);
         Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
@@ -76,17 +81,119 @@ public class TestDfaRetainedState
                 .isEqualTo(dfa.stateMemorySnapshot().totalBytes());
         assertThat(reset.stateBudget() - reset.availableStateMemory())
                 .isEqualTo(dfa.stateMemorySnapshot().totalBytes() + reset.fixedDistanceByteCandidateMemory());
-        assertThat(reset.transitionCapacity()).isEqualTo(warm.transitionCapacity());
-        assertThat(reset.stateCapacity()).isEqualTo(warm.stateCapacity());
-        assertThat(reset.stateReferenceCapacity()).isEqualTo(warm.stateReferenceCapacity());
+        assertThat(reset.transitionCapacity()).isEqualTo(cold.transitionCapacity());
+        assertThat(reset.stateCapacity()).isEqualTo(cold.stateCapacity());
+        assertThat(reset.stateReferenceCapacity()).isEqualTo(cold.stateReferenceCapacity());
 
         Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true);
         Dfa.CacheSnapshot rebuilt = dfa.cacheSnapshot();
-        assertThat(rebuilt.transitionCapacity()).isEqualTo(warm.transitionCapacity());
-        assertThat(rebuilt.stateCapacity()).isEqualTo(warm.stateCapacity());
-        assertThat(rebuilt.stateReferenceCapacity()).isEqualTo(warm.stateReferenceCapacity());
+        assertThat(rebuilt.transitionCapacity()).isEqualTo(cold.transitionCapacity());
+        assertThat(rebuilt.stateCapacity()).isEqualTo(cold.stateCapacity());
+        assertThat(rebuilt.stateReferenceCapacity()).isEqualTo(cold.stateReferenceCapacity());
         assertThat(rebuilt.stateCount()).isEqualTo(warm.stateCount());
         assertThat(rebuilt.cacheEntries()).isEqualTo(warm.cacheEntries());
+    }
+
+    @Test
+    public void testResetLeavesSupersededTablesUnchanged()
+    {
+        // Up to 2^7 states, more than the initial capacity, so the rebuilt cache grows.
+        Prog program = compileProgram("1[01]{6}$", 1 << 20);
+        Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
+        Slice input = bitText();
+        Dfa.search(program, input, false, Prog.MatchKind.LONGEST_MATCH, true);
+
+        // A search that began before the reset reads these tables until it ends.
+        Dfa.CacheTables superseded = dfa.cacheTablesForTesting();
+        int[] transitions = superseded.transitions.clone();
+        Dfa.StateData[] stateData = superseded.stateData.clone();
+        Object[][] rows = new Object[superseded.stateRefArrays.length][];
+        for (int i = 0; i < rows.length; i++) {
+            rows[i] = superseded.stateRefArrays[i] == null ? null : superseded.stateRefArrays[i].clone();
+        }
+        int[] selfLoopExitByteSets = superseded.selfLoopExitByteSets.clone();
+        List<Dfa.StateData> startStates = startStates(superseded);
+
+        dfa.resetCacheExternal();
+        Dfa.CacheTables reset = dfa.cacheTablesForTesting();
+        Dfa.search(program, input, false, Prog.MatchKind.LONGEST_MATCH, true);
+
+        assertThat(superseded.transitions).isEqualTo(transitions);
+        assertThat(superseded.stateData).isEqualTo(stateData);
+        for (int i = 0; i < rows.length; i++) {
+            // Rows refer to themselves through self-loops, so compare their slots by identity.
+            assertThat(Arrays.equals(superseded.stateRefArrays[i], rows[i])).as("state reference row %s", i).isTrue();
+        }
+        assertThat(superseded.selfLoopExitByteSets).isEqualTo(selfLoopExitByteSets);
+        assertThat(startStates(superseded)).isEqualTo(startStates);
+        assertThat(reset).isNotSameAs(superseded);
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(reset.transitions.length);
+    }
+
+    @Test
+    public void testReaderOfGrownOutTablesRetries()
+    {
+        Prog program = compileProgram("1[01]{6}$", 1 << 20);
+        Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
+        Dfa.search(program, Slices.utf8Slice("1"), false, Prog.MatchKind.LONGEST_MATCH, true);
+        // A search that began now reads these tables until it ends.
+        Dfa.CacheTables stale = dfa.cacheTablesForTesting();
+
+        // Growth publishes larger arrays; the stale tables share their start caches and rows.
+        Dfa.search(program, bitText(), false, Prog.MatchKind.LONGEST_MATCH, true);
+        Slice anchoredText = Slices.utf8Slice("1010101");
+        Dfa.search(program, anchoredText, true, Prog.MatchKind.LONGEST_MATCH, true);
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(stale.transitions.length);
+
+        // A start state cached after the growth, in a start cache the stale tables share. The
+        // indexes select the forward, anchored slot.
+        Dfa.StateData anchoredStart = stale.startBeginText[1][1];
+        assertThat(anchoredStart.offset()).isGreaterThanOrEqualTo(stale.transitions.length);
+        int textBegin = anchoredText.byteArrayOffset();
+        assertThatThrownBy(() -> dfa.analyzeStart(stale, anchoredText, textBegin, textBegin + anchoredText.length(), true, true))
+                .isInstanceOf(Dfa.RetrySearchException.class);
+
+        // A shared row of the stale tables leads to a row allocated after the growth, whose state
+        // lies beyond them.
+        Object[] grownRow = grownRowReachableFrom(stale, dfa.nextSize);
+        assertThatThrownBy(() -> Dfa.rowStateOffset(grownRow, dfa.nextSize, stale.transitions))
+                .isInstanceOf(Dfa.RetrySearchException.class);
+        int grownOffset = ((Dfa.StateData) grownRow[dfa.nextSize]).offset();
+        assertThatThrownBy(() -> dfa.stateReferences(stale, grownOffset))
+                .isInstanceOf(Dfa.RetrySearchException.class);
+    }
+
+    // 4,096 pseudo-random bits, enough to reach every state of `1[01]{6}$`.
+    private static Slice bitText()
+    {
+        StringBuilder bits = new StringBuilder();
+        for (int i = 0; i < 4_096; i++) {
+            bits.append(Integer.bitCount(i * 0x9E37) & 1);
+        }
+        return Slices.utf8Slice(bits.toString());
+    }
+
+    private static Object[] grownRowReachableFrom(Dfa.CacheTables tables, int nextSize)
+    {
+        for (Object[] row : tables.stateRefArrays) {
+            if (row == null) {
+                continue;
+            }
+            for (int byteClass = 0; byteClass < nextSize; byteClass++) {
+                if (row[byteClass] instanceof Object[] next && ((Dfa.StateData) next[nextSize]).offset() >= tables.transitions.length) {
+                    return next;
+                }
+            }
+        }
+        throw new AssertionError("no row of the grown cache is reachable from the stale tables");
+    }
+
+    private static List<Dfa.StateData> startStates(Dfa.CacheTables tables)
+    {
+        return Stream.of(tables.startBeginText, tables.startBeginLine, tables.startAfterWord, tables.startAfterNonWord)
+                .flatMap(Arrays::stream)
+                .flatMap(Arrays::stream)
+                .toList();
     }
 
     @Test
