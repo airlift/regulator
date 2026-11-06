@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -240,10 +241,24 @@ public class TestLiteralAlternationSpanMatcher
             Re2 pattern = Re2.compile(utf8Slice(expression));
             assertThat(pattern.literalSetSpanMatcher()).as(expression).isNotNull();
             LiteralSetSpanMatcher trinoScanner = literalSet(expression);
+            Map<String, CompiledPattern> languagePatterns = re2JavaAndRustPatterns(expression);
 
             for (int inputIndex = 0; inputIndex < 5; inputIndex++) {
                 Slice input = randomInput(random, literals, tokens);
                 assertFindAgreement(pattern, input);
+                // Full-Slice find and count run the automaton in every language, here over a
+                // view between sentinel bytes, and agree with the general engine.
+                Slice backing = Slices.allocate(input.length() + 2);
+                backing.setBytes(1, input);
+                Slice view = backing.slice(1, input.length());
+                for (Map.Entry<String, CompiledPattern> entry : languagePatterns.entrySet()) {
+                    CompiledPattern languagePattern = entry.getValue();
+                    assertThat(shape(languagePattern)).as(entry.getKey()).isEqualTo(CompiledPattern.Shape.LITERAL_ALTERNATION);
+                    assertThat(languagePattern.literalSetSpanMatcher()).as(entry.getKey()).isNotNull();
+                    long expectedCount = generalEngineCount(languagePattern, view);
+                    assertThat(languagePattern.find(view)).as("%s input %s", entry.getKey(), view.toStringUtf8()).isEqualTo(expectedCount > 0);
+                    assertThat(languagePattern.count(view)).as("%s input %s", entry.getKey(), view.toStringUtf8()).isEqualTo(expectedCount);
+                }
                 for (int start = 0; start <= input.length(); start++) {
                     RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
                     long expected = generalMatcher.find(start)
@@ -297,6 +312,21 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalLiteralSet(sharedPrefix, 1024)).isNull();
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice(sharedPrefix), TrinoRegexp.Options.defaults().setMaxMemory(1024)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
+
+        // A large alternation that fits the forward budget takes Trino's own literal-set route
+        // and compiles no program, even under a small budget.
+        String dictionary = words(65);
+        TrinoRegexp setRoute = TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(4096));
+        assertThat(setRoute.usesLiteralSetMatcherForDiagnostics()).isTrue();
+        assertThat(setRoute.re2()).isNull();
+        // One that does not fit compiles a program, whose analysis, bounded by the program's
+        // smaller DFA budget, carries no literal set either, so Trino never takes the set's
+        // literal-alternation shape.
+        long setSize = literalSet(dictionary).estimatedRetainedSize();
+        TrinoRegexp programRoute = TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(setSize));
+        assertThat(programRoute.usesLiteralSetMatcherForDiagnostics()).isFalse();
+        assertThat(programRoute.re2()).isNotNull();
+        assertThat(programRoute.re2().literalSetSpanMatcher()).isNull();
     }
 
     @Test
@@ -666,15 +696,21 @@ public class TestLiteralAlternationSpanMatcher
         return output.slice();
     }
 
-    // A routed find runs the automaton, leaving the program's first-match DFA unbuilt, and its
-    // spans are the general engine's.
+    // A large alternation takes the literal-alternation shape, so its full-Slice find and count
+    // and a routed matcher's find run the automaton, leaving the program's first-match DFA
+    // unbuilt, and its spans and count are the general engine's.
     private static void assertLiteralSetFind(CompiledPattern pattern, Slice input)
     {
-        assertThat(pattern.literalSetSpanMatcher()).isNotNull();
+        String expression = pattern.pattern().toStringUtf8();
+        assertThat(pattern.literalSetSpanMatcher()).as(expression).isNotNull();
+        assertThat(shape(pattern)).as(expression).isEqualTo(CompiledPattern.Shape.LITERAL_ALTERNATION);
+        assertThat(pattern.find(input)).as(expression).isTrue();
+        long count = pattern.count(input);
         RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.literalSetEnabledForDiagnostics()).isTrue();
         assertThat(matcher.find()).isTrue();
-        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(expression).isNull();
+        assertThat(count).as(expression).isEqualTo(generalEngineCount(pattern, input));
         assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).literalSetEnabledForDiagnostics()).isFalse();
         assertFindAgreement(pattern, input);
     }

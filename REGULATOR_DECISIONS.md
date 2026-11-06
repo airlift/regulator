@@ -1665,13 +1665,14 @@ NFA, which re-added a root alternation of about 4,000 branches at every byte.
 
 Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
-trie. RE2, Java, and Rust route only `RegexpMatcher.find()`; count, boolean,
-anchored, and capture operations keep the program. Smaller alternations keep the
-Trino trie where it is eligible; RE2, Java, and Rust search the same trie for
-full-Slice boolean `find` and count when the general engine would otherwise
-answer, and run their other operations on the program. Trino checks the
-automaton against the forward-DFA budget, while RE2, Java, and Rust charge it to
-that budget.
+trie. RE2, Java, and Rust search the automaton for `RegexpMatcher.find()` and,
+when the general engine would otherwise answer, for full-Slice boolean `find`
+and count, as they search the trie of a smaller alternation; `matches`,
+`lookingAt`, anchored, and capture operations keep the program. Trino checks the
+automaton against the forward-DFA budget before compiling a program, while the
+other languages charge it to that budget. The compile applies the same rule in
+every language, but a Trino pattern never reaches it with an automaton that
+fits: the program's DFA budget is smaller than the forward budget Trino checked.
 
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at

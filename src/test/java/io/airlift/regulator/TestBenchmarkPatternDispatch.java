@@ -199,15 +199,14 @@ public class TestBenchmarkPatternDispatch
             // is no contained literal.
             case "DOT_STAR_LITERAL" -> compiled instanceof JavaRegexp ? ENGINE : LITERAL_KERNEL;
             case "CHARACTER_CLASS" -> CLASS_RUN;
-            case "LITERAL_ALTERNATION" -> LITERAL_ALTERNATION;
+            // An alternation of more than 64 literals takes the same shape on the literal set.
+            case "LITERAL_ALTERNATION", "LITERAL_SET" -> LITERAL_ALTERNATION;
             case "FIXED_WIDTH" -> FIXED_WIDTH;
             // A Rust `\s` is Unicode, so it is no byte run.
             case "BYTE_TABLE" -> compiled instanceof RustRegexp ? ENGINE : BYTE_TABLE;
             // `[Kk]` simplifies to a folded literal, which keeps FOLDED_PAIR_SEQUENCE off the
             // fixed-width route in every language, and ordered literals have no find plan.
             case "GENERAL", "FOLDED_PAIR_SEQUENCE", "ORDERED_LITERALS" -> ENGINE;
-            // The literal set serves only the matcher's find.
-            case "LITERAL_SET" -> ENGINE;
             // An inner literal of two or more bytes keeps the DFA's inner literal search instead
             // of the fixed-width matcher.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;

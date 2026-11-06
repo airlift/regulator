@@ -65,8 +65,8 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// fixed-width subtype runs the fixed-width matcher, which checks every `s`. ORDERED_LITERALS finds
 /// three literals in order with any text between them and runs the ordinary search today.
 /// LITERAL_SET is an alternation of 100 words, more than the 64 literals of the literal-alternation
-/// span matcher: full-Slice `find` runs the ordinary search today, and RE2, Java, and Rust matchers
-/// find it with the literal set's automaton. SINGLE_BYTE is the one-byte exact literal `,`, which
+/// span matcher, which RE2, Java, and Rust search with the literal set's automaton for full-Slice
+/// `find` and `count` and a matcher's `find`. SINGLE_BYTE is the one-byte exact literal `,`, which
 /// the single-byte table supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line
 /// feed, unlike CONTAINS's `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose
 /// dot stops at more line terminators, runs the ordinary search. TestBenchmarkPatternDispatch
