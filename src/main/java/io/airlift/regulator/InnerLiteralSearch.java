@@ -347,7 +347,18 @@ final class InnerLiteralSearch
         if (foldedBytes != null) {
             return findFoldedLiteral(text, offset, length);
         }
+        if (usesVectorSearch(length)) {
+            return findLiteralVector(text, offset, length);
+        }
         return minimumLiteralLength == 1 ? literalSearch.findSingleByte(text, offset, length) : literalSearch.findContains(text, offset, length);
+    }
+
+    /// Whether a scan of `length` bytes for a single literal takes the vector kernels, under the
+    /// same cutoff as the prefix scans. A case-insensitive literal never does: its kernel holds
+    /// only the exact head, so a vector scan would accept hits without the folded rest.
+    boolean usesVectorSearch(int length)
+    {
+        return literalSearch != null && foldedBytes == null && VectorSupport.isAvailable() && length >= Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
     }
 
     // Each hit of the exact head, with room for the whole literal, is checked for the folded rest,
@@ -382,6 +393,24 @@ final class InnerLiteralSearch
             }
         }
         return true;
+    }
+
+    // A one-byte literal takes the byte-set scan, and a longer one the fused pair scan, which
+    // finishes with KMP once its failed candidates pass the comparison budget.
+    private int findLiteralVector(Slice text, int offset, int length)
+    {
+        byte[] data = text.byteArray();
+        int dataOffset = text.byteArrayOffset();
+        int start = dataOffset + offset;
+        byte[] literal = literalSearch.literalBytes();
+        int found;
+        if (minimumLiteralLength == 1) {
+            found = VectorByteSetScanner.find(data, start, length, literal[0], (byte) 0, (byte) 0, 1);
+        }
+        else {
+            found = Prog.findLiteral(data, start, length, literal, literalSearch);
+        }
+        return found < 0 ? -1 : found - dataOffset;
     }
 
     // The filter accepts a superset of the positions where a member starts, so each hit is

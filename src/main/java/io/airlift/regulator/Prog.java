@@ -40,7 +40,7 @@ final class Prog
     // an output in 28 bits, as upstream's `Prog::Inst` does.
     static final int MAX_FLATTENED_INSTRUCTIONS = (1 << 28) - 1;
     private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
-    private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
+    static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
     public enum MatchKind
     {
