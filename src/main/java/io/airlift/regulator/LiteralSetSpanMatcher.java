@@ -44,7 +44,21 @@ import static java.util.Objects.requireNonNull;
 /// States are numbered breadth-first and their edges stored in that order, sorted by byte, so
 /// a state's edges are contiguous and edge `e` leads to state `e + 1`. The root keeps a dense
 /// 256-entry row whose missing bytes stay at the root.
-final class LiteralSetSpanMatcher
+///
+/// At the root, a search skips the bytes that lead no literal with a vector scan for the root's
+/// leading bytes. Such a byte leaves the state at the root and records nothing, so the skip is
+/// exact. A search at the root has no match pending, since once one is recorded no state the
+/// search reaches fails back to the root. The scan uses the forward DFA's kernel selection,
+/// [Dfa#buildStartByteScanSet] and [Dfa#findByteSet] over two or three bytes or a contiguous
+/// range, and otherwise its nibble tables, which take 4 to 64 bytes with at most 8 high nibbles.
+/// It is not the DFA's start-byte skip, which prefers its start literal filter for up to 16
+/// common start bytes, covers a single start byte with its prefix scan, and vector-scans only
+/// with [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] bytes left. A matcher with the skip is a
+/// [RootSkippingMatcher], so one without it retains only its trie arrays and the object holding
+/// them, and the skip costs nothing where it is not built. No method is overridden: the
+/// searches reach the skip's scan set by testing `this` against the subclass.
+sealed class LiteralSetSpanMatcher
+        permits LiteralSetSpanMatcher.RootSkippingMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralSetSpanMatcher.class);
     private static final int ROOT = 0;
@@ -80,7 +94,9 @@ final class LiteralSetSpanMatcher
     /// already case-folded, such as Rust's `[Kk\x{212A}]` for `(?i)k`, is an ordinary class. Its
     /// literals keep the alternation's leftmost-first priority order. `maximumRetainedBytes`
     /// bounds the states the build adds but not the root's row or the object overhead, so a
-    /// caller admits the result by its [#estimatedRetainedSize()].
+    /// caller admits the result by its [#estimatedRetainedSize()]. The root's skip is built only
+    /// where the matcher with it still retains at most `maximumRetainedBytes`, so a matcher a
+    /// caller admitted without it is admitted with it or built without it.
     static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes)
     {
         requireNonNull(expression, "expression is null");
@@ -222,7 +238,13 @@ final class LiteralSetSpanMatcher
             }
         }
         firstEdgeByState[stateCount] = edgeCount;
-        return new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+        LiteralSetSpanMatcher matcher = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+
+        // Phase 4: the root's skip, whose scan set and any nibble tables, with the larger object
+        // holding them, are a retained charge that never costs the matcher itself: where they do
+        // not fit, the matcher searches without them.
+        RootSkippingMatcher rootSkipping = VectorSupport.isAvailable() ? RootSkippingMatcher.build(matcher, rootChildByByte) : null;
+        return rootSkipping != null && rootSkipping.estimatedRetainedSize() <= maximumRetainedBytes ? rootSkipping : matcher;
     }
 
     private static int findTrieChild(int child, byte value, int[] nextSibling, byte[] incomingByte)
@@ -256,28 +278,91 @@ final class LiteralSetSpanMatcher
         }
     }
 
-    long estimatedRetainedSize()
+    final long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE +
-                SizeOf.sizeOf(rootStateByByte) +
+        long trieSize = SizeOf.sizeOf(rootStateByByte) +
                 SizeOf.sizeOf(firstEdgeByState) +
                 SizeOf.sizeOf(edgeByte) +
                 SizeOf.sizeOf(failureByState) +
                 SizeOf.sizeOf(matchLengthByState);
+        if (this instanceof RootSkippingMatcher rootSkipping) {
+            return RootSkippingMatcher.INSTANCE_SIZE + trieSize + SizeOf.sizeOf(rootSkipping.rootByteNibbleTables);
+        }
+        return INSTANCE_SIZE + trieSize;
+    }
+
+    /// Returns this matcher without the root's skip: one sharing its trie arrays, or this matcher
+    /// if it has none. It retains what the matcher built without the skip would.
+    final LiteralSetSpanMatcher withoutRootSkipping()
+    {
+        if (this instanceof RootSkippingMatcher) {
+            return new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+        }
+        return this;
+    }
+
+    /// Returns the scan set of the root's skip for [Dfa#findByteSet], or `0` without the skip.
+    final int rootByteScanSetForDiagnostics()
+    {
+        return this instanceof RootSkippingMatcher rootSkipping ? rootSkipping.rootByteScanSet : 0;
+    }
+
+    /// Returns whether a search at the root with `remaining` bytes left, the current byte
+    /// included, may skip to the next leading byte with the root's vector scan; shorter searches
+    /// keep the byte-by-byte root walk, which won on the benchmark's short rows. See
+    /// CompiledPattern.MINIMUM_LONG_SEARCH_BYTES.
+    final boolean skipsRootBytes(int remaining)
+    {
+        return remaining >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && this instanceof RootSkippingMatcher;
     }
 
     /// Finds the leftmost-first match in `[start, end)` of `input`; the caller checks that
     /// `0 <= start <= end <= input.length()`. This is the crate's leftmost search: record the
     /// match on entering a match state, and return the last one recorded on reaching [#DEAD] or
-    /// the end.
-    long findSpan(Slice input, int start, int end)
+    /// the end. A search that may skip root bytes, see [#skipsRootBytes(int)], skips from a byte
+    /// without a root edge at the root to the next byte with one. It stops skipping once
+    /// [VectorByteSetScanner#SHORT_SCAN_LIMIT] skips in a row each skipped fewer than
+    /// [VectorByteSetScanner#SHORT_SCAN_BYTES] bytes, the rule of the forward DFA's count
+    /// self-loop scan: on prose such as `word. word.`, a skip lands on the next word. The rest of
+    /// that search, and every search that may not skip, is the plain trie walk.
+    final long findSpan(Slice input, int start, int end)
+    {
+        return findSpan(input, start, end, null);
+    }
+
+    /// Returns [#findSpan(Slice,int,int)], adding the root skips it makes to `diagnostics`.
+    final long findSpanForDiagnostics(Slice input, int start, int end, SkipDiagnostics diagnostics)
+    {
+        requireNonNull(diagnostics, "diagnostics is null");
+        long[] rootSkipCount = new long[1];
+        long span = findSpan(input, start, end, rootSkipCount);
+        diagnostics.rootSkipCount += rootSkipCount[0];
+        return span;
+    }
+
+    // Picks the search's walk once, so a search that may not skip never checks for a skip. A
+    // null `rootSkipCount`, as every production search passes, counts nothing. It is an array
+    // rather than a SkipDiagnostics because C2 does not inline a method whose signature names a
+    // class that is not loaded, and production never loads SkipDiagnostics.
+    private long findSpan(Slice input, int start, int end, long[] rootSkipCount)
+    {
+        if (!skipsRootBytes(end - start)) {
+            int inputOffset = input.byteArrayOffset();
+            return walkTrie(input, inputOffset + start, inputOffset + end, Dfa.SEARCH_NO_MATCH);
+        }
+        RootSkippingMatcher rootSkipping = (RootSkippingMatcher) this;
+        return walkTrieSkippingRootBytes(input, start, end, rootSkipping.rootByteScanSet, rootSkipping.rootByteNibbleTables, rootSkipCount);
+    }
+
+    // The plain trie walk from the root at array index `position` to array index `inputEnd`,
+    // with `match` recorded before `position`. It has no skip check and calls only the inlined
+    // child lookup, so C2 keeps the trie arrays and the state in registers across the loop.
+    private long walkTrie(Slice input, int position, int inputEnd, long match)
     {
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
-        int inputEnd = inputOffset + end;
-        long match = Dfa.SEARCH_NO_MATCH;
         int state = ROOT;
-        for (int position = inputOffset + start; position < inputEnd; position++) {
+        for (; position < inputEnd; position++) {
             byte value = bytes[position];
             int next;
             while (true) {
@@ -304,6 +389,69 @@ final class LiteralSetSpanMatcher
         return match;
     }
 
+    // The trie walk of a search that may skip root bytes, with the skip's scan set and any nibble
+    // tables. Its trie step repeats walkTrie's instead of sharing one loop with it: the skip's
+    // checks and kernel calls would then sit in the loop of every search, and their calls make
+    // C2 reload the trie arrays and spill the state around them. Once the short-skip limit ends
+    // skipping, the rest of the search is walkTrie from the leading byte the last scan found.
+    private long walkTrieSkippingRootBytes(Slice input, int start, int end, int rootByteScanSet, byte[] rootByteNibbleTables, long[] rootSkipCount)
+    {
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int inputEnd = inputOffset + end;
+        long match = Dfa.SEARCH_NO_MATCH;
+        int state = ROOT;
+        int shortSkipCount = 0;
+        for (int position = inputOffset + start; position < inputEnd; position++) {
+            byte value = bytes[position];
+            int next;
+            while (true) {
+                if (state == ROOT) {
+                    next = rootStateByByte[value & 0xFF];
+                    break;
+                }
+                next = findChild(state, value);
+                if (next != ROOT) {
+                    break;
+                }
+                state = failureByState[state];
+                if (state == DEAD) {
+                    return match;
+                }
+            }
+            // Only the root's row leads back to the root, for a byte that leads no literal, so
+            // the state stays at the root.
+            if (next == ROOT) {
+                // The skip starts only at a second root miss in a row: on dense text, where most
+                // bytes lead a literal, a vector call that lands a byte ahead costs more than the
+                // step it saves. Text whose misses come in short runs, such as the `. ` between
+                // words, passes that check, so the short-skip limit ends skipping there.
+                if (inputEnd - position >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && rootStateByByte[bytes[position + 1] & 0xFF] == ROOT) {
+                    if (rootSkipCount != null) {
+                        rootSkipCount[0]++;
+                    }
+                    int leadingBytePosition = Dfa.findByteSet(bytes, position + 1, inputEnd - position - 1, rootByteScanSet, rootByteNibbleTables);
+                    if (leadingBytePosition < 0) {
+                        return match;
+                    }
+                    shortSkipCount = VectorByteSetScanner.shortScanCount(shortSkipCount, leadingBytePosition - position - 1);
+                    if (shortSkipCount == VectorByteSetScanner.SHORT_SCAN_LIMIT) {
+                        return walkTrie(input, leadingBytePosition, inputEnd, match);
+                    }
+                    position = leadingBytePosition - 1;
+                }
+                continue;
+            }
+            state = next;
+            int matchLength = matchLengthByState[state];
+            if (matchLength != 0) {
+                int matchEnd = position + 1 - inputOffset;
+                match = ((long) (matchEnd - matchLength) << 32) | (matchEnd & 0xFFFF_FFFFL);
+            }
+        }
+        return match;
+    }
+
     // Edge e leads to state e + 1, and no edge leads to the root, so ROOT means no transition.
     private int findChild(int state, byte value)
     {
@@ -316,5 +464,58 @@ final class LiteralSetSpanMatcher
             }
         }
         return ROOT;
+    }
+
+    /// Counts what a diagnostics search of a literal set reads.
+    static final class SkipDiagnostics
+    {
+        private long rootSkipCount;
+
+        /// The vector scans that skipped from the root to the next byte leading a literal.
+        long rootSkipCount()
+        {
+            return rootSkipCount;
+        }
+    }
+
+    /// A matcher that skips the root's missing bytes; see [#skipsRootBytes(int)].
+    static final class RootSkippingMatcher
+            extends LiteralSetSpanMatcher
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(RootSkippingMatcher.class);
+
+        // The scan set of the root's leading bytes for Dfa.findByteSet: two or three bytes or a
+        // contiguous range, which need no tables, or Dfa.MIXED_BYTE_SET_MARKER.
+        private final int rootByteScanSet;
+        // The nibble tables of a mixed scan set, or null.
+        private final byte[] rootByteNibbleTables;
+
+        private RootSkippingMatcher(LiteralSetSpanMatcher trie, int rootByteScanSet, byte[] rootByteNibbleTables)
+        {
+            super(trie.rootStateByByte, trie.firstEdgeByState, trie.edgeByte, trie.failureByState, trie.matchLengthByState);
+            this.rootByteScanSet = rootByteScanSet;
+            this.rootByteNibbleTables = rootByteNibbleTables;
+        }
+
+        /// Returns `trie` with the skip of its root's leading bytes, `rootChildByByte`'s non-root
+        /// entries, or `null` where neither of the forward DFA's scans takes them: the scan set
+        /// [Dfa#buildStartByteScanSet] selects, else the nibble tables, which take 4 to 64 bytes
+        /// with at most 8 high nibbles. Loaded only with the Vector API, as the DFA builds its
+        /// tables.
+        private static RootSkippingMatcher build(LiteralSetSpanMatcher trie, int[] rootChildByByte)
+        {
+            byte[] leadingBytes = new byte[256];
+            for (int value = 0; value < 256; value++) {
+                if (rootChildByByte[value] != ROOT) {
+                    leadingBytes[value] = 1;
+                }
+            }
+            int scanSet = Dfa.buildStartByteScanSet(leadingBytes);
+            if (scanSet != 0) {
+                return new RootSkippingMatcher(trie, scanSet, null);
+            }
+            byte[] nibbleTables = VectorByteSetScanner.buildNibbleTables(leadingBytes);
+            return nibbleTables == null ? null : new RootSkippingMatcher(trie, Dfa.MIXED_BYTE_SET_MARKER, nibbleTables);
+        }
     }
 }

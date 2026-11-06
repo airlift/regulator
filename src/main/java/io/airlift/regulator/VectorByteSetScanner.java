@@ -24,8 +24,21 @@ final class VectorByteSetScanner
     // The nibble tables are replicated to 64 bytes, one reason VectorSupport allows at most 64 lanes.
     private static final int NIBBLE_TABLE_BYTES = 64;
     private static final int HIGH_NIBBLE_TABLE_OFFSET = NIBBLE_TABLE_BYTES;
+    // A loop that skips ahead with these scans stops skipping once SHORT_SCAN_LIMIT scans in a
+    // row each skipped fewer than SHORT_SCAN_BYTES bytes: the stops are dense, and a scan's setup
+    // costs more than the few bytes it skips. The forward DFA's count self-loop scan and the
+    // literal set's root skip apply the rule through shortScanCount.
+    static final int SHORT_SCAN_BYTES = 16;
+    static final int SHORT_SCAN_LIMIT = 4;
 
     private VectorByteSetScanner() {}
+
+    /// Returns the number of short scans in a row after a scan that skipped `skippedBytes`, given
+    /// the `shortScanCount` before it. A caller stops skipping when it reaches [#SHORT_SCAN_LIMIT].
+    static int shortScanCount(int shortScanCount, int skippedBytes)
+    {
+        return skippedBytes < SHORT_SCAN_BYTES ? shortScanCount + 1 : 0;
+    }
 
     static boolean shouldSampleCandidateDensity()
     {

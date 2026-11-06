@@ -2258,6 +2258,25 @@ answer, and run their other operations on the program. Trino checks the
 automaton against the forward-DFA budget, while RE2, Java, and Rust charge it to
 that budget.
 
+At the root, with the Vector API and at least 64 bytes left, the automaton skips
+the bytes that lead no literal with a vector scan for its leading bytes; walking
+the root's row over every byte lost on 1024-byte rows. The scan uses the forward
+DFA's kernel selection, two or three bytes or a contiguous range of 4 to 64, and
+otherwise its nibble tables, which take 4 to 64 bytes with at most 8 high
+nibbles. It is not the DFA's start-byte skip, which prefers its start literal
+filter for up to 16 common start bytes, covers a single start byte with its
+prefix scan, and vector-scans only with at least 1024 bytes left. The skip is
+exact, since a byte that leads no literal leaves the automaton at the root and
+records nothing. It starts only at a second root miss in a row, and, as in the
+DFA's count self-loop scan, stops for the rest of the search once 4 skips in a
+row each moved fewer than 16 bytes, as on prose, where a skip crosses only the
+punctuation and space between words. The skip, with its tables where it needs
+them, is built only where the automaton still fits the memory it may retain with
+it; otherwise the automaton walks every byte, so no pattern that compiled
+without the skip fails to compile. A skip that would cost either forward DFA its
+initialization is dropped too, since the skip changes no result, so a set the
+DFA cannot hold searches without it.
+
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at
 most 16 code points merged from single-character alternatives, in the
