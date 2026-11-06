@@ -2143,8 +2143,10 @@ abstract sealed class CompiledPattern
     /// text start or the previous match end, or a search falls back for another reason, the
     /// ordinary count takes over from there and hands back at the first match end whose next
     /// literal is not near. Its start-byte scan selection then holds for the whole dense run,
-    /// instead of being made again for each match, and it records its own failures. Every match
-    /// holds the literal, so none is empty and each step advances.
+    /// instead of being made again for each match, and it records its own failures. The ordinary
+    /// counts share their start-byte selection and productivity checks, so one that starts within
+    /// 64 KiB of an earlier sample does not repeat them. Every match holds the literal, so none is
+    /// empty and each step advances.
     private long countInnerLiteralMatches(InnerLiteralSearch innerLiteralSearch, Slice text)
     {
         // As in the ordinary count, a forward DFA that failed a count leaves later counts to the
@@ -2154,6 +2156,9 @@ abstract sealed class CompiledPattern
         }
         int length = text.length();
         IntPredicate continueCounting = next -> innerLiteralSearch.fallsBackNearStart(text, next, length);
+        // The first fallback with enough text left to sample allocates the shared sampling, and
+        // later ones reuse it. Positions only advance, so a short row never allocates it.
+        Dfa.CountByteScanSampling sampling = null;
         long count = 0;
         int position = 0;
         while (position < length) {
@@ -2166,7 +2171,10 @@ abstract sealed class CompiledPattern
                 position = (int) span;
                 continue;
             }
-            long counted = Dfa.countMatches(partialProg, text, position, Prog.MatchKind.FIRST_MATCH, continueCounting);
+            if (sampling == null && length - position >= Dfa.CountByteScanSampling.MIN_SAMPLED_BYTES) {
+                sampling = new Dfa.CountByteScanSampling();
+            }
+            long counted = Dfa.countMatches(partialProg, text, position, Prog.MatchKind.FIRST_MATCH, continueCounting, sampling);
             if (counted < 0) {
                 return -1;
             }

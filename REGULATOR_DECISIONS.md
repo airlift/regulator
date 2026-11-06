@@ -837,11 +837,12 @@ sample, so dense input such as `[a-z]:[0-9]+` over repeated `a:1.` does not pay
 a start-byte density sample per match. Below 4 KiB the check reports the span
 as productive without sampling, so resampling there would promote the vector
 scan for uniformly dense input. The per-search productivity check that can
-reject candidate scanning altogether still runs for each match. Retries after
-a cache reset keep the current selection; a promotion made by the search that
-retried is discarded, and the retry samples again. The selected primitive
-changes only how candidates are found, never which candidates the DFA
-processes. Fixed-distance candidate selection still samples at each match.
+reject candidate scanning altogether still runs for each match, except in the
+shared counts described below. Retries after a cache reset keep the current
+selection; a promotion made by the search that retried is discarded, and the
+retry samples again. The selected primitive changes only how candidates are
+found, never which candidates the DFA processes. Fixed-distance candidate
+selection still samples at each match.
 
 Sampling at each match boundary made the choice depend on where the previous
 match ended rather than on the input. On sparse capture input with a match
@@ -863,6 +864,18 @@ although only 1.6% of its bytes are digits. A clearly dense first sample skips
 the wider one, since dense text pays for every sampled byte, and a count that
 stops at a match end keeps the 64-byte decision, because it samples at every
 call.
+
+The inner-literal count hands each span whose next literal sits near the
+previous match end over to a fused count that stops at the first match end whose
+next literal is not near, so one text can take thousands of short fused counts.
+Each sample spreads its windows over the whole remaining text, so every one of
+those counts read the same far, cold bytes again. These counts therefore share
+their sampling outcomes: a vector selection holds for the rest of the
+inner-literal count, and a scalar selection and each start-byte and
+fixed-distance productivity result, productive or not, hold for the next 64 KiB
+past the position sampled, as the group-zero search cursor holds a rejection. A
+vector selection recorded by a search that then retries is kept, and the shared
+counts keep the 64-byte start decision.
 
 ## Bounded Native-Memory DFA Transition Table
 

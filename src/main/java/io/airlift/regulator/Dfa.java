@@ -629,7 +629,7 @@ final class Dfa
 
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
     {
-        long result = countMatches(prog, context, 0, matchKind, COUNT_EVERY_MATCH);
+        long result = countMatches(prog, context, 0, matchKind, COUNT_EVERY_MATCH, null);
         return result < 0 ? result : countStopCount(result);
     }
 
@@ -644,9 +644,12 @@ final class Dfa
     /// there. Returns [#COUNT_UNSUPPORTED], or the count and the Slice offset where counting
     /// stopped, which is the context end when no match remains, packed for [#countStopCount(long)]
     /// and [#countStopPosition(long)]. A retried search resumes at the last match end, so the
-    /// predicate sees each match end once.
+    /// predicate sees each match end once. Reuses and records byte-scan sampling outcomes in
+    /// `sampling` when it is not null. A caller that counts one text in several calls, each
+    /// starting at or after where the previous one stopped, passes the same
+    /// [CountByteScanSampling] to every call.
     @SuppressWarnings("UnusedException")
-    static long countMatches(Prog prog, Slice context, int start, Prog.MatchKind matchKind, IntPredicate continueCounting)
+    static long countMatches(Prog prog, Slice context, int start, Prog.MatchKind matchKind, IntPredicate continueCounting, CountByteScanSampling sampling)
     {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
@@ -700,13 +703,19 @@ final class Dfa
         // the start-byte scan, so the selection is made only when it can be read. A start literal
         // filter is kept without sampling. A count of every match, the three-argument form's
         // `COUNT_EVERY_MATCH`, settles a borderline first sample with a wider one; any other
-        // predicate keeps the 64-byte decision.
+        // predicate keeps the 64-byte decision. A count that carries sampling across calls keeps an
+        // earlier call's selection where it still holds.
         int startByteScanSet = 0;
         boolean resampleStartByteScanSet = false;
         if (dfa.canStartByteAcceleration() && !prog.canPrefixAccel()) {
-            startByteScanSet = continueCounting == COUNT_EVERY_MATCH
-                    ? selectEveryMatchCountByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd)
-                    : selectByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd);
+            if (sampling != null) {
+                startByteScanSet = sampling.selectStartByteScanSet(dfa, bytes, textBegin, contextEnd);
+            }
+            else {
+                startByteScanSet = continueCounting == COUNT_EVERY_MATCH
+                        ? selectEveryMatchCountByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd)
+                        : selectByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd);
+            }
             resampleStartByteScanSet = startByteScanSet == 0 && dfa.startByteScanSet != 0;
         }
         // The self-loop cutoff applies to one count call; a new text may reach an eligible loop.
@@ -740,7 +749,8 @@ final class Dfa
                             textBegin,
                             fixedDistanceCandidates,
                             startByteScanSet,
-                            resampleStartByteScanSet);
+                            resampleStartByteScanSet,
+                            sampling);
                     if (matchEnd == SEARCH_FAILED) {
                         dfa.recordCountSearchBailedWhenSlow();
                         return COUNT_UNSUPPORTED;
@@ -1170,7 +1180,8 @@ final class Dfa
             int textBegin,
             Prog.FixedDistanceByteCandidates fixedDistanceCandidates,
             int startByteScanSet,
-            boolean resampleStartByteScanSet)
+            boolean resampleStartByteScanSet,
+            CountByteScanSampling sampling)
     {
         if (prog.anchorStart() && contextBegin != textBegin) {
             return SEARCH_NO_MATCH;
@@ -1219,11 +1230,9 @@ final class Dfa
         boolean byteScanRejected = false;
         if (fixedDistanceCandidates != null &&
                 canUseFixedDistanceByteAcceleration(false, true, startData.flag(), contextEnd - textBegin)) {
-            byteScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !isByteCandidateScanProductive(
-                    fixedDistanceCandidates.candidates(),
-                    bytes,
-                    textBegin + fixedDistanceCandidates.offset(),
-                    contextEnd);
+            byteScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !(sampling == null
+                    ? isByteCandidateScanProductive(fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd)
+                    : sampling.isFixedDistanceByteScanProductive(fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd));
             if (!byteScanRejected) {
                 int fixedDistanceSmallByteSet = selectByteScanSet(
                         dfa.fixedDistanceSmallByteSet(),
@@ -1249,7 +1258,9 @@ final class Dfa
         }
         if (canUseStartByteAcceleration(dfa, false, true, startData.flag())) {
             if (BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED &&
-                    !dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)) {
+                    !(sampling == null
+                            ? dfa.isStartByteScanProductive(bytes, textBegin, contextEnd)
+                            : sampling.isStartByteScanProductive(dfa, bytes, textBegin, contextEnd))) {
                 byteScanRejected = true;
                 dfa.byteScanFallbackCount++;
             }
@@ -1258,12 +1269,9 @@ final class Dfa
                 // served by the fixed-distance scan do not pay for a density sample.
                 boolean promoted = false;
                 if (resampleStartByteScanSet && contextEnd - textBegin >= MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES) {
-                    startByteScanSet = selectByteScanSet(
-                            dfa.startByteScanSet,
-                            dfa.startByteCandidates,
-                            bytes,
-                            textBegin,
-                            contextEnd);
+                    startByteScanSet = sampling == null
+                            ? selectByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, textBegin, contextEnd)
+                            : sampling.selectStartByteScanSet(dfa, bytes, textBegin, contextEnd);
                     promoted = startByteScanSet != 0;
                 }
                 long result = searchForwardScanAcceleration(
@@ -4661,10 +4669,95 @@ final class Dfa
             startByteScanProductivityRejectedUntil = productive ? 0 : nextProductivityCheckPosition(position, textEnd);
             return productive;
         }
+    }
 
-        private static int nextProductivityCheckPosition(int position, int textEnd)
+    // A sample spreads its windows over the whole remaining text, so a sample taken this close to
+    // an earlier one reads nearly the same bytes.
+    private static int nextProductivityCheckPosition(int position, int textEnd)
+    {
+        return position + Math.min(BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES, textEnd - position);
+    }
+
+    /// Carries the byte-scan sampling outcomes of one count made in several
+    /// [Dfa#countMatches(Prog,Slice,int,Prog.MatchKind,IntPredicate,CountByteScanSampling)] calls,
+    /// such as the inner literal count's fallback counts, each starting at or after where the
+    /// previous one stopped. Every sample spreads its windows over the whole remaining text, so a
+    /// call that starts close to an earlier sample would read nearly the same, often cold, bytes
+    /// again.
+    /// A vector start-byte scan selection holds for the rest of the count, as within one call; a
+    /// scalar selection and each productivity result hold for
+    /// [Dfa#BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES] past the position sampled. The outcomes only
+    /// choose how candidates are found, never which candidates the DFA processes. One count owns
+    /// the object, so it is never shared between threads.
+    static final class CountByteScanSampling
+    {
+        /// With fewer bytes remaining, every byte-scan choice is made without sampling, so a
+        /// count whose first call has fewer bytes remaining makes the same choices when passed
+        /// `null`.
+        static final int MIN_SAMPLED_BYTES = Math.min(MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES, MIN_SELECTIVE_SCAN_SEARCH_BYTES);
+
+        private boolean startByteVectorScanSelected;
+        private int startByteScalarScanSelectedUntil;
+        private boolean startByteScanProductive;
+        private int startByteScanProductivityCheckedUntil;
+        private boolean fixedDistanceByteScanProductive;
+        private int fixedDistanceByteScanProductivityCheckedUntil;
+        private int byteScanCheckCount;
+
+        int byteScanCheckCount()
         {
-            return position + Math.min(BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES, textEnd - position);
+            return byteScanCheckCount;
+        }
+
+        private int selectStartByteScanSet(DfaInstance dfa, byte[] bytes, int position, int textEnd)
+        {
+            if (startByteVectorScanSelected) {
+                return dfa.startByteScanSet;
+            }
+            if (position < startByteScalarScanSelectedUntil) {
+                return 0;
+            }
+
+            byteScanCheckCount++;
+            int selected = selectByteScanSet(dfa.startByteScanSet, dfa.startByteCandidates, bytes, position, textEnd);
+            if (selected != 0) {
+                startByteVectorScanSelected = true;
+            }
+            else {
+                startByteScalarScanSelectedUntil = nextProductivityCheckPosition(position, textEnd);
+            }
+            return selected;
+        }
+
+        private boolean isStartByteScanProductive(DfaInstance dfa, byte[] bytes, int position, int textEnd)
+        {
+            // Below the minimum the check reports the span as productive without sampling.
+            if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+                return true;
+            }
+            if (position < startByteScanProductivityCheckedUntil) {
+                return startByteScanProductive;
+            }
+
+            byteScanCheckCount++;
+            startByteScanProductive = dfa.isStartByteScanProductive(bytes, position, textEnd);
+            startByteScanProductivityCheckedUntil = nextProductivityCheckPosition(position, textEnd);
+            return startByteScanProductive;
+        }
+
+        private boolean isFixedDistanceByteScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
+        {
+            if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+                return true;
+            }
+            if (position < fixedDistanceByteScanProductivityCheckedUntil) {
+                return fixedDistanceByteScanProductive;
+            }
+
+            byteScanCheckCount++;
+            fixedDistanceByteScanProductive = isByteCandidateScanProductive(candidates, bytes, position, textEnd);
+            fixedDistanceByteScanProductivityCheckedUntil = nextProductivityCheckPosition(position, textEnd);
+            return fixedDistanceByteScanProductive;
         }
     }
 
