@@ -673,8 +673,8 @@ Do not expand coverage based solely on aggregate speedups. Preserve the URL and
 mixed-plan controls at every stage. If a richer operation increases ordinary
 execution cost, compare a separate executor route before adding complexity to
 the common dispatch loop. By default the plan generates no bytecode; the
-experimental option described in [Generated kernels](#generated-kernels)
-compiles an eligible pattern's plan into its own class.
+option described in [Generated kernels](#generated-kernels) compiles an eligible
+pattern's plan into its own class.
 
 `BenchmarkTrinoScanProfiles` derives every pattern/input pair from the
 `OPTIONAL_MIXED` workload. `INTERLEAVED` preserves its row order; `GROUPED`

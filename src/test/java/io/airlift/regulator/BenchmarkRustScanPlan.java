@@ -135,8 +135,7 @@ public class BenchmarkRustScanPlan
         @Param({"true", "false"})
         public boolean scanPlan;
 
-        // Experimental per-pattern scan kernels; false compiles every pattern as it would without
-        // the option.
+        // Per-pattern scan kernels; false compiles every pattern as it would without the option.
         @Param("false")
         public boolean generateBytecode;
 

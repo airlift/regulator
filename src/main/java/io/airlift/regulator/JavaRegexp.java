@@ -140,8 +140,8 @@ public sealed class JavaRegexp
             return generateBytecode;
         }
 
-        /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
-        /// so each operation that would run its specialized scan runs dedicated bytecode instead.
+        /// When enabled, compilation generates a hidden class for an eligible pattern, so each
+        /// operation that would run its specialized scan runs dedicated bytecode instead.
         /// Operations that take another route keep it. Patterns that are not eligible, or whose
         /// class cannot be generated, compile as they do without this option. Disabled by default.
         ///

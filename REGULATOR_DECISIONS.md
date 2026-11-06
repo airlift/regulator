@@ -1911,9 +1911,8 @@ malformed-input opt-in. RE2, Java, and Rust patterns select the same plans,
 plus runs of sets of some non-ASCII characters, and report the ordinary engine's
 results on malformed input too, as described in
 [RE2 Scan Plans](#re2-scan-plans). By default the plan performs no runtime
-code generation; an experimental option may compile the plan into its
-own class, as described in
-[Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
+code generation; an option may compile the plan into its own class, as described
+in [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
 semantic program remains the fallback. The
 [scan-plan guide](docs/benchmarks/SCAN_PLAN.md) describes candidate
 selection, resume rules, the executors, and optional-capture execution.
@@ -2150,9 +2149,8 @@ measurements specific to each language.
   do.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
-- An experimental option compiles a case-sensitive RE2 plan into its own
-  class, as described in
-  [Generated RE2 Scan Kernels](#generated-re2-scan-kernels).
+- An option compiles a case-sensitive RE2 plan into its own class, as described
+  in [Generated RE2 Scan Kernels](#generated-re2-scan-kernels).
 - A plan must not be slower than the same pattern without it. On R9g, R8g, and
   R8i, RE2 `BenchmarkClickBenchRegexp` `contains` takes 0.09 to 0.84 times the
   time of a build without RE2 plans on every `HTTP`, `WWW`, `LONG_HOST`, and
@@ -2367,7 +2365,7 @@ measurements specific to each language.
 
 ## Generated Trino Scan Kernels
 
-`TrinoRegexp.Options.setGenerateBytecode` is an experimental opt-in, disabled
+`TrinoRegexp.Options.setGenerateBytecode` is an opt-in, disabled
 by default, that compiles the case-sensitive scan plan of an eligible pattern
 into its own hidden class. The class holds the plan's attempt loop as
 straight-line code, with literals, their lengths, and branch targets as
@@ -2448,7 +2446,7 @@ which differential tests check operation by operation.
 
 ## Generated RE2 Scan Kernels
 
-`Re2.Options.setGenerateBytecode` is an experimental opt-in, disabled by
+`Re2.Options.setGenerateBytecode` is an opt-in, disabled by
 default, that compiles the case-sensitive scan plan of an RE2 pattern with the
 generator of [Generated Trino Scan Kernels](#generated-trino-scan-kernels),
 under its rules: generation happens once at compilation, a pattern whose class
@@ -2593,7 +2591,7 @@ plans; the last bullets record the rules and measurements specific to each.
 
 ## Generated Trino LIKE Kernels
 
-`TrinoLikePattern.Options.setGenerateBytecode` is an experimental opt-in,
+`TrinoLikePattern.Options.setGenerateBytecode` is an opt-in,
 disabled by default, that compiles a LIKE pattern into its own hidden class
 with the same rules as generated Trino scan kernels: generation happens once
 at compilation, a pattern whose class cannot be generated or defined is
