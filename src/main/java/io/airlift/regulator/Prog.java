@@ -707,6 +707,64 @@ final class Prog
         return onePassStateCount * onePassStateSize(ONEPASS_ACTION_BYTES, onePassActionCapture != null, onePassActionAssertions != null);
     }
 
+    /// Whether this program is one-pass only because OnePass evaluates Java's `$` and `\Z` and
+    /// Trino's `$`: it is one-pass and has one of those assertions. Compilation releases such a
+    /// program's tables and restores them only where they fit beside the forward DFAs.
+    boolean isOnePassOnlyForFinalLineEnds()
+    {
+        return isOnePass() && (textDependentAssertions & ONEPASS_FINAL_LINE_END_ASSERTIONS) != 0;
+    }
+
+    /// Takes this program's OnePass tables off it and returns their memory to its DFA budget, so
+    /// the program is as it would be had it never been one-pass, and returns the tables for
+    /// [#restoreOnePass].
+    OnePassTables releaseOnePass()
+    {
+        OnePassTables tables = new OnePassTables(
+                onePassStateCount,
+                onePassMatchCond,
+                onePassStep,
+                onePassMatchCapture,
+                onePassActionCapture,
+                onePassMatchAssertions,
+                onePassActionAssertions,
+                onePassMemory());
+        dfaMemory += tables.retainedSize();
+        onePassStateCount = 0;
+        onePassMatchCond = null;
+        onePassStep = null;
+        onePassMatchCapture = null;
+        onePassActionCapture = null;
+        onePassMatchAssertions = null;
+        onePassActionAssertions = null;
+        return tables;
+    }
+
+    /// Puts back the OnePass tables [#releaseOnePass()] took off this program. The caller charges
+    /// their retained size to a DFA budget.
+    void restoreOnePass(OnePassTables tables)
+    {
+        onePassStateCount = tables.stateCount();
+        onePassMatchCond = tables.matchCondition();
+        onePassStep = tables.step();
+        onePassMatchCapture = tables.matchCapture();
+        onePassActionCapture = tables.actionCapture();
+        onePassMatchAssertions = tables.matchAssertions();
+        onePassActionAssertions = tables.actionAssertions();
+    }
+
+    /// The OnePass tables of a program, as [#releaseOnePass()] takes them off it, with the bytes
+    /// they retain.
+    record OnePassTables(
+            int stateCount,
+            int[] matchCondition,
+            long[] step,
+            long[] matchCapture,
+            long[] actionCapture,
+            int[] matchAssertions,
+            int[] actionAssertions,
+            long retainedSize) {}
+
     /// Returns the bytes one one-pass state retains when each action takes `actionBytes`.
     private long onePassStateSize(int actionBytes, boolean extendedCaptures, boolean extendedAssertions)
     {
@@ -3461,14 +3519,24 @@ final class Prog
 
     private static final int ONEPASS_MATCH_WINS = 1 << ONEPASS_EMPTY_SHIFT;
     private static final int ONEPASS_IMPOSSIBLE = EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY;
-    // The text-dependent assertions OnePass evaluates: Rust's, and Java's and Trino's word
-    // boundaries. They do not fit in a condition's six empty-width bits. A condition that needs one
-    // carries ONEPASS_EXTENDED_ASSERTIONS instead, which sends the search to OnePass.satisfyAction
-    // or OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from the parallel assertion
-    // arrays. In a program with one of them, every match condition also carries its node
-    // index above ONEPASS_INDEX_SHIFT, where an action keeps its next node. The bit is never part
-    // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
-    private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS | EmptyOp.JAVA_TRINO_WORD_BOUNDARIES;
+    // The text-dependent assertions OnePass evaluates: Rust's, Java's and Trino's word boundaries,
+    // and Java's and Trino's $ that also matches before a final line terminator (Java's \Z too).
+    // OnePass evaluates each through EmptyOp.contextFlags on the same context BitState and the NFA
+    // read, and a one-pass program has a single path, so Java's priority rules cannot pick another
+    // match. These assertions do not fit in a condition's six empty-width bits, so a condition
+    // that needs one carries ONEPASS_EXTENDED_ASSERTIONS instead, which sends the search to
+    // OnePass.satisfyAction or OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from
+    // the parallel assertion arrays. In a program with one of them, every match condition also
+    // carries its node index above ONEPASS_INDEX_SHIFT, where an action keeps its next node. The
+    // bit is never part of ONEPASS_IMPOSSIBLE, so a marked condition never reads as
+    // ONEPASS_IMPOSSIBLE.
+    private static final int ONEPASS_TEXT_DEPENDENT_ASSERTIONS = EmptyOp.RUST_ASSERTIONS |
+            EmptyOp.JAVA_TRINO_WORD_BOUNDARIES |
+            EmptyOp.EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR |
+            EmptyOp.EMPTY_END_TEXT_OR_FINAL_NEWLINE;
+    // Java's $ and \Z and Trino's $, whose one-pass programs' tables yield to the forward DFAs;
+    // see isOnePassOnlyForFinalLineEnds.
+    private static final int ONEPASS_FINAL_LINE_END_ASSERTIONS = EmptyOp.EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR | EmptyOp.EMPTY_END_TEXT_OR_FINAL_NEWLINE;
     private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
     // The bytes each action retains: one step, the action packed with its next-state offset.
     private static final int ONEPASS_ACTION_BYTES = Long.BYTES;

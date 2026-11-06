@@ -173,6 +173,29 @@ public class TestTrinoRegexpDifferential
         }
     }
 
+    @Test
+    public void testFinalNewlineAnchorCapturesMatchJoni()
+    {
+        // The capture searches of these patterns, the last the Unicode character data line
+        // benchmark, run on OnePass, which reads a final LF after the position, on inputs ending in
+        // each line terminator.
+        String ucdLine = "0000;<control>;Cc;0;BN;;;;;N;NULL;;;;";
+        List<String> patterns = List.of("^(a*)(\\n??)$", "^(a*?)(\\n?)$", "^(a+)(\\r??)(\\n??)$", "^" + TestingEngineAgreement.UNICODE_DATA_LINE_FIELDS);
+        List<String> bodies = List.of("", "a", "aa", ";", ucdLine);
+        List<String> ends = List.of("", "\n", "\n\n", "\r\n", "\r", "\r\r", "\n\r", "\u0085", "\u2028", "\u2029");
+        for (String pattern : patterns) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            Regex oracle = joniPattern(pattern);
+            List<Slice> sources = new ArrayList<>();
+            for (String body : bodies) {
+                for (String end : ends) {
+                    sources.add(utf8Slice(body + end));
+                }
+            }
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+    }
+
     private static Map<String, Integer> joniNamedGroups(String description, Regex joni)
     {
         Map<String, Integer> namedGroups = new HashMap<>();

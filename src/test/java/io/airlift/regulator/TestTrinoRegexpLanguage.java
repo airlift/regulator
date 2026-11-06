@@ -36,8 +36,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.LongFunction;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestBudget;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -700,6 +702,65 @@ public class TestTrinoRegexpLanguage
         }
     }
 
+    @Test
+    public void testFinalNewlineAnchorRunsOnOnePass()
+    {
+        // Trino's $ reads a final LF after the position, which OnePass evaluates as BitState does,
+        // over text with CR, LF, and U+0085 and its bytes alone.
+        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) 'A', (byte) ';', (byte) '\r', (byte) '\n', (byte) 0xC2, (byte) 0x85);
+        for (Map.Entry<String, Integer> entry : Map.of("^(a+)$", 4, "^([A-Z]+);([^;]*)$", 6, "^(a*)(\\n??)$", 6, "^(a*?)(\\n?)$", 6).entrySet()) {
+            Prog program = compileTrinoProgram(entry.getKey(), false);
+            assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
+            TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), texts, "Trino");
+        }
+
+        // The capture search of the Unicode character data line benchmark runs on OnePass, not
+        // BitState; of the patterns above, only `^(a+)$` and `^([A-Z]+);([^;]*)$` take a scan plan
+        // instead.
+        String ucd = "^" + TestingEngineAgreement.UNICODE_DATA_LINE_FIELDS;
+        RegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(ucd)).re2().matcher(utf8Slice("0000;<control>;Cc;0;BN;;;;;N;NULL;;;;"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.end()).isEqualTo(37);
+        assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+
+        // Release 2.0 built no OnePass tables for a program with $, so the tables yield to the
+        // lowered boolean program, which takes the forward DFA budget. At the least budget that
+        // keeps the lowered program, and at the least at which each of its DFAs initializes, the
+        // tables would cost it, so the program runs without them, as in 2.0.
+        LongFunction<TrinoCompiledPattern> compiler = maxMemory -> TrinoRegexp.compile(utf8Slice("(a|b)+c$"), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
+        List<TrinoCompiledPattern> thresholds = List.of(
+                compileAtSmallestBudget(compiler, pattern -> pattern.findPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM),
+                compileAtSmallestBudget(compiler, pattern -> pattern.booleanProgramForDiagnostics() != null && pattern.booleanProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH) != null),
+                compileAtSmallestBudget(compiler, pattern -> pattern.booleanProgramForDiagnostics() != null && pattern.booleanProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null));
+        for (int index = 0; index < thresholds.size(); index++) {
+            TrinoCompiledPattern threshold = thresholds.get(index);
+            String label = "threshold " + index;
+            assertThat(threshold.findPlanForDiagnostics()).as(label).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
+            assertThat(threshold.forwardProgramForDiagnostics().isOnePass()).as(label).isFalse();
+            assertThat(threshold.find(utf8Slice("xabc\n"))).as(label).isTrue();
+        }
+        TrinoCompiledPattern defaultBudget = compiler.apply(TrinoRegexp.Options.defaults().maxMemory());
+        assertThat(defaultBudget.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
+        assertThat(defaultBudget.forwardProgramForDiagnostics().isOnePass()).isTrue();
+        RegexpMatcher anchored = defaultBudget.matcher(utf8Slice("abac\n"));
+        assertThat(anchored.lookingAt()).isTrue();
+        assertThat(anchored.group(1)).isEqualTo(utf8Slice("a"));
+        assertThat(anchored.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+
+        // The default budget keeps the required bytes beside the tables, but the required bytes
+        // only save work, so they give way to them. At the least budget at which the lowered
+        // program's pattern keeps its tables, too little is left for the required bytes, and the
+        // pattern keeps no short-window check.
+        assertThat(defaultBudget.requiredBytesRetainedSizeForDiagnostics()).isPositive();
+        TrinoCompiledPattern tablesFirst = compileAtSmallestBudget(compiler, pattern -> pattern.findPlanForDiagnostics() == CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM && pattern.forwardProgramForDiagnostics().isOnePass());
+        assertThat(tablesFirst.requiredBytesRetainedSizeForDiagnostics()).isZero();
+        RegexpMatcher tablesFirstMatcher = tablesFirst.matcher(utf8Slice("abc"));
+        assertThat(tablesFirstMatcher.lookingAt()).isTrue();
+        assertThat(tablesFirstMatcher.group(1)).isEqualTo(utf8Slice("b"));
+        assertThat(tablesFirstMatcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+    }
+
     // Properties hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558 MODIFIER LETTER
     // ARMENIAN SMALL EH, a letter, and the Seal script, which starts at U+3D000.
     @Test
@@ -1067,7 +1128,7 @@ public class TestTrinoRegexpLanguage
     {
         TrinoCompiledPattern finalLine = TrinoRegexp.compile(utf8Slice("a$")).re2();
         assertThat(finalLine.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
-        assertThat(finalLine.forwardProgramForDiagnostics().isOnePass()).isFalse();
+        assertThat(finalLine.forwardProgramForDiagnostics().isOnePass()).isTrue();
         assertThat(finalLine.reverseProgramSize()).isEqualTo(-1);
 
         TrinoCompiledPattern fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).re2();
