@@ -26,9 +26,11 @@ import java.util.Map;
 import java.util.Set;
 
 import static io.airlift.regulator.BenchmarkPatternDispatch.expression;
+import static io.airlift.regulator.BenchmarkPatternDispatch.sharedSiteTargets;
 import static io.airlift.regulator.BenchmarkPatternDispatch.targets;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
 import static io.airlift.regulator.CompiledPattern.Shape.BYTE_TABLE;
 import static io.airlift.regulator.CompiledPattern.Shape.CLASS_RUN;
@@ -38,6 +40,7 @@ import static io.airlift.regulator.CompiledPattern.Shape.FIXED_WIDTH;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,6 +51,8 @@ public class TestBenchmarkPatternDispatch
     // Targets whose scan plan has a generated class in every language, Trino included. No other
     // target has one.
     private static final Set<String> GENERATED_TARGETS = Set.of("ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET");
+    // The languages with the byte mode that ORDERED_LITERALS_BYTES compiles in.
+    private static final Set<String> BYTE_LANGUAGES = Set.of("RE2", "RUST");
     // The pollution patterns, in the benchmark's order. Each has a generated class in every language.
     private static final List<String> POLLUTION = List.of(
             "^https?://[^/]+/",
@@ -65,10 +70,26 @@ public class TestBenchmarkPatternDispatch
         Map<String, Object> interpreted = new HashMap<>();
         for (String language : List.of("RE2", "JAVA", "RUST", "TRINO")) {
             for (String target : targets()) {
-                // The target, then every other target in order, then the pollution patterns.
+                // The byte target runs alone, in the byte mode that only RE2 and Rust have.
+                boolean bytes = target.equals("ORDERED_LITERALS_BYTES");
+                if (bytes && !BYTE_LANGUAGES.contains(language)) {
+                    assertThatThrownBy(() -> data(language, target, "SHORT", false, false))
+                            .as("%s %s", language, target)
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("no byte mode");
+                    continue;
+                }
+                if (bytes) {
+                    assertThatThrownBy(() -> data(language, target, "SHORT", true, false))
+                            .as("%s %s", language, target)
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("no pollution set");
+                }
+                // The target, then every other target of the shared site in order, then the
+                // pollution patterns.
                 List<String> expressions = new ArrayList<>();
                 expressions.add(expression(target));
-                targets().stream()
+                sharedSiteTargets().stream()
                         .filter(other -> !other.equals(target))
                         .map(BenchmarkPatternDispatch::expression)
                         .forEach(expressions::add);
@@ -76,7 +97,7 @@ public class TestBenchmarkPatternDispatch
                 List<Object> sharedSite = expressions.stream()
                         .map(expression -> interpreted.computeIfAbsent(language + " " + expression, _ -> interpreted(language, expression)))
                         .toList();
-                Object reference = sharedSite.getFirst();
+                Object reference = bytes ? bytePattern(language, expression(target)) : sharedSite.getFirst();
                 if (!GENERATED_TARGETS.contains(target)) {
                     assertThatThrownBy(() -> data(language, target, "SHORT", false, true))
                             .as("%s %s", language, target)
@@ -85,16 +106,25 @@ public class TestBenchmarkPatternDispatch
                 }
                 for (String rows : List.of("SHORT", "LONG")) {
                     for (boolean generated : GENERATED_TARGETS.contains(target) ? new boolean[] {false, true} : new boolean[] {false}) {
-                        for (boolean polluted : new boolean[] {false, true}) {
+                        for (boolean polluted : bytes ? new boolean[] {false} : new boolean[] {false, true}) {
                             String description = "%s %s %s polluted=%s generated=%s".formatted(language, target, rows, polluted, generated);
                             BenchmarkPatternDispatch.BenchmarkData data = data(language, target, rows, polluted, generated);
-                            assertPatterns(data.patterns, polluted ? expressions : expressions.subList(0, 1), generated, description);
+                            assertPatterns(data.patterns, polluted ? expressions : List.of(expressionOf(reference)), generated, description);
                             // Of Trino's routes, only the control's is pinned here.
                             if (compiledPatterns(data.patterns)[0] instanceof CompiledPattern compiled) {
                                 assertRoute(target, compiled, (RegexpMatcher) targetMatcher(data.patterns), description);
                             }
                             else if (target.equals("FOLDED_PAIR_SEQUENCE")) {
                                 assertThat(compiledPatterns(data.patterns)[0]).as(description).isNotInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+                            }
+                            if (bytes) {
+                                // Creating the benchmark's matcher builds a DFA, so a fresh pattern
+                                // shows that full-Slice find over these rows runs the plan alone.
+                                CompiledPattern fresh = bytePattern(language, expression(target));
+                                for (Slice input : data.inputs) {
+                                    assertThat(fresh.find(input)).as(description).isEqualTo(find(reference, input));
+                                }
+                                assertNoProgramSearch(fresh, description);
                             }
                             for (Slice input : data.inputs) {
                                 assertThat(input.byteArrayOffset()).as(description).isPositive();
@@ -133,6 +163,9 @@ public class TestBenchmarkPatternDispatch
                                 assertThatThrownBy(() -> benchmark.lookingAt(data)).as(description).isInstanceOf(UnsupportedOperationException.class);
                             }
                         }
+                        if (bytes) {
+                            continue;
+                        }
 
                         String description = "%s %s %s sharedSite generated=%s".formatted(language, target, rows, generated);
                         BenchmarkPatternDispatch.SharedSiteData data = sharedSiteData(language, target, rows, generated);
@@ -155,12 +188,15 @@ public class TestBenchmarkPatternDispatch
             throws NoSuchFieldException
     {
         // JMH reads the parameters of each state from its own annotations, so the shared-site state
-        // repeats those of the benchmark data, all but `polluted`.
-        for (String parameter : List.of("language", "target", "rows", "generated")) {
+        // repeats those of the benchmark data, all but `polluted` and the byte target, which is no
+        // pollution pattern.
+        for (String parameter : List.of("language", "rows", "generated")) {
             assertThat(parameterValues(BenchmarkPatternDispatch.SharedSiteData.class, parameter))
                     .as(parameter)
                     .containsExactly(parameterValues(BenchmarkPatternDispatch.BenchmarkData.class, parameter));
         }
+        assertThat(sharedSiteTargets())
+                .containsExactlyElementsOf(targets().stream().filter(target -> !target.equals("ORDERED_LITERALS_BYTES")).toList());
     }
 
     private static String[] parameterValues(Class<?> state, String parameter)
@@ -192,7 +228,7 @@ public class TestBenchmarkPatternDispatch
         Shape expected = switch (target) {
             case "ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET", "FOLDED_PLAN" -> SCAN_PLAN;
             case "EXACT_LITERAL", "SINGLE_BYTE" -> EXACT_LITERAL;
-            case "CONTAINS", "ANCHORED_LITERAL" -> LITERAL_KERNEL;
+            case "CONTAINS", "ANCHORED_LITERAL", "ORDERED_LITERALS_BYTES" -> LITERAL_KERNEL;
             // Java's dot also stops at `\r`, U+0085, U+2028, and U+2029, so its `.*timeout.*`
             // is no contained literal.
             case "DOT_STAR_LITERAL" -> compiled instanceof JavaRegexp ? ENGINE : LITERAL_KERNEL;
@@ -202,10 +238,14 @@ public class TestBenchmarkPatternDispatch
             // A Rust `\s` is Unicode, so it is no byte run.
             case "BYTE_TABLE" -> compiled instanceof RustRegexp ? ENGINE : BYTE_TABLE;
             // `[Kk]` simplifies to a folded literal, which keeps FOLDED_PAIR_SEQUENCE off the
-            // fixed-width route in every language, and ordered literals have no find plan.
-            case "GENERAL", "FOLDED_PAIR_SEQUENCE", "ORDERED_LITERALS" -> ENGINE;
+            // fixed-width route in every language.
+            case "GENERAL", "FOLDED_PAIR_SEQUENCE" -> ENGINE;
             // The literal set serves only the matcher's find.
             case "LITERAL_SET" -> ENGINE;
+            // The ordered-literal find plan takes only gaps that match any bytes, and a UTF-8
+            // `(?s:.)` matches no malformed UTF-8 in RE2, Java, or Rust, so these gaps keep the
+            // general engine; ORDERED_LITERALS_BYTES reaches the plan.
+            case "ORDERED_LITERALS" -> ENGINE;
             // An inner literal of two or more bytes keeps the DFA's inner literal search instead
             // of the fixed-width matcher, which answers only short counts and matcher finds.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;
@@ -255,7 +295,13 @@ public class TestBenchmarkPatternDispatch
                 assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.fixedWidthByteSpanMatcherForDiagnostics());
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
-            case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
+            case "ORDERED_LITERALS" -> {
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
+                assertThat(compiled.orderedLiteralMatcherForDiagnostics()).as(description).isNull();
+            }
+            // Gaps that match any byte, in RE2's Latin-1 option and Rust's bytes API after
+            // `(?-u)`, run the ordered-literal find plan.
+            case "ORDERED_LITERALS_BYTES" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(ORDERED_LITERALS);
             case "INNER_LITERAL_FIXED_WIDTH" -> {
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
                 assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
@@ -298,6 +344,16 @@ public class TestBenchmarkPatternDispatch
             case "RUST" -> RustRegexp.compile(pattern);
             case "TRINO" -> TrinoRegexp.compile(pattern);
             default -> throw new IllegalArgumentException("unknown language: " + language);
+        };
+    }
+
+    // The byte target's pattern, in RE2's Latin-1 option or after `(?-u)` in Rust's bytes API.
+    private static CompiledPattern bytePattern(String language, String expression)
+    {
+        return switch (language) {
+            case "RE2" -> Re2.compile(utf8Slice(expression), Re2.Options.latin1());
+            case "RUST" -> RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes());
+            default -> throw new IllegalArgumentException("no byte mode: " + language);
         };
     }
 

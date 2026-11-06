@@ -1515,6 +1515,26 @@ Trino's dot-star spans previously ended at any byte sequence that is not
 well-formed UTF-8; they now read malformed input as Trino's ordinary engine
 does, which its garbage-in, garbage-out contract leaves unspecified either way.
 
+Full-Slice boolean `find` of literals in order with any bytes between them, such
+as RE2's `a\C*b\C*c`, `a(?s:.*)b(?s:.*)c` under RE2's Latin-1 option, or
+`(?s-u)a.*b.*c` in Rust's bytes API, searches for each literal in turn after the
+previous one's match with the ordered-literal matcher of Trino's contains, in
+place of the general engine. The matcher reads nothing between the literals, so
+it takes only gaps that match every byte sequence. A UTF-8 `(?s:.)` gap keeps
+the general engine in every language: the general engines of RE2, Java, and Rust
+all reject malformed UTF-8 in it, so `(?s:a.*b)` matches none of `61 ff 62`,
+`61 80 62`, `61 c0 80 62`, and `61 e2 82 62`, and Java, whose contract leaves
+malformed input unspecified, keeps its engine's answer as its scan plans do. The
+plan does not check a gap's bytes. A leading or trailing gap can match empty, so
+it does not decide whether a match exists. The matcher's memory comes from the
+forward DFA budget, as Trino's ordered-literal subtype's does, so a pattern with
+a lowered boolean or tagged alternation program, or without room for the
+matcher, keeps the engine. Release 2.0 had no such plan outside Trino, and the
+matcher [yields to the forward DFAs](#memory-budgets-and-dfa-caching). Trino's
+contains keeps its own ordered-literal subtype, which reads any bytes in its
+`(?s:.)` gaps under its garbage-in, garbage-out rule; no Trino pattern takes the
+plan, since Trino reads only UTF-8 and has no dot that matches any byte.
+
 The literal-alternation matcher's root-table route restarts its trie at every
 input byte, and a filter stop compares the literals that begin with its byte,
 so it takes only alternatives of at most 64 bytes; a longer literal keeps the
