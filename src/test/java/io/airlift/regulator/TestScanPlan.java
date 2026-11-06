@@ -173,7 +173,7 @@ public class TestScanPlan
             assertThat(compiled.usesScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(compiled.forwardProgramForDiagnostics().dfaMemory())
                     .as(expression)
-                    .isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize());
+                    .isEqualTo(control.dfaMemory() - plan.estimatedRetainedSize() - compiled.requiredBytesRetainedSizeForDiagnostics());
         }
     }
 

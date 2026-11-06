@@ -332,11 +332,21 @@ public class TestTrinoRegexpFunctions
         assertThat(smallest.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
         assertThat(smallest.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
 
+        // The required bytes give way to the matcher: at its smallest budget, a 128-byte leading
+        // literal leaves too little allowance after their charge for the matcher, which takes
+        // their memory instead.
+        TrinoRegexp shorter = compileAtSmallestBudget(utf8("a".repeat(128) + "(?s:.*)b"));
+        assertThat(shorter.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
+        assertThat(shorter.re2().requiredBytesForDiagnostics()).isNull();
+        assertThat(shorter.contains(utf8("x" + "a".repeat(128) + "yyb"))).isTrue();
+
         // A long leading literal whose first byte recurs keeps a prefix shift table, charged after
         // flattening, which can take enough of the remaining allowance to leave the matcher out.
+        // Its matches span more than 256 bytes, so it keeps no required bytes.
         String literal = "a".repeat(320);
         TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
         assertThat(fallback.usesOrderedLiteralMatcherForDiagnostics()).isFalse();
+        assertThat(fallback.re2().requiredBytesForDiagnostics()).isNull();
         Slice source = utf8("x" + literal + "yyb\nb");
         assertThat(fallback.contains(source)).isTrue();
         assertThat(fallback.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
@@ -345,11 +355,53 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testOrderedLiteralMatcherKeepsRequiredBytesOnlyWhereForwardDfasStillInitialize()
+    {
+        // The matcher is charged first, with the required bytes' memory handed back, and the
+        // required bytes stay only where they fit what is left and every forward DFA that
+        // initializes with it still does after their charge. The baseline, compiled without the
+        // matcher, holds the required bytes the pattern had before the matcher's charge. The
+        // budgets run from the smallest that compiles until both forward DFAs initialize beside
+        // the required bytes, crossing each DFA's boundary in steps finer than the band, about
+        // 150 bytes of budget wide, where the required bytes would cost that DFA.
+        Slice pattern = utf8("Yeah(?s:.*)there");
+        ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
+        List<Boolean> outcomes = new ArrayList<>();
+        boolean bothInitialize = false;
+        for (long maxMemory = smallestBudget(pattern); !bothInitialize; maxMemory += 16) {
+            assertThat(maxMemory).isLessThan(1 << 20);
+            TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, maxMemory, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
+            TrinoRegexp regexp = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+            assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).as("matcher at %s", maxMemory).isTrue();
+            long requiredBytes = baseline.requiredBytesRetainedSizeForDiagnostics();
+            if (requiredBytes == 0) {
+                continue;
+            }
+            Prog program = regexp.re2().forwardProgramForDiagnostics();
+            boolean keeps = regexp.re2().requiredBytesForDiagnostics() != null;
+            long allowance = program.dfaMemory() + (keeps ? requiredBytes : 0);
+            boolean costsDfa = false;
+            for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+                costsDfa |= Dfa.DfaInstance.initializes(program, kind, allowance / 2) &&
+                        !Dfa.DfaInstance.initializes(program, kind, (allowance - requiredBytes) / 2);
+            }
+            assertThat(keeps).as("required bytes at %s", maxMemory).isEqualTo(requiredBytes <= allowance && !costsDfa);
+            if (requiredBytes <= allowance) {
+                outcomes.add(keeps);
+            }
+            bothInitialize = keeps &&
+                    Dfa.DfaInstance.initializes(program, Dfa.DfaInstance.Kind.FIRST_MATCH, program.dfaMemory() / 2) &&
+                    Dfa.DfaInstance.initializes(program, Dfa.DfaInstance.Kind.LONGEST_MATCH, program.dfaMemory() / 2);
+        }
+        assertThat(outcomes).contains(false, true);
+    }
+
+    @Test
     public void testLiteralSearchMemoryIsReservedFromForwardDfa()
     {
         Slice pattern = utf8(".*literal.*");
         // The compile builds no scan plan for this pattern, so its program and DFA allowance
-        // differ from the plain program's only by the search's charge.
+        // differ from the plain program's only by the charges of the search and the required bytes.
         long defaultMaxMemory = TrinoRegexp.Options.defaults().maxMemory();
         Prog control = Compiler.compile(TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(), false, defaultMaxMemory - defaultMaxMemory / 3);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
@@ -358,7 +410,9 @@ public class TestTrinoRegexpFunctions
         assertThat(search).isNotNull();
         assertThat(regexp.re2().usesScanPlanForDiagnostics()).isFalse();
         assertThat(regexp.re2().forwardProgramForDiagnostics().size()).isEqualTo(control.size());
-        assertThat(control.dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory()).isEqualTo(search.estimatedRetainedSize());
+        assertThat(regexp.re2().requiredBytesForDiagnostics()).isNotNull();
+        assertThat(control.dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
+                .isEqualTo(search.estimatedRetainedSize() + regexp.re2().requiredBytesRetainedSizeForDiagnostics());
 
         // As for the ordered literal matcher, a short pattern that does not grow when flattened
         // keeps the search at the smallest budget that fits it.
@@ -386,6 +440,11 @@ public class TestTrinoRegexpFunctions
 
     private static TrinoRegexp compileAtSmallestBudget(Slice pattern)
     {
+        return TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(smallestBudget(pattern)));
+    }
+
+    private static long smallestBudget(Slice pattern)
+    {
         // Compiling succeeds at every budget from the smallest that fits the semantic program.
         long rejected = 512;
         long compiled = 1 << 20;
@@ -399,7 +458,7 @@ public class TestTrinoRegexpFunctions
                 rejected = maxMemory;
             }
         }
-        return TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(compiled));
+        return compiled;
     }
 
     @Test
@@ -408,8 +467,9 @@ public class TestTrinoRegexpFunctions
         // Trino's final-line $ keeps the semantic program off the DFA, so the lowered boolean
         // program holds the forward DFA budget and the literal reserves its memory from it. The
         // baseline's lowered program has the same size and no common literal, so the two DFA
-        // allowances differ only by the literal's charge. The literal is kept only where that
-        // charge leaves both lowered DFAs their minimum, and there the lowered DFA still runs.
+        // allowances differ only by the literal's charge and each pattern's required bytes, reserved
+        // after it. The literal is kept only where that charge leaves both lowered DFAs their
+        // minimum, and there the lowered DFA still runs.
         Prog program = TrinoRegexp.compile(utf8("^ab|ab$")).re2().forwardProgramForDiagnostics();
         Slice text = utf8("x".repeat(100) + "ab");
         long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
@@ -417,12 +477,15 @@ public class TestTrinoRegexpFunctions
         // Both patterns build a lowered program from 5,312 bytes.
         for (long maxMemory = 5312; maxMemory <= 32 * 1024; maxMemory += 64) {
             TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
-            Prog baseline = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2().booleanProgramForDiagnostics();
+            TrinoCompiledPattern baselinePattern = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2();
+            long allowance = baselinePattern.booleanProgramForDiagnostics().dfaMemory() + baselinePattern.requiredBytesRetainedSizeForDiagnostics();
             TrinoCompiledPattern regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();
             Prog lowered = regexp.booleanProgramForDiagnostics();
-            boolean keeps = (baseline.dfaMemory() - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(lowered, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            boolean keeps = (allowance - reservation) / 2 >= Dfa.DfaInstance.minimumMemory(lowered, Dfa.DfaInstance.Kind.LONGEST_MATCH);
             assertThat(regexp.forwardProgramForDiagnostics().transparentStartLiteral() != null).as("keeps at %s", maxMemory).isEqualTo(keeps);
-            assertThat(baseline.dfaMemory() - lowered.dfaMemory()).as("reservation at %s", maxMemory).isEqualTo(keeps ? reservation : 0);
+            assertThat(allowance - lowered.dfaMemory() - regexp.requiredBytesRetainedSizeForDiagnostics())
+                    .as("reservation at %s", maxMemory)
+                    .isEqualTo(keeps ? reservation : 0);
             assertThat(keeps ? Dfa.search(lowered, text, false, Prog.MatchKind.FIRST_MATCH, false) : text.length()).as("lowered DFA at %s", maxMemory).isEqualTo(text.length());
             outcomes.add(keeps);
         }

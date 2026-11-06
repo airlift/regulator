@@ -24,6 +24,8 @@ final class VectorByteSetScanner
     // The nibble tables are replicated to 64 bytes, one reason VectorSupport allows at most 64 lanes.
     private static final int NIBBLE_TABLE_BYTES = 64;
     private static final int HIGH_NIBBLE_TABLE_OFFSET = NIBBLE_TABLE_BYTES;
+    // The low-nibble table, then the high-nibble table.
+    static final int NIBBLE_TABLES_LENGTH = NIBBLE_TABLE_BYTES * 2;
     // A loop that skips ahead with these scans stops skipping once SHORT_SCAN_LIMIT scans in a
     // row each skipped fewer than SHORT_SCAN_BYTES bytes: the stops are dense, and a scan's setup
     // costs more than the few bytes it skips. The forward DFA's count self-loop scan and the
@@ -339,7 +341,7 @@ final class VectorByteSetScanner
         // Each high nibble owns one bit. A byte is a member when the masks selected by
         // its low and high nibbles share that bit. Replication supports lane-local byte
         // shuffles while still allowing full-width rearranges where the ISA provides them.
-        byte[] tables = new byte[NIBBLE_TABLE_BYTES * 2];
+        byte[] tables = new byte[NIBBLE_TABLES_LENGTH];
         for (int value = 0; value < candidates.length; value++) {
             if (candidates[value] == 0) {
                 continue;

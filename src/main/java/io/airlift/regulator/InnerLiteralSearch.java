@@ -198,8 +198,9 @@ final class InnerLiteralSearch
     // Any other concatenation stays one element: simplification already flattens groups that do
     // not capture, so the rest are the copies it makes of a counted repetition, which the crate
     // keeps whole. Past the depth limit a group stays one element too, which only hides
-    // literals inside it.
-    private static void addConcatenationElements(Regexp concatenation, List<Regexp> elements, int depth)
+    // literals inside it. RequiredBytes finds its literal with these elements and the literal
+    // helpers below, so a change to them changes which short windows it rejects too.
+    static void addConcatenationElements(Regexp concatenation, List<Regexp> elements, int depth)
     {
         for (Regexp child : concatenation.children()) {
             Regexp element = child;
@@ -513,7 +514,7 @@ final class InnerLiteralSearch
     // starts with no exact head. A folded letter byte matches as the compiler's folded byte range
     // does: lowered, it equals the lower-case letter, which `(byte | 0x20) == letter` tests. Any
     // other folded ASCII byte matches only itself.
-    private static FoldedLiteral foldedLiteral(List<Regexp> children, int index)
+    static FoldedLiteral foldedLiteral(List<Regexp> children, int index)
     {
         byte[] bytes = new byte[MAXIMUM_LITERAL_LENGTH];
         byte[] masks = new byte[MAXIMUM_LITERAL_LENGTH];
@@ -584,9 +585,9 @@ final class InnerLiteralSearch
     }
 
     // A case-insensitive literal: its exact head, and its whole bytes and masks.
-    private record FoldedLiteral(byte[] head, byte[] bytes, byte[] masks) {}
+    record FoldedLiteral(byte[] head, byte[] bytes, byte[] masks) {}
 
-    private static byte[] asciiLiteral(Regexp regexp)
+    static byte[] asciiLiteral(Regexp regexp)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
             regexp = regexp.child(0);

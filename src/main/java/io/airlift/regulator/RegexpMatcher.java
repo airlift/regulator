@@ -292,6 +292,10 @@ public final class RegexpMatcher
         if (regionLength - nextFindStart < minimumMatchLength) {
             return failFind();
         }
+        // So do the bytes every match holds.
+        if (pattern.shortWindowLacksRequiredBytes(input, regionStart + nextFindStart, regionEnd)) {
+            return failFind();
+        }
 
         if (rustSearch && isPartialRegion()) {
             return findNextWithInputContext();

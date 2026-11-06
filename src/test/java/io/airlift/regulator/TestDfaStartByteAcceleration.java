@@ -519,6 +519,24 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testInitializationMemoryCountsStartByteTables()
+    {
+        // The exact memory a forward DFA needs exceeds its minimum by its start-byte tables, which
+        // stay within their bound even for the widest literal filter, so a budget that keeps the
+        // bound initializes the DFA without building them.
+        for (String expression : List.of("(abc|def)", "(abc|def|ghi|jkl|mno|pqr|stu|vwx)")) {
+            Prog program = compile(expression);
+            for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+                String description = kind + " " + expression;
+                long initializationMemory = Dfa.DfaInstance.initializationMemory(program, kind);
+                assertThat(initializationMemory - Dfa.DfaInstance.minimumMemory(program, kind)).as(description).isLessThanOrEqualTo(Dfa.DfaInstance.MAXIMUM_START_BYTE_TABLES_MEMORY);
+                assertThat(new Dfa.DfaInstance(program, kind, initializationMemory).ok()).as(description).isTrue();
+                assertThat(new Dfa.DfaInstance(program, kind, initializationMemory - 1).ok()).as(description).isFalse();
+            }
+        }
+    }
+
+    @Test
     public void testStartLiteralFilterVectorScannerMatchesScalarReference()
     {
         assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");

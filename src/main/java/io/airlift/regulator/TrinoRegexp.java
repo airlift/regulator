@@ -200,6 +200,7 @@ public sealed class TrinoRegexp
             return new BeginLineTrinoRegexp(compiledPattern);
         }
         OrderedLiteralMatcher orderedLiteralMatcher = compiledPattern.createOrderedLiteralMatcher();
+        // The ordered matcher takes precedence over the required bytes.
         if (orderedLiteralMatcher != null && compiledPattern.tryReserveForwardDfaMemory(orderedLiteralMatcher.estimatedRetainedSize())) {
             return new OrderedLiteralTrinoRegexp(compiledPattern, orderedLiteralMatcher);
         }

@@ -161,7 +161,8 @@ public class TestInnerLiteralSearch
         Re2 compiled = Re2.compileParsed(pattern, parsed, flags, maxMemory);
         InnerLiteralSearch search = compiled.innerLiteralSearchForDiagnostics();
         assertThat(search).isNotNull();
-        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory());
+        // The forward DFA gives up only what the required bytes reserve.
+        assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(control.dfaMemory() - compiled.requiredBytesRetainedSizeForDiagnostics());
 
         // The full reverse program takes what the inner literal search leaves of the reverse third.
         assertThat(compiled.reverseProgramSize()).isPositive();
