@@ -85,6 +85,36 @@ public class TestCompilerDominatorElision
         assertFlatteningIdentical(utf8Slice(largeLatin1Pattern), Re2.Options.latin1(), true);
     }
 
+    /// The dominator pass skips the predecessors of an instruction that is already a root, so
+    /// optional repeats that all skip to one shared root scan linearly.
+    @Test
+    public void testDominatorPassSkipsSharedRoots()
+    {
+        // The simplifier coalesces the optional repeats into one long repeat, whose nested
+        // optional elements all skip to one shared instruction.
+        Slice pattern = utf8Slice("a?".repeat(10_000));
+        Re2.Options options = Re2.Options.defaults();
+        Regexp parsed = RegexpParser.parse(pattern, options.parseFlags()).regexp();
+        // The repeats still coalesce, so the program keeps its shared instruction.
+        assertThat(Simplifier.Coalescer.coalesce(parsed, CaseFolding.RE2)).isNotSameAs(parsed);
+        Regexp normalized = Simplifier.simplify(parsed, CaseFolding.RE2);
+        long forwardMemory = options.maxMemory() - (options.maxMemory() / 3);
+        Prog program = Compiler.compileNormalizedForBenchmark(
+                normalized,
+                false,
+                forwardMemory,
+                Compiler.CompileStage.OPTIMIZED);
+        int programSize = program.size();
+
+        Prog.FlattenStructure structure = program.flattenForTesting();
+
+        // Each alternation adds itself to the predecessor lists of its two outs, so the lists
+        // hold at most twice the program size in edges, and this shape scans fewer than that.
+        // Rescanning the shared instruction from every root that reaches it reads about 10,000
+        // squared edges here.
+        assertThat(structure.dominatorEdgesScanned()).isLessThanOrEqualTo(2L * programSize);
+    }
+
     private static String largeAlternation(String... leadingAlternatives)
     {
         StringBuilder pattern = new StringBuilder();
