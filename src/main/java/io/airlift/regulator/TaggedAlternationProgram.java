@@ -45,7 +45,8 @@ final class TaggedAlternationProgram
     {
         // Keep upstream's 512-instruction rule here rather than asking whether BitState can run.
         // A larger program runs BitState only on spans its bitmap bound holds, which shrink as
-        // its list count grows, so it keeps this program for every span.
+        // its list count grows and which limitBitStateMemory lowers further for the job stack, so
+        // it keeps this program for every span.
         if (longestMatch ||
                 semanticProgram.isOnePass() ||
                 semanticProgram.hasUpstreamListHeads() ||

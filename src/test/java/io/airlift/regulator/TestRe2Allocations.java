@@ -745,14 +745,59 @@ public class TestRe2Allocations
         assertThat(onePassGroups).containsExactly(onePassExpected);
         assertThat(onePassAllocatedBytes / 10_000).isLessThanOrEqualTo(64);
 
+        // OnePass takes at most 64 slots, so a wider program searches the caller's buffer in
+        // place, and a miss leaves every slot -1.
+        int sentinel = 7;
+        Re2 wide = Re2.compile(Slices.utf8Slice("(a)".repeat(40)));
+        int[] wideGroups = new int[100];
+        Arrays.fill(wideGroups, sentinel);
+        assertThat(wide.findInto(Slices.utf8Slice("a".repeat(39) + "b"), wideGroups)).isFalse();
+        assertThat(wideGroups).containsOnly(-1);
+
+        // A removed group below a surviving one keeps its slots, so the copy for 4,000 removed
+        // groups before (a) took 8,004 slots, 32,032 bytes per call against a 1,768-byte forward
+        // share.
+        long tightForwardMemory = 2_651 - (2_651 / 3);
+        Re2 belowSurviving = Re2.compile(Slices.utf8Slice("(q){0}".repeat(4_000) + "(a)"), Re2.Options.defaults().setMaxMemory(2_651));
+        int[] belowSurvivingGroups = new int[8_006];
+        Arrays.fill(belowSurvivingGroups, sentinel);
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean belowSurvivingMatched = belowSurviving.matchesInto(Slices.EMPTY_SLICE, belowSurvivingGroups);
+        long belowSurvivingAllocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(belowSurvivingMatched).isFalse();
+        assertThat(belowSurvivingAllocatedBytes).isLessThanOrEqualTo(tightForwardMemory);
+        assertThat(belowSurvivingGroups).containsOnly(-1);
+
+        // The share bounds the memory a search holds at once, and bounded passes allocate per
+        // pass, so a match compares against a buffer of exactly the program's slots.
+        Slice belowSurvivingSource = Slices.utf8Slice("a");
+        int[] exactGroups = new int[8_004];
+        assertThat(belowSurviving.findInto(belowSurvivingSource, exactGroups)).isTrue();
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean exactMatched = belowSurviving.findInto(belowSurvivingSource, exactGroups);
+        long exactAllocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(exactMatched).isTrue();
+        Arrays.fill(belowSurvivingGroups, sentinel);
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        belowSurvivingMatched = belowSurviving.findInto(belowSurvivingSource, belowSurvivingGroups);
+        belowSurvivingAllocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(belowSurvivingMatched).isTrue();
+        assertThat(belowSurvivingAllocatedBytes).isLessThanOrEqualTo(exactAllocatedBytes + 64);
+        int[] belowSurvivingExpected = new int[8_006];
+        Arrays.fill(belowSurvivingExpected, -1);
+        belowSurvivingExpected[0] = 0;
+        belowSurvivingExpected[1] = 1;
+        belowSurvivingExpected[8_002] = 0;
+        belowSurvivingExpected[8_003] = 1;
+        assertThat(belowSurvivingGroups).containsExactly(belowSurvivingExpected);
+
         // The copy held every declared group's slots, so 4,000 groups the simplifier removed took
         // an 8,002-slot array per call against a 1,768-byte forward share, although the program
         // tracks only group zero.
-        long tightForwardMemory = 2_651 - (2_651 / 3);
         Re2 removedGroups = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(2_651));
         int[] removedGroupsOffsets = new int[8_004];
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         boolean removedGroupsFound = removedGroups.findInto(Slices.EMPTY_SLICE, removedGroupsOffsets);
         long removedGroupsAllocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
         assertThat(removedGroupsFound).isTrue();
@@ -809,6 +854,77 @@ public class TestRe2Allocations
             // result, its group array, and this test's copy of the offsets.
             assertThat(allocatedBytes).as(search.name()).isLessThanOrEqualTo(forwardMemory + 64L * search.program().size());
         }
+    }
+
+    @Test
+    public void testBitStateStaysWithinForwardShare()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // On a's, each position pushes five BitState jobs that stay on the stack until the match
+        // ends. At the 419,429 bytes the bitmap alone allowed, a fresh matcher's direct BitState
+        // capture took 67 MB, past the default budget's 64 MiB forward share.
+        Slice pattern = Slices.utf8Slice("(?:(a)|a)*");
+        long forwardMemory = Re2.Options.DEFAULT_MAX_MEMORY - (Re2.Options.DEFAULT_MAX_MEMORY / 3);
+        long threadId = Thread.currentThread().threadId();
+
+        // BitState still takes the longest text it accepts, and its search allocates within the share.
+        Re2 edge = Re2.compile(pattern);
+        int edgeLength = edge.forwardProgramForDiagnostics().bitStateTextMaxSize();
+        assertThat(edge.canUseDirectBitStateCapture(edge.forwardProgramForDiagnostics(), edgeLength, 2)).isTrue();
+        RegexpMatcher edgeMatcher = edge.matcher(Slices.utf8Slice("a".repeat(edgeLength)));
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean edgeFound = edgeMatcher.find();
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(edgeFound).isTrue();
+        assertThat(edge.isReverseProgramComputed()).isFalse();
+        assertThat(allocatedBytes).isLessThanOrEqualTo(forwardMemory);
+
+        // A longer text takes the capture NFA, which reports the same groups.
+        Re2 longer = Re2.compile(pattern);
+        Slice text = Slices.utf8Slice("a".repeat(419_429));
+        assertThat(longer.canUseDirectBitStateCapture(longer.forwardProgramForDiagnostics(), text.length(), 2)).isFalse();
+        RegexpMatcher matcher = longer.matcher(text);
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        int[] offsets = matcherOffsets(matcher, 1);
+        allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(offsets).containsExactly(0, 419_429, 419_428, 419_429);
+        assertThat(allocatedBytes).isLessThanOrEqualTo(forwardMemory);
+
+        // Trailing groups the simplifier removes have no CAPTURE, so BitState tracks no slot for
+        // them. It gave the 2,000 removed groups here a 16,032-byte capture array, past the
+        // 5,462-byte share.
+        long smallForwardMemory = 8_192 - (8_192 / 3);
+        Re2 removedGroups = Re2.compile(Slices.utf8Slice("(?:(a)|a)*(?:" + "(b)".repeat(2_000) + "){0}"), Re2.Options.defaults().setMaxMemory(8_192));
+        assertThat(removedGroups.forwardProgramForDiagnostics().captureSlotCount()).isEqualTo(4);
+        RegexpMatcher removedGroupsMatcher = removedGroups.matcher(Slices.utf8Slice("a"));
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean removedGroupsMatched = removedGroupsMatcher.matches();
+        allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(removedGroupsMatched).isTrue();
+        assertThat(allocatedBytes).isLessThanOrEqualTo(smallForwardMemory);
+        assertThat(removedGroupsMatcher.group(1)).isEqualTo(Slices.utf8Slice("a"));
+        assertThat(removedGroupsMatcher.group(2_001)).isNull();
+
+        // The same check for a two-slot program at 2,651 bytes, the smallest budget the plan is
+        // proven at: a buffer that holds exactly the declared groups, all removed, took an
+        // 8,002-slot array against a 1,768-byte share.
+        long tightForwardMemory = 2_651 - (2_651 / 3);
+        Re2 allRemoved = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(2_651));
+        assertThat(allRemoved.forwardProgramForDiagnostics().captureSlotCount()).isEqualTo(2);
+        int[] allRemovedGroups = new int[8_002];
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean allRemovedFound = allRemoved.findInto(Slices.EMPTY_SLICE, allRemovedGroups);
+        allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(allRemovedFound).isTrue();
+        assertThat(allocatedBytes).isLessThanOrEqualTo(tightForwardMemory);
+        int[] expectedGroups = new int[8_002];
+        Arrays.fill(expectedGroups, -1);
+        expectedGroups[0] = 0;
+        expectedGroups[1] = 0;
+        assertThat(allRemovedGroups).containsExactly(expectedGroups);
     }
 
     private record CaptureSearch(String name, Prog program, Supplier<Object> search, Object expected) {}

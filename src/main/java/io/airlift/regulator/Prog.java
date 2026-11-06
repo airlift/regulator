@@ -744,6 +744,15 @@ final class Prog
         return bitStateTextMaxSize;
     }
 
+    /// Lowers the BitState text limit so that a search's visited bitmap, capture slots, job stack,
+    /// and objects fit in `allowance` bytes. Only valid after [#flatten()] has been called.
+    void limitBitStateMemory(long allowance)
+    {
+        if (listHeads != null) {
+            bitStateTextMaxSize = BitState.maxTextLength(this, bitStateTextMaxSize, allowance);
+        }
+    }
+
     /// Returns instruction counts by opcode, indexed by [InstOp#ordinal()].
     /// Only valid after [#flatten()] has been called.
     public int[] getInstCount()
@@ -3268,8 +3277,9 @@ final class Prog
         // Populate the list-head mapping used by the BitState engine. Upstream gives list heads
         // only to programs of at most 512 instructions, which sends a large program's captures to
         // the NFA even for a short match. The visited bitmap grows with the list count, not the
-        // instruction count, so the bitmap bound below alone limits the text, as the Rust crate
-        // bounds its backtracker.
+        // instruction count, so the bitmap bound below limits the text, as the Rust crate bounds
+        // its backtracker, and compilation lowers that limit for the job stack with
+        // limitBitStateMemory.
         listCount = rootIdsByInstruction.size();
         listHeads = null;
         bitStateTextMaxSize = 0;

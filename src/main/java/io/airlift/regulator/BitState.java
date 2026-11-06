@@ -18,15 +18,84 @@ import io.airlift.slice.Slice;
 
 import java.util.Arrays;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOfIntArray;
+import static io.airlift.slice.SizeOf.sizeOfLongArray;
+import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static java.util.Objects.requireNonNull;
 
 final class BitState
 {
     private BitState() {}
 
+    private static final long JOB_BYTES = instanceSize(Job.class);
+    // The search, its workspace, and the Slice view of the context that a region search passes.
+    private static final long SEARCH_BYTES = (long) instanceSize(BitStateImpl.class) + instanceSize(Workspace.class) + instanceSize(Slice.class);
+
     static int initialJobCapacity(int programSize)
     {
         return Math.max(16, Math.min(64, programSize));
+    }
+
+    /// Returns the longest text, at most `textMaxSize`, whose search keeps its visited bitmap,
+    /// capture slots, job stack, and objects within `allowance` bytes, or -1 when no text fits.
+    ///
+    /// The visited bitmap lets a search enter each list at each position once, across all of its
+    /// start positions. An entry walks the list's instructions in order, each at most once: a
+    /// popped job resumes the walk past the instruction that pushed it, and ALT_MATCH only jumps
+    /// ahead in the list. On that walk a BYTE_RANGE with a hint, or a CAPTURE, EMPTY_WIDTH, or
+    /// NOP that is not last, pushes one job, and a CAPTURE pushes one more to undo itself. So a
+    /// start position's stack holds at most its own job and the program's pushes for each of the
+    /// text's positions, and the stack doubles from [#initialJobCapacity] until it holds them.
+    static int maxTextLength(Prog prog, int textMaxSize, long allowance)
+    {
+        long pushesPerPosition = 0;
+        for (int id = 0; id < prog.size(); id++) {
+            Prog.Inst instruction = prog.inst(id);
+            switch (instruction.opcode()) {
+                case BYTE_RANGE -> pushesPerPosition += instruction.hint() != 0 ? 1 : 0;
+                case CAPTURE -> pushesPerPosition += instruction.last() ? 1 : 2;
+                case EMPTY_WIDTH, NOP -> pushesPerPosition += instruction.last() ? 0 : 1;
+                default -> {}
+            }
+        }
+        // A search tracks at most the program's capture slots, whatever the caller's buffer.
+        int slotCount = prog.captureSlotCount();
+        if (searchBytes(prog, pushesPerPosition, slotCount, textMaxSize) <= allowance) {
+            return textMaxSize;
+        }
+        int low = -1;
+        int high = textMaxSize;
+        while (low < high - 1) {
+            int middle = (low + high) >>> 1;
+            if (searchBytes(prog, pushesPerPosition, slotCount, middle) <= allowance) {
+                low = middle;
+            }
+            else {
+                high = middle;
+            }
+        }
+        return low;
+    }
+
+    private static long searchBytes(Prog prog, long pushesPerPosition, int slotCount, int textLength)
+    {
+        long positions = textLength + 1L;
+        long visitedWords = (prog.listCount() * positions + 63) / 64;
+        long jobs = 1 + positions * pushesPerPosition;
+        // Each array the stack grows through, and a job for each slot of the last. Unlike the
+        // capture NFA's plan, which counts the memory live at a search's peak, this counts the
+        // search's allocation total, which its allocation test holds to the share with no slack.
+        long capacity = initialJobCapacity(prog.size());
+        long stackBytes = sizeOfObjectArray((int) capacity);
+        while (capacity < jobs) {
+            capacity *= 2;
+            if (capacity > Integer.MAX_VALUE) {
+                return Long.MAX_VALUE;
+            }
+            stackBytes += sizeOfObjectArray((int) capacity);
+        }
+        return SEARCH_BYTES + sizeOfLongArray((int) visitedWords) + sizeOfIntArray(slotCount) + capacity * JOB_BYTES + stackBytes;
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOPS: job-stack layout, visited-state checks, and capture
@@ -174,6 +243,8 @@ final class BitState
         private final boolean longest;
         private final boolean endMatch;
         private final int[] submatch;
+        // The pairs the search tracks: the caller's, up to the program's capture slots. The pairs
+        // past them keep the -1 that the static search filled in.
         private final int submatchCount;
 
         private final byte[] bytes;
@@ -206,7 +277,7 @@ final class BitState
             this.longest = longest;
             this.endMatch = endMatch;
             this.submatch = submatch;
-            this.submatchCount = submatchCount;
+            this.submatchCount = Math.min(submatchCount, prog.captureSlotCount() / 2);
             this.workspace = workspace;
 
             this.bytes = context.byteArray();
@@ -217,7 +288,7 @@ final class BitState
 
             int visitedBitCount = prog.listCount() * ((textEnd - textBegin) + 1);
             int visitedWordCount = (visitedBitCount + VISITED_BITS - 1) / VISITED_BITS;
-            int captureSlotCount = Math.max(2, 2 * submatchCount);
+            int captureSlotCount = Math.max(2, 2 * this.submatchCount);
             if (workspace == null) {
                 this.visited = new long[visitedWordCount];
                 this.cap = new int[captureSlotCount];

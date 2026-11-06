@@ -654,7 +654,11 @@ text, so the pair scan rejects little that a first-byte scan would not.
   sizes its thread tables by doubling and may keep group-zero queues; a pass
   over a window also keeps a `long[P]` of instruction words. The allowance
   bounds what a search holds at once: each bounded pass also allocates a small
-  search object, which is transient.
+  search object, which is transient. A caller buffer longer than the pattern's
+  slots is searched through a copy of the program's slots when there are at most
+  64, OnePass's limit, so OnePass still runs; that copy of at most 64 slots,
+  272 bytes with compressed class pointers, is held outside the allowance, and a
+  wider program searches the caller's buffer in place.
 - Compilation plans each pattern's capture searches. A search that fits keeps
   the ordinary single pass. A wider one runs passes that each track group zero
   and the widest window of other slots that fits, over a copy of the instruction
@@ -670,6 +674,9 @@ text, so the pair scan rejects little that a first-byte scan would not.
   spare.
   Upstream RE2 and the Rust crate bound neither the capture NFA's threads nor
   their slots.
+- A direct BitState capture search also stays within the forward share:
+  compilation lowers the program's BitState text limit until the search fits.
+  See [Bounded Direct BitState Capture](#bounded-direct-bitstate-capture).
 
 `maxMemory` is a planning budget, not an eager allocation or a byte-exact JVM
 heap limit. The default is demand-driven, so simple patterns retain only the
@@ -1559,25 +1566,36 @@ byte sequence: `\C*` in UTF-8 mode and dot-all `.*` in Latin-1 mode. UTF-8 dot-a
 ## Bounded Direct BitState Capture
 
 Eligible unanchored leftmost-first searches through a reusable matcher that
-request subgroup captures run BitState directly when its complete visited
-bitmap fits within 256 KiB. This single pass replaces forward and reverse DFA
+request subgroup captures run BitState directly when the input is within the
+program's BitState text limit. This single pass replaces forward and reverse DFA
 boundary searches followed by an anchored NFA capture pass. Inputs above the
-fixed bound, programs that cannot use BitState, and stateless caller-buffer
+limit, programs that cannot use BitState, and stateless caller-buffer
 operations retain the ordinary engine cascade.
 
-Upstream caps this bitmap at 256 Kibit (32 KiB). The Java port deliberately uses
-more temporary memory because it targets server workloads where a bounded
-256 KiB workspace is small compared with input pages and can replace multiple
-boundary and capture passes.
+Upstream caps the visited bitmap at 256 Kibit (32 KiB). The Java port allows
+256 KiB because it targets server workloads where a larger bitmap is small
+compared with input pages and can replace multiple boundary and capture passes.
+The bitmap is not the whole bound: a search's job stack grows with the input and
+the program's captures, to 67 MB for `(?:(a)|a)*` on the 419,429 bytes the
+bitmap alone allows. The visited bitmap admits each list at each position once,
+so a search over n bytes holds at most `1 + (n + 1) × J` jobs on its stack at
+once, where J counts a job for each BYTE_RANGE with a hint and each CAPTURE,
+EMPTY_WIDTH, or NOP that is not last, and one more for each CAPTURE's undo.
+Compilation lowers the text limit until the visited bitmap, capture slots and
+job stack, at the capacity its doubling reaches, and the search's objects fit
+the forward share, the allowance the capture NFA plans against. A longer input
+takes the engine it would take without BitState. As in the capture NFA, a search
+tracks only the slots through the program's highest surviving CAPTURE, so a
+trailing group the simplifier removes costs it nothing.
 
 Upstream gives list heads, and so BitState, only to programs of at most 512
 instructions. Regulator gives list heads to every program with at most 32,767
-lists, so BitState also runs on a larger program whenever the visited bitmap
-bound fits the span. A large program, such as a Unicode letter class with a
-dozen captures, otherwise extracted every short match's groups with the NFA,
-where the Rust crate runs its bounded backtracker. The bitmap grows with the
-list count, not the instruction count, so its bound alone limits the span, as
-the crate bounds its backtracker.
+lists, so BitState also runs on a larger program whenever the span fits within
+its text limit. A large program, such as a Unicode letter class with a dozen
+captures, otherwise extracted every short match's groups with the NFA, where the
+Rust crate runs its bounded backtracker. The bitmap grows with the list count,
+not the instruction count, and the job stack with the instructions that push
+jobs, so these bounds alone limit the span, as the crate bounds its backtracker.
 
 ## Matcher-Owned Capture Workspaces
 

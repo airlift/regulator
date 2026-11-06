@@ -93,7 +93,7 @@ public class TestTraditionalBenchmarkInputs
         Slice input = Slices.utf8Slice(".".repeat(8 * 1024) + "abc-123");
 
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isTrue();
-        assertThat(pattern.canUseDirectBitStateCapture(input.length(), 3)).isFalse();
+        assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), input.length(), 3)).isFalse();
 
         RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
@@ -109,7 +109,7 @@ public class TestTraditionalBenchmarkInputs
         Slice input = Slices.utf8Slice("x".repeat(4 * 1024) + "a");
         int[] groups = new int[8];
 
-        assertThat(pattern.canUseDirectBitStateCapture(input.length() - 1, 4)).isTrue();
+        assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), input.length() - 1, 4)).isTrue();
 
         assertThat(pattern.matchInto(
                 input,
@@ -138,7 +138,7 @@ public class TestTraditionalBenchmarkInputs
         int[] groups = new int[4];
 
         Slice input = Slices.utf8Slice("x".repeat(4 * 1024));
-        assertThat(pattern.canUseDirectBitStateCapture(input.length(), 2)).isTrue();
+        assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), input.length(), 2)).isTrue();
         assertThat(pattern.matchInto(
                 input,
                 0,
@@ -174,7 +174,7 @@ public class TestTraditionalBenchmarkInputs
             Slice input = Slices.utf8Slice("x".repeat(4 * 1024) + suffixes.get(caseIndex));
             Prog program = pattern.forwardProgramForDiagnostics();
             int groupCount = pattern.capturingGroupCount() + 1;
-            assertThat(pattern.canUseDirectBitStateCapture(input.length(), groupCount)).isTrue();
+            assertThat(pattern.canUseDirectBitStateCapture(program, input.length(), groupCount)).isTrue();
 
             int[] expected = new int[2 * groupCount];
             Arrays.fill(expected, -1);

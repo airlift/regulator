@@ -1237,14 +1237,14 @@ abstract sealed class CompiledPattern
         return booleanPlans.matches();
     }
 
-    boolean canUseDirectBitStateCapture(int searchLength, int captureCount)
+    boolean canUseDirectBitStateCapture(Prog prog, int searchLength, int captureCount)
     {
         return !longestMatch &&
                 searchLength >= DIRECT_BIT_STATE_CAPTURE_MINIMUM_LENGTH &&
                 captureCount > 1 &&
-                !partialProg.isOnePass() &&
-                partialProg.canBitState() &&
-                searchLength <= partialProg.bitStateTextMaxSize();
+                !prog.isOnePass() &&
+                prog.canBitState() &&
+                searchLength <= prog.bitStateTextMaxSize();
     }
 
     FanoutResult programFanout()
@@ -2504,11 +2504,12 @@ abstract sealed class CompiledPattern
             Arrays.fill(groups, -1);
             int patternSlotCount = 2 * (capturingGroupCount + 1);
             int copySlotCount = Math.min(patternSlotCount, partialProg.captureSlotCount());
-            if (groups.length > patternSlotCount) {
-                // The engines pick their route by the buffer's length, and some size their capture
-                // state by it, so a buffer past the pattern's groups would track slots no
-                // instruction writes and could turn OnePass away: on small patterns that cost 584
-                // to 1,120 bytes per call, where this copy of the program's slots costs 24 to 40.
+            if (groups.length > patternSlotCount && copySlotCount <= Long.SIZE) {
+                // OnePass picks its route by the buffer's length, so a buffer past the pattern's
+                // groups would turn it away: on small patterns that cost 584 to 1,120 bytes per
+                // call, where this copy of the program's slots costs 24 to 40. OnePass takes at
+                // most Long.SIZE slots, and the other engines track at most the program's slots
+                // whatever the buffer, so a wider program searches the caller's buffer.
                 // The program's slots leave out trailing groups the simplifier removed. No engine
                 // writes the pairs past them, and callers read them, so those pairs keep the -1 of
                 // the fill above: a path that skips that fill must still set them to -1.
@@ -2841,7 +2842,7 @@ abstract sealed class CompiledPattern
         if (anchorMode == Anchor.UNANCHORED &&
                 mutableGroupOffsets != null &&
                 hasBitStateWorkspace(workspaces) &&
-                canUseDirectBitStateCapture(searchLength, captureCount)) {
+                canUseDirectBitStateCapture(prog, searchLength, captureCount)) {
             Slice logicalContext = logicalContext(text, contextStart, contextEnd);
             boolean matched = BitState.search(
                     prog,

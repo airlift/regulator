@@ -879,6 +879,12 @@ final class Compiler
                 // the square of the program the instruction budget bounds. Charge each flattened
                 // instruction as it is emitted, so an oversized program fails before it is built.
                 program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory);
+                if (maxMemory > 0) {
+                    // A BitState search gets the program's whole share as its own allowance, as a
+                    // capture NFA search does in Nfa.planCaptureSearches, which CompiledPattern.build
+                    // calls.
+                    program.limitBitStateMemory(maxMemory);
+                }
             }
             if (stage.ordinal() >= CompileStage.BYTEMAP.ordinal()) {
                 program.computeByteMap();
