@@ -43,10 +43,11 @@ final class VectorPrefixScanner
         int position = offset;
 
         for (; position < vectorEnd; position += SPECIES.length()) {
-            VectorMask<Byte> candidates = ByteVector.fromArray(SPECIES, data, position + primaryOffset)
-                    .compare(VectorOperators.EQ, primaryVector)
-                    .and(ByteVector.fromArray(SPECIES, data, position + secondaryOffset)
-                            .compare(VectorOperators.EQ, secondaryVector));
+            ByteVector primary = ByteVector.fromArray(SPECIES, data, position + primaryOffset);
+            ByteVector secondary = ByteVector.fromArray(SPECIES, data, position + secondaryOffset);
+            VectorMask<Byte> candidates = VectorSupport.SVE_128
+                    ? sveMatches(primary, primaryVector, secondary, secondaryVector)
+                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector));
             // Most vectors hold no candidate, so test for one before converting the mask.
             if (!candidates.anyTrue()) {
                 continue;
@@ -120,6 +121,14 @@ final class VectorPrefixScanner
             }
         }
         return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
+    }
+
+    /// Returns the lanes where `first` equals `firstProbe` and `second` equals `secondProbe`, by
+    /// XOR, OR, and one compare with zero; see [VectorSupport#SVE_128]. `VectorScanner` calls it
+    /// too. Copied as `VectorScanKernelSupport.sveMatches`; keep the copy in step.
+    static VectorMask<Byte> sveMatches(ByteVector first, ByteVector firstProbe, ByteVector second, ByteVector secondProbe)
+    {
+        return first.lanewise(VectorOperators.XOR, firstProbe).or(second.lanewise(VectorOperators.XOR, secondProbe)).compare(VectorOperators.EQ, (byte) 0);
     }
 
     private static int findScalar(byte[] data, int offset, int candidateCount, byte[] prefix, int primaryOffset, int secondaryOffset, int comparisonEnd)

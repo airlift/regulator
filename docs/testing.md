@@ -63,6 +63,12 @@ hosts. To reproduce one:
     -Dregulator.vectorJvmArgument=-XX:MaxVectorSize=8
 ```
 
+A third build runs the current feature release with native access enabled on an
+arm64 runner, whose SVE with 16-byte vectors selects the XOR candidate masks
+described in "Candidate Masks on SVE" in `REGULATOR_DECISIONS.md`. It sets
+`-Dregulator.expectSve128=true`, so a test fails if `VectorSupport` stops selecting
+them on that runner.
+
 Before changing the Unicode database generator, its manifest, or the
 generated database, run the same check CI runs. It downloads the pinned UCD
 files from unicode.org:

@@ -159,8 +159,8 @@ jobs:
           npm run check
 
   build:
-    name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }}${{ matrix.max-vector-size && format(', {0}-byte vectors', matrix.max-vector-size) || '' }})
-    runs-on: ubuntu-latest
+    name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }}${{ matrix.max-vector-size && format(', {0}-byte vectors', matrix.max-vector-size) || '' }}${{ matrix.runner && ', arm64' || '' }})
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -171,7 +171,11 @@ jobs:
         native-access:
           - disabled
           - enabled
+        # Empty axes let each include below set them and add a job of its own; an include that
+        # sets only existing values merges into the matching job instead.
         max-vector-size:
+          - ""
+        runner:
           - ""
         include:
           - java-version: 26
@@ -180,6 +184,10 @@ jobs:
           - java-version: 26
             native-access: enabled
             max-vector-size: 16
+          - java-version: 26
+            native-access: enabled
+            runner: ubuntu-24.04-arm
+            sve-128: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -194,6 +202,7 @@ jobs:
         env:
           NATIVE_ACCESS: ${{ matrix.native-access }}
           MAX_VECTOR_SIZE: ${{ matrix.max-vector-size }}
+          SVE_128: ${{ matrix.sve-128 }}
         run: |
           arguments=()
           if [[ "$NATIVE_ACCESS" == enabled ]]; then
@@ -201,6 +210,9 @@ jobs:
           fi
           if [[ -n "$MAX_VECTOR_SIZE" ]]; then
             arguments+=("-Dregulator.vectorJvmArgument=-XX:MaxVectorSize=${MAX_VECTOR_SIZE}")
+          fi
+          if [[ "$SVE_128" == true ]]; then
+            arguments+=("-Dregulator.expectSve128=true")
           fi
           ./mvnw clean install -B -V -P ci "${arguments[@]}"
 

@@ -183,8 +183,11 @@ final class VectorScanKernelSupport
         ByteVector first = ByteVector.broadcast(SPECIES, literal.literal[0]);
         ByteVector last = ByteVector.broadcast(SPECIES, literal.literal[lastOffset]);
         for (; cursor <= lastStart - SPECIES.length() + 1; cursor += SPECIES.length()) {
-            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, bytes, cursor).compare(VectorOperators.EQ, first)
-                    .and(ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset).compare(VectorOperators.EQ, last));
+            ByteVector front = ByteVector.fromArray(SPECIES, bytes, cursor);
+            ByteVector back = ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset);
+            VectorMask<Byte> matches = VectorSupport.SVE_128
+                    ? sveMatches(front, first, back, last)
+                    : front.compare(VectorOperators.EQ, first).and(back.compare(VectorOperators.EQ, last));
             long bits = matches.toLong();
             while (bits != 0) {
                 if (ScanKernelSupport.literalMatches(literal, bytes, cursor + Long.numberOfTrailingZeros(bits), end)) {
@@ -199,6 +202,12 @@ final class VectorScanKernelSupport
             }
         }
         return false;
+    }
+
+    /// A copy of `VectorPrefixScanner.sveMatches`.
+    private static VectorMask<Byte> sveMatches(ByteVector first, ByteVector firstProbe, ByteVector second, ByteVector secondProbe)
+    {
+        return first.lanewise(VectorOperators.XOR, firstProbe).or(second.lanewise(VectorOperators.XOR, secondProbe)).compare(VectorOperators.EQ, (byte) 0);
     }
 
     /// A copy of `VectorScanner.findByte`.

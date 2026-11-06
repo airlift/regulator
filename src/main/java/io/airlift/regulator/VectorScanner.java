@@ -186,8 +186,11 @@ final class VectorScanner
         ByteVector first = ByteVector.broadcast(SPECIES, literal.literal[0]);
         ByteVector last = ByteVector.broadcast(SPECIES, literal.literal[lastOffset]);
         for (; cursor <= lastStart - SPECIES.length() + 1; cursor += SPECIES.length()) {
-            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, bytes, cursor).compare(VectorOperators.EQ, first)
-                    .and(ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset).compare(VectorOperators.EQ, last));
+            ByteVector front = ByteVector.fromArray(SPECIES, bytes, cursor);
+            ByteVector back = ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset);
+            VectorMask<Byte> matches = VectorSupport.SVE_128
+                    ? VectorPrefixScanner.sveMatches(front, first, back, last)
+                    : front.compare(VectorOperators.EQ, first).and(back.compare(VectorOperators.EQ, last));
             long bits = matches.toLong();
             while (bits != 0) {
                 if (literal.matches(bytes, cursor + Long.numberOfTrailingZeros(bits), end)) {
