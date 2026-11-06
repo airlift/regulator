@@ -1391,22 +1391,35 @@ the accelerated result with a scalar folded-prefix search.
 ## Literal Prefix Vector Scan
 
 Case-sensitive multi-byte prefixes that probe their first byte use fused
-first-byte and last-byte candidate masks for searches of at least 1 KiB, in the
-platform's preferred Vector API species when the application resolves
-`jdk.incubator.vector` and that species holds 16 to 64 bytes. A candidate needs
-both bytes at their offsets, so a common first byte no longer restarts the scan
-at every occurrence: over English prose, `aqj` stopped at each of 35,301 `a`
-bytes in rebar's sherlock text and now stops at 12 candidates, each an `a` with
-a `j` two bytes later. Shorter searches, and longer ones without the Vector API,
-keep repeated first-byte scanning for an ASCII first byte and use fused SWAR
-masks for a non-ASCII one. Single-byte prefixes and probes moved by byte
-frequencies keep their own scans.
+candidate masks of two bytes, by default the first and the last, for searches of
+at least 1 KiB, in the platform's preferred Vector API species when the
+application resolves `jdk.incubator.vector` and that species holds 16 to 64
+bytes. A candidate needs both bytes at their offsets, so a common first byte no
+longer restarts the scan at every occurrence: over English prose, `aqj` stopped
+at each of 35,301 `a` bytes in rebar's sherlock text and now stops at 12
+candidates, each an `a` with a `j` two bytes later. Shorter searches, and longer
+ones without the Vector API, keep repeated first-byte scanning for an ASCII
+first byte and use fused SWAR masks for a non-ASCII one. Single-byte prefixes
+and probes moved by byte frequencies keep their own scans.
+
+A prefix that starts with a multibyte UTF-8 character ending before the
+prefix's last byte pairs that character's last byte, not its lead byte, with the
+prefix's last byte, in the vector and SWAR pair scans and in the vector search
+for a literal behind a leading assertion. A lead byte names little more than the
+script, which most letters of a text share: `0xD0` is 30% of the bytes of
+rebar's Russian sherlock text, and `Шерлок Холмс` stopped at 10,385 candidates
+for its 724 matches with the lead byte and stops at 726 with the last byte of
+`Ш`. Each candidate is still compared with the complete prefix from its start,
+so the choice of byte never changes what matches. The contains search of
+`LiteralSearchKernel` and the vector filter of the scan plan's required-literal
+check still pair the first and last bytes; the continuation byte has not been
+measured there.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
 candidate is compared with the complete prefix until failed candidates spend
 the contains search's comparison budget, after which KMP finishes the search.
-Front/back byte selection keeps preprocessing bounded and the integrated scanner
+Pair byte selection keeps preprocessing bounded and the integrated scanner
 compact.
 
 Each pass of the vector scan counts the whole vectors left, runs a loop that
@@ -1428,8 +1441,8 @@ the scan leave and re-enter its test loop at nearly every vector.
 ## Candidate Masks on SVE
 
 Several vector scans build a candidate mask from more than one byte compare.
-Three need every byte to match: the literal prefix scan's first and last bytes,
-the scan plan's contains search, and the two three-byte groups of the
+Three need every byte to match: the literal prefix scan's pair bytes, the scan
+plan's contains search, and the two three-byte groups of the
 [start literal filter](#start-literal-filter)'s two-literal check; a later
 paragraph covers scans that stop at any of several bytes. Where C2 compiles
 vector code with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5),
@@ -1512,8 +1525,8 @@ sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,
 and Rust), scan for one probe byte. A prefix whose probe stays at its first byte
-instead takes the [first-and-last pair scan](#literal-prefix-vector-scan) on
-inputs of at least 1 KiB when the Vector API is available. Every distribution
+instead takes the [pair scan](#literal-prefix-vector-scan) on inputs of at least
+1 KiB when the Vector API is available. Every distribution
 follows one rule: the probe is the rarest byte after the first, earliest on
 ties, used only when its estimated probability is less than a quarter of the
 first byte's; otherwise the probe remains offset 0. The factor keeps the first
@@ -1578,14 +1591,17 @@ Counts and learned distributions are add-one smoothed:
 they may probe any byte after offset 0, including punctuation, digits, and
 bytes at or above `0x80`.
 
-Under every distribution, fused first-byte/last-byte strategies, paired
-candidate scans, case-folded prefixes and literals, required-literal checks,
-and single-byte literals keep first-byte scanning. This is a performance-only
-deviation. Randomized tests compare the RE2 site with scalar literal searches
-in UTF-8 and Latin-1, and the Trino site with Joni, under a distribution learned
-from a short JSON sample and under a supplied distribution that probes
-punctuation, digits, and UTF-8 bytes; the same comparisons under default
-options cover first-byte scanning.
+Under every distribution, fused pair strategies, paired candidate scans,
+case-folded prefixes and literals, required-literal checks, and single-byte
+literals keep their default bytes: the first byte, or, for a pair scan of a
+prefix led by a multibyte UTF-8 character that ends before the prefix's last
+byte, that character's last byte. This is a performance-only deviation. Randomized tests
+compare the RE2 site with scalar literal searches in UTF-8 and Latin-1, and the
+Trino site with Joni, under a distribution learned from a short JSON sample and
+under a supplied distribution that probes punctuation, digits, and UTF-8 bytes;
+the same comparisons under default options cover first-byte scanning, and the
+prefix reference comparisons on Russian and Chinese literals cover the
+continuation byte.
 
 ## Small Candidate-Byte Vector Scan
 

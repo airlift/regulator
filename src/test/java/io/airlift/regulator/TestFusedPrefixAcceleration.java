@@ -90,9 +90,13 @@ public class TestFusedPrefixAcceleration
         int length = 2_048;
         byte[] data = new byte[length];
         Arrays.fill(data, (byte) 'x');
+        // Each start holds the bytes the pair scans test and the lead byte before them, so every
+        // one is a candidate that fails at the prefix's third byte. Starts four bytes apart keep
+        // each start's last byte clear of the next start's copy.
+        int pairOffset = Prog.pairOffset(PREFIX);
         int backOffset = PREFIX.length - 1;
-        for (int position = 0; position <= length - PREFIX.length; position += 3) {
-            data[position] = PREFIX[0];
+        for (int position = 0; position <= length - PREFIX.length; position += 4) {
+            System.arraycopy(PREFIX, 0, data, position, pairOffset + 1);
             data[position + backOffset] = PREFIX[backOffset];
         }
         int matchPosition = length - PREFIX.length;
@@ -143,6 +147,51 @@ public class TestFusedPrefixAcceleration
         assertThat(VectorSupport.SVE_128)
                 .as("SVE_128 on %s with %s preferred byte lanes", System.getProperty("os.arch"), ByteVector.SPECIES_PREFERRED.length())
                 .isEqualTo(Boolean.parseBoolean(expected));
+    }
+
+    @Test
+    public void testMultibyteLeadPairsCharacterLastByte()
+    {
+        assertThat(Prog.pairOffset("Шерлок".getBytes(StandardCharsets.UTF_8))).isEqualTo(1);
+        assertThat(Prog.pairOffset("福尔摩斯".getBytes(StandardCharsets.UTF_8))).isEqualTo(2);
+        assertThat(Prog.pairOffset("😀x".getBytes(StandardCharsets.UTF_8))).isEqualTo(3);
+        assertThat(Prog.pairOffset("Holmes".getBytes(StandardCharsets.UTF_8))).isZero();
+        // The character must end before the last byte, its bytes after the lead must be
+        // continuation bytes, and the first byte must be a lead byte.
+        assertThat(Prog.pairOffset("Ш".getBytes(StandardCharsets.UTF_8))).isZero();
+        assertThat(Prog.pairOffset(new byte[] {(byte) 0xC3, 1, 2, (byte) 0xC3})).isZero();
+        assertThat(Prog.pairOffset(new byte[] {(byte) 0xA5, (byte) 0xA5, (byte) 0xA5})).isZero();
+
+        // Lead bytes everywhere, and decoys that share the pair's two bytes but not the lead, which
+        // only the comparison from each candidate's start rejects. 256 bytes runs the SWAR scan
+        // and 4,096 the vector scan when it is available.
+        byte[] prefix = "Шерлок".getBytes(StandardCharsets.UTF_8);
+        Prog program = configuredProgram(prefix, false);
+        for (int length : new int[] {256, 4_096}) {
+            byte[] data = new byte[length + 5];
+            for (int position = 0; position + 1 < data.length; position += 2) {
+                data[position] = (byte) 0xD0;
+                data[position + 1] = (byte) 0xB0;
+            }
+            for (int position = 0; position + prefix.length < length - 64; position += 37) {
+                System.arraycopy(prefix, 0, data, position, prefix.length);
+                data[position] = (byte) 0xD1;
+            }
+            int matchPosition = length - prefix.length;
+            System.arraycopy(prefix, 0, data, matchPosition, prefix.length);
+            assertThat(program.prefixAccel(data, 0, length)).isEqualTo(matchPosition);
+            assertThat(program.prefixAccel(data, 0, length - 1)).isEqualTo(-1);
+        }
+
+        // The literal ends in its lead byte, so in a run of that byte a first-byte pair would find
+        // a failing candidate at every byte and hand off to KMP at 64. The character's last byte,
+        // 0xA8, never occurs there, so neither scan hands off.
+        Prog leadRun = configuredProgram(new byte[] {(byte) 0xD0, (byte) 0xA8, (byte) 0xD0}, false);
+        byte[] leads = new byte[4_096];
+        Arrays.fill(leads, (byte) 0xD0);
+        for (int length : new int[] {256, 4_096}) {
+            assertThat(leadRun.prefixAccelKmpHandoffForDiagnostics(leads, 0, length)).isEqualTo(-1);
+        }
     }
 
     @Test
