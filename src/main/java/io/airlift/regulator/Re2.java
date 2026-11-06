@@ -117,7 +117,7 @@ public sealed class Re2
             return maxMemory;
         }
 
-        /// Sets the positive compilation and DFA-cache memory budget in bytes.
+        /// Sets the positive compilation, DFA-cache and capture-search memory budget in bytes.
         public Options setMaxMemory(long maxMemory)
         {
             if (maxMemory <= 0) {

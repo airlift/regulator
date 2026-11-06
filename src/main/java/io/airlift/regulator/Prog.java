@@ -376,6 +376,8 @@ final class Prog
 
     // Instruction counts by opcode, populated by flatten().
     private final int[] instCount = new int[InstOp.values().length];
+    // The slots the program's CAPTURE instructions write, populated by flatten().
+    private int captureSlotCount = 2;
 
     private int bytemapRange;
     private final byte[] bytemap = new byte[256];
@@ -428,6 +430,10 @@ final class Prog
     private final AtomicReference<NoSubmatchTables> noSubmatchNfaTables = new AtomicReference<>();
     // Compact immutable instructions built lazily after flattening and shared by capture engines.
     private volatile long[] captureInstructionWords;
+    // The capture NFA's plan, set once by pattern compilation before the program is published. A
+    // program it never plans keeps these defaults and runs every capture search in one pass.
+    private int singlePassCaptureSlots = Integer.MAX_VALUE;
+    private int boundedPassCaptureSlots = Integer.MAX_VALUE;
 
     public Prog()
     {
@@ -750,6 +756,15 @@ final class Prog
     public int getInstCount(InstOp op)
     {
         return instCount[op.ordinal()];
+    }
+
+    /// Returns the slots the program's CAPTURE instructions write: every slot through the highest
+    /// surviving CAPTURE's, rounded up to a pair, and at least two. Slots past it belong to
+    /// trailing groups the simplifier removed, which every match leaves unset; a removed group
+    /// below a surviving one keeps its slots. Only valid after [#flatten()] has been called.
+    int captureSlotCount()
+    {
+        return captureSlotCount;
     }
 
     public boolean canPrefixAccel()
@@ -1932,6 +1947,25 @@ final class Prog
         return dfaMemory;
     }
 
+    /// Sets the capture NFA's plan; see [Nfa#planCaptureSearches].
+    void setCapturePlan(int singlePassCaptureSlots, int boundedPassCaptureSlots)
+    {
+        this.singlePassCaptureSlots = singlePassCaptureSlots;
+        this.boundedPassCaptureSlots = boundedPassCaptureSlots;
+    }
+
+    /// Returns the most slots a capture NFA search tracks in one ordinary pass.
+    int singlePassCaptureSlots()
+    {
+        return singlePassCaptureSlots;
+    }
+
+    /// Returns the most slots each bounded capture NFA pass tracks.
+    int boundedPassCaptureSlots()
+    {
+        return boundedPassCaptureSlots;
+    }
+
     /// Get or create cached DFA with memory budget.
     /// Like upstream Prog::GetDFA().
     public Dfa.DfaInstance getCachedDfa(Dfa.DfaInstance.Kind kind)
@@ -2150,8 +2184,6 @@ final class Prog
             boolean[] altMatchGreedy = new boolean[progSize];
 
             int captures = 0;
-            int emptyWidths = 0;
-            int nops = 0;
             for (int id = 0; id < progSize; id++) {
                 Inst inst = prog.inst(id);
                 InstOp opcode = inst.opcode();
@@ -2166,11 +2198,8 @@ final class Prog
                 outLast[id] = (outValue << 1) | (inst.last() ? 1 : 0);
                 foldCase[id] = inst.foldCase();
 
-                switch (opcode) {
-                    case CAPTURE -> captures++;
-                    case EMPTY_WIDTH -> emptyWidths++;
-                    case NOP -> nops++;
-                    default -> {}
+                if (opcode == InstOp.CAPTURE) {
+                    captures++;
                 }
             }
 
@@ -2188,7 +2217,7 @@ final class Prog
             }
 
             boolean hasCaptureOps = captures != 0;
-            int addStackSize = Math.max(8, captures + emptyWidths + nops + 1);
+            int addStackSize = Nfa.groupZeroStackSize(prog);
 
             return new NoSubmatchTables(
                     op,
@@ -3202,16 +3231,21 @@ final class Prog
                     hintSplits,
                     hintColors);
         }
-        // Reset instruction counts before fourth pass.
+        // Reset instruction counts and the capture slot count before fourth pass.
         Arrays.fill(instCount, 0);
+        captureSlotCount = 2;
 
-        // Fourth pass: remap outputs to flattened indexes and count instructions by opcode.
+        // Fourth pass: remap outputs to flattened indexes, count instructions by opcode, and record
+        // the capture slot count.
         for (int id = 0; id < flattenedInstructions.size(); id++) {
             Inst instruction = flattenedInstructions.get(id);
             if (instruction.opcode() != InstOp.ALT_MATCH) {
                 instruction.setOut(flattenedIndexesByRoot[instruction.out()]);
             }
             instCount[instruction.opcode().ordinal()]++;
+            if (instruction.opcode() == InstOp.CAPTURE) {
+                captureSlotCount = Math.max(captureSlotCount, (instruction.cap() | 1) + 1);
+            }
         }
 
         // Remap start_unanchored and start.

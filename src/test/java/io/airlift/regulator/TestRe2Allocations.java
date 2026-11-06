@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
@@ -743,6 +744,100 @@ public class TestRe2Allocations
         onePassExpected[5] = 9;
         assertThat(onePassGroups).containsExactly(onePassExpected);
         assertThat(onePassAllocatedBytes / 10_000).isLessThanOrEqualTo(64);
+
+        // The copy held every declared group's slots, so 4,000 groups the simplifier removed took
+        // an 8,002-slot array per call against a 1,768-byte forward share, although the program
+        // tracks only group zero.
+        long tightForwardMemory = 2_651 - (2_651 / 3);
+        Re2 removedGroups = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(2_651));
+        int[] removedGroupsOffsets = new int[8_004];
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean removedGroupsFound = removedGroups.findInto(Slices.EMPTY_SLICE, removedGroupsOffsets);
+        long removedGroupsAllocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(removedGroupsFound).isTrue();
+        assertThat(removedGroupsAllocatedBytes).isLessThanOrEqualTo(tightForwardMemory);
+        int[] removedGroupsExpected = new int[8_004];
+        Arrays.fill(removedGroupsExpected, -1);
+        removedGroupsExpected[0] = 0;
+        removedGroupsExpected[1] = 0;
+        assertThat(removedGroupsOffsets).containsExactly(removedGroupsExpected);
+    }
+
+    @Test
+    public void testCaptureSearchStaysWithinForwardShare()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // (a?) repeated 2,000 times on 2,000 a's holds about 6,000 capture threads, each with all
+        // 4,002 slots: about 96 MB of slots a search, past the default budget's 64 MiB forward
+        // share. At 4,000 repetitions the forward DFA's cache churns, allocating 74 MB a search on
+        // its own.
+        int groups = 2_000;
+        Slice pattern = Slices.utf8Slice("(a?)".repeat(groups));
+        Slice text = Slices.utf8Slice("a".repeat(groups));
+        int[] offsets = new int[2 * groups + 2];
+        offsets[1] = groups;
+        for (int group = 1; group <= groups; group++) {
+            offsets[2 * group] = group - 1;
+            offsets[2 * group + 1] = group;
+        }
+
+        Re2 re2 = Re2.compile(pattern);
+        JavaRegexp java = JavaRegexp.compile(pattern);
+        RustRegexp rust = RustRegexp.compile(pattern);
+        RustRegexp rustBytes = RustRegexp.compile(pattern, RustRegexp.Options.bytes());
+        TrinoRegexp trino = TrinoRegexp.compile(pattern);
+        List<CaptureSearch> searches = List.of(
+                new CaptureSearch("RE2 matcher find", re2.forwardProgramForDiagnostics(), () -> matcherOffsets(re2.matcher(text), groups), offsets),
+                new CaptureSearch("Java matcher find", java.forwardProgramForDiagnostics(), () -> matcherOffsets(java.matcher(text), groups), offsets),
+                new CaptureSearch("Rust findResult", rust.forwardProgramForDiagnostics(), () -> resultOffsets(rust.findResult(text), groups), offsets),
+                new CaptureSearch("Rust bytes findResult", rustBytes.forwardProgramForDiagnostics(), () -> resultOffsets(rustBytes.findResult(text), groups), offsets),
+                new CaptureSearch("Trino regexp_extract", trino.re2().forwardProgramForDiagnostics(), () -> trino.extract(text, groups), Slices.utf8Slice("a")));
+
+        long forwardMemory = Re2.Options.DEFAULT_MAX_MEMORY - (Re2.Options.DEFAULT_MAX_MEMORY / 3);
+        long threadId = Thread.currentThread().threadId();
+        for (CaptureSearch search : searches) {
+            assertThat(search.search().get()).as(search.name()).isEqualTo(search.expected());
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            Object result = search.search().get();
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            assertThat(result).as(search.name()).isEqualTo(search.expected());
+            // The slack covers what the call allocates beside the capture search: the matcher or
+            // result, its group array, and this test's copy of the offsets.
+            assertThat(allocatedBytes).as(search.name()).isLessThanOrEqualTo(forwardMemory + 64L * search.program().size());
+        }
+    }
+
+    private record CaptureSearch(String name, Prog program, Supplier<Object> search, Object expected) {}
+
+    // Returns null when the matcher finds no match.
+    private static int[] matcherOffsets(RegexpMatcher matcher, int groups)
+    {
+        if (!matcher.find()) {
+            return null;
+        }
+        int[] offsets = new int[2 * groups + 2];
+        for (int group = 0; group <= groups; group++) {
+            offsets[2 * group] = matcher.start(group);
+            offsets[2 * group + 1] = matcher.end(group);
+        }
+        return offsets;
+    }
+
+    private static int[] resultOffsets(MatchResult result, int groups)
+    {
+        if (result == null) {
+            return null;
+        }
+        int[] offsets = new int[2 * groups + 2];
+        for (int group = 0; group <= groups; group++) {
+            offsets[2 * group] = result.start(group);
+            offsets[2 * group + 1] = result.end(group);
+        }
+        return offsets;
     }
 
     @Test
