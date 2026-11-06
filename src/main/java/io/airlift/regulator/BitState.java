@@ -251,7 +251,9 @@ final class BitState
         private final int textBegin;
         private final int textEnd;
 
-        private final short[] listHeads;
+        private final short[] outputLists;
+        // The list of prog.start(), where every attempt begins.
+        private final int startList;
         private final long[] visited;
         private final int[] cap;
         private final Workspace workspace;
@@ -284,7 +286,8 @@ final class BitState
             this.textBegin = textBegin;
             this.textEnd = textEnd;
 
-            this.listHeads = requireNonNull(prog.listHeads(), "prog.listHeads() is null");
+            this.outputLists = requireNonNull(prog.outputLists(), "prog.outputLists() is null");
+            this.startList = prog.startList();
 
             int visitedBitCount = prog.listCount() * ((textEnd - textBegin) + 1);
             int visitedWordCount = (visitedBitCount + VISITED_BITS - 1) / VISITED_BITS;
@@ -317,7 +320,7 @@ final class BitState
             // Anchored search must start at text.begin().
             if (anchored) {
                 cap[0] = textBegin;
-                return trySearch(prog.start(), textBegin);
+                return trySearch(textBegin);
             }
 
             // Unanchored search from each possible text position.
@@ -333,7 +336,7 @@ final class BitState
                 }
 
                 cap[0] = position;
-                if (trySearch(prog.start(), position)) {
+                if (trySearch(position)) {
                     return true;
                 }
             }
@@ -388,15 +391,16 @@ final class BitState
         }
 
         @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "The switch exhaustively handles encoded instruction opcodes")
-        private boolean trySearch(int startId, int startPosition)
+        private boolean trySearch(int startPosition)
         {
             long[] instructionWords = prog.getOrCreateCaptureInstructionWords();
+            short[] outputLists = this.outputLists;
             boolean matched = false;
             jobCount = 0;
 
             int textLen = textEnd - textBegin;
-            if (shouldVisit(textLen, visited, listHeads[startId], startPosition - textBegin)) {
-                push(startId, startPosition);
+            if (shouldVisit(textLen, visited, startList, startPosition - textBegin)) {
+                push(prog.start(), startPosition);
             }
 
             while (jobCount > 0) {
@@ -458,9 +462,10 @@ final class BitState
                             if (hint != 0) {
                                 push(id + hint, position);
                             }
+                            int outputList = outputLists[id];
                             id = output;
                             position++;
-                            if (!checkAndLoop(textLen, id, position)) {
+                            if (!checkAndLoop(textLen, id, outputList, position)) {
                                 id = 0;
                             }
                         }
@@ -472,8 +477,9 @@ final class BitState
                                 push(-id, cap[payload]);
                                 cap[payload] = position;
                             }
+                            int outputList = outputLists[id];
                             id = output;
-                            if (!checkAndLoop(textLen, id, position)) {
+                            if (!checkAndLoop(textLen, id, outputList, position)) {
                                 id = 0;
                             }
                         }
@@ -486,8 +492,9 @@ final class BitState
                             if (!last) {
                                 push(id + 1, position);
                             }
+                            int outputList = outputLists[id];
                             id = output;
-                            if (!checkAndLoop(textLen, id, position)) {
+                            if (!checkAndLoop(textLen, id, outputList, position)) {
                                 id = 0;
                             }
                         }
@@ -495,8 +502,9 @@ final class BitState
                             if (!last) {
                                 push(id + 1, position);
                             }
+                            int outputList = outputLists[id];
                             id = output;
-                            if (!checkAndLoop(textLen, id, position)) {
+                            if (!checkAndLoop(textLen, id, outputList, position)) {
                                 id = 0;
                             }
                         }
@@ -563,13 +571,13 @@ final class BitState
             return 0;
         }
 
-        private boolean checkAndLoop(int textLen, int id, int p)
+        private boolean checkAndLoop(int textLen, int id, int listId, int p)
         {
             if (id == 0) {
                 return false;
             }
 
-            return shouldVisit(textLen, visited, listHeads[id], p - textBegin);
+            return shouldVisit(textLen, visited, listId, p - textBegin);
         }
     }
 }

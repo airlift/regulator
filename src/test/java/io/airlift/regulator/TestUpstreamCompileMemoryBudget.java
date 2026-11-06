@@ -133,8 +133,9 @@ public class TestUpstreamCompileMemoryBudget
                 .forwardProgramForDiagnostics();
         assertThat(Compiler.estimatedProgramMemory(forwardProgram) + forwardProgram.dfaMemory()).isEqualTo(forwardMemory);
 
-        // A program over upstream's 512 instructions keeps list heads for BitState, which upstream
-        // gives none, and the flatten charge counts them as it does for every program.
+        // A program over upstream's 512 instructions keeps output list ids for BitState, where
+        // upstream gives it no list heads, and the flatten charge counts them as it does for every
+        // program.
         int largeMaxMemory = 1 << 20;
         Prog large = Compiler.compile(parse("(\\pL+)(\\pL*) ([0-9]+)"), false, largeMaxMemory);
         assertThat(large.size()).isGreaterThan(512);
@@ -159,6 +160,9 @@ public class TestUpstreamCompileMemoryBudget
         Prog program = compiled.forwardProgramForDiagnostics();
         assertThat(program.prefixShiftsMemory()).isPositive();
         assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isLessThanOrEqualTo(maxMemory - (maxMemory / 3));
+        // At its exact limit the program still compiles and keeps its BitState output lists,
+        // which take the list heads' place inside the instruction charge.
+        assertThat(program.canBitState()).isTrue();
         // The lazy loops prefer to match nothing after the literal.
         RegexpMatcher matcher = compiled.matcher(Slices.utf8Slice("x" + literal + "bb"));
         assertThat(matcher.find()).isTrue();

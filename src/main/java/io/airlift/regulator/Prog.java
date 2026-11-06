@@ -375,7 +375,13 @@ final class Prog
 
     // Prepared by flatten() for BitState execution.
     private int listCount;
-    private short[] listHeads; // maps list-head instruction index to list ID; other entries contain -1
+    // Each instruction's output list id, so BitState can index its visited set without decoding
+    // the instruction first. Byte-range, capture, empty-width and no-op instructions hold the list
+    // they step to; -1 marks the others (alt-match, match, fail), whose outputs BitState never
+    // enters through a visited check. Null when the program has too many lists for BitState.
+    private short[] outputLists;
+    // The list id of the start instruction, or -1 when the program cannot run BitState.
+    private int startList;
     private int bitStateTextMaxSize;
 
     // Instruction counts by opcode, populated by flatten().
@@ -735,7 +741,7 @@ final class Prog
 
     public boolean canBitState()
     {
-        return listHeads != null;
+        return outputLists != null;
     }
 
     /// Returns whether upstream RE2 would give this program list heads, which it charges to the
@@ -751,9 +757,19 @@ final class Prog
         return listCount;
     }
 
-    public short[] listHeads()
+    /// Returns, for each instruction, the list id of its output, which BitState uses to index its
+    /// visited set. Byte-range, capture, empty-width and no-op instructions hold the list they step
+    /// to; -1 marks the others (alt-match, match, fail), whose outputs BitState never enters
+    /// through a visited check. Null when the program cannot run BitState.
+    short[] outputLists()
     {
-        return listHeads;
+        return outputLists;
+    }
+
+    /// Returns the list id of the start instruction, or -1 when the program cannot run BitState.
+    int startList()
+    {
+        return startList;
     }
 
     public int bitStateTextMaxSize()
@@ -765,7 +781,7 @@ final class Prog
     /// and objects fit in `allowance` bytes. Only valid after [#flatten()] has been called.
     void limitBitStateMemory(long allowance)
     {
-        if (listHeads != null) {
+        if (outputLists != null) {
             bitStateTextMaxSize = BitState.maxTextLength(this, bitStateTextMaxSize, allowance);
         }
     }
@@ -3288,10 +3304,30 @@ final class Prog
         Arrays.fill(instCount, 0);
         captureSlotCount = 2;
 
-        // Fourth pass: remap outputs to flattened indexes, count instructions by opcode, and record
-        // the capture slot count.
+        // Prepare the output list ids used by the BitState engine. Upstream gives list heads only
+        // to programs of at most 512 instructions, which sends a large program's captures to the
+        // NFA even for a short match. The visited bitmap grows with the list count, not the
+        // instruction count, so the bitmap bound below limits the text, as the Rust crate bounds
+        // its backtracker, and compilation lowers that limit for the job stack with
+        // limitBitStateMemory. BitState indexes its visited set by the list each step enters,
+        // which is the list of the instruction's output. Before the fourth pass remaps it, an
+        // output is the root id of that list, and a list's id is its root id.
+        listCount = rootIdsByInstruction.size();
+        short[] outputLists = null;
+        if (listCount <= Short.MAX_VALUE) {
+            outputLists = new short[flattenedInstructions.size()];
+        }
+
+        // Fourth pass: record output list ids, remap outputs to flattened indexes, count
+        // instructions by opcode, and record the capture slot count.
         for (int id = 0; id < flattenedInstructions.size(); id++) {
             Inst instruction = flattenedInstructions.get(id);
+            if (outputLists != null) {
+                outputLists[id] = switch (instruction.opcode()) {
+                    case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, NOP -> (short) instruction.out();
+                    case ALT, ALT_MATCH, MATCH, FAIL -> -1;
+                };
+            }
             if (instruction.opcode() != InstOp.ALT_MATCH) {
                 instruction.setOut(flattenedIndexesByRoot[instruction.out()]);
             }
@@ -3302,14 +3338,18 @@ final class Prog
         }
 
         // Remap start_unanchored and start.
+        int startRootId;
         if (startUnanchored() == 0) {
             // Leave both as zero.
+            startRootId = 0;
         }
         else if (startUnanchored() == start()) {
+            startRootId = 1;
             setStartUnanchored(flattenedIndexesByRoot[1]);
             setStart(flattenedIndexesByRoot[1]);
         }
         else {
+            startRootId = 2;
             setStartUnanchored(flattenedIndexesByRoot[1]);
             setStart(flattenedIndexesByRoot[2]);
         }
@@ -3318,25 +3358,12 @@ final class Prog
         insts = flattenedInstructions.retainedInstructions();
         instructionCount = flattenedInstructions.size();
 
-        // Populate the list-head mapping used by the BitState engine. Upstream gives list heads
-        // only to programs of at most 512 instructions, which sends a large program's captures to
-        // the NFA even for a short match. The visited bitmap grows with the list count, not the
-        // instruction count, so the bitmap bound below limits the text, as the Rust crate bounds
-        // its backtracker, and compilation lowers that limit for the job stack with
-        // limitBitStateMemory.
-        listCount = rootIdsByInstruction.size();
-        listHeads = null;
+        this.outputLists = null;
+        startList = -1;
         bitStateTextMaxSize = 0;
-        if (listCount <= Short.MAX_VALUE) {
-            short[] heads = new short[instructionCount];
-            Arrays.fill(heads, (short) -1);
-            for (int i = 0; i < listCount; i++) {
-                int headInstructionIndex = flattenedIndexesByRoot[i];
-                if (headInstructionIndex >= 0 && headInstructionIndex < heads.length) {
-                    heads[headInstructionIndex] = (short) i;
-                }
-            }
-            listHeads = heads;
+        if (outputLists != null) {
+            this.outputLists = outputLists;
+            startList = startRootId;
 
             // BitState allocates a bitmap of size listCount * (text.size()+1). The Java server
             // implementation accepts a larger fixed bound than upstream when that avoids three

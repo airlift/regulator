@@ -61,7 +61,7 @@ final class Compiler
     // bytes as above:
     // - 56: the instruction object, as above.
     // - 16: the instruction array slot, as above.
-    // - 2: the list-head entry.
+    // - 2: the instruction's output list id, which BitState indexes its visited set by.
     // - 31: the no-submatch NFA tables, which the first no-submatch NFA search builds and the
     //   program keeps: one byte, seven ints and two booleans.
     // - 8: the packed capture instruction word, which compilation builds and the program keeps.
