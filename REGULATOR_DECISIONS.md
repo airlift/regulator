@@ -1295,10 +1295,24 @@ one out; r9g and r8i safe tie. Holmes, `around-holmes-english` in Rust, takes
 A separate scan for short windows cost more on short lines. Email reused
 contains took 1.9 ns more than the base on r9g native and 4.0 ns more on r8i
 native, against 0.4 ns and 1.9 ns with the shared scan, and lh3lh3's short date
-lines gave back 6 to 7 points on r9g safe. Holmes ties the base on Graviton,
-1.012x native, only because of how C2 currently compiles the shared scan: the
-same check on an earlier base ran it 1.66x slower. A later change to the shared
-scan or its callers must therefore measure Holmes on r9g again.
+lines gave back 6 to 7 points on r9g safe. Holmes tied the base on Graviton,
+1.012x native, only because of how C2 then compiled the shared scan: the same
+check on an earlier base ran it 1.66x slower. A later change to the shared scans
+or their callers must therefore measure Holmes on r9g again.
+
+Since long inner literal searches moved to the fused pair scan, Holmes runs
+through that scan. Inlined, C2 copied the scan's vector loop into the callers it
+compiled, and which copy each language ran followed its profiles and compile
+order: on r9g, `\b\w+\s+Holmes\s+\w+\b` over the whole text took 33 us in some
+languages and 59 us in others, where the copy sat inside the ordinary engine's
+large match compile and spilled registers on every iteration. The scan now runs
+out of line, as [Literal Prefix Vector Scan](#literal-prefix-vector-scan)
+records. Measured with JDK 25 on a form of that loop that compared and ANDed
+on every platform, the row took 31 us on r9g in all four languages and in every
+fork, and on r8i, which keeps that form, 0.70x the inlined scan's time. On
+r9g's XOR form, the row takes 17.6 us in all four languages. A form that kept
+the earlier loop and moved its scalar tail into the method only to keep it out
+of line ran at 42 us on r9g.
 
 ## Trino LIKE Frontend
 
@@ -1574,6 +1588,12 @@ accepted at 1.13x to 1.16x for Cyrillic sherlock on r8i in all four languages,
 `no-match-uncommon` with the Rust and RE2 front ends on r8i. The likely cause,
 inferred but not measured, is that the dense candidates of Cyrillic text make
 the scan leave and re-enter its test loop at nearly every vector.
+
+Running out of line is also intended: every caller calls the scan's compiled
+method rather than an inlined copy shaped by the caller's profiles and compile
+order, which ran Holmes up to 1.8x apart, as
+[Short-Window Inner Literal Check](#short-window-inner-literal-check) records, so
+`TestHotMethodSize` also keeps the method above the inline limit.
 
 ## Candidate Masks on SVE
 
