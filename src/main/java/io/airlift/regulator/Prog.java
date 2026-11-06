@@ -31,12 +31,28 @@ import static java.util.Objects.requireNonNull;
 
 @SuppressFBWarnings(
         value = {"AT_NONATOMIC_64BIT_PRIMITIVE", "AT_NONATOMIC_OPERATIONS_ON_SHARED_VARIABLE", "AT_STALE_THREAD_WRITE_OF_PRIMITIVE"},
-        justification = "Prog is mutated during single-threaded compilation and safely published before matching")
+        justification = "Prog is mutated during single-threaded compilation and safely published before matching, except prefixScanScore, a racy scan choice that never changes a result")
 final class Prog
 {
     private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
     private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
     private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
+    // The fused search's choice between its pair and first-byte scans; see prefixAccelFused.
+    // A score of FIRST_BYTE_SCAN_MINIMUM_SCORE or more runs the first-byte scan. Only matches at a
+    // position that is a multiple of 8 score. A pair scan match that starts 192 to 3,072 bytes
+    // into its search adds a point and any other match takes 2; reaching the minimum sets the
+    // score to FIRST_BYTE_SCAN_ENTRY_SCORE, so the first-byte scan starts 16 points above it.
+    // prefixAccelFirstByte lists the first-byte scan's scoring rules, which stop at
+    // FIRST_BYTE_SCAN_MAXIMUM_SCORE.
+    private static final int SCORE_SAMPLE_MASK = 7;
+    private static final int FIRST_BYTE_SCAN_MINIMUM_SCORE = 16;
+    private static final int FIRST_BYTE_SCAN_ENTRY_SCORE = 32;
+    private static final int FIRST_BYTE_SCAN_MAXIMUM_SCORE = 64;
+    private static final int SPARSE_MATCH_MINIMUM_GAP = 192;
+    private static final int SPARSE_MATCH_MAXIMUM_GAP = 3_072;
+    private static final int FIRST_BYTE_SCAN_CALL_BYTES = 8_192;
+    private static final int FIRST_BYTE_SCAN_CALL_FAILURES = 16;
+    private static final int FIRST_BYTE_SCAN_CALL_PENALTY = 16;
 
     public enum MatchKind
     {
@@ -392,6 +408,11 @@ final class Prog
     private int[] prefixShifts;
     // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
     private long prefixShiftsCharge;
+    // Read once and written at most once per fused search, only when it changes: after a match
+    // at a multiple of 8 in either scan, or after a first-byte scan call that finds no match or
+    // takes the 16-point penalty. Threads that share this program race on it harmlessly: it picks
+    // a scan, never a result.
+    private int prefixScanScore;
     private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
 
     // The literal every match begins with behind a leading assertion, and its search; see
@@ -1326,6 +1347,7 @@ final class Prog
         this.prefixCheckOffset = 0;
         this.prefixProbeBroadcastMask = 0;
         this.prefixShifts = null;
+        this.prefixScanScore = 0;
         this.dfaMemory += prefixShiftsCharge;
         this.prefixShiftsCharge = 0;
         if (bytes == null || bytes.length == 0) {
@@ -1373,7 +1395,8 @@ final class Prog
     /// - First-byte and last-byte masks for folded prefixes, a vector at a time on long windows
     /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes that probe their
     ///   first byte, in Vector lanes for long searches and, for a non-ASCII first byte, in SWAR
-    ///   words when the search is short or the Vector API is unavailable
+    ///   words when the search is short or the Vector API is unavailable; on 16-lane vectors a
+    ///   long search switches to a first-byte scan while matches are sparse
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
@@ -1404,7 +1427,7 @@ final class Prog
         int end = offset + length;
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
         if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
-            return finishWithKmp(data, end, VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1));
+            return prefixAccelFused(data, offset, length);
         }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
             return finishWithKmp(data, end, prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length));
@@ -1448,11 +1471,115 @@ final class Prog
         return -1;
     }
 
+    /// Runs the [PrefixAccelStrategy#FUSED_VECTOR] search. On 16-lane vectors it picks the scan
+    /// from [#prefixScanScore]: the pair scan, or the first-byte scan of [#prefixAccelFirstByte]
+    /// once the pair scan has found mostly sparse matches. On those vectors the pair loop costs
+    /// about 9 cycles a vector when candidates turn up often, while the first-byte scan seldom
+    /// stops. Wider vectors amortize that loop, so they always run the pair scan.
+    private int prefixAccelFused(byte[] data, int offset, int length)
+    {
+        int end = offset + length;
+        int score = 0;
+        if (VectorSupport.SIXTEEN_LANES) {
+            score = prefixScanScore;
+            if (score >= FIRST_BYTE_SCAN_MINIMUM_SCORE) {
+                return prefixAccelFirstByte(data, offset, end, score);
+            }
+        }
+        int found = VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1);
+        if (VectorSupport.SIXTEEN_LANES && found >= 0 && (found & SCORE_SAMPLE_MASK) == 0) {
+            int gap = found - offset;
+            int next = gap >= SPARSE_MATCH_MINIMUM_GAP && gap <= SPARSE_MATCH_MAXIMUM_GAP ? score + 1 : Math.max(0, score - 2);
+            if (next != score) {
+                prefixScanScore = next >= FIRST_BYTE_SCAN_MINIMUM_SCORE ? FIRST_BYTE_SCAN_ENTRY_SCORE : next;
+            }
+        }
+        return finishWithKmp(data, end, found);
+    }
+
+    /// The first-byte scan of [#prefixAccelFused], from `offset` to `end`, given the score the
+    /// call read. Each match at a multiple of 8 adds 2 to the score less the call's failed
+    /// candidates, up to [#FIRST_BYTE_SCAN_MAXIMUM_SCORE], and a search that ends without a match
+    /// takes a point per whole KiB. A call that passes 8 KiB without a match, or fails 16
+    /// candidates, takes 16 points and finishes with the pair scan; one whose failed candidates
+    /// spend the comparison budget finishes with KMP and leaves the score. Each call writes it at
+    /// most once, on the exit that changes it. Below [#FIRST_BYTE_SCAN_MINIMUM_SCORE] the program
+    /// returns to the pair scan with a score of zero. Returns what [#prefixAccel] returns. Its
+    /// candidate checks are those of [#continueFrontAndBack]; keep the two in step.
+    private int prefixAccelFirstByte(byte[] data, int offset, int end, int score)
+    {
+        byte prefixFront = prefix[0];
+        byte prefixBack = prefix[prefixSize - 1];
+        int lastStart = end - prefixSize;
+        int scanEnd = lastStart + 1 - offset > FIRST_BYTE_SCAN_CALL_BYTES ? offset + FIRST_BYTE_SCAN_CALL_BYTES : lastStart + 1;
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
+        int failures = 0;
+        int position = offset;
+        while (true) {
+            int next = indexOf(data, position, scanEnd - position, prefixFront, false);
+            if (next < 0) {
+                break;
+            }
+            if (data[next + prefixSize - 1] == prefixBack) {
+                int matchedLength = prefixMatchingLength(data, next);
+                if (matchedLength == prefixSize) {
+                    if ((next & SCORE_SAMPLE_MASK) == 0) {
+                        updatePrefixScanScore(score, Math.min(FIRST_BYTE_SCAN_MAXIMUM_SCORE, score + 2 - failures));
+                    }
+                    return next;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, next)) {
+                    return LiteralSearchKernel.findKmp(data, next + 1, end, prefix, prefixShifts);
+                }
+            }
+            position = next + 1;
+            if (++failures == FIRST_BYTE_SCAN_CALL_FAILURES) {
+                scanEnd = position;
+                break;
+            }
+        }
+        // A call that failed 16 candidates takes the penalty even when its last one ended the
+        // search, so failures alone cannot hold the program in this scan.
+        if (scanEnd > lastStart && failures < FIRST_BYTE_SCAN_CALL_FAILURES) {
+            updatePrefixScanScore(score, score - ((scanEnd - offset) >> 10));
+            return -1;
+        }
+        updatePrefixScanScore(score, score - FIRST_BYTE_SCAN_CALL_PENALTY);
+        return finishWithKmp(data, end, VectorPrefixScanner.find(data, scanEnd, end - scanEnd, prefix, 0, prefixSize - 1));
+    }
+
+    /// Stores the score a first-byte scan call computed, once and only when it changed.
+    private void updatePrefixScanScore(int score, int next)
+    {
+        if (next != score) {
+            prefixScanScore = next < FIRST_BYTE_SCAN_MINIMUM_SCORE ? 0 : next;
+        }
+    }
+
+    /// Runs the [PrefixAccelStrategy#FUSED_VECTOR] search with its scan forced: the first-byte
+    /// scan at the highest score, which updates the score as a search would, or the pair scan;
+    /// only tests call it.
+    int prefixAccelFusedForTesting(byte[] data, int offset, int length, boolean firstByteScan)
+    {
+        if (firstByteScan) {
+            return prefixAccelFirstByte(data, offset, offset + length, FIRST_BYTE_SCAN_MAXIMUM_SCORE);
+        }
+        return finishWithKmp(data, offset + length, VectorPrefixScanner.find(data, offset, length, prefix, 0, prefixSize - 1));
+    }
+
+    /// Returns the score that picks the fused search's scan; only tests call it.
+    int prefixScanScoreForTesting()
+    {
+        return prefixScanScore;
+    }
+
     /// Returns the absolute index where [#prefixAccel] continues with KMP; only tests call it.
     /// Returns -1 when the search ends, with or without a match, before it switches to KMP, and
-    /// for a folded or one-byte prefix. It runs the scans [#prefixAccel] runs, except that the
-    /// first-byte scan starts in [#continueFrontAndBack], whose handoff is the same because the
-    /// scan charges nothing before its first failed candidate.
+    /// for a folded or one-byte prefix. It runs the scans [#prefixAccel] runs while the fused
+    /// search takes its pair scan, as on a new program, except that the repeated first-byte scan
+    /// starts in [#continueFrontAndBack], whose handoff is the same because the scan charges
+    /// nothing before its first failed candidate.
     int prefixAccelKmpHandoffForDiagnostics(byte[] data, int offset, int length)
     {
         if (prefixFoldCase || prefixSize <= 1 || length < prefixSize) {
@@ -1476,10 +1603,11 @@ final class Prog
         return found;
     }
 
-    /// Continues the first-byte scan of [#prefixAccel] from `position`, charging failed
+    /// Continues the repeated first-byte scan of [#prefixAccel] from `position`, charging failed
     /// candidates to the comparison budget from `offset`. Returns what [#prefixAccel] returns,
     /// or `-2 - resume` when the search must continue with KMP at `resume`. Out of line so the
-    /// scan up to the first failed candidate keeps no budget state.
+    /// scan up to the first failed candidate keeps no budget state. [#prefixAccelFirstByte]
+    /// checks candidates the same way; keep the two in step.
     private int continueFrontAndBack(byte[] data, int offset, int position, int end)
     {
         byte prefixFront = prefix[0];

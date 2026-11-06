@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Random;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -146,12 +147,128 @@ public class TestFusedPrefixAcceleration
     }
 
     @Test
+    public void testFirstByteAndPairScansAgree()
+    {
+        // Each input runs through both scans of the fused search. They cover a match in the
+        // first vector and past the first-byte scan's 8 KiB call limit, 16 failed candidates in a
+        // row, failed candidates that spend the comparison budget, and no match before and past
+        // the call limit.
+        Random random = new Random(42);
+        byte[] prefix = "The".getBytes(StandardCharsets.US_ASCII);
+        for (int iteration = 0; iteration < 200; iteration++) {
+            byte[] data = new byte[1_024 + random.nextInt(20_000)];
+            for (int index = 0; index < data.length; index++) {
+                data[index] = (byte) "Tthe x".charAt(random.nextInt(6));
+            }
+            int matches = random.nextInt(4);
+            for (int match = 0; match < matches; match++) {
+                System.arraycopy(prefix, 0, data, random.nextInt(data.length - prefix.length + 1), prefix.length);
+            }
+            assertScansAgree(prefix, data, random.nextInt(8));
+        }
+        byte[] sparse = new byte[20_000];
+        Arrays.fill(sparse, (byte) 'x');
+        assertScansAgree(prefix, Arrays.copyOf(sparse, 4_096), 0);
+        assertScansAgree(prefix, sparse, 0);
+        System.arraycopy(prefix, 0, sparse, 12_000, prefix.length);
+        assertScansAgree(prefix, sparse, 0);
+        assertScansAgree(prefix, sparse, 11_999);
+        byte[] failures = sparse.clone();
+        for (int position = 100; position < 200; position += 5) {
+            failures[position] = 'T';
+        }
+        assertScansAgree(prefix, failures, 0);
+        byte[] atCallLimit = sparse.clone();
+        System.arraycopy(prefix, 0, atCallLimit, 8_192, prefix.length);
+        assertScansAgree(prefix, atCallLimit, 0);
+        assertScansAgree(prefix, atCallLimit, 9_000);
+        byte[] afterFailures = sparse.clone();
+        Arrays.fill(afterFailures, 0, 16, (byte) 'T');
+        System.arraycopy(prefix, 0, afterFailures, 16, prefix.length);
+        assertScansAgree(prefix, afterFailures, 0);
+        // 8,193 candidate starts, one more than a call scans, with the match at the last.
+        byte[] lastStart = Arrays.copyOf(sparse, 8_192 + prefix.length);
+        System.arraycopy(prefix, 0, lastStart, 8_192, prefix.length);
+        assertScansAgree(prefix, lastStart, 0);
+
+        byte[] budgetPrefix = withA5(("a".repeat(100) + "b" + "a".repeat(100)).getBytes(StandardCharsets.US_ASCII));
+        byte[] budgetData = withA5(("x".repeat(824) + "a".repeat(400) + "x".repeat(200)).getBytes(StandardCharsets.US_ASCII));
+        System.arraycopy(budgetPrefix, 0, budgetData, 1_000, budgetPrefix.length);
+        assertScansAgree(budgetPrefix, budgetData, 0);
+        // The candidate at 0 spends the budget, and KMP resumes at the match right after it.
+        byte[] longPrefix = new byte[1_001];
+        Arrays.fill(longPrefix, (byte) 0xA5);
+        longPrefix[500] = 'b';
+        byte[] afterBudget = new byte[20_000];
+        Arrays.fill(afterBudget, (byte) 'x');
+        afterBudget[0] = (byte) 0xA5;
+        System.arraycopy(longPrefix, 0, afterBudget, 1, longPrefix.length);
+        assertScansAgree(longPrefix, afterBudget, 0);
+        // The first-byte scan hands that search to KMP without scoring it, so a match at 8 after
+        // the spent candidate leaves a new program's score at zero.
+        byte[] sampledAfterBudget = new byte[20_000];
+        Arrays.fill(sampledAfterBudget, (byte) 'x');
+        Arrays.fill(sampledAfterBudget, 0, 8, (byte) 0xA5);
+        System.arraycopy(longPrefix, 0, sampledAfterBudget, 8, longPrefix.length);
+        Prog budgetProgram = configuredProgram(longPrefix, false);
+        assertThat(budgetProgram.prefixAccelFusedForTesting(sampledAfterBudget, 0, sampledAfterBudget.length, true)).isEqualTo(8);
+        assertThat(budgetProgram.prefixScanScoreForTesting()).isZero();
+    }
+
+    @Test
+    public void testScoreSwitchesBetweenScans()
+    {
+        // Sparse matches move the search to the first-byte scan, where a counted match adds two
+        // less its failed candidates, a search without a match takes a point per whole KiB, and a
+        // call that fails 16 candidates moves it back, even when the last failure ends the search.
+        assumeTrue(VectorSupport.SIXTEEN_LANES, "requires 16-lane vectors");
+        byte[] prefix = "ab".getBytes(StandardCharsets.US_ASCII);
+        Prog program = configuredProgram(prefix, false);
+        byte[] sparse = new byte[4_096];
+        Arrays.fill(sparse, (byte) 'x');
+        System.arraycopy(prefix, 0, sparse, 256, prefix.length);
+        for (int search = 0; search < 16; search++) {
+            assertThat(program.prefixAccel(sparse, 0, sparse.length)).isEqualTo(256);
+        }
+        assertThat(program.prefixScanScoreForTesting()).isEqualTo(32);
+        assertThat(program.prefixAccel(sparse, 0, sparse.length)).isEqualTo(256);
+        assertThat(program.prefixScanScoreForTesting()).isEqualTo(34);
+        byte[] atEnd = Arrays.copyOf(sparse, 2_048);
+        System.arraycopy(prefix, 0, atEnd, atEnd.length - prefix.length, prefix.length);
+        // A match at the last start, off the sampled positions, leaves the score as it is.
+        assertThat(program.prefixAccel(atEnd, 300, atEnd.length - 300)).isEqualTo(atEnd.length - prefix.length);
+        assertThat(program.prefixScanScoreForTesting()).isEqualTo(34);
+        byte[] absent = new byte[4_096];
+        Arrays.fill(absent, (byte) 'x');
+        assertThat(program.prefixAccel(absent, 0, absent.length)).isEqualTo(-1);
+        assertThat(program.prefixScanScoreForTesting()).isEqualTo(31);
+
+        byte[] failures = new byte[1_024];
+        Arrays.fill(failures, (byte) 'x');
+        for (int position = 62; position <= failures.length - prefix.length; position += 64) {
+            failures[position] = 'a';
+        }
+        // 31 less the 16-point penalty falls below 16, so the program returns to the pair scan.
+        assertThat(program.prefixAccel(failures, 0, failures.length)).isEqualTo(-1);
+        assertThat(program.prefixScanScoreForTesting()).isZero();
+    }
+
+    @Test
     public void testIneligiblePrefixesStayOnExistingRoutes()
     {
         assertThat(configuredProgram(PREFIX, true).prefixAccelStrategy(4_096))
                 .isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
         assertThat(configuredProgram(new byte[] {(byte) 0xD0}, false).prefixAccelStrategy(4_096))
                 .isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+    }
+
+    private static void assertScansAgree(byte[] prefix, byte[] data, int offset)
+    {
+        Prog program = configuredProgram(prefix, false);
+        int length = data.length - offset;
+        int expected = Slices.wrappedBuffer(data).indexOf(Slices.wrappedBuffer(prefix), offset);
+        assertThat(program.prefixAccelFusedForTesting(data, offset, length, false)).isEqualTo(expected);
+        assertThat(program.prefixAccelFusedForTesting(data, offset, length, true)).isEqualTo(expected);
     }
 
     /// Asserts where, relative to the window, the scan of a window holding `lead` followed by

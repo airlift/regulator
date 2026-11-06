@@ -18,18 +18,23 @@ import jdk.incubator.vector.ByteVector;
 
 import java.lang.management.ManagementFactory;
 
-/// Reports whether the vector scanners can run, and which candidate-mask form their multi-byte
-/// scans take ([#SVE_128]). They need the optional `jdk.incubator.vector`
-/// module and a preferred byte vector of 16 to 64 lanes. With fewer lanes, the lookup wraps the
-/// 16-entry nibble tables; with more, the replicated tables hold only 64 bytes, and
-/// `VectorMask.toLong()` throws for masks wider than 64 lanes. Other JVMs use the scalar or SWAR
-/// scanners. This one switch conservatively turns off every vector route, including the fixed
-/// 128-bit scans that would be correct at 8 lanes.
+/// Reports whether the vector scanners can run, whether the preferred byte vector has 16 lanes
+/// ([#SIXTEEN_LANES]), and which candidate-mask form their multi-byte scans take ([#SVE_128]). They
+/// need the optional `jdk.incubator.vector` module and a preferred byte vector of 16 to 64 lanes.
+/// With fewer lanes, the lookup wraps the 16-entry nibble tables; with more, the replicated tables
+/// hold only 64 bytes, and `VectorMask.toLong()` throws for masks wider than 64 lanes. Other JVMs
+/// use the scalar or SWAR scanners. Availability is one switch that conservatively turns off every
+/// vector route, including the fixed 128-bit scans that would be correct at 8 lanes.
 final class VectorSupport
 {
     private static final boolean AVAILABLE = ModuleLayer.boot()
             .findModule("jdk.incubator.vector")
             .isPresent() && PreferredSpecies.hasSupportedLength();
+
+    // Whether the preferred byte vector has 16 lanes, as with SVE on r9g or with NEON. There, a
+    // literal prefix with sparse matches scans for its first byte instead of its byte pair;
+    // "Literal Prefix Vector Scan" in REGULATOR_DECISIONS.md records why and the measurements.
+    static final boolean SIXTEEN_LANES = AVAILABLE && PreferredSpecies.hasSixteenLanes();
 
     // Whether C2 compiles this JVM's vector code with SVE and a 16-byte preferred byte vector, as
     // on r9g. There, the multi-byte candidate scans XOR each probe byte, OR the results, and
@@ -48,7 +53,7 @@ final class VectorSupport
 
     private static boolean sve128()
     {
-        if (!AVAILABLE || !"aarch64".equals(System.getProperty("os.arch")) || !PreferredSpecies.hasSixteenLanes()) {
+        if (!SIXTEEN_LANES || !"aarch64".equals(System.getProperty("os.arch"))) {
             return false;
         }
         try {

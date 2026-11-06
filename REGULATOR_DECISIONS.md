@@ -1238,6 +1238,34 @@ the contains search's comparison budget, after which KMP finishes the search.
 Front/back byte selection keeps preprocessing bounded and the integrated scanner
 compact.
 
+With 16-byte preferred vectors, as with SVE on r9g or with NEON, the pair scan
+costs about 9 cycles a vector when candidates turn up often, while a first-byte
+scan seldom stops for a literal whose matches are sparse. So each program keeps
+a score of where the matches of its prefix acceleration's pair scan fall,
+counting only matches at a multiple of 8. A match 192 to 3,072 bytes into its
+search adds a point and any other match takes two; at 16 the score jumps to 32,
+and long searches switch to the first-byte scan with 16 points to spare. There,
+each counted match adds two less the candidates the call failed, up to 64; a
+search that ends without a match takes a point per whole KiB; a call that passes
+8 KiB without a match or fails 16 candidates takes 16 points and finishes with
+the pair scan; and a call whose failed candidates spend the comparison budget
+finishes with KMP and leaves the score. Below 16 the program returns to the pair
+scan. The switch covers every prefix the fused vector scan takes, though only
+ASCII-led literals were measured.
+
+Each call reads the score once and writes it at most once, only when it changes:
+in the pair scan after a counted match, and in the first-byte scan after a
+counted match, after a search that ends without a match, or with the 16-point
+penalty. Searches without a match therefore write it even when most rows match:
+on 2 KiB rows that match 90% of the time, a local count found writes on 16% of
+searches. Threads that share a program race on it harmlessly, because it picks a
+scan, never a result; what the writes cost such threads is unmeasured. On r9g
+with JDK 25, counting `The` in rebar's sherlock text takes 0.63 times the pair
+scan's time (0.62 for Java and 0.67 for Rust), 75.6k ns against RE2's native
+87.0k. `the`, which matches every 82 bytes, never switches and pays 3%;
+`Sherlock` pays 2%, and `aqj` and `zqj` are unchanged. Wider vectors fold the
+switch away, and r8i stays within 2%.
+
 ## Candidate Masks on SVE
 
 Three vector scans build a candidate mask from bytes that must all match: the
@@ -1296,7 +1324,8 @@ Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,
 and Rust), scan for one probe byte. A prefix whose probe stays at its first byte
 instead takes the [first-and-last pair scan](#literal-prefix-vector-scan) on
-inputs of at least 1 KiB when the Vector API is available. Every distribution
+inputs of at least 1 KiB when the Vector API is available, or the first-byte
+scan that section switches to while matches are sparse. Every distribution
 follows one rule: the probe is the rarest byte after the first, earliest on
 ties, used only when its estimated probability is less than a quarter of the
 first byte's; otherwise the probe remains offset 0. The factor keeps the first
