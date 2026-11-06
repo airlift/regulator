@@ -30,6 +30,7 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -39,6 +40,7 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 
@@ -65,25 +67,33 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
 /// literal, `[a-z]shing`: every language, Trino included, keeps the DFA's inner literal search
 /// instead of the fixed-width matcher, which would check every `s`, and runs the matcher only for
-/// counts and matcher finds of fewer than 64 bytes, where the search does not run. ORDERED_LITERALS
-/// finds three literals in order with any text between them and runs the ordinary search today.
-/// LITERAL_SET alternates 100 words, over the limit of 64 literals of the literal-alternation span
-/// matcher: full-Slice `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers
-/// find it with the literal set's automaton, skipping the bytes that lead no word with a vector
-/// scan on LONG rows. SINGLE_BYTE is the one-byte exact literal `,`, which a matcher's `find` reads
-/// with the single-byte table on SHORT rows and with the group-zero forward cursor's vector scan on
-/// LONG rows. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
+/// counts and matcher finds of fewer than 64 bytes, where the search does not run.
+/// ORDERED_LITERALS, three literals in order with any text between them, is a control for the
+/// byte-gap ordered-literal find plan, which only RE2 Latin-1 or `\C` and Rust bytes-API patterns
+/// reach: its UTF-8 `(?s:.)` gaps match no malformed UTF-8, so RE2, Java, and Rust run the ordinary
+/// search. ORDERED_LITERALS_BYTES measures that plan: the same expression compiled with RE2's
+/// Latin-1 option and, after `(?-u)`, with Rust's bytes API, whose gaps match any byte, so
+/// full-Slice `find` runs the ordered-literal find plan while `count` and the matcher still run the
+/// engine. Its rows are Latin-1 bytes, with accented letters and a stray `0xFF` that are no UTF-8.
+/// Java and Trino have no byte mode, so setup rejects the target in them. LITERAL_SET alternates
+/// 100 words, over the limit of 64 literals of the literal-alternation span matcher: full-Slice
+/// `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers find it with the
+/// literal set's automaton, skipping the bytes that lead no word with a vector scan on LONG rows.
+/// SINGLE_BYTE is the one-byte exact literal `,`, which a matcher's `find` reads with the
+/// single-byte table on SHORT rows and with the group-zero forward cursor's vector scan on LONG
+/// rows. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
 /// `(?s)`; RE2 and Rust search it as a contained literal and count and iterate its spans on the
 /// dot-star literal matcher, while Java, whose dot stops at more line terminators, runs the
 /// ordinary search. TestBenchmarkPatternDispatch checks each route in RE2, Java, and Rust, and in
 /// Trino only that FOLDED_PAIR_SEQUENCE takes no fixed-width route. SHORT rows are 16 to 64 bytes
 /// and LONG rows 1024 bytes, padded in the host run of the anchored URL pattern, after the text of
-/// ANCHORED_LITERAL, whose search reads only its start, and before the text of the others. LONG
-/// inputs contain padding, but anchored URL rows 4–6 reject before reaching it. The padding of
-/// INNER_LITERAL_FIXED_WIDTH is English text rich in `s` without its literal, so its SHORT rows
-/// find the literal within their first 64 bytes and its LONG rows only after them, the two sides of
-/// the inner literal search's 64-byte minimum skip. Each target's rows mix matching and
-/// non-matching log lines, requests, URLs, or prose.
+/// ANCHORED_LITERAL, whose search reads only its start, after the first literal of
+/// ORDERED_LITERALS_BYTES, so its gap search crosses the padding before it decides, and before the
+/// text of the others. LONG inputs contain padding, but anchored URL rows 4–6 reject before
+/// reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s`
+/// without its literal, so its SHORT rows find the literal within their first 64 bytes and its LONG
+/// rows only after them, the two sides of the inner literal search's 64-byte minimum skip. Each
+/// target's rows mix matching and non-matching log lines, requests, URLs, or prose.
 ///
 /// Where a route above names no language, it is the route of RE2, Java, and Rust. Trino compiles
 /// most targets to its own subtypes instead, such as its ordered-literal matcher for
@@ -119,6 +129,10 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// pattern on each row, from one call site: the loop of an application that holds many patterns.
 /// It reports the time per call. Its state always compiles the pollution set and has no `polluted`
 /// parameter, since its own loop trains the shared methods with every pattern.
+///
+/// ORDERED_LITERALS_BYTES is no other target's pollution pattern and adds no training rows, so
+/// every other target's runs stay as they were. It runs only with `polluted=false`, setup rejects
+/// `polluted=true`, and `sharedSite` does not run it.
 ///
 /// With `generated=true`, every pattern compiles with generated bytecode requested. Setup
 /// requires the target to have a generated class, which only the case-sensitive scan-plan targets
@@ -170,7 +184,7 @@ public class BenchmarkPatternDispatch
             hidden island jacket kitchen ladder letter listen market member method
             middle minute mirror modern moment mother number office orange window
             """.strip().split("\\s+"));
-    // The target, the seventeen other targets, and the POLLUTION patterns.
+    // The target, the seventeen other targets of `sharedSite`, and the POLLUTION patterns.
     private static final int SHARED_SITE_PATTERNS = 24;
 
     private static volatile long trainingSink;
@@ -197,6 +211,7 @@ public class BenchmarkPatternDispatch
                 "FOLDED_PAIR_SEQUENCE",
                 "INNER_LITERAL_FIXED_WIDTH",
                 "ORDERED_LITERALS",
+                "ORDERED_LITERALS_BYTES",
                 "LITERAL_SET",
                 "SINGLE_BYTE",
                 "DOT_STAR_LITERAL",
@@ -207,6 +222,7 @@ public class BenchmarkPatternDispatch
         @Param({"SHORT", "LONG"})
         public String rows;
 
+        // `true` is invalid for ORDERED_LITERALS_BYTES, which has no pollution set.
         @Param({"false", "true"})
         public boolean polluted;
 
@@ -220,9 +236,13 @@ public class BenchmarkPatternDispatch
         @Setup
         public void setup()
         {
+            boolean bytes = target.equals("ORDERED_LITERALS_BYTES");
+            if (bytes && polluted) {
+                throw new IllegalArgumentException(target + " has no pollution set; it runs only with polluted=false");
+            }
             inputs = inputs(target, rows);
             List<String> expressions = polluted ? sharedSiteExpressions(target) : List.of(expression(target));
-            patterns = compile(language, expressions, generated, inputs);
+            patterns = compile(language, expressions, generated, bytes, inputs);
 
             if (polluted) {
                 Slice[] trainingInputs = trainingInputs(rows);
@@ -246,7 +266,7 @@ public class BenchmarkPatternDispatch
         @Param({"RE2", "JAVA", "RUST", "TRINO"})
         public String language;
 
-        // The targets of BenchmarkData.
+        // The targets of BenchmarkData, all but ORDERED_LITERALS_BYTES.
         @Param({
                 "ANCHORED_WWW_HOST",
                 "UNANCHORED_URL",
@@ -284,7 +304,7 @@ public class BenchmarkPatternDispatch
         public void setup()
         {
             inputs = inputs(target, rows);
-            patterns = compile(language, sharedSiteExpressions(target), generated, inputs);
+            patterns = compile(language, sharedSiteExpressions(target), generated, false, inputs);
         }
     }
 
@@ -333,14 +353,18 @@ public class BenchmarkPatternDispatch
         return data.patterns.sharedSite(data.inputs);
     }
 
-    /// Compiles `expressions` of `language`, the target first, and requires the target to have a
-    /// generated class when `generated` is set and to find some of `inputs` but not all.
-    private static LanguagePatterns compile(String language, List<String> expressions, boolean generated, Slice[] inputs)
+    /// Compiles `expressions` of `language`, the target first, in byte mode when `bytes` is set,
+    /// and requires the target to have a generated class when `generated` is set and to find some
+    /// of `inputs` but not all. Only RE2 and Rust have a byte mode.
+    private static LanguagePatterns compile(String language, List<String> expressions, boolean generated, boolean bytes, Slice[] inputs)
     {
+        if (bytes && !language.equals("RE2") && !language.equals("RUST")) {
+            throw new IllegalArgumentException(language + " has no byte mode for " + expressions.getFirst());
+        }
         LanguagePatterns patterns = switch (language) {
-            case "RE2" -> new Re2Patterns(expressions, generated);
+            case "RE2" -> new Re2Patterns(expressions, generated, bytes);
             case "JAVA" -> new JavaPatterns(expressions, generated);
-            case "RUST" -> new RustPatterns(expressions, generated);
+            case "RUST" -> new RustPatterns(expressions, generated, bytes);
             case "TRINO" -> new TrinoPatterns(expressions, generated);
             default -> throw new IllegalArgumentException("unknown language: " + language);
         };
@@ -365,8 +389,20 @@ public class BenchmarkPatternDispatch
 
     static List<String> targets()
     {
+        return targets(BenchmarkData.class);
+    }
+
+    /// Returns the targets of `sharedSite`, every target but ORDERED_LITERALS_BYTES: the patterns
+    /// of [#sharedSiteExpressions(String)] and the rows of training.
+    static List<String> sharedSiteTargets()
+    {
+        return targets(SharedSiteData.class);
+    }
+
+    private static List<String> targets(Class<?> state)
+    {
         try {
-            return List.of(BenchmarkData.class.getDeclaredField("target").getAnnotation(Param.class).value());
+            return List.of(state.getDeclaredField("target").getAnnotation(Param.class).value());
         }
         catch (NoSuchFieldException e) {
             throw new IllegalStateException(e);
@@ -390,7 +426,7 @@ public class BenchmarkPatternDispatch
             case "FOLDED_PLAN" -> "(?i)content-type:([^;]+);";
             case "FOLDED_PAIR_SEQUENCE" -> "[Kk][a-z]{7}";
             case "INNER_LITERAL_FIXED_WIDTH" -> "[a-z]shing";
-            case "ORDERED_LITERALS" -> "a(?s:.*)b(?s:.*)c";
+            case "ORDERED_LITERALS", "ORDERED_LITERALS_BYTES" -> "a(?s:.*)b(?s:.*)c";
             case "LITERAL_SET" -> String.join("|", LITERAL_SET_WORDS);
             case "SINGLE_BYTE" -> ",";
             case "DOT_STAR_LITERAL" -> ".*timeout.*";
@@ -398,13 +434,13 @@ public class BenchmarkPatternDispatch
         };
     }
 
-    /// Returns the target's expression, then those of every other target, then [#POLLUTION]:
-    /// the patterns of setup's training and of `sharedSite`, in their order.
+    /// Returns the target's expression, then those of every other target of `sharedSite`, then
+    /// [#POLLUTION]: the patterns of setup's training and of `sharedSite`, in their order.
     private static List<String> sharedSiteExpressions(String target)
     {
         List<String> expressions = new ArrayList<>();
         expressions.add(expression(target));
-        for (String other : targets()) {
+        for (String other : sharedSiteTargets()) {
             if (!other.equals(target)) {
                 expressions.add(expression(other));
             }
@@ -457,9 +493,10 @@ public class BenchmarkPatternDispatch
         // One group-zero matcher per pattern, reset to each row.
         final RegexpMatcher[] matchers;
 
-        private Re2Patterns(List<String> expressions, boolean generated)
+        // In byte mode, patterns and inputs are Latin-1, so `(?s:.)` matches any byte.
+        private Re2Patterns(List<String> expressions, boolean generated, boolean bytes)
         {
-            Re2.Options options = Re2.Options.defaults().setGenerateBytecode(generated);
+            Re2.Options options = (bytes ? Re2.Options.latin1() : Re2.Options.defaults()).setGenerateBytecode(generated);
             patterns = expressions.stream().map(expression -> Re2.compile(utf8Slice(expression), options)).toArray(Re2[]::new);
             target = patterns[0];
             matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(RegexpMatcher[]::new);
@@ -691,10 +728,13 @@ public class BenchmarkPatternDispatch
         // One group-zero matcher per pattern, reset to each row.
         final RegexpMatcher[] matchers;
 
-        private RustPatterns(List<String> expressions, boolean generated)
+        // In byte mode, each expression compiles with the bytes API after `(?-u)`, with which
+        // `(?s:.)` matches any byte rather than one UTF-8 character.
+        private RustPatterns(List<String> expressions, boolean generated, boolean bytes)
         {
-            RustRegexp.Options options = RustRegexp.Options.defaults().setGenerateBytecode(generated);
-            patterns = expressions.stream().map(expression -> RustRegexp.compile(utf8Slice(expression), options)).toArray(RustRegexp[]::new);
+            RustRegexp.Options options = (bytes ? RustRegexp.Options.bytes() : RustRegexp.Options.defaults()).setGenerateBytecode(generated);
+            String flags = bytes ? "(?-u)" : "";
+            patterns = expressions.stream().map(expression -> RustRegexp.compile(utf8Slice(flags + expression), options)).toArray(RustRegexp[]::new);
             target = patterns[0];
             matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(RegexpMatcher[]::new);
             targetMatcher = matchers[0];
@@ -904,9 +944,9 @@ public class BenchmarkPatternDispatch
         }
     }
 
-    /// Returns row `row` of a target. A LONG row fills the template's padding up to
-    /// [#LONG_ROW_BYTES] with the target's [#filler(String)], repeated and cut to length; a SHORT
-    /// row leaves it empty.
+    /// Returns row `row` of a target, encoded as UTF-8, or as Latin-1 for ORDERED_LITERALS_BYTES.
+    /// A LONG row fills the template's padding up to [#LONG_ROW_BYTES] with the target's
+    /// [#filler(String)], repeated and cut to length; a SHORT row leaves it empty.
     private static byte[] row(String target, int row, boolean longRow)
     {
         String host = "host" + row + ".example.com";
@@ -1061,6 +1101,18 @@ public class BenchmarkPatternDispatch
                 case 6 -> "WARN slow query on db-" + row;
                 default -> "INFO subscriber " + row + " attached";
             };
+            // The padding follows each row's first `a`, and rows 1, 3, 5, and 6 lack a `b`, or a
+            // `c` after it, past that `a`.
+            case "ORDERED_LITERALS_BYTES" -> switch (row % 8) {
+                case 0 -> "WARN Müller pa" + PAD + "id by card " + row;
+                case 1 -> "INFO ca" + PAD + "fé opened at " + row + " hours";
+                case 2 -> "ERROR São Pa" + PAD + "ulo backlog " + row + " cleared";
+                case 3 -> "DEBUG cubes from Mála" + PAD + "ga " + row;
+                case 4 -> "TRACE ra" + PAD + "w bytes \u00ff\u00ff in block " + row;
+                case 5 -> "INFO Ångström la" + PAD + "bel " + row + " set";
+                case 6 -> "ERROR Göteborg bra" + PAD + "nch closed, row " + row;
+                default -> "INFO fa" + PAD + "çade rebuilt, cache " + row;
+            };
             case "LITERAL_SET" -> PAD + switch (row % 8) {
                 case 0 -> "we met again after the storm, row " + row;
                 case 1 -> "INFO request " + row + " completed in 12ms";
@@ -1093,33 +1145,36 @@ public class BenchmarkPatternDispatch
             };
             default -> throw new IllegalArgumentException("unknown target: " + target);
         };
-        int length = LONG_ROW_BYTES - template.replace(PAD, "").getBytes(UTF_8).length;
+        Charset charset = target.equals("ORDERED_LITERALS_BYTES") ? ISO_8859_1 : UTF_8;
+        int length = LONG_ROW_BYTES - template.replace(PAD, "").getBytes(charset).length;
         String filler = filler(target);
         String padding = filler.repeat(length / filler.length() + 1).substring(0, length);
-        return template.replace(PAD, longRow ? padding : "").getBytes(UTF_8);
+        return template.replace(PAD, longRow ? padding : "").getBytes(charset);
     }
 
-    /// Returns the ASCII text that a LONG row of `target` repeats as its padding, so cutting it
-    /// to length never splits a character: spaces for CHARACTER_CLASS, FIXED_WIDTH, and
-    /// FOLDED_PAIR_SEQUENCE, whose classes hold `x`; English rich in `s` without `shing` for
-    /// INNER_LITERAL_FIXED_WIDTH; and `x` for every other target.
+    /// Returns the text that a LONG row of `target` repeats as its padding, one byte per
+    /// character, so cutting it to length never splits a character: spaces for CHARACTER_CLASS,
+    /// FIXED_WIDTH, and FOLDED_PAIR_SEQUENCE, whose classes hold `x`; English rich in `s` without
+    /// `shing` for INNER_LITERAL_FIXED_WIDTH; Latin-1 text without `a`, `b`, or `c` for
+    /// ORDERED_LITERALS_BYTES; and `x` for every other target.
     private static String filler(String target)
     {
         return switch (target) {
             case "CHARACTER_CLASS", "FIXED_WIDTH", "FOLDED_PAIR_SEQUENCE" -> " ";
             case "INNER_LITERAL_FIXED_WIDTH" -> "the status of these sessions is still unsettled, so we must assess its uses. ";
+            case "ORDERED_LITERALS_BYTES" -> "Müller in Köln, señor Düsseldorf; fête \u00ff öl. ";
             default -> "x";
         };
     }
 
-    // Rows of every target in the run's `rows` length, and rows that the pollution patterns match,
-    // so each pattern's find sees rows it matches and rows it does not, and the shared methods
-    // train on the row length the run measures.
+    // Rows of every target of `sharedSite` in the run's `rows` length, and rows that the pollution
+    // patterns match, so each pattern's find sees rows it matches and rows it does not, and the
+    // shared methods train on the row length the run measures.
     private static Slice[] trainingInputs(String rows)
     {
         List<Slice> inputs = new ArrayList<>();
         for (int row = 0; row < 64; row++) {
-            for (String target : targets()) {
+            for (String target : sharedSiteTargets()) {
                 inputs.add(offsetInput(row(target, row, rows.equals("LONG"))));
             }
             inputs.add(offsetInput(("item_" + row + "-" + row + "/").getBytes(UTF_8)));
