@@ -84,13 +84,13 @@ public class TestHotMethodSize
                 .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
     }
 
-    /// Keeps the word-run plan's search and boundary check small enough for C2 to inline into the
+    /// Keeps the word-run plan's searches and boundary check small enough for C2 to inline into the
     /// pre-engine plan dispatch, which runs once per match when a matcher iterates over dense
     /// `\b\w+\b` matches.
     @Test
     public void testWordRunSearchFitsInlineSize()
     {
-        for (String method : List.of("search", "boundaryAt")) {
+        for (String method : List.of("search", "searchLongRuns", "boundaryAt")) {
             assertThat(codeLength(WordRunMatcher.class, method))
                     .as("WordRunMatcher.%s bytecode bytes", method)
                     .isPositive()

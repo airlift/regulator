@@ -32,10 +32,10 @@ public class TestWordRunMatcher
     @Test
     public void testEligibility()
     {
-        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b", "(?i)\\b[a-z]+\\b")) {
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b", "(?i)\\b[a-z]+\\b", "\\b\\w{12,}\\b", "\\b[a-z]{2,4}\\b")) {
             assertThat(analyze(pattern)).as(pattern).isNotNull();
         }
-        for (String pattern : List.of("(?U)\\b\\w+\\b", "\\b\\w+?\\b", "\\B\\w+\\b", "\\b(\\w+)\\b", "\\b[a-z!]+\\b", "\\b\\w*\\b", "\\b\\w+")) {
+        for (String pattern : List.of("(?U)\\b\\w+\\b", "\\b\\w+?\\b", "\\B\\w+\\b", "\\b(\\w+)\\b", "\\b[a-z!]+\\b", "\\b\\w*\\b", "\\b\\w+", "\\b\\w{0,3}\\b", "\\b\\w{2,}?\\b")) {
             assertThat(analyze(pattern)).as(pattern).isNull();
         }
     }
@@ -43,7 +43,7 @@ public class TestWordRunMatcher
     @Test
     public void testAsciiBoundaryEligibility()
     {
-        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b")) {
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "\\b\\w{25,}\\b", "\\b[0-9A-Za-z_]{12,}\\b")) {
             assertThat(analyze(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL))).as("re2 %s", pattern).isNotNull();
             for (boolean bytes : new boolean[] {false, true}) {
                 RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes).setUnicode(false);
@@ -95,8 +95,8 @@ public class TestWordRunMatcher
     @Test
     public void testWindowsAgainstSemanticNfa()
     {
-        List<Slice> values = List.of(utf8Slice("éabc def💰ghi"), utf8Slice("foo\u0301 bar"), utf8Slice("ab123cd"), utf8Slice("\u0301abc"), utf8Slice(""));
-        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b")) {
+        List<Slice> values = List.of(utf8Slice("éabc def💰ghi"), utf8Slice("foo\u0301 bar"), utf8Slice("ab123cd"), utf8Slice("\u0301abc"), utf8Slice("a bc def ghij"), utf8Slice("abcdefgh_12 xyzw é1234567"), utf8Slice(""));
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b", "\\b\\w{3,}\\b", "\\b[a-z]{2,3}\\b", "\\b\\w{5,7}\\b")) {
             assertWindowsMatchNfa(pattern, JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags()), values);
         }
     }
@@ -106,7 +106,7 @@ public class TestWordRunMatcher
     {
         // Matcher iteration skips the DFA group-zero cursor, and with the ordinary engine
         // disabled it finds these only through the word-run plan.
-        for (String expression : List.of("\\b\\w+\\b")) {
+        for (String expression : List.of("\\b\\w+\\b", "\\b[a-z]{2,4}\\b")) {
             for (CompiledPattern pattern : List.of(Re2.compile(utf8Slice(expression)), RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.defaults().setUnicode(false)))) {
                 String description = pattern.getClass().getSimpleName() + " " + expression;
                 assertThat(pattern.createGroupZeroForwardCursor()).as(description).isNull();
@@ -129,10 +129,12 @@ public class TestWordRunMatcher
         List<Slice> values = List.of(
                 utf8Slice("éabc def💰ghi"),
                 utf8Slice("ab_9 Cd\nxy"),
+                utf8Slice("a bc def ghij"),
+                utf8Slice("abcdefgh_12 xyzw é1234567"),
                 wrappedBuffer(new byte[] {'a', (byte) 0xE9, 'b', ' ', (byte) 0xFF, 'c', 'd', (byte) 0x80}),
                 utf8Slice(""));
         RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(true).setUnicode(false);
-        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b")) {
+        for (String pattern : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "\\b\\w{3,}\\b", "\\b[a-z]{2,3}\\b", "\\b\\w{5,7}\\b")) {
             assertWindowsMatchNfa(pattern, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL), values);
             assertWindowsMatchNfa(pattern, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.LATIN1), values);
             assertWindowsMatchNfa(pattern, RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit()), values);
@@ -148,7 +150,7 @@ public class TestWordRunMatcher
     {
         Random random = new Random(39217);
         String[] alphabet = {"a", "z", "A", "9", "_", "é", "δ", "💰", "\u0301", " ", "\n", "!"};
-        for (String expression : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b", "(?i)\\b[a-z]+\\b")) {
+        for (String expression : List.of("\\b\\w+\\b", "\\b[a-z]+\\b", "(?U)\\b[a-z]+\\b", "(?i)\\b[a-z]+\\b", "\\b\\w{2,}\\b", "\\b[a-z]{2,3}\\b", "\\b\\w{4,}\\b", "\\b[a-z9]{3,5}\\b")) {
             Pattern comparator = Pattern.compile(expression);
             JavaRegexp pattern = JavaRegexp.compile(utf8Slice(expression));
             for (int trial = 0; trial < 300; trial++) {
