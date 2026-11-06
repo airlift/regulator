@@ -84,6 +84,20 @@ public class TestHotMethodSize
                 .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
     }
 
+    /// Keeps the word-run plan's search and boundary check small enough for C2 to inline into the
+    /// pre-engine plan dispatch, which runs once per match when a matcher iterates over dense
+    /// `\b\w+\b` matches.
+    @Test
+    public void testWordRunSearchFitsInlineSize()
+    {
+        for (String method : List.of("search", "boundaryAt")) {
+            assertThat(codeLength(WordRunMatcher.class, method))
+                    .as("WordRunMatcher.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps each public entry of a generated pattern class small enough for C2 to inline into a
     /// caller that holds the pattern as a constant; the attempt loop and searches stay static
     /// calls. The patterns cover start-anchored and unanchored plans, a search that hands off to
