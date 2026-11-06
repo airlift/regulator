@@ -439,12 +439,12 @@ fi
 run_semantic_verifier "DFA absolute-pointer probe" \
     taskset --cpu-list "${CPU_LIST}" \
     java "${route_jvm_arguments[@]}" \
-    -Dio.airlift.regulator.dfa.native-reader-probe="${expected_native_access}" \
+    -Dio.airlift.regulator.dfa.pointer-reader-probe=true \
     -cp "${CLASSPATH}" \
     io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}"
 # Units of one shard on one host share a route's semantic tests. The
 # receipt is keyed by the host epoch and candidate identity and verified by
-# hash; each unit still runs the native probe above and its handler's own
+# hash; each unit still runs the pointer probe above and its handler's own
 # preparation and verifiers below.
 semantic_receipt_directory=
 semantic_receipt=measured

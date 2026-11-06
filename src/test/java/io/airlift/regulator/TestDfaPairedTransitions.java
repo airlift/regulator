@@ -116,16 +116,11 @@ public class TestDfaPairedTransitions
                 .isEqualTo(availableStateMemory + pairedTransitionMemory - allocatedAbsolutePointerMemory);
 
         dfa.resetCacheExternal();
-        boolean absolutePointersActive = dfa.absolutePointerTransitionMemory() > 0;
-        assertThat(dfa.pairedTransitionsDisabled()).isEqualTo(absolutePointersActive);
+        assertThat(dfa.absolutePointerTransitionMemory()).isPositive();
+        assertThat(dfa.pairedTransitionsDisabled()).isTrue();
         assertThat(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
-        if (absolutePointersActive) {
-            assertThat(dfa.pairedTransitionMemory()).isZero();
-            assertThat(dfa.absolutePointerTransitionCount()).isPositive();
-        }
-        else {
-            assertThat(dfa.pairedTransitionMemory()).isPositive();
-        }
+        assertThat(dfa.pairedTransitionMemory()).isZero();
+        assertThat(dfa.absolutePointerTransitionCount()).isPositive();
         assertThat(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
     }
 
@@ -196,7 +191,7 @@ public class TestDfaPairedTransitions
         for (int search = 0; search < 2; search++) {
             assertThat(Dfa.search(quittingProgram, byteOrderMarkInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
         }
-        assertThat(quittingProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).absolutePointerTransitionsAvailable()).isEqualTo(Dfa.nativeAccessEnabled());
+        assertThat(quittingProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).absolutePointerTransitionsAvailable()).isTrue();
     }
 
     @Test

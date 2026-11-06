@@ -30,8 +30,10 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Dfa.DfaInstance.Kind.FIRST_MATCH;
 import static io.airlift.regulator.Dfa.DfaInstance.Kind.LONGEST_MATCH;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
+import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.lang.Math.toIntExact;
 
 public final class DfaAbsolutePointerProbe
 {
@@ -89,26 +91,20 @@ public final class DfaAbsolutePointerProbe
         check(Dfa.countMatches(latin1CountProgram, countInput, Prog.MatchKind.FIRST_MATCH) == 200, "LATIN1 short fused count changed the result");
         Dfa.DfaInstance latin1CountDfa = latin1CountProgram.getCachedDfa(FIRST_MATCH);
 
-        exerciseCountSelfLoopMatchHandOff(expectedNativeAccess);
+        exerciseCountSelfLoopMatchHandOff();
         exerciseCountSelfLoopMatchHandOffWithPairedRows();
-        exerciseShortSearchesAfterPairedRejection(expectedNativeAccess);
-        exerciseOptionalStorageFailureAtomicity(expectedNativeAccess);
-        if (expectedNativeAccess) {
-            exerciseNativeCacheGrowthAtomicity();
-        }
+        exerciseShortSearchesAfterPairedRejection();
+        exerciseOptionalStorageFailureAtomicity(true);
+        exerciseOptionalStorageFailureAtomicity(false);
+        exerciseCacheGrowthAtomicity();
 
-        if (!expectedNativeAccess) {
-            check(dfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a sidecar");
-            check(reverseDfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a reverse sidecar");
-            check(utf8ReverseDfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a UTF-8 reverse sidecar");
-            check(latin1ReverseDfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a LATIN1 reverse sidecar");
-            check(countDfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a fused-count sidecar");
-            check(latin1CountDfa.absolutePointerTransitionMemory() == 0, "disabled native access allocated a LATIN1 fused-count sidecar");
-            System.out.println("OK disabled");
-            return;
-        }
-
-        check(dfa.absolutePointerTransitionMemory() > 0, "enabled native access did not allocate a sidecar");
+        // With native access the sidecar is native memory charged its bytes; without it, a heap
+        // array charged its real size.
+        check(dfa.absolutePointerTransitionMemory() > 0, "search did not allocate a sidecar");
+        MemorySegment segment = dfa.absolutePointerTransitionSegment();
+        check(segment.isNative() == expectedNativeAccess, "sidecar memory does not follow native access");
+        long expectedMemory = expectedNativeAccess ? segment.byteSize() : sizeOfLongArray(toIntExact(segment.byteSize() / Long.BYTES));
+        check(dfa.absolutePointerTransitionMemory() == expectedMemory, "sidecar was not charged its real size");
         check(dfa.absolutePointerTransitionMemory() < 1L << 20, "small DFA reserved a maximum-capacity sidecar");
         check(dfa.absolutePointerTransitionCount() > 0, "search did not populate pointer transitions");
         check(dfa.availableStateMemory() + dfa.absolutePointerTransitionMemory() < dfa.stateBudget(), "sidecar was not charged to the DFA budget");
@@ -118,9 +114,8 @@ public final class DfaAbsolutePointerProbe
         check(utf8ReverseDfa.absolutePointerBackwardSearchCount() > 0, "UTF-8 boundary did not use reverse pointer transitions");
         check(latin1ReverseDfa.absolutePointerBackwardSearchCount() > 0, "LATIN1 boundary did not use reverse pointer transitions");
 
-        long originalAddress = dfa.absolutePointerTransitionBaseAddress();
         long originalMemory = dfa.absolutePointerTransitionMemory();
-        exerciseResetOverlap(program, input, dfa, originalAddress, originalMemory);
+        exerciseResetOverlap(program, input, dfa, segment, originalMemory);
         check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "search after reset failed");
         check(dfa.absolutePointerTransitionCount() > 0, "search after reset did not rebuild pointer transitions");
 
@@ -185,9 +180,9 @@ public final class DfaAbsolutePointerProbe
         long initialGrowingPointerMemory = growingDfa.absolutePointerTransitionMemory();
         check(initialGrowingPointerMemory < 1L << 20, "growing DFA reserved a maximum-capacity sidecar before graph construction");
         Slice growingInput = utf8Slice("_".repeat(4_096) + growingSuffix);
-        growingDfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
+        growingDfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.POINTER_TABLE_GROWTH);
         expectTestingFailure(() -> Dfa.search(growingProgram, growingInput, false, Prog.MatchKind.FIRST_MATCH, true));
-        check(growingDfa.testingSnapshotBeforeFailure().equals(growingDfa.failureAtomicitySnapshot()), "failed native growth changed the DFA cache");
+        check(growingDfa.testingSnapshotBeforeFailure().equals(growingDfa.failureAtomicitySnapshot()), "failed sidecar growth changed the DFA cache");
         exerciseGrowthOverlap(growingProgram, growthWarmupInput, growingInput, growingDfa);
         long growingPointerMemory = growingDfa.absolutePointerTransitionMemory();
         check((long) growingDfa.stateCount * growingDfa.nextSize * Long.BYTES > 48L << 10, "growing DFA did not cross the former initial tier");
@@ -195,21 +190,22 @@ public final class DfaAbsolutePointerProbe
         check(growingDfa.absolutePointerTransitionsAvailable(), "growing DFA switched to object traversal");
         check(growingDfa.availableStateMemory() + growingDfa.retainedStateMemory() + growingPointerMemory == growingDfa.stateBudget(), "growing DFA accounting did not reconcile to its memory budget");
 
-        long growingAddress = growingDfa.absolutePointerTransitionBaseAddress();
+        MemorySegment growingSegment = growingDfa.absolutePointerTransitionSegment();
         growingDfa.resetCacheExternal();
-        check(growingDfa.absolutePointerTransitionBaseAddress() != growingAddress, "reset reused the grown sidecar");
+        check(!growingDfa.absolutePointerTransitionSegment().equals(growingSegment), "reset reused the grown sidecar");
         check(growingDfa.absolutePointerTransitionMemory() == growingPointerMemory, "reset changed the grown sidecar allocation");
 
-        exerciseWithheldPointerTable("[ -~]*" + suffix + "$", input);
-        exerciseFailedGrowthAllocation(growingPattern, growthWarmupInput, growingInput);
+        exerciseWithheldPointerTable("[ -~]*" + suffix + "$", input, expectedNativeAccess);
+        exerciseFailedGrowthAllocation(growingPattern, growthWarmupInput, growingInput, expectedNativeAccess);
 
-        System.out.println("OK enabled");
+        System.out.println(expectedNativeAccess ? "OK enabled" : "OK disabled");
     }
 
-    // A reset that cannot have a new segment, because superseded segments still await collection or
-    // the allocation fails, publishes its tables without the pointer table and keeps it selected; a
-    // later exclusive search allocates it again.
-    private static void exerciseWithheldPointerTable(String pattern, Slice input)
+    // A reset that cannot have a new segment, because superseded native segments still await
+    // collection or the allocation fails, publishes its tables without the pointer table and keeps it
+    // selected; a later exclusive search allocates it again. Superseded heap tables are neither
+    // counted nor capped.
+    private static void exerciseWithheldPointerTable(String pattern, Slice input, boolean expectedNativeAccess)
             throws InterruptedException
     {
         Prog program = compileProg(pattern);
@@ -217,33 +213,43 @@ public final class DfaAbsolutePointerProbe
         check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "withheld-table warm-up failed");
         Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
         check(dfa.absolutePointerTransitionsAvailable(), "withheld-table warm-up did not allocate a sidecar");
-        // Growth during the warm-up may have superseded segments; the cap checks below count from zero.
+        // Growth during the warm-up may have superseded native segments; the native cap checks below
+        // count from zero.
         awaitSupersededMemory(dfa, 0);
         long segmentMemory = dfa.absolutePointerTransitionMemory();
 
-        // Searches still reading superseded tables keep their segments. Two superseded segments fit
-        // within twice the segment; a third would not.
+        // Searches still reading superseded tables keep them. For native tables, two superseded
+        // segments fit within the cap of twice the segment; a third would not.
         List<Dfa.CacheTables> readerTables = new ArrayList<>();
         for (int reset = 0; reset < 2; reset++) {
             readerTables.add(dfa.cacheTablesForTesting());
             dfa.resetCacheExternal();
-            check(dfa.absolutePointerTransitionsAvailable(), "reset below the superseded-segment cap withheld the sidecar");
+            check(dfa.absolutePointerTransitionsAvailable(), "reset below the native superseded-segment cap withheld the sidecar");
         }
         readerTables.add(dfa.cacheTablesForTesting());
         dfa.resetCacheExternal();
-        check(!dfa.absolutePointerTransitionsAvailable(), "reset at the superseded-segment cap allocated another sidecar");
-        check(dfa.supersededAbsolutePointerMemory() == 3 * segmentMemory, "superseded sidecars were not counted");
-        assertWithheld(dfa, "superseded-segment cap");
-        check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "search at the superseded-segment cap changed the result");
-        check(!dfa.absolutePointerTransitionsAvailable(), "exclusive search allocated a sidecar at the superseded-segment cap");
-
         check(!readerTables.contains(dfa.cacheTablesForTesting()), "reset republished tables a reader holds");
-        // The readers return.
-        readerTables.clear();
-        awaitSupersededMemory(dfa, 0);
-        assertReselected(program, input, dfa, "superseded-segment cap");
+        if (expectedNativeAccess) {
+            check(!dfa.absolutePointerTransitionsAvailable(), "reset at the superseded-segment cap allocated another sidecar");
+            check(dfa.supersededAbsolutePointerMemory() == 3 * segmentMemory, "superseded sidecars were not counted");
+            assertWithheld(dfa, "superseded-segment cap");
+            check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "search at the superseded-segment cap changed the result");
+            check(!dfa.absolutePointerTransitionsAvailable(), "exclusive search allocated a sidecar at the superseded-segment cap");
+        }
+        else {
+            check(dfa.absolutePointerTransitionsAvailable(), "reset withheld a heap sidecar while readers held superseded ones");
+            check(dfa.supersededAbsolutePointerMemory() == 0, "superseded heap sidecars were counted");
+        }
 
-        dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.NATIVE_TRANSITION_RESET);
+        // The readers return, releasing the superseded tables they held in either mode; only native
+        // ones were counted toward the cap.
+        readerTables.clear();
+        if (expectedNativeAccess) {
+            awaitSupersededMemory(dfa, 0);
+            assertReselected(program, input, dfa, "superseded-segment cap");
+        }
+
+        dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.POINTER_TABLE_RESET);
         dfa.resetCacheExternal();
         assertWithheld(dfa, "failed sidecar allocation");
         check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "search after a failed sidecar allocation changed the result");
@@ -254,9 +260,9 @@ public final class DfaAbsolutePointerProbe
     }
 
     // A growth whose segment cannot be allocated withholds the table: the DFA goes on adding states
-    // on object rows, refunds the current segment's charge and counts that segment as superseded,
-    // and allocates no pointer table again until the next reset.
-    private static void exerciseFailedGrowthAllocation(String pattern, Slice warmupInput, Slice input)
+    // on object rows, refunds the current segment's charge and counts a native segment as
+    // superseded, and allocates no pointer table again until the next reset.
+    private static void exerciseFailedGrowthAllocation(String pattern, Slice warmupInput, Slice input, boolean expectedNativeAccess)
             throws InterruptedException
     {
         Prog program = growingProgram(pattern, warmupInput);
@@ -267,11 +273,11 @@ public final class DfaAbsolutePointerProbe
         // A search still reading the warm-up tables keeps the segment the growth supersedes.
         List<Dfa.CacheTables> readerTables = new ArrayList<>(List.of(dfa.cacheTablesForTesting()));
 
-        dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.NATIVE_TRANSITION_GROWTH_ALLOCATION);
+        dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.POINTER_TABLE_GROWTH_ALLOCATION);
         check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == input.length(), "search through a failed growth allocation changed the result");
         check((long) dfa.stateCount * dfa.nextSize * Long.BYTES > segmentMemory, "DFA with a failed growth allocation stopped adding states");
         assertWithheld(dfa, "failed growth allocation");
-        check(dfa.supersededAbsolutePointerMemory() == segmentMemory, "failed growth allocation did not count the superseded sidecar");
+        check(dfa.supersededAbsolutePointerMemory() == (expectedNativeAccess ? segmentMemory : 0), "failed growth allocation miscounted the superseded sidecar");
         check(!readerTables.contains(dfa.cacheTablesForTesting()), "failed growth allocation republished tables a reader holds");
         // The reader returns.
         readerTables.clear();
@@ -341,7 +347,7 @@ public final class DfaAbsolutePointerProbe
             Prog program,
             Slice input,
             Dfa.DfaInstance dfa,
-            long originalAddress,
+            MemorySegment originalSegment,
             long originalMemory)
             throws Exception
     {
@@ -351,21 +357,21 @@ public final class DfaAbsolutePointerProbe
             dfa.resetCacheExternal();
             return null;
         });
-        Dfa.armNativeReaderProbeForTesting(reader);
+        Dfa.armPointerReaderProbeForTesting(reader);
         try {
             reader.start();
-            check(Dfa.awaitNativeReaderProbeForTesting(10, TimeUnit.SECONDS), "native reader did not reach the reset overlap probe");
-            // Readers do not register: the reset runs while the reader is paused inside the native
+            check(Dfa.awaitPointerReaderProbeForTesting(10, TimeUnit.SECONDS), "pointer reader did not reach the reset overlap probe");
+            // Readers do not register: the reset runs while the reader is paused inside the pointer
             // table and publishes a fresh one, leaving the reader's table unchanged.
             Thread.ofPlatform().daemon().start(resetTask);
             resetTask.get(10, TimeUnit.SECONDS);
-            check(dfa.absolutePointerTransitionBaseAddress() != originalAddress, "reset reused the sidecar a paused reader reads");
+            check(!dfa.absolutePointerTransitionSegment().equals(originalSegment), "reset reused the sidecar a paused reader reads");
             check(dfa.absolutePointerTransitionCount() == 0, "reset left pointer transitions in the current table");
         }
         finally {
-            Dfa.releaseNativeReaderProbeForTesting();
+            Dfa.releasePointerReaderProbeForTesting();
         }
-        check(readerTask.get(10, TimeUnit.SECONDS) == input.length(), "paused native reader changed the match result");
+        check(readerTask.get(10, TimeUnit.SECONDS) == input.length(), "paused pointer reader changed the match result");
         check(dfa.absolutePointerTransitionMemory() == originalMemory, "reset changed the replacement sidecar charge");
         // The released reader finished in the superseded tables, which are no longer charged.
         check(dfa.availableStateMemory() + dfa.retainedStateMemory() + originalMemory == dfa.stateBudget(), "reset returned the replacement sidecar charge");
@@ -378,30 +384,31 @@ public final class DfaAbsolutePointerProbe
             Dfa.DfaInstance dfa)
             throws Exception
     {
-        long originalAddress = dfa.absolutePointerTransitionBaseAddress();
+        MemorySegment originalSegment = dfa.absolutePointerTransitionSegment();
         long originalMemory = dfa.absolutePointerTransitionMemory();
         WeakReference<Object> retiredOwner = dfa.absolutePointerOwnerReferenceForTesting();
 
         FutureTask<Long> readerTask = new FutureTask<>(() -> Dfa.search(program, readerInput, false, Prog.MatchKind.FIRST_MATCH, true));
         Thread reader = Thread.ofPlatform().daemon().unstarted(readerTask);
         FutureTask<Long> growthTask = new FutureTask<>(() -> Dfa.search(program, growingInput, false, Prog.MatchKind.FIRST_MATCH, true));
-        Dfa.armNativeReaderProbeForTesting(reader);
+        Dfa.armPointerReaderProbeForTesting(reader);
         try {
             reader.start();
-            check(Dfa.awaitNativeReaderProbeForTesting(10, TimeUnit.SECONDS), "native reader did not reach the growth overlap probe");
+            check(Dfa.awaitPointerReaderProbeForTesting(10, TimeUnit.SECONDS), "pointer reader did not reach the growth overlap probe");
             // The growth completes while the reader is paused inside the retired table. The
-            // reader's reference keeps the retired table's automatic arena alive.
+            // reader's reference keeps the retired table, and a native table's automatic arena,
+            // alive.
             Thread.ofPlatform().daemon().start(growthTask);
             check(growthTask.get(10, TimeUnit.SECONDS) == growingInput.length(), "growing DFA search failed while a reader was paused");
-            check(dfa.absolutePointerTransitionBaseAddress() != originalAddress, "growth did not rebase the sidecar");
+            check(!dfa.absolutePointerTransitionSegment().equals(originalSegment), "growth did not rebase the sidecar");
             for (int i = 0; i < 5; i++) {
                 System.gc();
                 Thread.sleep(Duration.ofMillis(10));
             }
-            check(retiredOwner.get() != null, "retired native transition owner was collected while a paused reader used it");
+            check(retiredOwner.get() != null, "retired pointer table owner was collected while a paused reader used it");
         }
         finally {
-            Dfa.releaseNativeReaderProbeForTesting();
+            Dfa.releasePointerReaderProbeForTesting();
         }
         check(readerTask.get(10, TimeUnit.SECONDS) == Dfa.SEARCH_NO_MATCH, "paused growth reader changed the search result");
         check(dfa.absolutePointerTransitionMemory() > originalMemory, "growth did not enlarge the sidecar");
@@ -418,7 +425,7 @@ public final class DfaAbsolutePointerProbe
             System.gc();
             Thread.sleep(Duration.ofMillis(10));
         }
-        check(reference.get() == null, "retired native transition owner remained reachable");
+        check(reference.get() == null, "retired pointer table owner remained reachable");
     }
 
     private static void expectTestingFailure(Runnable runnable)
@@ -436,7 +443,7 @@ public final class DfaAbsolutePointerProbe
     // match bit, so the count self-loop scan stops with a match pending. The pending match must
     // continue through the pointer table; requesting paired rows first would prevent the table
     // from being allocated.
-    private static void exerciseCountSelfLoopMatchHandOff(boolean expectedNativeAccess)
+    private static void exerciseCountSelfLoopMatchHandOff()
     {
         byte[] prefix = "xaaaaaaaa".getBytes(StandardCharsets.UTF_8);
         byte[] cycle = "\u00e9a".getBytes(StandardCharsets.UTF_8);
@@ -453,13 +460,8 @@ public final class DfaAbsolutePointerProbe
             check(pattern.count(input) == 1, "count self-loop match hand-off changed the count");
         }
         check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match");
-        if (expectedNativeAccess) {
-            check(dfa.absolutePointerTransitionsAvailable(), "count self-loop match hand-off did not allocate a pointer sidecar");
-            check(dfa.pairedTransitionMemory() == 0, "count self-loop match hand-off built paired transitions");
-        }
-        else {
-            check(dfa.pairedTransitionMemory() > 0, "count self-loop match hand-off did not build paired transitions");
-        }
+        check(dfa.absolutePointerTransitionsAvailable(), "count self-loop match hand-off did not allocate a pointer sidecar");
+        check(dfa.pairedTransitionMemory() == 0, "count self-loop match hand-off built paired transitions");
     }
 
     // Paired rows block pointer-table allocation, so once an ordinary search has built them, a
@@ -498,7 +500,7 @@ public final class DfaAbsolutePointerProbe
     // rows remain until a later request releases them. Short searches never request paired rows,
     // and the rows block the pointer table, so the pointer request must release them; otherwise
     // every later short search retries exclusively and still uses the compact loop.
-    private static void exerciseShortSearchesAfterPairedRejection(boolean expectedNativeAccess)
+    private static void exerciseShortSearchesAfterPairedRejection()
     {
         Prog program = compileProg("^x*(ab|a)");
         Slice warmingInput = utf8Slice("x".repeat(300) + "abz");
@@ -521,28 +523,27 @@ public final class DfaAbsolutePointerProbe
             check(Dfa.search(program, shortInput, true, Prog.MatchKind.FIRST_MATCH, true) == 2, "short search after paired rejection changed the boundary");
         }
         check(dfa.cacheVersion() == cacheVersion, "short searches after paired rejection retried exclusively");
-        if (expectedNativeAccess) {
-            check(dfa.absolutePointerTransitionsAvailable(), "short searches after paired rejection did not allocate a pointer sidecar");
-            check(dfa.pairedTransitionMemory() == 0, "pointer request retained rejected paired transitions");
-        }
+        check(dfa.absolutePointerTransitionsAvailable(), "short searches after paired rejection did not allocate a pointer sidecar");
+        check(dfa.pairedTransitionMemory() == 0, "pointer request retained rejected paired transitions");
     }
 
-    private static void exerciseOptionalStorageFailureAtomicity(boolean expectedNativeAccess)
+    // Fails a cache insertion with the pointer table, or with paired transitions, in place.
+    private static void exerciseOptionalStorageFailureAtomicity(boolean pointerTable)
     {
         String suffix = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-        Prog program = compileProg(expectedNativeAccess
+        Prog program = compileProg(pointerTable
                 ? "(?:\\bx*|y*)" + suffix + '$'
                 : "(?:\\bx*|y*)(a[01]{200}|a)");
-        program.setDfaMemory(expectedNativeAccess ? 64L << 20 : 64 * 1024);
-        Slice warmupInput = utf8Slice("x".repeat(300) + (expectedNativeAccess ? suffix : "a0"));
-        boolean anchored = !expectedNativeAccess;
+        program.setDfaMemory(pointerTable ? 64L << 20 : 64 * 1024);
+        Slice warmupInput = utf8Slice("x".repeat(300) + (pointerTable ? suffix : "a0"));
+        boolean anchored = !pointerTable;
         Dfa.search(program, warmupInput, anchored, Prog.MatchKind.FIRST_MATCH, true);
-        Dfa.DfaInstance dfa = program.getCachedDfa(expectedNativeAccess ? LONGEST_MATCH : FIRST_MATCH);
-        if (expectedNativeAccess) {
-            check(dfa.absolutePointerTransitionMemory() > 0, "native atomicity fixture did not allocate a pointer sidecar");
+        Dfa.DfaInstance dfa = program.getCachedDfa(pointerTable ? LONGEST_MATCH : FIRST_MATCH);
+        if (pointerTable) {
+            check(dfa.absolutePointerTransitionMemory() > 0, "pointer atomicity fixture did not allocate a pointer sidecar");
         }
         else {
-            check(dfa.pairedTransitionMemory() > 0, "safe atomicity fixture did not allocate paired transitions");
+            check(dfa.pairedTransitionMemory() > 0, "paired atomicity fixture did not allocate paired transitions");
         }
 
         byte[] contextBytes = new byte[warmupInput.length() + 1];
@@ -573,7 +574,7 @@ public final class DfaAbsolutePointerProbe
         check(dfa.stateCount == stateCount, "later search did not reuse the recovered start state");
     }
 
-    private static void exerciseNativeCacheGrowthAtomicity()
+    private static void exerciseCacheGrowthAtomicity()
     {
         Prog program = compileProg("[a-q][^u-z]{80}x");
         program.setDfaMemory(4L << 20);
@@ -587,17 +588,17 @@ public final class DfaAbsolutePointerProbe
         finally {
             dfa.endSearch(true);
         }
-        check(dfa.absolutePointerTransitionMemory() > 0, "native cache-growth fixture did not allocate a pointer sidecar");
+        check(dfa.absolutePointerTransitionMemory() > 0, "cache-growth fixture did not allocate a pointer sidecar");
 
         Slice warmupInput = wrappedBuffer(stateExplosionInput(1_538));
         Dfa.search(program, warmupInput, false, Prog.MatchKind.FIRST_MATCH, true);
         Dfa.FailureAtomicitySnapshot warmed = dfa.failureAtomicitySnapshot();
-        check(warmed.cacheEntries() == (warmed.cacheTableCapacity() * 3) / 4, "native cache-growth fixture did not reach the resize threshold");
+        check(warmed.cacheEntries() == (warmed.cacheTableCapacity() * 3) / 4, "cache-growth fixture did not reach the resize threshold");
 
         Slice growingInput = wrappedBuffer(stateExplosionInput(16 * 1024));
         dfa.failNextForTesting(Dfa.DfaInstance.TestingFailurePoint.STATE_CACHE_INSERTION);
         expectTestingFailure(() -> Dfa.search(program, growingInput, false, Prog.MatchKind.FIRST_MATCH, true));
-        check(dfa.testingSnapshotBeforeFailure().equals(dfa.failureAtomicitySnapshot()), "failed native cache growth changed storage or accounting");
+        check(dfa.testingSnapshotBeforeFailure().equals(dfa.failureAtomicitySnapshot()), "failed cache growth changed storage or accounting");
         Dfa.search(program, growingInput, false, Prog.MatchKind.FIRST_MATCH, true);
     }
 
@@ -612,11 +613,9 @@ public final class DfaAbsolutePointerProbe
         return input;
     }
 
-    @SuppressWarnings("restricted")
     private static int countTaggedTransitions(Dfa.DfaInstance dfa)
     {
-        MemorySegment transitions = MemorySegment.ofAddress(dfa.absolutePointerTransitionBaseAddress())
-                .reinterpret(dfa.absolutePointerTransitionMemory());
+        MemorySegment transitions = dfa.absolutePointerTransitionSegment();
         int count = 0;
         for (long offset = 0; offset < transitions.byteSize(); offset += Long.BYTES) {
             long transition = transitions.get(ValueLayout.JAVA_LONG_UNALIGNED, offset);

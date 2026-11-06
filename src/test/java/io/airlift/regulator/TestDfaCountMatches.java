@@ -236,10 +236,10 @@ public class TestDfaCountMatches
     public void testPointerTableThrashingKeepsDfa()
     {
         // These texts reach about 2,700 DFA states. A 2 MiB budget holds them all on object rows,
-        // where the DFA never resets, but not beside the native pointer table, which a fresh DFA
-        // keeps through its first two resets whenever the collector runs. A count that resets too
-        // often while the DFA has the table gives the table back instead of leaving the count, and
-        // later finds, to the NFA.
+        // where the DFA never resets, but not beside the pointer table, which a fresh DFA keeps
+        // through its first two resets, a native table whenever the collector runs. A count that
+        // resets too often while the DFA has the table gives the table back instead of leaving the
+        // count, and later finds, to the NFA.
         Slice patternText = utf8Slice("[ab]*a[ab]{12}c");
         Re2 reference = Re2.compile(patternText);
         Random random = new Random(1);
@@ -268,7 +268,7 @@ public class TestDfaCountMatches
             assertThat(dfa.resetCount()).isZero();
 
             assertThat(pattern.count(input)).isEqualTo(reference.count(input));
-            assertThat(dfa.resetCount() >= 2).isEqualTo(Dfa.nativeAccessEnabled());
+            assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
             RegexpMatcher matcher = pattern.matcher(input);
             assertThat(findCount(matcher)).isEqualTo(findCount(reference.matcher(input)));
             assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
@@ -283,8 +283,7 @@ public class TestDfaCountMatches
         // A count over cached states runs without the lock, and between two of its matches finds
         // on another text reset the DFA twice while it holds the pointer table; neither find
         // resets often enough itself to give the table back. With the table the count goes on
-        // under the lock, which gives the table back, and reports each match end once; on object
-        // rows it gives up as before.
+        // under the lock, which gives the table back, and reports each match end once.
         Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
         Prog program = pattern.forwardProgramForDiagnostics();
         Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
@@ -302,19 +301,14 @@ public class TestDfaCountMatches
             return true;
         }, null);
 
-        assertThat(dfa.countSearchBailedWhenSlow()).isEqualTo(!Dfa.nativeAccessEnabled());
-        if (Dfa.nativeAccessEnabled()) {
-            assertThat(result).isEqualTo(4_000L << Integer.SIZE | cached.length());
-            assertThat(matchEnds[0]).isEqualTo(4_000);
-            assertThat(dfa.releasedAbsolutePointerResetCount()).isPositive();
-        }
-        else {
-            assertThat(result).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        }
+        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+        assertThat(result).isEqualTo(4_000L << Integer.SIZE | cached.length());
+        assertThat(matchEnds[0]).isEqualTo(4_000);
+        assertThat(dfa.releasedAbsolutePointerResetCount()).isPositive();
 
-        // Now the DFA has no table to give back: it gave it back above, or never had one. A count
-        // that sees two foreign resets gives up without the lock, which this thread holds from
-        // the resets until the count returns.
+        // Now the DFA has no table to give back: it gave it back above. A count that sees two
+        // foreign resets gives up without the lock, which this thread holds from the resets until
+        // the count returns.
         dfa.resetCacheExternal();
         assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
         CountDownLatch resetsMade = new CountDownLatch(1);
@@ -367,12 +361,12 @@ public class TestDfaCountMatches
 
         dfa.beginSearch(true);
         try {
-            assertThat(dfa.releaseAbsolutePointerTransitionsForSlowReset()).isEqualTo(Dfa.nativeAccessEnabled());
+            assertThat(dfa.releaseAbsolutePointerTransitionsForSlowReset()).isTrue();
         }
         finally {
             dfa.endSearch(true);
         }
-        assertThat(dfa.countHandsResetsToLock(initialResetCount)).isEqualTo(Dfa.nativeAccessEnabled());
+        assertThat(dfa.countHandsResetsToLock(initialResetCount)).isTrue();
     }
 
     @Test
@@ -382,7 +376,7 @@ public class TestDfaCountMatches
         // A count without the lock hands two resets to the lock while another search holds it.
         // Before the count gets the lock, that search gives the table back, makes the reset that
         // drops it, and one more. The count must count that reset, so it gives up at the first
-        // reset its own searches make under the lock. On object rows it gives up without the lock.
+        // reset its own searches make under the lock.
         Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
         Prog program = pattern.forwardProgramForDiagnostics();
         String match = "x".repeat(15) + "a".repeat(14) + "x";
@@ -451,7 +445,7 @@ public class TestDfaCountMatches
         assertThat(result).isEqualTo(Dfa.COUNT_UNSUPPORTED);
         assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
         int releasedResetCount = dfa.releasedAbsolutePointerResetCount();
-        assertThat(releasedResetCount != 0).isEqualTo(Dfa.nativeAccessEnabled());
+        assertThat(releasedResetCount).isPositive();
         assertThat(dfa.resetCount() - Math.max(startResetCount, releasedResetCount)).isEqualTo(2);
     }
 
@@ -740,8 +734,8 @@ public class TestDfaCountMatches
         // The Russian letters in this input start with 0xD0 or 0xD1, the start state's exits, so
         // the start-byte scan's productivity check (64 KiB minimum, 64 sampled bytes) rejects the
         // scan, and four short scans stop the route with no match pending. The search continues
-        // through the absolute-pointer loop, which the first count requests and its exclusive
-        // search builds. Paired rows requested from the route would block the table.
+        // through the pointer loop, which the first count requests and its exclusive search
+        // builds. Paired rows requested from the route would block the table.
         Prog program = compile("(?i)шерлок холмс|я");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(dfa.startLiteralFilter()).isNull();
@@ -752,13 +746,8 @@ public class TestDfaCountMatches
         assertThat(dfa.countSelfLoopScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         // Without the vector scanners, the count takes the ordinary routes and never hands off.
         if (VectorSupport.isAvailable()) {
-            assertThat(dfa.absolutePointerTransitionsAvailable()).isEqualTo(Dfa.nativeAccessEnabled());
-            if (Dfa.nativeAccessEnabled()) {
-                assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).isPositive();
-            }
-            else {
-                assertThat(dfa.pairedTransitionMemory()).isPositive();
-            }
+            assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
+            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).isPositive();
         }
     }
 
@@ -833,8 +822,7 @@ public class TestDfaCountMatches
     public void testSelfLoopExitScanMatchHandOff()
     {
         // After the x, the matching loop exits at every two-byte character, so four short scans
-        // stop the route with a match pending. The search continues through the absolute-pointer
-        // loop, or without native access through the paired after-match loop.
+        // stop the route with a match pending. The search continues through the pointer loop.
         String multibyte = "\u00e9a".repeat(2_000);
         assertSelfLoopMatchHandOff(utf8Slice("xaaaaaaaa" + multibyte), 1, 1);
         // The match covers the whole text; a match ending early would leave the trailing y for a
@@ -844,21 +832,16 @@ public class TestDfaCountMatches
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.end()).isEqualTo(trailing.length());
         assertSelfLoopMatchHandOff(trailing, 1, 1);
-        // The paired after-match loop scans the ASCII tail as a matching self-loop, and the
-        // absolute-pointer loop never builds paired transitions.
+        // The pointer loop carries the match through the ASCII tail and never builds paired
+        // transitions.
         Slice tail = utf8Slice("xaaaaaaaa" + multibyte + "a".repeat(4_000));
         Prog program = assertSelfLoopMatchHandOff(tail, 1, 1);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        int matchingScanCount = dfa.matchingSelfLoopScanCount();
         assertThat(Dfa.countMatches(program, tail, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
         // Without the vector scanners, the count takes the ordinary routes and never hands off.
         if (VectorSupport.isAvailable()) {
-            if (dfa.absolutePointerTransitionsAvailable()) {
-                assertThat(dfa.pairedTransitionMemory()).isZero();
-            }
-            else {
-                assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingScanCount);
-            }
+            assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
+            assertThat(dfa.pairedTransitionMemory()).isZero();
         }
         // The newline ends the first match, and the second search hands off the same way.
         String line = "aaaaaaaa" + "\u00e9a".repeat(1_000);
@@ -869,15 +852,32 @@ public class TestDfaCountMatches
     }
 
     @Test
+    public void testSelfLoopExitScanPairedMatchHandOffScansAsciiTail()
+    {
+        // With paired rows built first, the matching hand-off continues through the paired loop
+        // rather than the pointer loop.
+        Prog program = compile(".*(x|y).*");
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        warmPairedTransitions(program, utf8Slice("\u00e9a".repeat(200)));
+        Slice tail = utf8Slice("xaaaaaaaa" + "\u00e9a".repeat(2_000) + "a".repeat(4_000));
+        assertThat(Dfa.countMatches(program, tail, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        int scanCount = dfa.matchingSelfLoopScanCount();
+        assertThat(Dfa.countMatches(program, tail, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            // The paired after-match loop scans the ASCII tail as a matching self-loop.
+            assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(scanCount);
+        }
+    }
+
+    @Test
     public void testSelfLoopExitScanLongestMatchHandOffUsesContinuation()
     {
         Slice source = utf8Slice("xaaaaaaaa" + "\u00e9a".repeat(2_000) + "y");
         Slice noMatch = utf8Slice("\u00e9a".repeat(200));
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
-        // Short scans without a pending match hand off to the absolute-pointer route, or without
-        // native access to the paired route. A pending longest match still continues through the
-        // compact loop.
+        // Short scans without a pending match hand off to the pointer route. A pending longest
+        // match still continues through the compact loop.
         assertThat(Dfa.countMatches(program, noMatch, Prog.MatchKind.LONGEST_MATCH)).isZero();
         for (int iteration = 0; iteration < 2; iteration++) {
             assertThat(Dfa.countMatches(program, source, Prog.MatchKind.LONGEST_MATCH)).isEqualTo(1);
@@ -885,12 +885,7 @@ public class TestDfaCountMatches
         assertThat(dfa.countSelfLoopScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         // Without the vector scanners, the count takes the ordinary routes and never hands off.
         if (VectorSupport.isAvailable()) {
-            if (Dfa.nativeAccessEnabled()) {
-                assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
-            }
-            else {
-                assertThat(dfa.pairedTransitionMemory()).isPositive();
-            }
+            assertThat(dfa.absolutePointerTransitionsAvailable()).isTrue();
         }
         assertThat(dfa.countSelfLoopMatchHandOffCount()).isZero();
 
@@ -898,9 +893,7 @@ public class TestDfaCountMatches
         // requested.
         assertThat(Dfa.countMatches(program, noMatch, Prog.MatchKind.LONGEST_MATCH)).isZero();
         assertThat(Nfa.search(program, noMatch, false, Prog.MatchKind.LONGEST_MATCH, null)).isFalse();
-        if (Dfa.nativeAccessEnabled()) {
-            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount() > 0).isEqualTo(VectorSupport.isAvailable());
-        }
+        assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount() > 0).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -1423,7 +1416,7 @@ public class TestDfaCountMatches
     }
 
     // Paired rows block the pointer table, so once an ordinary search has built them, count
-    // hand-offs keep the paired routes with native access too.
+    // hand-offs keep the paired routes.
     private static void warmPairedTransitions(Prog program, Slice noMatch)
     {
         for (int iteration = 0; iteration < 2; iteration++) {

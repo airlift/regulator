@@ -132,11 +132,12 @@ costs n copies of `x`. Copies in a branch that simplification removes because
 it can never match are not counted.
 
 Compiled patterns are immutable and safe to share across threads. They do not
-need to be closed. Lazily built DFA caches and optional native transition
-storage belong to the compiled pattern and are reclaimed when it is no longer
-reachable. Native access is optional; when it is unavailable, the ordinary
-on-heap DFA remains fully functional without a warning or initialization
-failure.
+need to be closed. Lazily built DFA caches belong to the compiled pattern and
+are reclaimed when it is no longer reachable. Their integer and object
+transition tables stay on the Java heap; only an eligible DFA's optional pointer
+table moves to native memory when native access is enabled. Native access is
+optional; when it is unavailable, the DFA keeps the same pointer table on the
+Java heap without a warning or initialization failure.
 
 ### Byte frequencies
 
@@ -258,21 +259,24 @@ bytes. Without the module, or on a JVM whose vectors fall outside the supported
 16-to-64-lane range, such as one run with `-XX:MaxVectorSize=8`, the same
 searches use scalar or SWAR scanners.
 
-Native access lets eligible forward DFA searches use a small internal
-native-memory allocation containing DFA transition entries. Each entry is eight
-bytes. Its initial row-rounded capacity is based on the DFA graph already built;
-it grows geometrically when useful, remains charged to the existing DFA budget,
-and is reclaimed with the compiled pattern. A segment that a reset or growth
-replaces is freed once in-flight searches finish and the collector finds it
-unreachable, and under memory pressure the table can be withheld, leaving
-searches on the pure-Java path until it is allocated again.
+Every DFA keeps its transitions in Java object rows, heap arrays whose entries
+reference the next state's row. Eligible forward DFA searches may also use an
+optional internal pointer table of DFA transition entries, each eight bytes. Its
+initial row-rounded capacity is based on the DFA graph already built; it grows
+geometrically when useful, remains charged to the existing DFA budget, and is
+reclaimed with the compiled pattern. A table that a reset or growth replaces
+becomes reclaimable once in-flight searches finish, and under memory pressure
+the table can be withheld, leaving searches on Java object rows until it is
+allocated again.
 
-This uses native memory, not native code, a JNI library, or a file. The API
-never exposes native pointers. Patterns, inputs, captures, and results remain
-Java and Slice data. Without native access, the DFA uses its pure-Java
-transition table without a warning or initialization failure.
+Native access puts the table in a small native-memory allocation whose entries
+are row addresses. This uses native memory, not native code, a JNI library, or
+a file. The API never exposes native pointers. Patterns, inputs, captures, and
+results remain Java and Slice data. Without native access, the same pointer
+table is a Java array whose entries are row offsets, which cost an addition per
+transition, and no warning or initialization failure occurs.
 
-The native table avoids following Java object references for rows and decoding
+Either table avoids following Java object references for rows and decoding
 compressed references on each transition. This mainly helps DFA-heavy
 operations. The
 [benchmark report](https://airlift.github.io/regulator/benchmarks/) compares

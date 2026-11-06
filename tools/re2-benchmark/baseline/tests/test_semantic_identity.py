@@ -9,7 +9,7 @@ BASE = Path(__file__).parents[1]
 
 
 class TestSemanticIdentity(unittest.TestCase):
-    def test_native_probe_options_do_not_reach_measurements(self):
+    def test_pointer_probe_options_do_not_reach_measurements(self):
         source = (BASE / "run-shard.sh").read_text()
         options = source[source.index("route_jvm_arguments=("):source.index("prepare_jmh_host_compiler_arguments()")]
         start = source.index("SEMANTIC_FAILURE_STATUS=")
@@ -30,12 +30,11 @@ class TestSemanticIdentity(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 probe_arguments = (root / "probe.log").read_text().splitlines()
                 expected = "true" if route == "native-access" else "false"
-                flag = f"-Dio.airlift.regulator.dfa.native-reader-probe={expected}"
-                self.assertIn(flag, probe_arguments)
+                self.assertIn("-Dio.airlift.regulator.dfa.pointer-reader-probe=true", probe_arguments)
                 self.assertEqual(["io.airlift.regulator.DfaAbsolutePointerProbe", expected], probe_arguments[-2:])
                 measurement_arguments = result.stdout.splitlines()[len(probe_arguments):]
                 self.assertTrue(measurement_arguments)
-                self.assertFalse(any("native-reader-probe" in argument for argument in measurement_arguments))
+                self.assertFalse(any("pointer-reader-probe" in argument for argument in measurement_arguments))
 
 
 if __name__ == "__main__":
