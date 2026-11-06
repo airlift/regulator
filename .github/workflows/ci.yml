@@ -161,7 +161,7 @@ jobs:
   build:
     name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }}${{ matrix.max-vector-size && format(', {0}-byte vectors', matrix.max-vector-size) || '' }}${{ matrix.runner && ', arm64' || '' }})
     runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
