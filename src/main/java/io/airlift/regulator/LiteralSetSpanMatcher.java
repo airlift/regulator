@@ -530,17 +530,21 @@ sealed class LiteralSetSpanMatcher
     }
 
     // Edge e leads to state e + 1, and no edge leads to the root, so ROOT means no transition.
+    // A state's edges are sorted by byte, and a byte above the last edge, or any byte at a state
+    // with no edges, is rejected first, so the scan always stops at or before the last edge and
+    // needs no bound test.
     private int findChild(int state, byte value)
     {
         int unsignedValue = value & 0xFF;
-        int edgeEnd = firstEdgeByState[state + 1];
-        for (int edge = firstEdgeByState[state]; edge < edgeEnd; edge++) {
-            int candidate = edgeByte[edge] & 0xFF;
-            if (candidate >= unsignedValue) {
-                return candidate == unsignedValue ? edge + 1 : ROOT;
-            }
+        int edge = firstEdgeByState[state];
+        int lastEdge = firstEdgeByState[state + 1] - 1;
+        if (edge > lastEdge || (edgeByte[lastEdge] & 0xFF) < unsignedValue) {
+            return ROOT;
         }
-        return ROOT;
+        while ((edgeByte[edge] & 0xFF) < unsignedValue) {
+            edge++;
+        }
+        return (edgeByte[edge] & 0xFF) == unsignedValue ? edge + 1 : ROOT;
     }
 
     /// Counts what a diagnostics search of a literal set reads.

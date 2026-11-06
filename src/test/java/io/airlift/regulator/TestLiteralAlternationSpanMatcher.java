@@ -290,10 +290,11 @@ public class TestLiteralAlternationSpanMatcher
         for (CompiledPattern pattern : patterns) {
             assertLiteralSetFind(pattern, input);
         }
-        // A Latin-1 program reads a class's members as bytes.
-        Slice latin1Backing = wrappedBuffer("!caf\u00E8 word5 cafe caf\u00E9?".getBytes(ISO_8859_1));
+        // A Latin-1 program reads a class's members as bytes, so trie edges reach 0x00 and 0xFF,
+        // and the text holds each of those bytes below, between, at, and above a state's edges.
+        Slice latin1Backing = wrappedBuffer("!caf\u00E8 word\u0000 cafe caf\u00E9 caf\u0000 word\u00FF caf\u00FF?".getBytes(ISO_8859_1));
         assertLiteralSetFind(
-                Re2.compile(utf8Slice(words(65) + "|caf[\\xE9\\xE8]"), Re2.Options.latin1()),
+                Re2.compile(utf8Slice(words(65) + "|caf[\\x00\\xE9\\xFF]"), Re2.Options.latin1()),
                 latin1Backing.slice(1, latin1Backing.length() - 2));
 
         // Longest-match search keeps the program, so its forward budget is the uncharged control.
