@@ -94,12 +94,13 @@ public class TestDotStarLiteralSpanMatcher
     @Test
     public void testGeneralEngineAgreement()
     {
-        Re2 pattern = Re2.compile(utf8Slice(".*literal.*"));
+        // A one-byte literal has no contains search, so this checks Slice.indexOf's spans.
+        Re2 pattern = Re2.compile(utf8Slice(".*l.*"));
         DotStarLiteralSpanMatcher matcher = pattern.createDotStarLiteralSpanMatcher();
         assertThat(matcher.searchForDiagnostics()).isNull();
         assertGeneralEngineAgreement(pattern, matcher);
 
-        // Trino spans share the pattern's contains search, so this checks the call-free scan's spans.
+        // Spans share the pattern's contains search, so this checks the call-free scan's spans.
         TrinoCompiledPattern trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
         DotStarLiteralSpanMatcher trinoMatcher = trinoPattern.createDotStarLiteralSpanMatcher();
         assertThat(trinoMatcher.searchForDiagnostics())

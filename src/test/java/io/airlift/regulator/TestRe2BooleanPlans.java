@@ -158,22 +158,26 @@ public class TestRe2BooleanPlans
     }
 
     @Test
-    public void testLongContainedLiteralUsesLiteralSearch()
+    public void testContainedLiteralUsesLiteralSearch()
     {
-        // Languages other than Trino find a contained literal up to the literal search's
-        // comparison budget with Slice.indexOf, and a longer one with the search: in a run of the
-        // literal's first byte, Slice.indexOf would compare half the literal at every position.
-        // Here each candidate compares 33 bytes and covers one, so the second passes the budget.
+        // Every language finds a contained literal of two or more bytes with the literal search
+        // and a one-byte literal with Slice.indexOf. In a run of the literal's first byte,
+        // Slice.indexOf would compare half of the long literal at every position; the search
+        // continues with KMP once its failed candidates pass the comparison budget. Here each
+        // candidate compares 33 bytes and covers one, so the second passes the budget.
         String half = "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2);
         String literal = half + "b" + half;
-        assertThat(Re2.compile(utf8("(?s:.*" + literal.substring(1) + ".*)")).literalSearchForDiagnostics()).isNull();
-
-        Slice pattern = utf8("(?s:.*" + literal + ".*)");
         Slice input = utf8(half.repeat(64) + literal);
-        for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern))) {
-            assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
-            assertThat(compiledPattern.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
-            assertThat(compiledPattern.find(input)).isTrue();
+        for (String contained : List.of("b", "ab", literal)) {
+            Slice pattern = utf8("(?s:.*" + contained + ".*)");
+            for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern))) {
+                assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
+                assertThat(compiledPattern.literalSearchForDiagnostics() != null).isEqualTo(contained.length() >= 2);
+                if (contained.equals(literal)) {
+                    assertThat(compiledPattern.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
+                }
+                assertThat(compiledPattern.find(input)).isTrue();
+            }
         }
     }
 

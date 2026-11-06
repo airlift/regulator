@@ -578,8 +578,11 @@ second byte removed the r9g loss but cost 1.33x on r8i gharchive, so it was not
 taken.
 
 Exact-literal spans on short rows, which count, position, and extract a plain
-literal, keep their first-byte search, and RE2, Java, and Rust keep
-`Slice.indexOf`; only Trino rows were measured. Alternatives rejected:
+literal, keep their first-byte search. The measurements above cover only Trino
+rows. Under the one engine path of release 2.1, RE2, Java, and Rust boolean
+`contains` of a contained literal of two or more bytes uses the same search, as
+Trino does; an A/B on their short rows decides whether it stays, and a loss
+would restore `Slice.indexOf` with its measured reason. Alternatives rejected:
 
 - The pair scan for short-row exact-literal spans won only 3% to 4% on r9g and
   8% to 12% on r8i, and lost 1.53x to 1.78x on short r8i Russian rows (14.0 to
@@ -964,11 +967,11 @@ shifts are built when the prefix is configured and charged to the program's DFA
 allowance, up to what remains; a prefix under 64 bytes whose first byte does not
 recur shares the contains search's read-only table and is charged nothing.
 Case-insensitive prefixes stop at nine bytes and keep their scan.
-`Slice.indexOf` puts no limit on the bytes its failed candidates compare, so
-RE2, Java, and Rust contains of a literal longer than the budget uses the
-contains search when it fits the forward-DFA allowance; shorter literals keep
-`Slice.indexOf`. Scan-plan leading and required literals, capped at 256 bytes,
-still check every candidate; bounding them is a separate change.
+`Slice.indexOf` puts no limit on the bytes its failed candidates compare; every
+language's contains of a literal of two or more bytes uses the contains search
+when it fits the forward-DFA allowance. Scan-plan leading and required literals,
+capped at 256 bytes, still check every candidate; bounding them is a separate
+change.
 
 ## Short-Window Inner Literal Check
 

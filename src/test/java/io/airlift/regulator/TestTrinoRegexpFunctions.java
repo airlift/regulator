@@ -345,18 +345,17 @@ public class TestTrinoRegexpFunctions
     public void testLiteralSearchMemoryIsReservedFromForwardDfa()
     {
         Slice pattern = utf8(".*literal.*");
-        // The RE2 dialect builds no literal search for this short literal, and neither compile
-        // builds a scan plan for this pattern, so the baseline's program and DFA allowance differ
-        // only by the search's charge.
-        Re2 baseline = Re2.compileParsed(pattern, TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL), Regexp.LIKE_PERL, 96L << 20);
+        // The compile builds no scan plan for this pattern, so its program and DFA allowance
+        // differ from the plain program's only by the search's charge.
+        long defaultMaxMemory = 96L << 20;
+        Prog control = Compiler.compile(TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(), false, defaultMaxMemory - defaultMaxMemory / 3);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
         LiteralSearchKernel search = regexp.re2().literalSearchForDiagnostics();
         assertThat(search).isNotNull();
-        assertThat(baseline.literalSearchForDiagnostics()).isNull();
         assertThat(regexp.re2().usesScanPlanForDiagnostics()).isFalse();
-        assertThat(regexp.re2().forwardProgramForDiagnostics().size()).isEqualTo(baseline.forwardProgramForDiagnostics().size());
-        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
+        assertThat(regexp.re2().forwardProgramForDiagnostics().size()).isEqualTo(control.size());
+        assertThat(control.dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(search.estimatedRetainedSize());
 
         TrinoRegexp fallback = null;
