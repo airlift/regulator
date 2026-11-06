@@ -188,8 +188,17 @@ public class TestJavaRegexpDifferential
         assertThat(JavaRegexp.compile(utf8Slice(literalAlternationSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(LiteralAlternationSpanMatcher.class);
         String dotStarSpan = "(?d).*ab.*";
         assertThat(JavaRegexp.compile(utf8Slice(dotStarSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(DotStarLiteralSpanMatcher.class);
-        List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
-        for (String pattern : List.of(
+        // These capture searches run on OnePass, which reads the terminator after the position from
+        // the region or, for a ranged call, the whole input.
+        List<String> onePassFinalTerminator = List.of("^(a*)(\\n??)$", "^(a*?)(\\n?)$", "^(a+)(\\r??)(\\n??)$", "(?d)^(a+)(\\r??)(\\n??)$", "^([ab]*)\\Z");
+        for (String pattern : onePassFinalTerminator) {
+            RegexpMatcher matcher = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice("a\r\n"));
+            assertThat(matcher.find()).as(pattern).isTrue();
+            assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).as(pattern).isTrue();
+        }
+        List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n", "a\r\r", "a\n\r", "a\n\n", "a\u0085", "a\u2028", "a\u2029");
+        List<String> patterns = new ArrayList<>(onePassFinalTerminator);
+        patterns.addAll(List.of(
                 "^",
                 "$",
                 "^$",
@@ -221,7 +230,8 @@ public class TestJavaRegexpDifferential
                 unanchoredPlan,
                 fixedWidthSpan,
                 literalAlternationSpan,
-                dotStarSpan)) {
+                dotStarSpan));
+        for (String pattern : patterns) {
             assertEveryRegionMatchesJdk(pattern, inputs, true);
         }
     }

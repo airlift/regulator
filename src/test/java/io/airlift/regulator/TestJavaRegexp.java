@@ -233,6 +233,29 @@ public class TestJavaRegexp
         }
     }
 
+    @Test
+    public void testFinalTerminatorAnchorsRunOnOnePass()
+    {
+        // Java's $ and \Z read the line terminator after the position, which OnePass evaluates as
+        // BitState does, over text with CR, LF, and U+0085 and its bytes alone.
+        List<byte[]> texts = TestingEngineAgreement.shortTexts((byte) 'a', (byte) 'A', (byte) ';', (byte) '\r', (byte) '\n', (byte) 0xC2, (byte) 0x85);
+        for (Map.Entry<String, Integer> entry : Map.of("^(a+)$", 4, "^([A-Z]+);([^;]*)$", 6, "^(a*)(\\n??)$", 6, "^(a+)(\\r??)(\\n??)$", 8, "^(a*?)\\Z", 4).entrySet()) {
+            Prog program = compileJavaProgram(entry.getKey(), false);
+            assertThat(program.isOnePass()).as(entry.getKey()).isTrue();
+            TestingEngineAgreement.assertOnePassAgreesWithBitState(entry.getKey(), program, entry.getValue(), texts, "Java");
+        }
+
+        // The capture search of the Unicode character data line benchmark runs on OnePass, not
+        // BitState; of the patterns above, only `^(a+)$` and `^([A-Z]+);([^;]*)$` take a scan plan
+        // instead.
+        String ucd = "^" + TestingEngineAgreement.UNICODE_DATA_LINE_FIELDS;
+        RegexpMatcher matcher = JavaRegexp.compile(utf8Slice(ucd)).matcher(utf8Slice("0000;<control>;Cc;0;BN;;;;;N;NULL;;;;"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.end()).isEqualTo(37);
+        assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
     private static Prog compileJavaProgram(String pattern, boolean reversed)
     {
         ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
