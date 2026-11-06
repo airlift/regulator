@@ -1415,20 +1415,32 @@ The fact takes one of two shapes:
 
 - A literal of at least two bytes that every match consumes. It starts at the
   first element of the normalized top-level concatenation, groups looked
-  through as for the inner literal search, where one begins: an ASCII literal
-  element, or a run of ASCII literal and case-pair elements whose exact bytes
-  before its first case-insensitive letter number at least two.
+  through as for the inner literal search, where one begins, or at a pattern
+  that is a single literal: an ASCII literal element, or a run of ASCII
+  literal and case-pair elements whose exact bytes before its first
+  case-insensitive letter number at least two.
   Case-insensitive letters compare through a mask. A literal that starts with a
   case-insensitive letter, as in `\s+(?i:noqa)`, is not used; whether its
   masked scan repays itself is unmeasured.
-- Otherwise, unless the pattern has an inner literal search or a prefix scan
-  (either already rejects such a window), up to three ASCII bytes of which
-  every match holds one, such as `/` and `@` for
+- Otherwise, unless the pattern has an inner literal search (which already
+  rejects such a window before any engine setup), up to three ASCII bytes of
+  which every match holds one, such as `/` and `@` for
   `[a-z]+://\S+|[^ @]+@[^ @]+`. An alternation takes the union of its branches'
   bytes, and a concatenation the bytes of its element that is rarest in English
   text. A case-insensitive letter gives no byte: one byte cannot cover both
   cases, and some letters, such as `k` with the Kelvin sign, also match a
-  non-ASCII form.
+  non-ASCII form. A prefix scan does not count as a reject: it runs inside the
+  DFA, after the find and engine setup the check saves. So
+  `(?:ASIA|AKIA|AROA|AIDA)[A-Z0-7]{16}`, whose prefix scan looks for `A`,
+  keeps `A`.
+
+A pattern with a single-byte table, such as `,`, keeps neither. Its group-zero
+matchers find on the table once fewer than 64 bytes are left, and a check ahead
+of the table would scan such a window twice. Windows of 64 to 255 bytes, and
+matchers that keep capture groups, which never use the table, go without the
+check. With the check, a matcher iterating `,` over 16- to 64-byte rows took 10 to 12%
+longer on r9g and 12 to 19% longer on r8i (`BenchmarkPatternDispatch`, two Spot
+hosts each, JDK 25).
 
 The literal scan tests the literal's first and last bytes on each 8-byte word,
 the last word overlapping the one before it, and verifies each candidate whole;

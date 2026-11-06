@@ -105,9 +105,8 @@ final class RequiredBytes
     /// Returns the bytes every match of the `normalized` expression holds, for the short-window
     /// check, or null: the first literal every match consumes, where there is one, or else up to
     /// three bytes of which every match holds one. `minimumMatchLength` counts any required
-    /// prefix, and `hasOwnLiteralScan` says whether the pattern has an inner literal search or a
-    /// prefix scan.
-    static RequiredBytes analyze(Regexp normalized, int minimumMatchLength, boolean hasOwnLiteralScan)
+    /// prefix, and `hasInnerLiteralSearch` says whether the pattern has an inner literal search.
+    static RequiredBytes analyze(Regexp normalized, int minimumMatchLength, boolean hasInnerLiteralSearch)
     {
         // A pattern whose matches span at least SHORT_WINDOW_LIMIT bytes keeps none, since no
         // window the check reads can hold a match.
@@ -115,9 +114,10 @@ final class RequiredBytes
             return null;
         }
         RequiredBytes literal = analyzeLiteral(normalized);
-        // A pattern with its own literal scan keeps no one-of check, since that scan already
-        // rejects a window without its literal.
-        if (literal != null || hasOwnLiteralScan) {
+        // A pattern with an inner literal search keeps no one-of check, since that search already
+        // rejects a window without its literal before any engine setup. A prefix scan does not
+        // count: it runs inside the DFA, after the find and engine setup the check saves.
+        if (literal != null || hasInnerLiteralSearch) {
             return literal;
         }
         return analyzeOneOf(normalized);
@@ -125,19 +125,23 @@ final class RequiredBytes
 
     /// Returns the first literal of at least two bytes that every match of the normalized
     /// `regexp` consumes, or null. The literal starts at an element of its top-level
-    /// concatenation, groups looked through, as for [InnerLiteralSearch]: an ASCII literal
-    /// element, or a run of ASCII literal and case-pair elements whose exact bytes before the
-    /// first case-insensitive letter number at least two.
+    /// concatenation, groups looked through, as for [InnerLiteralSearch], or, where the
+    /// expression is not a concatenation, at the expression itself: an ASCII literal element, or
+    /// a run of ASCII literal and case-pair elements whose exact bytes before the first
+    /// case-insensitive letter number at least two.
     private static RequiredBytes analyzeLiteral(Regexp regexp)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
             regexp = regexp.child(0);
         }
-        if (regexp.op() != RegexpOp.CONCAT) {
-            return null;
-        }
+        // A pattern that is a single literal is its own one element.
         List<Regexp> elements = new ArrayList<>();
-        InnerLiteralSearch.addConcatenationElements(regexp, elements, 0);
+        if (regexp.op() == RegexpOp.CONCAT) {
+            InnerLiteralSearch.addConcatenationElements(regexp, elements, 0);
+        }
+        else {
+            elements.add(regexp);
+        }
         for (int index = 0; index < elements.size(); index++) {
             InnerLiteralSearch.FoldedLiteral folded = InnerLiteralSearch.foldedLiteral(elements, index);
             if (folded != null && folded.head().length >= MINIMUM_LITERAL_LENGTH) {

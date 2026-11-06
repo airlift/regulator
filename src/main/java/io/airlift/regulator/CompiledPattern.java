@@ -677,7 +677,7 @@ abstract sealed class CompiledPattern
         }
         // The bytes every match holds, for the short-window check, come from the semantic
         // expression: the lowered expression adds only an optional final LF and an end assertion.
-        RequiredBytes requiredBytes = RequiredBytes.analyze(normalizedSuffixRegexp, MatchLength.minimum(expressionAnalysis.length().encoded()), booleanPlans.innerLiteralSearch() != null || semanticProgram.canPrefixAccel());
+        RequiredBytes requiredBytes = RequiredBytes.analyze(normalizedSuffixRegexp, MatchLength.minimum(expressionAnalysis.length().encoded()), booleanPlans.innerLiteralSearch() != null);
         // A call-free first-and-last-byte search for contains and dot-star spans, in every
         // language. Unlike Slice.indexOf, it bounds the bytes its failed candidates compare, so
         // long partial matches of a long literal do not cost the input times the literal. A Trino
@@ -886,9 +886,12 @@ abstract sealed class CompiledPattern
         // where there is one, and only where each forward DFA that could initialize still can;
         // otherwise the pattern keeps no check. A frontend route reserved later, Trino's
         // ordered-literal matcher, is charged ahead of them, and they are judged again after it.
+        // A pattern with a single-byte table keeps none: its group-zero matchers find on the
+        // table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a check ahead of the
+        // table would scan such a window twice.
         RequiredBytes reservedRequiredBytes = null;
         Prog requiredBytesProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
-        if (requiredBytes != null && tryReserveBesideForwardDfas(requiredBytesProgram, requiredBytes.estimatedRetainedSize())) {
+        if (requiredBytes != null && singleByteMatcher == null && tryReserveBesideForwardDfas(requiredBytesProgram, requiredBytes.estimatedRetainedSize())) {
             reservedRequiredBytes = requiredBytes;
         }
         boolean ordinaryShortMatch = false;
