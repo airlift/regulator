@@ -275,9 +275,9 @@ final class TrinoLikeKernelGenerator
     }
 
     /// Emits the class of one pattern: `matches`, the method of its middle, a search
-    /// method for each literal the middle searches for, a method that verifies the candidates of
-    /// each search of a literal of two or more bytes, and a class initializer that sets the
-    /// constant fields those searches read.
+    /// method for each literal the middle searches for, a method that finishes each search of a
+    /// one-byte literal, a method that verifies the candidates of each search of a literal of two
+    /// or more bytes, and a class initializer that sets the constant fields those searches read.
     private static final class LikeEmitter
     {
         private final Kernel kernel;
@@ -635,11 +635,12 @@ final class TrinoLikeKernelGenerator
         }
 
         /// Defines a search method for each of `literals`, numbered in order: a copy of
-        /// `LiteralSearchKernel.findSingleByte` for a one-byte literal, and for a literal of
-        /// two or more bytes, a copy of `LiteralSearchKernel.skipToContainsCandidate` with a
-        /// method that copies `verifyContainsCandidates` to verify its candidates. A search
-        /// takes the backing array and the absolute range to search, and returns the absolute
-        /// position of the first occurrence or `-1`.
+        /// `LiteralSearchKernel.findSingleByte` for a one-byte literal, with a method that
+        /// copies `findSingleByteTail` to finish it, and for a literal of two or more bytes, a
+        /// copy of `LiteralSearchKernel.skipToContainsCandidate` with a method that copies
+        /// `verifyContainsCandidates` to verify its candidates. A search takes the backing array
+        /// and the absolute range to search, and returns the absolute position of the first
+        /// occurrence or `-1`.
         private List<MethodDefinition> defineSearches(List<LiteralSearchKernel> literals)
         {
             List<MethodDefinition> searches = new ArrayList<>();
@@ -656,7 +657,8 @@ final class TrinoLikeKernelGenerator
                         .then(constantInt(-1).ret())
                         .build());
                 if (literalBytes.length == 1) {
-                    emitFindSingleByte(body, bytes, start, end, literalBytes[0]);
+                    MethodDefinition findTail = defineFindTail(searches.size(), literalBytes[0]);
+                    emitFindSingleByte(body, bytes, start, end, literalBytes[0], findTail);
                 }
                 else {
                     // Each search splits its loop as the interpreter's searches do: a word scan
@@ -670,8 +672,9 @@ final class TrinoLikeKernelGenerator
             return searches;
         }
 
-        /// A copy of `LiteralSearchKernel.findSingleByte`, two words at a time.
-        private static void emitFindSingleByte(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte target)
+        /// A copy of `LiteralSearchKernel.findSingleByte`, two words at a time, which returns
+        /// `findTail` from where the word loop ends.
+        private static void emitFindSingleByte(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte target, MethodDefinition findTail)
         {
             long broadcast = broadcast(target);
             Variable position = body.declare("position", start);
@@ -703,6 +706,63 @@ final class TrinoLikeKernelGenerator
             body.jump(word);
 
             body.mark(tail);
+            body.append(invokeStatic(findTail, bytes, start, position, end).ret());
+        }
+
+        /// Defines the method that finishes the search of a one-byte literal, numbered as its
+        /// search, which takes the backing array, the start of the search, the position where its
+        /// word loop ended, and the end of the search. Callers inline the search only while it fits
+        /// C2's 325-byte FreqInlineSize, so the finish lives in its own method.
+        private MethodDefinition defineFindTail(int index, byte target)
+        {
+            Parameter bytes = arg("bytes", byte[].class);
+            Parameter start = arg("start", int.class);
+            Parameter tailStart = arg("tailStart", int.class);
+            Parameter end = arg("end", int.class);
+            MethodDefinition method = definition.method("findTail" + index, int.class, bytes, start, tailStart, end)
+                    .access(PRIVATE, STATIC);
+            emitFindTail(method.body(), bytes, start, tailStart, end, target);
+            return method;
+        }
+
+        /// A copy of `LiteralSearchKernel.findSingleByteTail`, which finishes the search from
+        /// `tailStart`, where its word loop ended.
+        private static void emitFindTail(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter tailStart, Parameter end, byte target)
+        {
+            long broadcast = broadcast(target);
+            Variable position = body.declare("position", tailStart);
+            Variable matches = body.declare(long.class, "matches");
+            Variable difference = body.declare(long.class, "difference");
+            CodeLabel tailByte = body.label("tailByte");
+
+            // Up to 15 bytes remain. As in LiteralSearchKernel, a range of at least eight bytes
+            // searches a word at the position when more than eight remain, then the word ending at
+            // the range end; its lowest set bit is the first match.
+            body.append(ifThenJump(end.subtract(start).lessThan(constantInt(Long.BYTES)), tailByte));
+            body.append(IfStatement.builder()
+                    .condition(end.subtract(position).greaterThan(constantInt(Long.BYTES)))
+                    .then(CodeBlock.block(
+                            difference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast))),
+                            matches.set(zeroByteMask(difference)),
+                            IfStatement.builder()
+                                    .condition(matches.notEqual(constantLong(0)))
+                                    .then(position.add(firstByte(matches)).ret())
+                                    .build()))
+                    .build());
+            body.append(IfStatement.builder()
+                    .condition(position.greaterThanOrEqual(end))
+                    .then(constantInt(-1).ret())
+                    .build());
+            body.append(position.set(end.subtract(constantInt(Long.BYTES))));
+            body.append(difference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast))));
+            body.append(matches.set(zeroByteMask(difference)));
+            body.append(IfStatement.builder()
+                    .condition(matches.notEqual(constantLong(0)))
+                    .then(position.add(firstByte(matches)).ret())
+                    .build());
+            body.append(constantInt(-1).ret());
+
+            body.mark(tailByte);
             body.append(IfStatement.builder()
                     .condition(position.greaterThanOrEqual(end))
                     .then(constantInt(-1).ret())
@@ -712,7 +772,7 @@ final class TrinoLikeKernelGenerator
                     .then(position.ret())
                     .build());
             body.append(position.set(position.add(constantInt(1))));
-            body.jump(tail);
+            body.jump(tailByte);
         }
 
         /// A copy of `LiteralSearchKernel.verifyContainsCandidates`: possible candidates
@@ -779,9 +839,10 @@ final class TrinoLikeKernelGenerator
         /// A copy of `LiteralSearchKernel.skipToContainsCandidate`, the word scan of a
         /// search: skips to the first word, or tail position, holding a possible candidate, and
         /// returns `verifyCandidates` from there. The scan makes no call until it finds a
-        /// possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it. It
-        /// reads LOW_BITS from [#lowBitsField], and the literal's broadcasts as
-        /// [#broadcastOperand] provides them.
+        /// possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it. After
+        /// at least one word it finishes with one word ending at the last candidate; a search of
+        /// fewer than eight candidates checks them one at a time. It reads LOW_BITS from
+        /// [#lowBitsField], and the literal's broadcasts as [#broadcastOperand] provides them.
         private void emitSkipToCandidate(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte[] literal, MethodDefinition verifyCandidates)
         {
             int backOffset = literal.length - 1;
@@ -812,6 +873,23 @@ final class TrinoLikeKernelGenerator
 
             body.mark(tail);
             Variable candidateEnd = body.declare("candidateEnd", end.subtract(constantInt(backOffset)));
+            // As in LiteralSearchKernel, after at least one word, search the word ending at the last
+            // candidate; it starts at or after the search start, flags no candidate it shares with
+            // scanned words, and verification rejects a false one among its new candidates.
+            body.append(ifThenJump(position.lessThanOrEqual(start), tailCandidate));
+            body.append(IfStatement.builder()
+                    .condition(position.greaterThanOrEqual(candidateEnd))
+                    .then(constantInt(-1).ret())
+                    .build());
+            body.append(position.set(candidateEnd.subtract(constantInt(Long.BYTES))));
+            body.append(frontDifference.set(readLong(bytes, position).bitwiseXor(front)));
+            body.append(backDifference.set(readLong(bytes, position.add(constantInt(backOffset))).bitwiseXor(back)));
+            body.append(IfStatement.builder()
+                    .condition(bothZeroByteMask(frontDifference, backDifference, lowBits).notEqual(constantLong(0)))
+                    .then(invokeStatic(verifyCandidates, bytes, start, position, end).ret())
+                    .build());
+            body.append(constantInt(-1).ret());
+
             body.mark(tailCandidate);
             body.append(IfStatement.builder()
                     .condition(position.greaterThanOrEqual(candidateEnd))

@@ -23,6 +23,7 @@ import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
 import java.lang.reflect.AccessFlag;
 import java.util.List;
+import java.util.function.Predicate;
 
 import static io.airlift.regulator.TestScanKernel.classfile;
 import static io.airlift.regulator.TestScanKernel.patternClassfile;
@@ -135,15 +136,50 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps each literal search small enough for C2 to inline: `LiteralSearchKernel.findSingleByte`
+    /// into matchers such as InnerLiteralSearch, OrderedLiteralMatcher, and LiteralGapMatcher,
+    /// `skipToContainsCandidate` into `findContains`, the generated searches of a LIKE pattern into
+    /// its `matchesMiddle`, and the finish of each one-byte scan into the scan. Candidate
+    /// verification is outside this size check.
+    @Test
+    public void testLiteralSearchesFitInlineSize()
+    {
+        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate")) {
+            assertThat(codeLength(LiteralSearchKernel.class, method))
+                    .as("LiteralSearchKernel.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+        for (String pattern : List.of("%x%", "%needle%")) {
+            TrinoLikePattern compiled = TrinoLikePattern.compile(utf8Slice(pattern));
+            for (boolean aarch64 : new boolean[] {false, true}) {
+                assertMethodsFitInlineSize(
+                        "LIKE " + pattern + " aarch64=" + aarch64,
+                        "searches",
+                        TrinoLikeKernelGenerator.classfileForDiagnostics(compiled.kernelForDiagnostics(), aarch64),
+                        method -> method.methodName().stringValue().startsWith("find"));
+            }
+        }
+    }
+
     private static void assertEntriesFitInlineSize(String description, byte[] classfile)
     {
-        List<MethodModel> entries = ClassFile.of().parse(classfile).methods().stream()
-                .filter(method -> method.flags().has(AccessFlag.PUBLIC) && !method.flags().has(AccessFlag.STATIC) && !method.methodName().equalsString("<init>"))
+        assertMethodsFitInlineSize(
+                description,
+                "entries",
+                classfile,
+                method -> method.flags().has(AccessFlag.PUBLIC) && !method.flags().has(AccessFlag.STATIC) && !method.methodName().equalsString("<init>"));
+    }
+
+    private static void assertMethodsFitInlineSize(String description, String kind, byte[] classfile, Predicate<MethodModel> filter)
+    {
+        List<MethodModel> methods = ClassFile.of().parse(classfile).methods().stream()
+                .filter(filter)
                 .toList();
-        assertThat(entries).as("%s entries", description).isNotEmpty();
-        for (MethodModel entry : entries) {
-            assertThat(entry.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0))
-                    .as("%s %s bytecode bytes", description, entry.methodName())
+        assertThat(methods).as("%s %s", description, kind).isNotEmpty();
+        for (MethodModel method : methods) {
+            assertThat(method.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0))
+                    .as("%s %s bytecode bytes", description, method.methodName())
                     .isPositive()
                     .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
         }
