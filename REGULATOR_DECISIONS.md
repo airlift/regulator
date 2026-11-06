@@ -1622,7 +1622,8 @@ estimated to stop at least four times less often than the start bytes. Vector
 code checks a vector of positions at a time on searches of at least 1 KiB,
 comparing the bytes of up to two literal groups directly and, for more, looking
 up one bit per group from the low and high nibbles of each of the three bytes;
-shorter searches use the same check one position at a time.
+shorter searches use the same check one position at a time, except for the rare
+start sets below.
 
 The nibble lookup loads one vector per step, at the third position, as the Rust
 crate's Teddy does. It looks up all three positions' bits from that vector and
@@ -1663,12 +1664,41 @@ aarch64 shifts bytes in one instruction, so there the AND only adds work: the
 on r9g. Platforms other than x86 and aarch64 were not measured.
 
 The filter is built only when the Vector API is available, and only for start
-sets of at most 16 bytes that are at least 5% probable in English text; rarer
-sets keep their single-byte scanners. It uses English frequencies even when
-the pattern was compiled with other byte frequencies. Fixed estimates are
-enough because these gates admit only start sets that stop often, and the
-start-scan productivity check still samples the filter's own stops on long
-inputs and falls back when they are dense.
+sets of at most 16 bytes. Sets less than 5% probable in English text keep their
+single-byte scanners, with two exceptions. The exceptions take the filter only
+on vector searches of at least 1 KiB; shorter searches stop on the start bytes
+through the byte table rather than check three bytes at every position.
+
+A rare set of more than three bytes that is not one range would take the mixed
+nibble-table scan. The filter's three-position scan costs about as much per
+vector and stops far less often, so such a set takes the filter: for
+`imported/sherlock/name-alt3` (`Sherlock|Holmes|Watson|Irene|Adler|John|Baker`),
+whose start bytes are about 1.2% of English text, it took 0.26x to 0.31x the
+mixed scan's time on r8i and 0.45x to 0.53x on r9g in RE2, Java, and Rust. Much
+rarer mixed sets were not measured.
+
+Rare small sets and ranges keep their single-byte scanners, which cost less per
+vector, except with 64-byte vectors, as with AVX-512, where a set whose filter
+holds two literals takes it. In the same A/Bs, on r8i, that took 0.56x to 0.60x
+the time for `imported/leipzig/huck-saw` (`Huck[a-zA-Z]+|Saw[a-zA-Z]+`), 0.85x
+to 0.96x for `name-alt2` (1.00x in Trino), and 0.87x to 0.94x for `name-alt4`.
+On r9g's 16-byte vectors, with the SVE XOR two-literal scan, taking the filter
+took 0.84x to 0.91x the time for `huck-saw` but 1.17x to 1.19x for `name-alt2`
+and 1.19x for `name-alt4` in all four languages. With NEON (`-XX:UseSVE=0`) it
+took 0.89x to 0.91x for `huck-saw` but 1.22x for `name-alt2` (1.00x in Trino)
+and `name-alt4`. An earlier measurement of the same gate change on r9g, with the
+XOR arithmetic written inline in the loop rather than in helpers, likewise took
+0.72x for `huck-saw` but 1.03x for `name-alt4`. So 16-byte vectors keep their
+scanners. 32-byte vectors, as with AVX2 or 256-bit SVE, were not measured and
+keep theirs too. A rare small set or range whose filter would hold more
+literals, and so need the nibble lookup, keeps its scanner on every platform.
+
+The filter uses English frequencies even when the pattern was compiled with
+other byte frequencies. Fixed estimates are enough for the common sets, which
+need only to stop often; the rare exceptions rest on the scanner comparisons
+measured above rather than on the estimate. On long inputs the start-scan
+productivity check still samples the filter's own stops and falls back when
+they are dense.
 
 The literal-alternation matcher builds the same filter from its own literals,
 reading each literal's bytes and treating positions past its end as accepting
