@@ -1987,6 +1987,12 @@ time on r9g and 1.10x on r8i, and about 1.04x and 1.02x for a single-use count.
 In return, iterating over dense matches takes 0.37x to 0.49x the base's time in
 RE2 and Unicode-off Rust.
 
+Bounded runs such as `\b\w{25,}\b` take the plan too. Only a maximal run can
+match, so the plan checks its length, and with a minimum it probes that far
+ahead to step over short words. On r8i, a short row with no qualifying word
+costs about 2.5 ns more, 1.03x to 1.04x the base for Java and Trino. Java and
+Trino long-word rows take 0.02x to 0.17x the base's time.
+
 ## Large Literal Alternations
 
 A capture-free alternation of more than 64 case-sensitive, non-empty literals,

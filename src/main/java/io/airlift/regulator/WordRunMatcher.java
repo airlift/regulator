@@ -16,7 +16,8 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
-/// Matches a nonempty ASCII word-class run with the original dialect's endpoint assertions.
+/// Matches a nonempty ASCII word-class run, at least `minimumLength` and at most
+/// `maximumLength` bytes long, with the original dialect's endpoint assertions.
 final class WordRunMatcher
 {
     // [0-9A-Za-z_] as bits of the low (0-63) and high (64-127) ASCII halves.
@@ -26,12 +27,16 @@ final class WordRunMatcher
     private final long lowMask;
     private final long highMask;
     private final int boundary;
+    private final int minimumLength;
+    private final int maximumLength;
 
-    private WordRunMatcher(long lowMask, long highMask, int boundary)
+    private WordRunMatcher(long lowMask, long highMask, int boundary, int minimumLength, int maximumLength)
     {
         this.lowMask = lowMask;
         this.highMask = highMask;
         this.boundary = boundary;
+        this.minimumLength = minimumLength;
+        this.maximumLength = maximumLength;
     }
 
     static WordRunMatcher analyze(Regexp expression, Prog program)
@@ -50,10 +55,21 @@ final class WordRunMatcher
             boundary = EmptyOp.EMPTY_WORD_BOUNDARY;
         }
         Regexp repetition = expression.child(1);
+        // A greedy run between two boundaries can only end at the end of its maximal class run:
+        // every shorter end lies between two word characters. So a bounded repetition matches a
+        // maximal class run whose length it allows and whose ends are boundaries.
+        int minimumLength = 1;
+        int maximumLength = Integer.MAX_VALUE;
+        if (repetition.op() == RegexpOp.REPEAT && repetition.min() >= 1) {
+            minimumLength = repetition.min();
+            maximumLength = repetition.max() < 0 ? Integer.MAX_VALUE : repetition.max();
+        }
+        else if (repetition.op() != RegexpOp.PLUS) {
+            return null;
+        }
         // Latin-1 only changes how non-ASCII bytes decode, and matching an ASCII class between
         // ASCII boundaries does not depend on that decoding.
-        if (repetition.op() != RegexpOp.PLUS ||
-                (repetition.parseFlags() & (asciiBoundary ? Regexp.NON_GREEDY : Regexp.NON_GREEDY | Regexp.LATIN1)) != 0 ||
+        if ((repetition.parseFlags() & (asciiBoundary ? Regexp.NON_GREEDY : Regexp.NON_GREEDY | Regexp.LATIN1)) != 0 ||
                 repetition.child(0).op() != RegexpOp.CHAR_CLASS) {
             return null;
         }
@@ -87,7 +103,7 @@ final class WordRunMatcher
                 }
             }
         }
-        return (lowMask | highMask) == 0 ? null : new WordRunMatcher(lowMask, highMask, boundary);
+        return (lowMask | highMask) == 0 ? null : new WordRunMatcher(lowMask, highMask, boundary, minimumLength, maximumLength);
     }
 
     long estimatedRetainedSize()
@@ -101,6 +117,9 @@ final class WordRunMatcher
         int base = text.byteArrayOffset();
         int position = base + start;
         int limit = base + end;
+        if (minimumLength > 1 && anchor == CompiledPattern.Anchor.UNANCHORED) {
+            return searchLongRuns(bytes, base, contextStart, contextEnd, position, limit);
+        }
         while (position < limit) {
             if (!contains(bytes[position])) {
                 if (anchor != CompiledPattern.Anchor.UNANCHORED) {
@@ -117,7 +136,9 @@ final class WordRunMatcher
 
             // Every interior position is between two word characters. Only the endpoints can
             // satisfy a boundary, including when a narrower class splits a larger word.
-            if (boundaryAt(bytes, base + contextStart, base + contextEnd, runStart, runStart - 1) &&
+            int length = position - runStart;
+            if (length >= minimumLength && length <= maximumLength &&
+                    boundaryAt(bytes, base + contextStart, base + contextEnd, runStart, runStart - 1) &&
                     boundaryAt(bytes, base + contextStart, base + contextEnd, position, position) &&
                     (anchor != CompiledPattern.Anchor.ANCHOR_BOTH || position == limit)) {
                 return ((long) (runStart - base - contextStart) << 32) | ((position - base - contextStart) & 0xFFFF_FFFFL);
@@ -125,6 +146,43 @@ final class WordRunMatcher
             if (anchor != CompiledPattern.Anchor.UNANCHORED) {
                 return Dfa.SEARCH_NO_MATCH;
             }
+        }
+        return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // A qualifying run that starts between position and the probe, minimumLength - 1 bytes
+    // ahead, covers the probe. A probe outside the class rules out every such run, so the
+    // search moves past it. A probe in the class scans back to its run's start; when that
+    // start lies after position, the search resumes there, since no qualifying run starts
+    // earlier. Only a run that reaches back to position is scanned forward for its end, so
+    // runs shorter than the minimum are mostly stepped over without reading each byte.
+    private long searchLongRuns(byte[] bytes, int base, int contextStart, int contextEnd, int position, int limit)
+    {
+        int reach = minimumLength - 1;
+        while (limit - position > reach) {
+            int probe = position + reach;
+            if (!contains(bytes[probe])) {
+                position = probe + 1;
+                continue;
+            }
+            int runStart = probe;
+            while (runStart > position && contains(bytes[runStart - 1])) {
+                runStart--;
+            }
+            if (runStart > position) {
+                position = runStart;
+                continue;
+            }
+            int runEnd = probe + 1;
+            while (runEnd < limit && contains(bytes[runEnd])) {
+                runEnd++;
+            }
+            if (runEnd - runStart <= maximumLength &&
+                    boundaryAt(bytes, base + contextStart, base + contextEnd, runStart, runStart - 1) &&
+                    boundaryAt(bytes, base + contextStart, base + contextEnd, runEnd, runEnd)) {
+                return ((long) (runStart - base - contextStart) << 32) | ((runEnd - base - contextStart) & 0xFFFF_FFFFL);
+            }
+            position = runEnd;
         }
         return Dfa.SEARCH_NO_MATCH;
     }
