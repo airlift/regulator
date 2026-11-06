@@ -33,6 +33,7 @@ import java.util.stream.IntStream;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfByteArray;
+import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.SizeOf.sizeOfShortArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -276,18 +277,22 @@ public class TestLiteralAlternationSpanMatcher
                 2 * sizeOfShortArray(15) +
                 2 * sizeOfShortArray(14) +
                 sizeOfByteArray(14);
-        assertThat(matcher.estimatedRetainedSize()).isEqualTo(trieSize + (filter == null ? 0 : filter.estimatedRetainedSize()));
+        // The literals grouped by leading byte for the stop compare, which exist only with the
+        // filter: E, W and F lead one literal each.
+        long stopLiteralsSize = filter == null ? 0 : sizeOfObjectArray(256) + 3 * sizeOfObjectArray(1) + 2 * sizeOfByteArray(5) + sizeOfByteArray(4);
+        assertThat(matcher.estimatedRetainedSize()).isEqualTo(trieSize + stopLiteralsSize + (filter == null ? 0 : filter.estimatedRetainedSize()));
 
         assertThat(TrinoRegexp.compile(utf8Slice("foo|(bar)")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:foo)|bar")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("foo|")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("a".repeat(64) + "b|x")).literalAlternationSpanMatcher()).isNull();
 
-        // With the Vector API, the filter's nibble tables make the matcher retain more than the
-        // general engine needs, so only a budget well under its size is too small for both.
+        // With the Vector API, the filter's nibble tables and the stop compare's literals make the
+        // matcher retain more than the general engine needs. The budget is half the size without
+        // the stop literals, so that it stays too small for both.
         assertThatThrownBy(() -> TrinoRegexp.compile(
                 utf8Slice("ERROR|WARN|FATAL"),
-                TrinoRegexp.Options.defaults().setMaxMemory(matcher.estimatedRetainedSize() / 2)))
+                TrinoRegexp.Options.defaults().setMaxMemory((matcher.estimatedRetainedSize() - stopLiteralsSize) / 2)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
 
         // A shared prefix expands to megabytes of literals but few states, and an automaton over
@@ -357,6 +362,9 @@ public class TestLiteralAlternationSpanMatcher
                 "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
                 "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
                 "Tom|Sawyer|Huckleberry|Finn",
+                // At a filter stop where several literals match, the first in pattern order wins,
+                // whether it is the longer or the shorter one.
+                "Holmes|Watson|Holm|Watsonian",
                 "ERROR|WARN|FATAL",
                 // In abcde, the near miss of abcx hides the start of bcde one byte later.
                 "abcx|bcde");
@@ -613,7 +621,7 @@ public class TestLiteralAlternationSpanMatcher
         return counters;
     }
 
-    // The literals, prefixes of them that the trie walks and abandons, single bytes and two-byte
+    // The literals, prefixes of them, which no literal matches, single bytes and two-byte
     // runs of them that a filter may accept, spaces, and malformed UTF-8, ending with a literal.
     private static byte[] literalText(Random random, String[] literals, int length)
     {
