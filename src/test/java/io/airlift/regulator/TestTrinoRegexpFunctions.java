@@ -691,22 +691,11 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testFullCaptureMatcherDoesNotAnalyzeSingleBytePattern()
-    {
-        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(a)"));
-        assertThat(regexp.isSingleByteMatcherComputed()).isFalse();
-
-        assertThat(regexp.extract(utf8("a"), 1)).isEqualTo(utf8("a"));
-        assertThat(regexp.isSingleByteMatcherComputed()).isFalse();
-    }
-
-    @Test
-    public void testContainsInitializesOnlyEligibleSingleByteMatcher()
+    public void testCompileBuildsOnlyEligibleSingleByteMatcher()
     {
         TrinoRegexp delimiter = TrinoRegexp.compile(utf8("[,;]"));
-        assertThat(delimiter.isSingleByteMatcherComputed()).isFalse();
-        assertThat(delimiter.contains(utf8("abc;def"))).isTrue();
         assertThat(delimiter.isSingleByteMatcherComputed()).isTrue();
+        assertThat(delimiter.contains(utf8("abc;def"))).isTrue();
         assertThat(delimiter.contains(Slices.wrappedBuffer(utf8("xxabc;defyy").getBytes(), 2, 7))).isTrue();
         assertThat(delimiter.contains(utf8("abcdef"))).isFalse();
         assertThatThrownBy(() -> delimiter.contains(null)).isInstanceOf(NullPointerException.class);
@@ -1114,7 +1103,7 @@ public class TestTrinoRegexpFunctions
         assertThat(countSingleByteMatches("^ab[,;]", utf8("ab,xx;"))).isEqualTo(-1);
         assertThat(TrinoRegexp.compile(utf8("^ab[,;]")).count(utf8("ab,xx;"))).isEqualTo(1);
 
-        SingleByteMatcher matcher = Re2.compile(utf8("[,;]")).createSingleByteMatcher();
+        SingleByteMatcher matcher = Re2.compile(utf8("[,;]")).sharedSingleByteMatcher();
         Slice slice = Slices.wrappedBuffer(utf8("xxa,b;cyy").getBytes(), 2, 5);
         assertThat(matcher.find(slice, 0)).isEqualTo(1);
         assertThat(matcher.find(slice, 2)).isEqualTo(3);
@@ -1131,7 +1120,7 @@ public class TestTrinoRegexpFunctions
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread compilerThread = new Thread(null, () -> {
             try {
-                SingleByteMatcher matcher = Re2.compile(utf8(pattern)).createSingleByteMatcher();
+                SingleByteMatcher matcher = Re2.compile(utf8(pattern)).sharedSingleByteMatcher();
                 result.set(matcher == null ? -1 : matcher.count(utf8("aba")));
             }
             catch (Throwable throwable) {
@@ -1148,7 +1137,7 @@ public class TestTrinoRegexpFunctions
 
     private static long countSingleByteMatches(String pattern, Slice source)
     {
-        SingleByteMatcher matcher = Re2.compile(utf8(pattern)).createSingleByteMatcher();
+        SingleByteMatcher matcher = Re2.compile(utf8(pattern)).sharedSingleByteMatcher();
         return matcher == null ? -1 : matcher.count(source);
     }
 

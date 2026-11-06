@@ -54,7 +54,7 @@ public class TestSingleByteMatcher
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
             assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(patternCase.pattern()).isTrue();
-            SingleByteMatcher singleByteMatcher = re2.createSingleByteMatcher();
+            SingleByteMatcher singleByteMatcher = re2.sharedSingleByteMatcher();
             assertThat(singleByteMatcher).as(patternCase.pattern()).isNotNull();
 
             RegexpMatcher regularMatcher = re2.genericGroupZeroMatcherForDiagnostics(input);
@@ -92,7 +92,7 @@ public class TestSingleByteMatcher
         for (String pattern : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(pattern));
             assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(pattern).isFalse();
-            assertThat(re2.createSingleByteMatcher()).as(pattern).isNull();
+            assertThat(re2.sharedSingleByteMatcher()).as(pattern).isNull();
         }
     }
 

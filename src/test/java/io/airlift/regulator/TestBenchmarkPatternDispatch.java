@@ -185,7 +185,7 @@ public class TestBenchmarkPatternDispatch
     }
 
     /// Requires `compiled` to take the full-Slice `find` route that `target` names, and its
-    /// benchmark matcher `matcher` the matcher route LITERAL_SET names.
+    /// benchmark matcher `matcher` the matcher route LITERAL_SET or SINGLE_BYTE names.
     private static void assertRoute(String target, CompiledPattern compiled, RegexpMatcher matcher, String description)
     {
         Shape expected = switch (target) {
@@ -222,7 +222,12 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();
             }
             case "DOT_STAR_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
-            case "SINGLE_BYTE" -> assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isTrue();
+            case "SINGLE_BYTE" -> {
+                assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isTrue();
+                assertThat(matcher.singleByteMatcherForDiagnostics()).as(description).isSameAs(compiled.sharedSingleByteMatcher());
+                // A find with at least 64 bytes left, on LONG rows, runs the forward cursor.
+                assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).as(description).isTrue();
+            }
             case "LITERAL_SET" -> {
                 assertThat(compiled.literalSetSpanMatcher()).as(description).isNotNull();
                 assertThat(matcher.literalSetEnabledForDiagnostics()).as(description).isTrue();

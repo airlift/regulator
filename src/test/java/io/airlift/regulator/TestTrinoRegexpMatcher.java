@@ -40,9 +40,7 @@ public class TestTrinoRegexpMatcher
     {
         // The single-byte matcher records its own retry point, so the table's [ab] entry covers that route.
         String singleByte = "[ab]";
-        TrinoRegexp singleBytePattern = TrinoRegexp.compile(utf8Slice(singleByte));
-        singleBytePattern.matcher(EMPTY_SLICE);
-        assertThat(singleBytePattern.isSingleByteMatcherComputed()).isTrue();
+        assertThat(TrinoRegexp.compile(utf8Slice(singleByte)).isSingleByteMatcherComputed()).isTrue();
         for (String expression : List.of(
                 "foo|foobar|bar",
                 "foobar|foo|bar",

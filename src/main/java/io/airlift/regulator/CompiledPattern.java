@@ -176,7 +176,7 @@ abstract sealed class CompiledPattern
     ///
     /// @param matcherClassCounter off the compact route, the counter that finds a class pattern's
     ///         matches, whose memory is reserved, or `null`
-    /// @param singleByteMatcherReserved whether the single-byte table's memory is reserved
+    /// @param singleByteMatcher the single-byte table, whose memory is reserved, or `null`
     /// @param retainedClassCountDfa whether a [Shape#CLASS_RUN] pattern counts on the retained
     ///         class count DFA rather than its counter
     /// @param ordinaryShortBooleanMatch whether unanchored boolean calls of a
@@ -209,7 +209,7 @@ abstract sealed class CompiledPattern
             BoundedCharacterClassCounter compactBoundedCharacterClass,
             Shape shape,
             BoundedCharacterClassCounter matcherClassCounter,
-            boolean singleByteMatcherReserved,
+            SingleByteMatcher singleByteMatcher,
             boolean retainedClassCountDfa,
             boolean ordinaryShortBooleanMatch,
             boolean singleAttemptCount,
@@ -260,11 +260,13 @@ abstract sealed class CompiledPattern
     // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
     // repeat's counter.
     private final BoundedCharacterClassCounter matcherClassCounter;
+    // The single-byte table of a one-byte pattern, which route selection builds when its memory
+    // fits, or null. Group-zero matchers, the byte-table shape, and Trino share it.
+    private final SingleByteMatcher singleByteMatcher;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
     private volatile BoundedCharacterClassCounter boundedCharacterClassCounter;
-    private volatile SingleByteMatcher singleByteMatcher;
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only classes of this package; each scan-plan shape class permits only its non-sealed CompiledScan class, which only its generated hidden class extends")
     CompiledPattern(Analysis analysis)
@@ -289,9 +291,7 @@ abstract sealed class CompiledPattern
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
         this.hasAnchoredSubmatchRoute = !clearsGroupsBeforeMatch && takesAnchoredSubmatchRoute();
         this.matcherClassCounter = analysis.matcherClassCounter();
-        if (!analysis.singleByteMatcherReserved()) {
-            singleByteMatcher = SingleByteMatcher.unsupported();
-        }
+        this.singleByteMatcher = analysis.singleByteMatcher();
         this.capturingGroupCount = analysis.capturingGroupCount();
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
         // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
@@ -734,7 +734,7 @@ abstract sealed class CompiledPattern
 
     /// Returns the analysis of a pattern with its shape and routes selected. Selection reserves the
     /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
-    /// budget, before any DFA can snapshot it; the table itself stays lazy.
+    /// budget, before any DFA can snapshot it, and builds the table.
     private static Analysis selectRoutes(
             int flags,
             long maxMemory,
@@ -787,10 +787,16 @@ abstract sealed class CompiledPattern
         else {
             matcherClass = null;
         }
-        boolean singleByteMatcher = mayHaveSingleByteMatcher(requiredPrefix, partialProg, matchLength) &&
+        // A group-zero matcher's find runs the table ahead of the scan plan, so a pattern with a
+        // scan plan takes no table and keeps its plan. No one-byte pattern is known to take a
+        // plan, so this guard is defensive.
+        SingleByteMatcher singleByteMatcher = booleanPlans.scanPlan() == null &&
+                mayHaveSingleByteMatcher(requiredPrefix, partialProg, matchLength) &&
                 SingleByteMatcher.supports(suffixRegexp, expressionAnalysis.caseFolding()) &&
-                SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory();
-        if (singleByteMatcher) {
+                SingleByteMatcher.estimatedRetainedSize() <= partialProg.dfaMemory()
+                ? SingleByteMatcher.analyze(suffixRegexp, expressionAnalysis.caseFolding())
+                : null;
+        if (singleByteMatcher != null) {
             partialProg.setDfaMemory(partialProg.dfaMemory() - SingleByteMatcher.estimatedRetainedSize());
             if (general) {
                 shape = Shape.BYTE_TABLE;
@@ -1521,7 +1527,7 @@ abstract sealed class CompiledPattern
             return findOnForwardProgram(input);
         }
         SingleByteMatcher byteRunMatcher = booleanPlans.byteRunMatcher();
-        return (byteRunMatcher != null ? byteRunMatcher : sharedSingleByteMatcher()).find(input, 0) >= 0;
+        return (byteRunMatcher != null ? byteRunMatcher : singleByteMatcher).find(input, 0) >= 0;
     }
 
     /// The full-Slice find of a scan plan. A pattern whose find keeps the literal kernel of its
@@ -1808,7 +1814,7 @@ abstract sealed class CompiledPattern
     /// Creates a mutable matcher retaining every capturing group.
     public RegexpMatcher matcher(Slice input)
     {
-        return new RegexpMatcher(this, input);
+        return new RegexpMatcher(this, input, singleByteMatcher);
     }
 
     /// Creates a reusable matcher that retains group zero and the requested prefix of explicit
@@ -1816,7 +1822,7 @@ abstract sealed class CompiledPattern
     public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
         requireInput(input);
-        return new RegexpMatcher(this, input, null, retainedCapturingGroupCount);
+        return new RegexpMatcher(this, input, singleByteMatcher, retainedCapturingGroupCount);
     }
 
     RegexpMatcher matcher(Slice input, SingleByteMatcher singleByteMatcher)
@@ -1839,10 +1845,9 @@ abstract sealed class CompiledPattern
 
     /// Returns the start-anchored scan plan that an unanchored capture search may run directly
     /// through [#findWithStartAnchoredScanPlan], or `null`. The compile-time plan is the whole
-    /// decision: a pattern with a scan plan never matches empty and has no candidate-start or
-    /// group-zero cursor, direct lowered search, or lowered program, so no
-    /// [RegexpMatcher#find()] check runs ahead of the plan. Only a caller's single-byte matcher
-    /// can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
+    /// decision: a pattern with a scan plan never matches empty and has no single-byte table,
+    /// candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
+    /// [RegexpMatcher#find()] check runs ahead of the plan. A Rust matcher over a partial region runs
     /// its Rust search instead, which reaches the plan only when the region ends at the input end.
     /// A Java matcher region whose $ reads a CR before it runs the ordinary search instead.
     ScanPlan startAnchoredScanPlan()
@@ -1865,20 +1870,11 @@ abstract sealed class CompiledPattern
     /// Returns the case-sensitive scan plan that every capture search of this pattern runs, or
     /// `null`. As for [#startAnchoredScanPlan()], the compile-time plan is the whole decision,
     /// so no [#matchRegionInto] check runs ahead of the plan route of [#matchInternalOnScanPlan]
-    /// either.
-    /// Only a caller's single-byte matcher can still answer first, and a Java matcher region whose
-    /// $ reads a CR before it runs on the NFA instead.
+    /// either. A Java matcher region whose $ reads a CR before it runs on the NFA instead.
     ScanPlan caseSensitiveScanPlan()
     {
         ScanPlan plan = booleanPlans.scanPlan();
         return plan != null && !plan.usesAsciiFoldedExecutor() ? plan : null;
-    }
-
-    /// Returns whether group-zero matchers of this pattern use a single-byte matcher, without
-    /// loading it.
-    boolean hasSingleByteMatcher()
-    {
-        return singleByteMatcher != SingleByteMatcher.unsupported();
     }
 
     /// Returns how [#countMatches] counts this pattern, for a pattern with a
@@ -2271,7 +2267,7 @@ abstract sealed class CompiledPattern
     {
         requireNonNull(text, "text is null");
         if (booleanPlans.byteRunMatcher() == null && text.length() <= MAX_DIRECT_BYTE_SCAN_BYTES) {
-            return sharedSingleByteMatcher().count(text);
+            return singleByteMatcher.count(text);
         }
         BoundedCharacterClassCounter characterClassCounter = boundedCharacterClassCounter();
         if (characterClassCounter != BoundedCharacterClassCounter.unsupported()) {
@@ -2397,35 +2393,17 @@ abstract sealed class CompiledPattern
         return count;
     }
 
-    SingleByteMatcher createSingleByteMatcher()
-    {
-        if (!mayHaveSingleByteMatcher()) {
-            return null;
-        }
-        return SingleByteMatcher.analyze(suffixRegexp, caseFolding());
-    }
-
+    /// Returns the single-byte table that this pattern's group-zero matchers and byte-table routes
+    /// share, or `null` when the pattern has none.
     SingleByteMatcher sharedSingleByteMatcher()
     {
-        SingleByteMatcher matcher = singleByteMatcher;
-        if (matcher == SingleByteMatcher.unsupported()) {
-            return null;
-        }
-        return matcher != null ? matcher : loadSingleByteMatcher();
+        return singleByteMatcher;
     }
 
+    /// Returns whether this pattern has a single-byte table, which compilation builds.
     boolean isSingleByteMatcherComputed()
     {
-        SingleByteMatcher matcher = singleByteMatcher;
-        return matcher != null && matcher != SingleByteMatcher.unsupported();
-    }
-
-    private synchronized SingleByteMatcher loadSingleByteMatcher()
-    {
-        if (singleByteMatcher == null) {
-            singleByteMatcher = requireNonNull(createSingleByteMatcher(), "selected single-byte matcher is unsupported");
-        }
-        return singleByteMatcher;
+        return singleByteMatcher != null;
     }
 
     boolean mayHaveSingleByteMatcher()

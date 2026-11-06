@@ -16,11 +16,11 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
-import java.util.stream.IntStream;
 
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -54,40 +54,24 @@ public class TestPublicMatchCount
     }
 
     @Test
-    public void testSingleByteCacheIsSharedAndBudgetedBeforeUse()
-            throws Exception
+    public void testSingleByteTableIsSharedAndBudgetedAtCompile()
     {
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[,;]"));
         TrinoCompiledPattern pattern = trino.re2();
         long reservedDfaMemory = pattern.forwardProgramForDiagnostics().dfaMemory();
-        assertThat(pattern.isSingleByteMatcherComputed()).isFalse();
+        SingleByteMatcher shared = pattern.sharedSingleByteMatcher();
+        assertThat(shared).isNotNull();
         pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(pattern.findInto(utf8Slice("a,b;c"), null)).isTrue();
         assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
-        try (var executor = Executors.newFixedThreadPool(4)) {
-            var tasks = IntStream.range(0, 16)
-                    .mapToObj(_ -> executor.submit(pattern::sharedSingleByteMatcher))
-                    .toList();
-            SingleByteMatcher shared = tasks.getFirst().get();
-            assertThat(shared).isNotNull();
-            for (var task : tasks) {
-                assertThat(task.get()).isSameAs(shared);
-            }
-            assertThat(trino.count(utf8Slice("a,b;c"))).isEqualTo(2);
-            assertThat(pattern.sharedSingleByteMatcher()).isSameAs(shared);
-            assertThat(trino.isSingleByteMatcherComputed()).isTrue();
-        }
+        assertThat(trino.count(utf8Slice("a,b;c"))).isEqualTo(2);
+        assertThat(pattern.matcher(utf8Slice("a,b;c"), 0).singleByteMatcherForDiagnostics()).isSameAs(shared);
         assertThat(pattern.forwardProgramForDiagnostics().dfaMemory()).isEqualTo(reservedDfaMemory);
-
-        Re2 captures = Re2.compile(utf8Slice("([,;])"));
-        assertThat(captures.matcher(utf8Slice(",")).find()).isTrue();
-        assertThat(captures.isSingleByteMatcherComputed()).isFalse();
 
         for (String expression : List.of("a", "(a)")) {
             TrinoRegexp literal = TrinoRegexp.compile(utf8Slice(expression));
-            assertThat(literal.isSingleByteMatcherComputed()).isFalse();
-            assertThat(literal.matcher(utf8Slice("a"), 0).find()).isTrue();
             assertThat(literal.isSingleByteMatcherComputed()).isTrue();
+            assertThat(literal.matcher(utf8Slice("a"), 0).find()).isTrue();
             assertThat(literal.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
         }
 
@@ -119,6 +103,53 @@ public class TestPublicMatchCount
     }
 
     @Test
+    public void testPublicMatchersFindOnSingleByteTable()
+    {
+        // A group-zero matcher of a one-byte pattern finds on the single-byte table in every
+        // language, apart from a Rust search of a partial region, which reads the input around
+        // it, with the generic matcher's spans in every region of a Slice view that begins inside
+        // its byte array.
+        byte[] bytes = utf8Slice("!!x,é;\t \r\n,💰;y\u000B,").getBytes();
+        Slice input = wrappedBuffer(bytes, 2, bytes.length - 3);
+        List<CompiledPattern> patterns = List.of(
+                Re2.compile(utf8Slice("[,;]")),
+                Re2.compile(utf8Slice("\\s")),
+                JavaRegexp.compile(utf8Slice(",")),
+                JavaRegexp.compile(utf8Slice("\\s")),
+                RustRegexp.compile(utf8Slice("[,;]")),
+                RustRegexp.compile(utf8Slice("(?-u:\\s)")),
+                RustRegexp.compile(utf8Slice("(?-u:[\\x80-\\xFF])"), RustRegexp.Options.bytes()));
+        for (CompiledPattern pattern : patterns) {
+            String expression = pattern.pattern().toStringUtf8();
+            assertThat(pattern.matcher(input).singleByteMatcherForDiagnostics()).as(expression).isSameAs(pattern.sharedSingleByteMatcher());
+            assertThat(pattern.matcher(input, 0).singleByteMatcherForDiagnostics()).as(expression).isSameAs(pattern.sharedSingleByteMatcher());
+            assertThat(findSpans(pattern.matcher(input))).as(expression).isNotEmpty();
+            assertNoProgramSearch(pattern, expression);
+            for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+                for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                    assertThat(findSpans(pattern.matcher(input).reset(input, regionStart, regionEnd)))
+                            .as("pattern %s region %s-%s", expression, regionStart, regionEnd)
+                            .isEqualTo(findSpans(pattern.genericGroupZeroMatcherForDiagnostics(input).reset(input, regionStart, regionEnd)));
+                }
+            }
+        }
+
+        // A matcher that retains a capture keeps the engine, which reports it.
+        Re2 captures = Re2.compile(utf8Slice("([,;])"));
+        assertThat(captures.matcher(input).singleByteMatcherForDiagnostics()).isNull();
+        assertThat(captures.matcher(input, 0).singleByteMatcherForDiagnostics()).isNotNull();
+    }
+
+    private static List<String> findSpans(RegexpMatcher matcher)
+    {
+        List<String> spans = new ArrayList<>();
+        while (matcher.find()) {
+            spans.add(matcher.start() + "-" + matcher.end());
+        }
+        return spans;
+    }
+
+    @Test
     public void testLongSingleByteOperationsRetainDfaAcceleration()
     {
         for (int length : List.of(63, 64, 65, 4096, 32768)) {
@@ -129,7 +160,6 @@ public class TestPublicMatchCount
                 assertThat(pattern.count(input)).isEqualTo(suffix.equals(",") ? 1 : 0);
                 if (length > 64) {
                     assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
-                    assertThat(pattern.isSingleByteMatcherComputed()).isFalse();
                 }
                 else {
                     assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();

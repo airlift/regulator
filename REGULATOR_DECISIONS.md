@@ -1157,10 +1157,10 @@ short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
 another's branch profile. Only a pattern that cannot match empty takes a shape
 other than the engine. With compressed references, the `Re2` layout is 104
-bytes, including one reference each for the shared single-byte matcher cache
-and the [matcher counter](#bounded-character-class-counting), and the base
-pattern's per-pattern ordinary-engine flags. The scan-plan shape's three facts
-fit in its padding, so its layout is also 104 bytes. A pattern with a scan plan
+bytes, including one reference each for the shared single-byte table and the
+[matcher counter](#bounded-character-class-counting), and the base pattern's
+per-pattern ordinary-engine flags. The scan-plan shape's three facts fit in its
+padding, so its layout is also 104 bytes. A pattern with a scan plan
 takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
 prefix, equality, and final-line equality kernels, and its `matches` and
 `lookingAt` keep their literal kernels, which answer without reading past the
@@ -1172,12 +1172,14 @@ also stop once a match is certain, as described in the
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
 or produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
-cascade when no scan plan applies. Trino's explicit single-byte matcher also
-shares the byte scanner; RE2, Java, and Rust matchers keep their existing
-construction routes. Unsupported shapes, position-dependent assertions, and
-other unproven forms retain the ordinary path. The single-byte table is
-initialized lazily; subsequent direct boolean calls allocate no matching
-storage.
+cascade when no scan plan applies. A group-zero matcher of a one-byte pattern
+finds on the single-byte table in every language, Trino's included, while
+fewer than 64 bytes are left; a longer search runs the group-zero forward
+cursor, whose vector byte scan the table replaced, because the table, which
+reads every byte, lost on 1024-byte rows. A pattern with a scan plan takes no
+table, so its matchers keep the plan. Unsupported shapes, position-dependent
+assertions, and other unproven forms retain the ordinary path. Compilation
+builds the single-byte table; direct boolean calls allocate no matching storage.
 
 When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
@@ -1215,8 +1217,8 @@ shorter than the minimum. Trino's existing byte count and explicit matcher
 routes share the same table without changing their input-size policy.
 Capture-retaining iteration remains generic. The table's retained size is
 reserved before a DFA can snapshot its memory budget. If it does not fit, the
-pattern keeps its generic execution route. Trino delegates to this cache instead
-of retaining a second table.
+pattern keeps its generic execution route. Trino delegates to this table instead
+of retaining a second one.
 
 Targeted Java 25 measurements on C9g, C8g, and C8i retain this bounded sharing.
 Unconditional scalar literal and byte-table counting were rejected because
@@ -3145,9 +3147,9 @@ plans; the last bullets record the rules and measurements specific to each.
   generated class adds no fields, so it keeps the scan-plan shape's 104-byte
   layout.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
-  count that skips the plan does not exclude a pattern, because only the calls
-  that reach the plan change.
+  stays interpreted, as in Trino. Unlike Trino, a count that skips the plan
+  does not exclude a pattern, because only the calls that reach the plan
+  change. Route selection gives no pattern with a plan a single-byte table.
 - Short boolean calls that the interpreter hands to the DFA stay on the
   generated class, as in Trino. Boolean calls of a plan run its full plan
   rather than the save-free boolean plan: a capture save without groups is one
