@@ -79,12 +79,14 @@ final class VectorScanKernelSupport
         }
         // Most runs stop at one ASCII byte, such as a host's '/', and their scans often end in the
         // first block. Keep this path small: callers inline it, and a larger body pushed them past
-        // C2's inlining limits. With no excluded ASCII byte, broadcast -1; the non-ASCII comparison
-        // already stops at that value.
-        ByteVector needle = ByteVector.broadcast(SPECIES, needles.length > 0 ? needles[0] : (byte) -1);
+        // C2's inlining limits. The needle is ASCII, so a byte XORed with the needle is zero where
+        // the byte equals it and negative where the byte is non-ASCII: one signed compare with 1
+        // finds both. With no excluded ASCII byte, XOR with zero and compare with 0, stopping at
+        // non-ASCII bytes only.
+        ByteVector needle = ByteVector.broadcast(SPECIES, needles.length > 0 ? needles[0] : 0);
+        ByteVector limit = ByteVector.broadcast(SPECIES, (byte) (needles.length > 0 ? 1 : 0));
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
-            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
-            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0).or(bytes.compare(VectorOperators.EQ, needle));
+            VectorMask<Byte> stops = ByteVector.fromArray(SPECIES, input, cursor).lanewise(VectorOperators.XOR, needle).compare(VectorOperators.LT, limit);
             if (stops.anyTrue()) {
                 return cursor + stops.firstTrue();
             }
@@ -108,13 +110,17 @@ final class VectorScanKernelSupport
         ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : 0);
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
-            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0).or(bytes.compare(VectorOperators.EQ, first)).or(bytes.compare(VectorOperators.EQ, second));
+            // As in findRe2RunStop: each needle is ASCII, so the smallest XOR difference is zero at
+            // a needle and has its high bit set at a non-ASCII byte, so a stop is a lane below 1 as
+            // a signed byte.
+            ByteVector difference = bytes.lanewise(VectorOperators.XOR, first).lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, second));
             if (count > 2) {
-                stops = stops.or(bytes.compare(VectorOperators.EQ, third));
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, third));
             }
             if (count > 3) {
-                stops = stops.or(bytes.compare(VectorOperators.EQ, fourth));
+                difference = difference.lanewise(VectorOperators.UMIN, bytes.lanewise(VectorOperators.XOR, fourth));
             }
+            VectorMask<Byte> stops = difference.compare(VectorOperators.LT, (byte) 1);
             if (stops.anyTrue()) {
                 return cursor + stops.firstTrue();
             }
