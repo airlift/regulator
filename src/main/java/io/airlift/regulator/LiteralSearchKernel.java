@@ -182,10 +182,9 @@ final class LiteralSearchKernel
     }
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-    /// `-1`, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
-    /// Trino dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal,
-    /// InnerLiteralSearch, and the other languages' contains of a literal longer than
-    /// [#CANDIDATE_COMPARISON_BUDGET] call it for such literals. Its word scan makes no call until
+    /// `-1`, for a literal of at least two bytes and a valid range. LIKE and every language's
+    /// regexp contains, Trino dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first
+    /// literal, and InnerLiteralSearch call it for such literals. Its word scan makes no call until
     /// it finds a possible candidate, and a separate method verifies the candidates.
     int findContains(Slice input, int offset, int length)
     {

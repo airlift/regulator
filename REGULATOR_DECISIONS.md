@@ -578,8 +578,15 @@ second byte removed the r9g loss but cost 1.33x on r8i gharchive, so it was not
 taken.
 
 Exact-literal spans on short rows, which count, position, and extract a plain
-literal, keep their first-byte search, and RE2, Java, and Rust keep
-`Slice.indexOf`; only Trino rows were measured. Alternatives rejected:
+literal, keep their first-byte search. The measurements above cover only Trino
+rows. Under the one engine path of release 2.1, RE2, Java, and Rust boolean
+`contains` of a contained literal of two or more bytes uses the same search, as
+Trino does. The 2.1 full run's real short rows decide whether it stays. A
+preliminary dispatch A/B on synthetic rows measured their short `find` at 0.69x
+to 0.71x the time on r9g and 0.62x to 0.71x on r8i, with `matches` and
+`lookingAt` flat. If the full run shows a loss on real short rows, a follow-up
+removes the contains search for that language and restores `Slice.indexOf`.
+Alternatives rejected:
 
 - The pair scan for short-row exact-literal spans won only 3% to 4% on r9g and
   8% to 12% on r8i, and lost 1.53x to 1.78x on short r8i Russian rows (14.0 to
@@ -637,6 +644,11 @@ text, so the pair scan rejects little that a first-byte scan would not.
   below its minimum is never built, and its searches use the NFA. The minimum
   leaves out a forward DFA's start-byte tables, so a DFA can still fail to
   initialize; its program remembers that allowance and does not build it again.
+- A plan that yields to the forward DFAs is left out when its reservation would
+  leave the forward program's first-match or longest-match DFA too little to
+  initialize where that DFA initializes without it, start-byte tables included.
+  Plans that release 2.0 did not build yield where their record says so, so
+  they never change which forward DFAs a `maxMemory` initializes.
 - DFA construction derives retained array and object sizes from the running VM.
   A reset publishes Java state and transition arrays at their initial capacity,
   so expanded tables and per-state objects return to the budget; the state hash table keeps its
@@ -1247,11 +1259,14 @@ allowance, and a compile whose shift table does not fit what remains fails; a
 prefix under 64 bytes whose first byte does not recur shares the contains
 search's read-only table and is charged nothing.
 Case-insensitive prefixes stop at nine bytes and keep their scan.
-`Slice.indexOf` puts no limit on the bytes its failed candidates compare, so
-RE2, Java, and Rust contains of a literal longer than the budget uses the
-contains search when it fits the forward-DFA allowance; shorter literals keep
-`Slice.indexOf`. Scan-plan leading and required literals, capped at 256 bytes,
-still check every candidate; bounding them is a separate change.
+Because `Slice.indexOf` puts no limit on the bytes its failed candidates
+compare, every language's contains of a literal of two or more bytes uses the
+contains search when it fits the forward-DFA allowance. Where release 2.0 built
+the search, in Trino and for a literal of more than 64 bytes elsewhere, it
+reserves its memory whenever it fits, as it did; any other search [yields to
+the forward DFAs](#memory-budgets-and-dfa-caching). Scan-plan leading and
+required literals, capped at 256 bytes, still check every candidate; bounding
+them is a separate change.
 
 ## Short-Window Inner Literal Check
 

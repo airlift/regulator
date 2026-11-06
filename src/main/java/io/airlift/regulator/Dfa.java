@@ -5373,24 +5373,14 @@ final class Dfa
 
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
-            this.stack = new int[Math.max(16, prog.size() * 3 + 32 + nmark + 1)];
-            this.startByteCandidates = prog.buildStartByteCandidates(stack);
-            this.nullableStartByteCandidates = startByteCandidates != null && prog.canMatchEmpty();
-            int startByteScanSet = buildStartByteScanSet(startByteCandidates);
-            StartLiteralFilterChoice startLiteralFilterChoice = !nullableStartByteCandidates && VectorSupport.isAvailable()
-                    ? buildStartLiteralFilter(prog, stack, startByteCandidates, startByteScanSet)
-                    : null;
-            this.startLiteralFilter = startLiteralFilterChoice == null ? null : startLiteralFilterChoice.filter();
-            this.startLiteralFilterVectorOnly = startLiteralFilterChoice != null && startLiteralFilterChoice.vectorOnly();
-            this.startByteNibbleTables = startLiteralFilter == null && startByteScanSet == 0 && !nullableStartByteCandidates && VectorSupport.isAvailable()
-                    ? VectorByteSetScanner.buildNibbleTables(startByteCandidates)
-                    : null;
-            if (startLiteralFilter != null) {
-                this.startByteScanSet = START_LITERAL_FILTER_MARKER;
-            }
-            else {
-                this.startByteScanSet = startByteNibbleTables == null ? startByteScanSet : MIXED_BYTE_SET_MARKER;
-            }
+            this.stack = new int[stackLength(prog, nmark)];
+            StartByteTables startByteTables = StartByteTables.build(prog, stack);
+            this.startByteCandidates = startByteTables.candidates();
+            this.nullableStartByteCandidates = startByteTables.nullableCandidates();
+            this.startLiteralFilter = startByteTables.literalFilter();
+            this.startLiteralFilterVectorOnly = startByteTables.literalFilterVectorOnly();
+            this.startByteNibbleTables = startByteTables.nibbleTables();
+            this.startByteScanSet = startByteTables.scanSet();
 
             if (maxMemory == 0) {
                 this.stateBudget = Long.MAX_VALUE;
@@ -5405,16 +5395,7 @@ final class Dfa
                 return;
             }
 
-            long overhead = fixedOverhead(prog, nmark);
-            if (startByteCandidates != null) {
-                overhead += 16L + startByteCandidates.length;
-            }
-            if (startByteNibbleTables != null) {
-                overhead += 16L + startByteNibbleTables.length;
-            }
-            if (startLiteralFilter != null) {
-                overhead += startLiteralFilter.estimatedRetainedSize();
-            }
+            long overhead = fixedOverhead(prog, nmark) + startByteTables.estimatedRetainedSize();
 
             long memoryBudget = maxMemory - overhead;
             if (memoryBudget < 0) {
@@ -5482,15 +5463,26 @@ final class Dfa
             return published;
         }
 
-        /// Returns the least `maxMemory` with which the constructor initializes a DFA of `kind` over
-        /// `prog`. [Prog#getCachedDfa] gives a reversed program's longest-match DFA the whole
-        /// program DFA memory, so compare that against this value. The start-byte tables are left
-        /// out, since only the constructor builds them, so for a forward program this is a lower
-        /// bound. A reversed program builds none, so for it this is exact.
+        /// Returns a lower bound on the `maxMemory` with which the constructor initializes a DFA of
+        /// `kind` over `prog`. [Prog#getCachedDfa] gives a reversed program's longest-match DFA the
+        /// whole program DFA memory, so compare that against this value. It leaves out the
+        /// start-byte tables, which this does not build, so for a forward program it can fall
+        /// short of what the constructor charges; [#initializationMemory(Prog,Kind)] builds them
+        /// and is exact. A reversed program builds none, so for it this is exact too.
         static long minimumMemory(Prog prog, Kind kind)
         {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
             return fixedOverhead(prog, nmark) + MINIMUM_INITIAL_STATES * largestStateSize(prog, kind, nmark);
+        }
+
+        /// Returns the least `maxMemory` with which the constructor initializes a DFA of `kind` over
+        /// `prog`: [#minimumMemory(Prog,Kind)] and the start-byte tables the constructor would
+        /// charge, which this builds to measure. Unlike that lower bound, it is exact for a forward
+        /// program too.
+        static long initializationMemory(Prog prog, Kind kind)
+        {
+            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            return minimumMemory(prog, kind) + StartByteTables.build(prog, new int[stackLength(prog, nmark)]).estimatedRetainedSize();
         }
 
         // The work queues, the stack, and fixed fields, without the start-byte tables.
@@ -5504,6 +5496,56 @@ final class Dfa
             // The current cache root; the arrays it holds are charged as state memory.
             overhead += CACHE_TABLES_BYTES;
             return overhead;
+        }
+
+        private static int stackLength(Prog prog, int nmark)
+        {
+            return Math.max(16, prog.size() * 3 + 32 + nmark + 1);
+        }
+
+        // The start-byte tables a forward program's DFA builds and charges to its budget: the
+        // bytes that can begin a match and, with the Vector API, the start literal filter or the
+        // nibble tables a search scans for them with. The scan set selects that search, and a
+        // filter taken for rare start bytes serves only vector searches.
+        private record StartByteTables(byte[] candidates, boolean nullableCandidates, int scanSet, StartLiteralFilter literalFilter, boolean literalFilterVectorOnly, byte[] nibbleTables)
+        {
+            static StartByteTables build(Prog prog, int[] stack)
+            {
+                byte[] candidates = prog.buildStartByteCandidates(stack);
+                boolean nullableCandidates = candidates != null && prog.canMatchEmpty();
+                int byteScanSet = buildStartByteScanSet(candidates);
+                StartLiteralFilterChoice literalFilterChoice = !nullableCandidates && VectorSupport.isAvailable()
+                        ? buildStartLiteralFilter(prog, stack, candidates, byteScanSet)
+                        : null;
+                StartLiteralFilter literalFilter = literalFilterChoice == null ? null : literalFilterChoice.filter();
+                boolean literalFilterVectorOnly = literalFilterChoice != null && literalFilterChoice.vectorOnly();
+                byte[] nibbleTables = literalFilter == null && byteScanSet == 0 && !nullableCandidates && VectorSupport.isAvailable()
+                        ? VectorByteSetScanner.buildNibbleTables(candidates)
+                        : null;
+                int scanSet;
+                if (literalFilter != null) {
+                    scanSet = START_LITERAL_FILTER_MARKER;
+                }
+                else {
+                    scanSet = nibbleTables == null ? byteScanSet : MIXED_BYTE_SET_MARKER;
+                }
+                return new StartByteTables(candidates, nullableCandidates, scanSet, literalFilter, literalFilterVectorOnly, nibbleTables);
+            }
+
+            long estimatedRetainedSize()
+            {
+                long size = 0;
+                if (candidates != null) {
+                    size += 16L + candidates.length;
+                }
+                if (nibbleTables != null) {
+                    size += 16L + nibbleTables.length;
+                }
+                if (literalFilter != null) {
+                    size += literalFilter.estimatedRetainedSize();
+                }
+                return size;
+            }
         }
 
         private static long largestStateSize(Prog prog, Kind kind, int nmark)

@@ -2089,8 +2089,8 @@ final class Prog
         Dfa.DfaInstance newDfa = new Dfa.DfaInstance(this, kind, budget);
 
         if (!newDfa.ok()) {
-            // The minimum leaves out a forward program's start-byte tables, which only the
-            // constructor builds, so a budget that passes it can still fail here.
+            // The minimum leaves out a forward program's start-byte tables, so a budget that
+            // passes it can still fail here.
             failedDfaBudgets.set(kind.ordinal(), budget);
             return null;
         }
@@ -2117,6 +2117,23 @@ final class Prog
         long remaining = dfaMemory - reservation;
         return dfaBudget(remaining, Dfa.DfaInstance.Kind.FIRST_MATCH) >= Dfa.DfaInstance.minimumMemory(this, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
                 dfaBudget(remaining, Dfa.DfaInstance.Kind.LONGEST_MATCH) >= Dfa.DfaInstance.minimumMemory(this, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+    }
+
+    /// Whether taking `reservation` bytes from the DFA memory budget leaves the DFA of `kind` at
+    /// least the memory its constructor charges to initialize, the start-byte tables of a forward
+    /// program included. [#leavesDfaMinimum(long)] compares against a lower bound that leaves
+    /// those tables out. This builds them to measure them. A program whose assertions the DFA
+    /// cannot run builds no DFA, so for it this returns true whenever the reservation fits the
+    /// DFA memory budget.
+    boolean leavesDfaInitialization(long reservation, Dfa.DfaInstance.Kind kind)
+    {
+        if (reservation > dfaMemory) {
+            return false;
+        }
+        if (hasDfaUnsupportedAssertions()) {
+            return true;
+        }
+        return dfaBudget(dfaMemory - reservation, kind) >= Dfa.DfaInstance.initializationMemory(this, kind);
     }
 
     private long dfaBudget(long memory, Dfa.DfaInstance.Kind kind)
