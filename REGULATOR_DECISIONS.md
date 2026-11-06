@@ -910,13 +910,15 @@ filter](#start-literal-filter), inputs of at least 64 bytes may skip to the
 positions the filter accepts, unless the filter's stops are dense.
 
 The fixed-width matcher checks every occurrence of one byte, such as the `s` of
-`[a-z]shing`, which English text holds far more often than `shing`. RE2, Java,
-and Rust therefore keep the DFA's inner literal search when its literal, or
-every literal of its set, has two or more bytes. A find whose input lacks the
-literal reports no match without running the DFA, and one whose literal first
-appears within the input's first 64 bytes runs the plain DFA. A count searches
-for the literal only in inputs of 64 bytes or more and runs the plain DFA on
-shorter ones. Trino's fixed-width subtype keeps the matcher.
+`[a-z]shing`, which English text holds far more often than `shing`. Every
+language, Trino included, therefore keeps the DFA's inner literal search when
+its literal, or every literal of its set, has two or more bytes. A find whose
+input lacks the literal reports no match without running the DFA, and one whose
+literal first appears within the input's first 64 bytes runs the plain DFA. A
+count searches for the literal only in inputs of 64 bytes or more and runs the
+plain DFA on shorter ones. A Trino fixed-width pattern otherwise compiles no
+program, and the search needs one, so a pattern whose `maxMemory` leaves no
+room for its program keeps the matcher and compiles wherever the matcher fits.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.

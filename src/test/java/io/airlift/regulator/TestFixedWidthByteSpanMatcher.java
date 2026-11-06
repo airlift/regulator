@@ -242,8 +242,59 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 
-        // Trino's fixed-width subtype keeps its matcher.
-        assertThat(TrinoRegexp.compile(utf8Slice("[a-z]shing"))).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+        // Trino follows the same rule: its plain subtype answers contains and count on the
+        // ordinary engine, which searches for shing, and agrees with RE2's general engine.
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[a-z]shing"));
+        assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
+        assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).isFalse();
+        assertThat(trino.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
+        Re2 reference = Re2.compile(utf8Slice("[a-z]shing"));
+        String prose = "the status of these sessions is still unsettled, so we must assess its uses. ";
+        for (String text : List.of("", "fishing", prose, prose + "go fishing, then washing", "shing ashing " + prose)) {
+            Slice input = utf8Slice(text);
+            long expectedCount = generalEngineCount(reference, input);
+            assertThat(trino.contains(input)).as(text).isEqualTo(expectedCount > 0);
+            assertThat(trino.count(input)).as(text).isEqualTo(expectedCount);
+        }
+
+        // A one-byte inner literal is no rarer than the matcher's byte, so Trino keeps the
+        // matcher on its route that compiles no program.
+        for (String expression : List.of("[a-z]{8}-[0-9]{4}", "\\d{4}-\\d{2}-\\d{2}")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+            assertThat(regexp).as(expression).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+            assertThat(regexp.re2().forwardProgramForDiagnostics().start()).as(expression).isZero();
+        }
+    }
+
+    @Test
+    public void testTrinoMaxMemoryOfFixedWidthPatterns()
+    {
+        // Each pattern compiles from the same maxMemory as when every Trino fixed-width pattern
+        // took the route that compiles no program; below it neither the matcher nor a program
+        // fits. Up to 4 KiB the inner literal search of a shing pattern does not fit, so the
+        // matcher is the route. The program of the last pattern needs 1595 bytes, so from 1574
+        // it compiles only on the route without one.
+        Map<String, Long> minimumMaxMemory = Map.of(
+                "[a-z]shing", 887L,
+                "\\d{4}-\\d{2}-\\d{2}", 935L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 1574L);
+        for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
+            Slice expression = utf8Slice(entry.getKey());
+            for (long maxMemory = 256; maxMemory <= 4096; maxMemory++) {
+                TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
+                String label = "%s at %s".formatted(entry.getKey(), maxMemory);
+                if (maxMemory < entry.getValue()) {
+                    assertThatThrownBy(() -> TrinoRegexp.compile(expression, options))
+                            .as(label)
+                            .isInstanceOf(RegexpCompileMemoryLimitException.class);
+                }
+                else {
+                    assertThat(TrinoRegexp.compile(expression, options)).as(label).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+                }
+            }
+        }
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(1574));
+        assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
     }
 
     // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.

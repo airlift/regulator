@@ -141,6 +141,28 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testPredictsLiteralOfFixedWidthPatterns()
+    {
+        // A fixed-width pattern has no assertion, so its expression alone gives the length of the
+        // literal the compiled search takes, or zero when it takes none.
+        for (String pattern : List.of(
+                "[a-z]shing",
+                "[a-z]{3}shing[0-9]",
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}",
+                "[a-z]{8}-[0-9]{4}",
+                "\\d{4}-\\d{2}-\\d{2}",
+                // A common byte, a prefix the program accelerates, and no literal.
+                "[a-z] [a-z]",
+                "ab[0-9]shing",
+                "[a-z]{4}")) {
+            ParseResult parsed = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
+            int predicted = InnerLiteralSearch.predictMinimumLiteralLength(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), parsed.caseFolding());
+            InnerLiteralSearch search = Re2.compile(utf8Slice(pattern)).innerLiteralSearchForDiagnostics();
+            assertThat(predicted).as(pattern).isEqualTo(search == null ? 0 : search.minimumLiteralLength());
+        }
+    }
+
+    @Test
     public void testRetainedSearchUsesReverseBudget()
     {
         Slice pattern = utf8Slice("\\w+\\s+Holmes");

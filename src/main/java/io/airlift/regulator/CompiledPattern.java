@@ -350,7 +350,6 @@ abstract sealed class CompiledPattern
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
 
-        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
         Regexp entireRegexp = parsed.regexp();
         CaseFolding caseFolding = parsed.caseFolding();
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
@@ -358,33 +357,70 @@ abstract sealed class CompiledPattern
                 : null;
         if (fixedWidthMatcher != null) {
             Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
-            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
-            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO, caseFolding);
-            if (fixedWidthMatcher.estimatedRetainedSize() <= placeholderProgram.dfaMemory()) {
-                placeholderProgram.setDfaMemory(0);
-                BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram).withFixedWidthByteMatcher(fixedWidthMatcher);
-                return selectRoutes(
-                        flags,
-                        maxMemory,
-                        Compiler.Dialect.TRINO,
-                        false,
-                        pattern,
-                        entireRegexp,
-                        expressionAnalysis,
-                        entireRegexp,
-                        null,
-                        null,
-                        false,
-                        expressionAnalysis.length().encoded(),
-                        -1,
-                        placeholderProgram,
-                        booleanPlans,
-                        0,
-                        Map.of(),
-                        null);
+            // A fixed-width pattern has no assertion, so the expression alone shows whether find
+            // would search a multi-byte inner literal. That search runs on a compiled program,
+            // so the full analysis decides such a pattern, as it does in every language.
+            if (innerLiteralPrecedesFixedWidth(InnerLiteralSearch.predictMinimumLiteralLength(normalizedRegexp, caseFolding))) {
+                try {
+                    return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+                }
+                catch (RegexpCompileMemoryLimitException e) {
+                    // The inner literal search needs a program; without room for one, the matcher
+                    // is the route, so the pattern compiles wherever the matcher alone fits.
+                    Analysis analysis = analyzeFixedWidthWithoutProgram(pattern, entireRegexp, normalizedRegexp, caseFolding, fixedWidthMatcher, flags, maxMemory);
+                    if (analysis == null) {
+                        throw e;
+                    }
+                    return analysis;
+                }
+            }
+            Analysis analysis = analyzeFixedWidthWithoutProgram(pattern, entireRegexp, normalizedRegexp, caseFolding, fixedWidthMatcher, flags, maxMemory);
+            if (analysis != null) {
+                return analysis;
             }
         }
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+    }
+
+    /// Returns the analysis of a Trino fixed-width pattern that answers every operation from
+    /// `fixedWidthMatcher` and compiles no program, or null when the matcher does not fit the
+    /// forward budget.
+    private static Analysis analyzeFixedWidthWithoutProgram(
+            Slice pattern,
+            Regexp entireRegexp,
+            Regexp normalizedRegexp,
+            CaseFolding caseFolding,
+            FixedWidthByteSpanMatcher fixedWidthMatcher,
+            int flags,
+            long maxMemory)
+    {
+        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
+        Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO, caseFolding);
+        if (fixedWidthMatcher.estimatedRetainedSize() > placeholderProgram.dfaMemory()) {
+            return null;
+        }
+        placeholderProgram.setDfaMemory(0);
+        BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram).withFixedWidthByteMatcher(fixedWidthMatcher);
+        return selectRoutes(
+                flags,
+                maxMemory,
+                Compiler.Dialect.TRINO,
+                false,
+                pattern,
+                entireRegexp,
+                expressionAnalysis,
+                entireRegexp,
+                null,
+                null,
+                false,
+                expressionAnalysis.length().encoded(),
+                -1,
+                placeholderProgram,
+                booleanPlans,
+                0,
+                Map.of(),
+                null);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -1149,7 +1185,7 @@ abstract sealed class CompiledPattern
         if (retainedMatcher != null) {
             return retainedMatcher;
         }
-        if (!mayHaveFixedWidthByteSpanMatcher()) {
+        if (!mayHaveFixedWidthByteSpanMatcher() || searchesMultiByteInnerLiteral(booleanPlans)) {
             return null;
         }
         return FixedWidthByteSpanMatcher.analyze(regexp, expressionAnalysis);
@@ -1174,14 +1210,20 @@ abstract sealed class CompiledPattern
                 literalSequence.literalCount() != 0;
     }
 
-    // The fixed-width matcher checks every occurrence of one byte, such as the s of [a-z]shing,
-    // which English text holds far more often than the inner literal shing the DFA searches for
-    // instead. A one-byte inner literal, such as the - of an ISO date, is no rarer than the
-    // matcher's byte.
     private static boolean searchesMultiByteInnerLiteral(BooleanPlans booleanPlans)
     {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        return innerLiteralSearch != null && innerLiteralSearch.minimumLiteralLength() >= 2;
+        return innerLiteralSearch != null && innerLiteralPrecedesFixedWidth(innerLiteralSearch.minimumLiteralLength());
+    }
+
+    // The one rule, in every language, for whether a pattern whose find searches for an inner
+    // literal of this length, or with a set of this shortest member, keeps that search instead
+    // of the fixed-width matcher. The matcher checks every occurrence of one byte, such as the s
+    // of [a-z]shing, which English text holds far more often than the inner literal shing. A
+    // one-byte inner literal, such as the - of an ISO date, is no rarer than the matcher's byte.
+    private static boolean innerLiteralPrecedesFixedWidth(int minimumLiteralLength)
+    {
+        return minimumLiteralLength >= 2;
     }
 
     long findExactLiteralSpan(Slice input, int start)
