@@ -607,7 +607,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
   with a non-positive budget uses upstream's 1 MiB default DFA allowance.
 - A forward program divides its DFA allowance between first-match and
   longest-match caches. A reverse longest-match DFA and a set's many-match DFA use
-  their program's complete allowance.
+  their program's complete allowance. As upstream, a DFA whose allowance is
+  below its minimum is never built, and its searches use the NFA. The minimum
+  leaves out a forward DFA's start-byte tables, so a DFA can still fail to
+  initialize; its program remembers that allowance and does not build it again.
 - DFA construction derives retained array and object sizes from the running VM.
   Expanded backing arrays and hash-table capacity remain charged after reset;
   only unreachable per-state objects return to the budget. A full cache resets,
