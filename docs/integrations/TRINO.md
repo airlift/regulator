@@ -52,7 +52,8 @@ expression binds the public method to the pattern with
 `findVirtual(...).bindTo(pattern)`, inserting a fixed extract group with
 `insertArguments`, and holds the handle as a constant, so the call reaches the
 pattern's own generated operation directly, with no dispatch, and C2 can
-inline it.
+inline it; see
+[Binding a compiled pattern](../reference/REGULATOR_API.md#binding-a-compiled-pattern).
 Variable patterns call the public API. Each successful generation defines a
 new hidden class, so compile patterns that are not cached, such as a different
 pattern on every row, without this option.
