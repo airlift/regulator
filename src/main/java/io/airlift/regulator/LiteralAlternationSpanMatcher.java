@@ -28,9 +28,10 @@ import static io.airlift.regulator.Regexp.LATIN1;
 import static java.util.Objects.requireNonNull;
 
 /// Finds the leftmost-first match of an alternation of at most [#MAXIMUM_ALTERNATIVES] literal
-/// strings, such as `ERROR|WARN|FATAL`, by walking a trie at each position it does not skip,
-/// which serves short Trino patterns. [LiteralSetSpanMatcher] searches a larger alternation,
-/// whose literals this class's analysis also extracts.
+/// strings, such as `ERROR|WARN|FATAL`, which serves short Trino patterns. It walks a trie at
+/// each position it reads through its root table, and compares the literals that begin with
+/// the byte at each start literal filter stop. [LiteralSetSpanMatcher] searches a larger
+/// alternation, whose literals this class's analysis also extracts.
 final class LiteralAlternationSpanMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralAlternationSpanMatcher.class);
@@ -48,9 +49,9 @@ final class LiteralAlternationSpanMatcher
     // A class the parsers merge from a dictionary's single-character alternatives holds a few
     // members, such as [ds] from word(?:d|s); a wider one, such as [!-~], is not a literal set.
     private static final int MAXIMUM_CLASS_RUNES = 16;
-    // The search restarts the trie at every input byte it does not skip, so a long literal costs
-    // its length per byte on a dense near-miss input; such a pattern keeps the general engine's
-    // linear scan.
+    // The root-table route restarts the trie at every input byte, and a filter stop compares the
+    // literals that begin with its byte, so a long literal costs its length per byte on a dense
+    // near-miss input; such a pattern keeps the general engine's linear scan.
     // At most 64 alternatives of this length also keep every trie index within a short.
     private static final int MAXIMUM_TRIE_LITERAL_BYTES = 64;
     // A denser filter would stop the vector scan so often that restarting it would cost more
@@ -72,6 +73,10 @@ final class LiteralAlternationSpanMatcher
     private final short[] targetState;
     private final byte[] edgeByte;
     private final short[] alternativeByState;
+    // The literals that begin with each leading byte, in pattern order, which a filter stop
+    // compares directly instead of walking the trie. Null when there is no start literal filter,
+    // whose stops are its only reader.
+    private final byte[][][] literalsByLeadingByte;
     // Null without the Vector API, or when the literals admit no selective filter.
     private final StartLiteralFilter startLiteralFilter;
     // Observability, updated without synchronization as the DFA's scan counters are.
@@ -86,6 +91,7 @@ final class LiteralAlternationSpanMatcher
             short[] targetState,
             byte[] edgeByte,
             short[] alternativeByState,
+            byte[][][] literalsByLeadingByte,
             StartLiteralFilter startLiteralFilter)
     {
         this.rootStateByLeadingByte = rootStateByLeadingByte;
@@ -94,6 +100,7 @@ final class LiteralAlternationSpanMatcher
         this.targetState = targetState;
         this.edgeByte = edgeByte;
         this.alternativeByState = alternativeByState;
+        this.literalsByLeadingByte = literalsByLeadingByte;
         this.startLiteralFilter = startLiteralFilter;
     }
 
@@ -156,6 +163,7 @@ final class LiteralAlternationSpanMatcher
                 alternativeByState[state] = (short) alternativeIndex;
             }
         }
+        StartLiteralFilter startLiteralFilter = VectorSupport.isAvailable() ? buildStartLiteralFilter(literalAlternatives) : null;
         return new LiteralAlternationSpanMatcher(
                 rootStateByLeadingByte,
                 firstEdgeByState,
@@ -163,7 +171,21 @@ final class LiteralAlternationSpanMatcher
                 targetState,
                 edgeByte,
                 alternativeByState,
-                VectorSupport.isAvailable() ? buildStartLiteralFilter(literalAlternatives) : null);
+                startLiteralFilter == null ? null : buildLiteralsByLeadingByte(literalAlternatives),
+                startLiteralFilter);
+    }
+
+    private static byte[][][] buildLiteralsByLeadingByte(List<byte[]> literals)
+    {
+        byte[][][] literalsByLeadingByte = new byte[256][][];
+        for (byte[] literal : literals) {
+            int leadingByte = literal[0] & 0xFF;
+            byte[][] group = literalsByLeadingByte[leadingByte];
+            group = group == null ? new byte[1][] : Arrays.copyOf(group, group.length + 1);
+            group[group.length - 1] = literal;
+            literalsByLeadingByte[leadingByte] = group;
+        }
+        return literalsByLeadingByte;
     }
 
     // Each literal is one path of the byte sets Prog.buildStartPositionByteSets returns: its byte
@@ -201,7 +223,25 @@ final class LiteralAlternationSpanMatcher
                 SizeOf.sizeOf(targetState) +
                 SizeOf.sizeOf(edgeByte) +
                 SizeOf.sizeOf(alternativeByState) +
+                literalsByLeadingByteRetainedSize() +
                 (startLiteralFilter == null ? 0 : startLiteralFilter.estimatedRetainedSize());
+    }
+
+    private long literalsByLeadingByteRetainedSize()
+    {
+        if (literalsByLeadingByte == null) {
+            return 0;
+        }
+        long size = SizeOf.sizeOfObjectArray(literalsByLeadingByte.length);
+        for (byte[][] literals : literalsByLeadingByte) {
+            if (literals != null) {
+                size += SizeOf.sizeOfObjectArray(literals.length);
+                for (byte[] literal : literals) {
+                    size += SizeOf.sizeOf(literal);
+                }
+            }
+        }
+        return size;
     }
 
     /// True when a search with `length` bytes left may skip to the start literal filter's
@@ -218,7 +258,7 @@ final class LiteralAlternationSpanMatcher
         return startLiteralFilter;
     }
 
-    /// The positions where the start literal filter's scan stopped for the trie.
+    /// The positions where the start literal filter's scan stopped to compare the literals.
     long filterStopCountForDiagnostics()
     {
         return filterStopCount;
@@ -226,7 +266,7 @@ final class LiteralAlternationSpanMatcher
 
     /// The positions the scalar root-table loop read in searches and counts that began with at
     /// least 64 bytes left. Shorter ones always read the root table, and count nothing. Filter
-    /// stops also look up the root table, but [#filterStopCountForDiagnostics()] counts them.
+    /// stops compare the literals instead, and [#filterStopCountForDiagnostics()] counts them.
     long rootTablePositionCountForDiagnostics()
     {
         return rootTablePositionCount;
@@ -486,9 +526,9 @@ final class LiteralAlternationSpanMatcher
     // True when the route from `position` reads every byte through the root table rather than
     // skipping to the filter's stops: there is no filter, or at least 64 KiB remain and the DFA's
     // start-scan productivity check finds the stops too dense in its sample. Near misses that
-    // the filter passes and the trie rejects, such as ERxO under ERROR|WARN|FATAL every fifth
-    // byte, make frequent filter stops, and restarting the vector scan at each costs more than
-    // one root-table lookup per byte.
+    // the filter passes and the literal compare rejects, such as ERxO under ERROR|WARN|FATAL
+    // every fifth byte, make frequent filter stops, and restarting the vector scan at each costs
+    // more than one root-table lookup per byte.
     private boolean readsRootTable(byte[] bytes, int position, int inputEnd)
     {
         if (startLiteralFilter == null) {
@@ -520,17 +560,18 @@ final class LiteralAlternationSpanMatcher
         return position + Dfa.BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES;
     }
 
-    // Returns the span of the first match that starts in `[position, routeEnd)`, whose trie walk
-    // may read to the input end, or Dfa.SEARCH_NO_MATCH. Each pass searches either one filter stop
-    // or the rest of the route, so the trie walk has one call site: C2 inlined a copy at each of
-    // two sites, which grew this method past its inline size limit, and its callers then called
-    // it rather than inlining it.
+    // Returns the span of the first match that starts in `[position, routeEnd)`, or
+    // Dfa.SEARCH_NO_MATCH; checking a match may read to the input end. Each pass searches either
+    // one filter stop, comparing its literals, or the rest of the route through the root table,
+    // which keeps the root-table trie walk at this one call site: C2 inlined a copy at each of two
+    // sites, which grew this method past its inline size limit, and its callers then called it
+    // rather than inlining it.
     private long findSpanInRoute(byte[] bytes, int position, int routeEnd, boolean readsRootTable, int inputOffset, int inputEnd)
     {
         // The filter accepts every position where a literal starts, so the positions it skips
-        // hold no match, and the trie decides each one it stops at. Every literal reaches the
-        // filter's last position, so a scan that reads that far past the route end finds every
-        // stop before the route end.
+        // hold no match, and comparing the literals at each stop decides it. Every literal reaches
+        // the filter's last position, so a scan that reads that far past the route end finds
+        // every stop before the route end.
         int scanEnd = readsRootTable ? routeEnd : Math.min(inputEnd, routeEnd + startLiteralFilter.thirdOffset());
         while (true) {
             boolean filterStop = !readsRootTable && position < routeEnd && usesStartLiteralFilter(inputEnd - position);
@@ -541,7 +582,9 @@ final class LiteralAlternationSpanMatcher
                 }
                 filterStopCount++;
             }
-            long span = findSpanInRootTable(bytes, position, filterStop ? position + 1 : routeEnd, inputOffset, inputEnd);
+            long span = filterStop
+                    ? findSpanAtStop(bytes, position, inputOffset, inputEnd)
+                    : findSpanInRootTable(bytes, position, routeEnd, inputOffset, inputEnd);
             if (!filterStop) {
                 // The filter's scan can stop past the route end, leaving the root table nothing to read.
                 int readEnd = span < 0 ? Math.max(position, routeEnd) : inputOffset + (int) (span >>> 32) + 1;
@@ -555,12 +598,31 @@ final class LiteralAlternationSpanMatcher
         }
     }
 
+    // Returns the span of the match that starts at `position`, or Dfa.SEARCH_NO_MATCH: the first
+    // literal in pattern order that begins with the position's byte and matches there, which is
+    // the alternative the trie walk would pick.
+    private long findSpanAtStop(byte[] bytes, int position, int inputOffset, int inputEnd)
+    {
+        byte[][] candidates = literalsByLeadingByte[bytes[position] & 0xFF];
+        if (candidates == null) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+        int remaining = inputEnd - position;
+        for (byte[] literal : candidates) {
+            if (literal.length <= remaining && Arrays.mismatch(bytes, position, position + literal.length, literal, 0, literal.length) < 0) {
+                int matchStart = position - inputOffset;
+                return ((long) matchStart << 32) | ((matchStart + literal.length) & 0xFFFF_FFFFL);
+            }
+        }
+        return Dfa.SEARCH_NO_MATCH;
+    }
+
     // Returns the span of the first match that starts in `[position, routeEnd)`, or
     // Dfa.SEARCH_NO_MATCH. Each position's byte is looked up in the root table, and the trie is
-    // walked from each one the table admits for the earliest alternative in pattern order. A
-    // filter stop searches its one position here too. Walking in this loop keeps the child
-    // lookup inlined: C2 compiled a separate walk method into its callers before that method's
-    // own profile matured, and without call counts it left the child lookup a call.
+    // walked from each one the table admits for the earliest alternative in pattern order.
+    // Walking in this loop keeps the child lookup inlined: C2 compiled a separate walk method
+    // into its callers before that method's own profile matured, and without call counts it left
+    // the child lookup a call.
     private long findSpanInRootTable(byte[] bytes, int position, int routeEnd, int inputOffset, int inputEnd)
     {
         for (; position < routeEnd; position++) {

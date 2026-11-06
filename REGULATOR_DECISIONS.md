@@ -1010,9 +1010,10 @@ When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
 matchers Trino uses. Trino's subtypes call these matchers directly because
 routing through the compiled pattern's dispatch measured about 9% more per
-call on Graviton. The literal-alternation matcher restarts its trie at every
-input byte it does not skip, so it takes only alternatives of at most 64 bytes;
-a longer literal keeps the general engine, whose DFA scans each byte once. The
+call on Graviton. The literal-alternation matcher's root-table route restarts
+its trie at every input byte, and a filter stop compares the literals that
+begin with its byte, so it takes only alternatives of at most 64 bytes; a
+longer literal keeps the general engine, whose DFA scans each byte once. The
 longest literal among the measured rows is 35 bytes, in rebar's Russian
 Sherlock names. When its literals admit a [start literal
 filter](#start-literal-filter), inputs of at least 64 bytes may skip to the
@@ -1591,17 +1592,26 @@ The literal-alternation matcher builds the same filter from its own literals,
 reading each literal's bytes and treating positions past its end as accepting
 every byte, so they are never chosen. It keeps the filter only when the Vector
 API is available and the estimated density is at most 1/64. Searches with at
-least 64 bytes left skip to the filter's next candidate and walk the trie
-there; shorter searches, such as short everyday values, keep reading every
-byte through the trie's root table. A search with at least 64 KiB left first
-samples the filter's stops with the DFA's start-scan productivity check. When
-they are dense, as on a log of near misses such as `ERxO` under
-`ERROR|WARN|FATAL`, which the filter passes and the trie rejects, the search
-reads the root table for the next 64 KiB and then samples again; otherwise it
-keeps the filter for those 64 KiB. A count, a Trino matcher's repeated finds,
-and each call of Trino's position, extract-all, split, and replace carry that
-choice from one match to the next, so they sample at most once per 64 KiB
-rather than once per match.
+least 64 bytes left skip to the filter's next candidate and there compare, in
+pattern order, the literals that begin with its byte, which picks the
+alternative the trie walk would; shorter searches, such as short everyday
+values, keep reading every byte through the trie's root table. Walking the
+trie at each stop was 34-38% of the time of the Sherlock-style literal
+alternation counts, which the direct compare runs at 0.82 of before on Intel
+and 0.77 on Graviton. The compare at a stop is linear in the literals that
+begin with the stop's byte, at most 64, where the trie walked a shared prefix
+once; the measured rows have at most two literals per leading byte. The matcher
+retains its literals for the compare, grouped in a 256-entry table by leading
+byte.
+
+A search with at least 64 KiB left first samples the filter's stops with the
+DFA's start-scan productivity check. When they are dense, as on a log of near
+misses such as `ERxO` under `ERROR|WARN|FATAL`, which the filter passes and the
+literal compare rejects, the search reads the root table for the next 64 KiB
+and then samples again; otherwise it keeps the filter for those 64 KiB. A
+count, a Trino matcher's repeated finds, and each call of Trino's position,
+extract-all, split, and replace carry that choice from one match to the next,
+so they sample at most once per 64 KiB rather than once per match.
 
 When the first sample of an input finds the stops dense, RE2, Java, and Rust
 boolean find and count do not read the root table: they hand the input to the
@@ -1617,8 +1627,9 @@ general engine, so it reads the root table on a dense first sample as well.
 This follows the Rust regex crate's packed Teddy prefilter, which the crate
 treats as fast only when every literal has at least three bytes. It is a
 performance-only deviation. The filter accepts every position where a match
-can start, the DFA or the trie still decides each one, and randomized tests
-compare the results with the NFA or the general engine.
+can start, the DFA, the trie, or the literal compare at a stop still decides
+each one, and randomized tests compare the results with the NFA or the general
+engine.
 
 ## Bounded Character-Class Counting
 
