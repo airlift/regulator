@@ -31,6 +31,7 @@ import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfByteArray;
@@ -217,6 +218,40 @@ public class TestLiteralAlternationSpanMatcher
                 .isEqualTo(longestMatch.forwardProgramForDiagnostics().dfaMemory() - patterns.getFirst().literalSetSpanMatcher().estimatedRetainedSize());
         assertThat(Re2.compile(utf8Slice(words(64))).literalSetSpanMatcher()).isNull();
         assertThat(Re2.compile(utf8Slice("(" + words(65) + ")")).literalSetSpanMatcher()).isNull();
+
+        // The set answers full-Slice find and count only where the forward DFA each runs cannot
+        // initialize beside it. Find's earliest-match search runs the longest-match DFA, which
+        // needs more memory than count's first-match DFA, so between the two least budgets find
+        // runs on the set and count on the DFA, as for a dictionary of tens of thousands of words
+        // under the default budget. A budget least for the root's skip shows that the skip, a
+        // contiguous range or nibble tables, compiles with the same answers whether it fits or not;
+        // without the Vector API no budget builds it. The count is answered without a matcher at
+        // every budget, below the first-match DFA's least budget by the set.
+        Slice wordsInput = utf8Slice("zz ax0 then ax64, ax8x and ax6?");
+        for (String leadingBytes : List.of("abcdefgh", "acegikmo")) {
+            String expression = leadingByteWords(leadingBytes, 65);
+            Prog program = Re2.compile(utf8Slice(expression)).forwardProgramForDiagnostics();
+            long dfaMemory = 2 * leastValue(1, budget -> new Dfa.DfaInstance(program, Dfa.DfaInstance.Kind.FIRST_MATCH, budget).ok());
+            long countEdge = leastValue(dfaMemory, budget -> compileWithMaxMemory(expression, budget).forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH) != null);
+            long findEdge = leastValue(countEdge, budget -> compileWithMaxMemory(expression, budget).forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null);
+            long skipEdge = VectorSupport.isAvailable()
+                    ? leastValue(findEdge, budget -> compileWithMaxMemory(expression, budget).literalSetSpanMatcher().rootByteScanSetForDiagnostics() != 0)
+                    : findEdge;
+            int scanSet = literalSet(expression).rootByteScanSetForDiagnostics();
+            for (long budget : List.of(countEdge - 1, countEdge, findEdge - 1, findEdge, skipEdge - 1, skipEdge)) {
+                Re2 pattern = compileWithMaxMemory(expression, budget);
+                String label = expression.substring(0, 20) + " at " + budget;
+                assertThat(pattern.literalSetSpanMatcher()).as(label).isNotNull();
+                assertThat(shape(pattern)).as(label).isEqualTo(budget >= findEdge ? CompiledPattern.Shape.ENGINE : CompiledPattern.Shape.LITERAL_ALTERNATION);
+                assertThat(pattern.countsOnLiteralSetForDiagnostics()).as(label).isEqualTo(budget < countEdge);
+                assertThat(pattern.literalSetSpanMatcher().rootByteScanSetForDiagnostics()).as(label).isEqualTo(budget >= skipEdge ? scanSet : 0);
+                assertThat(pattern.find(wordsInput)).as(label).isTrue();
+                assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null).as(label).isEqualTo(budget >= findEdge);
+                assertThat(pattern.countMatches(wordsInput)).as(label).isEqualTo(3);
+                assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH) != null).as(label).isEqualTo(budget >= countEdge);
+                assertThat(findSpans(pattern.matcher(wordsInput, 0))).as(label).containsExactly("3-6", "12-16", "18-21");
+            }
+        }
     }
 
     @Test
@@ -425,6 +460,18 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalLiteralSet(sharedPrefix)).isNotNull();
         assertThat(optionalLiteralSet(sharedPrefix, 1024)).isNull();
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice(sharedPrefix), TrinoRegexp.Options.defaults().setMaxMemory(1024)))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+
+        // A large alternation that fits the forward budget takes Trino's own literal-set route
+        // and compiles no program, even under a small budget.
+        String dictionary = words(65);
+        TrinoRegexp setRoute = TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(4096));
+        assertThat(setRoute.usesLiteralSetMatcherForDiagnostics()).isTrue();
+        assertThat(setRoute.re2()).isNull();
+        // One that does not fit cannot compile a program either, which retains more than the set,
+        // so Trino never takes the set's literal-alternation shape.
+        long setSize = literalSet(dictionary).estimatedRetainedSize();
+        assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(setSize)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
 
         // A set without the root's skip, which one leading byte is too few for and eight only
@@ -841,6 +888,11 @@ public class TestLiteralAlternationSpanMatcher
         return IntStream.range(0, count).mapToObj(index -> leadingBytes.charAt(index % leadingBytes.length()) + "x" + index).collect(Collectors.joining("|"));
     }
 
+    private static Re2 compileWithMaxMemory(String expression, long maxMemory)
+    {
+        return Re2.compile(utf8Slice(expression), Re2.Options.defaults().setMaxMemory(maxMemory));
+    }
+
     // The least value above `low`, which fails `predicate`, from which on `predicate` holds. The
     // search fails the test once `predicate` fails at a value past MAXIMUM_LEAST_VALUE.
     private static long leastValue(long low, LongPredicate predicate)
@@ -891,15 +943,24 @@ public class TestLiteralAlternationSpanMatcher
         return output.slice();
     }
 
-    // A routed find runs the automaton, leaving the program's first-match DFA unbuilt, and its
-    // spans are the general engine's.
+    // A routed matcher's find runs a large alternation's automaton, leaving the program's DFAs
+    // unbuilt, while full-Slice find and count keep the engine shape and run the forward
+    // longest-match and first-match DFAs, as they would without the automaton. Its spans and
+    // count are the general engine's.
     private static void assertLiteralSetFind(CompiledPattern pattern, Slice input)
     {
-        assertThat(pattern.literalSetSpanMatcher()).isNotNull();
+        String expression = pattern.pattern().toStringUtf8();
+        assertThat(pattern.literalSetSpanMatcher()).as(expression).isNotNull();
+        assertThat(shape(pattern)).as(expression).isEqualTo(CompiledPattern.Shape.ENGINE);
         RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.literalSetEnabledForDiagnostics()).isTrue();
         assertThat(matcher.find()).isTrue();
-        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        assertNoProgramSearch(pattern, expression);
+        assertThat(pattern.find(input)).as(expression).isTrue();
+        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(expression).isNotNull();
+        long count = pattern.count(input);
+        assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(expression).isNotNull();
+        assertThat(count).as(expression).isEqualTo(generalEngineCount(pattern, input));
         assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).literalSetEnabledForDiagnostics()).isFalse();
         assertFindAgreement(pattern, input);
     }

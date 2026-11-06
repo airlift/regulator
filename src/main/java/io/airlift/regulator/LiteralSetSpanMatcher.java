@@ -316,6 +316,23 @@ sealed class LiteralSetSpanMatcher
         return remaining >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && this instanceof RootSkippingMatcher;
     }
 
+    /// Returns the number of non-overlapping leftmost-first matches in `input`. Its literals never
+    /// match empty, so each search resumes at the previous match's end.
+    final long count(Slice input)
+    {
+        long count = 0;
+        int searchStart = 0;
+        while (searchStart < input.length()) {
+            long span = findSpan(input, searchStart, input.length());
+            if (span < 0) {
+                break;
+            }
+            count++;
+            searchStart = (int) span;
+        }
+        return count;
+    }
+
     /// Finds the leftmost-first match in `[start, end)` of `input`; the caller checks that
     /// `0 <= start <= end <= input.length()`. This is the crate's leftmost search: record the
     /// match on entering a match state, and return the last one recorded on reaching [#DEAD] or

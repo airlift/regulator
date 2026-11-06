@@ -26,7 +26,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
+import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.ORDERED_LITERALS;
@@ -182,6 +185,39 @@ public class TestRe2Allocations
 
             assertThat(allocatedBytes / 20_000).as("maxMemory %s", maxMemory).isLessThanOrEqualTo(256);
         }
+    }
+
+    @Test
+    public void testLiteralSetFindDoesNotAllocate()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // A dictionary of more than 64 words, under a budget too small for the longest-match DFA
+        // beside its literal set, finds on the set. The ordinary engine would build a DFA that
+        // cannot initialize on every call and then search without it, allocating both times.
+        String dictionary = IntStream.range(0, 65).mapToObj(index -> "word" + index).collect(Collectors.joining("|"));
+        Re2 pattern = Re2.compile(Slices.utf8Slice(dictionary), Re2.Options.defaults().setMaxMemory(8192));
+        assertThat(shape(pattern)).isEqualTo(CompiledPattern.Shape.LITERAL_ALTERNATION);
+        Slice matched = Slices.utf8Slice("see word17 and word64");
+        Slice absent = Slices.utf8Slice("no dictionary words here");
+
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(pattern.find(matched)).isTrue();
+            assertThat(pattern.find(absent)).isFalse();
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(20_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matchCount += pattern.find(matched) ? 1 : 0;
+                matchCount += !pattern.find(absent) ? 1 : 0;
+            }
+            return matchCount;
+        });
+
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test

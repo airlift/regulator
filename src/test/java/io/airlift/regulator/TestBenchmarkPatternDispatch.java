@@ -226,6 +226,8 @@ public class TestBenchmarkPatternDispatch
             case "LITERAL_SET" -> {
                 assertThat(compiled.literalSetSpanMatcher()).as(description).isNotNull();
                 assertThat(matcher.literalSetEnabledForDiagnostics()).as(description).isTrue();
+                // LONG rows skip the bytes that lead no word.
+                assertThat(compiled.literalSetSpanMatcher().skipsRootBytes(1024)).as(description).isEqualTo(VectorSupport.isAvailable());
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);

@@ -698,9 +698,12 @@ public sealed class Re2
     static final class LiteralAlternationRe2
             extends Re2
     {
+        private final boolean literalSetCount;
+
         private LiteralAlternationRe2(Analysis analysis)
         {
             super(analysis);
+            this.literalSetCount = analysis.literalSetCount();
         }
 
         @Override
@@ -712,7 +715,13 @@ public sealed class Re2
         @Override
         long countMatches(Slice text)
         {
-            return countOnLiteralAlternation(text);
+            return countOnLiteralAlternation(text, literalSetCount);
+        }
+
+        @Override
+        boolean countsOnLiteralSetForDiagnostics()
+        {
+            return literalSetCount;
         }
     }
 
