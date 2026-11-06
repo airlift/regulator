@@ -1641,6 +1641,31 @@ Measured 3 hosts a side with compare and AND on both platforms,
 `quotes-bounded` takes 0.54x the time of the start-byte scan on r8i and 0.74x on
 r9g, and `sherlock/quotes` 0.71x and 0.98x.
 
+## Inner Literal Byte Gates
+
+When the element after a literal, or a set whose members share one length, or
+the element before it, is a single ASCII byte class, alone or repeated at least
+once, the inner literal search skips each hit whose neighboring byte lies
+outside that class before either DFA runs. Elements that match only the empty string, such as `\b`, are
+looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules out the `ing`
+of `kingdom`, as the crate's prefilter does by searching `ing\s`. A skipped hit
+leaves the bound on how far back the next reverse search may read where it
+was, since no reverse search ran; raising it, as a DFA rejection does, would
+make the second `ing` of `singing` fall back to the ordinary engine.
+
+A gate whose class holds the literal's own byte at that edge, of either case
+for a case-insensitive letter, is dropped. It borders runs of its own class,
+as `[a-z]` does before `shing` inside a word, so it passes nearly every hit
+and only adds its test.
+
+A pattern without a gate keeps the search loop without the check, and a gated
+pattern runs a copy of the loop with it. With the check in one shared loop, the
+ungated `lh3lh3/uri` row took 1.040x its time on r9g, and `lh3lh3/email` 1.035x
+on r8i. Measured 3 hosts a side, the gates take `ing-suffix-limited-space` to
+0.78x on r8i and 0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x,
+`before-after-holmes` to 0.71x and 0.76x, and `mariomka/email` to 0.91x and
+0.90x.
+
 ## Trino LIKE Frontend
 
 `TrinoLikePattern` is a separate language frontend rather than an RE2 dialect.

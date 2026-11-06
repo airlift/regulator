@@ -28,9 +28,9 @@ import static java.util.Objects.requireNonNull;
 /// byte. `L` may also be a literal set, an alternation of literals or the members of a class pair,
 /// where an occurrence of any member is an occurrence of `L`. This is the Rust crate's reverse
 /// inner strategy, which also covers its reverse suffix strategy (regex-automata 0.4.18
-/// `meta/strategy.rs` and `meta/reverse_inner.rs`). For each occurrence of `L`, a reverse DFA of
-/// `P` anchored at the occurrence finds the earliest start, and the forward DFA of the whole
-/// pattern anchored at that start finds the end.
+/// `meta/strategy.rs` and `meta/reverse_inner.rs`). For each occurrence of `L` that its neighboring
+/// bytes do not rule out, a reverse DFA of `P` anchored at the occurrence finds the earliest start,
+/// and the forward DFA of the whole pattern anchored at that start finds the end.
 ///
 /// The first confirmed candidate is the leftmost-first match only when no earlier match can span
 /// a later occurrence of `L`. [#analyze] accepts a literal or literal set only when one of the
@@ -53,6 +53,10 @@ import static java.util.Objects.requireNonNull;
 /// folded rest. Two adjacent elements that each match one of a few ASCII bytes, such as the
 /// `[?!.]["']` that ends `["'][^"']{0,30}[?!.]["']`, are searched as the set of their two-byte
 /// members when English text rarely holds them, under a proof of its own.
+///
+/// When the element next to a literal, or a set whose members share one length, is a single ASCII
+/// byte class, alone or repeated at least once, a hit whose neighboring byte is outside that class
+/// is skipped before either DFA runs, as the `ing` of `kingdom` is for `\s[a-zA-Z]{0,12}ing\s`.
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
@@ -98,11 +102,23 @@ final class InnerLiteralSearch
     private final byte[] classPairBytes;
     private final int minimumLiteralLength;
     private final int maximumLiteralLength;
+    // The ASCII bytes the byte after the literal, and the byte before it, must be one of, as the
+    // bits of two words each, low bytes first. Both words zero is no gate.
+    private final long suffixGateLow;
+    private final long suffixGateHigh;
+    private final long prefixGateLow;
+    private final long prefixGateHigh;
+    private final boolean hasByteGates;
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, ByteGate prefixGate, ByteGate suffixGate, Prog reversePrefixProgram, Prog forwardProgram)
     {
+        this.suffixGateLow = suffixGate.low();
+        this.suffixGateHigh = suffixGate.high();
+        this.prefixGateLow = prefixGate.low();
+        this.prefixGateHigh = prefixGate.high();
+        this.hasByteGates = !suffixGate.equals(ByteGate.NONE) || !prefixGate.equals(ByteGate.NONE);
         this.literalSearch = literalSearch;
         this.foldedBytes = foldedBytes;
         this.foldedMasks = foldedMasks;
@@ -173,7 +189,7 @@ final class InnerLiteralSearch
                 reversePrefixProgram.dfaMemory() < Dfa.DfaInstance.minimumMemory(reversePrefixProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
             return null;
         }
-        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, reversePrefixProgram, forwardProgram);
+        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, innerLiteral.prefixGate(), innerLiteral.suffixGate(), reversePrefixProgram, forwardProgram);
     }
 
     /// Returns the shortest literal length [#analyze] would search the normalized `regexp` for:
@@ -200,7 +216,7 @@ final class InnerLiteralSearch
 
     // The inner literal of the normalized `regexp` and the prefix before it: a single literal, the
     // members of a literal set with their filter, or the members of a class pair with its sides'
-    // bytes.
+    // bytes, and the byte gates beside it.
     private static InnerLiteral findInnerLiteral(Regexp regexp, CaseFolding caseFolding)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
@@ -254,7 +270,15 @@ final class InnerLiteralSearch
                 }
                 return null;
             }
-            return new InnerLiteral(prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes());
+            // The byte after the literal is known only when every member has one length.
+            ByteGate suffixGate = ByteGate.NONE;
+            ByteGate prefixGate = ByteGate.NONE;
+            if (hasOneLength(literals)) {
+                int literalElements = foldedLiteral != null ? foldedLiteral.elements() : classPair != null ? 2 : 1;
+                suffixGate = suffixGate(children, index + literalElements).unlessHolding(literalEdgeBytes(literals, foldedLiteral, true));
+                prefixGate = prefixGate(children, index).unlessHolding(literalEdgeBytes(literals, foldedLiteral, false));
+            }
+            return new InnerLiteral(prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), prefixGate, suffixGate);
         }
         return null;
     }
@@ -262,8 +286,9 @@ final class InnerLiteralSearch
     // `literal` is the single literal, or null for a set, whose filter is `literalSetFilter`, or
     // for a class pair, whose sides' bytes are `classPairBytes`; `literals` holds the single
     // literal or the members. A case-insensitive literal's `literal` is its exact head, and
-    // `foldedLiteral` holds the whole literal, or is null.
-    private record InnerLiteral(Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes) {}
+    // `foldedLiteral` holds the whole literal, or is null. Each gate holds the bytes the
+    // neighbor on its side of a hit may be, or is `ByteGate.NONE` for no gate.
+    private record InnerLiteral(Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, ByteGate prefixGate, ByteGate suffixGate) {}
 
     // As the crate's top_concat does, a capturing group in the top-level concatenation is looked
     // through, and a concatenation inside it joins the top level, so `(\s*)(# x)` has the inner
@@ -301,6 +326,24 @@ final class InnerLiteralSearch
             return new byte[][] {literalSearch.literal()};
         }
         return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
+    }
+
+    /// The bytes the byte before the literal and the byte after it must be one of, each as a
+    /// string in byte order, empty for no gate.
+    List<String> byteGatesForDiagnostics()
+    {
+        return List.of(gateBytes(prefixGateLow, prefixGateHigh), gateBytes(suffixGateLow, suffixGateHigh));
+    }
+
+    private static String gateBytes(long low, long high)
+    {
+        StringBuilder bytes = new StringBuilder();
+        for (int value = 0; value < 0x80; value++) {
+            if (inByteGate((byte) value, low, high)) {
+                bytes.append((char) value);
+            }
+        }
+        return bytes.toString();
     }
 
     /// The literal's length, or the length of the shortest member of the literal set. A
@@ -360,6 +403,13 @@ final class InnerLiteralSearch
     /// [#FALLBACK].
     long search(Slice text, int contextStart, int contextEnd, int start, int end)
     {
+        // With the gate check in this loop, patterns without a gate measured up to about 4%
+        // slower, lh3lh3/uri on Graviton (and lh3lh3/email 3.5% on Intel); see
+        // REGULATOR_DECISIONS.md, Inner Literal Byte Gates. They keep this loop free of it, and
+        // gated ones run their own copy.
+        if (hasByteGates) {
+            return searchGated(text, contextStart, contextEnd, start, end);
+        }
         // The reverse search may read back to the end of the previous candidate, and a candidate
         // may not start inside the text the previous confirmation read.
         int minimumMatchStart = start;
@@ -414,6 +464,73 @@ final class InnerLiteralSearch
             return FALLBACK;
         }
         return forward;
+    }
+
+    // The search loop of a pattern with a byte gate: as in search, with each hit first checked
+    // against the gates.
+    private long searchGated(Slice text, int contextStart, int contextEnd, int start, int end)
+    {
+        // The reverse search may read back to the end of the previous candidate, and a candidate
+        // may not start inside the text the previous confirmation read.
+        int minimumMatchStart = start;
+        int minimumLiteralStart = start;
+        int scanStart = start;
+        while (end - scanStart >= minimumLiteralLength) {
+            int literalStart = findLiteral(text, scanStart, end - scanStart);
+            if (literalStart < 0) {
+                return Dfa.SEARCH_NO_MATCH;
+            }
+            if (scanStart == start && literalStart - start < MINIMUM_SKIPPED_BYTES) {
+                return FALLBACK;
+            }
+            if (literalStart < minimumLiteralStart) {
+                return FALLBACK;
+            }
+            if (!passesByteGates(text, start, literalStart, end)) {
+                // No match uses the literal here, which is all a rejection by the DFAs would tell
+                // the loop, so the scan moves on as after a DFA rejection. No reverse search ran,
+                // so the bound on how far back the next reverse search may read stays where it
+                // was: raising it, as after a rejection, would make the second `ing` of `singing`
+                // fall back.
+                scanStart = literalStart + 1;
+                continue;
+            }
+            int maximumReverseBytes = minimumMatchStart == start ? Integer.MAX_VALUE : Math.max(1, literalStart - minimumMatchStart);
+            long candidate = Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+            if (candidate == Dfa.SEARCH_FAILED) {
+                candidate = confirmCandidate(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+            }
+            if (candidate >= 0 || candidate == FALLBACK) {
+                return candidate;
+            }
+            if (candidate != Dfa.SEARCH_NO_MATCH) {
+                minimumLiteralStart = Dfa.anchoredStopPosition(candidate);
+            }
+            scanStart = literalStart + 1;
+            minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
+        }
+        return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // Whether the bytes next to the literal at `literalStart` can be those of a match in
+    // `[start, end)`. A gate on the byte after the literal fails when that byte lies at or past
+    // `end`, and one on the byte before it when that byte lies before `start`.
+    private boolean passesByteGates(Slice text, int start, int literalStart, int end)
+    {
+        byte[] data = text.byteArray();
+        int dataOffset = text.byteArrayOffset();
+        int literalEnd = literalStart + minimumLiteralLength;
+        if ((suffixGateLow | suffixGateHigh) != 0 && (literalEnd >= end || !inByteGate(data[dataOffset + literalEnd], suffixGateLow, suffixGateHigh))) {
+            return false;
+        }
+        return (prefixGateLow | prefixGateHigh) == 0 || (literalStart > start && inByteGate(data[dataOffset + literalStart - 1], prefixGateLow, prefixGateHigh));
+    }
+
+    // A long shift uses only the low six bits of its count, so the byte itself picks its bit in
+    // either word.
+    private static boolean inByteGate(byte value, long low, long high)
+    {
+        return value >= 0 && (((value < 64 ? low : high) >>> value) & 1) != 0;
     }
 
     private int findLiteral(Slice text, int offset, int length)
@@ -726,12 +843,14 @@ final class InnerLiteralSearch
         byte[] bytes = new byte[MAXIMUM_LITERAL_LENGTH];
         byte[] masks = new byte[MAXIMUM_LITERAL_LENGTH];
         int length = 0;
+        int elements = 0;
         for (int childIndex = index; childIndex < children.size(); childIndex++) {
             int newLength = appendFoldedElement(children.get(childIndex), bytes, masks, length);
             if (newLength < 0) {
                 break;
             }
             length = newLength;
+            elements++;
         }
         int headLength = 0;
         while (headLength < length && masks[headLength] == 0) {
@@ -740,7 +859,7 @@ final class InnerLiteralSearch
         if (headLength == 0 || headLength == length) {
             return null;
         }
-        return new FoldedLiteral(Arrays.copyOf(bytes, headLength), Arrays.copyOf(bytes, length), Arrays.copyOf(masks, length));
+        return new FoldedLiteral(Arrays.copyOf(bytes, headLength), Arrays.copyOf(bytes, length), Arrays.copyOf(masks, length), elements);
     }
 
     // Appends the element's bytes and masks after `length`, and returns the new length, or -1 when
@@ -791,8 +910,101 @@ final class InnerLiteralSearch
         return lower.low();
     }
 
-    // A case-insensitive literal: its exact head, and its whole bytes and masks.
-    record FoldedLiteral(byte[] head, byte[] bytes, byte[] masks) {}
+    // A case-insensitive literal: its exact head, its whole bytes and masks, and the number of
+    // elements it covers.
+    record FoldedLiteral(byte[] head, byte[] bytes, byte[] masks, int elements) {}
+
+    private static boolean hasOneLength(byte[][] literals)
+    {
+        for (byte[] literal : literals) {
+            if (literal.length != literals[0].length) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The ASCII bytes allowed after the literal: those of the first element at or after `index`
+    // that does not match only the empty string, when it must consume one of a set of ASCII
+    // bytes first, since the elements before it consume nothing. Otherwise no gate, all words
+    // zero.
+    private static ByteGate suffixGate(List<Regexp> children, int index)
+    {
+        for (int childIndex = index; childIndex < children.size(); childIndex++) {
+            if (!matchesEmptyOnly(children.get(childIndex), 0)) {
+                return byteGate(children.get(childIndex));
+            }
+        }
+        return ByteGate.NONE;
+    }
+
+    // The gate on the byte before the literal, from the last element before `index` that does
+    // not match only the empty string, as for the byte after it.
+    private static ByteGate prefixGate(List<Regexp> children, int index)
+    {
+        for (int childIndex = index - 1; childIndex >= 0; childIndex--) {
+            if (!matchesEmptyOnly(children.get(childIndex), 0)) {
+                return byteGate(children.get(childIndex));
+            }
+        }
+        return ByteGate.NONE;
+    }
+
+    // A single-byte ASCII element, alone or repeated at least once, consumes one of its bytes
+    // first and last; any other element gives no gate.
+    private static ByteGate byteGate(Regexp element)
+    {
+        while (element.op() == RegexpOp.CAPTURE) {
+            element = element.child(0);
+        }
+        if (element.op() == RegexpOp.PLUS || (element.op() == RegexpOp.REPEAT && element.min() > 0)) {
+            element = element.child(0);
+        }
+        byte[] bytes = asciiByteSet(element, 0x80);
+        if (bytes == null) {
+            return ByteGate.NONE;
+        }
+        ByteGate gate = ByteGate.NONE;
+        for (byte value : bytes) {
+            gate = gate.with(value);
+        }
+        return gate;
+    }
+
+    // The bytes the literal, or any member of the set, can have first, or last when `last` is
+    // set. A case-insensitive letter can have either case.
+    private static ByteGate literalEdgeBytes(byte[][] literals, FoldedLiteral foldedLiteral, boolean last)
+    {
+        byte[][] members = foldedLiteral == null ? literals : new byte[][] {foldedLiteral.bytes()};
+        ByteGate edge = ByteGate.NONE;
+        for (byte[] member : members) {
+            int position = last ? member.length - 1 : 0;
+            edge = edge.with(member[position]);
+            if (foldedLiteral != null) {
+                edge = edge.with((byte) (member[position] ^ foldedLiteral.masks()[position]));
+            }
+        }
+        return edge;
+    }
+
+    // The ASCII bytes a gate admits: bytes 0 to 63 in `low` and 64 to 127 in `high`.
+    private record ByteGate(long low, long high)
+    {
+        static final ByteGate NONE = new ByteGate(0, 0);
+
+        ByteGate with(byte value)
+        {
+            return value < 64 ? new ByteGate(low | (1L << value), high) : new ByteGate(low, high | (1L << value));
+        }
+
+        // No gate when this one admits one of `bytes`. A gate that holds the literal's own edge
+        // byte borders runs of its class, as a letter before `shing` does inside a word, so it
+        // passes nearly every hit and only adds its test.
+        ByteGate unlessHolding(ByteGate bytes)
+        {
+            return ((low & bytes.low) | (high & bytes.high)) != 0 ? NONE : this;
+        }
+    }
 
     static byte[] asciiLiteral(Regexp regexp)
     {
