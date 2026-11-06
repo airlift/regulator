@@ -966,6 +966,67 @@ public class TestDfaCountMatches
                 .isEqualTo(3 * 8_192);
     }
 
+    @Test
+    public void testSingleCountSamplesOncePerRecheck()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        Slice source = utf8Slice(("abc-1" + ".".repeat(195)).repeat(1_311));
+        Prog program = compile(expression);
+        // A plain count creates this sampling inside countMatches; the test passes it only to read
+        // its check count.
+        Dfa.CountByteScanSampling sampling = Dfa.CountByteScanSampling.forSingleCount();
+
+        // The first search, at position 0, rejects the start-byte scan, which is not held, so the
+        // next search samples again. A productive result then holds for 64 KiB past the position
+        // sampled, and a vector scan choice holds for the whole count, so the count samples at
+        // most once per 64 KiB rather than once per match.
+        long counted = Dfa.countMatches(program, source, 0, Prog.MatchKind.FIRST_MATCH, _ -> true, sampling);
+        assertThat(Dfa.countStopCount(counted))
+                .isEqualTo(trinoMatcherCount(expression, source))
+                .isEqualTo(1_311);
+        assertThat(sampling.byteScanCheckCount()).isEqualTo(VectorSupport.isAvailable() ? 6 : 5);
+    }
+
+    @Test
+    public void testSingleCountHoldsOnlySafeSamplingOutcomes()
+    {
+        // Twenty adjacent matches, then a match 40,000 bytes later and 64 KiB of filler. The 18
+        // searches with at least three matches of the cluster ahead sample them, reject the
+        // start-byte scan, and walk the DFA. The rejection is not held: the last searches in the
+        // cluster sample filler, so the searches across the gap and after the far match scan.
+        assertSingleCountFallbacks(
+                "([a-z]+)-([0-9]+)",
+                "abc-1".repeat(20) + ".".repeat(40_000) + "abc-1" + ".".repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES),
+                21,
+                18);
+        // A lone match ahead of the cluster: the first search samples sparse text and finds the
+        // start-byte scan productive. The count holds that outcome across the cluster, so no
+        // search walks the DFA; sampling at each search would reject the scan inside the cluster.
+        assertSingleCountFallbacks("([a-z]+)-([0-9]+)", "abc-1" + ".".repeat(200) + "abc-1".repeat(20) + ".".repeat(70_000), 21, 0);
+        // The cluster's dense `:` bytes reject the fixed-distance scan, and the count holds that
+        // rejection. The searches whose start-byte samples also reject scanning walk the DFA, the
+        // 16 fallbacks; holding the earlier productive fixed-distance result instead would leave
+        // none.
+        assertSingleCountFallbacks(
+                "\\w:[0-9]+",
+                "a:1" + ".".repeat(200) + "a:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000),
+                23,
+                16);
+    }
+
+    private static void assertSingleCountFallbacks(String expression, String text, long expectedCount, int expectedFallbackCount)
+    {
+        Slice source = utf8Slice(text);
+        Prog program = compile(expression);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+        assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
+                .as(expression)
+                .isEqualTo(trinoMatcherCount(expression, source))
+                .isEqualTo(expectedCount);
+        assertThat(dfa.byteScanFallbackCount()).as(expression).isEqualTo(expectedFallbackCount);
+    }
+
     private static void assertSelfLoopScanCount(String expression, Slice source, long expected, int expectedScanCount)
     {
         assertSelfLoopScanCount(expression, source, expected, scanCount -> assertThat(scanCount)

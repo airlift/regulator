@@ -864,17 +864,21 @@ moves from the scalar scan to the vector scan. When the first sample selects
 the vector scan, the count keeps it for every match. When it selects the scalar
 scan, a later search that reaches the start-byte scan samples again from its
 start while at least 4 KiB remain, and the count keeps the vector scan from the
-first sample that selects it. Searches served by the fixed-distance scan do not
-sample, so dense input such as `[a-z]:[0-9]+` over repeated `a:1.` does not pay
-a start-byte density sample per match. Below 4 KiB the check reports the span
-as productive without sampling, so resampling there would promote the vector
-scan for uniformly dense input. The per-search productivity check that can
-reject candidate scanning altogether still runs for each match, except in the
-shared counts described below. Retries after a cache reset keep the current
-selection; a promotion made by the search that retried is discarded, and the
-retry samples again. The selected primitive changes only how candidates are
-found, never which candidates the DFA processes. Fixed-distance candidate
-selection still samples at each match.
+first sample that selects it; on a text of at least 64 KiB, a later scalar
+choice holds for the next 64 KiB past its sample. Searches served by the
+fixed-distance scan do not sample, so dense input such as `[a-z]:[0-9]+` over
+repeated `a:1.` does not pay a start-byte density sample per match. Below 4 KiB
+the check reports the span as productive without sampling, so resampling there
+would promote the vector scan for uniformly dense input. The per-search
+productivity check that can reject candidate scanning altogether runs for each
+match, except in the shared counts and the counts of at least 64 KiB described
+below, which hold some of its results. Retries after a cache reset keep the
+current selection. A count under 64 KiB with no sampling carried across calls
+discards a vector scan promotion made by the search that retried, and the retry
+samples again; a longer count, or one that carries sampling, keeps what its
+sampling recorded. The selected primitive changes only how candidates are found,
+never which candidates the DFA processes. Fixed-distance candidate selection
+still samples at each match.
 
 Sampling at each match boundary made the choice depend on where the previous
 match ended rather than on the input. On sparse capture input with a match
@@ -885,8 +889,8 @@ per call, with r8g at 0.43x and r8i at 0.17x of the previous time. A vector
 choice is therefore never demoted. A single sample from the start of the text
 misjudges the opposite shape, where a dense prefix precedes a long sparse
 span, so a scalar choice is checked again when a later search reaches the
-start-byte scan. Dense input rejects every such sample and keeps the scalar
-scan.
+start-byte scan, at most once per 64 KiB on a text of at least 64 KiB. Dense
+input rejects every such sample and keeps the scalar scan.
 
 A count of every match settles a borderline first sample, 4 to 7 candidates in
 64 bytes, with a second sample of 256 bytes in 16 windows at the same density
@@ -908,6 +912,46 @@ fixed-distance productivity result, productive or not, hold for the next 64 KiB
 past the position sampled, as the group-zero search cursor holds a rejection. A
 vector selection recorded by a search that then retries is kept, and the shared
 counts keep the 64-byte start decision.
+
+A single count call over at least 64 KiB of text, the productivity check's
+minimum, also shares one sampling among its own searches when the caller
+carries no sampling across calls. Each search starts at a match end, so
+sampling at every one read windows spread over the rest of the text once per
+match, which was 36-55% of the time of the case-insensitive literal count rows.
+Each later search of a call starts just past a match near the position
+sampled, so the call holds only the outcomes that stay valid past those
+matches: a fixed-distance rejection, a productive start-byte result, and the
+scalar scan choice hold for the next 64 KiB, and a productive fixed-distance
+result and a start-byte rejection are sampled again at each search. A held
+start-byte rejection taken among a cluster of matches sent the search after the
+cluster walking the plain DFA to a far match, and on the bounded-repeat context
+row a held productive fixed-distance result sent a search into a 670 KB gap
+where the fixed-distance scan stopped densely. The bounded-repeat context row
+counts `[A-Za-z]{10}\s+[\s\S]{0,100}Result[\s\S]{0,100}\s+[A-Za-z]{10}`. Ratios
+are to sampling at every match end, on r8i / r9g (lower is faster).
+
+Alternatives rejected:
+
+- Holding every outcome took 6.65x / 6.56x on the `\p{Sm}` count, 1.85x /
+  1.55x on the IPv4 count, and 1.064x / 1.047x on the bounded-repeat context
+  row. It ran the case-insensitive literal counts at 0.47x-0.67x /
+  0.58x-0.74x and rebar's leipzig `ing` count at 0.90x / 0.92x, a win the
+  shipped rule gives up because it needs held start-byte rejections.
+- Holding only productive outcomes took 1.10x / 1.07x on the bounded-repeat
+  context row, 1.005x / 0.999x on the `\p{Sm}` count, and 1.00x / 0.90x on the
+  IPv4 count, and gave up part of the case-insensitive win, with
+  `02-literal-alternate sherlock-casei-en` at 0.52x / 0.60x.
+- Holding fixed-distance results either way, the scalar choice, and productive
+  start-byte results took 1.065x / 1.052x on the bounded-repeat context row and
+  1.010x / 1.013x on the `\p{Sm}` count, and 1.00x on r8i on the IPv4 count,
+  unchanged on r9g, while keeping the case-insensitive literal count win.
+
+The shipped rule takes 0.994x / 0.998x on the `\p{Sm}` count, 0.995x / 0.995x
+on the bounded-repeat context row, and 0.994x on r8i on the IPv4 count,
+unchanged on r9g, where that row is bimodal across forks. It keeps the
+case-insensitive literal count win: `02-literal-alternate sherlock-casei-en`
+takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
+`tom-sawyer-huckle-fin-insensitive` 0.481x / 0.656x.
 
 ## Bounded Native-Memory DFA Transition Table
 
