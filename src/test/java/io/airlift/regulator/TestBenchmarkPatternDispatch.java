@@ -217,7 +217,10 @@ public class TestBenchmarkPatternDispatch
         }
         switch (target) {
             case "FOLDED_PLAN" -> assertThat(compiled.usesAsciiFoldedScanExecutorForDiagnostics()).as(description).isTrue();
-            case "CONTAINS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
+            case "CONTAINS" -> {
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(CONTAINS);
+                assertThat(compiled.literalSearchForDiagnostics()).as(description).isNotNull();
+            }
             case "DOT_STAR_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
             case "SINGLE_BYTE" -> assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isTrue();
             case "LITERAL_SET" -> {

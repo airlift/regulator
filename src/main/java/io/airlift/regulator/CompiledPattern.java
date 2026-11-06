@@ -605,14 +605,22 @@ abstract sealed class CompiledPattern
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }
         }
-        // A call-free first-and-last-byte search for contains and dot-star spans. Only Trino rows
-        // were measured, so other languages' contains keeps Slice.indexOf for a literal of at most
-        // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes. Slice.indexOf puts no limit on
-        // the bytes its failed candidates compare, so for a longer literal, long partial matches
-        // cost the input times the literal.
-        LiteralSearchKernel literalSearch = createLiteralSearch(booleanPlans, compilerDialect == Compiler.Dialect.TRINO);
-        if (literalSearch != null && literalSearch.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
-            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSearch.estimatedRetainedSize());
+        // A call-free first-and-last-byte search for contains and dot-star spans, in every
+        // language. Unlike Slice.indexOf, it bounds the bytes its failed candidates compare, so
+        // long partial matches of a long literal do not cost the input times the literal. A Trino
+        // search, and elsewhere a search for a literal longer than
+        // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes, reserves its memory whenever it
+        // fits. Any other search yields to the forward DFAs; see costsDfaInitialization.
+        LiteralSearchKernel literalSearch = createLiteralSearch(booleanPlans);
+        boolean reservesWheneverItFits = literalSearch != null &&
+                (compilerDialect == Compiler.Dialect.TRINO || booleanPlans.literal().length() > LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET);
+        if (reservesWheneverItFits) {
+            if (literalSearch.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
+                semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSearch.estimatedRetainedSize());
+                booleanPlans = booleanPlans.withLiteralSearch(literalSearch);
+            }
+        }
+        else if (literalSearch != null && tryReserveBesideForwardDfas(semanticProgram, literalSearch.estimatedRetainedSize())) {
             booleanPlans = booleanPlans.withLiteralSearch(literalSearch);
         }
         // The literal every match begins with behind a leading assertion. The candidate cursor
@@ -827,18 +835,42 @@ abstract sealed class CompiledPattern
                 literalKernelFind);
     }
 
-    /// Creates a search for a CONTAINS plan whose literal is at least two bytes long and, outside
-    /// Trino, longer than [LiteralSearchKernel#CANDIDATE_COMPARISON_BUDGET] bytes, or returns
+    /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
     /// null. Boolean contains and dot-star span matching share this search.
-    private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans, boolean trino)
+    private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans)
     {
         if (booleanPlans.find() != BooleanPlanKind.CONTAINS || booleanPlans.literal().length() < 2) {
             return null;
         }
-        if (!trino && booleanPlans.literal().length() <= LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET) {
-            return null;
-        }
         return new LiteralSearchKernel(booleanPlans.literal());
+    }
+
+    /// Reserves `reservation` bytes from `program`'s DFA budget for a plan that yields to the
+    /// forward DFAs, or returns false when the reservation does not fit or
+    /// [#costsDfaInitialization] rejects it.
+    private static boolean tryReserveBesideForwardDfas(Prog program, long reservation)
+    {
+        if (reservation > program.dfaMemory() || costsDfaInitialization(program, reservation)) {
+            return false;
+        }
+        program.setDfaMemory(program.dfaMemory() - reservation);
+        return true;
+    }
+
+    /// Whether reserving `reservation` bytes from `program`'s DFA budget would leave its
+    /// first-match or longest-match DFA too little to initialize where that DFA initializes
+    /// without the reservation. A plan this rejects yields to the forward DFAs: it is left out, so
+    /// maxMemory decides which forward DFAs initialize as it would without the plan.
+    /// [Prog#leavesDfaInitialization] counts the start-byte tables a forward DFA builds, which
+    /// [Prog#leavesDfaMinimum] leaves out.
+    private static boolean costsDfaInitialization(Prog program, long reservation)
+    {
+        return costsDfaInitialization(program, reservation, Dfa.DfaInstance.Kind.FIRST_MATCH) || costsDfaInitialization(program, reservation, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+    }
+
+    private static boolean costsDfaInitialization(Prog program, long reservation, Dfa.DfaInstance.Kind kind)
+    {
+        return !program.leavesDfaInitialization(reservation, kind) && program.leavesDfaInitialization(0, kind);
     }
 
     private static LoweredBooleanProgram compileLoweredBooleanProgram(
@@ -3388,11 +3420,9 @@ abstract sealed class CompiledPattern
             // The scan plan's boolean plan, resolved here so that full-Slice boolean find loads
             // it as directly as it would load the plan.
             ScanPlan scanBooleanPlan,
-            // Scans for a literal of two or more bytes by its first and last bytes together, when
-            // it fits the forward-DFA allowance: for boolean contains and dot-star spans in Trino,
-            // and in the other languages for contains of a literal longer than
-            // LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET bytes; null leaves them on
-            // Slice.indexOf. Exact-literal spans never use it.
+            // Scans for a contained literal of two or more bytes by its first and last bytes
+            // together, for boolean contains and dot-star spans, when it fits beside the forward
+            // DFAs; null leaves them on Slice.indexOf. Exact-literal spans never use it.
             LiteralSearchKernel literalSearch,
             // Searches an alternation of more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES
             // literals for the RE2, Java, and Rust RegexpMatcher.find() group-zero spans; every

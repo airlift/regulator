@@ -146,20 +146,20 @@ search scan for a rarer byte of the literal instead. Outside scan plans,
 `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a multi-byte
 literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
 move it for a plan's leading literal led by a non-ASCII byte. Byte frequencies
-do not affect `TrinoRegexp` contains of a contained literal such as `.*lit.*`,
-its dot-star literal spans, or its ordered literals such as `a(?s:.*)b`, which
-scan for the first and last bytes of a multi-byte literal together, nor the
-other languages' contains of a contained literal, which uses `Slice.indexOf`
-for a literal of at most 64 bytes and the same pair scan for a longer one when
-it fits the forward-DFA allowance, nor the start literal filter of a pattern
-that begins with a few literals, which always estimates with English text
-frequencies, nor the literal behind a leading assertion, which scans for its
-first and last bytes, or, in vector scans of a literal led by a multibyte UTF-8
-character that ends before the literal's last byte, that character's last byte
-and the literal's last byte. A distribution that does not match the data can make
-literal scans several times slower per byte than first-byte scanning, because
-it moves the scan onto bytes that are common in the searched text; it never
-changes what matches, and the cost stays linear in the input. The choices are:
+do not affect any language's contains of a contained literal such as `.*lit.*`,
+which scans for the first and last bytes of a literal of two or more bytes
+together when that search fits beside the forward DFAs and otherwise, as for a
+one-byte literal, uses `Slice.indexOf`, nor `TrinoRegexp`'s dot-star literal
+spans or its ordered literals such as `a(?s:.*)b`, which use the same scan, nor
+the start literal filter of a pattern that begins with a few literals, which
+always estimates with English text frequencies, nor the literal behind a leading
+assertion, which scans for its first and last bytes, or, in vector scans of a
+literal led by a multibyte UTF-8 character that ends before the literal's last
+byte, that character's last byte and the literal's last byte. A distribution
+that does not match the data can make literal scans several times slower per
+byte than first-byte scanning, because it moves the scan onto bytes that are
+common in the searched text; it never changes what matches, and the cost stays
+linear in the input. The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole

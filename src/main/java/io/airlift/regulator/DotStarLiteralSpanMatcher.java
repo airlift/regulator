@@ -21,9 +21,8 @@ import static java.util.Objects.requireNonNull;
 final class DotStarLiteralSpanMatcher
 {
     private final Slice literal;
-    // The pattern's shared contains search for this literal, or null for a one-byte literal, a
-    // literal of at most CANDIDATE_COMPARISON_BUDGET bytes outside Trino, or no room in the
-    // forward-DFA budget. Null selects Slice.indexOf.
+    // The pattern's shared contains search for this literal, or null for a one-byte literal or
+    // no room beside the forward DFAs. Null selects Slice.indexOf.
     private final LiteralSearchKernel search;
     private final boolean latin1;
 

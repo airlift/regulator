@@ -22,6 +22,7 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.function.LongFunction;
 
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ENDS_WITH;
@@ -38,6 +39,8 @@ import static io.airlift.regulator.CompiledPattern.Shape.FIXED_WIDTH;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
+import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.stream.Collectors.toSet;
@@ -158,22 +161,47 @@ public class TestRe2BooleanPlans
     }
 
     @Test
-    public void testLongContainedLiteralUsesLiteralSearch()
+    public void testContainedLiteralUsesLiteralSearch()
     {
-        // Languages other than Trino find a contained literal up to the literal search's
-        // comparison budget with Slice.indexOf, and a longer one with the search: in a run of the
-        // literal's first byte, Slice.indexOf would compare half the literal at every position.
-        // Here each candidate compares 33 bytes and covers one, so the second passes the budget.
+        // Every language finds a contained literal of two or more bytes with the literal search
+        // and a one-byte literal with Slice.indexOf. In a run of the literal's first byte,
+        // Slice.indexOf would compare half of the long literal at every position; the search
+        // continues with KMP once its failed candidates pass the comparison budget. Here each
+        // candidate compares 33 bytes and covers one, so the second passes the budget.
         String half = "a".repeat(LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET / 2);
         String literal = half + "b" + half;
-        assertThat(Re2.compile(utf8("(?s:.*" + literal.substring(1) + ".*)")).literalSearchForDiagnostics()).isNull();
-
-        Slice pattern = utf8("(?s:.*" + literal + ".*)");
         Slice input = utf8(half.repeat(64) + literal);
-        for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern))) {
-            assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
-            assertThat(compiledPattern.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
-            assertThat(compiledPattern.find(input)).isTrue();
+        for (String contained : List.of("b", "ab", literal)) {
+            Slice pattern = utf8("(?s:.*" + contained + ".*)");
+            for (CompiledPattern compiledPattern : List.of(Re2.compile(pattern), JavaRegexp.compile(pattern), RustRegexp.compile(pattern))) {
+                assertThat(compiledPattern.findPlanForDiagnostics()).isEqualTo(CONTAINS);
+                assertThat(compiledPattern.literalSearchForDiagnostics() != null).isEqualTo(contained.length() >= 2);
+                if (contained.equals(literal)) {
+                    assertThat(compiledPattern.literalSearchForDiagnostics().kmpHandoffOffsetForDiagnostics(input, 0, input.length())).isEqualTo(2);
+                }
+                assertThat(compiledPattern.find(input)).isTrue();
+                assertNoProgramSearch(compiledPattern, compiledPattern.getClass().getSimpleName() + " " + contained);
+            }
+        }
+
+        // The search yields to the forward DFAs: at the least budget at which a DFA initializes,
+        // the search's reservation would leave it too little, so the search is left out. A
+        // literal longer than the comparison budget had the search in release 2.0, which reserved
+        // it whenever it fit, and keeps it.
+        for (String contained : List.of("ab", literal)) {
+            Slice pattern = utf8("(?s:.*" + contained + ".*)");
+            List<LongFunction<CompiledPattern>> compilers = List.of(
+                    maxMemory -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory)),
+                    maxMemory -> JavaRegexp.compile(pattern, JavaRegexp.Options.defaults().setMaxMemory(maxMemory)),
+                    maxMemory -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)));
+            for (LongFunction<CompiledPattern> compiler : compilers) {
+                for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+                    CompiledPattern compiledPattern = compileAtSmallestDfaBudget(compiler, kind);
+                    String label = compiledPattern.getClass().getSimpleName() + " " + contained + " " + kind;
+                    assertThat(compiledPattern.literalSearchForDiagnostics() != null).as(label).isEqualTo(contained.length() > LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET);
+                    assertThat(compiledPattern.find(input)).as(label).isTrue();
+                }
+            }
         }
     }
 
