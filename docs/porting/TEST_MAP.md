@@ -142,4 +142,4 @@ new audit rather than assuming this map remains complete.
 
 The parser has no Java-only capture-count limit; a 10,000-capture stack-safety
 test protects that contract. `TestUpstreamCompileMemoryBudget` protects the
-upstream program/DFA budget split and the internal unbounded-compile default.
+program charge/DFA remainder split and the internal unbounded-compile default.

@@ -492,6 +492,7 @@ abstract sealed class CompiledPattern
                 : literalSequence.retainedExactLiteral();
         if (exactLiteral != null && exactLiteral.length() != 0) {
             semanticProgram.configurePrefixAccelShared(exactLiteral, false, byteFrequencies);
+            Compiler.requireProgramFits(semanticProgram, forwardMemory);
         }
         BooleanPlans booleanPlans = selectBooleanPlans(
                 expressionAnalysis,

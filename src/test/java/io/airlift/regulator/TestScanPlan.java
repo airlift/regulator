@@ -1592,7 +1592,8 @@ public class TestScanPlan
 
         // Anchored and literal-leading plans reserve before the lowered program is considered;
         // run-leading unanchored plans reserve only when no lowered program was built.
-        assertSmallestBudgetKeepsOrdinaryRoute(URL, "https://host/path", "host");
+        // URL keeps its plan at its first admitted budget, 8,687; this pattern drops it at 4,007.
+        assertSmallestBudgetKeepsOrdinaryRoute("^([a-z]+)-([0-9]+)-([a-z]+)$", "ab-12-cd", "ab");
         assertSmallestBudgetKeepsOrdinaryRoute("https?://([^/]+)/", "x https://host/path", "host");
         assertSmallestBudgetKeepsOrdinaryRoute("([^/]+)/", "x/ab/c", "x");
     }

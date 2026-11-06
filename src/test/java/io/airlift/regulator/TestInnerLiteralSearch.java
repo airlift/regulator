@@ -161,8 +161,8 @@ public class TestInnerLiteralSearch
         // At small budgets the search leaves the full reverse DFA enough to initialize, as it does
         // without the search, and a search that is kept can run its reverse prefix DFA.
         for (SmallBudget budget : List.of(
-                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 1L << 20, "ab@cd1", true),
-                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 896L << 10, "ab@cd1", true),
+                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 1536L << 10, "ab@cd1", true),
+                new SmallBudget("[a-z]+@\\p{L}+\\p{N}", 1424L << 10, "ab@cd1", true),
                 new SmallBudget("[a-z]+-[0-9]+", 24L << 10, "ab-12", false))) {
             String description = budget.pattern() + " " + budget.maxMemory();
             Re2 small = Re2.compile(utf8Slice(budget.pattern()), Re2.Options.defaults().setMaxMemory(budget.maxMemory()));

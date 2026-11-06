@@ -158,6 +158,16 @@ public class TestTaggedAlternationProgram
     }
 
     @Test
+    public void testExhaustedForwardMemoryLeavesNoAuxiliaryProgram()
+    {
+        // Each budget's forward share is exactly 512 bytes plus 113 per flattened semantic
+        // instruction, so the semantic program leaves no DFA memory. The auxiliary program must
+        // not read that zero as an unlimited budget.
+        assertNoAuxiliaryProgram("((?:(?:a?)*?){150})|(z)", 154_843);
+        assertNoAuxiliaryProgram("((?:(?:(?:(?:a?)*?){16})*?)+)|(z)", 97_213);
+    }
+
+    @Test
     public void testAuxiliaryProgramSharesForwardMemoryBudgetAndFallsBack()
     {
         Slice patternText = utf8Slice(largeAlternation("a", "ab", "."));
@@ -237,6 +247,22 @@ public class TestTaggedAlternationProgram
         finally {
             executor.shutdownNow();
         }
+    }
+
+    private static void assertNoAuxiliaryProgram(String patternText, long maxMemory)
+    {
+        Re2 pattern = Re2.compile(utf8Slice(patternText), Re2.Options.defaults().setMaxMemory(maxMemory));
+        long forwardMemory = maxMemory - (maxMemory / 3);
+        Prog semanticProgram = pattern.forwardProgramForDiagnostics();
+        assertThat(Compiler.estimatedProgramMemory(semanticProgram)).isEqualTo(forwardMemory);
+        assertThat(semanticProgram.dfaMemory()).isZero();
+        assertThat(pattern.taggedAlternationProgramForDiagnostics()).isNull();
+        assertThat(pattern.usesTaggedAlternationForDiagnostics()).isFalse();
+
+        // The nullable first branch wins with an empty match.
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("xz"));
+        assertThat(matcher.find()).isTrue();
+        assertMatch(matcher, 0, 0, 1);
     }
 
     private static void assertFallback(String patternText, Slice input)

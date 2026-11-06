@@ -54,6 +54,11 @@ public class BenchmarkDfaCache
     // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
     // answer it without the DFA.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
+    // Keeps the first-match DFA's 1,388,257-byte state allowance, so the 3,980-state fill has no
+    // reset.
+    private static final long STATE_GROWTH_FILL_MEMORY = 4_232_311;
+    // At 4 MiB the next insert still doubles the state-cache table without a reset.
+    private static final long STATE_GROWTH_INSERT_MEMORY = 4L << 20;
 
     @State(Scope.Benchmark)
     public static class SharedWarmState
@@ -241,7 +246,7 @@ public class BenchmarkDfaCache
             text = Slices.wrappedBuffer(stateGrowthInput(textSize));
             pattern = Re2.compile(
                     Slices.utf8Slice(STATE_GROWTH),
-                    Re2.Options.latin1().setMaxMemory(4L << 20));
+                    Re2.Options.latin1().setMaxMemory(STATE_GROWTH_FILL_MEMORY));
             find(pattern, text);
             dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         }
@@ -288,7 +293,7 @@ public class BenchmarkDfaCache
             text = Slices.wrappedBuffer(stateGrowthInput(textSize));
             pattern = Re2.compile(
                     Slices.utf8Slice(STATE_GROWTH),
-                    Re2.Options.latin1().setMaxMemory(4L << 20));
+                    Re2.Options.latin1().setMaxMemory(STATE_GROWTH_FILL_MEMORY));
             find(pattern, text);
             dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         }
@@ -346,7 +351,7 @@ public class BenchmarkDfaCache
             growthText = Slices.wrappedBuffer(input);
             pattern = Re2.compile(
                     Slices.utf8Slice(STATE_GROWTH),
-                    Re2.Options.latin1().setMaxMemory(4L << 20));
+                    Re2.Options.latin1().setMaxMemory(STATE_GROWTH_INSERT_MEMORY));
             find(pattern, warmText);
             dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
             verifyNextInsertGrowsCache();

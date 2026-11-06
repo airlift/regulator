@@ -324,21 +324,24 @@ public class TestTrinoRegexpFunctions
         assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(retainedSize);
 
-        TrinoRegexp fallback = null;
-        for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
-            try {
-                TrinoRegexp candidate = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-                if (!candidate.usesOrderedLiteralMatcherForDiagnostics()) {
-                    fallback = candidate;
-                    break;
-                }
-            }
-            catch (RegexpCompileMemoryLimitException ignored) {
-                // Continue until the semantic program fits but the optional matcher does not.
-            }
-        }
-        assertThat(fallback).isNotNull();
-        assertThat(fallback.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
+        // The smallest budget that compiles fits the program before flattening at 120 bytes per
+        // instruction, and the flattened program is charged 113. When flattening does not grow the
+        // program, its DFA keeps at least 7 bytes per unflattened instruction, more when flattening
+        // removes instructions, so this short pattern keeps the matcher at that budget.
+        TrinoRegexp smallest = compileAtSmallestBudget(pattern);
+        assertThat(smallest.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
+        assertThat(smallest.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
+
+        // A long leading literal whose first byte recurs keeps a prefix shift table, charged after
+        // flattening, which can take enough of the remaining allowance to leave the matcher out.
+        String literal = "a".repeat(320);
+        TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
+        assertThat(fallback.usesOrderedLiteralMatcherForDiagnostics()).isFalse();
+        Slice source = utf8("x" + literal + "yyb\nb");
+        assertThat(fallback.contains(source)).isTrue();
+        assertThat(fallback.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
+        assertThat(fallback.count(source)).isEqualTo(1);
+        assertThat(fallback.extract(source)).isEqualTo(utf8(literal + "yyb\nb"));
     }
 
     @Test
@@ -359,29 +362,46 @@ public class TestTrinoRegexpFunctions
         assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(search.estimatedRetainedSize());
 
-        TrinoRegexp fallback = null;
-        for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
-            try {
-                TrinoRegexp candidate = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-                if (candidate.re2().literalSearchForDiagnostics() == null) {
-                    fallback = candidate;
-                    break;
-                }
-            }
-            catch (RegexpCompileMemoryLimitException ignored) {
-                // Continue until the semantic program fits but the optional search does not.
-            }
-        }
-        assertThat(fallback).isNotNull();
-        assertThat(fallback.re2().forwardProgramForDiagnostics().dfaMemory()).isLessThan(search.estimatedRetainedSize());
+        // As for the ordered literal matcher, a short pattern that does not grow when flattened
+        // keeps the search at the smallest budget that fits it.
+        TrinoRegexp smallest = compileAtSmallestBudget(pattern);
+        assertThat(smallest.re2().literalSearchForDiagnostics()).isNotNull();
+        Slice source = utf8("xxliteralyy\nliteral");
+        assertThat(smallest.contains(source)).isTrue();
+        assertThat(smallest.contains(utf8("xxlitera lyy"))).isFalse();
+        assertThat(smallest.count(source)).isEqualTo(2);
+        assertThat(smallest.extract(source)).isEqualTo(utf8("xxliteralyy"));
+
+        // A long leading literal's prefix shift table can take enough of the allowance to leave
+        // the search out.
+        String literal = "a".repeat(320);
+        TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + ".*"));
+        assertThat(fallback.re2().literalSearchForDiagnostics()).isNull();
         assertThat(shape(fallback.re2())).isEqualTo(CompiledPattern.Shape.LITERAL_KERNEL);
         assertThat(fallback.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.CONTAINS);
-        assertThat(fallback.usesDotStarLiteralSpanMatcherForDiagnostics()).isTrue();
-        Slice source = utf8("xxliteralyy\nliteral");
-        assertThat(fallback.contains(source)).isTrue();
-        assertThat(fallback.contains(utf8("xxlitera lyy"))).isFalse();
-        assertThat(fallback.count(source)).isEqualTo(2);
-        assertThat(fallback.extract(source)).isEqualTo(utf8("xxliteralyy"));
+        Slice longSource = utf8("x" + literal + "yy\n" + literal);
+        assertThat(fallback.contains(longSource)).isTrue();
+        assertThat(fallback.contains(utf8("x" + literal.substring(1) + " a"))).isFalse();
+        assertThat(fallback.count(longSource)).isEqualTo(2);
+        assertThat(fallback.extract(longSource)).isEqualTo(utf8(literal + "yy"));
+    }
+
+    private static TrinoRegexp compileAtSmallestBudget(Slice pattern)
+    {
+        // Compiling succeeds at every budget from the smallest that fits the semantic program.
+        long rejected = 512;
+        long compiled = 1 << 20;
+        while (compiled - rejected > 1) {
+            long maxMemory = (rejected + compiled) >>> 1;
+            try {
+                TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+                compiled = maxMemory;
+            }
+            catch (RegexpCompileMemoryLimitException ignored) {
+                rejected = maxMemory;
+            }
+        }
+        return TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(compiled));
     }
 
     @Test
@@ -396,7 +416,8 @@ public class TestTrinoRegexpFunctions
         Slice text = utf8("x".repeat(100) + "ab");
         long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
         List<Boolean> outcomes = new ArrayList<>();
-        for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
+        // Both patterns build a lowered program from 5,312 bytes.
+        for (long maxMemory = 5312; maxMemory <= 32 * 1024; maxMemory += 64) {
             TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
             Prog baseline = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2().booleanProgramForDiagnostics();
             TrinoCompiledPattern regexp = TrinoRegexp.compile(utf8("^ab|ab$"), options).re2();

@@ -36,6 +36,9 @@ import static java.util.Objects.requireNonNull;
 final class Prog
 {
     private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    // The most instructions a flattened program may hold: a packed capture instruction word keeps
+    // an output in 28 bits, as upstream's `Prog::Inst` does.
+    static final int MAX_FLATTENED_INSTRUCTIONS = (1 << 28) - 1;
     private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
     private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
@@ -1361,7 +1364,9 @@ final class Prog
             this.prefixCheckOffset = probeOffset > lastOffset - probeOffset ? 0 : lastOffset;
             this.prefixProbeBroadcastMask = (bytes[probeOffset] & 0xFFL) * 0x0101010101010101L;
             this.prefixShifts = LiteralSearchKernel.computePrefixShifts(bytes);
-            // Like the OnePass table, the retained shifts come out of the DFA allowance.
+            // Like the OnePass table, the retained shifts come out of the DFA allowance. A budgeted
+            // compile fails when they do not fit, so the clamp only keeps an unbudgeted program's
+            // default allowance from going negative.
             this.prefixShiftsCharge = Math.min(dfaMemory, prefixShiftsMemory());
             this.dfaMemory -= prefixShiftsCharge;
         }
@@ -2049,7 +2054,7 @@ final class Prog
         // [0..2] opcode, [3] last, [4..31] output, [32..63] opcode-specific payload.
         // ALT_MATCH uses payload bit 31 for greedy and BYTE_RANGE uses it for fold-case.
         long[] words = new long[size()];
-        int outputMask = (1 << 28) - 1;
+        int outputMask = MAX_FLATTENED_INSTRUCTIONS;
         for (int instructionId = 0; instructionId < words.length; instructionId++) {
             Inst instruction = inst(instructionId);
             checkPackedInstructionOutput(instruction.out(), outputMask);
@@ -3126,12 +3131,14 @@ final class Prog
 
     public void flatten()
     {
-        flatten(false, false);
+        flatten(false, MAX_FLATTENED_INSTRUCTIONS, 0, false);
     }
 
-    void flatten(boolean skipDominatorPass)
+    /// Flattens the program. Throws [RegexpCompileMemoryLimitException], reporting `maxMemory`,
+    /// when the flattened program would hold more than `maxInstructionCount` instructions.
+    void flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory)
     {
-        flatten(skipDominatorPass, false);
+        flatten(skipDominatorPass, maxInstructionCount, maxMemory, false);
     }
 
     FlattenStructure flattenForTesting()
@@ -3144,10 +3151,10 @@ final class Prog
         if (didFlatten) {
             throw new IllegalStateException("program is already flattened");
         }
-        return flatten(skipDominatorPass, true);
+        return flatten(skipDominatorPass, MAX_FLATTENED_INSTRUCTIONS, 0, true);
     }
 
-    private FlattenStructure flatten(boolean skipDominatorPass, boolean recordStructure)
+    private FlattenStructure flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory, boolean recordStructure)
     {
         if (didFlatten) {
             return null;
@@ -3181,7 +3188,7 @@ final class Prog
         int finalRootCount = rootIdsByInstruction.size();
         // Third pass: emit lists and map each root to its flattened instruction index.
         int[] flattenedIndexesByRoot = new int[rootIdsByInstruction.size()];
-        InstList flattenedInstructions = new InstList(size());
+        InstList flattenedInstructions = new InstList(size(), maxInstructionCount, maxMemory);
         for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
             int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
             int rootId = rootIdsByInstruction.denseValueAt(rootIndex);
@@ -3221,7 +3228,7 @@ final class Prog
         }
 
         // Replace old instructions with flattened ones.
-        insts = flattenedInstructions.instructions;
+        insts = flattenedInstructions.retainedInstructions();
         instructionCount = flattenedInstructions.size();
 
         // Populate the list-head mapping used by the BitState engine. Upstream gives list heads
@@ -4250,18 +4257,25 @@ final class Prog
     // Growable instruction array used while emitting flattened lists.
     private static final class InstList
     {
+        private final int maxSize;
+        private final long maxMemory;
         private Inst[] instructions;
         private int size;
 
-        InstList(int capacity)
+        InstList(int capacity, int maxSize, long maxMemory)
         {
+            this.maxSize = maxSize;
+            this.maxMemory = maxMemory;
             instructions = new Inst[Math.max(1, capacity)];
         }
 
         void add(Inst instruction)
         {
+            if (size == maxSize) {
+                throw new RegexpCompileMemoryLimitException(maxMemory);
+            }
             if (size == instructions.length) {
-                instructions = Arrays.copyOf(instructions, size * 2);
+                instructions = Arrays.copyOf(instructions, (int) Math.min(size * 2L, maxSize));
             }
             instructions[size++] = instruction;
         }
@@ -4279,6 +4293,17 @@ final class Prog
         int size()
         {
             return size;
+        }
+
+        /// The instructions for the program to keep. The array starts at the unflattened size, and
+        /// a program that flattens to less than half of that would keep more slots than the
+        /// flattened charge's doubling allowance covers, so it gets an exact copy instead.
+        Inst[] retainedInstructions()
+        {
+            if (instructions.length > 2L * size) {
+                return Arrays.copyOf(instructions, size);
+            }
+            return instructions;
         }
     }
 
