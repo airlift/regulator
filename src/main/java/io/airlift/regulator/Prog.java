@@ -974,6 +974,19 @@ final class Prog
         return candidateCount;
     }
 
+    /// Returns a 256-entry table that is nonzero for each byte that can begin a non-empty match
+    /// from [#start()], for a reversed program the bytes that can end one, or null when the
+    /// program can match the empty string, the walk reaches an assertion, or every byte can.
+    byte[] boundaryBytes()
+    {
+        if (canMatchEmpty || start() == 0) {
+            return null;
+        }
+        byte[] candidates = new byte[256];
+        int count = walkStartBytes(new int[3 * size() + 1], candidates, false, true);
+        return count > 0 && count < 256 ? candidates : null;
+    }
+
     /// Builds the byte sets at the first `positionCount` positions of every match path, for the
     /// start literal filter a search scans instead of the start byte set. Each path is
     /// `positionCount` 256-bit sets of four longs. A path that matches before its last position
@@ -2657,14 +2670,7 @@ final class Prog
         builder.build(bytemap, outRange);
         bytemapRange = outRange[0];
 
-        anchoredStartBytes = null;
-        if (anchorStart && !reversed && !canMatchEmpty && start() != 0) {
-            byte[] candidates = new byte[256];
-            int count = walkStartBytes(new int[3 * size() + 1], candidates, false, true);
-            if (count > 0 && count < 256) {
-                anchoredStartBytes = candidates;
-            }
-        }
+        anchoredStartBytes = anchorStart && !reversed ? boundaryBytes() : null;
     }
 
     /// Computes a lexicographic range `[min, max]` such that any string `s` that is a
