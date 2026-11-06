@@ -31,19 +31,22 @@ import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
+import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 
-/// Public `find`, `count`, and `matches` of RE2, Java, and Rust patterns over a batch of rows
-/// on one target pattern, called the way an application calls a pattern it holds: one call site
-/// that only ever sees that pattern. It measures profile pollution, what other patterns cost the
-/// target when they have run first through the library code every pattern shares.
+/// Public `find`, `count`, `matches`, `lookingAt`, and matcher iteration of RE2, Java, Rust, and
+/// Trino patterns over a batch of rows on one target pattern, called the way an application calls a
+/// pattern it holds: one call site that only ever sees that pattern. It measures profile pollution,
+/// what other patterns cost the target when they have run first through the library code every
+/// pattern shares.
 ///
 /// The targets are the three case-sensitive scan-plan targets of [BenchmarkRe2ScanPlan] workloads,
 /// the start-anchored ANCHORED_WWW_HOST and the unanchored UNANCHORED_URL and UNANCHORED_SET, and
@@ -55,34 +58,59 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// byte span matcher; BYTE_TABLE runs a one-byte member run on the single-byte table for SHORT rows
 /// in RE2 and Java, and on the ordinary search for LONG rows and in Rust, whose `\s` is Unicode;
 /// and ANCHORED_LITERAL compares a literal prefix. FOLDED_PLAN is an ASCII-folded scan plan, which
-/// has no generated class. TestBenchmarkPatternDispatch checks each route in every language. SHORT
-/// rows are 16 to 64 bytes and LONG rows 1024 bytes, padded in the host run of the anchored URL
-/// pattern, after the text of ANCHORED_LITERAL, whose search reads only its start, and before the
-/// text of the others. LONG inputs contain padding, but anchored URL rows 4–6 reject before
-/// reaching it. Each target's rows mix matching and non-matching log lines, requests, or URLs.
+/// has no generated class. FOLDED_PAIR_SEQUENCE is a control: a class sequence whose first class
+/// simplifies to a case-folded literal, so it takes no fixed-width route in any language, Trino
+/// included. INNER_LITERAL_FIXED_WIDTH is a fixed-width class sequence with a five-byte inner
+/// literal, `[a-z]shing`: RE2, Java, and Rust keep the DFA's inner literal search, while Trino's
+/// fixed-width subtype runs the fixed-width matcher, which checks every `s`. ORDERED_LITERALS finds
+/// three literals in order with any text between them and runs the ordinary search today.
+/// LITERAL_SET alternates 100 words, over the limit of 64 literals of the literal-alternation span
+/// matcher: full-Slice `find` runs the ordinary search today, and RE2, Java, and Rust matchers find
+/// it with the literal set's automaton. SINGLE_BYTE is the one-byte exact literal `,`, which
+/// the single-byte table supports. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line
+/// feed, unlike CONTAINS's `(?s)`; RE2 and Rust search it as a contained literal, while Java, whose
+/// dot stops at more line terminators, runs the ordinary search. TestBenchmarkPatternDispatch
+/// checks each route in RE2, Java, and Rust, and in Trino only that FOLDED_PAIR_SEQUENCE takes no
+/// fixed-width route. SHORT rows are 16 to 64 bytes and LONG rows 1024 bytes, padded in the host
+/// run of the anchored URL pattern, after the text of ANCHORED_LITERAL, whose search reads only its
+/// start, and before the text of the others. LONG inputs contain padding, but anchored URL rows 4–6
+/// reject before reaching it. The padding of INNER_LITERAL_FIXED_WIDTH is English text rich in `s`
+/// without its literal, so its SHORT rows find the literal within their first 64 bytes and its LONG
+/// rows only after them, the two sides of the inner literal search's 64-byte minimum skip. Each
+/// target's rows mix matching and non-matching log lines, requests, URLs, or prose.
 ///
-/// Each language compiles through its own public `compile(Slice, Options)`, and an adapter of
-/// that language, [Re2Patterns], [JavaPatterns], or [RustPatterns], holds its patterns as the
-/// language's public type and writes each measured loop out for that type. A benchmark method
-/// calls the adapter once per invocation, outside the loop, and a fork creates adapters of one
-/// language only, so that call sees one receiver. Inside the loop every call is of the language's
-/// own type, as in an application written against that language: a JAVA run's call sites are
-/// `JavaRegexp` sites. One loop calling the three languages through a shared interface would
-/// add the many-receiver call site that this benchmark measures.
+/// Where a route above names no language, it is the route of RE2, Java, and Rust. Trino compiles
+/// most targets to its own subtypes instead, such as its ordered-literal matcher for
+/// ORDERED_LITERALS and its literal-set matcher for LITERAL_SET.
 ///
-/// With `polluted=false`, setup compiles only the target, so no other pattern has run or loaded
-/// a generated class: the run is the one-pattern baseline. With `polluted=true`, setup also
-/// compiles a pollution set with the target's language and `generated` setting, every other
-/// target and the six patterns of [#POLLUTION], and calls `find`, `count`, and `matches` on the
-/// target and the pollution set, interleaved, through one non-inlined training method, with one
-/// site per operation, for enough rounds to encourage C2 to compile the shared methods with the
-/// profile of all of them. The measured methods then call only the target, so the difference from
-/// `polluted=false` is the cost of reaching the target through shared methods whose profile holds
-/// many patterns, with the other patterns' generated classes loaded. The `sharedSite` method calls
-/// `find` of the target and then of every pollution pattern on each row, from one call site: the
-/// loop of an application that holds many patterns. It reports the time per call. Its state always
-/// compiles the pollution set and has no `polluted` parameter, since its own loop trains the shared
-/// methods with every pattern.
+/// Each language compiles through its own public `compile(Slice, Options)`, and an adapter of that
+/// language, [Re2Patterns], [JavaPatterns], [RustPatterns], or [TrinoPatterns], holds its patterns
+/// as the language's public type and writes each measured loop out for that type. A benchmark
+/// method calls the adapter once per invocation, outside the loop, and a fork creates adapters of
+/// one language only, so that call sees one receiver. Inside the loop every call is of the
+/// language's own type, as in an application written against that language: a JAVA run's call sites
+/// are `JavaRegexp` sites. One loop calling the languages through a shared interface would add the
+/// many-receiver call site that this benchmark measures. `iterate` counts the matches of each row
+/// with a find loop of the language's public matcher, which retains only group zero; each pattern
+/// has one matcher, created at setup and reset to each row, so the loop allocates nothing. Trino's
+/// `find` is its `contains`. Trino has no whole-input or anchored-prefix match, so its `matches`
+/// and `lookingAt` throw `UnsupportedOperationException`, and its training calls only `contains`,
+/// `count`, and its matcher.
+///
+/// With `polluted=false`, setup compiles only the target, so no other pattern has run or loaded a
+/// generated class: the run is the one-pattern baseline. With `polluted=true`, setup also compiles
+/// a pollution set with the target's language and `generated` setting, every other target and the
+/// six patterns of [#POLLUTION], and calls `find`, `count`, `matches`, `lookingAt`, and a matcher's
+/// find loop on the target and the pollution set, interleaved, through one non-inlined training
+/// method, with one site per operation, for enough rounds to encourage C2 to compile the shared
+/// methods with the profile of all of them. Training reads every target's rows at the run's `rows`
+/// length, so a LONG run's shared methods also learn long inputs. The measured methods then call
+/// only the target, so the difference from `polluted=false` is the cost of reaching the target
+/// through shared methods whose profile holds many patterns, with the other patterns' generated
+/// classes loaded. The `sharedSite` method calls `find` of the target and then of every pollution
+/// pattern on each row, from one call site: the loop of an application that holds many patterns.
+/// It reports the time per call. Its state always compiles the pollution set and has no `polluted`
+/// parameter, since its own loop trains the shared methods with every pattern.
 ///
 /// With `generated=true`, every pattern compiles with generated bytecode requested. Setup
 /// requires the target to have a generated class, which only the case-sensitive scan-plan targets
@@ -93,8 +121,8 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// results. It does not require full matches: some targets' rows never match whole, and
 /// `matches` then times the route that rejects them.
 ///
-/// The benchmark uses only the public API of `Re2`, `JavaRegexp`, and `RustRegexp`, so this
-/// source also compares builds that change how a pattern reaches its generated class.
+/// The benchmark uses only the public API of `Re2`, `JavaRegexp`, `RustRegexp`, and `TrinoRegexp`,
+/// so this source also compares builds that change how a pattern reaches its generated class.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -104,8 +132,8 @@ public class BenchmarkPatternDispatch
 {
     private static final int ROWS = 1024;
     private static final int LONG_ROW_BYTES = 1024;
-    // Calls of find, count, and matches per pattern before measurement, to encourage C2 to compile
-    // the shared methods with the polluted profile.
+    // Calls of every operation per pattern before measurement, to encourage C2 to compile the
+    // shared methods with the polluted profile.
     private static final int TRAINING_ROUNDS = 30_000;
     // Where each row template puts the padding of a LONG row.
     private static final String PAD = "{pad}";
@@ -119,15 +147,30 @@ public class BenchmarkPatternDispatch
             "id=(\\d+)&",
             "svc1://(?:www\\.)?([^/]+)/",
             "https?://(?:www\\.)?([^/]+)/.*$");
-    // The target, the eleven other targets, and the POLLUTION patterns.
-    private static final int SHARED_SITE_PATTERNS = 18;
+    // The words of LITERAL_SET: 100 distinct lowercase English words, over the literal-alternation
+    // span matcher's limit of 64 literals.
+    private static final List<String> LITERAL_SET_WORDS = List.of(
+            """
+            about above across after again against almost along already always
+            among another answer around because become before behind believe better
+            between beyond bottom branch bridge bright broken budget button camera
+            castle center change church circle closed coffee column common corner
+            county credit damage danger decade decide degree design detail dinner
+            doctor double dragon driver during eleven energy engine enough entire
+            escape evening family father figure finger flight flower follow forest
+            forget friend future garden gather golden ground growth guitar health
+            hidden island jacket kitchen ladder letter listen market member method
+            middle minute mirror modern moment mother number office orange window
+            """.strip().split("\\s+"));
+    // The target, the seventeen other targets, and the POLLUTION patterns.
+    private static final int SHARED_SITE_PATTERNS = 24;
 
     private static volatile long trainingSink;
 
     @State(Scope.Thread)
     public static class BenchmarkData
     {
-        @Param({"RE2", "JAVA", "RUST"})
+        @Param({"RE2", "JAVA", "RUST", "TRINO"})
         public String language;
 
         @Param({
@@ -143,6 +186,12 @@ public class BenchmarkPatternDispatch
                 "BYTE_TABLE",
                 "ANCHORED_LITERAL",
                 "FOLDED_PLAN",
+                "FOLDED_PAIR_SEQUENCE",
+                "INNER_LITERAL_FIXED_WIDTH",
+                "ORDERED_LITERALS",
+                "LITERAL_SET",
+                "SINGLE_BYTE",
+                "DOT_STAR_LITERAL",
         })
         public String target;
 
@@ -168,7 +217,7 @@ public class BenchmarkPatternDispatch
             patterns = compile(language, expressions, generated, inputs);
 
             if (polluted) {
-                Slice[] trainingInputs = trainingInputs();
+                Slice[] trainingInputs = trainingInputs(rows);
                 long checksum = 0;
                 for (int round = 0; round < TRAINING_ROUNDS; round++) {
                     Slice input = trainingInputs[round % trainingInputs.length];
@@ -186,7 +235,7 @@ public class BenchmarkPatternDispatch
     @State(Scope.Thread)
     public static class SharedSiteData
     {
-        @Param({"RE2", "JAVA", "RUST"})
+        @Param({"RE2", "JAVA", "RUST", "TRINO"})
         public String language;
 
         // The targets of BenchmarkData.
@@ -203,6 +252,12 @@ public class BenchmarkPatternDispatch
                 "BYTE_TABLE",
                 "ANCHORED_LITERAL",
                 "FOLDED_PLAN",
+                "FOLDED_PAIR_SEQUENCE",
+                "INNER_LITERAL_FIXED_WIDTH",
+                "ORDERED_LITERALS",
+                "LITERAL_SET",
+                "SINGLE_BYTE",
+                "DOT_STAR_LITERAL",
         })
         public String target;
 
@@ -246,6 +301,21 @@ public class BenchmarkPatternDispatch
         return data.patterns.matches(data.inputs);
     }
 
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public int lookingAt(BenchmarkData data)
+    {
+        return data.patterns.lookingAt(data.inputs);
+    }
+
+    /// Counts every row's matches with a find loop of the target's reused matcher.
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public long iterate(BenchmarkData data)
+    {
+        return data.patterns.iterate(data.inputs);
+    }
+
     /// Calls `find` of every pattern of [#sharedSiteExpressions(String)] on each row from one
     /// call site.
     @Benchmark
@@ -263,6 +333,7 @@ public class BenchmarkPatternDispatch
             case "RE2" -> new Re2Patterns(expressions, generated);
             case "JAVA" -> new JavaPatterns(expressions, generated);
             case "RUST" -> new RustPatterns(expressions, generated);
+            case "TRINO" -> new TrinoPatterns(expressions, generated);
             default -> throw new IllegalArgumentException("unknown language: " + language);
         };
         if (generated && !patterns.targetUsesGeneratedBytecode()) {
@@ -309,6 +380,12 @@ public class BenchmarkPatternDispatch
             case "BYTE_TABLE" -> "\\s+";
             case "ANCHORED_LITERAL" -> "^GET /";
             case "FOLDED_PLAN" -> "(?i)content-type:([^;]+);";
+            case "FOLDED_PAIR_SEQUENCE" -> "[Kk][a-z]{7}";
+            case "INNER_LITERAL_FIXED_WIDTH" -> "[a-z]shing";
+            case "ORDERED_LITERALS" -> "a(?s:.*)b(?s:.*)c";
+            case "LITERAL_SET" -> String.join("|", LITERAL_SET_WORDS);
+            case "SINGLE_BYTE" -> ",";
+            case "DOT_STAR_LITERAL" -> ".*timeout.*";
             default -> throw new IllegalArgumentException("unknown target: " + target);
         };
     }
@@ -338,7 +415,8 @@ public class BenchmarkPatternDispatch
     abstract static sealed class LanguagePatterns
             permits JavaPatterns,
                     Re2Patterns,
-                    RustPatterns
+                    RustPatterns,
+                    TrinoPatterns
     {
         abstract boolean targetUsesGeneratedBytecode();
 
@@ -348,12 +426,17 @@ public class BenchmarkPatternDispatch
 
         abstract int matches(Slice[] inputs);
 
+        abstract int lookingAt(Slice[] inputs);
+
+        abstract long iterate(Slice[] inputs);
+
         abstract int sharedSite(Slice[] inputs);
 
-        /// Runs `find`, `count`, and `matches` of shared-site pattern `patternIndex` on `input`.
-        /// Each implementation is setup's one non-inlined training method, with one site per
-        /// operation shared by every pattern, so its own profile never narrows what the shared
-        /// library methods see.
+        /// Runs `find`, `count`, `matches`, `lookingAt`, and a find loop of the pattern's matcher
+        /// for shared-site pattern `patternIndex` on `input`, or only `find`, `count`, and the find
+        /// loop in Trino, which has no `matches` or `lookingAt`. Each implementation is setup's
+        /// one non-inlined training method, with one site per operation shared by every pattern,
+        /// so its own profile never narrows what the shared library methods see.
         abstract long train(int patternIndex, Slice input);
     }
 
@@ -362,12 +445,17 @@ public class BenchmarkPatternDispatch
     {
         final Re2 target;
         final Re2[] patterns;
+        final RegexpMatcher targetMatcher;
+        // One group-zero matcher per pattern, reset to each row.
+        final RegexpMatcher[] matchers;
 
         private Re2Patterns(List<String> expressions, boolean generated)
         {
             Re2.Options options = Re2.Options.defaults().setGenerateBytecode(generated);
             patterns = expressions.stream().map(expression -> Re2.compile(utf8Slice(expression), options)).toArray(Re2[]::new);
             target = patterns[0];
+            matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(RegexpMatcher[]::new);
+            targetMatcher = matchers[0];
         }
 
         @Override
@@ -407,6 +495,33 @@ public class BenchmarkPatternDispatch
             int matches = 0;
             for (Slice input : inputs) {
                 if (pattern.matches(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        int lookingAt(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.lookingAt(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long iterate(Slice[] inputs)
+        {
+            RegexpMatcher matcher = targetMatcher;
+            long matches = 0;
+            for (Slice input : inputs) {
+                matcher.reset(input);
+                while (matcher.find()) {
                     matches++;
                 }
             }
@@ -433,7 +548,12 @@ public class BenchmarkPatternDispatch
         long train(int patternIndex, Slice input)
         {
             Re2 compiled = patterns[patternIndex];
-            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0);
+            RegexpMatcher matcher = matchers[patternIndex].reset(input);
+            long matches = 0;
+            while (matcher.find()) {
+                matches++;
+            }
+            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0) + (compiled.lookingAt(input) ? 1 : 0) + matches;
         }
     }
 
@@ -442,12 +562,17 @@ public class BenchmarkPatternDispatch
     {
         final JavaRegexp target;
         final JavaRegexp[] patterns;
+        final RegexpMatcher targetMatcher;
+        // One group-zero matcher per pattern, reset to each row.
+        final RegexpMatcher[] matchers;
 
         private JavaPatterns(List<String> expressions, boolean generated)
         {
             JavaRegexp.Options options = JavaRegexp.Options.defaults().setGenerateBytecode(generated);
             patterns = expressions.stream().map(expression -> JavaRegexp.compile(utf8Slice(expression), options)).toArray(JavaRegexp[]::new);
             target = patterns[0];
+            matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(RegexpMatcher[]::new);
+            targetMatcher = matchers[0];
         }
 
         @Override
@@ -487,6 +612,33 @@ public class BenchmarkPatternDispatch
             int matches = 0;
             for (Slice input : inputs) {
                 if (pattern.matches(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        int lookingAt(Slice[] inputs)
+        {
+            JavaRegexp pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.lookingAt(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long iterate(Slice[] inputs)
+        {
+            RegexpMatcher matcher = targetMatcher;
+            long matches = 0;
+            for (Slice input : inputs) {
+                matcher.reset(input);
+                while (matcher.find()) {
                     matches++;
                 }
             }
@@ -513,7 +665,12 @@ public class BenchmarkPatternDispatch
         long train(int patternIndex, Slice input)
         {
             JavaRegexp compiled = patterns[patternIndex];
-            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0);
+            RegexpMatcher matcher = matchers[patternIndex].reset(input);
+            long matches = 0;
+            while (matcher.find()) {
+                matches++;
+            }
+            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0) + (compiled.lookingAt(input) ? 1 : 0) + matches;
         }
     }
 
@@ -522,12 +679,17 @@ public class BenchmarkPatternDispatch
     {
         final RustRegexp target;
         final RustRegexp[] patterns;
+        final RegexpMatcher targetMatcher;
+        // One group-zero matcher per pattern, reset to each row.
+        final RegexpMatcher[] matchers;
 
         private RustPatterns(List<String> expressions, boolean generated)
         {
             RustRegexp.Options options = RustRegexp.Options.defaults().setGenerateBytecode(generated);
             patterns = expressions.stream().map(expression -> RustRegexp.compile(utf8Slice(expression), options)).toArray(RustRegexp[]::new);
             target = patterns[0];
+            matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(RegexpMatcher[]::new);
+            targetMatcher = matchers[0];
         }
 
         @Override
@@ -574,6 +736,33 @@ public class BenchmarkPatternDispatch
         }
 
         @Override
+        int lookingAt(Slice[] inputs)
+        {
+            RustRegexp pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.lookingAt(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long iterate(Slice[] inputs)
+        {
+            RegexpMatcher matcher = targetMatcher;
+            long matches = 0;
+            for (Slice input : inputs) {
+                matcher.reset(input);
+                while (matcher.find()) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
         int sharedSite(Slice[] inputs)
         {
             RustRegexp[] patterns = this.patterns;
@@ -593,13 +782,123 @@ public class BenchmarkPatternDispatch
         long train(int patternIndex, Slice input)
         {
             RustRegexp compiled = patterns[patternIndex];
-            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0);
+            RegexpMatcher matcher = matchers[patternIndex].reset(input);
+            long matches = 0;
+            while (matcher.find()) {
+                matches++;
+            }
+            return (compiled.find(input) ? 1 : 0) + compiled.count(input) + (compiled.matches(input) ? 1 : 0) + (compiled.lookingAt(input) ? 1 : 0) + matches;
+        }
+    }
+
+    /// Trino patterns, whose `find` is `contains`. Trino has no whole-input or anchored-prefix
+    /// match, so `matches` and `lookingAt` throw.
+    static final class TrinoPatterns
+            extends LanguagePatterns
+    {
+        final TrinoRegexp target;
+        final TrinoRegexp[] patterns;
+        final TrinoRegexpMatcher targetMatcher;
+        // One group-zero matcher per pattern, reset to each row.
+        final TrinoRegexpMatcher[] matchers;
+
+        private TrinoPatterns(List<String> expressions, boolean generated)
+        {
+            TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setGenerateBytecode(generated);
+            patterns = expressions.stream().map(expression -> TrinoRegexp.compile(utf8Slice(expression), options)).toArray(TrinoRegexp[]::new);
+            target = patterns[0];
+            matchers = Arrays.stream(patterns).map(pattern -> pattern.matcher(EMPTY_SLICE, 0)).toArray(TrinoRegexpMatcher[]::new);
+            targetMatcher = matchers[0];
+        }
+
+        @Override
+        boolean targetUsesGeneratedBytecode()
+        {
+            return target.usesGeneratedBytecode();
+        }
+
+        @Override
+        int find(Slice[] inputs)
+        {
+            TrinoRegexp pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.contains(input)) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long count(Slice[] inputs)
+        {
+            TrinoRegexp pattern = target;
+            long matches = 0;
+            for (Slice input : inputs) {
+                matches += pattern.count(input);
+            }
+            return matches;
+        }
+
+        @Override
+        int matches(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Trino has no whole-input match operation");
+        }
+
+        @Override
+        int lookingAt(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Trino has no anchored-prefix match operation");
+        }
+
+        @Override
+        long iterate(Slice[] inputs)
+        {
+            TrinoRegexpMatcher matcher = targetMatcher;
+            long matches = 0;
+            for (Slice input : inputs) {
+                matcher.reset(input);
+                while (matcher.find()) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        int sharedSite(Slice[] inputs)
+        {
+            TrinoRegexp[] patterns = this.patterns;
+            int matches = 0;
+            for (Slice input : inputs) {
+                for (TrinoRegexp pattern : patterns) {
+                    if (pattern.contains(input)) {
+                        matches++;
+                    }
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        @CompilerControl(DONT_INLINE)
+        long train(int patternIndex, Slice input)
+        {
+            TrinoRegexp compiled = patterns[patternIndex];
+            TrinoRegexpMatcher matcher = matchers[patternIndex].reset(input);
+            long matches = 0;
+            while (matcher.find()) {
+                matches++;
+            }
+            return (compiled.contains(input) ? 1 : 0) + compiled.count(input) + matches;
         }
     }
 
     /// Returns row `row` of a target. A LONG row fills the template's padding up to
-    /// [#LONG_ROW_BYTES] with spaces for CHARACTER_CLASS and FIXED_WIDTH, whose classes hold `x`,
-    /// and with `x` for every other target; a SHORT row leaves it empty.
+    /// [#LONG_ROW_BYTES] with the target's [#filler(String)], repeated and cut to length; a SHORT
+    /// row leaves it empty.
     private static byte[] row(String target, int row, boolean longRow)
     {
         String host = "host" + row + ".example.com";
@@ -724,21 +1023,96 @@ public class BenchmarkPatternDispatch
                 case 6 -> "content-type:;" + row + " empty";
                 default -> "Content-Type:テキスト/プレーン;" + row;
             };
+            case "FOLDED_PAIR_SEQUENCE" -> PAD + switch (row % 8) {
+                case 0 -> "INFO kubernetes pod " + row + " ready";
+                case 1 -> "WARN Kafka lag " + row + " on topic";
+                case 2 -> "ERROR Keepalive timeout on conn " + row;
+                case 3 -> "DEBUG cache key " + row + " evicted";
+                case 4 -> "INFO KAFKA-BROKER " + row + " online";
+                case 5 -> "WARN 鍵 keystore " + row + " expires";
+                case 6 -> "INFO worker " + row + " parked";
+                default -> "ERROR checkpointing " + row + " failed";
+            };
+            case "INNER_LITERAL_FIXED_WIDTH" -> PAD + switch (row % 8) {
+                case 0 -> "INFO publishing release notes for build " + row;
+                case 1 -> "status is stale since sessions closed at " + row;
+                case 2 -> "WARN washing cycle " + row + " paused";
+                case 3 -> "the session list is sorted by user, page " + row;
+                case 4 -> "finishing sync of " + row + " assets to storage";
+                case 5 -> "WARN shins and sashes pass as usual " + row;
+                case 6 -> "café sessions stay open, so status is " + row;
+                default -> "phishing test mail " + row + " was flagged";
+            };
+            case "ORDERED_LITERALS" -> PAD + switch (row % 8) {
+                case 0 -> "GET /about/contact " + row;
+                case 1 -> "INFO request " + row + " done";
+                case 2 -> "WARN cache miss for job " + row;
+                case 3 -> "ERROR stale lab " + row + "\ncode 7";
+                case 4 -> "DEBUG backlog " + row + " is empty";
+                case 5 -> "INFO 計算 abacus " + row + " ok";
+                case 6 -> "WARN slow query on db-" + row;
+                default -> "INFO subscriber " + row + " attached";
+            };
+            case "LITERAL_SET" -> PAD + switch (row % 8) {
+                case 0 -> "we met again after the storm, row " + row;
+                case 1 -> "INFO request " + row + " completed in 12ms";
+                case 2 -> "kitchen window left open, row " + row;
+                case 3 -> "GET /api/v1/items/" + row + "?page=2";
+                case 4 -> "ERROR disk full on node-" + row;
+                case 5 -> "日本 garden party at " + row;
+                case 6 -> "Garden " + row + ": Kitchen Window";
+                default -> "warn: slow query on db-" + row;
+            };
+            case "SINGLE_BYTE" -> PAD + switch (row % 8) {
+                case 0 -> "id,name,email,row " + row;
+                case 1 -> "plain text row " + row + " without separators";
+                case 2 -> "row " + row + ",alice,42,true";
+                case 3 -> "key=value;other=" + row;
+                case 4 -> "\"quoted, field\"," + row;
+                case 5 -> "名前,値,行 " + row;
+                case 6 -> "tab\tseparated\trow " + row;
+                default -> ", leading comma on row " + row;
+            };
+            case "DOT_STAR_LITERAL" -> PAD + switch (row % 8) {
+                case 0 -> "ERROR read timeout after 30s on " + row;
+                case 1 -> "INFO GET /health 200 in " + row + "ms";
+                case 2 -> "WARN connect timeout\nretry timeout " + row;
+                case 3 -> "DEBUG retry " + row + " scheduled\nnext";
+                case 4 -> "ERROR time out on socket " + row;
+                case 5 -> "WARN 接続 timeout " + row;
+                case 6 -> "INFO request " + row + " ok, timeouts=0";
+                default -> "INFO session " + row + " expired";
+            };
             default -> throw new IllegalArgumentException("unknown target: " + target);
         };
-        String padding = target.equals("CHARACTER_CLASS") || target.equals("FIXED_WIDTH") ? " " : "x";
-        int length = template.replace(PAD, "").getBytes(UTF_8).length;
-        return template.replace(PAD, longRow ? padding.repeat(LONG_ROW_BYTES - length) : "").getBytes(UTF_8);
+        int length = LONG_ROW_BYTES - template.replace(PAD, "").getBytes(UTF_8).length;
+        String filler = filler(target);
+        String padding = filler.repeat(length / filler.length() + 1).substring(0, length);
+        return template.replace(PAD, longRow ? padding : "").getBytes(UTF_8);
     }
 
-    // Short rows of every target and rows that the pollution patterns match, so each pattern's
-    // find sees rows it matches and rows it does not.
-    private static Slice[] trainingInputs()
+    /// Returns the ASCII text that a LONG row of `target` repeats as its padding, so cutting it
+    /// to length never splits a character: spaces for CHARACTER_CLASS, FIXED_WIDTH, and
+    /// FOLDED_PAIR_SEQUENCE, whose classes hold `x`; English rich in `s` without `shing` for
+    /// INNER_LITERAL_FIXED_WIDTH; and `x` for every other target.
+    private static String filler(String target)
+    {
+        return switch (target) {
+            case "CHARACTER_CLASS", "FIXED_WIDTH", "FOLDED_PAIR_SEQUENCE" -> " ";
+            case "INNER_LITERAL_FIXED_WIDTH" -> "the status of these sessions is still unsettled, so we must assess its uses. ";
+            default -> "x";
+        };
+    }
+
+    // Rows of every target in the run's `rows` length, and rows that the pollution patterns match,
+    // so each pattern's find sees rows it matches and rows it does not, and the shared methods
+    // train on the row length the run measures.
+    private static Slice[] trainingInputs(String rows)
     {
         List<Slice> inputs = new ArrayList<>();
         for (int row = 0; row < 64; row++) {
             for (String target : targets()) {
-                inputs.add(offsetInput(row(target, row, false)));
+                inputs.add(offsetInput(row(target, row, rows.equals("LONG"))));
             }
             inputs.add(offsetInput(("item_" + row + "-" + row + "/").getBytes(UTF_8)));
             inputs.add(offsetInput(("/search?id=" + row + "&page=2").getBytes(UTF_8)));
