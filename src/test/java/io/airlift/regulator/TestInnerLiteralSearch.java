@@ -120,6 +120,18 @@ public class TestInnerLiteralSearch
         // A pair with a side of more than three bytes, or one common in English text, is not.
         assertThat(literal("[ \\t][!#%&][\"']@x")).isEqualTo("@x");
         assertThat(literal("\\s[ae][st]@x")).isEqualTo("@x");
+        // A single-byte class next to the literal gates each hit, but not one that holds the
+        // literal's own byte at that edge, as the letters before shing do: it borders nearly
+        // every hit.
+        for (Map.Entry<String, List<String>> entry : List.of(
+                Map.entry("\\s[a-zA-Z]{0,12}ing\\s", List.of("", "\t\n\f\r ")),
+                Map.entry("\\w+\\s+Holmes\\s+\\w+", List.of("\t\n\f\r ", "\t\n\f\r ")),
+                Map.entry("[\\w.+-]+@[\\w.-]+\\.[\\w.-]+", List.of(
+                        "+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
+                        "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz")),
+                Map.entry("[a-z]shing[a-z]", List.of("", "")))) {
+            assertThat(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).as(entry.getKey()).isEqualTo(entry.getValue());
+        }
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -383,9 +395,14 @@ public class TestInnerLiteralSearch
 
     private static long forwardStateCount(CompiledPattern pattern)
     {
+        return stateCount(pattern.forwardProgramForDiagnostics());
+    }
+
+    private static long stateCount(Prog program)
+    {
         long states = 0;
         for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
-            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(kind);
+            Dfa.DfaInstance dfa = program.cachedDfaIfPresent(kind);
             if (dfa != null) {
                 states += dfa.cacheSnapshot().stateCount();
             }
@@ -415,6 +432,30 @@ public class TestInnerLiteralSearch
                 "([A-Za-z]awyer|[A-Za-z]inn)\\s",
                 List.of(".".repeat(62) + "xinn " + filler, ".".repeat(62) + "Sawyer " + filler),
                 List.of(".".repeat(63) + "xinn " + filler, ".".repeat(63) + "Sawyer " + filler));
+    }
+
+    @Test
+    public void testGateSkippedHitLeavesReverseBound()
+    {
+        // A hit whose neighboring bytes no match can hold runs no reverse search, so it does not
+        // bound the next one: the first ing of singing is skipped, and the second confirms from
+        // the space before the word.
+        String filler = ".".repeat(200);
+        assertNearStart("\\s[a-zA-Z]{0,12}ing\\s", List.of(), List.of(filler + " singing " + filler));
+    }
+
+    @Test
+    public void testGateSkippedHitRunsNeitherDfa()
+    {
+        // The ing of kingdom, far from the start, is followed by a letter, not the whitespace
+        // every match needs there, so the search skips it before either DFA starts.
+        Re2 pattern = Re2.compile(utf8Slice("\\s[a-zA-Z]{0,12}ing\\s"));
+        InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
+        Slice text = utf8Slice(".".repeat(200) + " kingdom " + ".".repeat(200));
+
+        assertThat(search.search(text, 0, text.length(), 0, text.length())).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(stateCount(search.reversePrefixProgramForDiagnostics())).isZero();
+        assertThat(stateCount(pattern.forwardProgramForDiagnostics())).isZero();
     }
 
     @Test
@@ -495,8 +536,9 @@ public class TestInnerLiteralSearch
         List<Slice> texts = new ArrayList<>();
         // Overlapping and adjacent candidates, and failing confirmations that would rescan.
         for (String text : List.of(
-                "Holmes Holmes Holmes Holmes Holmes Holmes Holmes Holmes Holmes Holmes Holmes",
-                "singing bringing thing, singingX ing ing ingest sing ing\n".repeat(4),
+                // Literals with and without the neighboring bytes a match needs, at both ends.
+                "Holmes Holmes Holmes's Holmes. Holmes\nHolmes, Holmes\tHolmes Holmes Holmes Holmes",
+                "singing bringing thing, kingdom things ing\tsingingX ing ing ingest sing ing\n".repeat(4),
                 "a@b@c@d@e@f@g@h@i@j@k@l@m@n@o@p@q@r@s@t@u@v@w@x@y@z@a.b@c.d@e.f".repeat(2),
                 "xshingshingshing ashing shing Ashing shingle punishing".repeat(2),
                 "azxx zxx azx azxxx ".repeat(5),
