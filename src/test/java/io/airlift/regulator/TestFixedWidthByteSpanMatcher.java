@@ -17,10 +17,13 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static io.airlift.regulator.CompiledPattern.shouldAnalyzeFixedWidthByteSpanForTrino;
+import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
+import static io.airlift.regulator.TestingPatternShapes.assertProgramSearchUnless;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -226,10 +229,11 @@ public class TestFixedWidthByteSpanMatcher
     }
 
     @Test
-    public void testMultiByteInnerLiteralKeepsTheDfa()
+    public void testMultiByteInnerLiteralKeepsTheDfaExceptOnShortSearches()
     {
         // The matcher would check every s for [a-z]shing, which English text holds far more often
-        // than shing, so boolean find and count keep the DFA's search for the inner literal.
+        // than shing, so boolean find, and count and matcher find on long inputs, keep the DFA's
+        // search for the inner literal; the last block below covers the short searches.
         for (Map.Entry<String, CompiledPattern> entry : re2JavaAndRustPatterns("[a-z]shing").entrySet()) {
             String label = entry.getKey();
             CompiledPattern pattern = entry.getValue();
@@ -238,8 +242,106 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 
-        // Trino's fixed-width subtype keeps its matcher.
-        assertThat(TrinoRegexp.compile(utf8Slice("[a-z]shing"))).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+        // Trino follows the same rule: its plain subtype answers contains, and count on long
+        // inputs, on the ordinary engine, which searches for shing, and agrees with RE2's general
+        // engine.
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[a-z]shing"));
+        assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
+        assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).isFalse();
+        assertThat(trino.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
+        Re2 reference = Re2.compile(utf8Slice("[a-z]shing"));
+        String prose = "the status of these sessions is still unsettled, so we must assess its uses. ";
+        for (String text : List.of("", "fishing", prose, prose + "go fishing, then washing", "shing ashing " + prose)) {
+            Slice input = utf8Slice(text);
+            long expectedCount = generalEngineCount(reference, input);
+            assertThat(trino.contains(input)).as(text).isEqualTo(expectedCount > 0);
+            assertThat(trino.count(input)).as(text).isEqualTo(expectedCount);
+        }
+
+        // The inner literal search runs only on at least MINIMUM_LONG_SEARCH_BYTES bytes, so on
+        // fewer every language, Trino included, counts and finds matcher spans with a second,
+        // short-search fixed-width matcher, which builds no program search, while full-Slice find
+        // stays on the engine. Each search covers the last 63 or 64 bytes of a 1024-byte input
+        // that ends in ishing, so the find that resumes after the match has no bytes left.
+        byte[] bytes = "x".repeat(1024).getBytes(ISO_8859_1);
+        System.arraycopy("ishing".getBytes(ISO_8859_1), 0, bytes, 1018, 6);
+        Slice longInput = wrappedBuffer(bytes);
+        for (int length : List.of(63, 64)) {
+            Slice input = longInput.slice(longInput.length() - length, length);
+            boolean shortSearch = length < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
+            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
+                String label = "%s count of %s bytes".formatted(entry.getKey(), length);
+                CompiledPattern pattern = entry.getValue();
+                assertThat(pattern.shortFixedWidthByteMatcher()).as(label).isNotNull();
+                assertThat(pattern.count(input)).as(label).isEqualTo(1);
+                assertProgramSearchUnless(shortSearch, pattern, label);
+            }
+            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
+                String label = "%s matcher find with %s bytes left".formatted(entry.getKey(), length);
+                CompiledPattern pattern = entry.getValue();
+                RegexpMatcher matcher = pattern.matcher(longInput, 0);
+                assertThat(matcher.find(longInput.length() - length)).as(label).isTrue();
+                assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(1018, 1024);
+                assertThat(matcher.find()).as(label).isFalse();
+                assertProgramSearchUnless(shortSearch, pattern, label);
+            }
+            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
+                String label = "%s find of %s bytes".formatted(entry.getKey(), length);
+                assertThat(entry.getValue().find(input)).as(label).isTrue();
+                assertProgramSearch(entry.getValue(), label);
+            }
+        }
+
+        // A one-byte inner literal is no rarer than the matcher's byte, so Trino keeps the
+        // matcher on its route that compiles no program.
+        for (String expression : List.of("[a-z]{8}-[0-9]{4}", "\\d{4}-\\d{2}-\\d{2}")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+            assertThat(regexp).as(expression).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+            assertThat(regexp.re2().forwardProgramForDiagnostics().start()).as(expression).isZero();
+        }
+    }
+
+    @Test
+    public void testTrinoMaxMemoryOfFixedWidthPatterns()
+    {
+        // Each pattern compiles from the same maxMemory as when every Trino fixed-width pattern
+        // took the route that compiles no program; below it neither the matcher nor a program
+        // fits. Up to 4 KiB the inner literal search of a shing pattern does not fit, so the
+        // matcher is the route. The last pattern compiles a program only from a maxMemory beyond
+        // the 4 KiB checked here, so from 1729 it compiles only on the route without one.
+        Map<String, Long> minimumMaxMemory = Map.of(
+                "[a-z]shing", 1487L,
+                "\\d{4}-\\d{2}-\\d{2}", 1487L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 1729L);
+        for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
+            Slice expression = utf8Slice(entry.getKey());
+            for (long maxMemory = 256; maxMemory <= 4096; maxMemory++) {
+                TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
+                String label = "%s at %s".formatted(entry.getKey(), maxMemory);
+                if (maxMemory < entry.getValue()) {
+                    assertThatThrownBy(() -> TrinoRegexp.compile(expression, options)).as(label).isInstanceOf(RegexpCompileMemoryLimitException.class);
+                }
+                else {
+                    assertThat(TrinoRegexp.compile(expression, options)).as(label).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
+                }
+            }
+        }
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(1729));
+        assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
+
+        // Where the program fits but neither the inner literal search nor the matcher fits beside
+        // it, the pattern takes the route without a program, which reserves the matcher.
+        Map<String, List<Long>> matcherOnlyMaxMemory = Map.of(
+                "[a-z]shing", List.of(2567L, 2797L),
+                "[a-z]{2}ing", List.of(2387L, 2604L));
+        for (Map.Entry<String, List<Long>> entry : matcherOnlyMaxMemory.entrySet()) {
+            for (long maxMemory = entry.getValue().get(0); maxMemory <= entry.getValue().get(1); maxMemory++) {
+                String label = "%s at %s".formatted(entry.getKey(), maxMemory);
+                TrinoCompiledPattern pattern = TrinoRegexp.compile(utf8Slice(entry.getKey()), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
+                assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(label).isTrue();
+                assertThat(pattern.forwardProgramForDiagnostics().start()).as(label).isZero();
+            }
+        }
     }
 
     // Compiles `expression` as RE2, Java, Rust, and Rust byte mode, keyed by a failure label.
@@ -251,6 +353,15 @@ public class TestFixedWidthByteSpanMatcher
                 "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
                 "Rust " + expression, RustRegexp.compile(utf8Slice(expression)),
                 "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
+    }
+
+    // Freshly compiles [a-z]shing in every language, Trino included, so no earlier search has
+    // built a DFA.
+    private static Map<String, CompiledPattern> shingPatterns()
+    {
+        Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns("[a-z]shing"));
+        patterns.put("Trino [a-z]shing", TrinoRegexp.compile(utf8Slice("[a-z]shing")).re2());
+        return patterns;
     }
 
     private static long generalEngineCount(CompiledPattern pattern, Slice input)
