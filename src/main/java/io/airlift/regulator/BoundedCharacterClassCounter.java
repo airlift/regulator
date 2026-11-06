@@ -16,6 +16,9 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 
 import static io.airlift.regulator.Regexp.LATIN1;
@@ -36,11 +39,26 @@ final class BoundedCharacterClassCounter
     // Planes 4 through 13 hold no characters, so only a class that reaches the last planes ends
     // here or beyond, such as `\PL`, `\p{Mn}`, or Unicode `\w`. Its bitset would cost up to
     // 136 KiB per pattern, unless the class holds every non-ASCII character, as a negated ASCII
-    // class does; its bitset then ends at ASCII.
+    // class does; its bitset then ends at U+07FF.
     private static final int LAST_MEMBER_LIMIT = 0x40000;
     private static final BoundedCharacterClassCounter UNSUPPORTED = new BoundedCharacterClassCounter();
     private static final RuneRange[] ALL_CHARACTERS = {new RuneRange(0, CharClass.RUNEMAX)};
     private static final RuneRange[] ALL_BYTES = {new RuneRange(0, 0xFF)};
+    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final long LOW_BITS = 0x0101010101010101L;
+    private static final long HIGH_BITS = 0x8080808080808080L;
+    // The bytes `twoByteLeads` checks at once for ASCII and two-byte characters. A block of
+    // `countUtf8` is one such chunk, or two when the second passes too.
+    private static final int TWO_BYTE_CHUNK_BYTES = 32;
+    // The longest stretch `countUtf8` decodes between chunk checks, finishing the character that
+    // crosses its end. Each failed check doubles the stretch, starting from one chunk, and a
+    // passing check starts over.
+    private static final int MAX_DECODE_STRETCH_BYTES = 1024;
+    // What `twoByteLeads` returns for a chunk holding anything but ASCII and two-byte characters;
+    // a chunk it accepts never has two adjacent leads, so it never has every bit set.
+    private static final long INVALID_CHUNK = -1L;
+    // The first code point that takes three UTF-8 bytes.
+    private static final int TWO_BYTE_LIMIT = 0x800;
 
     private final long[] matchingCodePoints;
     private final boolean[] memberStartBytes;
@@ -73,17 +91,22 @@ final class BoundedCharacterClassCounter
         int lastHigh = ranges[ranges.length - 1].high();
         boolean readsBytes = latin1 || lastHigh <= 0x7F;
         boolean matchesAllNonAscii = !latin1 && holdsAllNonAscii(ranges);
-        // The bitset ends at the class's last member, or at ASCII for a class holding every
-        // non-ASCII character. `matches` rejects every code point beyond, except that such a class
-        // accepts them.
+        // The bitset ends at the class's last member, but a bitset that `countUtf8` reads reaches
+        // at least U+07FF, so it reads the membership of every one- and two-byte code point from it. A
+        // class holding every non-ASCII character marks only its ASCII members and every code
+        // point from U+0080 to U+07FF. `matches` rejects every code point beyond the bitset,
+        // except that such a class accepts them.
         int lastMember = matchesAllNonAscii ? 0x7F : Math.min(CharClass.RUNEMAX, lastHigh);
-        matchingCodePoints = new long[readsBytes ? 4 : (lastMember >>> 6) + 1];
+        matchingCodePoints = new long[readsBytes ? 4 : (Math.max(TWO_BYTE_LIMIT - 1, lastMember) >>> 6) + 1];
         for (RuneRange range : ranges) {
             int low = Math.max(0, range.low());
             int high = Math.min(latin1 ? 0xFF : lastMember, range.high());
             if (low <= high) {
                 setRange(matchingCodePoints, low, high);
             }
+        }
+        if (matchesAllNonAscii) {
+            setRange(matchingCodePoints, 0x80, TWO_BYTE_LIMIT - 1);
         }
         boolean matchesEveryCharacter = matchesAllNonAscii && matchingCodePoints[0] == -1L && matchingCodePoints[1] == -1L;
         memberStartBytes = buildMemberStartBytes(ranges, readsBytes);
@@ -328,29 +351,124 @@ final class BoundedCharacterClassCounter
         return UNSUPPORTED;
     }
 
-    // PERFORMANCE-SENSITIVE HOT LOOP: decoding and bitset membership replace one complete matcher
-    // invocation per result. Changes require focused Intel and Graviton qualification.
+    // Decoding and bitset membership replace one complete matcher invocation per result. The
+    // loops are in `countBytes`, `countUtf8`, and `countDecoded`.
     long count(Slice input)
     {
+        // Every code point takes at least one byte, so an input shorter than the minimum can hold no match.
+        if (input.length() < minimum) {
+            return 0;
+        }
         byte[] bytes = input.byteArray();
         int position = input.byteArrayOffset();
         int end = position + input.length();
+        if (readsBytes) {
+            return countBytes(bytes, position, end);
+        }
+        return countUtf8(bytes, position, end);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: A run ends at every word boundary of ordinary text, too
+    // often and too irregularly for a branch on membership to predict, so a byte class counts
+    // without one: a run reaching the maximum counts one match and starts over, and a nonmember
+    // counts the run's remainder when it reaches the minimum. On Graviton this per-byte update
+    // beat reading membership into a block mask, which only `countUtf8` keeps. Changes require
+    // focused Intel and Graviton qualification.
+    private long countBytes(byte[] bytes, int position, int end)
+    {
+        long[] members = matchingCodePoints;
+        // No input reaches Integer.MAX_VALUE bytes, so a run of an unbounded repeat never reaches the maximum.
+        int maximum = this.maximum == -1 ? Integer.MAX_VALUE : this.maximum;
+        int minimum = this.minimum;
         int runLength = 0;
         long count = 0;
+        for (; position < end; position++) {
+            int value = bytes[position] & 0xFF;
+            int member = (int) (members[value >>> 6] >>> value) & 1;
+            runLength += member;
+            int full = runLength == maximum ? 1 : 0;
+            count += full;
+            runLength &= full - 1;
+            count += (member ^ 1) & ((minimum - 1 - runLength) >>> 31);
+            runLength &= -member;
+        }
+        return count + (runLength >= minimum ? 1 : 0);
+    }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: Text of ASCII and two-byte characters, as in Latin, Greek,
+    // Cyrillic, Hebrew, and Arabic, counts as `countBytes` does, without branching on width or
+    // membership: each byte that ends a character, an ASCII byte or a continuation byte, takes
+    // the membership of the code point it ends, and a lead byte is neither member nor nonmember,
+    // so it leaves the run unchanged. Each 32-byte chunk of such text is checked first, and the
+    // next one only when it passes. Other text, holding a longer character or a malformed
+    // sequence, and the last bytes, fewer than one chunk, decode character by character with the
+    // same run state, for a stretch that doubles while checks keep failing: CJK text, which fails
+    // every check, would otherwise pay one per 32 bytes. A check that fails after the longest stretch hands the rest of the input,
+    // whatever it holds, to `countDecoded`.
+    // Changes require focused Intel and Graviton qualification.
+    private long countUtf8(byte[] bytes, int position, int end)
+    {
+        long[] members = matchingCodePoints;
+        // No input reaches Integer.MAX_VALUE bytes, so a run of an unbounded repeat holds one match at most.
+        int maximum = this.maximum == -1 ? Integer.MAX_VALUE : this.maximum;
+        int minimum = this.minimum;
+        int runLength = 0;
+        long count = 0;
+        int stretch = TWO_BYTE_CHUNK_BYTES;
         while (position < end) {
-            int codePoint;
-            int width;
-            if (readsBytes) {
-                codePoint = bytes[position] & 0xFF;
-                width = 1;
+            long leads = end - position >= TWO_BYTE_CHUNK_BYTES ? twoByteLeads(bytes, position, 0) : INVALID_CHUNK;
+            if (leads != INVALID_CHUNK) {
+                int blockBytes = TWO_BYTE_CHUNK_BYTES;
+                if (end - position >= 2 * TWO_BYTE_CHUNK_BYTES) {
+                    // Bit 7 when the first chunk ends with a lead byte, whose continuation begins the second.
+                    long highLeads = twoByteLeads(bytes, position + TWO_BYTE_CHUNK_BYTES, (leads >>> 24) & 0x80);
+                    if (highLeads != INVALID_CHUNK) {
+                        leads |= highLeads << TWO_BYTE_CHUNK_BYTES;
+                        blockBytes = 2 * TWO_BYTE_CHUNK_BYTES;
+                    }
+                }
+                long memberBits = twoByteMembers(bytes, position, blockBytes, members) & ~leads;
+                long nonmemberBits = ~(memberBits | leads) & (-1L >>> (Long.SIZE - blockBytes));
+                long runs = countRuns(memberBits, nonmemberBits, runLength, minimum, maximum);
+                count += (int) (runs >>> 32);
+                runLength = (int) runs;
+                // A lead in the last byte waits for the next block, which then begins at a character.
+                position += blockBytes - (int) (leads >>> (blockBytes - 1));
+                stretch = TWO_BYTE_CHUNK_BYTES;
+                continue;
             }
-            else {
+            if (stretch > MAX_DECODE_STRETCH_BYTES) {
+                return count + countDecoded(bytes, position, end, runLength);
+            }
+            // Written so that a slice ending near the largest array index cannot overflow.
+            int stretchEnd = position + Math.min(end - position, stretch);
+            stretch *= 2;
+            while (position < stretchEnd) {
                 long decoded = decodeUtf8(bytes, position, end);
-                codePoint = Utf8.decodedCodePoint(decoded);
-                width = Utf8.decodedWidth(decoded);
+                if (matches(Utf8.decodedCodePoint(decoded))) {
+                    runLength++;
+                }
+                else {
+                    count += countRun(runLength);
+                    runLength = 0;
+                }
+                position += Utf8.decodedWidth(decoded);
             }
+        }
+        return count + countRun(runLength);
+    }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: Returns the matches from `position` on, after `runLength`
+    // members, decoding character by character. `countUtf8` hands the rest of the input here after
+    // its longest stretch, because Intel decodes long text slower inside the block loop than in a
+    // loop of its own. Changes require focused Intel and Graviton qualification.
+    private long countDecoded(byte[] bytes, int position, int end, int runLength)
+    {
+        long count = 0;
+        while (position < end) {
+            long decoded = decodeUtf8(bytes, position, end);
+            int codePoint = Utf8.decodedCodePoint(decoded);
+            int width = Utf8.decodedWidth(decoded);
             if (matches(codePoint)) {
                 runLength++;
             }
@@ -363,6 +481,8 @@ final class BoundedCharacterClassCounter
         return count + countRun(runLength);
     }
 
+    // Returns the matches in a decoded run of `runLength` members, as `runMatches` does, but with a
+    // branch on the minimum. Intel decoded text slower with `runMatches`.
     private long countRun(int runLength)
     {
         if (maximum == -1) {
@@ -375,6 +495,96 @@ final class BoundedCharacterClassCounter
         int completeMatches = runLength / maximum;
         int remainder = runLength - (completeMatches * maximum);
         return (long) completeMatches + (remainder >= minimum ? 1 : 0);
+    }
+
+    // Returns the bits of the `blockBytes` bytes at `position`, bit `i` for byte `i`, that end a
+    // member: an ASCII member, or a continuation byte ending a two-byte member. The block holds
+    // only such characters and begins one, as `twoByteLeads` checks. A lead byte's bit is
+    // meaningless; its code point is below `TWO_BYTE_LIMIT`, within the bitset. Each byte's lookup
+    // depends only on the byte before it, not on that byte's lookup, so the lookups overlap.
+    private static long twoByteMembers(byte[] bytes, int position, int blockBytes, long[] members)
+    {
+        long memberBits = 0;
+        // The low five bits of the byte before, a lead byte for a continuation, shifted into place.
+        int leadBits = 0;
+        for (int bit = 0; bit < blockBytes; bit++) {
+            int value = bytes[position + bit];
+            // Bit 6 of a continuation byte is clear, so its low seven bits are its low six, and an
+            // ASCII byte, whose sign bit is clear, takes no lead bits.
+            int codePoint = (value & 0x7F) | (leadBits & (value >> 7));
+            leadBits = (value & 0x1F) << 6;
+            memberBits |= ((members[codePoint >>> 6] >>> codePoint) & 1) << bit;
+        }
+        return memberBits;
+    }
+
+    // Accounts for the runs of a block, given the bits of its member and nonmember characters, set
+    // on the byte that ends each; a nonmember ends a run. `runLength` members precede the block.
+    // Returns the matches of the runs that end in the block, shifted left 32 bits, combined with
+    // the members of the run still open at its end.
+    private static long countRuns(long memberBits, long nonmemberBits, int runLength, int minimum, int maximum)
+    {
+        int count = 0;
+        while (nonmemberBits != 0) {
+            long before = Long.lowestOneBit(nonmemberBits) - 1;
+            count += runMatches(runLength + Long.bitCount(memberBits & before), minimum, maximum);
+            memberBits &= ~before;
+            runLength = 0;
+            nonmemberBits &= nonmemberBits - 1;
+        }
+        return ((long) count << 32) | (runLength + Long.bitCount(memberBits));
+    }
+
+    // Returns the matches in a run of `runLength` members: one for each `maximum` members, and
+    // one for a remainder of at least `minimum`.
+    private static int runMatches(int runLength, int minimum, int maximum)
+    {
+        // Most runs hold one match at most, so only a longer one pays the division. A run ends at
+        // every word boundary of ordinary text, too irregularly for a branch on the minimum to
+        // predict.
+        if (runLength <= maximum) {
+            return (minimum - 1 - runLength) >>> 31;
+        }
+        int fullMatches = runLength / maximum;
+        return fullMatches + ((minimum - 1 - (runLength - fullMatches * maximum)) >>> 31);
+    }
+
+    // Returns the lead bytes among the 32 bytes at `position`, bit `i` for byte `i`, or
+    // `INVALID_CHUNK` if they hold anything other than ASCII bytes and two-byte characters of a
+    // lead byte C2 through DF and one continuation byte. `carriedLead` is 0x80 when the byte
+    // before `position` is a lead whose continuation begins them, and 0 when `position` begins a
+    // character. The last byte can be a lead; the caller checks its continuation with the bytes
+    // that follow.
+    private static long twoByteLeads(byte[] bytes, int position, long carriedLead)
+    {
+        long invalid = 0;
+        long leadBits = 0;
+        for (int offset = 0; offset < TWO_BYTE_CHUNK_BYTES; offset += Long.BYTES) {
+            long word = (long) LONG_HANDLE.get(bytes, position + offset);
+            // Bit 7 of each byte of `word << 1` is bit 6 of that byte, and of `word << 2` bit 5.
+            long shifted = word << 1;
+            long leads = word & shifted & HIGH_BITS;
+            long continuations = word & ~shifted & HIGH_BITS;
+            // E0 and above begin longer characters or are never valid.
+            invalid |= leads & (word << 2);
+            // C0 and C1 begin only overlong encodings: a zero byte after clearing bit 0 and XOR
+            // with C0.
+            long overlong = (word & ~LOW_BITS) ^ 0xC0C0C0C0C0C0C0C0L;
+            invalid |= (overlong - LOW_BITS) & ~overlong & HIGH_BITS;
+            // Every continuation byte, and only a continuation byte, follows a lead byte.
+            invalid |= continuations ^ ((leads << 8) | carriedLead);
+            carriedLead = leads >>> 56;
+            // Gathers bit 7 of each byte into the low byte: each step doubles the bits gathered.
+            // Shifts and ORs, rather than a multiply, need no multiplier constant, which aarch64
+            // builds with up to four instructions and C2 can rebuild on every word, as it did
+            // in LiteralSearchKernel.
+            long gathered = leads >>> 7;
+            gathered |= gathered >>> 7;
+            gathered |= gathered >>> 14;
+            gathered |= gathered >>> 28;
+            leadBits |= (gathered & 0xFF) << offset;
+        }
+        return invalid == 0 ? leadBits : INVALID_CHUNK;
     }
 
     int sampleMatchingCodePointCount(Slice input, int inputOffset, int inputBytes, int maximumMatchingCodePoints)

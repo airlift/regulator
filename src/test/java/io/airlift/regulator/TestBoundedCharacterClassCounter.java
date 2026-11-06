@@ -384,7 +384,8 @@ public class TestBoundedCharacterClassCounter
         // Planes 4 through 13 hold no characters, so a class ending before U+40000 has a counter,
         // and one that reaches the last planes, such as `\PL` or a class with plane-14 members, has
         // none; its bitset would retain up to 136 KiB. A class holding every non-ASCII character,
-        // such as a negated ASCII class, is the exception: its bitset holds only its ASCII members.
+        // such as a negated ASCII class, is the exception: its bitset ends at U+07FF, the last
+        // two-byte character.
         List<Function<Slice, CompiledPattern>> compilers = List.of(
                 Re2::compile,
                 JavaRegexp::compile,
@@ -396,7 +397,7 @@ public class TestBoundedCharacterClassCounter
             CompiledPattern atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
             assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
             CompiledPattern allNonAscii = compiler.apply(utf8Slice("[^,]+"));
-            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(344);
+            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(584);
         }
         List<CompiledPattern> lastPlaneClasses = List.of(
                 Re2.compile(utf8Slice("\\PL")),
@@ -468,13 +469,22 @@ public class TestBoundedCharacterClassCounter
         assertCount("[a-z]{8,13}", "abcdefghijklmnopqrstuvwxyz", 2);
         assertCount("(\\p{L}{8,13})", "абвгдежз 12 абвгдежзийклм", 2);
 
-        Re2 re2 = Re2.compile(utf8Slice("[a-z]{2,5}"));
-        BoundedCharacterClassCounter counter = re2.createBoundedCharacterClassCounter();
-        for (int runLength = 0; runLength <= 30; runLength++) {
-            Slice input = utf8Slice("a".repeat(runLength));
-            assertThat(counter.count(input))
-                    .as("run length %s", runLength)
-                    .isEqualTo(countWithGeneralMatcher(re2, input));
+        // A UTF-8 class of two-byte members counts runs a 32- or 64-byte block at a time, so each
+        // run of every length up to 70 characters, cut or unbounded, starts at every offset of a
+        // block and crosses into the next block or more; a byte class, counted byte by byte, takes
+        // the same runs. A second run ends at the end of the input.
+        for (String pattern : List.of("[a-z]{2,5}", "[a-z]{3,}", "\\p{L}{2,5}", "\\p{L}{3,}")) {
+            BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
+            Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
+            String member = counter.readsBytesForDiagnostics() ? "a" : "ж";
+            for (int offset = 0; offset <= Long.SIZE; offset++) {
+                for (int runLength = 0; runLength <= 70; runLength++) {
+                    Slice input = utf8Slice(" ".repeat(offset) + member.repeat(runLength) + " " + member.repeat(runLength));
+                    assertThat(counter.count(input))
+                            .as("pattern %s offset %s run length %s", pattern, offset, runLength)
+                            .isEqualTo(countWithGeneralMatcher(reference, input));
+                }
+            }
         }
     }
 
@@ -516,6 +526,17 @@ public class TestBoundedCharacterClassCounter
                     .isEqualTo(countWithGeneralMatcher(Re2.compile(utf8Slice("(" + pattern + ")")), malformed));
         }
 
+        // A bare continuation byte that begins a block's second chunk, after a first chunk ending in
+        // ASCII, is malformed and ends the run rather than continuing a character.
+        byte[] chunkBoundary = new byte[1 + 64];
+        Arrays.fill(chunkBoundary, (byte) 'g');
+        chunkBoundary[0] = (byte) 0x80;
+        chunkBoundary[1 + 32] = (byte) 0x80;
+        Slice continuationAfterChunk = Slices.wrappedBuffer(chunkBoundary, 1, 64);
+        assertThat(Re2.compile(utf8Slice("\\p{L}+")).createBoundedCharacterClassCounter().count(continuationAfterChunk))
+                .isEqualTo(countWithGeneralMatcher(Re2.compile(utf8Slice("(\\p{L}+)")), continuationAfterChunk))
+                .isEqualTo(2);
+
         // An encoded surrogate cut off by the end of the input, though its backing bytes continue.
         Slice truncatedSurrogate = Slices.wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80}, 0, 2);
         BoundedCharacterClassCounter surrogateCounter = Re2.compile(utf8Slice("[^\\x{100}]{1,3}")).createBoundedCharacterClassCounter();
@@ -542,6 +563,71 @@ public class TestBoundedCharacterClassCounter
         Slice validReplacementCharacter = utf8Slice("�");
         assertThat(counter.count(validReplacementCharacter))
                 .isEqualTo(countWithGeneralMatcher(replacementCharacter, validReplacementCharacter));
+    }
+
+    @Test
+    public void testTwoByteTextMatchesGeneralMatcherAtEveryPosition()
+    {
+        // Cyrillic and ASCII text counts without decoding, a chunk at a time. Each nonempty insert,
+        // at every position, puts a longer character or a malformed sequence in some chunk, or
+        // splits a two-byte character: a three-byte and a four-byte character, a lone continuation
+        // byte, the overlong leads C0 and C1, and a lead byte, which at the end is truncated; the
+        // empty insert checks the text alone.
+        byte[] text = "Съешь же ещё этих мягких французских булок, да выпей чаю. ".getBytes(UTF_8);
+        List<byte[]> inserts = List.of(
+                new byte[0],
+                "€".getBytes(UTF_8),
+                "😀".getBytes(UTF_8),
+                new byte[] {(byte) 0x80},
+                new byte[] {(byte) 0xC0, (byte) 0x80},
+                new byte[] {(byte) 0xC1, (byte) 0xBF},
+                new byte[] {(byte) 0xD0});
+        // Classes whose bitset reaches past U+07FF, ends below it and is extended, or holds every
+        // non-ASCII character, with runs cut at the maximum or unbounded.
+        for (String pattern : List.of("\\p{L}{2,5}", "[а-яё]{2,4}", "[^x]{3,7}", "\\p{L}+", ALL_NON_ASCII_CLASS + "{1,3}")) {
+            BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
+            Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
+            for (byte[] insert : inserts) {
+                for (int position = 0; position <= text.length; position++) {
+                    // A leading continuation byte outside the slice keeps the backing array's offset nonzero.
+                    byte[] bytes = new byte[1 + text.length + insert.length];
+                    bytes[0] = (byte) 0x80;
+                    System.arraycopy(text, 0, bytes, 1, position);
+                    System.arraycopy(insert, 0, bytes, 1 + position, insert.length);
+                    System.arraycopy(text, position, bytes, 1 + position + insert.length, text.length - position);
+                    Slice input = Slices.wrappedBuffer(bytes, 1, bytes.length - 1);
+                    assertThat(counter.count(input))
+                            .as("pattern %s insert %s at %s", pattern, HexFormat.of().formatHex(insert), position)
+                            .isEqualTo(countWithGeneralMatcher(reference, input));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testLongerCharactersMatchGeneralMatcherAcrossDecodeStretches()
+    {
+        // Text of three- and four-byte characters fails every chunk check, so it decodes in
+        // stretches that double until the rest of the input is handed to one decoding loop, here
+        // with Cyrillic text after it. An emoji every 84 bytes of Latin text fails a check and then
+        // passes one, starting the stretches over. Cyrillic before CJK enters the stretches from
+        // blocks of two-byte characters. Runs cross every stretch boundary.
+        String cjk = "汉字测试文本 ".repeat(150);
+        String cyrillic = "Съешь же ещё этих мягких французских булок. ".repeat(20);
+        String latin = ("the quick brown fox jumps over the lazy dog, then naps in the sun all afternoon " + "😀").repeat(40);
+        for (String pattern : List.of("\\p{L}{2,5}", "\\p{L}+", "[^x]{3,7}")) {
+            BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
+            Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
+            List<String> texts = List.of(cjk + cyrillic, latin, cyrillic + cjk + latin);
+            for (int textIndex = 0; textIndex < texts.size(); textIndex++) {
+                for (int offset = 0; offset < 4; offset++) {
+                    Slice input = utf8Slice("a".repeat(offset) + texts.get(textIndex));
+                    assertThat(counter.count(input))
+                            .as("pattern %s text %s offset %s", pattern, textIndex, offset)
+                            .isEqualTo(countWithGeneralMatcher(reference, input));
+                }
+            }
+        }
     }
 
     @Test
