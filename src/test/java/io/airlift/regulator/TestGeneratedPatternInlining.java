@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.regulator.GeneratedPatternInliningProbe.FirstGroup;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -35,6 +36,7 @@ import java.util.regex.Pattern;
 import static io.airlift.regulator.GeneratedPatternInliningProbe.HANDOFF_EXPRESSION;
 import static io.airlift.regulator.GeneratedPatternInliningProbe.SITES;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /// Checks that a caller holding a generated pattern as a constant reaches the pattern's generated
 /// code with no dispatch, for every language, after many generated patterns of the language have
@@ -56,11 +58,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 /// look inside it, as C2 decides such calls by sizes and call frequencies that depend on what
 /// else the JVM ran. Shared code that C2 inlines into a checked tree is still checked for
 /// dispatch. Each checked compile, the caller's or one in its place, must still be entrant at the
-/// end: one the JVM made not entrant, or that C2 skipped, fails. The probe's replacement callback
-/// is the caller's code, not the pattern's, so the callback `replace` entry's own call of it, the
-/// call at the bytecode index the probe reads from the generated class, is not checked; every
-/// other call of the entry is. The probe proves that call is the callback parameter's own: its
-/// receiver is loaded straight from the parameter, which the entry never reassigns.
+/// end: one the JVM made not entrant, or that C2 skipped, fails, as does one whose output holds a
+/// line the test does not recognise. The probe's replacement callback is the caller's code, not the
+/// pattern's, so the callback `replace` entry's own call of it, the call at the bytecode index the
+/// probe reads from the generated class, is not checked; every other call of the entry is. The
+/// probe proves that call is the callback parameter's own: its receiver is loaded straight from the
+/// parameter, which the entry never reassigns.
 ///
 /// The probe's handoff sites hand an RE2, Java, Rust, or Trino search off to the ordinary
 /// engine, so their checked trees must include the generated class's call of the engine's
@@ -76,15 +79,35 @@ public class TestGeneratedPatternInlining
     // flagged %, prints its bytecode index after the method, so it does not match.
     private static final String C2_COMPILE_LINE = "^\\s*\\d+\\s+(\\d+)\\s+[%sbn! ]*\\s4\\s+(\\S+)::(\\S+) \\((\\d+) bytes\\)";
     private static final Pattern C2_COMPILE = Pattern.compile(C2_COMPILE_LINE + "$");
-    // A later notice on a C2 compile, printed as its compile line followed by the notice: the
-    // JVM made the code not entrant, or C2 skipped the compile, and why.
-    private static final Pattern C2_NOTICE = Pattern.compile(C2_COMPILE_LINE + "   (made not entrant|COMPILE SKIPPED): (.*)$");
+    // The notice that the JVM made the code of a C2 compile not entrant, printed as its compile
+    // line followed by the notice and why.
+    private static final Pattern C2_NOT_ENTRANT = Pattern.compile(C2_COMPILE_LINE + "   made not entrant: (.*)$");
+    // A compile line of any tier, as PrintCompilation prints it when the compile starts. An
+    // on-stack-replacement compile prints its bytecode index after the method.
+    private static final String COMPILE_LINE = "^\\s*\\d+\\s+\\d+\\s+[%sbn! ]*\\s[0-4]\\s+\\S+::\\S+(?: @ \\d+)? \\(\\d+ bytes\\)";
+    private static final Pattern COMPILE_START = Pattern.compile(COMPILE_LINE + "$");
+    // The line of a native wrapper that the JVM generated, which a compiler thread prints whole,
+    // under the output lock, when a compile resolves a method handle intrinsic: the timestamp, the
+    // compile id, the attribute flags with the native flag, tier 0, and the method, then three
+    // spaces, followed by `(static)` for a static method. The JVM generates a wrapper on the
+    // thread that needs it, not as a compile of its own, so the line does not start a compile.
+    private static final Pattern NATIVE_WRAPPER = Pattern.compile("^\\s*\\d+\\s+\\d+\\s+[ s]*n\\s+0\\s+\\S+::\\S+ \\(native\\)   (?:\\(static\\))?$");
+    // The notice that the JVM made the code of a compile of any tier not entrant, which the
+    // compiler thread that installs the code replacing it prints whole, under the output lock.
+    private static final Pattern NOT_ENTRANT = Pattern.compile(COMPILE_LINE + "   made not entrant: .*$");
+    // The notice of a compile that C2 skipped. C2 prints it without the output lock, in pieces,
+    // so another thread's output can split it.
+    private static final String COMPILE_SKIPPED = "COMPILE SKIPPED";
     private static final String CONTINUATION = "continueScanSearch";
     // One call of an inlining tree, as PrintInlining prints it: the method attribute flags, the
     // indent that gives the call's depth, the bytecode index, the callee, and the decision.
     private static final Pattern INLINE_LINE = Pattern.compile("^([ sm!]*)@ (\\d+)\\s+(\\S+)::(\\S+) \\((?:(\\d+) bytes|not loaded)\\)\\s*(.*)$");
-    private static final Pattern COMPILE_LINE = Pattern.compile("^\\s*\\d+\\s+\\d+\\s");
-    private static final Pattern CALL_SITE = Pattern.compile("@ \\d+");
+    // The tty element bounds the VM's output in the VM log, markup includes the line end that
+    // follows it, and a writer element names the thread that writes the output after it.
+    private static final String TTY_START = "<tty>\n";
+    private static final String TTY_END = "</tty>";
+    private static final Pattern MARKUP = Pattern.compile("<[^>]*>\n?");
+    private static final Pattern WRITER = Pattern.compile("<writer thread='(\\d+)'/>\n?");
     private static final List<String> DISPATCH_MARKERS = List.of(
             "virtual call",
             "megamorphic",
@@ -100,15 +123,16 @@ public class TestGeneratedPatternInlining
             "size > DesiredMethodLimit");
 
     @Test
-    public void testConstantCallersReachGeneratedPatternsDirectly()
+    public void testConstantCallersReachGeneratedPatternsDirectly(@TempDir Path temporaryDirectory)
             throws Exception
     {
-        String output = runProbe();
-        List<String> lines = output.lines().toList();
-        assertThat(lines).as(tail(lines)).contains("DONE");
-        assertThat(sites(lines)).hasSize(SITES);
+        ProbeRun run = runProbe(temporaryDirectory);
+        List<String> output = run.output().lines().toList();
+        assertThat(output).as(tail(output)).contains("DONE");
+        Map<String, Site> sites = sites(output);
+        assertThat(sites).hasSize(SITES);
 
-        List<String> failures = failures(lines);
+        List<String> failures = failures(sites, vmOutput(run.vmLog()));
         assertThat(failures).as(String.join("\n", failures)).isEmpty();
     }
 
@@ -122,6 +146,8 @@ public class TestGeneratedPatternInlining
                 site("re2_find_0", entry, -1),
                 c2Compile(6541, caller),
                 call(0, "", "java.lang.invoke.Invokers$Holder::invokeExact_MT (23 bytes)", "force inline by annotation"));
+        List<String> callerWithInlinedEntry = concat(callerCompile, List.of(
+                call(1, "", entry + " (45 bytes)", "inline (hot)")));
         String callbackEntry = "io.airlift.regulator.UnanchoredCompiledScanTrinoRegexp/0x3::replace";
         List<String> callbackCallerCompile = List.of(
                 site("trino_replaceWithCallback_0", callbackEntry, 145),
@@ -133,9 +159,52 @@ public class TestGeneratedPatternInlining
                 call(3, 5, "", "java.util.List::getFirst (0 bytes)", "failed to inline: virtual call"));
         List<LogCase> cases = List.of(
                 new LogCase(
-                        "a flagged line under the entry, then a virtual call below it",
-                        concat(callerCompile, List.of(
+                        "a caller whose tree does not call the entry",
+                        callerCompile,
+                        "is not in the caller's inlining tree"),
+                new LogCase(
+                        "another thread's output is ignored, the caller's thread's whole notices and native wrappers are allowed, and its next compile ends the caller's tree",
+                        List.of(
+                                site("re2_find_0", entry, -1),
+                                writer(31),
+                                c2Compile(6541, caller),
+                                writer(47),
+                                c2Compile(6547, "java.lang.ref.ReferenceQueue::enqueue0 (65 bytes)"),
+                                writer(31),
+                                call(0, "", "java.lang.invoke.Invokers$Holder::invokeExact_MT (23 bytes)", "force inline by annotation"),
                                 call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                                writer(47),
+                                call(2, "", "java.lang.Object::hashCode (0 bytes)", "failed to inline: virtual call"),
+                                skipped(6547, "java.lang.ref.ReferenceQueue::enqueue0 (65 bytes)"),
+                                " (8 bytes)   force inline by annotation",
+                                writer(31),
+                                nativeWrapper(6548, "java.lang.invoke.MethodHandle::invokeBasic(LLLL)I", false),
+                                nativeWrapper(6549, "java.lang.invoke.MethodHandle::linkToStatic(LLLL)L", true),
+                                "   9026 5101 %     3       io.airlift.regulator.Dfa::search @ 17 (1523 bytes)   made not entrant: OSR invalidation of lower levels",
+                                "   9027 5102       3       java.lang.String::hashCode (60 bytes)   made not entrant: marked for deoptimization",
+                                "   9028 5103       3       java.lang.Object::<init> (1 bytes)   made not entrant: not used",
+                                call(2, "", "java.lang.Long::<init> (10 bytes)", "inline (hot)"),
+                                "   9029 6550 %  b  4       io.airlift.regulator.Dfa::search @ 17 (1523 bytes)",
+                                call(0, "", "java.lang.Object::hashCode (0 bytes)", "failed to inline: virtual call")),
+                        null),
+                new LogCase(
+                        "a caller whose compile C2 skipped, with the skip notice split by another thread's output",
+                        List.of(
+                                site("re2_find_0", entry, -1),
+                                writer(31),
+                                c2Compile(6541, caller),
+                                call(0, "", "java.lang.invoke.Invokers$Holder::invokeExact_MT (23 bytes)", "force inline by annotation"),
+                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                                skipped(6541, caller).substring(0, 8),
+                                writer(47),
+                                c2Compile(6547, "java.lang.ref.ReferenceQueue::enqueue0 (65 bytes)"),
+                                writer(31),
+                                skipped(6541, caller).substring(8)),
+                        "was skipped"),
+                new LogCase(
+                        "a native wrapper and a flagged line under the entry, then a virtual call below it",
+                        concat(callerWithInlinedEntry, List.of(
+                                nativeWrapper(6548, "java.lang.invoke.MethodHandle::invokeBasic(LLLL)I", false),
                                 call(2, "!", "io.airlift.regulator.CompiledPattern::finishScanSearch (60 bytes)", "inline (hot)"),
                                 call(3, "", "io.airlift.regulator.CompiledPattern::matchOnOrdinaryEngine (90 bytes)", "failed to inline: virtual call"))),
                         "dispatch under the entry"),
@@ -147,14 +216,12 @@ public class TestGeneratedPatternInlining
                         "dispatch to the entry"),
                 new LogCase(
                         "a statically bound out-of-line hand-written call under the entry",
-                        concat(callerCompile, List.of(
-                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                        concat(callerWithInlinedEntry, List.of(
                                 call(2, "", "io.airlift.regulator.CompiledPattern::matchOnOrdinaryEngine (1793 bytes)", "failed to inline: hot method too big"))),
                         null),
                 new LogCase(
                         "a Function call under an entry other than the callback replace",
-                        concat(callerCompile, List.of(
-                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                        concat(callerWithInlinedEntry, List.of(
                                 call(2, "", "java.util.function.Function::apply (0 bytes)", "failed to inline: virtual call"))),
                         "dispatch under the entry"),
                 new LogCase(
@@ -168,17 +235,47 @@ public class TestGeneratedPatternInlining
                         "dispatch under the entry"),
                 new LogCase(
                         "a caller whose compile was made not entrant",
-                        concat(callerCompile, List.of(
-                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                        concat(callerWithInlinedEntry, List.of(
                                 call(2, "", "io.airlift.regulator.ScanKernelSupport::findByte (36 bytes)", "inline (hot)"),
                                 notEntrant(6541, caller))),
                         "was made not entrant"),
                 new LogCase(
-                        "a caller whose compile C2 skipped",
-                        concat(callerCompile, List.of(
-                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
+                        "a caller whose compile C2 skipped after printing its tree",
+                        concat(callerWithInlinedEntry, List.of(
+                                call(2, "", "io.airlift.regulator.ScanKernelSupport::findByte (36 bytes)", "inline (hot)"),
                                 skipped(6541, caller))),
                         "was skipped"),
+                new LogCase(
+                        "a line the test does not recognise in the caller's compile output, a piece of a tree line another thread cut",
+                        concat(callerWithInlinedEntry, List.of(
+                                " (8 bytes)   force inline by annotation",
+                                call(2, "", "io.airlift.regulator.ScanKernelSupport::findByte (36 bytes)", "inline (hot)"))),
+                        "does not recognise"),
+                new LogCase(
+                        "a profiling notice in the caller's compile output, which does not say COMPILE SKIPPED",
+                        concat(callerWithInlinedEntry, List.of(
+                                "COMPILE PROFILING SKIPPED: some methods may not be compiled because metaspace is out of memory")),
+                        "does not recognise"),
+                new LogCase(
+                        "a caller whose compile was blocked at exit",
+                        concat(callerWithInlinedEntry, List.of(
+                                c2Compile(6541, caller) + "   blocked")),
+                        "does not recognise"),
+                new LogCase(
+                        "a full code heap's summary in the caller's compile output",
+                        concat(callerWithInlinedEntry, List.of(
+                                "CodeHeap 'non-profiled nmethods': size=119168Kb used=119100Kb max_used=119100Kb free=68Kb")),
+                        "does not recognise"),
+                new LogCase(
+                        "a caller made not compilable in its compile output",
+                        concat(callerWithInlinedEntry, List.of(
+                                "made not compilable on level 4  " + caller + "   decompile_count > PerMethodRecompilationCutoff")),
+                        "does not recognise"),
+                new LogCase(
+                        "a native line in the caller's compile output that is not a native wrapper's",
+                        concat(callerWithInlinedEntry, List.of(
+                                "   9024 6548     n 4       java.lang.Object::hashCode (native)")),
+                        "does not recognise"),
                 new LogCase(
                         "a handoff site whose checked trees never call the continuation",
                         List.of(
@@ -190,12 +287,6 @@ public class TestGeneratedPatternInlining
                                 c2Compile(6546, search),
                                 call(0, "", "io.airlift.regulator.ScanKernelSupport::findByte (36 bytes)", "inline (hot)")),
                         "never call the engine's continuation"),
-                new LogCase(
-                        "an unreadable call line",
-                        concat(callerCompile, List.of(
-                                call(1, "", entry + " (45 bytes)", "inline (hot)"),
-                                " ".repeat(32) + "@ 9   an unreadable call")),
-                        "unreadable inlining line"),
                 new LogCase(
                         "a big-method entry whose own compile is clean",
                         concat(callerCompile, List.of(
@@ -221,7 +312,7 @@ public class TestGeneratedPatternInlining
                                 call(0, "", "io.airlift.regulator.CompiledPattern::continueScanSearch (80 bytes)", "failed to inline: virtual call"))),
                         "dispatch under the entry"));
         for (LogCase logCase : cases) {
-            List<String> failures = failures(logCase.log());
+            List<String> failures = failures(sites(logCase.log()), vmOutput(vmLog(logCase.log())));
             if (logCase.failure() == null) {
                 assertThat(failures).as(logCase.description()).isEmpty();
             }
@@ -229,6 +320,12 @@ public class TestGeneratedPatternInlining
                 assertThat(failures).as(logCase.description()).singleElement().asString().contains(logCase.failure());
             }
         }
+
+        String log = vmLog(callerCompile);
+        assertThatThrownBy(() -> vmOutput(log.substring(0, log.indexOf("</tty>"))))
+                .as("a VM log that ends before its output does")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("truncated");
     }
 
     /// The sites in the probe's output, by caller.
@@ -244,22 +341,25 @@ public class TestGeneratedPatternInlining
         return sites;
     }
 
-    /// The failures of every site in the probe's output: C2 did not compile the site's caller,
-    /// the caller does not call the pattern's entry, C2 declined to inline the entry for a reason
-    /// other than its size, C2 did not compile a method of the generated class that it calls, a
-    /// checked compile is no longer entrant, a call in a checked tree dispatches, a handoff site's
-    /// checked trees never call the engine's continuation, or an inlining line is unreadable.
-    private static List<String> failures(List<String> lines)
+    /// The failures of `sites`, checked against the VM's output `lines`: C2 did not compile the
+    /// site's caller, the caller does not call the pattern's entry, C2 declined to inline the
+    /// entry for a reason other than its size, C2 did not compile a method of the generated class
+    /// that it calls, the JVM made a checked compile not entrant, C2 skipped a checked compile, a
+    /// checked compile printed a line the test does not recognise, a call in a checked tree
+    /// dispatches, or a handoff site's checked trees never call the engine's continuation.
+    private static List<String> failures(Map<String, Site> sites, List<LogLine> lines)
     {
         Map<String, Compile> callerCompiles = new HashMap<>();
         Map<String, Compile> compiles = new HashMap<>();
-        // Why each compile that has a notice is no longer entrant, by compile id and method.
+        // Why each compile the JVM made not entrant is no longer entrant, by compile id and method.
         Map<String, String> notices = new HashMap<>();
         for (int index = 0; index < lines.size(); index++) {
-            String line = lines.get(index);
+            String line = lines.get(index).text();
             Matcher compile = C2_COMPILE.matcher(line);
             if (compile.matches()) {
-                // The last C2 compile of a method is the code it runs, unless a notice ends it.
+                // The last C2 compile of a method is the code it runs, unless a notice ends it. A
+                // skip notice cut after the method's size reads as a later compile line of the
+                // method, and the notice's tail then fails that compile.
                 String method = methodKey(compile.group(2), compile.group(3), compile.group(4));
                 Compile last = new Compile(compile.group(1), method, index);
                 compiles.put(method, last);
@@ -268,15 +368,15 @@ public class TestGeneratedPatternInlining
                 }
                 continue;
             }
-            Matcher notice = C2_NOTICE.matcher(line);
+            Matcher notice = C2_NOT_ENTRANT.matcher(line);
             if (notice.matches()) {
                 String method = methodKey(notice.group(2), notice.group(3), notice.group(4));
-                notices.put(notice.group(1) + " " + method, (notice.group(5).equals("made not entrant") ? "made not entrant: " : "skipped: ") + notice.group(6));
+                notices.put(notice.group(1) + " " + method, "made not entrant: " + notice.group(5));
             }
         }
 
         List<String> failures = new ArrayList<>();
-        for (Map.Entry<String, Site> entry : sites(lines).entrySet()) {
+        for (Map.Entry<String, Site> entry : sites.entrySet()) {
             Site site = entry.getValue();
             Compile callerCompile = callerCompiles.get(entry.getKey());
             if (callerCompile == null) {
@@ -297,14 +397,14 @@ public class TestGeneratedPatternInlining
     private static final class SiteCheck
     {
         private final Site site;
-        private final List<String> lines;
+        private final List<LogLine> lines;
         private final Map<String, Compile> compiles;
         private final Map<String, String> notices;
         private final Set<String> checkedCompiles = new HashSet<>();
         private final List<String> failures = new ArrayList<>();
         private boolean continuation;
 
-        private SiteCheck(Site site, List<String> lines, Map<String, Compile> compiles, Map<String, String> notices)
+        private SiteCheck(Site site, List<LogLine> lines, Map<String, Compile> compiles, Map<String, String> notices)
         {
             this.site = site;
             this.lines = lines;
@@ -325,7 +425,7 @@ public class TestGeneratedPatternInlining
 
         private void checkCaller(Compile callerCompile)
         {
-            List<Call> callerTree = inliningTree(lines, callerCompile.line());
+            List<Call> callerTree = inliningTree(lines, callerCompile);
             for (int index = 0; index < callerTree.size(); index++) {
                 Call entry = callerTree.get(index);
                 if (!entry.owner().equals(site.patternClass()) || !entry.method().equals(site.method())) {
@@ -401,12 +501,12 @@ public class TestGeneratedPatternInlining
                 return;
             }
             if (entrant(compile)) {
-                checkCalls(inliningTree(lines, compile.line()), -1, entry);
+                checkCalls(inliningTree(lines, compile), -1, entry);
             }
         }
 
-        /// Whether the code of `compile` is still entrant at the end of the output: neither made
-        /// not entrant nor skipped by C2. Records a failure when it is not.
+        /// Whether the code of `compile` is still entrant at the end of the output, which it is
+        /// unless the JVM made it not entrant. Records a failure when it is not.
         private boolean entrant(Compile compile)
         {
             String notice = notices.get(compile.id() + " " + compile.method());
@@ -418,76 +518,166 @@ public class TestGeneratedPatternInlining
         }
     }
 
-    /// The calls of the inlining tree that follows a compile line, past the notices C2 prints when
-    /// the new code replaces older code.
+    /// The calls of the inlining tree of `compile`. A compiler thread runs one compile at a time,
+    /// and prints the compile's line when the compile starts, then its tree and, if C2 skipped the
+    /// compile, a skip notice. The compile's output is therefore its thread's lines up to that
+    /// thread's next compile line; another thread's output can print among them. Besides the
+    /// tree, the output may hold only the whole notices of older code that the JVM made not
+    /// entrant when the thread installed the code replacing it, and the whole lines of native
+    /// wrappers that the thread generated for the compile. Any other line, a piece of a skip
+    /// notice included, fails the compile: the test does not read a tree it cannot account for.
+    /// Before JDK 26 C2 printed a tree in many unlocked writes (JDK-8349191), so another thread's
+    /// output can cut a tree line in two; the pieces are lines the test does not recognise, and
+    /// the compile fails rather than passes on a tree the test did not read whole.
     ///
-    /// @throws IllegalArgumentException if a line names a call site but is not a call the parser
-    ///         reads
-    private static List<Call> inliningTree(List<String> lines, int compile)
+    /// @throws IllegalArgumentException if C2 skipped the compile, or its output has a line the
+    ///         test does not recognise
+    private static List<Call> inliningTree(List<LogLine> lines, Compile compile)
     {
+        String writer = lines.get(compile.line()).writer();
         List<Call> tree = new ArrayList<>();
-        for (String line : lines.subList(compile + 1, lines.size())) {
+        String unrecognised = null;
+        for (LogLine logLine : lines.subList(compile.line() + 1, lines.size())) {
+            if (!logLine.writer().equals(writer)) {
+                continue;
+            }
+            String line = logLine.text();
+            if (COMPILE_START.matcher(line).matches()) {
+                break;
+            }
+            if (line.contains(COMPILE_SKIPPED)) {
+                throw new IllegalArgumentException("C2 compile " + compile.id() + " of " + compile.method() + " was skipped: " + line.strip());
+            }
             Matcher call = INLINE_LINE.matcher(line);
             if (call.matches()) {
                 tree.add(new Call(line, call.group(1).length(), Integer.parseInt(call.group(2)), call.group(3), call.group(4), call.group(5), call.group(6)));
             }
-            else if (COMPILE_LINE.matcher(line).lookingAt()) {
-                if (!line.contains("made not entrant")) {
-                    break;
-                }
+            else if (!NOT_ENTRANT.matcher(line).matches() && !NATIVE_WRAPPER.matcher(line).matches() && unrecognised == null) {
+                unrecognised = line;
             }
-            else if (CALL_SITE.matcher(line).find()) {
-                throw new IllegalArgumentException("unreadable inlining line: " + line.strip());
-            }
-            else {
-                break;
-            }
+        }
+        if (unrecognised != null) {
+            throw new IllegalArgumentException("C2 compile " + compile.id() + " of " + compile.method() + " printed a line the test does not recognise: \"" + unrecognised + "\"");
         }
         return tree;
     }
 
-    private static String runProbe()
+    /// The lines of the VM's output in `log`, the file that `-XX:+LogVMOutput` writes, each with
+    /// the thread that wrote it. The output is the log's `tty` element: escaped text with a
+    /// `writer` element wherever another thread takes over the output, before which the VM ends
+    /// the current line. Other elements and the line end that follows each element are markup,
+    /// not output.
+    ///
+    /// @throws IllegalArgumentException if the log ends before the VM's output does
+    private static List<LogLine> vmOutput(String log)
+    {
+        int start = log.indexOf(TTY_START);
+        int end = log.lastIndexOf(TTY_END);
+        if (start < 0 || end < start) {
+            throw new IllegalArgumentException("the VM log is truncated: it has no complete tty element");
+        }
+        List<LogLine> lines = new ArrayList<>();
+        String writer = "";
+        StringBuilder line = new StringBuilder();
+        Matcher markup = MARKUP.matcher(log).region(start + TTY_START.length(), end);
+        int text = markup.regionStart();
+        while (markup.find()) {
+            appendText(lines, writer, line, log.substring(text, markup.start()));
+            Matcher writerMarkup = WRITER.matcher(markup.group());
+            if (writerMarkup.matches()) {
+                if (!line.isEmpty()) {
+                    lines.add(new LogLine(writer, line.toString()));
+                    line.setLength(0);
+                }
+                writer = writerMarkup.group(1);
+            }
+            text = markup.end();
+        }
+        appendText(lines, writer, line, log.substring(text, end));
+        if (!line.isEmpty()) {
+            lines.add(new LogLine(writer, line.toString()));
+        }
+        return lines;
+    }
+
+    /// Adds the escaped `text` of thread `writer` to the current `line`, and each line it ends to
+    /// `lines`.
+    private static void appendText(List<LogLine> lines, String writer, StringBuilder line, String text)
+    {
+        String unescaped = text
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&apos;", "'")
+                .replace("&quot;", "\"")
+                .replace("&amp;", "&");
+        int lineStart = 0;
+        for (int lineEnd = unescaped.indexOf('\n'); lineEnd >= 0; lineEnd = unescaped.indexOf('\n', lineStart)) {
+            line.append(unescaped, lineStart, lineEnd);
+            lines.add(new LogLine(writer, line.toString()));
+            line.setLength(0);
+            lineStart = lineEnd + 1;
+        }
+        line.append(unescaped, lineStart, unescaped.length());
+    }
+
+    /// Runs the probe in a child JVM, keeping its output files in `directory`.
+    private static ProbeRun runProbe(Path directory)
             throws IOException, InterruptedException
     {
+        Path output = directory.resolve("probe.out");
+        Path errors = directory.resolve("probe.err");
+        Path vmLog = directory.resolve("vm.log");
         List<String> command = new ArrayList<>();
         command.add(System.getProperty("java.home") + "/bin/java");
         command.add("--add-modules");
         command.add("jdk.incubator.vector");
-        // Compile in the foreground so each compile's inlining output follows its compile line,
-        // and keep the probe's driver interpreted so C2 compiles each caller on its own rather
-        // than into the driver's loop.
+        // Compile in the foreground, and keep the probe's driver interpreted so C2 compiles each
+        // caller on its own rather than into the driver's loop.
         command.add("-Xbatch");
         command.add("-XX:+UnlockDiagnosticVMOptions");
         command.add("-XX:+PrintCompilation");
         command.add("-XX:+PrintInlining");
         command.add("-XX:CompileCommand=quiet");
         command.add("-XX:CompileCommand=exclude," + GeneratedPatternInliningProbe.class.getName() + "::main");
+        // Write the VM's output to a log that names the thread that writes each line, as another
+        // thread's compile can print between a caller's compile line and its inlining tree, and
+        // keep it and the unified logging warnings, which go to standard output by default, out of
+        // the probe's standard output, where they could break a line the probe prints.
+        command.add("-XX:+LogVMOutput");
+        command.add("-XX:LogFile=" + vmLog);
+        command.add("-XX:-DisplayVMOutput");
+        command.add("-Xlog:disable");
+        command.add("-Xlog:all=warning:stderr");
         command.add("-cp");
         command.add(System.getProperty("java.class.path"));
         command.add(GeneratedPatternInliningProbe.class.getName());
 
-        Path output = Files.createTempFile("regulator-inlining-probe-", ".log");
+        ProcessBuilder processBuilder = new ProcessBuilder(command).redirectOutput(output.toFile()).redirectError(errors.toFile());
+        processBuilder.environment().remove("JDK_JAVA_OPTIONS");
+        Process process = processBuilder.start();
         try {
-            ProcessBuilder processBuilder = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output.toFile());
-            processBuilder.environment().remove("JDK_JAVA_OPTIONS");
-            Process process = processBuilder.start();
-            try {
-                boolean finished = process.waitFor(TIMEOUT);
-                String result = Files.readString(output, StandardCharsets.UTF_8);
-                assertThat(finished).as("inlining probe timed out:\n%s", tail(result.lines().toList())).isTrue();
-                assertThat(process.exitValue()).as(tail(result.lines().toList())).isZero();
-                return result;
-            }
-            finally {
-                if (process.isAlive()) {
-                    process.destroyForcibly();
-                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("inlining probe did not terminate").isTrue();
-                }
-            }
+            boolean finished = process.waitFor(TIMEOUT);
+            String diagnostics = String.join("\n", tail("standard output", output), tail("standard error", errors), tail("VM log", vmLog));
+            assertThat(finished).as("inlining probe timed out:\n%s", diagnostics).isTrue();
+            assertThat(process.exitValue()).as(diagnostics).isZero();
+            return new ProbeRun(Files.readString(output, StandardCharsets.UTF_8), Files.readString(vmLog, StandardCharsets.UTF_8));
         }
         finally {
-            Files.deleteIfExists(output);
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                assertThat(process.waitFor(Duration.ofSeconds(10))).as("inlining probe did not terminate").isTrue();
+            }
         }
+    }
+
+    /// The last lines of the probe's output file `file`, under `label`.
+    private static String tail(String label, Path file)
+            throws IOException
+    {
+        if (!Files.exists(file)) {
+            return label + ": none";
+        }
+        return label + ":\n" + tail(Files.readString(file, StandardCharsets.UTF_8).lines().toList());
     }
 
     private static String tail(List<String> lines)
@@ -512,10 +702,47 @@ public class TestGeneratedPatternInlining
         return String.join("\t", "SITE", CALLER_PREFIX + caller, parts[0], parts[1], method, patternClass, expression, String.valueOf(callbackBytecodeIndex));
     }
 
+    /// The `-XX:+LogVMOutput` log of a VM whose output is `lines`, without the probe's `SITE`
+    /// lines, which it writes to its standard output. A [#writer(int)] line is markup; every
+    /// other line is escaped text.
+    private static String vmLog(List<String> lines)
+    {
+        StringBuilder log = new StringBuilder("<?xml version='1.0' encoding='UTF-8'?>\n<hotspot_log version='160 1'>\n" + TTY_START);
+        for (String line : lines) {
+            if (WRITER.matcher(line).matches()) {
+                log.append(line).append('\n');
+            }
+            else if (!line.startsWith("SITE\t")) {
+                String text = line
+                        .replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace("'", "&apos;")
+                        .replace("\"", "&quot;");
+                log.append(text).append('\n');
+            }
+        }
+        return log.append("<tty_done stamp='15.309'/>\n" + TTY_END + "\n<hotspot_log_done stamp='15.309'/>\n</hotspot_log>\n").toString();
+    }
+
+    /// The marker the VM log writes when thread `thread` takes over the output.
+    private static String writer(int thread)
+    {
+        return "<writer thread='" + thread + "'/>";
+    }
+
     /// A PrintCompilation line of a normal blocking C2 compile, numbered `id`, of `method`.
     private static String c2Compile(int id, String method)
     {
         return "   9023 " + id + "    b  4       " + method;
+    }
+
+    /// The PrintCompilation line of native wrapper `id` of the method handle intrinsic `method`,
+    /// which a compile generates when it resolves the intrinsic, and which is static when
+    /// `staticMethod` is set.
+    private static String nativeWrapper(int id, String method, boolean staticMethod)
+    {
+        return "   9024 " + id + "     n 0       " + method + " (native)   " + (staticMethod ? "(static)" : "");
     }
 
     /// The PrintCompilation line that makes the code of C2 compile `id` of `method` not entrant.
@@ -582,8 +809,14 @@ public class TestGeneratedPatternInlining
         return owner + "::" + method + " (" + size + " bytes)";
     }
 
-    /// A C2 compile, numbered `id`, of `method`, at index `line` of the output.
+    /// A C2 compile, numbered `id`, of `method`, at index `line` of the VM's output.
     private record Compile(String id, String method, int line) {}
+
+    /// A line of the VM's output, written by thread `writer`.
+    private record LogLine(String writer, String text) {}
+
+    /// The probe's standard output, and the log of its VM's output.
+    private record ProbeRun(String output, String vmLog) {}
 
     private record Site(String language, String operation, String method, String patternClass, String expression, int callbackBytecodeIndex)
     {
