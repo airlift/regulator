@@ -2656,6 +2656,13 @@ without the skip fails to compile. A skip that would cost either forward DFA its
 initialization is dropped too, since the skip changes no result, so a set the
 DFA cannot hold searches without it.
 
+At a state past the root, the walk rejects a byte above the state's last edge
+first, so its scan over the sorted edges needs no bound test. Against the
+bounded scan, `english-15` search took 0.62x to 0.66x the time on r9g and 0.85x
+to 0.86x on r8i. `english-10` is accepted at +4.6% on r9g and +3.6% on r8i, from
+the sentinel edge scan on its dense sets, on top of about 1.03x to 1.11x on r9g
+after the root skip, and the gd sparse Trino contains row at +1.5% on r9g.
+
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at
 most 16 code points merged from single-character alternatives, in the
