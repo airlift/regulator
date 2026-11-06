@@ -118,9 +118,10 @@ The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching, an
 a 96 MiB compilation, DFA-cache and capture-search budget. A non-positive public
 memory budget is rejected. Each capture search in progress also holds at most
 the forward program's two-thirds share of the budget in working memory at once,
-beside what the compiled pattern retains. The budget does not include
-caller-owned input, result objects, matcher capture buffers, replacement output,
-or collections returned by aggregate APIs.
+beside what the compiled pattern retains, plus a copy of at most 64 capture slots
+when a caller buffer is longer than the pattern's groups. The budget does not
+include caller-owned input, result objects, matcher capture buffers, replacement
+output, or collections returned by aggregate APIs.
 
 Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
