@@ -703,6 +703,65 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testClassPairVectorScannerMatchesScalarReference()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        Random random = new Random(98);
+        // Each side's bytes in three slots, a side with fewer repeating its last byte, as the inner
+        // literal search stores a class pair.
+        List<byte[]> pairs = List.of(
+                new byte[] {'!', '.', '?', '"', '\'', '\''},
+                new byte[] {'@', '@', '@', 'x', 'x', 'x'},
+                new byte[] {'a', 'b', 'b', '1', '2', '3'});
+        for (byte[] bytes : pairs) {
+            String description = new String(bytes, StandardCharsets.US_ASCII);
+            for (int iteration = 0; iteration < 200; iteration++) {
+                // Pair bytes from dense to rare among letters and spaces.
+                int rarity = 1 + random.nextInt(200);
+                byte[] text = new byte[1 + random.nextInt(4_096)];
+                for (int index = 0; index < text.length; index++) {
+                    text[index] = random.nextInt(rarity) == 0 ? bytes[random.nextInt(bytes.length)] : (byte) " abcdefghijklmnopqrstuvwxyz".charAt(random.nextInt(27));
+                }
+                int offset = random.nextInt(Math.min(8, text.length));
+                int length = random.nextInt(text.length - offset + 1);
+
+                int expected = -1;
+                for (int position = offset; position < offset + length - 1; position++) {
+                    if (inClassPairSide(text[position], bytes, 0) && inClassPairSide(text[position + 1], bytes, 3)) {
+                        expected = position;
+                        break;
+                    }
+                }
+                assertThat(InnerLiteralSearch.findClassPair(text, offset, length, bytes))
+                        .as("pair %s offset=%s length=%s", description, offset, length)
+                        .isEqualTo(expected);
+                assertThat(VectorByteSetScanner.findClassPair(text, offset, length, bytes))
+                        .as("pair %s offset=%s length=%s", description, offset, length)
+                        .isEqualTo(expected);
+                assertThat(VectorByteSetScanner.findClassPairSve(text, offset, length, bytes))
+                        .as("SVE pair %s offset=%s length=%s", description, offset, length)
+                        .isEqualTo(expected);
+            }
+
+            // The pair ends a zero-filled window that ends the array, its second byte the last byte
+            // of the window: the only hit lands in the last lane of a full vector or at each offset
+            // of the scalar tail. One byte shorter, the window holds no pair, and a scan that reads
+            // past it fails.
+            for (int end = 2; end <= 200; end++) {
+                byte[] text = new byte[end];
+                text[end - 2] = bytes[2];
+                text[end - 1] = bytes[5];
+                assertThat(InnerLiteralSearch.findClassPair(text, 0, end, bytes)).as("pair %s end=%s", description, end).isEqualTo(end - 2);
+                assertThat(VectorByteSetScanner.findClassPair(text, 0, end, bytes)).as("pair %s end=%s", description, end).isEqualTo(end - 2);
+                assertThat(InnerLiteralSearch.findClassPair(text, 0, end - 1, bytes)).as("pair %s end=%s", description, end).isEqualTo(-1);
+                assertThat(VectorByteSetScanner.findClassPair(text, 0, end - 1, bytes)).as("pair %s end=%s", description, end).isEqualTo(-1);
+                assertThat(VectorByteSetScanner.findClassPairSve(text, 0, end, bytes)).as("SVE pair %s end=%s", description, end).isEqualTo(end - 2);
+                assertThat(VectorByteSetScanner.findClassPairSve(text, 0, end - 1, bytes)).as("SVE pair %s end=%s", description, end).isEqualTo(-1);
+            }
+        }
+    }
+
+    @Test
     public void testStartLiteralFilterSearchMatchesNfa()
     {
         Random random = new Random(97);
@@ -1228,6 +1287,12 @@ public class TestDfaStartByteAcceleration
             }
         }
         return text.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    // Whether the byte is in the side of a class pair whose three slots start at `side`.
+    private static boolean inClassPairSide(byte value, byte[] bytes, int side)
+    {
+        return value == bytes[side] || value == bytes[side + 1] || value == bytes[side + 2];
     }
 
     // The literals of a pattern from startLiteralFilterPatterns(), with each class read as "ock".
