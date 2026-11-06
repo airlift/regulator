@@ -354,9 +354,10 @@ public final class RegexpMatcher
                 groups[1] = (int) matchBoundary;
                 if (groups.length == 2 || pattern.materializeTaggedAlternation(
                         input,
+                        regionStart,
+                        regionEnd,
                         regionStart + groups[0],
                         regionStart + groups[1],
-                        regionStart,
                         groups)) {
                     setMatchAndAdvance(groups[0], groups[1]);
                     return true;

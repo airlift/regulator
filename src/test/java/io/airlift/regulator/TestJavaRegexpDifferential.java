@@ -208,6 +208,7 @@ public class TestJavaRegexpDifferential
                 "x*",
                 "(a)(b)?",
                 "(b?)$",
+                "(.\\b)|(\\w)|(\\p{L})",
                 startAnchoredPlan,
                 unanchoredPlan)) {
             Pattern jdk = Pattern.compile(pattern);

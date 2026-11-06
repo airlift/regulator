@@ -107,7 +107,8 @@ public class TestTaggedAlternationProgram
     @Test
     public void testNonzeroRegionAndRetainedCapturePrefix()
     {
-        // Pinned re2_golden reports group 1 at 1:2 for this exact region.
+        // Pinned re2_golden reports group 1 at 1:2 for this range; this assertion-free pattern
+        // gives the same result for the matcher region.
         Re2 pattern = Re2.compile(utf8Slice(largeAlternation("a", ".")));
         RegexpMatcher matcher = pattern.matcher(utf8Slice("!a?"), 1)
                 .reset(utf8Slice("!a?"), 1, 2);
@@ -125,21 +126,60 @@ public class TestTaggedAlternationProgram
         Re2 pattern = Re2.compile(utf8Slice(largeAlternation("\\bfoo\\b", "foo", ".")));
         assertThat(pattern.usesTaggedAlternationForDiagnostics()).isTrue();
 
-        // Pinned re2_golden selects the first branch in this region because both adjacent
-        // context bytes are non-word bytes.
+        // The region holds exactly foo, so both word boundaries hold and the first branch wins.
         RegexpMatcher accepted = pattern.matcher(utf8Slice("!foo?"))
                 .reset(utf8Slice("!foo?"), 1, 4);
         assertThat(accepted.find()).isTrue();
         assertMatch(accepted, 1, 4, 1);
         assertThat(accepted.nfaWorkspaceInitializedForDiagnostics()).isFalse();
 
-        // Pinned re2_golden selects the second branch for the same search region when the
-        // byte after the region is a word byte.
+        // The byte after the exact match is a word byte inside the region, so the first branch's
+        // trailing word boundary fails and the second branch wins.
         RegexpMatcher rejected = pattern.matcher(utf8Slice("!fooa?"))
-                .reset(utf8Slice("!fooa?"), 1, 4);
+                .reset(utf8Slice("!fooa?"), 1, 5);
         assertThat(rejected.find()).isTrue();
         assertMatch(rejected, 1, 4, 2);
         assertThat(rejected.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    @Test
+    public void testMatcherRegionBoundsAreAssertionContext()
+    {
+        // A matcher region reads as a Slice view of its bytes. \p{L} makes this three-branch
+        // alternation large enough for a tagged program. In the region [0, 1) of "ab", the first
+        // branch's word boundary sees the end of the region, as it does on the Slice view, not
+        // the b after it.
+        Re2 shortPattern = Re2.compile(utf8Slice("(.\\b)|(\\w)|(\\p{L})"));
+        assertThat(shortPattern.usesTaggedAlternationForDiagnostics()).isTrue();
+        Slice shortInput = utf8Slice("ab");
+        RegexpMatcher shortRegion = shortPattern.matcher(shortInput)
+                .reset(shortInput, 0, 1);
+        assertThat(shortRegion.find()).isTrue();
+        assertMatch(shortRegion, 0, 1, 1);
+        assertThat(shortRegion.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        RegexpMatcher shortView = shortPattern.matcher(shortInput.slice(0, 1));
+        assertThat(shortView.find()).isTrue();
+        assertMatch(shortView, 0, 1, 1);
+
+        // A ranged call, unlike a matcher region, keeps the whole input as context, as upstream
+        // RE2's Match does. So the b after the range fails the word boundary and the second
+        // branch wins.
+        int[] rangedGroups = new int[8];
+        assertThat(shortPattern.findInto(shortInput, 0, 1, rangedGroups)).isTrue();
+        assertThat(rangedGroups).containsExactly(0, 1, -1, -1, 0, 1, -1, -1);
+
+        // In the region [1, 2) of "ab", the first branch's word boundary sees the start of the
+        // region, as it does on the Slice view, not the a before it.
+        Re2 startPattern = Re2.compile(utf8Slice("(\\b)|(\\B)|(\\p{L})"));
+        assertThat(startPattern.usesTaggedAlternationForDiagnostics()).isTrue();
+        RegexpMatcher startRegion = startPattern.matcher(shortInput)
+                .reset(shortInput, 1, 2);
+        assertThat(startRegion.find()).isTrue();
+        assertMatch(startRegion, 1, 1, 1);
+        assertThat(startRegion.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        RegexpMatcher startView = startPattern.matcher(shortInput.slice(1, 1));
+        assertThat(startView.find()).isTrue();
+        assertMatch(startView, 0, 0, 1);
     }
 
     @Test
