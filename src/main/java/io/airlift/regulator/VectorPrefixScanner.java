@@ -42,17 +42,41 @@ final class VectorPrefixScanner
         int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
         int position = offset;
 
-        for (; position < vectorEnd; position += SPECIES.length()) {
+        while (position < vectorEnd) {
+            // Each pass counts the whole vectors left and runs a loop that only tests each one for
+            // a candidate; candidates are verified after it breaks. With no verification inside,
+            // C2 compiles it as an innermost counted loop, unrolled four times on r9g. The method
+            // is too large for C2 to inline into its callers in Prog; "Literal Prefix Vector Scan"
+            // in REGULATOR_DECISIONS.md records the measured trade-off.
+            //
+            // The candidate test follows "Candidate Masks on SVE" there: the XOR form on SVE with
+            // 16-byte vectors, and compare and AND, written in line, elsewhere. Keep every vector
+            // and mask in this method or in a helper C2 inlines at each call site: a vector or mask
+            // returned from a helper C2 leaves out of line is boxed on every search.
+            int steps = (vectorEnd - position) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position + step * SPECIES.length();
+                if (VectorSupport.SVE_128
+                        ? pairDifference(data, stepPosition, primaryOffset, secondaryOffset, primaryVector, secondaryVector).compare(VectorOperators.EQ, (byte) 0).anyTrue()
+                        : ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector)
+                          .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).compare(VectorOperators.EQ, secondaryVector))
+                          .anyTrue()) {
+                    break;
+                }
+            }
+            position += step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            // Rebuild this vector's candidates as bits. The XOR form is repeated in line so that
+            // pairDifference keeps its one call site, in the scan loop.
             ByteVector primary = ByteVector.fromArray(SPECIES, data, position + primaryOffset);
             ByteVector secondary = ByteVector.fromArray(SPECIES, data, position + secondaryOffset);
-            VectorMask<Byte> candidates = VectorSupport.SVE_128
-                    ? sveMatches(primary, primaryVector, secondary, secondaryVector)
-                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector));
-            // Most vectors hold no candidate, so test for one before converting the mask.
-            if (!candidates.anyTrue()) {
-                continue;
-            }
-            long candidateBits = candidates.toLong();
+            long candidateBits = VectorSupport.SVE_128
+                    ? primary.lanewise(VectorOperators.XOR, primaryVector).lanewise(VectorOperators.OR, secondary.lanewise(VectorOperators.XOR, secondaryVector))
+                      .compare(VectorOperators.EQ, (byte) 0).toLong()
+                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
             while (candidateBits != 0) {
                 int candidate = position + Long.numberOfTrailingZeros(candidateBits);
                 // Keep sparse verification in this method. When composed with the DFA,
@@ -70,8 +94,20 @@ final class VectorPrefixScanner
                 }
                 candidateBits &= candidateBits - 1;
             }
+            position += SPECIES.length();
         }
         return findScalar(data, position, offset + candidateCount - position, prefix, primaryOffset, secondaryOffset, comparisonEnd);
+    }
+
+    /// Returns the XOR difference of the bytes at `position + primaryOffset` from the primary probe
+    /// byte, ORed with that of the bytes at `position + secondaryOffset` from the secondary one, so
+    /// a lane is zero only at a candidate; see [VectorSupport#SVE_128]. Call it only from the scan
+    /// loop in `find`: a second, rarely run call site can leave it out of line, and the vector it
+    /// returns is then boxed.
+    private static ByteVector pairDifference(byte[] data, int position, int primaryOffset, int secondaryOffset, ByteVector primaryVector, ByteVector secondaryVector)
+    {
+        return ByteVector.fromArray(SPECIES, data, position + primaryOffset).lanewise(VectorOperators.XOR, primaryVector)
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, position + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector));
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
@@ -124,8 +160,8 @@ final class VectorPrefixScanner
     }
 
     /// Returns the lanes where `first` equals `firstProbe` and `second` equals `secondProbe`, by
-    /// XOR, OR, and one compare with zero; see [VectorSupport#SVE_128]. `VectorScanner` calls it
-    /// too. Copied as `VectorScanKernelSupport.sveMatches`; keep the copy in step.
+    /// XOR, OR, and one compare with zero; see [VectorSupport#SVE_128]. `VectorScanner` calls it.
+    /// Copied as `VectorScanKernelSupport.sveMatches`; keep the copy in step.
     static VectorMask<Byte> sveMatches(ByteVector first, ByteVector firstProbe, ByteVector second, ByteVector secondProbe)
     {
         return first.lanewise(VectorOperators.XOR, firstProbe).or(second.lanewise(VectorOperators.XOR, secondProbe)).compare(VectorOperators.EQ, (byte) 0);
