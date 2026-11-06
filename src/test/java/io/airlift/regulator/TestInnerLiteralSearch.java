@@ -59,7 +59,8 @@ public class TestInnerLiteralSearch
             "[a-z](?:inn|innk)\\s",
             "[a-z](?:aba|bab)\\s",
             "\\s(?:foo|barbaz)\\d",
-            "\\s[a-z]{0,12}(?:ing|ment)\\s");
+            "\\s[a-z]{0,12}(?:ing|ment)\\s",
+            "[\"'][^\"']{0,30}[?!.][\"']");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -111,6 +112,14 @@ public class TestInnerLiteralSearch
         assertThat(literal("\\s[a-z]{0,12}(?:ing|ment)\\s")).isEqualTo("ing|ment");
         // A set that cannot be searched leaves a later literal to decide.
         assertThat(literal("[a-z](?:ab|cd)@x")).isEqualTo("@x");
+        assertThat(literal("\\w+[?!.][\"']@x")).isEqualTo("@x");
+        // A rare pair of small classes is searched as the set of its two-byte members. A quote
+        // ends every member, and the prefix holds one only as its one-byte opening quote, so no
+        // earlier match spans a later candidate.
+        assertThat(literal("[\"'][^\"']{0,30}[?!.][\"']")).isEqualTo("!\"|!'|.\"|.'|?\"|?'");
+        // A pair with a side of more than three bytes, or one common in English text, is not.
+        assertThat(literal("[ \\t][!#%&][\"']@x")).isEqualTo("@x");
+        assertThat(literal("\\s[ae][st]@x")).isEqualTo("@x");
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -145,7 +154,9 @@ public class TestInnerLiteralSearch
                 "[a-z](?:aaa|bbb|ccc|ddd|eee|fff|ggg|hhh|iii)\\s",
                 "[a-z](?i:foo|bar)\\s",
                 "[a-z](?:foo|b\u00E4r)\\s",
-                "[a-z](?:foo|b[ae]r)\\s")) {
+                "[a-z](?:foo|b[ae]r)\\s",
+                // A class pair whose prefix does not open with a single byte.
+                "\\w+[?!.][\"']")) {
             assertThat(innerLiteralSearch(pattern)).as(pattern).isNull();
         }
     }
@@ -164,6 +175,8 @@ public class TestInnerLiteralSearch
                 "\\d{4}-\\d{2}-\\d{2}",
                 // A case-insensitive literal counts its whole length, not its exact head's.
                 "[a-z]{3}#(?i:noqa)",
+                // A rare class pair counts its two bytes.
+                "[a-z][?!.][\"']x",
                 // A common byte, a prefix the program accelerates, and no literal.
                 "[a-z] [a-z]",
                 "ab[0-9]shing",
@@ -470,7 +483,8 @@ public class TestInnerLiteralSearch
         return literal(search);
     }
 
-    // A set's members, in alternation order, joined with a bar.
+    // A set's members, in alternation order, or for a class pair in class order, joined with a
+    // bar.
     private static String literal(InnerLiteralSearch search)
     {
         return Stream.of(search.literals())
@@ -502,6 +516,11 @@ public class TestInnerLiteralSearch
                 // a false filter hit, barb, in texts long enough for the vector scan.
                 "Sawyer inn tinn sawyerinn Xawyer\tbinnk\nainnk Jawyerinn abab babab ababa bab\n".repeat(16),
                 " foo1 barbaz2 foobarbaz3\tfoo barbell4 barbaz\n ring1 moment2 king ing ment\n".repeat(16),
+                // Quotes: apostrophes inside words, a closing quote without the punctuation, a
+                // body past 30 bytes, and adjacent quotes, with matches at the start and end of
+                // a text long enough for the vector scan, and in one shorter than the minimum skip.
+                "\"Go!\" I don't know 'fine' or \"a body that runs on well past thirty bytes.\" \"a.\" \"b?\"'x!' it's \"end.\"".repeat(10),
+                "'x!' don't \"a.\" \"b?\" ''\"c!\"",
                 // Windows long enough for the vector literal scans: a dense one-byte literal, and
                 // pair candidates that fail their verification.
                 "a@b.c x@y ".repeat(110),
@@ -511,7 +530,7 @@ public class TestInnerLiteralSearch
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);

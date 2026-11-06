@@ -258,6 +258,18 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(trino.count(input)).as(text).isEqualTo(expectedCount);
         }
 
+        // A rare class pair is a two-byte inner literal too, searched for as its members.
+        TrinoRegexp classPair = TrinoRegexp.compile(utf8Slice("[a-z][?!.][\"']x"));
+        assertThat(classPair).isExactlyInstanceOf(TrinoRegexp.class);
+        assertThat(classPair.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"!\"".getBytes(ISO_8859_1), "!'".getBytes(ISO_8859_1), ".\"".getBytes(ISO_8859_1), ".'".getBytes(ISO_8859_1), "?\"".getBytes(ISO_8859_1), "?'".getBytes(ISO_8859_1)});
+        Re2 classPairReference = Re2.compile(utf8Slice("[a-z][?!.][\"']x"));
+        for (String text : List.of("?\"x has no letter before", "ab?\"x", "no.'x here", "ok!\"x, so?'x and z.\"x")) {
+            Slice input = utf8Slice(text);
+            long expectedCount = generalEngineCount(classPairReference, input);
+            assertThat(classPair.contains(input)).as(text).isEqualTo(expectedCount > 0);
+            assertThat(classPair.count(input)).as(text).isEqualTo(expectedCount);
+        }
+
         // The inner literal search runs only on at least MINIMUM_LONG_SEARCH_BYTES bytes, so on
         // fewer every language, Trino included, counts and finds matcher spans with a second,
         // short-search fixed-width matcher, which builds no program search, while full-Slice find
