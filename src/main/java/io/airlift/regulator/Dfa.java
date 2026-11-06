@@ -5590,6 +5590,9 @@ final class Dfa
         // The reset count once the first reset after that release has run; from there the tables
         // hold no pointer table.
         private int releasedAbsolutePointerResetCount;
+        // The first pointer table allocation's one wait, for a search that computed no transition,
+        // is spent; later allocations, including after a reset, do not wait.
+        private boolean absolutePointerTransitionDeferralUsed;
         // Pointer tables a reset or growth superseded, linked until the collector finds them
         // unreachable and enqueues them, and their native bytes not yet released from the count.
         // The list and count are guarded by the cache mutation lock.
@@ -6781,7 +6784,8 @@ final class Dfa
 
         // Allocates the requested pointer table, or allocates a withheld one again. Sizing that does
         // not fit the budget makes the table unavailable when it is first requested; a withheld table
-        // was already requested and waits for a reset to free budget instead.
+        // was already requested and waits for a reset to free budget instead. The first allocation
+        // may wait once for a search that computes a transition.
         private void allocateAbsolutePointerTransitions()
         {
             CacheTables tables = this.tables;
@@ -6790,6 +6794,18 @@ final class Dfa
                     absolutePointerTransitionsUnavailable ||
                     absolutePointerTransitionAllocationFailed ||
                     tables.pairedStateRefArrays != null) {
+                return;
+            }
+            // A search that ended before computing a transition, such as one whose word boundary
+            // met a byte outside ASCII at its first byte, gave pairing nothing to evaluate. The
+            // request stays, so the next exclusive search chooses between paired rows and the
+            // table. It waits only once, so a DFA that never computes a transition does not retry
+            // every search exclusively.
+            if (!absolutePointerTransitionDeferralUsed &&
+                    pairedTransitionsRequested &&
+                    !pairedTransitionsDisabled &&
+                    computedNoTransition(tables.transitions)) {
+                absolutePointerTransitionDeferralUsed = true;
                 return;
             }
 
@@ -6846,6 +6862,17 @@ final class Dfa
             this.tables = pointerTables;
             absolutePointerTransitionsWithheld = false;
             pairedTransitionsDisabled = true;
+        }
+
+        // Whether no state's row, after the reserved row 0, holds a computed transition.
+        private boolean computedNoTransition(int[] transitions)
+        {
+            for (int transitionIndex = nextSize; transitionIndex < nextFreeOffset; transitionIndex++) {
+                if (transitions[transitionIndex] != T_UNCOMPUTED) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         // Returns the growth's size and charge, so the budget check sees it before the Java
