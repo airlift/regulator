@@ -38,18 +38,27 @@ final class LiteralMatchKernel
         };
     }
 
-    // A short literal of 1 to 16 bytes compares as a first and a last word of the width
-    // shortLiteralWidth returns, which overlap for non-power-of-two lengths. Together they cover
-    // every literal byte without reading outside the matched range. This byte-equality kernel has
-    // no regex or LIKE language semantics of its own. TrinoLikeKernelGenerator emits a copy of
-    // these comparisons for the short literals of a generated LIKE pattern; keep the copy in step.
+    /// A short literal of 1 to 16 bytes compares as a first and a last word of the width
+    /// [#shortLiteralWidth(int)] returns, which overlap for non-power-of-two lengths. Together
+    /// they cover every literal byte without reading outside the matched range. This byte-equality
+    /// kernel has no regex or LIKE language semantics of its own. [TrinoLikeKernelGenerator] emits
+    /// a copy of these comparisons for the short literals of a generated LIKE pattern; keep the
+    /// copy in step.
+    ///
+    /// The reads skip the slice's bounds checks, so the caller must check that `offset` is
+    /// non-negative and that `offset + lastOffset + width`, the end of the literal, is at most
+    /// `input.length()`. A read outside `input` could silently compare neighboring bytes of the
+    /// backing array, or throw past the array's ends. [TrinoLikePattern#matches(Slice)] checks
+    /// that `input` is at least the pattern's minimum size, which includes the literal, and then
+    /// places the literal at the start or the end of `input`, so checking each read again would
+    /// only cost instructions.
     static boolean matchesShortLiteralAt(Slice input, int offset, int width, int lastOffset, long first, long last)
     {
         return switch (width) {
-            case 1 -> input.getByte(offset) == first;
-            case 2 -> ((input.getShort(offset) ^ first) | (input.getShort(offset + lastOffset) ^ last)) == 0;
-            case 4 -> ((input.getInt(offset) ^ first) | (input.getInt(offset + lastOffset) ^ last)) == 0;
-            case 8 -> ((input.getLong(offset) ^ first) | (input.getLong(offset + lastOffset) ^ last)) == 0;
+            case 1 -> input.getByteUnchecked(offset) == first;
+            case 2 -> ((input.getShortUnchecked(offset) ^ first) | (input.getShortUnchecked(offset + lastOffset) ^ last)) == 0;
+            case 4 -> ((input.getIntUnchecked(offset) ^ first) | (input.getIntUnchecked(offset + lastOffset) ^ last)) == 0;
+            case 8 -> ((input.getLongUnchecked(offset) ^ first) | (input.getLongUnchecked(offset + lastOffset) ^ last)) == 0;
             default -> throw new IllegalStateException("unknown literal word width: " + width);
         };
     }
