@@ -1275,8 +1275,13 @@ shorter than 64 bytes, too short for the inner literal search to skip enough
 text to repay its reverse search and anchored confirmation. The search still
 checks each such window for its literal: a window without it has no match, and
 one whose first occurrence lies within 64 bytes of its start runs the ordinary
-engine. Short windows use the same literal scan as long ones. Whole-text counts
-keep their 64-byte minimum.
+engine. A single literal's scan over at least 1024 bytes, where vector support
+is available, uses the prefix scans' kernels and cutoff: the vector byte-set
+scan for a one-byte literal and the fused pair scan for a longer one. A shorter
+scan, including that check, uses the word-at-a-time scan. A case-insensitive
+literal, such as `# noqa` in `\s*# (?i:noqa)`, keeps the word-at-a-time scan
+for its exact head, `# `, and checks the rest of each hit with ASCII case
+folding, at every length. Whole-text counts keep their 64-byte minimum.
 
 The accepted costs were measured before RE2, Java, and Rust shared the
 fixed-width matchers, 3 hosts a side. The Rust `reallyreallyhard0-32` row checks

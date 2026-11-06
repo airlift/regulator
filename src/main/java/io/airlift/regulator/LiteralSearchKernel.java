@@ -97,6 +97,13 @@ final class LiteralSearchKernel
         return prefixShifts == BORDER_FREE_PREFIX_SHIFTS ? 0 : SizeOf.sizeOf(prefixShifts);
     }
 
+    /// The literal itself, not a copy, for the vector kernels. The caller must never change these
+    /// bytes.
+    byte[] literalBytes()
+    {
+        return literal;
+    }
+
     byte[] literal()
     {
         return literal.clone();

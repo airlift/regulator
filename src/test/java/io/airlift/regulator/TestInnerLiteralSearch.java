@@ -255,33 +255,37 @@ public class TestInnerLiteralSearch
     {
         // A ranged find keeps the whole Slice as assertion context, so its closing \b sees the
         // byte past the window, while a matcher region is its own context. The Slice starts inside
-        // its backing array, and the literal lies past the near-start window.
+        // its backing array, and the literal lies past the near-start fallback, in a window short
+        // enough for the word-at-a-time scan and in one long enough for the vector scan.
         String regex = "\\b\\w+\\s+Holmes\\s+\\w+\\b";
         Re2 pattern = Re2.compile(utf8Slice(regex));
         InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
         Re2 ordinary = Re2.compile(utf8Slice("(?:" + regex + ")|\\b\\B"));
-        String window = FILLER + "Sherlock Holmes sa";
-        int start = 2;
-        int end = start + window.length();
-        long span = ((long) (start + FILLER.length()) << 32) | end;
-        for (String after : List.of("id", " x")) {
-            byte[] backing = ("abcx " + window + after).getBytes(UTF_8);
-            Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
-            boolean wordAfter = after.equals("id");
-            assertThat(search.search(text, 0, text.length(), start, end)).as(after).isEqualTo(wordAfter ? Dfa.SEARCH_NO_MATCH : span);
-            assertThat(search.search(text, start, end, start, end)).as(after).isEqualTo(span);
+        for (String filler : List.of(FILLER, "-".repeat(1100))) {
+            String window = filler + "Sherlock Holmes sa";
+            int start = 2;
+            int end = start + window.length();
+            long span = ((long) (start + filler.length()) << 32) | end;
+            for (String after : List.of("id", " x")) {
+                String description = filler.length() + " " + after;
+                byte[] backing = ("abcx " + window + after).getBytes(UTF_8);
+                Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
+                boolean wordAfter = after.equals("id");
+                assertThat(search.search(text, 0, text.length(), start, end)).as(description).isEqualTo(wordAfter ? Dfa.SEARCH_NO_MATCH : span);
+                assertThat(search.search(text, start, end, start, end)).as(description).isEqualTo(span);
 
-            int[] actual = new int[2];
-            int[] expected = new int[2];
-            assertThat(pattern.findInto(text, start, end, actual)).as(after).isEqualTo(!wordAfter);
-            assertThat(ordinary.findInto(text, start, end, expected)).as(after).isEqualTo(!wordAfter);
-            assertThat(actual).as(after).isEqualTo(expected);
+                int[] actual = new int[2];
+                int[] expected = new int[2];
+                assertThat(pattern.findInto(text, start, end, actual)).as(description).isEqualTo(!wordAfter);
+                assertThat(ordinary.findInto(text, start, end, expected)).as(description).isEqualTo(!wordAfter);
+                assertThat(actual).as(description).isEqualTo(expected);
 
-            RegexpMatcher matcher = pattern.matcher(text).reset(text, start, end);
-            RegexpMatcher expectedMatcher = ordinary.matcher(text).reset(text, start, end);
-            assertThat(matcher.find()).as(after).isTrue();
-            assertThat(expectedMatcher.find()).as(after).isTrue();
-            assertThat(List.of(matcher.start(), matcher.end())).as(after).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+                RegexpMatcher matcher = pattern.matcher(text).reset(text, start, end);
+                RegexpMatcher expectedMatcher = ordinary.matcher(text).reset(text, start, end);
+                assertThat(matcher.find()).as(description).isTrue();
+                assertThat(expectedMatcher.find()).as(description).isTrue();
+                assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+            }
         }
     }
 
@@ -377,6 +381,22 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testVectorSearchCutoff()
+    {
+        // Both a longer and a one-byte literal take the vector scans from 1024 bytes.
+        for (Map.Entry<String, String> entry : List.of(Map.entry("\\w+\\s+Holmes", "Holmes"), Map.entry("[a-z]+@[a-z]+", "@"))) {
+            InnerLiteralSearch search = Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics();
+            assertThat(literal(search)).as(entry.getKey()).isEqualTo(entry.getValue());
+            assertThat(search.usesVectorSearch(1_023)).as(entry.getKey()).isFalse();
+            assertThat(search.usesVectorSearch(1_024)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
+            assertThat(search.usesVectorSearch(1_025)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
+        }
+        // A case-insensitive literal keeps its exact head's scan and folded check.
+        InnerLiteralSearch folded = Re2.compile(utf8Slice("(\\s*)((?i:# noqa)(?::\\s?([A-Z]+[0-9]+))?)")).innerLiteralSearchForDiagnostics();
+        assertThat(folded.usesVectorSearch(4_096)).isFalse();
+    }
+
+    @Test
     public void testNearStartCheckAgreesWithSearchPastShorterMember()
     {
         // The near-start check reads far enough to find the longest member starting before the
@@ -455,7 +475,11 @@ public class TestInnerLiteralSearch
                 // Literal sets: adjacent and overlapping members, one member inside another, and
                 // a false filter hit, barb, in texts long enough for the vector scan.
                 "Sawyer inn tinn sawyerinn Xawyer\tbinnk\nainnk Jawyerinn abab babab ababa bab\n".repeat(16),
-                " foo1 barbaz2 foobarbaz3\tfoo barbell4 barbaz\n ring1 moment2 king ing ment\n".repeat(16))) {
+                " foo1 barbaz2 foobarbaz3\tfoo barbell4 barbaz\n ring1 moment2 king ing ment\n".repeat(16),
+                // Windows long enough for the vector literal scans: a dense one-byte literal, and
+                // pair candidates that fail their verification.
+                "a@b.c x@y ".repeat(110),
+                "Hollys ".repeat(150) + "a Holmes b c@d.e singing")) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, so filler keeps the search
             // and its later candidates in play.
