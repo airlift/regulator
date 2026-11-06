@@ -308,8 +308,10 @@ public class TestCompilerAllocations
     public void testLargeUnicodeClassCompileAllocation()
     {
         // Unicode \w compiles to hundreds of byte ranges. The ceiling guards the combined savings of
-        // the byte-map, member-table and one-pass changes: a compile allocates about 1.24 MB, and
-        // about 1.45 MB when the JIT has not applied escape analysis, so it leaves room for both.
+        // the byte-map, member-table and one-pass changes: a compile allocates about 1.56 MB, and
+        // about 1.67 MB when the JIT has not applied escape analysis, so it leaves about 10% over
+        // the larger. About 300 KB of that is the one-pass step table, 8 bytes for each of the
+        // program's 37,500 actions.
         assumeTrue(((ThreadMXBean) ManagementFactory.getThreadMXBean()).isThreadAllocatedMemorySupported(), "requires thread allocation counting");
         ThreadMXBean threadBean = allocatedMemoryBean();
         Slice pattern = utf8Slice("^(\\w+)-(\\d+)/");
@@ -325,7 +327,7 @@ public class TestCompilerAllocations
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
-        assertThat(allocatedBytes / iterations).isLessThan(1_600_000);
+        assertThat(allocatedBytes / iterations).isLessThan(1_840_000);
     }
 
     @Test
