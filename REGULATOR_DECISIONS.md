@@ -868,8 +868,8 @@ short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
 another's branch profile. Only a pattern that cannot match empty takes a shape
 other than the engine. With compressed references, the `Re2` layout is 96
-bytes, including one reference each for the shared single-byte matcher cache
-and the [matcher counter](#bounded-character-class-counting), and the scan-plan
+bytes, including one reference each for the shared single-byte table and
+the [matcher counter](#bounded-character-class-counting), and the scan-plan
 shape's layout, with its three facts, is 104 bytes. A pattern with a scan plan
 takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
 prefix, equality, and final-line equality kernels, and its `matches` and
@@ -882,12 +882,12 @@ also stop once a match is certain, as described in the
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
 or produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
-cascade when no scan plan applies. Trino's explicit single-byte matcher also
-shares the byte scanner; RE2, Java, and Rust matchers keep their existing
-construction routes. Unsupported shapes, position-dependent assertions, and
-other unproven forms retain the ordinary path. The single-byte table is
-initialized lazily; subsequent direct boolean calls allocate no matching
-storage.
+cascade when no scan plan applies. A group-zero matcher of a one-byte pattern
+finds on the single-byte table in every language, Trino's included, and a
+pattern with a scan plan takes no table, so its matchers keep the plan.
+Unsupported shapes, position-dependent assertions, and other unproven forms
+retain the ordinary path. Compilation builds the single-byte table; direct
+boolean calls allocate no matching storage.
 
 When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
@@ -924,8 +924,8 @@ shorter than the minimum. Trino's existing byte count and explicit matcher
 routes share the same table without changing their input-size policy.
 Capture-retaining iteration remains generic. The table's retained size is
 reserved before a DFA can snapshot its memory budget. If it does not fit, the
-pattern keeps its generic execution route. Trino delegates to this cache instead
-of retaining a second table.
+pattern keeps its generic execution route. Trino delegates to this table instead
+of retaining a second one.
 
 Targeted Java 25 measurements on C9g, C8g, and C8i retain this bounded sharing.
 Unconditional scalar literal and byte-table counting were rejected because

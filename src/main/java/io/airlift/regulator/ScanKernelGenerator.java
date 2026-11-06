@@ -176,11 +176,12 @@ final class ScanKernelGenerator
             if (plan == null) {
                 return null;
             }
-            // A pattern with a scan plan has neither a single-byte matcher, which group-zero
-            // operations ask before the pattern, nor a count that skips the plan. A pattern that
-            // breaks either rule keeps the interpreter rather than reach the generated class.
+            // A pattern with a scan plan has no single-byte table, which group-zero operations ask
+            // before the pattern, as route selection guarantees, nor a count that skips the plan.
+            // A pattern that breaks the count rule keeps the interpreter rather than reach the
+            // generated class.
             CompiledPattern.ScanPlanCount count = pattern.scanPlanCount();
-            if (pattern.hasSingleByteMatcher() || count == CompiledPattern.ScanPlanCount.OTHER) {
+            if (count == CompiledPattern.ScanPlanCount.OTHER) {
                 return null;
             }
             return new TrinoRoutes(pattern, plan, pattern.usesScanPlanForFindForDiagnostics(), count);

@@ -37,6 +37,8 @@ public final class RegexpMatcher
     private final int[] groups;
     private final Map<String, Integer> namedCapturingGroups;
     private final boolean latin1;
+    // The pattern's single-byte table, which a group-zero find runs in place of the program. See
+    // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
     // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
     // of the program. See CompiledPattern.literalSetSpanMatcher.
@@ -79,11 +81,6 @@ public final class RegexpMatcher
     // already counted toward the streak.
     private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
-
-    RegexpMatcher(CompiledPattern pattern, Slice input)
-    {
-        this(pattern, input, null);
-    }
 
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
@@ -761,6 +758,11 @@ public final class RegexpMatcher
     boolean literalSetEnabledForDiagnostics()
     {
         return literalSet != null;
+    }
+
+    boolean singleByteMatcherEnabledForDiagnostics()
+    {
+        return singleByteMatcher != null;
     }
 
     int groupZeroForwardProductivityCheckCountForDiagnostics()

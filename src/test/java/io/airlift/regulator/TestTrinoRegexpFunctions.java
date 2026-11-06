@@ -671,22 +671,11 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
-    public void testFullCaptureMatcherDoesNotAnalyzeSingleBytePattern()
-    {
-        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(a)"));
-        assertThat(regexp.isSingleByteMatcherComputed()).isFalse();
-
-        assertThat(regexp.extract(utf8("a"), 1)).isEqualTo(utf8("a"));
-        assertThat(regexp.isSingleByteMatcherComputed()).isFalse();
-    }
-
-    @Test
-    public void testContainsInitializesOnlyEligibleSingleByteMatcher()
+    public void testCompileBuildsOnlyEligibleSingleByteMatcher()
     {
         TrinoRegexp delimiter = TrinoRegexp.compile(utf8("[,;]"));
-        assertThat(delimiter.isSingleByteMatcherComputed()).isFalse();
-        assertThat(delimiter.contains(utf8("abc;def"))).isTrue();
         assertThat(delimiter.isSingleByteMatcherComputed()).isTrue();
+        assertThat(delimiter.contains(utf8("abc;def"))).isTrue();
         assertThat(delimiter.contains(Slices.wrappedBuffer(utf8("xxabc;defyy").getBytes(), 2, 7))).isTrue();
         assertThat(delimiter.contains(utf8("abcdef"))).isFalse();
         assertThatThrownBy(() -> delimiter.contains(null)).isInstanceOf(NullPointerException.class);
