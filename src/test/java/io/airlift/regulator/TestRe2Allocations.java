@@ -882,6 +882,26 @@ public class TestRe2Allocations
         assertThat(edge.isReverseProgramComputed()).isFalse();
         assertThat(allocatedBytes).isLessThanOrEqualTo(forwardMemory);
 
+        // With the default object layout, BitState's charge for the longest text it accepts under a
+        // 1,579,008-byte budget is exactly the 1,052,672-byte share. A fresh program's first search
+        // used to build the program's 80 bytes of capture instruction words, which the charge leaves
+        // out; the charge also counts a 40-byte region view that a whole-input search never makes,
+        // so the search went 40 bytes past the share. Searching a second compile of the pattern
+        // first does the JVM's one-time setup for this path.
+        Re2.Options exactShareOptions = Re2.Options.defaults().setMaxMemory(1_579_008);
+        long exactForwardMemory = 1_579_008 - (1_579_008 / 3);
+        Re2 exactShare = Re2.compile(pattern, exactShareOptions);
+        int exactShareLength = exactShare.forwardProgramForDiagnostics().bitStateTextMaxSize();
+        Slice exactShareText = Slices.utf8Slice("a".repeat(exactShareLength));
+        assertThat(exactShare.canUseDirectBitStateCapture(exactShare.forwardProgramForDiagnostics(), exactShareLength, 2)).isTrue();
+        assertThat(Re2.compile(pattern, exactShareOptions).matcher(exactShareText).find()).isTrue();
+        RegexpMatcher exactShareMatcher = exactShare.matcher(exactShareText);
+        allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        boolean exactShareFound = exactShareMatcher.find();
+        allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(exactShareFound).isTrue();
+        assertThat(allocatedBytes).isLessThanOrEqualTo(exactForwardMemory);
+
         // A longer text takes the capture NFA, which reports the same groups.
         Re2 longer = Re2.compile(pattern);
         Slice text = Slices.utf8Slice("a".repeat(419_429));

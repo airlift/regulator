@@ -64,8 +64,7 @@ final class Compiler
     // - 2: the list-head entry.
     // - 31: the no-submatch NFA tables, which the first no-submatch NFA search builds and the
     //   program keeps: one byte, seven ints and two booleans.
-    // - 8: the packed capture instruction word, which the first capture NFA or BitState search
-    //   builds and the program keeps.
+    // - 8: the packed capture instruction word, which compilation builds and the program keeps.
     static final int FLATTENED_INSTRUCTION_BYTES = 56 + 16 + 2 + 31 + 8;
     private static final int DOMINATOR_ELISION_MINIMUM_INSTRUCTIONS = 1024;
     private static final int DOMINATOR_ELISION_MAXIMUM_VISITS = 1_000_000;
@@ -879,6 +878,9 @@ final class Compiler
                 // the square of the program the instruction budget bounds. Charge each flattened
                 // instruction as it is emitted, so an oversized program fails before it is built.
                 program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory);
+                // The flatten charge counts the capture instruction words the program keeps, so
+                // build them now rather than on the first capture search, whose share leaves them out.
+                program.getOrCreateCaptureInstructionWords();
                 if (maxMemory > 0) {
                     // A BitState search gets the program's whole share as its own allowance, as a
                     // capture NFA search does in Nfa.planCaptureSearches, which CompiledPattern.build
