@@ -92,7 +92,7 @@ final class Dfa
     private static final double MINIMUM_START_LITERAL_FILTER_START_PROBABILITY = 0.05;
     // Room for the folded first letters of eight literals.
     private static final int MAXIMUM_START_LITERAL_FILTER_START_BYTES = 16;
-    // The filter reads three bytes per position, so it replaces the start byte scan only when
+    // The filter checks three bytes per position, so it replaces the start byte scan only when
     // it is estimated to stop this many times less often.
     private static final int START_LITERAL_FILTER_NARROWING_FACTOR = 4;
     private static final int MINIMUM_PRODUCTIVE_FIXED_DISTANCE_SKIP = 16;
