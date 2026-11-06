@@ -74,15 +74,29 @@ public class TestDfaReverseSearch
     }
 
     @Test
-    public void testReverseMatchingSelfLoopRequiresNullableProgram()
+    public void testReverseMatchingSelfLoopScansProgramWithLoop()
     {
         ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("(?s:.)+"), Regexp.LIKE_PERL);
         Prog reverse = Compiler.compile(parsed.regexp(), true, 0);
         Slice text = Slices.utf8Slice("x".repeat(10_000));
 
+        assertThat(reverse.canMatchEmpty()).isFalse();
+        assertThat(reverse.hasLoop()).isTrue();
         assertThat(Dfa.search(reverse, text, 0, text.length(), true, Prog.MatchKind.LONGEST_MATCH, true))
                 .isZero();
         assertThat(reverse.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH).matchingSelfLoopScanCount())
-                .isZero();
+                .isPositive();
+    }
+
+    @Test
+    public void testCountedRepetitionCompilesWithoutLoop()
+    {
+        // A counted repetition compiles without a loop, so in a longest-match reverse search of a
+        // program that cannot match empty, no state matches on a self-loop.
+        Prog counted = Compiler.compile(RegexpParser.parse(Slices.utf8Slice("(?s:.){1,12}"), Regexp.LIKE_PERL).regexp(), true, 0);
+        Prog repeated = Compiler.compile(RegexpParser.parse(Slices.utf8Slice("(?s:.)+"), Regexp.LIKE_PERL).regexp(), true, 0);
+
+        assertThat(counted.hasLoop()).isFalse();
+        assertThat(repeated.hasLoop()).isTrue();
     }
 }

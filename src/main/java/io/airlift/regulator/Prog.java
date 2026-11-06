@@ -331,6 +331,7 @@ final class Prog
     private boolean anchorStart;
     private boolean anchorEnd;
     private boolean canMatchEmpty;
+    private boolean hasLoop = true;
     private boolean hasEmptyWidthAssertions;
     private int textDependentAssertions;
     private boolean hasFullCaseFold;
@@ -588,6 +589,18 @@ final class Prog
     public void setCanMatchEmpty(boolean canMatchEmpty)
     {
         this.canMatchEmpty = canMatchEmpty;
+    }
+
+    /// Returns whether the compiled pattern holds an unbounded repetition, not counting an
+    /// unanchored search's leading loop. True unless the compiler recorded that it has none.
+    public boolean hasLoop()
+    {
+        return hasLoop;
+    }
+
+    public void setHasLoop(boolean hasLoop)
+    {
+        this.hasLoop = hasLoop;
     }
 
     /// Returns whether any instruction is an empty-width assertion, such as `\b` or `(?m)^`. An

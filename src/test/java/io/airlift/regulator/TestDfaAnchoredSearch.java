@@ -37,6 +37,18 @@ public class TestDfaAnchoredSearch
     }
 
     @Test
+    public void testAnchoredSearchWithStopScansMatchingSelfLoop()
+    {
+        // Object rows hold no match transitions, so the confirmation scans the rest of a matching
+        // self-loop, such as the run of \w+, on the int table.
+        Prog prog = Compiler.compile(RegexpParser.parse(Slices.utf8Slice("\\w+"), Regexp.LIKE_PERL).regexp(), false, 0);
+        Slice text = Slices.utf8Slice("x".repeat(10_000) + " ");
+
+        assertThat(Dfa.searchAnchoredWithStop(prog, text, 0, text.length(), 0, text.length())).isEqualTo(10_000);
+        assertThat(prog.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+    }
+
+    @Test
     public void testConfirmationWithStopCrossesLongSelfLoops()
     {
         // The host, path, query, and fragment loops of this URI pattern are matching self-loops:
