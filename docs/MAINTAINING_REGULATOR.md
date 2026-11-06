@@ -49,6 +49,28 @@ copy is in `ScanKernelSupport` or `VectorScanKernelSupport`, also run
 Code whose comment names `TrinoLikeKernelGenerator` has its copy in the emitter
 rather than in Java source; change the emitter with it and run the same tests.
 
+A generated pattern class is the pattern a caller binds, so a caller holding a
+constant pattern can inline the class's public entries. Keep each entry within
+HotSpot's 325-byte inline size, which `TestHotMethodSize` checks, and read
+per-pattern state on an entry's hot path from class data, never from a field of
+the hand-written base class or through a virtual call on an object read from
+such a field: HotSpot folds final instance fields only of hidden classes,
+records, and system classes, so such a load is not a constant and a call
+through it dispatches. The decision record allows base fields only on cold
+paths, such as the ordinary-engine handoff, and for the mutable
+replacement-template cache.
+`TestGeneratedPatternInlining` checks, for every language, that a constant
+caller reaches the pattern's own search with no dispatch between them. C2
+inlines the entry or, when its size heuristics decline a large entry, calls it
+directly, so the test reads the entry's own compile in that case, and the
+compile of each method of the class that C2 calls rather than inlines. It trusts
+a call into shared hand-written code that C2 leaves out of line and does not
+read its body; shared code that C2 inlines into a checked compile is still
+checked for dispatch. Its probe covers RE2, Java, and Rust `find`, `count`, and
+`matches`, every public Trino operation that the generated class declares, LIKE
+`matches` for every plan, and a search of each regex language that hands off to
+the ordinary engine.
+
 ## Parser frontends
 
 `RegexpParser`, `TrinoRegexpParser`, `JavaRegexpParser`, and `RustRegexpParser`
