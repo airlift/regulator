@@ -118,6 +118,12 @@ public class TestFixedWidthByteSpanMatcher
         assertSpan(matcher, input, 0, 12, 17);
         assertSpan(matcher, input, 17, 17, 22);
         assertThat(matcher.findSpan(input, 22)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+
+        // A region search reports only a match lying entirely in the region.
+        assertThat(matcher.findSpan(input, 0, 16)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(matcher.findSpan(input, 0, 17)).isEqualTo(span(12, 17));
+        assertThat(matcher.findSpan(input, 13, 22)).isEqualTo(span(17, 22));
+        assertThat(matcher.findSpan(input, 13, 21)).isEqualTo(Dfa.SEARCH_NO_MATCH);
     }
 
     @Test
@@ -202,12 +208,17 @@ public class TestFixedWidthByteSpanMatcher
                     if (generalMatcher.find(start)) {
                         assertThat(span)
                                 .as("pattern %s input %s start %s", expression, input, start)
-                                .isEqualTo(((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL));
+                                .isEqualTo(span(generalMatcher.start(), generalMatcher.end()));
                     }
                     else {
                         assertThat(span)
                                 .as("pattern %s input %s start %s", expression, input, start)
                                 .isEqualTo(Dfa.SEARCH_NO_MATCH);
+                    }
+                    // A region search reports the general engine's first match in the region.
+                    for (int end = start; end <= input.length(); end++) {
+                        long expected = generalMatcher.reset(input, start, end).find() ? span(generalMatcher.start(), generalMatcher.end()) : Dfa.SEARCH_NO_MATCH;
+                        assertThat(matcher.findSpan(input, start, end)).as("pattern %s input %s region %s-%s", expression, input, start, end).isEqualTo(expected);
                     }
                 }
             }
@@ -262,6 +273,11 @@ public class TestFixedWidthByteSpanMatcher
     private static FixedWidthByteSpanMatcher optionalMatcher(String pattern)
     {
         return Re2.compile(utf8Slice(pattern)).createFixedWidthByteSpanMatcher();
+    }
+
+    private static long span(int start, int end)
+    {
+        return ((long) start << 32) | (end & 0xFFFF_FFFFL);
     }
 
     private static void assertSpan(FixedWidthByteSpanMatcher matcher, Slice input, int searchStart, int expectedStart, int expectedEnd)

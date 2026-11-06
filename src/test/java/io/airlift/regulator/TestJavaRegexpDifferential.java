@@ -180,6 +180,11 @@ public class TestJavaRegexpDifferential
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
         assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).usesScanPlanForDiagnostics()).isTrue();
+        // These matchers find on their pattern's span search rather than the DFA.
+        String fixedWidthSpan = "[a-z]b";
+        String literalAlternationSpan = "b|ab";
+        assertThat(JavaRegexp.compile(utf8Slice(fixedWidthSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(FixedWidthByteSpanMatcher.class);
+        assertThat(JavaRegexp.compile(utf8Slice(literalAlternationSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(LiteralAlternationSpanMatcher.class);
         List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
         for (String pattern : List.of(
                 "^",
@@ -210,7 +215,9 @@ public class TestJavaRegexpDifferential
                 "(b?)$",
                 "(.\\b)|(\\w)|(\\p{L})",
                 startAnchoredPlan,
-                unanchoredPlan)) {
+                unanchoredPlan,
+                fixedWidthSpan,
+                literalAlternationSpan)) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             RegexpMatcher actual = regexp.matcher(utf8Slice(""));

@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearchUnless;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -767,6 +768,40 @@ public class TestRegexpMatcher
             assertThat(matcher.find(0)).as(label).isTrue();
             assertThat(matcher.start()).as(label).isEqualTo(longBytes.length - 10);
             assertThat(matcher.groupZeroForwardProductivityCheckCountForDiagnostics()).as(label).isPositive();
+        }
+    }
+
+    @Test
+    public void testLiteralAlternationHandsOffToCandidateCursor()
+    {
+        // A find with fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes left runs the
+        // literal-alternation span search, which builds no program search, and one with at least
+        // that many runs the candidate cursor, whose start-byte scan the span search replaced.
+        // Each find starts partway into a 1024-byte input, so the bytes left decide, not the
+        // input length, and the find that resumes after the match has 6 left.
+        byte[] bytes = "x".repeat(1024).getBytes(US_ASCII);
+        System.arraycopy("WARN".getBytes(US_ASCII), 0, bytes, 1014, 4);
+        Slice input = Slices.wrappedBuffer(bytes);
+        for (int remaining : List.of(63, 64, 65)) {
+            for (CompiledPattern pattern : List.of(
+                    Re2.compile(Slices.utf8Slice("ERROR|WARN|FATAL")),
+                    JavaRegexp.compile(Slices.utf8Slice("ERROR|WARN|FATAL")),
+                    RustRegexp.compile(Slices.utf8Slice("ERROR|WARN|FATAL")),
+                    RustRegexp.compile(Slices.utf8Slice("(?-u)ERROR|WARN|FATAL"), RustRegexp.Options.bytes()))) {
+                String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8() + " " + remaining;
+                RegexpMatcher matcher = pattern.matcher(input, 0);
+                assertThat(matcher.spanSearchForDiagnostics()).as(label).isInstanceOf(LiteralAlternationSpanMatcher.class);
+                assertThat(matcher.find(input.length() - remaining)).as(label).isTrue();
+                assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(1014, 1018);
+                assertThat(matcher.find()).as(label).isFalse();
+                if (remaining < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
+                    assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(label).isZero();
+                    assertNoProgramSearch(pattern, label);
+                }
+                else {
+                    assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(label).isPositive();
+                }
+            }
         }
     }
 

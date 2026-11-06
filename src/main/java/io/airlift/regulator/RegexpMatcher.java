@@ -41,11 +41,16 @@ public final class RegexpMatcher
     // fewer than CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See
     // CompiledPattern.sharedSingleByteMatcher.
     private final SingleByteMatcher singleByteMatcher;
-    // The pattern's Aho-Corasick search of a large literal alternation, which find() runs in place
-    // of the program. See CompiledPattern.literalSetSpanMatcher.
-    private final LiteralSetSpanMatcher literalSet;
+    // The pattern's literal-alternation, literal-set, or fixed-width span search, which find()
+    // runs in place of the program, a literal alternation's only on fewer than
+    // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES bytes. See CompiledPattern.groupZeroSpanSearch.
+    private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
-    private final Dfa.CandidateStartCursor candidateStartCursor;
+    // Created by the constructor for a matcher with no single-byte table, span search, or class
+    // counter, and by a literal alternation's matcher on its first long search. See
+    // createLongSearchCandidateStartCursor.
+    private Dfa.CandidateStartCursor candidateStartCursor;
+    private boolean longSearchCandidateStartCursorCreated;
     private final boolean enableGroupZeroForwardCursor;
     private final boolean hasLoweredCandidateSearch;
     private final boolean hasDirectLoweredGroupZeroSearch;
@@ -97,7 +102,7 @@ public final class RegexpMatcher
     }
 
     /// `enableSpecializedGroupZeroRoutes` false turns off the group-zero forward cursor, the class
-    /// counter, and the literal set search of [#find()], for comparisons.
+    /// counter, and the span search of [#find()], for comparisons.
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableSpecializedGroupZeroRoutes)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
@@ -106,9 +111,11 @@ public final class RegexpMatcher
         this.namedCapturingGroups = retainedNamedCapturingGroups(pattern, capturingGroupCount);
         this.latin1 = (pattern.flags() & Regexp.LATIN1) != 0;
         this.singleByteMatcher = capturingGroupCount == 0 ? singleByteMatcher : null;
-        this.literalSet = enableSpecializedGroupZeroRoutes && this.singleByteMatcher == null ? pattern.literalSetSpanMatcher() : null;
+        // The table passed in is the pattern's own, and groupZeroSpanSearch() returns no span
+        // search beside it or a class counter.
+        this.spanSearch = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.groupZeroSpanSearch() : null;
         this.characterClassCounter = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
-        this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && this.literalSet == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
+        this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && spanSearch == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 characterClassCounter == null &&
                 pattern.canUseGroupZeroForwardCursor(groups.length);
@@ -202,8 +209,8 @@ public final class RegexpMatcher
         if (startAnchoredScanPlan != null) {
             return findWithStartAnchoredScanPlan();
         }
-        if (literalSet != null) {
-            return findLiteralSet();
+        if (spanSearch != null) {
+            return findSpanSearch();
         }
         if (pattern.hasAnchoredSubmatchRoute()) {
             return findAnchoredSubmatch();
@@ -214,12 +221,36 @@ public final class RegexpMatcher
         return findGeneral();
     }
 
-    /// The literals match no empty string and read no context outside the region, so every
-    /// language's search, a Rust one over a partial region included, is the automaton's search
-    /// of the rest of the region.
-    private boolean findLiteralSet()
+    /// A span search's patterns have no assertions, match no empty string, and read no context
+    /// outside the region, so every language's search, a Rust one over a partial region included,
+    /// is the span search of the rest of the region.
+    ///
+    /// The search is dispatched on its final class rather than through an interface method; see
+    /// [GroupZeroSpanSearch].
+    private boolean findSpanSearch()
     {
-        long span = literalSet.findSpan(input, regionStart + nextFindStart, regionEnd);
+        int start = regionStart + nextFindStart;
+        long span;
+        if (spanSearch instanceof LiteralAlternationSpanMatcher literalAlternation) {
+            // A region with at least MINIMUM_LONG_SEARCH_BYTES left takes the program's search,
+            // whose start-byte scan the span search replaced: the DFA candidate cursor where the
+            // literals differ in length, and the group-zero forward cursor where they share one.
+            // Without it, a matcher's finds of ERROR|WARN|FATAL took 2.0x the time on r9g and
+            // 4.4-4.6x on r8i on 1 KiB rows; 16 to 64 byte rows measured flat.
+            if (regionEnd - start >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
+                createLongSearchCandidateStartCursor();
+                return rustSearch ? findRust() : findGeneral();
+            }
+            // With fewer bytes left, the span search takes the root-table loop and carries no
+            // route from one find to the next.
+            span = literalAlternation.findSpan(input, start, regionEnd);
+        }
+        else if (spanSearch instanceof LiteralSetSpanMatcher literalSet) {
+            span = literalSet.findSpan(input, start, regionEnd);
+        }
+        else {
+            span = ((FixedWidthByteSpanMatcher) spanSearch).findSpan(input, start, regionEnd);
+        }
         if (span < 0) {
             return failFind();
         }
@@ -278,6 +309,22 @@ public final class RegexpMatcher
             }
         }
         return false;
+    }
+
+    /// Creates the candidate cursor the first time a literal alternation's matcher, whose span
+    /// search answers its short searches, searches a long region. Creating it builds the
+    /// program's DFA, so a matcher that searches only short regions builds none. An alternation
+    /// whose literals share one length has no candidate cursor and takes the group-zero forward
+    /// cursor instead.
+    private void createLongSearchCandidateStartCursor()
+    {
+        if (!longSearchCandidateStartCursorCreated) {
+            longSearchCandidateStartCursorCreated = true;
+            candidateStartCursor = pattern.createCandidateStartCursor();
+            if (candidateStartCursor != null) {
+                candidateStartCursor.reset(regionLength());
+            }
+        }
     }
 
     private boolean findGeneral()
@@ -791,9 +838,9 @@ public final class RegexpMatcher
         return startAnchoredScanPlan != null;
     }
 
-    boolean literalSetEnabledForDiagnostics()
+    GroupZeroSpanSearch spanSearchForDiagnostics()
     {
-        return literalSet != null;
+        return spanSearch;
     }
 
     SingleByteMatcher singleByteMatcherForDiagnostics()
