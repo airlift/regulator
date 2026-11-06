@@ -13,16 +13,23 @@
  */
 package io.airlift.regulator;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
 import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
+import java.lang.reflect.Field;
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
+import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestCompilerAllocations
@@ -88,6 +95,90 @@ public class TestCompilerAllocations
 
         assertThat(instructionCount).isEqualTo(300_000);
         assertThat(allocatedBytes / iterations).isLessThan(40_000);
+    }
+
+    @Test
+    public void testFlattenedInstructionLimitFitsPackedOutputs()
+    {
+        // Packed capture instruction words hold an output in 28 bits, so no budget may let a
+        // flattened program index past that.
+        assertThat(Compiler.maxFlattenedInstructions(Long.MAX_VALUE)).isEqualTo((1 << 28) - 1);
+        assertThat(Compiler.maxFlattenedInstructions(0)).isEqualTo((1 << 28) - 1);
+        assertThat(Compiler.maxFlattenedInstructions(96L << 20)).isEqualTo(((96L << 20) - 512) / Compiler.FLATTENED_INSTRUCTION_BYTES);
+    }
+
+    @Test
+    public void testInstructionChargesCoverWhatAProgramHolds()
+            throws ReflectiveOperationException
+    {
+        // Before flattening, an instruction is charged for its object, its array slot and the
+        // flattening pass's scratch. Once flattened, it is charged for its object, its array slot,
+        // its list-head entry and the tables the first searches build. The instance size checks
+        // the object, and the flattening and first-search allocations below check the rest.
+        // The 56-byte charge assumes compressed class pointers. Turning them off, which JDK 25 and
+        // 26 deprecate, together with compressed references makes an instruction 64 bytes.
+        assertThat(instanceSize(Prog.Inst.class)).isLessThanOrEqualTo(compressedClassPointers() ? 56 : 64);
+        long referenceBytes = (sizeOfObjectArray(1024) - sizeOfObjectArray(0)) / 1024;
+
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        long threadId = Thread.currentThread().threadId();
+        // A literal flattens to one list per instruction, and the alternations give instructions
+        // two predecessors.
+        for (String pattern : List.of("a".repeat(20_000), "(?:ab|cd)".repeat(10_000))) {
+            Regexp regexp = Simplifier.simplify(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp(), CaseFolding.RE2);
+            long scratchBytes = Long.MAX_VALUE;
+            long tablesBytes = Long.MAX_VALUE;
+            long wordsBytes = Long.MAX_VALUE;
+            for (int run = 0; run < 5; run++) {
+                Prog program = Compiler.compileNormalizedForBenchmark(regexp, false, 64 << 20, Compiler.CompileStage.OPTIMIZED);
+                int unflattenedSize = program.size();
+
+                long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                program.flatten();
+                long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+                int size = program.size();
+                assertThat(size).isLessThanOrEqualTo(unflattenedSize);
+                assertThat(sizeOf(program.listHeads()) - sizeOf(new short[0])).isEqualTo(2L * size);
+                // Flattening allocates the copies, their array, their list heads and its scratch.
+                long copiesBytes = size * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
+                scratchBytes = Math.min(scratchBytes, (flattenBytes - copiesBytes) / unflattenedSize);
+
+                allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                program.getOrCreateNoSubmatchTables();
+                tablesBytes = Math.min(tablesBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore - (31L * size));
+
+                allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                program.getOrCreateCaptureInstructionWords();
+                wordsBytes = Math.min(wordsBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore - (8L * size));
+            }
+            assertThat(scratchBytes).as("scratch bytes per instruction for %s", pattern.substring(0, 9)).isLessThanOrEqualTo(48);
+            // What remains past the per-instruction bytes is array headers.
+            assertThat(tablesBytes).isLessThan(1024);
+            assertThat(wordsBytes).isLessThan(64);
+        }
+
+        // Trino compiles a greedy nullable loop with a clone of its body for the empty-iteration
+        // check, so nested empty loops compile to 391 instructions that flatten to 42. The program
+        // must still keep an instruction array within the flattened charge's doubling allowance.
+        Prog shrunk = TrinoRegexp.compile(utf8Slice("(".repeat(13) + ")" + ")*".repeat(12))).re2().forwardProgramForDiagnostics();
+        Field instructions = Prog.class.getDeclaredField("insts");
+        instructions.setAccessible(true);
+        assertThat(((Prog.Inst[]) instructions.get(shrunk)).length).isLessThanOrEqualTo(2 * shrunk.size());
+    }
+
+    @Test
+    public void testFlattenedProgramsAreChargedAgainstTheBudget()
+    {
+        // Flattening copies each list's epsilon closure, and a lazy loop over a nullable body puts
+        // the loops inside it in many closures, so the flattened program grows with the square of
+        // the program the instruction limit bounds. Unchecked, the a? pattern allocated 309 MB to
+        // compile. Each language now stops at the forward program's share of the default budget.
+        String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
+        assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
+        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(nullableLoops)));
+        assertCompileRejectedWithinBudget(() -> RustRegexp.compile(utf8Slice(nullableLoops)));
+        // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
+        assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
     }
 
     @Test
@@ -282,6 +373,29 @@ public class TestCompilerAllocations
         // The count proves the pattern still reaches the nullable-loop lowering.
         assertThat(program.size()).isEqualTo(instructionCount);
         assertThat(allocatedBytes).isLessThan(maxAllocatedBytes);
+    }
+
+    private static void assertCompileRejectedWithinBudget(ThrowingCallable compile)
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        assertThatThrownBy(compile).isInstanceOf(RegexpCompileMemoryLimitException.class);
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        // The rejected compile builds at most the forward share of the budget, plus its scratch.
+        assertThat(allocatedBytes).isLessThan(2L * Re2.Options.DEFAULT_MAX_MEMORY);
+    }
+
+    private static boolean compressedClassPointers()
+    {
+        try {
+            return Boolean.parseBoolean(ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class).getVMOption("UseCompressedClassPointers").getValue());
+        }
+        catch (IllegalArgumentException e) {
+            // JDK 27 removes the option and always compresses class pointers.
+            return true;
+        }
     }
 
     private static ThreadMXBean allocatedMemoryBean()

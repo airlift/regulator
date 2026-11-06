@@ -71,6 +71,10 @@ final class TaggedAlternationProgram
         }
 
         long availableForwardMemory = semanticProgram.dfaMemory();
+        if (availableForwardMemory <= 0) {
+            // The compiler reads a budget of zero or less as no limit.
+            return null;
+        }
         Prog taggedProgram;
         try {
             taggedProgram = Compiler.compileSet(

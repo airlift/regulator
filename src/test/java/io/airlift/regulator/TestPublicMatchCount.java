@@ -91,7 +91,7 @@ public class TestPublicMatchCount
             assertThat(literal.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
         }
 
-        Re2 smallBudget = Re2.compile(utf8Slice("[,;]"), Re2.Options.defaults().setMaxMemory(1024));
+        Re2 smallBudget = Re2.compile(utf8Slice("[,;]"), Re2.Options.defaults().setMaxMemory(2048));
         assertThat(smallBudget.sharedSingleByteMatcher()).isNull();
         assertThat(smallBudget.count(utf8Slice("a,b;c"))).isEqualTo(2);
     }
@@ -206,7 +206,7 @@ public class TestPublicMatchCount
     public void testLongestMatchAndSmallMemoryFallback()
     {
         assertThat(Re2.compile(utf8Slice("a|aa"), Re2.Options.posix()).count(utf8Slice("aa"))).isEqualTo(1);
-        Re2 re2 = Re2.compile(utf8Slice("(a|b)+c"), Re2.Options.defaults().setMaxMemory(2048));
+        Re2 re2 = Re2.compile(utf8Slice("(a|b)+c"), Re2.Options.defaults().setMaxMemory(2400));
         assertThat(re2.count(utf8Slice("aac bbc nope"))).isEqualTo(2);
     }
 

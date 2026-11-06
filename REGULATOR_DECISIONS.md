@@ -600,11 +600,37 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to reverse search: a lazily compiled reverse program, less what an
   eagerly compiled inner literal search retains from that third.
-- Compilation accounts for the program and list-head storage before assigning the
-  remaining budget to DFA caches. List heads are charged under upstream's rule,
-  only for a program of at most 512 instructions. The 2-byte-per-instruction
-  list-head array a larger program keeps is not charged. Internal compilation
-  with a non-positive budget uses upstream's 1 MiB default DFA allowance.
+- A program is charged in two steps after a fixed 512 bytes, with references
+  counted at eight bytes. Before flattening, each instruction is charged 120
+  bytes: a 56-byte instruction object, 16 bytes of instruction array that
+  grows by doubling, and 48 bytes of the flattening pass's scratch. The
+  instruction limit is the budget past the fixed bytes divided by 120, up to
+  2^24 instructions. Flattening then charges each instruction it emits 113
+  bytes, up to 2^28 - 1 instructions, since a packed capture instruction word
+  keeps a 28-bit output. The 113 bytes are the object and array slot, a 2-byte
+  list-head entry, and the 31 bytes of no-submatch NFA tables and 8-byte
+  capture word that the first searches build and the program keeps. The
+  56-byte instruction assumes compressed class pointers, which a heap of 32 GB
+  or more keeps; only with them explicitly turned off, deprecated in JDK 25
+  and obsolete in JDK 27, is an instruction 64 bytes and the charges 1 to 3
+  percent short.
+- A long leading literal keeps a prefix shift table, configured after
+  flattening from what the flatten charge left. A forward program whose table
+  does not fit its share fails to compile.
+- Upstream charges 8 bytes per instruction, plus 2 for list heads in a program
+  of at most 512 instructions, and checks nothing after flattening. Flattening
+  copies each list's epsilon closure, so a program can grow with the square of
+  the instructions its limit admitted: nested lazy loops over nullable bodies
+  flattened to tens of millions of instructions and gigabytes of heap.
+  Regulator stops flattening when the charge of the emitted instructions
+  exceeds the program's share. A forward program then fails to compile, and a
+  reverse program is dropped, as any reverse program that does not fit is.
+- Trino programs reach the same growth through Joni's quantifier reduction
+  table, which keeps a lazy `+?` under a greedy quantifier, as in `(?:x+?)*`.
+- The DFA caches receive what the flatten charge leaves: the program's share
+  less the fixed bytes, 113 bytes per flattened instruction, and what one-pass
+  and prefix tables retain. Internal compilation with a non-positive budget
+  uses upstream's 1 MiB default DFA allowance.
 - A forward program divides its DFA allowance between first-match and
   longest-match caches. A reverse longest-match DFA and a set's many-match DFA use
   their program's complete allowance. As upstream, a DFA whose allowance is
@@ -964,8 +990,9 @@ search's comparison budget and continues with KMP once they pass it. A prefix
 with long partial matches, such as `a`×500 `b` `a`×500 in a run of `a`, then
 costs time linear in the input instead of the input times the prefix. The KMP
 shifts are built when the prefix is configured and charged to the program's DFA
-allowance, up to what remains; a prefix under 64 bytes whose first byte does not
-recur shares the contains search's read-only table and is charged nothing.
+allowance, and a compile whose shift table does not fit what remains fails; a
+prefix under 64 bytes whose first byte does not recur shares the contains
+search's read-only table and is charged nothing.
 Case-insensitive prefixes stop at nine bytes and keep their scan.
 `Slice.indexOf` puts no limit on the bytes its failed candidates compare, so
 RE2, Java, and Rust contains of a literal longer than the budget uses the
@@ -1423,8 +1450,9 @@ character, such as a negated ASCII class or a dot that matches newline, keeps
 counter is built lazily by a single writer and retained by the compiled
 pattern; a class repeat instead reuses its matcher counter, described below,
 when one was retained. The lazily built counter's size is independent of
-`maxMemory`, which remains the upstream-compatible program and DFA planning
-budget, and it does not scale with the expression or configured budget.
+`maxMemory`, the planning budget that charges the program 120 and then 113
+bytes per instruction and leaves the DFA caches the rest, and it does not
+scale with the expression or configured budget.
 Unsupported shapes continue through the ordinary DFA or matcher path. A
 Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
 that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of

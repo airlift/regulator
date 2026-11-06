@@ -251,9 +251,9 @@ public class TestBoundedCharacterClassCounter
 
         // A single class's or a class repeat's counter takes its bytes from the DFA budget; a
         // budget too small for it keeps the engine.
-        assertThat(Re2.compile(utf8Slice("\\pL"), Re2.Options.defaults().setMaxMemory(32 * 1024)).classMatchCounter()).isNull();
+        assertThat(Re2.compile(utf8Slice("\\p{Greek}"), Re2.Options.defaults().setMaxMemory(32 * 1024)).classMatchCounter()).isNull();
         int flags = Re2.Options.defaults().parseFlags();
-        long maxMemory = 64 * 1024;
+        long maxMemory = 292 * 1024;
         for (String source : List.of("\\pL", "[а-яё]+")) {
             Slice pattern = utf8Slice(source);
             ParseResult parsed = RegexpParser.parse(pattern, flags);

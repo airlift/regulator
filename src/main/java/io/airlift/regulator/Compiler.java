@@ -40,10 +40,33 @@ final class Compiler
     private static final int RUNES_SELF = 0x80;
     private static final int UTF_MAX = 4;
     private static final int MAX_INSTRUCTIONS = 1 << 24;
-    private static final int CPP_INSTRUCTION_BYTES = 8;
-    private static final int CPP_LIST_HEAD_BYTES = 2;
     private static final int CPP_PROG_OVERHEAD_BYTES = 512;
     private static final int DEFAULT_DFA_MEMORY = 1 << 20;
+    // The heap a program holds per instruction until it is flattened, with references counted at
+    // eight bytes so the bound also holds for heaps without compressed references:
+    // - 56: the instruction object, a 12-byte header, the opcode reference and eight int fields
+    //   and a boolean, aligned to eight bytes. A compressed opcode reference leaves it at 56.
+    //   The 12-byte header assumes compressed class pointers. A heap of 32 GB or more turns off
+    //   only compressed references, so the instruction stays at 56; JDK 27's compact headers
+    //   make it 48 with compressed references. Turning class pointers off as well, which JDK 25
+    //   and 26 deprecate and JDK 27 makes obsolete, makes it 64, and the charges then undercount
+    //   by 1 to 3 percent.
+    // - 16: the instruction array slot, doubled because the array grows by doubling.
+    // - 48: the flattening pass's scratch, which lives beside the program: the reachable set's
+    //   two ints, the work stack's int, the root map's three ints, the predecessor lists' first
+    //   edge and, for up to two edges per instruction, an id and a next link in arrays that
+    //   grow by doubling, and the root index map's int.
+    static final int UNFLATTENED_INSTRUCTION_BYTES = 56 + 16 + (8 + 4 + 12 + 4 + 16 + 4);
+    // The heap a flattened program retains per instruction, with references counted at eight
+    // bytes as above:
+    // - 56: the instruction object, as above.
+    // - 16: the instruction array slot, as above.
+    // - 2: the list-head entry.
+    // - 31: the no-submatch NFA tables, which the first no-submatch NFA search builds and the
+    //   program keeps: one byte, seven ints and two booleans.
+    // - 8: the packed capture instruction word, which the first capture NFA or BitState search
+    //   builds and the program keeps.
+    static final int FLATTENED_INSTRUCTION_BYTES = 56 + 16 + 2 + 31 + 8;
     private static final int DOMINATOR_ELISION_MINIMUM_INSTRUCTIONS = 1024;
     private static final int DOMINATOR_ELISION_MAXIMUM_VISITS = 1_000_000;
 
@@ -115,11 +138,27 @@ final class Compiler
 
     static long estimatedProgramMemory(Prog program)
     {
-        long memory = CPP_PROG_OVERHEAD_BYTES + ((long) program.size() * CPP_INSTRUCTION_BYTES);
-        if (program.hasUpstreamListHeads()) {
-            memory += (long) program.size() * CPP_LIST_HEAD_BYTES;
+        return CPP_PROG_OVERHEAD_BYTES + ((long) program.size() * FLATTENED_INSTRUCTION_BYTES) + program.onePassMemory() + program.prefixShiftsMemory();
+    }
+
+    /// Throws [RegexpCompileMemoryLimitException] when the program's charged memory exceeds a
+    /// positive `maxMemory`. A long prefix's shift table is configured after flattening and comes
+    /// out of what the flatten charge left, so it can need more than remains.
+    static void requireProgramFits(Prog program, long maxMemory)
+    {
+        if (maxMemory > 0 && estimatedProgramMemory(program) > maxMemory) {
+            throw new RegexpCompileMemoryLimitException(maxMemory);
         }
-        return memory + program.onePassMemory() + program.prefixShiftsMemory();
+    }
+
+    /// Returns how many instructions a program compiled with `maxMemory` may hold once it is
+    /// flattened.
+    static int maxFlattenedInstructions(long maxMemory)
+    {
+        if (maxMemory <= 0) {
+            return Prog.MAX_FLATTENED_INSTRUCTIONS;
+        }
+        return (int) Math.min(Prog.MAX_FLATTENED_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / FLATTENED_INSTRUCTION_BYTES);
     }
 
     private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
@@ -241,6 +280,7 @@ final class Compiler
             Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel(caseFolding);
             if (requiredPrefixForAccel != null) {
                 compiledProgram.configurePrefixAccel(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase(), byteFrequencies);
+                requireProgramFits(compiledProgram, maxMemory);
             }
 
             // Configure required prefix for instant rejection.
@@ -618,7 +658,7 @@ final class Compiler
                 throw new RegexpCompileMemoryLimitException(maxMemory);
             }
 
-            long availableInstructionCount = (maxMemory - CPP_PROG_OVERHEAD_BYTES) / CPP_INSTRUCTION_BYTES;
+            long availableInstructionCount = (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES;
             if (availableInstructionCount <= 0) {
                 // Upstream leaves max_ninst_ at zero here and every allocation fails, which surfaces
                 // as a compile failure rather than an argument error.
@@ -834,12 +874,11 @@ final class Compiler
                 program.optimize();
             }
             if (stage.ordinal() >= CompileStage.FLATTENED.ordinal()) {
-                if (skipDominatorPass) {
-                    program.flatten(true);
-                }
-                else {
-                    program.flatten();
-                }
+                // Flattening copies each list's epsilon closure, so an instruction reachable from
+                // many lists is copied into each of them, and the flattened program can grow with
+                // the square of the program the instruction budget bounds. Charge each flattened
+                // instruction as it is emitted, so an oversized program fails before it is built.
+                program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory);
             }
             if (stage.ordinal() >= CompileStage.BYTEMAP.ordinal()) {
                 program.computeByteMap();
@@ -847,11 +886,9 @@ final class Compiler
             if (stage == CompileStage.BYTEMAP) {
                 long dfaMemory = DEFAULT_DFA_MEMORY;
                 if (maxMemory > 0) {
-                    dfaMemory = maxMemory - CPP_PROG_OVERHEAD_BYTES - ((long) program.size() * CPP_INSTRUCTION_BYTES);
-                    if (program.hasUpstreamListHeads()) {
-                        dfaMemory -= (long) program.size() * CPP_LIST_HEAD_BYTES;
-                    }
-                    dfaMemory = Math.max(0, dfaMemory);
+                    // The program keeps what the flatten charge counted, so the DFA caches get
+                    // only the rest of the budget.
+                    dfaMemory = maxMemory - estimatedProgramMemory(program);
                 }
                 program.setDfaMemory(dfaMemory);
             }

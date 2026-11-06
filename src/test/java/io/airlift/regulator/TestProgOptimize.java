@@ -108,7 +108,8 @@ public class TestProgOptimize
     private static void assertOptimizes(String pattern)
     {
         Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
-        Prog prog = Compiler.compileForBenchmark(regexp, false, Re2.Options.DEFAULT_MAX_MEMORY, Compiler.CompileStage.RAW);
+        // The widest pattern compiles to 1.4 million instructions, which need 161 MiB.
+        Prog prog = Compiler.compileForBenchmark(regexp, false, 161L << 20, Compiler.CompileStage.RAW);
 
         assertThatCode(prog::optimize).doesNotThrowAnyException();
     }

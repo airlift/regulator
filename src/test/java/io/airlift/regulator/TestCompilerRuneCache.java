@@ -20,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestCompilerRuneCache
 {
-    private static final long MINIMUM_PROGRAM_MEMORY = 1_048;
+    // The class compiles to 67 instructions before flattening.
+    private static final long MINIMUM_PROGRAM_MEMORY = 512 + 67L * Compiler.UNFLATTENED_INSTRUCTION_BYTES;
 
     @Test
     public void testUnicodeCharacterClassProgram()
