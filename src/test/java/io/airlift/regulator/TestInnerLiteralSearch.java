@@ -19,9 +19,11 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -33,6 +35,7 @@ public class TestInnerLiteralSearch
 {
     private static final RustRegexp.Options RUST_BYTES_OPTIONS = RustRegexp.Options.defaults().setBytes(true);
     private static final String FILLER = "-".repeat(InnerLiteralSearch.MINIMUM_SKIPPED_BYTES);
+    private static final String DATE = "([0-9][0-9]?)/([0-9][0-9]?)/([0-9][0-9]([0-9][0-9])?)";
 
     private static final List<String> PATTERNS = List.of(
             "[\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+",
@@ -60,7 +63,8 @@ public class TestInnerLiteralSearch
             "[a-z](?:aba|bab)\\s",
             "\\s(?:foo|barbaz)\\d",
             "\\s[a-z]{0,12}(?:ing|ment)\\s",
-            "[\"'][^\"']{0,30}[?!.][\"']");
+            "[\"'][^\"']{0,30}[?!.][\"']",
+            DATE);
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -120,18 +124,26 @@ public class TestInnerLiteralSearch
         // A pair with a side of more than three bytes, or one common in English text, is not.
         assertThat(literal("[ \\t][!#%&][\"']@x")).isEqualTo("@x");
         assertThat(literal("\\s[ae][st]@x")).isEqualTo("@x");
-        // A single-byte class next to the literal gates each hit, but not one that holds the
-        // literal's own byte at that edge, as the letters before shing do: it borders nearly
-        // every hit.
+        // The bytes that can end the prefix gate the byte before each hit, as the digits that end
+        // a date's day or month do, and a single-byte class after a literal of one length gates
+        // the byte after it. A gate that holds the literal's own byte at that edge, as the letters
+        // before ing and shing do, is dropped: it borders nearly every hit.
         for (Map.Entry<String, List<String>> entry : List.of(
                 Map.entry("\\s[a-zA-Z]{0,12}ing\\s", List.of("", "\t\n\f\r ")),
                 Map.entry("\\w+\\s+Holmes\\s+\\w+", List.of("\t\n\f\r ", "\t\n\f\r ")),
                 Map.entry("[\\w.+-]+@[\\w.-]+\\.[\\w.-]+", List.of(
                         "+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
                         "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz")),
-                Map.entry("[a-z]shing[a-z]", List.of("", "")))) {
+                Map.entry("[a-z]shing[a-z]", List.of("", "")),
+                Map.entry(DATE, List.of("0123456789", "0123456789")))) {
             assertThat(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).as(entry.getKey()).isEqualTo(entry.getValue());
         }
+        // The gate before the literal comes from the bytes that can end the prefix, so a prefix
+        // that is not one ASCII class gates too: Rust's Unicode \w ends a character of more than
+        // one byte with a continuation byte, shown here as its Latin-1 char.
+        String continuationBytes = IntStream.rangeClosed(0x80, 0xBF).mapToObj(value -> String.valueOf((char) value)).collect(joining());
+        assertThat(RustRegexp.compile(utf8Slice("[\\w.+-]+@[\\w.-]+\\.[\\w.-]+")).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics())
+                .isEqualTo(List.of("+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz" + continuationBytes, ""));
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
@@ -255,6 +267,36 @@ public class TestInnerLiteralSearch
                     assertThat(actual.find(text)).as(description).isEqualTo(expected.find(text));
                 }
             }
+        }
+    }
+
+    @Test
+    public void testHighBytePrefixGateAgreesWithOrdinaryEngine()
+    {
+        // Any byte from 0x80 to 0xFF can end this prefix, and hits after any high byte, past the
+        // filler that keeps the search from falling back near its start, agree with the ordinary
+        // engine.
+        String pattern = "(?-u:[\\x80-\\xFF])@xy";
+        InnerLiteralSearch search = RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).innerLiteralSearchForDiagnostics();
+        String highBytes = IntStream.rangeClosed(0x80, 0xFF).mapToObj(value -> String.valueOf((char) value)).collect(joining());
+        assertThat(search.byteGatesForDiagnostics()).isEqualTo(List.of(highBytes, ""));
+
+        Engine actual = Language.RUST_BYTES.compile(pattern);
+        Engine expected = Language.RUST_BYTES.compile("(?:" + pattern + ")|\\b\\B");
+        byte[] filler = FILLER.getBytes(UTF_8);
+        for (byte[] hits : List.of(
+                new byte[] {(byte) 0xFF, '@', 'x', 'y'},
+                new byte[] {(byte) 0xC3, '@', 'x', 'y'},
+                new byte[] {'a', '@', 'x', 'y', ' ', (byte) 0xC3, '@', 'x', 'y', (byte) 0xFF, '@', 'x', 'y'},
+                new byte[] {'a', '@', 'x', 'y', (byte) 0x7F, '@', 'x', 'y', (byte) 0xBF, '@', 'x', 'y'})) {
+            byte[] bytes = Arrays.copyOf(filler, filler.length + hits.length);
+            System.arraycopy(hits, 0, bytes, filler.length, hits.length);
+            Slice text = Slices.wrappedBuffer(bytes);
+            String description = Arrays.toString(hits);
+            assertThat(search.search(text, 0, text.length(), 0, text.length())).as(description).isNotEqualTo(InnerLiteralSearch.FALLBACK);
+            assertThat(actual.spans(text)).as(description).isEqualTo(expected.spans(text));
+            assertThat(actual.count(text)).as(description).isEqualTo(expected.count(text));
+            assertThat(actual.find(text)).as(description).isEqualTo(expected.find(text));
         }
     }
 
@@ -414,13 +456,23 @@ public class TestInnerLiteralSearch
     public void testFallsBackWhenLiteralIsNearStart()
     {
         String filler = ".".repeat(200);
-        // A search skips at most the bytes before its first literal, as in a uuid whose hyphen
-        // sits 8 bytes in, so a first hit closer than the minimum falls back to the ordinary
-        // engine. Once a first hit fails to confirm, a later hit takes the search wherever it lies.
+        // A search skips at most the bytes before its first candidate, as in a uuid whose hyphen
+        // sits 8 bytes in, so a first candidate closer than the minimum falls back to the ordinary
+        // engine. A hit whose neighboring bytes no match can hold is no candidate, so in
+        // `--ab-12` the first candidate is the third hyphen: with 58 or 62 dots before `--ab-12`,
+        // the third hyphen is 62 or 66 bytes in.
         assertNearStart(
                 "[a-z]+-[0-9]+",
-                List.of("abcdefgh-1234" + filler, ".".repeat(61) + "ab-12" + filler, ".".repeat(62) + "--ab-12" + filler),
-                List.of(".".repeat(62) + "ab-12" + filler, filler + "ab-12", filler + "ab-....cd-12" + filler));
+                List.of("abcdefgh-1234" + filler, ".".repeat(61) + "ab-12" + filler, ".".repeat(58) + "--ab-12" + filler),
+                // A hit ruled out by its neighbors is no candidate, so the first hit that is one
+                // decides, wherever it lies.
+                List.of(".".repeat(62) + "ab-12" + filler, ".".repeat(62) + "--ab-12" + filler, filler + "ab-12", filler + "ab-....cd-12" + filler));
+        // No date ends a day or month in a letter, so the slash of a/1 near the start of a line is
+        // no candidate, and the date further on takes the search.
+        assertNearStart(
+                DATE,
+                List.of("1/2/2024" + filler),
+                List.of("a/1 " + ".".repeat(70) + "12/25/2024" + filler));
         // A longer literal is near at 63 bytes in, and not at 64 or 68, where the near check's read
         // ends inside it.
         assertNearStart(
@@ -564,13 +616,15 @@ public class TestInnerLiteralSearch
                 // Windows long enough for the vector literal scans: a dense one-byte literal, and
                 // pair candidates that fail their verification.
                 "a@b.c x@y ".repeat(110),
-                "Hollys ".repeat(150) + "a Holmes b c@d.e singing")) {
+                "Hollys ".repeat(150) + "a Holmes b c@d.e singing",
+                // Dates, and slashes after letters or before a non-digit, near the start and later.
+                "a/1 on 1/2/2024 x/y 12/25/24 3/4/ 99/99/9999 1/23/456 /1/2 7//8\n".repeat(4))) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, so filler keeps the search
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
