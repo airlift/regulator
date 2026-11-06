@@ -608,7 +608,7 @@ text, so the pair scan rejects little that a first-byte scan would not.
   2^24 instructions. Flattening then charges each instruction it emits 113
   bytes, up to 2^28 - 1 instructions, since a packed capture instruction word
   keeps a 28-bit output. The 113 bytes are the object and array slot, a 2-byte
-  list-head entry, the 31 bytes of no-submatch NFA tables that the first
+  output list id, the 31 bytes of no-submatch NFA tables that the first
   no-submatch NFA search builds, and the 8-byte capture word that compilation
   builds, all of which the program keeps. The 56-byte instruction assumes
   compressed class pointers, which a heap of 32 GB or more keeps; only with
@@ -1685,13 +1685,14 @@ tracks only the slots through the program's highest surviving CAPTURE, so a
 trailing group the simplifier removes costs it nothing.
 
 Upstream gives list heads, and so BitState, only to programs of at most 512
-instructions. Regulator gives list heads to every program with at most 32,767
-lists, so BitState also runs on a larger program whenever the span fits within
-its text limit. A large program, such as a Unicode letter class with a dozen
-captures, otherwise extracted every short match's groups with the NFA, where the
-Rust crate runs its bounded backtracker. The bitmap grows with the list count,
-not the instruction count, and the job stack with the instructions that push
-jobs, so these bounds alone limit the span, as the crate bounds its backtracker.
+instructions. Regulator gives output list ids to every program with at most
+32,767 lists, so BitState also runs on a larger program whenever the span fits
+within its text limit. A large program, such as a Unicode letter class with a
+dozen captures, otherwise extracted every short match's groups with the NFA,
+where the Rust crate runs its bounded backtracker. The bitmap grows with the
+list count, not the instruction count, and the job stack with the instructions
+that push jobs, so these bounds alone limit the span, as the crate bounds its
+backtracker.
 
 ## Matcher-Owned Capture Workspaces
 

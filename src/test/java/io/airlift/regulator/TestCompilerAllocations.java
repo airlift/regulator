@@ -113,7 +113,7 @@ public class TestCompilerAllocations
     {
         // Before flattening, an instruction is charged for its object, its array slot and the
         // flattening pass's scratch. Once flattened, it is charged for its object, its array slot,
-        // its list-head entry and the tables the program keeps for searches. The instance size
+        // its output list id and the tables the program keeps for searches. The instance size
         // checks the object, and the allocations of flattening and of building those tables below
         // check the rest.
         // The 56-byte charge assumes compressed class pointers. Turning them off, which JDK 25 and
@@ -139,8 +139,8 @@ public class TestCompilerAllocations
                 long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
                 int size = program.size();
                 assertThat(size).isLessThanOrEqualTo(unflattenedSize);
-                assertThat(sizeOf(program.listHeads()) - sizeOf(new short[0])).isEqualTo(2L * size);
-                // Flattening allocates the copies, their array, their list heads and its scratch.
+                assertThat(sizeOf(program.outputLists()) - sizeOf(new short[0])).isEqualTo(2L * size);
+                // Flattening allocates the copies, their array, their output list ids and its scratch.
                 long copiesBytes = size * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
                 scratchBytes = Math.min(scratchBytes, (flattenBytes - copiesBytes) / unflattenedSize);
 
