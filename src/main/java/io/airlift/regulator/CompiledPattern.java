@@ -522,6 +522,7 @@ abstract sealed class CompiledPattern
                 0,
                 Map.of(),
                 null,
+                null,
                 null);
     }
 
@@ -598,6 +599,7 @@ abstract sealed class CompiledPattern
                     0,
                     Map.of(),
                     compactBoundedCharacterClass,
+                    null,
                     null);
         }
 
@@ -628,6 +630,12 @@ abstract sealed class CompiledPattern
         // The whole-expression analysis describes the entire expression, so a split-off suffix
         // needs its own length.
         int encodedMatchLength = prefixResult != null ? MatchLength.analyze(suffixRegexp, caseFolding).encoded() : expressionAnalysis.length().encoded();
+
+        // OnePass evaluates Java's `$` and `\Z` and Trino's `$`. The tables of a program that is
+        // one-pass only because of them come off here, so no plan or route counts them, and return
+        // in selectRoutes, after its routes and ahead of the required bytes, only if they fit
+        // beside the forward DFAs.
+        Prog.OnePassTables finalLineEndOnePass = semanticProgram.isOnePassOnlyForFinalLineEnds() ? semanticProgram.releaseOnePass() : null;
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
                 ? null
@@ -872,7 +880,8 @@ abstract sealed class CompiledPattern
                 capturingGroupCount,
                 parsed.capturingGroupNames(),
                 null,
-                requiredBytes);
+                requiredBytes,
+                finalLineEndOnePass);
     }
 
     /// Returns the bytes of `prefix`, sharing the literal sequence's first literal when it holds
@@ -890,8 +899,9 @@ abstract sealed class CompiledPattern
 
     /// Returns the analysis of a pattern with its shape and routes selected. Selection reserves the
     /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
-    /// budget, and of the required bytes from the program that holds the forward DFA budget,
-    /// before any DFA can snapshot it, and builds the table.
+    /// budget, then of the OnePass tables in `finalLineEndOnePass`, which it restores to
+    /// `partialProg`, and of the required bytes from the program that holds the forward DFA
+    /// budget, before any DFA can snapshot it, and builds the table.
     private static Analysis selectRoutes(
             int flags,
             long maxMemory,
@@ -910,7 +920,8 @@ abstract sealed class CompiledPattern
             int capturingGroupCount,
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass,
-            RequiredBytes requiredBytes)
+            RequiredBytes requiredBytes,
+            Prog.OnePassTables finalLineEndOnePass)
     {
         // The shape full-Slice find takes, in the order each route was added. A pattern whose find
         // runs the ordinary engine on the forward program alone is general, and only a general
@@ -960,17 +971,24 @@ abstract sealed class CompiledPattern
                 general = false;
             }
         }
-        // The required bytes only save work, so they give way. They are reserved after the
-        // routes above, from the program that holds the forward DFA budget, the lowered program
-        // where there is one, and only where each forward DFA that could initialize still can;
-        // otherwise the pattern keeps no check. A frontend route reserved later, Trino's
-        // ordered-literal matcher, is charged ahead of them, and they are judged again after it.
-        // A pattern with a single-byte table keeps none: its group-zero matchers find on the
-        // table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a check ahead of the
-        // table would scan such a window twice.
+        // After the routes above, the OnePass tables build released and then the required bytes
+        // take their memory from the program that holds the forward DFA budget, the lowered
+        // program where there is one. Each is kept only where every forward DFA that could
+        // initialize still can; see costsDfaInitialization. The tables come after every plan and
+        // route, so they change none of them, and the literal set's DFA checks below give the
+        // same answers with or without them. A program that does not keep its tables runs on
+        // BitState or the NFA. The required bytes only save work, so they give way to the tables
+        // too, and a pattern they do not fit keeps no check. A frontend route reserved later,
+        // Trino's ordered-literal matcher, is charged ahead of the required bytes, and they are
+        // judged again after it. A pattern with a single-byte table keeps none: its group-zero
+        // matchers find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a
+        // check ahead of the table would scan such a window twice.
+        Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
+        if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
+            partialProg.restoreOnePass(finalLineEndOnePass);
+        }
         RequiredBytes reservedRequiredBytes = null;
-        Prog requiredBytesProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
-        if (requiredBytes != null && singleByteMatcher == null && tryReserveBesideForwardDfas(requiredBytesProgram, requiredBytes.estimatedRetainedSize())) {
+        if (requiredBytes != null && singleByteMatcher == null && tryReserveBesideForwardDfas(forwardBudgetProgram, requiredBytes.estimatedRetainedSize())) {
             reservedRequiredBytes = requiredBytes;
         }
         boolean ordinaryShortMatch = false;
