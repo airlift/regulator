@@ -20,6 +20,35 @@ Do not start speculative optimization work. A new optimization requires either
 a material gap in the latest published release campaign or representative
 production evidence.
 
+An optimization that meets the bar below adds an entry to the
+[optimization catalog](reference/OPTIMIZATION_CATALOG.md) in the same change:
+a `###` section in the category that fits it, giving its Origin, Where,
+Applies when, and What it does. Search for prior art before writing the
+Origin, and credit any earlier source with the labels the catalog defines. An
+entry cites the [registry](reference/OPTIMIZATION_REGISTRY.md) IDs of the RE2
+mechanisms it ports or changes, adding a registry entry when a mechanism has
+none. An RE2 mechanism used as ported is listed under
+[RE2 optimizations used as ported](reference/OPTIMIZATION_CATALOG.md#re2-optimizations-used-as-ported)
+with where it lives, which leaves its trigger to the registry. A change that
+alters or removes an optimization updates or deletes its entry.
+
+An entry needs all three of these:
+
+- It is a mechanism: it skips work, does work in bulk, or swaps in a cheaper
+  method.
+- It has a measured win on a family of benchmark rows, cited in the entry.
+- Someone building another regex engine would want to know about it.
+
+Lean toward an entry when another engine's author would recognize the
+technique as theirs, so the catalog credits it rather than appearing to claim
+it; a small borrowed detail does not count. A gate, guard, or fallback is a
+clause of the Applies when of the entry it serves, and a variant of an idea
+joins that idea's entry, keeping its credit in the Origin. What the JVM
+provides, such as the choice of vector width, gets a sentence in its section's
+introduction. Defaults, budgets, limits, safety bounds, and other
+configuration go in the [API guide](reference/REGULATOR_API.md). A minor
+technique that misses the bar gets no entry.
+
 ## Protected areas
 
 Treat these as performance-sensitive unless analysis proves otherwise:
