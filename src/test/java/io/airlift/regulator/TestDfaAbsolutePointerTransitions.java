@@ -48,7 +48,7 @@ public class TestDfaAbsolutePointerTransitions
     {
         assertThatThrownBy(() -> runProbe(false, Duration.ofNanos(1)))
                 .isInstanceOf(AssertionError.class)
-                .hasMessageContaining("native pointer probe timed out");
+                .hasMessageContaining("pointer probe timed out");
     }
 
     private static ProbeResult runProbe(boolean enableNativeAccess)
@@ -64,8 +64,8 @@ public class TestDfaAbsolutePointerTransitions
         command.add(System.getProperty("java.home") + "/bin/java");
         if (enableNativeAccess) {
             command.add("--enable-native-access=ALL-UNNAMED");
-            command.add("-Dio.airlift.regulator.dfa.native-reader-probe=true");
         }
+        command.add("-Dio.airlift.regulator.dfa.pointer-reader-probe=true");
         command.add("--illegal-native-access=deny");
         command.add("--add-modules");
         command.add("jdk.incubator.vector");
@@ -74,7 +74,7 @@ public class TestDfaAbsolutePointerTransitions
         command.add(DfaAbsolutePointerProbe.class.getName());
         command.add(Boolean.toString(enableNativeAccess));
 
-        Path output = Files.createTempFile("regulator-native-probe-", ".log");
+        Path output = Files.createTempFile("regulator-pointer-probe-", ".log");
         try {
             ProcessBuilder processBuilder = new ProcessBuilder(command)
                     .redirectErrorStream(true)
@@ -83,14 +83,14 @@ public class TestDfaAbsolutePointerTransitions
             Process process = processBuilder.start();
             try {
                 assertThat(process.waitFor(timeout))
-                        .as("native pointer probe timed out: %s", Files.readString(output))
+                        .as("pointer probe timed out: %s", Files.readString(output))
                         .isTrue();
                 return new ProbeResult(process.exitValue(), Files.readString(output, StandardCharsets.UTF_8));
             }
             finally {
                 if (process.isAlive()) {
                     process.destroyForcibly();
-                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("native pointer probe did not terminate").isTrue();
+                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("pointer probe did not terminate").isTrue();
                 }
             }
         }

@@ -3,12 +3,14 @@
 `shard-dispatch.tsv` assigns each shard's rows to routes and systems.
 `run-shard.sh` measures one route, and `run-unit.sh` runs it once for each
 route a measured group of a [work unit](#work-units) needs, keeping route
-artifacts under `routes/<route>`. Odd replicas run `native-access` first, while
-even replicas run `object-row` first, so route startup and thermal effects do
-not systematically favor one implementation. Expensive pinned Trino/Joni
-preparation and the installed native comparator runners are shared through
-`BASELINE_SHARED_WORK_DIR`; measurements and semantic receipts are never shared
-between routes.
+artifacts under `routes/<route>`. The `object-row` route runs with native access
+disabled; its DFA uses the heap pointer table, with object rows only as its
+fallback, and keeps its name for continuity with recorded results. Odd replicas
+run `native-access` first, while even replicas run `object-row` first, so route
+startup and thermal effects do not systematically favor one implementation.
+Expensive pinned Trino/Joni preparation and the installed native comparator
+runners are shared through `BASELINE_SHARED_WORK_DIR`; measurements and semantic
+receipts are never shared between routes.
 
 [Freezing a candidate](../aws/README.md#freeze-a-candidate) creates an
 immutable benchmark ref and records that candidate's commit, complete tree,
@@ -243,7 +245,7 @@ section covers baseline units.
   keeps the route's smoke windows. A method holding a value JMH cannot select
   runs whole with the handler's own arguments.
 - Odd replicas run the unit's groups in group order, and within each group
-  native access, then object row, with forward comparator order; even
+  native access enabled, then disabled, with forward comparator order; even
   replicas reverse all three, as the unit ID's order rule binds. A worker
   resuming a replica keeps that order for the groups left. A comparator order
   set in the environment that disagrees is an error.
@@ -261,8 +263,8 @@ section covers baseline units.
   first unit stores the reports and log under the shared work directory,
   keyed by host epoch, shard, route, handler, tests, candidate and manifest
   identity, and classes archive; a later unit uses them only when every file
-  matches the stored SHA-256 receipt. The native-access probe, preparations,
-  and differential verifiers still run for every unit.
+  matches the stored SHA-256 receipt. The DFA pointer probe, preparations, and
+  differential verifiers still run for every unit and route.
 - Outside planning, `run-unit.sh` requires the attempt's host session,
   `RE2_CAMPAIGN_HOST_SESSION`, and lease sequence,
   `RE2_CAMPAIGN_LEASE_SEQUENCE`; the region defaults to the availability

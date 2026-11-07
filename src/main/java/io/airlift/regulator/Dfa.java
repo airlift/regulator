@@ -34,6 +34,7 @@ import java.util.function.IntPredicate;
 
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfIntArray;
+import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -42,8 +43,8 @@ import static java.util.Objects.requireNonNull;
 ///
 /// Ordinary transitions use compact object-reference rows with an integer
 /// sidecar for abnormal transitions. Eligible long forward searches can use
-/// either a bounded depth-two table or an optional absolute-pointer
-/// sidecar, while object rows remain authoritative for every fallback.
+/// either a bounded depth-two table or an optional pointer sidecar, while
+/// object rows remain authoritative for every fallback.
 final class Dfa
 {
     static final long MAX_PAIRED_TRANSITION_MEMORY = 64 * 1024;
@@ -78,6 +79,19 @@ final class Dfa
     private static final long ABSOLUTE_POINTER_DEAD_TAG = 2;
     private static final long ABSOLUTE_POINTER_FULL_MATCH_TAG = 3;
     private static final long ABSOLUTE_POINTER_RETRY_OBJECT = Long.MIN_VALUE + 2;
+    // One pointer-table form serves the whole JVM, so the pointer loops see one segment kind. With
+    // native access a table is native memory whose entries are absolute addresses, read through a
+    // segment spanning the whole address space. Without it a table is a `long[]` read through its
+    // heap segment, whose base address is zero, so an entry is the byte offset of its target row in
+    // the array, with the same tags; offset zero is the reserved row before the first state, so
+    // zero still means uncomputed. A failed native allocation falls back to object rows, never to a
+    // heap table.
+    //
+    // Entries of both forms are eight-byte aligned and use plain access, which 64-bit HotSpot
+    // performs as one access, so an entry never tears. With JDK 25 C2 on AArch64, opaque heap
+    // access kept the segment's field loads and checks inside the loop. "Bounded DFA Pointer
+    // Transition Table" in REGULATOR_DECISIONS.md gives the full argument.
+    private static final boolean HEAP_POINTER_TABLES = !nativeAccessEnabled();
     static final int MAX_CANDIDATE_START_TRANSITIONS = 128;
     // A shorter unmatched check costs less to repeat than giving up the cursor for the rest of the reset.
     static final int MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES = 16;
@@ -119,8 +133,8 @@ final class Dfa
     private static final StartStateAllocationException START_STATE_ALLOCATION_FAILED = new StartStateAllocationException();
     @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final TestingFailureError TESTING_FAILURE = new TestingFailureError();
-    private static final NativeReaderProbe NATIVE_READER_PROBE = Boolean.getBoolean("io.airlift.regulator.dfa.native-reader-probe")
-            ? new NativeReaderProbe()
+    private static final PointerReaderProbe POINTER_READER_PROBE = Boolean.getBoolean("io.airlift.regulator.dfa.pointer-reader-probe")
+            ? new PointerReaderProbe()
             : null;
 
     private Dfa() {}
@@ -2484,12 +2498,12 @@ final class Dfa
         long transitionRowAddress = tableAddress + ((long) startOffset * Long.BYTES);
         boolean matched = initialMatchBoundary >= 0;
         int lastMatchBoundary = initialMatchBoundary;
-        NativeReaderProbe nativeReaderProbe = NATIVE_READER_PROBE;
-        if (nativeReaderProbe != null) {
-            nativeReaderProbe.pauseIfTarget();
+        PointerReaderProbe pointerReaderProbe = POINTER_READER_PROBE;
+        if (pointerReaderProbe != null) {
+            pointerReaderProbe.pauseIfTarget();
         }
         try {
-            MemorySegment addressSpace = AbsoluteAddressSpace.EVERYTHING;
+            MemorySegment addressSpace = HEAP_POINTER_TABLES ? absolutePointers.segment() : AbsoluteAddressSpace.EVERYTHING;
             byte[] byteMap = dfa.bytemap;
             for (; position < textEnd; position++) {
                 long transition = addressSpace.get(
@@ -2537,7 +2551,7 @@ final class Dfa
             }
         }
         finally {
-            // Raw addresses do not keep their automatic-arena owner reachable.
+            // Raw native addresses do not keep their automatic-arena owner reachable.
             Reference.reachabilityFence(absolutePointers);
         }
 
@@ -4342,7 +4356,7 @@ final class Dfa
         boolean matched = false;
         int lastMatchBoundary = -1;
         try {
-            MemorySegment addressSpace = AbsoluteAddressSpace.EVERYTHING;
+            MemorySegment addressSpace = HEAP_POINTER_TABLES ? absolutePointers.segment() : AbsoluteAddressSpace.EVERYTHING;
             byte[] byteMap = dfa.bytemap;
             for (; position > textBegin; position--) {
                 long transition = addressSpace.get(
@@ -4389,7 +4403,7 @@ final class Dfa
             return finalizeResult(textBegin, textEnd, false, matched, lastMatchBoundary, false);
         }
         finally {
-            // Raw addresses do not keep their automatic-arena owner reachable.
+            // Raw native addresses do not keep their automatic-arena owner reachable.
             Reference.reachabilityFence(absolutePointers);
         }
     }
@@ -4551,6 +4565,9 @@ final class Dfa
         }
     }
 
+    // A pointer table: a native segment owned by its automatic arena, or a heap segment over a
+    // `long[]` with no arena and base address zero. `allocatedBytes` is its charge, the native bytes
+    // or the array's size.
     private record AbsolutePointerTransitions(
             Arena arena,
             MemorySegment segment,
@@ -4559,8 +4576,8 @@ final class Dfa
             long allocatedBytes) {}
 
     // The enlarged pointer table a growth will allocate, and the charge it adds. An
-    // `allocatedBytes` of zero means the superseded-segment cap is full: the table is withheld
-    // rather than enlarged, and `memoryDelta` refunds the current segment's charge.
+    // `allocatedBytes` of zero means the native superseded-segment cap is full: the table is
+    // withheld rather than enlarged, and `memoryDelta` refunds the current segment's charge.
     private record AbsolutePointerGrowthSize(int entryCapacity, long allocatedBytes, long memoryDelta)
     {
         boolean withheld()
@@ -4571,17 +4588,18 @@ final class Dfa
 
     // A growth whose transitions are null withholds the table instead: the enlarged segment was
     // not allocated, and the delta refunds the current segment's charge. `allocationFailed` tells
-    // a failed allocation from a full cap.
+    // a failed allocation from a full native cap.
     private record AbsolutePointerGrowth(
             AbsolutePointerTransitions transitions,
             int transitionCount,
             long memoryDelta,
             boolean allocationFailed) {}
 
-    // A pointer table a reset or growth superseded, enqueued when the collector finds the table
-    // unreachable. Its DFA links it until then, so it stays reachable, and releases its bytes from
-    // the DFA's count when it next checks the cap. The native memory itself is freed by the
-    // automatic arena's cleaner in the JDK; this reference releases only the DFA's count of it.
+    // A reference to a native pointer table a reset or growth superseded. The collector enqueues
+    // this reference once the superseded native table is unreachable; the DFA links the reference
+    // until then, so it stays reachable, and releases the table's bytes from its count when it next
+    // checks the cap. The native memory itself is freed by the automatic arena's cleaner in the
+    // JDK; this reference releases only the DFA's count of it.
     private static final class SupersededAbsolutePointerReference
             extends PhantomReference<AbsolutePointerTransitions>
     {
@@ -4751,6 +4769,8 @@ final class Dfa
         return state.offset();
     }
 
+    // Loaded only with native access, because `reinterpret` is restricted: heap pointer tables read
+    // through their own segment and never initialize this holder.
     @SuppressWarnings("restricted")
     private static final class AbsoluteAddressSpace
     {
@@ -4759,14 +4779,14 @@ final class Dfa
         private AbsoluteAddressSpace() {}
     }
 
-    private static final class NativeReaderProbe
+    private static final class PointerReaderProbe
     {
         private ProbeSession session;
 
         synchronized void arm(Thread target)
         {
             if (session != null) {
-                throw new IllegalStateException("native reader probe is already armed");
+                throw new IllegalStateException("pointer reader probe is already armed");
             }
             session = new ProbeSession(requireNonNull(target, "target is null"));
         }
@@ -4786,7 +4806,7 @@ final class Dfa
             }
             catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new AssertionError("native reader probe interrupted", e);
+                throw new AssertionError("pointer reader probe interrupted", e);
             }
         }
 
@@ -4803,7 +4823,7 @@ final class Dfa
         synchronized void release()
         {
             if (session == null) {
-                throw new IllegalStateException("native reader probe is not armed");
+                throw new IllegalStateException("pointer reader probe is not armed");
             }
             session.release().countDown();
             session = null;
@@ -4822,20 +4842,20 @@ final class Dfa
         }
     }
 
-    static void armNativeReaderProbeForTesting(Thread target)
+    static void armPointerReaderProbeForTesting(Thread target)
     {
-        requireNonNull(NATIVE_READER_PROBE, "native reader probe is disabled").arm(target);
+        requireNonNull(POINTER_READER_PROBE, "pointer reader probe is disabled").arm(target);
     }
 
-    static boolean awaitNativeReaderProbeForTesting(long timeout, TimeUnit unit)
+    static boolean awaitPointerReaderProbeForTesting(long timeout, TimeUnit unit)
             throws InterruptedException
     {
-        return requireNonNull(NATIVE_READER_PROBE, "native reader probe is disabled").awaitReached(timeout, unit);
+        return requireNonNull(POINTER_READER_PROBE, "pointer reader probe is disabled").awaitReached(timeout, unit);
     }
 
-    static void releaseNativeReaderProbeForTesting()
+    static void releasePointerReaderProbeForTesting()
     {
-        requireNonNull(NATIVE_READER_PROBE, "native reader probe is disabled").release();
+        requireNonNull(POINTER_READER_PROBE, "pointer reader probe is disabled").release();
     }
 
     record CacheSnapshot(
@@ -4884,7 +4904,7 @@ final class Dfa
             int pairedRows,
             long pairedTransitionMemory,
             long pairedContentVersion,
-            long absolutePointerBaseAddress,
+            Object absolutePointerStorage,
             int absolutePointerEntryCapacity,
             long absolutePointerMemory,
             int absolutePointerTransitionCount) {}
@@ -5492,13 +5512,11 @@ final class Dfa
         {
             EXCLUSIVE_ADMISSION,
             EXCLUSIVE_TEARDOWN,
-            NATIVE_TRANSITION_GROWTH,
-            // Fails a growth's pointer table allocation as a native memory shortage does, without
-            // throwing.
-            NATIVE_TRANSITION_GROWTH_ALLOCATION,
-            // Fails the reset's pointer table allocation as a native memory shortage does, without
-            // throwing.
-            NATIVE_TRANSITION_RESET,
+            POINTER_TABLE_GROWTH,
+            // Fails a growth's pointer table allocation as a memory shortage does, without throwing.
+            POINTER_TABLE_GROWTH_ALLOCATION,
+            // Fails the reset's pointer table allocation as a memory shortage does, without throwing.
+            POINTER_TABLE_RESET,
             TRANSITION_ARRAY_GROWTH,
             STATE_DATA_ARRAY_GROWTH,
             STATE_REFERENCE_ARRAY_GROWTH,
@@ -5574,8 +5592,8 @@ final class Dfa
         // DFA was the table's.
         private boolean absolutePointerTransitionsPublished;
         private boolean absolutePointerTransitionsUnavailable;
-        // The requested pointer table is absent from the current tables: superseded segments still
-        // await collection, or its native memory could not be allocated. It stays requested, and
+        // The requested pointer table is absent from the current tables: superseded native segments
+        // still await collection, or its memory could not be allocated. It stays requested, and
         // paired rows stay disabled, until an exclusive search allocates it again or a search
         // about to give up gives it back, so a warm cache may run on object rows until its next
         // exclusive search or reset.
@@ -5590,8 +5608,11 @@ final class Dfa
         // The reset count once the first reset after that release has run; from there the tables
         // hold no pointer table.
         private int releasedAbsolutePointerResetCount;
-        // Pointer tables a reset or growth superseded, linked until the collector finds them
-        // unreachable and enqueues them, and their native bytes not yet released from the count.
+        // The first pointer table allocation's one wait, for a search that computed no transition,
+        // is spent; later allocations, including after a reset, do not wait.
+        private boolean absolutePointerTransitionDeferralUsed;
+        // References to native pointer tables a reset or growth superseded, linked until the
+        // collector enqueues them, and their native bytes not yet released from the count.
         // The list and count are guarded by the cache mutation lock.
         private final ReferenceQueue<AbsolutePointerTransitions> unreachableAbsolutePointerTables = new ReferenceQueue<>();
         private SupersededAbsolutePointerReference supersededAbsolutePointerReferences;
@@ -6294,14 +6315,14 @@ final class Dfa
             AbsolutePointerGrowth absolutePointerGrowth = null;
             if (absolutePointerGrowthSize != null) {
                 absolutePointerGrowth = allocateAbsolutePointerTransitionGrowth(absolutePointerGrowthSize, existingPointers, transitions);
-                endTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
+                endTestingFailurePoint(TestingFailurePoint.POINTER_TABLE_GROWTH);
             }
 
             // Every allocation precedes the first write to the DFA, so a failure that propagates
             // leaves the cache and its charges as they were; a failed pointer-table allocation
             // withholds that table. The enlarged pointer segment is allocated last, after the Java
-            // arrays and state; only small objects (new `CacheTables` and the superseded reference)
-            // follow it, and an error in them abandons the segment uncounted.
+            // arrays and state; only small objects (new `CacheTables` and, for a native table, the
+            // superseded reference) follow it, and an error in them abandons the segment uncounted.
             CacheTables newTables = tables;
             if (releasePairedTransitions) {
                 newTables = newTables.withPairedStateRefArrays(null);
@@ -6401,7 +6422,7 @@ final class Dfa
             if (tables.absolutePointerTransitions != null || absolutePointerTransitionsUnavailable || absolutePointerTransitionsWithheld) {
                 return tables;
             }
-            if (!nativeAccessEnabled() || kind == Kind.MANY_MATCH || stateBudget == Long.MAX_VALUE) {
+            if (kind == Kind.MANY_MATCH || stateBudget == Long.MAX_VALUE) {
                 absolutePointerTransitionsUnavailable = true;
                 return tables;
             }
@@ -6450,10 +6471,10 @@ final class Dfa
             return absolutePointers == null ? 0 : absolutePointers.allocatedBytes();
         }
 
-        long absolutePointerTransitionBaseAddress()
+        MemorySegment absolutePointerTransitionSegment()
         {
             AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
-            return absolutePointers == null ? 0 : absolutePointers.baseAddress();
+            return absolutePointers == null ? null : absolutePointers.segment();
         }
 
         WeakReference<Object> absolutePointerOwnerReferenceForTesting()
@@ -6781,7 +6802,8 @@ final class Dfa
 
         // Allocates the requested pointer table, or allocates a withheld one again. Sizing that does
         // not fit the budget makes the table unavailable when it is first requested; a withheld table
-        // was already requested and waits for a reset to free budget instead.
+        // was already requested and waits for a reset to free budget instead. The first allocation
+        // may wait once for a search that computes a transition.
         private void allocateAbsolutePointerTransitions()
         {
             CacheTables tables = this.tables;
@@ -6790,6 +6812,18 @@ final class Dfa
                     absolutePointerTransitionsUnavailable ||
                     absolutePointerTransitionAllocationFailed ||
                     tables.pairedStateRefArrays != null) {
+                return;
+            }
+            // A search that ended before computing a transition, such as one whose word boundary
+            // met a byte outside ASCII at its first byte, gave pairing nothing to evaluate. The
+            // request stays, so the next exclusive search chooses between paired rows and the
+            // table. It waits only once, so a DFA that never computes a transition does not retry
+            // every search exclusively.
+            if (!absolutePointerTransitionDeferralUsed &&
+                    pairedTransitionsRequested &&
+                    !pairedTransitionsDisabled &&
+                    computedNoTransition(tables.transitions)) {
+                absolutePointerTransitionDeferralUsed = true;
                 return;
             }
 
@@ -6801,15 +6835,16 @@ final class Dfa
                 long currentRowCount = nextFreeOffset / nextSize;
                 long minimumStateMemory = stateObjectMemory(0);
                 // Reserve enough budget for the Java states addressable by the sidecar instead
-                // of eagerly consuming the complete DFA budget for a small graph.
+                // of eagerly consuming the complete DFA budget for a small graph. A heap table's
+                // array header is charged once, outside the per-row cost.
                 long compatibleRowCount = Math.addExact(
-                        availableStateMemory,
+                        availableStateMemory - absolutePointerTableBytes(0),
                         Math.multiplyExact(currentRowCount, minimumStateMemory)) /
                         Math.addExact(rowBytes, minimumStateMemory);
                 rowCapacity = Math.min(
                         maxTransitionsLength / nextSize,
                         Math.min(compatibleRowCount, Math.max(2, currentRowCount * 2)));
-                allocatedBytes = Math.multiplyExact(rowCapacity, rowBytes);
+                allocatedBytes = absolutePointerTableBytes(rowCapacity);
             }
             catch (ArithmeticException ignored) {
                 if (!absolutePointerTransitionsWithheld) {
@@ -6848,14 +6883,25 @@ final class Dfa
             pairedTransitionsDisabled = true;
         }
 
+        // Whether no state's row, after the reserved row 0, holds a computed transition.
+        private boolean computedNoTransition(int[] transitions)
+        {
+            for (int transitionIndex = nextSize; transitionIndex < nextFreeOffset; transitionIndex++) {
+                if (transitions[transitionIndex] != T_UNCOMPUTED) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // Returns the growth's size and charge, so the budget check sees it before the Java
-        // allocations; a zero-byte size withholds the table when superseded segments fill their cap;
-        // null means the budget cannot hold the growth.
+        // allocations; a zero-byte size withholds the table when superseded native segments fill
+        // their cap; null means the budget cannot hold the growth.
         private AbsolutePointerGrowthSize sizeAbsolutePointerTransitionGrowth(int requiredEntryCapacity, long reservedStateMemory)
         {
             AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers == null || requiredEntryCapacity <= existingPointers.entryCapacity()) {
-                throw new IllegalStateException("native transition growth is not required");
+                throw new IllegalStateException("pointer table growth is not required");
             }
 
             long rowBytes;
@@ -6870,16 +6916,17 @@ final class Dfa
                 long minimumStateMemory = stateObjectMemory(0);
                 long remainingMemory = Math.max(0, availableStateMemory - reservedStateMemory);
                 // Preserve enough budget for the minimum Java state behind every additional
-                // native row. Failure means ordinary DFA budget exhaustion, not an object-row
+                // pointer row. A heap table's array header is charged once, outside the per-row
+                // cost. Failure means ordinary DFA budget exhaustion, not an object-row
                 // representation change.
                 long compatibleRowCount = Math.addExact(
                         remainingMemory,
                         Math.addExact(
-                                existingPointers.allocatedBytes(),
+                                existingPointers.allocatedBytes() - absolutePointerTableBytes(0),
                                 Math.multiplyExact(requiredRowCount, minimumStateMemory))) /
                         Math.addExact(rowBytes, minimumStateMemory);
                 rowCapacity = Math.min(maximumRowCount, Math.min(compatibleRowCount, currentRowCount * 2));
-                allocatedBytes = Math.multiplyExact(rowCapacity, rowBytes);
+                allocatedBytes = absolutePointerTableBytes(rowCapacity);
             }
             catch (ArithmeticException ignored) {
                 return null;
@@ -6888,8 +6935,8 @@ final class Dfa
                 return null;
             }
 
-            // When superseded segments fill their cap, the growth withholds the table and the state is
-            // allocated on object rows.
+            // When superseded native segments fill their cap, the growth withholds the table and
+            // the state is allocated on object rows.
             if (!supersededAbsolutePointerMemoryAllows(allocatedBytes, existingPointers.allocatedBytes())) {
                 return new AbsolutePointerGrowthSize(0, 0, -existingPointers.allocatedBytes());
             }
@@ -6909,11 +6956,11 @@ final class Dfa
                 AbsolutePointerTransitions existingPointers,
                 int[] transitions)
         {
-            beginTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH);
+            beginTestingFailurePoint(TestingFailurePoint.POINTER_TABLE_GROWTH);
             if (size.withheld()) {
                 return new AbsolutePointerGrowth(null, 0, size.memoryDelta(), false);
             }
-            AbsolutePointerTransitions expandedPointers = consumeTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_GROWTH_ALLOCATION)
+            AbsolutePointerTransitions expandedPointers = consumeTestingFailurePoint(TestingFailurePoint.POINTER_TABLE_GROWTH_ALLOCATION)
                     ? null
                     : allocateAbsolutePointerTable(size.allocatedBytes(), size.entryCapacity());
             if (expandedPointers == null) {
@@ -6926,23 +6973,32 @@ final class Dfa
         }
 
         // Whether a new pointer table of `allocatedBytes` may be allocated while one of
-        // `replacedBytes` is superseded. Superseded segments are freed only by the garbage collector,
-        // which nothing here can wait for, so the counted ones may total at most twice the new one,
-        // counting the one it replaces: with the new one, this DFA's counted native memory stays
-        // within three times the newest segment. A segment is counted until the collector finds it
-        // unreachable, and the JDK frees it later on its common cleaner, so the native memory
-        // actually held stays within that bound only up to the cleaner's backlog. The count is
-        // released here, so it may briefly over-count.
+        // `replacedBytes` is superseded. Superseded native segments are freed only by the garbage
+        // collector, which nothing here can wait for, so the counted ones may total at most twice
+        // the new one, counting the one it replaces: with the new one, this DFA's counted native
+        // memory stays within three times the newest segment. A segment is counted until the
+        // collector finds it unreachable, and the JDK frees it later on its common cleaner, so the
+        // native memory actually held stays within that bound only up to the cleaner's backlog. The
+        // count is released here, so it may briefly over-count.
         private boolean supersededAbsolutePointerMemoryAllows(long allocatedBytes, long replacedBytes)
         {
+            if (HEAP_POINTER_TABLES) {
+                // A superseded heap table is ordinary garbage that only in-flight searches hold, like
+                // superseded Java tables, so it is neither counted nor capped.
+                return true;
+            }
             releaseUnreachableAbsolutePointerTables();
             return supersededAbsolutePointerMemory + replacedBytes <= 2 * allocatedBytes;
         }
 
-        // Counts a pointer table that is no longer in the current tables until the collector finds it
-        // unreachable. The reference is the only allocation, so a failed one leaves the count as it was.
+        // Counts a native pointer table that is no longer in the current tables until the collector
+        // finds it unreachable. The reference is the only allocation, so a failed one leaves the
+        // count as it was.
         private void supersedeAbsolutePointerTransitions(AbsolutePointerTransitions absolutePointers)
         {
+            if (HEAP_POINTER_TABLES) {
+                return;
+            }
             SupersededAbsolutePointerReference reference = new SupersededAbsolutePointerReference(absolutePointers, unreachableAbsolutePointerTables);
             reference.next = supersededAbsolutePointerReferences;
             if (supersededAbsolutePointerReferences != null) {
@@ -6952,8 +7008,9 @@ final class Dfa
             supersededAbsolutePointerMemory += reference.allocatedBytes;
         }
 
-        // Releases the count of each superseded pointer table the collector has found unreachable,
-        // and unlinks its reference. Runs only under the cache mutation lock, never on a search path.
+        // Releases the count of each superseded native pointer table the collector has found
+        // unreachable, and unlinks its reference. Runs only under the cache mutation lock, never on
+        // a search path.
         private void releaseUnreachableAbsolutePointerTables()
         {
             SupersededAbsolutePointerReference reference;
@@ -6973,15 +7030,31 @@ final class Dfa
             }
         }
 
-        // A zeroed pointer table, or null when its native memory cannot be allocated.
+        // The charge for a pointer table of `rowCount` rows: its native bytes, or the real size of its
+        // heap array, header included.
+        private long absolutePointerTableBytes(long rowCount)
+        {
+            long entryCount = Math.multiplyExact(rowCount, nextSize);
+            if (HEAP_POINTER_TABLES) {
+                return sizeOfLongArray(toIntExact(entryCount));
+            }
+            return Math.multiplyExact(entryCount, Long.BYTES);
+        }
+
+        // A zeroed pointer table, or null when its memory cannot be allocated.
         private static AbsolutePointerTransitions allocateAbsolutePointerTable(long allocatedBytes, int entryCapacity)
         {
-            Arena arena;
+            Arena arena = null;
             MemorySegment segment;
             try {
-                arena = Arena.ofAuto();
-                segment = arena.allocate(allocatedBytes, Long.BYTES);
-                segment.fill((byte) 0);
+                if (HEAP_POINTER_TABLES) {
+                    segment = MemorySegment.ofArray(new long[entryCapacity]);
+                }
+                else {
+                    arena = Arena.ofAuto();
+                    segment = arena.allocate(allocatedBytes, Long.BYTES);
+                    segment.fill((byte) 0);
+                }
             }
             catch (RuntimeException | OutOfMemoryError ignored) {
                 return null;
@@ -7750,7 +7823,7 @@ final class Dfa
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
                     pairedContentVersion,
-                    absolutePointers == null ? 0 : absolutePointers.baseAddress(),
+                    absolutePointers == null ? null : absolutePointers.segment(),
                     absolutePointers == null ? 0 : absolutePointers.entryCapacity(),
                     absolutePointers == null ? 0 : absolutePointers.allocatedBytes(),
                     absolutePointerTransitionCount);
@@ -7774,14 +7847,14 @@ final class Dfa
                 return;
             }
             if (switch (testingFailurePoint) {
-                case NATIVE_TRANSITION_GROWTH,
+                case POINTER_TABLE_GROWTH,
                      TRANSITION_ARRAY_GROWTH,
                      STATE_DATA_ARRAY_GROWTH,
                      STATE_REFERENCE_ARRAY_GROWTH,
                      SELF_LOOP_ARRAY_GROWTH,
                      STATE_REFERENCE_ROW_ALLOCATION,
                      STATE_CACHE_INSERTION -> true;
-                case EXCLUSIVE_ADMISSION, EXCLUSIVE_TEARDOWN, NATIVE_TRANSITION_GROWTH_ALLOCATION, NATIVE_TRANSITION_RESET -> false;
+                case EXCLUSIVE_ADMISSION, EXCLUSIVE_TEARDOWN, POINTER_TABLE_GROWTH_ALLOCATION, POINTER_TABLE_RESET -> false;
             }) {
                 testingSnapshotBeforeFailure = failureAtomicitySnapshot();
             }
@@ -7875,22 +7948,22 @@ final class Dfa
         // Publishes empty tables at the initial capacity. Searches still reading the superseded
         // tables keep them, unchanged, until they finish; the superseded tables are no longer
         // charged. A pointer table moves to a new segment of the same size, or is withheld when
-        // superseded segments fill their cap or the segment cannot be allocated; a table a search
-        // gave back is dropped.
+        // superseded native segments fill their cap or the segment cannot be allocated; a table a
+        // search gave back is dropped.
         private void resetCache()
         {
             // Every allocation precedes the first write to the DFA, so a failure that propagates
             // leaves the cache as it was; a failed pointer-table allocation withholds that table.
             // The pointer segment is allocated after the Java tables; only small objects (new
-            // `CacheTables` and the superseded reference) follow it, and an error in them abandons
-            // the segment uncounted.
+            // `CacheTables` and, for a native table, the superseded reference) follow it, and an
+            // error in them abandons the segment uncounted.
             CacheTables resetTables = newCacheTables(initialStateCapacity);
             AbsolutePointerTransitions supersededPointers = tables.absolutePointerTransitions;
             AbsolutePointerTransitions absolutePointers = null;
             boolean allocationFailed = false;
             if (supersededPointers != null && !absolutePointerTransitionsReleased) {
                 long allocatedBytes = supersededPointers.allocatedBytes();
-                if (consumeTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_RESET)) {
+                if (consumeTestingFailurePoint(TestingFailurePoint.POINTER_TABLE_RESET)) {
                     allocationFailed = true;
                 }
                 else if (supersededAbsolutePointerMemoryAllows(allocatedBytes, allocatedBytes)) {
@@ -7942,8 +8015,9 @@ final class Dfa
         // Called under the cache mutation lock by a search or an exclusive count that would give up
         // for resetting too often. A DFA that holds a pointer table, or has one withheld, gives the
         // table back instead, so later resets leave room for the states object rows hold, and the
-        // search goes on; it gives up only if it resets that often again. Whether the table is held
-        // or withheld depends on when the collector finds superseded tables, so both give it back.
+        // search goes on; it gives up only if it resets that often again. Whether a native table is
+        // held or withheld depends on when the collector finds superseded tables, and either form is
+        // withheld when its allocation fails, so both give it back.
         // A DFA that never requested a table, or could not size one, has nothing to give back.
         // Returns whether the search goes on.
         boolean releaseAbsolutePointerTransitionsForSlowReset()

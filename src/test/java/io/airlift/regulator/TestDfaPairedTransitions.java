@@ -116,16 +116,11 @@ public class TestDfaPairedTransitions
                 .isEqualTo(availableStateMemory + pairedTransitionMemory - allocatedAbsolutePointerMemory);
 
         dfa.resetCacheExternal();
-        boolean absolutePointersActive = dfa.absolutePointerTransitionMemory() > 0;
-        assertThat(dfa.pairedTransitionsDisabled()).isEqualTo(absolutePointersActive);
+        assertThat(dfa.absolutePointerTransitionMemory()).isPositive();
+        assertThat(dfa.pairedTransitionsDisabled()).isTrue();
         assertThat(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
-        if (absolutePointersActive) {
-            assertThat(dfa.pairedTransitionMemory()).isZero();
-            assertThat(dfa.absolutePointerTransitionCount()).isPositive();
-        }
-        else {
-            assertThat(dfa.pairedTransitionMemory()).isPositive();
-        }
+        assertThat(dfa.pairedTransitionMemory()).isZero();
+        assertThat(dfa.absolutePointerTransitionCount()).isPositive();
         assertThat(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
     }
 
@@ -165,6 +160,38 @@ public class TestDfaPairedTransitions
             assertThat(Dfa.search(program, multipleMatches, false, Prog.MatchKind.FIRST_MATCH, true))
                     .isEqualTo(multipleMatches.length());
         }
+    }
+
+    @Test
+    public void testFirstSearchWithoutTransitionsDefersPointerTableOnce()
+    {
+        // The DFA quits when it evaluates Java's \b next to a byte outside ASCII, so a search that
+        // starts at a byte-order mark ends before the DFA computes a transition. Two short searches
+        // from different start contexts leave two start states with nothing computed, and the
+        // pointer table the long search then requests waits, so the next search builds paired rows.
+        String pattern = "\\b\\w+n\\b";
+        Prog program = compileJavaProgram(pattern);
+        Slice wordThenByteOrderMark = utf8Slice("x\uFEFF");
+        Slice byteOrderMarkInput = utf8Slice("\uFEFF" + "x ".repeat(150) + "plain");
+        Slice input = utf8Slice("x ".repeat(150) + "plain");
+
+        assertThat(Dfa.search(program, utf8Slice("\uFEFF"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(program, wordThenByteOrderMark, 1, wordThenByteOrderMark.length(), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(program, byteOrderMarkInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+
+        assertThat(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(input.length());
+        assertThat(dfa.pairedTransitionMemory()).isPositive();
+        assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+
+        // The table waits only once: a DFA that keeps quitting at its first byte gets the table on
+        // its second search.
+        Prog quittingProgram = compileJavaProgram(pattern);
+        for (int search = 0; search < 2; search++) {
+            assertThat(Dfa.search(quittingProgram, byteOrderMarkInput, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        }
+        assertThat(quittingProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).absolutePointerTransitionsAvailable()).isTrue();
     }
 
     @Test
@@ -499,5 +526,12 @@ public class TestDfaPairedTransitions
         assertThat(Dfa.search(program, matchingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
         assertThat(dfa.pairedTransitionMemory()).isPositive();
         assertThat(dfa.pairedMatchContinuationCount()).isPositive();
+    }
+
+    private static Prog compileJavaProgram(String pattern)
+    {
+        ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, false, 1 << 20, Compiler.Dialect.RE2, parsed.caseFolding());
     }
 }

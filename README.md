@@ -149,17 +149,20 @@ paths without changing matching behavior:
 The Vector API lets Regulator scan multiple input bytes at a time when looking
 for candidate matches. It is used when the JVM's preferred byte vector holds 16
 to 64 bytes; other JVMs use the scalar or SWAR scanners. Native access lets
-eligible DFA searches use a small native memory allocation for the DFA
-transition table.
+eligible DFA searches keep an optional pointer table of DFA transitions in a
+small native memory allocation; the DFA's other transition tables stay on the
+Java heap.
 
 This is native memory, not native code or a JNI library. It is entirely internal;
 the API never exposes native pointers. Patterns, inputs, captures, and results
 remain Java and Slice data. Without these flags, Regulator uses scalar or SWAR
-scanners and the pure-Java DFA.
+scanners and keeps the same DFA pointer table in a Java array.
 
-Native memory avoids following Java object references for DFA table rows and
-decoding compressed references, also known as compressed oops. Its effect depends
-on the pattern, input, and matching engine; LIKE-only routes do not use the DFA.
+Either table avoids following Java object references for DFA table rows and
+decoding compressed references, also known as compressed oops. In native memory
+an entry is the next row's address; in a Java array it is the next row's offset,
+which costs an addition per transition. The effect of native access depends on
+the pattern, input, and matching engine; LIKE-only routes do not use the DFA.
 Start with the pure-Java default and compare both modes on your workload when
 regex execution is a substantial part of its cost. The
 [benchmark report](https://airlift.github.io/regulator/benchmarks/) includes
