@@ -89,6 +89,35 @@ final class VectorByteSetScanner
         };
     }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. find scanning backward: returns the last position in
+    // [offset, offset + length) holding a candidate. Candidate count is one, two, or
+    // three; two and three take the XOR form under VectorSupport.SVE_128.
+    static int findLast(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
+    {
+        return switch (candidateCount) {
+            case 1 -> findLastOne(data, offset, length, first);
+            case 2 -> VectorSupport.SVE_128 ? findLastTwoSve(data, offset, length, first, second) : findLastTwo(data, offset, length, first, second);
+            case 3 -> VectorSupport.SVE_128 ? findLastThreeSve(data, offset, length, first, second, third) : findLastThree(data, offset, length, first, second, third);
+            default -> throw new IllegalArgumentException("candidateCount must be one, two, or three");
+        };
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findHighBitOr scanning backward: returns the last position
+    // in [offset, offset + length) holding a byte with its high bit set or equal to one
+    // of the candidates. Candidate count is zero, one, two, or three.
+    static int findLastHighBitOr(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
+    {
+        return switch (candidateCount) {
+            case 0 -> findLastHighBit(data, offset, length);
+            case 1 -> findLastHighBitOrOne(data, offset, length, first);
+            case 2 -> findLastHighBitOrTwo(data, offset, length, first, second);
+            case 3 -> findLastHighBitOrThree(data, offset, length, first, second, third);
+            default -> throw new IllegalArgumentException("candidateCount must be zero, one, two, or three");
+        };
+    }
+
     // PERFORMANCE-SENSITIVE HOT LOOP: unsigned comparisons preserve byte-set
     // ordering across the signed-byte boundary without an extra vector transform.
     // Copied as VectorScanKernelSupport.findRange; keep the copy in step.
@@ -390,6 +419,8 @@ final class VectorByteSetScanner
         return -1;
     }
 
+    // The forward kernels from here through findHighBitOrThree have backward mirrors, the findLast
+    // kernels from findLastOne on; keep each in step with its mirror.
     // Copied as VectorScanKernelSupport.findOne; keep the copy in step.
     private static int findOne(byte[] data, int offset, int length, byte candidate)
     {
@@ -621,6 +652,231 @@ final class VectorByteSetScanner
             byte value = data[position];
             if (value < 0 || value == first || value == second || value == third) {
                 return position;
+            }
+        }
+        return -1;
+    }
+
+    // The backward kernels below mirror the forward ones above, loading whole vectors from the end
+    // of the range toward its start and leaving the head shorter than a vector to a scalar loop;
+    // keep each in step with its forward form.
+    private static int findLastOne(byte[] data, int offset, int length, byte candidate)
+    {
+        ByteVector candidateVector = ByteVector.broadcast(SPECIES, candidate);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, data, position - SPECIES.length())
+                    .compare(VectorOperators.EQ, candidateVector);
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            if (data[position - 1] == candidate) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    // The SVE form is findLastTwoSve; keep the two in step.
+    private static int findLastTwo(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.compare(VectorOperators.EQ, firstVector)
+                    .or(values.compare(VectorOperators.EQ, secondVector));
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value == first || value == second) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    // findLastTwo in the form VectorSupport.SVE_128 selects, as findTwoSve is for findTwo.
+    private static int findLastTwoSve(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value == first || value == second) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    // The SVE form is findLastThreeSve; keep the two in step.
+    private static int findLastThree(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(SPECIES, third);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.compare(VectorOperators.EQ, firstVector)
+                    .or(values.compare(VectorOperators.EQ, secondVector))
+                    .or(values.compare(VectorOperators.EQ, thirdVector));
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value == first || value == second || value == third) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    // findLastThree in the form VectorSupport.SVE_128 selects, as findThreeSve is for findThree.
+    private static int findLastThreeSve(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(SPECIES, third);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.lanewise(VectorOperators.XOR, firstVector)
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, secondVector))
+                    .lanewise(VectorOperators.UMIN, values.lanewise(VectorOperators.XOR, thirdVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value == first || value == second || value == third) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    private static int findLastHighBit(byte[] data, int offset, int length)
+    {
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, data, position - SPECIES.length())
+                    .compare(VectorOperators.LT, (byte) 0);
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            if (data[position - 1] < 0) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    private static int findLastHighBitOrOne(byte[] data, int offset, int length, byte candidate)
+    {
+        ByteVector candidateVector = ByteVector.broadcast(SPECIES, candidate);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, candidateVector));
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value < 0 || value == candidate) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    private static int findLastHighBitOrTwo(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, firstVector))
+                    .or(values.compare(VectorOperators.EQ, secondVector));
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value < 0 || value == first || value == second) {
+                return position - 1;
+            }
+        }
+        return -1;
+    }
+
+    private static int findLastHighBitOrThree(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(SPECIES, third);
+        int vectorBegin = offset + length - SPECIES.loopBound(length);
+        int position = offset + length;
+        for (; position > vectorBegin; position -= SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position - SPECIES.length());
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, firstVector))
+                    .or(values.compare(VectorOperators.EQ, secondVector))
+                    .or(values.compare(VectorOperators.EQ, thirdVector));
+            if (matches.anyTrue()) {
+                return position - SPECIES.length() + matches.lastTrue();
+            }
+        }
+
+        for (; position > offset; position--) {
+            byte value = data[position - 1];
+            if (value < 0 || value == first || value == second || value == third) {
+                return position - 1;
             }
         }
         return -1;

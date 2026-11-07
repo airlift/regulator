@@ -197,7 +197,9 @@ public class TestDfaCandidateStartCursor
             assertThat(boundaries(matcher)).containsExactly(new Boundary(0, input.length()));
             assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(1);
             assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isZero();
-            assertThat(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(dfa.matchingSelfLoopScanCount()).isPositive();
+            assertThat(dfa.matchingSelfLoopExitByteScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         }
 
         // A run ends at a newline and at a multibyte character.
@@ -209,14 +211,19 @@ public class TestDfaCandidateStartCursor
         Re2 wordBounded = assertLiteralCandidateAgrees("\\Bab[a-z]*\\B", utf8("xab" + "y".repeat(100) + "\n"));
         assertThat(wordBounded.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isEqualTo(1);
 
-        // The scanned run is charged to the work budget, which runs out within it here.
-        Slice workLimitedInput = utf8("aaaaaa\n".repeat(15) + "b=y" + "y".repeat(100));
-        Re2 workLimitedPattern = compile("a.*z|b+=y.*");
-        RegexpMatcher workLimited = workLimitedPattern.groupZeroMatcher(workLimitedInput, null);
-        assertThat(boundaries(workLimited)).containsExactly(new Boundary(105, workLimitedInput.length()));
-        assertThat(workLimited.candidateStartRouteCountForDiagnostics()).isZero();
-        assertThat(workLimited.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
-        assertThat(workLimitedPattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).matchingSelfLoopScanCount()).isPositive();
+        // The scanned run is charged to the work budget, which runs out within it here: after 15
+        // lines within the run's stepped prefix, and after 14 within its vector scan.
+        for (int lines : List.of(14, 15)) {
+            Slice workLimitedInput = utf8("aaaaaa\n".repeat(lines) + "b=y" + "y".repeat(100));
+            Re2 workLimitedPattern = compile("a.*z|b+=y.*");
+            RegexpMatcher workLimited = workLimitedPattern.groupZeroMatcher(workLimitedInput, null);
+            Dfa.DfaInstance workLimitedDfa = workLimitedPattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(boundaries(workLimited)).containsExactly(new Boundary(7 * lines, workLimitedInput.length()));
+            assertThat(workLimited.candidateStartRouteCountForDiagnostics()).isZero();
+            assertThat(workLimited.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
+            assertThat(workLimitedDfa.matchingSelfLoopScanCount()).isPositive();
+            assertThat(workLimitedDfa.matchingSelfLoopExitByteScanCount() > 0).isEqualTo(lines == 14 && VectorSupport.isAvailable());
+        }
     }
 
     @Test

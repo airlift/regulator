@@ -229,6 +229,45 @@ public class TestDfaPairedTransitions
 
         Slice newline = utf8Slice("key=" + "x".repeat(300) + "\nignored");
         assertThat(Dfa.search(program, newline, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(304);
+
+        // A long run is skipped by a vector scan for the loop's exit bytes, a newline and every byte
+        // outside ASCII, after a stepped prefix. Runs that end inside, at, and just past the prefix
+        // end where stepping ends them, and a multibyte character leaves the loop and returns to it.
+        int exitByteScanCount = dfa.matchingSelfLoopExitByteScanCount();
+        assertThat(exitByteScanCount > 0).isEqualTo(VectorSupport.isAvailable());
+        for (int runLength = 0; runLength <= 40; runLength++) {
+            Slice ended = utf8Slice("key=" + "x".repeat(runLength) + "\n" + "x".repeat(300));
+            assertThat(Dfa.search(program, ended, false, Prog.MatchKind.FIRST_MATCH, true))
+                    .as("runLength=%s", runLength)
+                    .isEqualTo(4 + runLength);
+            Slice multibyte = utf8Slice("key=" + "x".repeat(runLength) + "é" + "x".repeat(300) + "\n");
+            assertThat(Dfa.search(program, multibyte, false, Prog.MatchKind.FIRST_MATCH, true))
+                    .as("runLength=%s", runLength)
+                    .isEqualTo(multibyte.length() - 1);
+        }
+        assertThat(dfa.matchingSelfLoopExitByteScanCount() > exitByteScanCount).isEqualTo(VectorSupport.isAvailable());
+    }
+
+    @Test
+    public void testMatchingSelfLoopScanContinuesAfterCacheGrowth()
+    {
+        // The warm-ups build paired transitions and fill the cache tables to just below their next
+        // growth. The long `x` run then passes the matching loop's stepped prefix, so the scan computes
+        // the loop's exit-byte set; the loop leaves on too many bytes for a vector scan, so the set is
+        // rejected and the run keeps stepping, but computing it added transitions that grew the
+        // tables. The paired search then continues through states allocated after that growth, so it
+        // must read the grown tables.
+        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|abx*![A-Z]+|abx*\\B)"));
+        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
+            pattern.matcher(utf8Slice(warm)).lookingAt();
+        }
+        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int matchingSelfLoopScanCount = dfa.matchingSelfLoopScanCount();
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("ab" + "x".repeat(300) + "!AAA"));
+        assertThat(matcher.lookingAt()).isTrue();
+        assertThat(matcher.start()).isZero();
+        assertThat(matcher.end()).isEqualTo(306);
+        assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingSelfLoopScanCount);
     }
 
     @Test

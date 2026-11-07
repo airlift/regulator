@@ -834,12 +834,14 @@ same state and byte boundary when a row or transition is unavailable. Cache
 exhaustion and every uncomputed transition retain the compact path's reset and
 fallback behavior.
 
-After a match transition enters a matching self-loop, the continuation scans
+After a match transition enters a matching self-loop, the continuation reads
 the authoritative primitive transition row directly until a byte changes the
-state or stops matching. It updates the match boundary for every consumed byte
-and leaves the first exceptional byte to the existing paired decoder. This
-avoids repeatedly decoding a deliberately null paired reference without adding
-another transition representation.
+state or stops matching: it steps the first 32 bytes, then may finish the run
+with a [vector scan for the state's exit bytes](#self-loop-exit-byte-skips-outside-counting).
+It records the match boundary the consumed bytes imply and leaves the first
+exceptional byte to the existing paired decoder. This avoids repeatedly
+decoding a deliberately null paired reference without adding another
+transition representation.
 
 Some eligible expressions produce repeated matches before pairing can amortize
 its entry and terminal handling. After 16 paired searches return within 16
@@ -899,16 +901,18 @@ call (0.79 to 0.11 ns per byte) against 21.3 us for Joni, and over 1 KiB
 from 911 ns to 148 ns against 699 ns for Joni; r8g and r8i moved by the
 same or larger factors, and no other benchmark changed outside noise.
 
-The route is limited to the count variant of the forward search. Counting needs
-only each match end, and that variant is already kept separate from the
-group-zero cursor because extra result handling in the cursor's generated code
-measurably regresses short repeated boundary operations. The route runs only
-for searches of at least 256 bytes, the same gate that requests paired
-transitions, and it runs before that request so a qualifying search does not
-build a paired table it will not use. Shorter searches cannot amortize the
-exit-set construction and Vector setup. Unanchored-end, non-matching start
-states and an available Vector API are also required; every other search keeps
-its existing route.
+This count route is limited to the count variant of the forward search.
+Counting needs only each match end, and that variant is already kept separate
+from the group-zero cursor because extra result handling in the cursor's
+generated code measurably regresses short repeated boundary operations. The
+route runs only for searches of at least 256 bytes, the same gate that requests
+paired transitions, and it runs before that request so a qualifying search does
+not build a paired table it will not use. Shorter searches cannot amortize this
+route's exit-set construction and Vector setup; the skips in
+[Self-Loop Exit-Byte Skips Outside Counting](#self-loop-exit-byte-skips-outside-counting)
+use shorter thresholds for the reasons given there. Unanchored-end,
+non-matching start states and an available Vector API are also required; every
+other search keeps its existing route.
 
 In UTF-8, a dot loop leaves its state on every byte from 0x80 through 0xFF
 because each multibyte character passes through intermediate states. A
@@ -947,9 +951,10 @@ took 215 us against 58.6 us before the route. A pending longest match keeps the
 compact loop, as it does after a paired search's first match. A paired search
 reached without a pending match reports the whole search length to the
 short-paired-search hint, as every other paired search does, so a short tail
-after a long scan does not disable paired transitions. The existing self-loop
-consumer ignores exit sets with the matching or high-bit flags, so its behavior
-is unchanged.
+after a long scan does not disable paired transitions. The forward search's
+object-row self-loop scan still rejects exit sets with the matching or high-bit
+flags, through its `selfLoopExitByteSet` wrapper, so its behavior is unchanged;
+the skips outside counting use both flags.
 
 Searches whose start state never reaches a qualifying loop pay the initial walk
 on every match. After eight consecutive searches in which the route does not
@@ -959,6 +964,49 @@ later text that does reach a qualifying loop still uses the route. As with the
 paired-transition hint, the counter is a best-effort performance hint shared by
 concurrent readers; races may change when the route engages but not the match
 result, because the ordinary route computes the same match end.
+
+## Self-Loop Exit-Byte Skips Outside Counting
+
+Matching and reverse searches also skip self-loop runs with the exit sets the
+[count route](#count-self-loop-exit-byte-scan) computes. Forward, the paired
+search's matching continuation and the
+[candidate-start cursor](#bounded-candidate-start-cursor)'s check step a
+matching self-loop run for 32 bytes. When the run continues past them, the
+Vector API is available, and the state's exit set is accepted, one to three
+bytes or every byte from 0x80 through 0xFF plus up to three ASCII bytes, a
+vector scan finishes the run at its first exit byte. Otherwise the run keeps
+stepping. Either way the run ends where stepping it would.
+
+Backward, a reverse search of at least 64 bytes, with no byte limit, not asking
+for the earliest match, and whose start state is not a match, probes up to five
+cached transitions back from its end. When the probe reaches a non-matching
+state that loops on itself, `findLast` or `findLastHighBitOr` skips back to the
+loop's last exit byte, and the absolute-pointer and object loops both start
+there in that state, as if they had stepped every skipped byte. An uncomputed
+transition, a match, a dead or full-match state, a rejected exit set, or no
+self-loop within five steps leaves the search as it was.
+
+Both thresholds sit below the count route's 256 bytes. The stepped prefix
+bounds the cost on short runs: a run that ends within its 32 bytes, twice the
+length below which a scan's setup costs more than it skips, costs what stepping
+costs. The exit set is computed once and cached with the state, so later
+searches pay only the lookup. Computing it can add transitions that grow the
+cache tables, even when the set is rejected, so each caller reads the current
+tables afterward.
+
+JMH `BenchmarkLanguageBulk` average time on Temurin 25.0.4+7, one r9g.xlarge
+and one r8i.xlarge, three alternating rounds against the search without the
+skips:
+
+- rebar `curated/06-cloud-flare-redos/simplified-long`, `.*.*=.*` over 10,000
+  bytes, fell from 22.5 us to 0.67 us on r9g and from 21.7 us to 0.27 us on
+  r8i.
+- `simplified-short` fell from 376 ns to 234 ns on r9g and from 308 ns to
+  205 ns on r8i.
+- The cloud-flare `original` fell from 120 ns to 100 ns on r9g and from 141 ns
+  to 92 ns on r8i.
+- Whole-line, non-DNA, email, URI, and a literal control stayed within 2% on
+  r9g and 3% on r8i.
 
 ## Once-Per-Count Start-Byte Scan Selection
 
