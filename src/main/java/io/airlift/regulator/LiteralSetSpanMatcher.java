@@ -115,39 +115,57 @@ sealed class LiteralSetSpanMatcher
                 return null;
             }
         }
-        return build(literals, maximumRetainedBytes);
+        Trie trie = new Trie(LiteralAlternationSpanMatcher.totalLength(literals), maximumRetainedBytes);
+        for (byte[] literal : literals) {
+            if (!trie.add(literal)) {
+                return null;
+            }
+        }
+        return trie.build(maximumRetainedBytes);
     }
 
-    /// Builds the automaton of non-empty `literals`, listed in priority order, or returns `null`
-    /// if its states would retain more than `maximumRetainedBytes`.
-    private static LiteralSetSpanMatcher build(List<byte[]> literals, long maximumRetainedBytes)
+    /// Phase 1 of the automaton's build: the leftmost-first trie of non-empty literals, added in
+    /// priority order. Each state records the byte of its incoming edge and its children as a list
+    /// sorted by byte, so the breadth-first pass emits sorted edges. A literal that passes through
+    /// an earlier literal's match state adds nothing, since the earlier one always matches first.
+    private static final class Trie
     {
-        // Literals sharing a long prefix expand to far more bytes than the trie has states, so
-        // the trie arrays grow with the states added, up to the most the budget can retain.
-        long totalLiteralBytes = LiteralAlternationSpanMatcher.totalLength(literals);
-        int maximumStates = (int) Math.min(totalLiteralBytes + 1, Math.max(1, maximumRetainedBytes / RETAINED_BYTES_PER_STATE));
+        private final int maximumStates;
+        private final int[] rootChildByByte = new int[256];
+        private int capacity;
+        private int[] firstChild;
+        private int[] nextSibling;
+        private byte[] incomingByte;
+        private int[] matchLength;
+        private int stateCount = 1;
 
-        // Phase 1: the leftmost-first trie. Each state records the byte of its incoming edge and
-        // its children as a list sorted by byte, so the breadth-first pass emits sorted edges.
-        int[] rootChildByByte = new int[256];
-        int capacity = Math.min(maximumStates, INITIAL_TRIE_CAPACITY);
-        int[] firstChild = new int[capacity];
-        int[] nextSibling = new int[capacity];
-        byte[] incomingByte = new byte[capacity];
-        int[] matchLength = new int[capacity];
-        int stateCount = 1;
-        nextLiteral:
-        for (byte[] literal : literals) {
+        /// A trie of literals of at most `totalLiteralBytes` bytes in all, whose states may retain
+        /// at most `maximumRetainedBytes`.
+        Trie(long totalLiteralBytes, long maximumRetainedBytes)
+        {
+            // Literals sharing a long prefix expand to far more bytes than the trie has states, so
+            // the trie arrays grow with the states added, up to the most the budget can retain.
+            maximumStates = (int) Math.min(totalLiteralBytes + 1, Math.max(1, maximumRetainedBytes / RETAINED_BYTES_PER_STATE));
+            capacity = Math.min(maximumStates, INITIAL_TRIE_CAPACITY);
+            firstChild = new int[capacity];
+            nextSibling = new int[capacity];
+            incomingByte = new byte[capacity];
+            matchLength = new int[capacity];
+        }
+
+        /// Adds `literal`, or returns `false` if the trie has no room for its states.
+        private boolean add(byte[] literal)
+        {
             int state = ROOT;
             for (byte value : literal) {
                 if (matchLength[state] != 0) {
-                    continue nextLiteral;
+                    return true;
                 }
                 int child = state == ROOT ? rootChildByByte[value & 0xFF] : findTrieChild(firstChild[state], value, nextSibling, incomingByte);
                 if (child == ROOT) {
                     if (stateCount == capacity) {
                         if (capacity == maximumStates) {
-                            return null;
+                            return false;
                         }
                         capacity = (int) Math.min(maximumStates, 2L * capacity);
                         firstChild = Arrays.copyOf(firstChild, capacity);
@@ -167,85 +185,91 @@ sealed class LiteralSetSpanMatcher
                 state = child;
             }
             matchLength[state] = literal.length;
+            return true;
         }
 
-        // Phase 2: number the states breadth-first and fill failure links in that order, so a
-        // state's failure state, which is shallower, is final when the state is reached.
-        int[] trieStateByOrder = new int[stateCount];
-        int[] orderByTrieState = new int[stateCount];
-        int[] failure = new int[stateCount];
-        int orderedCount = 1;
-        for (int value = 0; value < 256; value++) {
-            int child = rootChildByByte[value];
-            if (child != ROOT) {
-                failure[child] = matchLength[child] != 0 ? DEAD : ROOT;
-                orderByTrieState[child] = orderedCount;
-                trieStateByOrder[orderedCount++] = child;
-            }
-        }
-        for (int order = 1; order < orderedCount; order++) {
-            int state = trieStateByOrder[order];
-            for (int child = firstChild[state]; child != ROOT; child = nextSibling[child]) {
-                orderByTrieState[child] = orderedCount;
-                trieStateByOrder[orderedCount++] = child;
-                if (matchLength[child] != 0) {
-                    failure[child] = DEAD;
-                    continue;
-                }
-                byte value = incomingByte[child];
-                int fallback = failure[state];
-                while (fallback != ROOT && fallback != DEAD && findTrieChild(firstChild[fallback], value, nextSibling, incomingByte) == ROOT) {
-                    fallback = failure[fallback];
-                }
-                if (fallback == ROOT) {
-                    fallback = rootChildByByte[value & 0xFF];
-                }
-                else if (fallback != DEAD) {
-                    fallback = findTrieChild(firstChild[fallback], value, nextSibling, incomingByte);
-                }
-                failure[child] = fallback;
-                if (fallback != DEAD) {
-                    matchLength[child] = matchLength[fallback];
+        /// Builds the automaton of the literals added. `maximumRetainedBytes` decides only whether
+        /// the root's skip fits; whether to admit the automaton is the caller's decision.
+        private LiteralSetSpanMatcher build(long maximumRetainedBytes)
+        {
+            // Phase 2: number the states breadth-first and fill failure links in that order, so a
+            // state's failure state, which is shallower, is final when the state is reached.
+            int[] trieStateByOrder = new int[stateCount];
+            int[] orderByTrieState = new int[stateCount];
+            int[] failure = new int[stateCount];
+            int orderedCount = 1;
+            for (int value = 0; value < 256; value++) {
+                int child = rootChildByByte[value];
+                if (child != ROOT) {
+                    failure[child] = matchLength[child] != 0 ? DEAD : ROOT;
+                    orderByTrieState[child] = orderedCount;
+                    trieStateByOrder[orderedCount++] = child;
                 }
             }
-        }
-
-        // Phase 3: renumber into the breadth-first order with contiguous sorted edges.
-        int[] rootStateByByte = new int[256];
-        for (int value = 0; value < 256; value++) {
-            rootStateByByte[value] = orderByTrieState[rootChildByByte[value]];
-        }
-        int[] firstEdgeByState = new int[stateCount + 1];
-        byte[] edgeByte = new byte[stateCount - 1];
-        int[] failureByState = new int[stateCount];
-        int[] matchLengthByState = new int[stateCount];
-        int edgeCount = 0;
-        for (int order = 0; order < stateCount; order++) {
-            int state = trieStateByOrder[order];
-            firstEdgeByState[order] = edgeCount;
-            if (order == ROOT) {
-                for (int value = 0; value < 256; value++) {
-                    if (rootChildByByte[value] != ROOT) {
-                        edgeByte[edgeCount++] = (byte) value;
+            for (int order = 1; order < orderedCount; order++) {
+                int state = trieStateByOrder[order];
+                for (int child = firstChild[state]; child != ROOT; child = nextSibling[child]) {
+                    orderByTrieState[child] = orderedCount;
+                    trieStateByOrder[orderedCount++] = child;
+                    if (matchLength[child] != 0) {
+                        failure[child] = DEAD;
+                        continue;
+                    }
+                    byte value = incomingByte[child];
+                    int fallback = failure[state];
+                    while (fallback != ROOT && fallback != DEAD && findTrieChild(firstChild[fallback], value, nextSibling, incomingByte) == ROOT) {
+                        fallback = failure[fallback];
+                    }
+                    if (fallback == ROOT) {
+                        fallback = rootChildByByte[value & 0xFF];
+                    }
+                    else if (fallback != DEAD) {
+                        fallback = findTrieChild(firstChild[fallback], value, nextSibling, incomingByte);
+                    }
+                    failure[child] = fallback;
+                    if (fallback != DEAD) {
+                        matchLength[child] = matchLength[fallback];
                     }
                 }
             }
-            else {
-                for (int child = firstChild[state]; child != ROOT; child = nextSibling[child]) {
-                    edgeByte[edgeCount++] = incomingByte[child];
-                }
-                failureByState[order] = failure[state] == DEAD ? DEAD : orderByTrieState[failure[state]];
-                matchLengthByState[order] = matchLength[state];
-            }
-        }
-        firstEdgeByState[stateCount] = edgeCount;
-        LiteralSetSpanMatcher matcher = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
 
-        // Phase 4: the root's skip, whose scan set and any nibble tables, with the larger object
-        // holding them, are a retained charge that never costs the matcher itself: where they do
-        // not fit, the matcher searches without them.
-        RootSkippingMatcher rootSkipping = VectorSupport.isAvailable() ? RootSkippingMatcher.build(matcher, rootChildByByte) : null;
-        return rootSkipping != null && rootSkipping.estimatedRetainedSize() <= maximumRetainedBytes ? rootSkipping : matcher;
+            // Phase 3: renumber into the breadth-first order with contiguous sorted edges.
+            int[] rootStateByByte = new int[256];
+            for (int value = 0; value < 256; value++) {
+                rootStateByByte[value] = orderByTrieState[rootChildByByte[value]];
+            }
+            int[] firstEdgeByState = new int[stateCount + 1];
+            byte[] edgeByte = new byte[stateCount - 1];
+            int[] failureByState = new int[stateCount];
+            int[] matchLengthByState = new int[stateCount];
+            int edgeCount = 0;
+            for (int order = 0; order < stateCount; order++) {
+                int state = trieStateByOrder[order];
+                firstEdgeByState[order] = edgeCount;
+                if (order == ROOT) {
+                    for (int value = 0; value < 256; value++) {
+                        if (rootChildByByte[value] != ROOT) {
+                            edgeByte[edgeCount++] = (byte) value;
+                        }
+                    }
+                }
+                else {
+                    for (int child = firstChild[state]; child != ROOT; child = nextSibling[child]) {
+                        edgeByte[edgeCount++] = incomingByte[child];
+                    }
+                    failureByState[order] = failure[state] == DEAD ? DEAD : orderByTrieState[failure[state]];
+                    matchLengthByState[order] = matchLength[state];
+                }
+            }
+            firstEdgeByState[stateCount] = edgeCount;
+            LiteralSetSpanMatcher matcher = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+
+            // Phase 4: the root's skip, whose scan set and any nibble tables, with the larger
+            // object holding them, are a retained charge that never costs the matcher itself:
+            // where they do not fit, the matcher searches without them.
+            RootSkippingMatcher rootSkipping = VectorSupport.isAvailable() ? RootSkippingMatcher.build(matcher, rootChildByByte) : null;
+            return rootSkipping != null && rootSkipping.estimatedRetainedSize() <= maximumRetainedBytes ? rootSkipping : matcher;
+        }
     }
 
     private static int findTrieChild(int child, byte value, int[] nextSibling, byte[] incomingByte)
