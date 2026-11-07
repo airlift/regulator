@@ -23,8 +23,9 @@ import static java.util.Objects.requireNonNull;
 /// select the distribution used during compilation; a compiled pattern keeps only the chosen probe
 /// offsets. The options default to [#uniform()], which gives every byte the same
 /// probability, so every literal scan that chooses a probe probes its first byte. The start
-/// literal filter of a pattern that begins with a few literals and the short-window check of the
-/// bytes every match holds ignore the option and always use [#englishText()].
+/// literal filter of a pattern that begins with a few literals, an inner literal search's set
+/// filter, its choice of a rare class pair, and the short-window check of the bytes every match
+/// holds ignore the option and always use [#englishText()].
 ///
 /// A single-probe scan for a literal stops at every occurrence of its probe byte, so probing a
 /// rare byte hands fewer candidates to verification. The probe leaves the first byte only for a

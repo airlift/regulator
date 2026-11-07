@@ -840,6 +840,15 @@ and leaves the first exceptional byte to the existing paired decoder. This
 avoids repeatedly decoding a deliberately null paired reference without adding
 another transition representation.
 
+The reverse search and the inner literal search's anchored confirmation scan a
+matching self-loop the same way, since their object rows hold no match
+transitions either. A reverse search probes for one after a match transition
+only when its program has a repetition loop or can match empty. A program
+without a loop that cannot match empty, such as one built only from counted
+repetitions like the reversed `\s[a-zA-Z]{0,12}` of `\s[a-zA-Z]{0,12}ing\s`,
+has none to find. Probing it after each match transition cost
+`ing-suffix-limited-space` about 2.7%, measured on the exploration build.
+
 Some eligible expressions produce repeated matches before pairing can amortize
 its entry and terminal handling. After 16 paired searches return within 16
 bytes, the DFA rejects the paired table. The search that observes the
@@ -1452,6 +1461,80 @@ language, as the
 [short-window inner literal check](#short-window-inner-literal-check) records.
 The row has not been remeasured with this check since.
 
+## Inner Literal Class Pairs
+
+The Rust crate's reverse inner strategy searches only for a literal or a set of
+literals. The inner literal search also takes two adjacent elements that each
+consume exactly one ASCII byte from at most three, at least one of them matching
+more than one byte, when English text rarely holds the pair. The product of the
+two sides' English text byte probabilities, whatever frequencies the pattern was
+compiled with, must be under 0.002: assuming independent bytes, the pair is
+estimated below once in 500 bytes. Each hit may pay a reverse search and an
+anchored confirmation, so a commoner pair could stop the scan about as often as
+the start-byte scan it replaces. In `["'][^"']{0,30}[?!.]["']` the pair is
+`[?!.]["']`, searched as the set of its six two-byte members with a counted
+vector loop that tests each side against its bytes, in the mask form
+[Candidate Masks on SVE](#candidate-masks-on-sve) selects.
+
+None of the crate's proofs admits such a pattern, so the pair has its own: the
+prefix's first element that does not match only the empty string consumes
+exactly one ASCII byte, no later prefix element can consume a member's last
+byte, and no member holds one of those bytes before its end. An earlier match
+that spanned a later candidate would then need its prefix to consume that
+candidate's last byte, which only the one-byte opener could, and the opener lies
+before the candidate. A pair no proof admits is skipped, so a later literal can
+still decide. This is a performance-only deviation: the reverse prefix DFA and
+the anchored forward DFA still decide every candidate, and randomized tests
+compare the results with the ordinary engine.
+
+Measured 3 hosts a side with compare and AND on both platforms,
+`quotes-bounded` takes 0.54x the time of the start-byte scan on r8i and 0.74x on
+r9g, and `sherlock/quotes` 0.71x and 0.98x.
+
+## Inner Literal Byte Gates
+
+The inner literal search skips a hit before either DFA runs when a byte beside
+it cannot be one of a match. The byte before the hit must be one that can end
+the prefix: one the reverse prefix program can consume first. Taking them from
+the program gates any prefix that cannot match the empty string and has no
+assertion at its end, such as the digits that end the day and month of
+`([0-9][0-9]?)/([0-9][0-9]?)/([0-9][0-9]([0-9][0-9])?)`, or Rust's Unicode
+`\w`, which ends a character of more than one byte with a continuation byte.
+The byte after a literal, or a set whose members share one length, must lie in
+the element after it when that element is a single ASCII byte class, alone or
+repeated at least once; elements that match only the empty string, such as
+`\b`, are looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules
+out the `ing` of `kingdom`, as the crate's prefilter does by searching `ing\s`.
+
+A skipped hit is no candidate. It leaves the bound on how far back the next
+reverse search may read where it was, since no reverse search ran; raising it,
+as a DFA rejection does, would make the second `ing` of `singing` fall back to
+the ordinary engine. Nor does it make the search fall back: the gates are
+checked before the rule that a first candidate near the search start falls
+back, and before the one that a candidate inside text a confirmation read
+does. The near-start check a find loop or count makes skips the same hits, so
+it agrees with the search. Checked after the near-start rule, a slash after
+a letter near the start of a short line sent the line to the ordinary engine
+although no date could end there.
+
+A gate that holds the literal's own byte at that edge, of either case for a
+case-insensitive letter, is dropped. It borders runs of its own bytes, as
+`[a-z]` does before `shing` inside a word, so it passes nearly every hit and
+only adds its test. The gates are held as words in the search itself, so they
+take no memory beyond the instance size the search's budget already charges.
+
+A pattern without a gate keeps the search loop without the check, and a gated
+pattern runs a copy of the loop with it. With the check in one shared loop,
+patterns without a gate measured up to about 4% slower, on lh3lh3 uri
+(Graviton) and lh3lh3 email (Intel) before their prefixes were gated. The gated
+copy finds the first hit before it enters the loop, so a window without one, as
+most lines of a grep are, returns without paying for the loop's entry: entered
+for every line, it made lh3lh3 email 3–7% slower on Graviton and 5–7% on Intel
+than with no gate. Measured
+3 hosts a side, the gates take `ing-suffix-limited-space` to 0.78x on r8i and
+0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x, `before-after-holmes` to
+0.71x and 0.76x, and `mariomka/email` to 0.91x and 0.90x.
+
 ## Trino LIKE Frontend
 
 `TrinoLikePattern` is a separate language frontend rather than an RE2 dialect.
@@ -1736,17 +1819,19 @@ order, which ran Holmes up to 1.8x apart, as
 ## Candidate Masks on SVE
 
 Several vector scans build a candidate mask from more than one byte compare.
-Three need every byte to match: the literal prefix scan's pair bytes, the scan
-plan's contains search, and the two three-byte groups of the
-[start literal filter](#start-literal-filter)'s two-literal check; a later
+Four need every byte to match: the literal prefix scan's pair bytes, the scan
+plan's contains search, the two three-byte groups of the
+[start literal filter](#start-literal-filter)'s two-literal check, and the two
+sides of an [inner literal class pair](#inner-literal-class-pairs); a later
 paragraph covers scans that stop at any of several bytes. Where C2 compiles
 vector code with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5),
 each loaded vector is XORed with its probe byte, the differences are ORed, and
 one compare with zero gives the mask; the start literal filter first takes the
-unsigned minimum of its two groups' differences. Everywhere else these three
-compare each byte and AND the masks. The JVM's `UseSVE` flag is read once,
-through the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be
-read, the scans compare and AND.
+unsigned minimum of its two groups' differences, and the class-pair scan the
+unsigned minimum of each side's differences from its up to three bytes.
+Everywhere else these four compare each byte and AND the masks. The JVM's
+`UseSVE` flag is read once, through the HotSpot diagnostic MXBean, on aarch64
+only; if the flag cannot be read, the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -1757,7 +1842,9 @@ compare-and-AND form's time for `aqj` over rebar's sherlock text, 0.58x for
 `zqj`, 0.45x for `∞|✓` over the Leipzig text, 0.52x for
 `Tom.{10,25}river|river.{10,25}Tom`, and 0.55x to 0.60x for 64 KiB prefix
 probes. On JDK 27 the same rows took 0.65x, 0.56x, 0.45x, 0.51x, and 0.57x to
-0.62x.
+0.62x. The class-pair scan, measured later on JDK 25, took 0.84x to 0.85x for
+`sherlock/quotes` and 0.71x to 0.73x for `quotes-bounded` on r9g in all four
+languages.
 
 NEON has no predicates. With `-XX:UseSVE=0` the XOR form took 1.07x for `aqj`,
 1.12x for `zqj`, and 1.05x for the Tom and river alternation, so NEON hosts keep

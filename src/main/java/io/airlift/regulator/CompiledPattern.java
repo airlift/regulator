@@ -2092,9 +2092,10 @@ abstract sealed class CompiledPattern
     }
 
     /// Whether a search of `[start, end)` tries the inner literal first, so a find loop skips its
-    /// cursors. A search whose literal sits near its start keeps them, as the ordinary engine does,
-    /// and a short window without the literal has no match. This approximates the gate in
-    /// matchOnOrdinaryEngine, where a search that tries the literal can still fall back.
+    /// cursors. A search whose first candidate sits near its start keeps them, as the ordinary
+    /// engine does, and a short window without a hit that passes the byte gates has no match.
+    /// This approximates the gate in matchOnOrdinaryEngine, where a search that tries the literal
+    /// can still fall back.
     boolean searchesInnerLiteral(Slice text, int start, int end)
     {
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
@@ -2502,10 +2503,10 @@ abstract sealed class CompiledPattern
         return Dfa.countMatches(partialProg, text, matchKind);
     }
 
-    /// Counts the matches found through the inner literal. Where the next literal sits near the
+    /// Counts the matches found through the inner literal. Where the next candidate sits near the
     /// text start or the previous match end, or a search falls back for another reason, the
     /// ordinary count takes over from there and hands back at the first match end whose next
-    /// literal is not near. Its start-byte scan selection then holds for the whole dense run,
+    /// candidate is not near. Its start-byte scan selection then holds for the whole dense run,
     /// instead of being made again for each match, and it records its own failures. The ordinary
     /// counts share their start-byte selection and productivity checks, so one that starts within
     /// 64 KiB of an earlier sample does not repeat them. Every match holds the literal, so none is
