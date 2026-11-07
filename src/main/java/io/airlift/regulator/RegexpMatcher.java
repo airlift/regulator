@@ -33,6 +33,13 @@ import static java.util.Objects.requireNonNull;
 public final class RegexpMatcher
         implements CompiledPattern.MatchWorkspaces
 {
+    // A scan for the required literal that finds it within NEAR_REQUIRED_LITERAL_BYTES of where
+    // the find starts saves nothing: the engine reads those bytes anyway, and the scan paid its
+    // setup. After NEAR_REQUIRED_LITERAL_SCAN_LIMIT such scans in a row, the matcher stops
+    // scanning until the next reset, since on a region that dense the check cannot pay.
+    private static final int NEAR_REQUIRED_LITERAL_BYTES = 256;
+    static final int NEAR_REQUIRED_LITERAL_SCAN_LIMIT = 8;
+
     private final CompiledPattern pattern;
     private final int[] groups;
     private final Map<String, Integer> namedCapturingGroups;
@@ -64,6 +71,9 @@ public final class RegexpMatcher
     // The fewest bytes a match spans, so findGeneral fails a find whose rest of the region is
     // shorter before any engine runs.
     private final int minimumMatchLength;
+    // The pattern's required literal that findGeneral checks the rest of a long region for, or
+    // null. See CompiledPattern.longWindowRequiredLiteral.
+    private final RequiredBytes longWindowRequiredLiteral;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
@@ -92,6 +102,15 @@ public final class RegexpMatcher
     // already counted toward the streak.
     private boolean candidateStartCursorQuit;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
+    // The region-relative start of the occurrence of the pattern's long-window required literal
+    // that the last scan of the rest of the region found, or -1 when no scan has run since the
+    // last reset or the last one found none. See restOfRegionLacksRequiredLiteral.
+    private int requiredLiteralOccurrence;
+    // The scans in a row since the last reset that found the literal within
+    // NEAR_REQUIRED_LITERAL_BYTES of their start.
+    private int nearRequiredLiteralScans;
+    // The scans for the long-window required literal, across resets, for diagnostics.
+    private long requiredLiteralScanCount;
 
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
@@ -127,6 +146,7 @@ public final class RegexpMatcher
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
         this.minimumMatchLength = pattern.minimumMatchLength();
+        this.longWindowRequiredLiteral = pattern.longWindowRequiredLiteral();
         reset(input);
     }
 
@@ -198,6 +218,8 @@ public final class RegexpMatcher
         previousMatchEnd = -1;
         dfaQuitStreak = 0;
         candidateStartCursorQuit = false;
+        requiredLiteralOccurrence = -1;
+        nearRequiredLiteralScans = 0;
         invalidateMatch();
     }
 
@@ -358,6 +380,9 @@ public final class RegexpMatcher
         }
         // So do the bytes every match holds.
         if (pattern.shortWindowLacksRequiredBytes(input, regionStart + nextFindStart, regionEnd)) {
+            return failFind();
+        }
+        if (restOfRegionLacksRequiredLiteral()) {
             return failFind();
         }
 
@@ -522,6 +547,32 @@ public final class RegexpMatcher
 
         setMatchAndAdvance(groups[0], groups[1]);
         return true;
+    }
+
+    /// Whether the rest of the region, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
+    /// the literal every match consumes, for a pattern whose long windows are checked for it;
+    /// see [CompiledPattern#longWindowLacksRequiredLiteral]. A find that has not passed the
+    /// occurrence the last scan found reuses it, so a find loop scans at most once per match:
+    /// again only once a match has passed the occurrence. A reused occurrence only lets the
+    /// engine run, so it stays right even if the input changes; a scan that found nothing is not
+    /// reused, and every find reads the input, as the engine does. After
+    /// [#NEAR_REQUIRED_LITERAL_SCAN_LIMIT] scans in a row find the literal near their start, the
+    /// finds until the next reset skip the check.
+    private boolean restOfRegionLacksRequiredLiteral()
+    {
+        RequiredBytes literal = longWindowRequiredLiteral;
+        int from = nextFindStart;
+        if (literal == null || regionLength() - from < RequiredBytes.SHORT_WINDOW_LIMIT || requiredLiteralOccurrence >= from) {
+            return false;
+        }
+        if (nearRequiredLiteralScans >= NEAR_REQUIRED_LITERAL_SCAN_LIMIT) {
+            return false;
+        }
+        requiredLiteralScanCount++;
+        int occurrence = literal.indexIn(input, regionStart + from, regionEnd);
+        requiredLiteralOccurrence = occurrence < 0 ? -1 : occurrence - regionStart;
+        nearRequiredLiteralScans = occurrence >= 0 && requiredLiteralOccurrence - from < NEAR_REQUIRED_LITERAL_BYTES ? nearRequiredLiteralScans + 1 : 0;
+        return occurrence < 0;
     }
 
     // A Rust search of a region still sees the input outside it, so it bypasses the region-context
@@ -895,6 +946,11 @@ public final class RegexpMatcher
     long candidateStartProductivityRejectionCountForDiagnostics()
     {
         return candidateStartCursor == null ? 0 : candidateStartCursor.productivityRejectionCount();
+    }
+
+    long requiredLiteralScanCountForDiagnostics()
+    {
+        return requiredLiteralScanCount;
     }
 
     private void invalidateMatch()

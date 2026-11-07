@@ -276,9 +276,10 @@ abstract sealed class CompiledPattern
     // The single-byte table of a one-byte pattern, which route selection builds when its memory
     // fits, or null. Group-zero matchers, the byte-table shape, and Trino share it.
     private final SingleByteMatcher singleByteMatcher;
-    // The bytes every match holds, checked on a short window before any engine runs, or null.
-    // Not final only so that a frontend route can take back their memory before the frontend's
-    // pattern, whose final field publishes this one, is constructed.
+    // The bytes every match holds, checked on a short window before any engine runs, and for an
+    // exact literal with its long-window search on a long window too, or null. Not final only so
+    // that a frontend route can take back their memory before the frontend's pattern, whose final
+    // field publishes this one, is constructed.
     private RequiredBytes requiredBytes;
 
     private volatile Prog reverseProg;
@@ -743,8 +744,9 @@ abstract sealed class CompiledPattern
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }
         }
-        // The bytes every match holds, for the short-window check, come from the semantic
-        // expression: the lowered expression adds only an optional final LF and an end assertion.
+        // The bytes every match holds, for the short- and long-window checks, come from the
+        // semantic expression: the lowered expression adds only an optional final LF and an end
+        // assertion.
         RequiredBytes requiredBytes = RequiredBytes.analyze(normalizedSuffixRegexp, MatchLength.minimum(expressionAnalysis.length().encoded()), booleanPlans.innerLiteralSearch() != null);
         // A call-free first-and-last-byte search for contains and dot-star spans, in every
         // language. Unlike Slice.indexOf, it bounds the bytes its failed candidates compare, so
@@ -1006,14 +1008,20 @@ abstract sealed class CompiledPattern
         // Trino's ordered-literal matcher, is charged ahead of the required bytes, and they are
         // judged again after it. A pattern with a single-byte table keeps none: its group-zero
         // matchers find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a
-        // check ahead of the table would scan such a window twice.
+        // check ahead of the table would scan such a window twice. An exact literal of a pattern
+        // with no other literal route takes its long-window search into the same charge; where
+        // that larger charge does not fit, it keeps the short-window check alone if that charge
+        // fits.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
         }
         RequiredBytes reservedRequiredBytes = null;
-        if (requiredBytes != null && singleByteMatcher == null && tryReserveBesideForwardDfas(forwardBudgetProgram, requiredBytes.estimatedRetainedSize())) {
-            reservedRequiredBytes = requiredBytes;
+        if (requiredBytes != null && singleByteMatcher == null) {
+            RequiredBytes preferred = requiredBytes.isExactLiteral() && checksRequiredLiteralOnLongWindows(booleanPlans, requiredPrefix, exactLiteralLength, partialProg, compactBoundedCharacterClass, matcherClass)
+                    ? requiredBytes.withLongWindowSearch()
+                    : requiredBytes;
+            reservedRequiredBytes = reserveRequiredBytes(forwardBudgetProgram, preferred);
         }
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
@@ -1092,6 +1100,69 @@ abstract sealed class CompiledPattern
                 reservedRequiredBytes);
     }
 
+    /// Whether a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more is also checked for
+    /// the pattern's exact required literal before any engine runs. A match lies inside the
+    /// window, so a window without the literal holds none, in every language and search mode.
+    /// The check is left to a pattern whose engine reads the whole of a window that holds no
+    /// match, and which no other route already searches for a literal at least as fast. So the
+    /// pattern has no required prefix, exact literal, literal kernel or search, inner literal
+    /// search, scan plan, class counter, literal set or alternation, span, byte-run, word-run, or
+    /// disjoint suffix-repeat matcher, or whole-input capture plan. Neither its forward nor its
+    /// lowered program is anchored at either end, where the engine can stop early, or has a
+    /// prefix scan, a transparent start literal, or a start literal filter that its first-match
+    /// DFA can run. A pattern with a single-byte table is not checked here: the caller keeps no
+    /// required bytes for it at all.
+    private static boolean checksRequiredLiteralOnLongWindows(
+            BooleanPlans booleanPlans,
+            byte[] requiredPrefix,
+            int exactLiteralLength,
+            Prog partialProg,
+            BoundedCharacterClassCounter compactBoundedCharacterClass,
+            BoundedCharacterClassCounter matcherClass)
+    {
+        BooleanPlanKind find = booleanPlans.find();
+        Prog loweredProgram = booleanPlans.loweredProgram();
+        return requiredPrefix == null && exactLiteralLength <= 0 &&
+                (find == BooleanPlanKind.GENERAL || find == BooleanPlanKind.LOWERED_PROGRAM) &&
+                compactBoundedCharacterClass == null && matcherClass == null &&
+                booleanPlans.scanPlan() == null &&
+                booleanPlans.literalSearch() == null &&
+                booleanPlans.innerLiteralSearch() == null &&
+                booleanPlans.literalSet() == null &&
+                booleanPlans.literalAlternationMatcher() == null &&
+                booleanPlans.fixedWidthByteMatcher() == null &&
+                booleanPlans.shortFixedWidthByteMatcher() == null &&
+                booleanPlans.byteRunMatcher() == null &&
+                booleanPlans.wordRunMatcher() == null &&
+                booleanPlans.disjointSuffixRepeatMatcher() == null &&
+                booleanPlans.wholeInputCapturePlan() == null &&
+                readsWholeWindowWithoutLiteralScan(partialProg) &&
+                (loweredProgram == null || readsWholeWindowWithoutLiteralScan(loweredProgram)) &&
+                // Last, since it builds the start-byte tables.
+                !searchesStartLiteralFilter(partialProg) &&
+                (loweredProgram == null || !searchesStartLiteralFilter(loweredProgram));
+    }
+
+    // Whether `program` has a start literal filter that its first-match DFA can run. A program
+    // whose assertions the DFA cannot run never scans for the filter, and neither does one whose
+    // first-match DFA does not initialize in its budget, since the longest-match DFA needs more. A
+    // search that skips the DFA anyway, such as a longest-match search whose DFA alone does not fit
+    // or a find after a count gave up on the DFA, reads the window as before. The required bytes
+    // are reserved later, and only where they leave every DFA that initializes now able to, so the
+    // budget is judged without them. The DFA kind decides the start bytes only for a program that
+    // can match empty, which has no start literal filter, so one kind answers for every search.
+    private static boolean searchesStartLiteralFilter(Prog program)
+    {
+        return !program.hasDfaUnsupportedAssertions() &&
+                program.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
+                Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH);
+    }
+
+    private static boolean readsWholeWindowWithoutLiteralScan(Prog program)
+    {
+        return !program.anchorStart() && !program.anchorEnd() && !program.canPrefixAccel() && program.transparentStartLiteral() == null;
+    }
+
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
     /// null. Boolean contains and dot-star span matching share this search.
     private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans)
@@ -1112,6 +1183,24 @@ abstract sealed class CompiledPattern
         }
         program.setDfaMemory(program.dfaMemory() - reservation);
         return true;
+    }
+
+    /// Reserves the required bytes beside `program`'s forward DFAs and returns those kept:
+    /// `preferred` where its charge fits, or else, for a literal with its long-window search,
+    /// the same literal without that search, for the short-window check alone, where that
+    /// smaller charge fits, or else null.
+    private static RequiredBytes reserveRequiredBytes(Prog program, RequiredBytes preferred)
+    {
+        if (tryReserveBesideForwardDfas(program, preferred.estimatedRetainedSize())) {
+            return preferred;
+        }
+        if (preferred.searchesLongWindows()) {
+            RequiredBytes shortWindowOnly = preferred.withoutLongWindowSearch();
+            if (tryReserveBesideForwardDfas(program, shortWindowOnly.estimatedRetainedSize())) {
+                return shortWindowOnly;
+            }
+        }
+        return null;
     }
 
     /// Whether reserving `reservation` bytes from `program`'s DFA budget would leave its
@@ -1517,7 +1606,8 @@ abstract sealed class CompiledPattern
     /// The route is charged first, against the allowance with the required bytes' memory handed
     /// back. The required bytes are then judged again by the rule that admitted them: they stay
     /// only if every forward DFA that initializes after the route's charge still does after
-    /// theirs.
+    /// theirs. Where a literal with its long-window search no longer fits, it keeps the
+    /// short-window check alone if that smaller charge fits.
     boolean tryReserveForwardDfaMemory(long retainedSize)
     {
         if (!mayReserveForwardDfaMemory(booleanPlans, retainedSize)) {
@@ -1531,8 +1621,8 @@ abstract sealed class CompiledPattern
             return false;
         }
         partialProg.setDfaMemory(dfaMemory - retainedSize);
-        if (requiredBytes != null && !tryReserveBesideForwardDfas(partialProg, released)) {
-            requiredBytes = null;
+        if (requiredBytes != null) {
+            requiredBytes = reserveRequiredBytes(partialProg, requiredBytes);
         }
         return true;
     }
@@ -1775,6 +1865,25 @@ abstract sealed class CompiledPattern
         return bytes != null && end - start < RequiredBytes.SHORT_WINDOW_LIMIT && !bytes.occursIn(input, start, end);
     }
 
+    /// Whether `[start, end)` of `text`, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
+    /// the exact literal every match consumes, for a pattern whose long windows are checked for
+    /// it, so it holds no match. A window that holds the literal is scanned only up to its first
+    /// occurrence, which the engine reads too. Out of line, so the routes that call it stay
+    /// small.
+    final boolean longWindowLacksRequiredLiteral(Slice text, int start, int end)
+    {
+        RequiredBytes literal = requiredBytes;
+        return literal != null && end - start >= RequiredBytes.SHORT_WINDOW_LIMIT && literal.searchesLongWindows() && literal.indexIn(text, start, end) < 0;
+    }
+
+    /// The required literal that a matcher checks the rest of a long region for, or null; see
+    /// [#longWindowLacksRequiredLiteral].
+    final RequiredBytes longWindowRequiredLiteral()
+    {
+        RequiredBytes literal = requiredBytes;
+        return literal != null && literal.searchesLongWindows() ? literal : null;
+    }
+
     boolean canUseDirectBitStateCapture(Prog prog, int searchLength, int captureCount)
     {
         return !longestMatch &&
@@ -1805,9 +1914,9 @@ abstract sealed class CompiledPattern
         return findOnEngine(input);
     }
 
-    /// The full-Slice find of the ordinary engine: the short-window rejects, the nullable-start
-    /// shortcut, then an ordinary search of the lowered boolean program where there is one, or
-    /// else of the forward program.
+    /// The full-Slice find of the ordinary engine: the short-window rejects or the long-window
+    /// literal reject, the nullable-start shortcut, then an ordinary search of the lowered boolean
+    /// program where there is one, or else of the forward program.
     private boolean findOnEngine(Slice input)
     {
         requireNonNull(input, "input is null");
@@ -1833,6 +1942,9 @@ abstract sealed class CompiledPattern
             if (!bytes.occursIn(input, 0, length)) {
                 return false;
             }
+        }
+        else if (bytes != null && longWindowLacksRequiredLiteral(input, 0, length)) {
+            return false;
         }
         if (canReturnEmptyAtStartForBooleanMatch(input, 0)) {
             return true;
@@ -2721,10 +2833,14 @@ abstract sealed class CompiledPattern
     /// Counts the matches of an unanchored pattern on the DFA, starting from the inner literal
     /// where one is required and the text is long enough, or on the short-search fixed-width
     /// matcher where the pattern has one and the text is shorter than
-    /// [#MINIMUM_LONG_SEARCH_BYTES]. It is out of line so that the count route methods stay small
-    /// enough for C2 to inline into their callers.
+    /// [#MINIMUM_LONG_SEARCH_BYTES]. A long text that lacks the pattern's long-window literal
+    /// counts none before any of them runs. It is out of line so that the count route methods
+    /// stay small enough for C2 to inline into their callers.
     private long countDfaMatches(Slice text)
     {
+        if (longWindowLacksRequiredLiteral(text, 0, text.length())) {
+            return 0;
+        }
         InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
         if (innerLiteralSearch != null && text.length() >= InnerLiteralSearch.MINIMUM_TEXT_BYTES) {
             return countInnerLiteralMatches(innerLiteralSearch, text);
@@ -2990,6 +3106,18 @@ abstract sealed class CompiledPattern
     {
         requireNonNull(text, "text is null");
         validateRange(text, start, end);
+        // The one-shot unanchored searches come here: find and findInto of a range, findInto,
+        // findResult, RE2's replaceFirst and extract, RE2's replaceAll once per match with no
+        // back-off, and each retry of a Rust search after an empty match that splits a
+        // character. None has checked for the required literal yet; a matcher's searches take
+        // matchRegionInto after their own check. The capture buffer is checked first, as the
+        // engine checks it before it reads any input.
+        if (groups != null) {
+            checkGroupsLength(groups);
+        }
+        if (anchor == Anchor.UNANCHORED && longWindowLacksRequiredLiteral(text, start, end)) {
+            return failWithoutMatch(groups);
+        }
         return matchRegionInto(
                 text,
                 0,
@@ -3000,6 +3128,26 @@ abstract sealed class CompiledPattern
                 groups,
                 fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace),
                 true);
+    }
+
+    /// Leaves caller groups, already checked, as a failed [#matchRegionInto] that clears them
+    /// does: unset.
+    private static boolean failWithoutMatch(int[] groups)
+    {
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        return false;
+    }
+
+    private static void checkGroupsLength(int[] groups)
+    {
+        if ((groups.length % 2) != 0) {
+            throw new IllegalArgumentException("groups length must be even: " + groups.length);
+        }
+        if (groups.length < 2) {
+            throw new IllegalArgumentException("groups must include group 0 start/end");
+        }
     }
 
     private static void validateRange(Slice text, int start, int end)
@@ -3069,12 +3217,7 @@ abstract sealed class CompiledPattern
         requireNonNull(text, "text is null");
         int[] searchGroups = groups;
         if (groups != null) {
-            if ((groups.length % 2) != 0) {
-                throw new IllegalArgumentException("groups length must be even: " + groups.length);
-            }
-            if (groups.length < 2) {
-                throw new IllegalArgumentException("groups must include group 0 start/end");
-            }
+            checkGroupsLength(groups);
             int patternSlotCount = 2 * (capturingGroupCount + 1);
             int copySlotCount = Math.min(patternSlotCount, partialProg.captureSlotCount());
             if (groups.length > patternSlotCount && copySlotCount <= Long.SIZE) {
