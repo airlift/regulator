@@ -38,7 +38,6 @@ public class TestRe2ParsedCompile
             Re2 normal = Re2.compile(patternSlice);
             Re2 compiledFromParsed = Re2.compileParsed(patternSlice, parsed, Regexp.LIKE_PERL);
 
-            assertThat(compiledFromParsed.regexp()).isEqualTo(normal.regexp());
             assertThat(compiledFromParsed.capturingGroupCount()).isEqualTo(normal.capturingGroupCount());
             assertThat(compiledFromParsed.namedCapturingGroups()).isEqualTo(normal.namedCapturingGroups());
 

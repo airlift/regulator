@@ -217,8 +217,11 @@ public final class FilteredRe2
                 throw new IllegalArgumentException("all FilteredRe2 patterns must use the same encoding");
             }
 
-            Re2 compiledPattern = Re2.compile(pattern, options);
-            Prefilter prefilter = Prefilter.fromRe2(compiledPattern);
+            Slice patternCopy = pattern.copy();
+            int parseFlags = options.parseFlags();
+            ParseResult parsed = RegexpParser.parse(patternCopy, parseFlags);
+            Re2 compiledPattern = Re2.compileParsed(patternCopy, parsed, parseFlags, options);
+            Prefilter prefilter = Prefilter.fromRegexp(parsed.regexp());
 
             int patternId = patterns.size();
             patterns.add(compiledPattern);

@@ -53,7 +53,6 @@ public class TestSingleByteMatcher
 
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
-            assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(patternCase.pattern()).isTrue();
             SingleByteMatcher singleByteMatcher = re2.sharedSingleByteMatcher();
             assertThat(singleByteMatcher).as(patternCase.pattern()).isNotNull();
 
@@ -91,7 +90,6 @@ public class TestSingleByteMatcher
 
         for (String pattern : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(pattern));
-            assertThat(re2.supportsSingleByteMatcherForDiagnostics()).as(pattern).isFalse();
             assertThat(re2.sharedSingleByteMatcher()).as(pattern).isNull();
         }
     }
@@ -150,7 +148,7 @@ public class TestSingleByteMatcher
 
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
-            SingleByteRepeatMatcher repeatMatcher = re2.createSingleByteRepeatMatcher();
+            SingleByteRepeatMatcher repeatMatcher = repeatMatcher(patternCase);
             assertThat(repeatMatcher).as(patternCase.pattern()).isNotNull();
 
             for (Slice input : inputs) {
@@ -181,7 +179,7 @@ public class TestSingleByteMatcher
 
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
-            SingleByteRepeatMatcher repeatMatcher = re2.createSingleByteRepeatMatcher();
+            SingleByteRepeatMatcher repeatMatcher = repeatMatcher(patternCase);
             assertThat(repeatMatcher).as(patternCase.pattern()).isNotNull();
 
             for (Slice input : inputs) {
@@ -212,7 +210,7 @@ public class TestSingleByteMatcher
 
         for (PatternCase patternCase : patterns) {
             Re2 re2 = Re2.compile(Slices.utf8Slice(patternCase.pattern()), patternCase.options());
-            SingleByteRepeatMatcher repeatMatcher = re2.createSingleByteRepeatMatcher();
+            SingleByteRepeatMatcher repeatMatcher = repeatMatcher(patternCase);
             assertThat(repeatMatcher).as(patternCase.pattern()).isNotNull();
 
             for (Slice input : inputs) {
@@ -238,10 +236,20 @@ public class TestSingleByteMatcher
                 ".*");
 
         for (String pattern : patterns) {
-            assertThat(Re2.compile(Slices.utf8Slice(pattern)).createSingleByteRepeatMatcher())
-                    .as(pattern)
-                    .isNull();
+            assertThat(TrinoRegexp.compile(Slices.utf8Slice(pattern)).re2().createSingleByteRepeatMatcher()).as(pattern).isNull();
         }
+        // Only Trino builds the matcher, so only a Trino pattern keeps the repeat's members.
+        assertThat(TrinoRegexp.compile(Slices.utf8Slice("a*")).re2().createSingleByteRepeatMatcher()).isNotNull();
+        assertThat(Re2.compile(Slices.utf8Slice("a*")).createSingleByteRepeatMatcher()).isNull();
+    }
+
+    /// Returns the repeat matcher of `patternCase`, analyzed from its parse tree as a Trino
+    /// pattern's compile analyzes its own.
+    private static SingleByteRepeatMatcher repeatMatcher(PatternCase patternCase)
+    {
+        ParseResult parsed = RegexpParser.parse(Slices.utf8Slice(patternCase.pattern()), patternCase.options().parseFlags());
+        SingleByteRepeatMatcher.Repeat repeat = SingleByteRepeatMatcher.analyze(parsed.regexp(), parsed.caseFolding());
+        return repeat == null ? null : SingleByteRepeatMatcher.create(repeat);
     }
 
     private static long countRegularMatches(Re2 re2, Slice input)

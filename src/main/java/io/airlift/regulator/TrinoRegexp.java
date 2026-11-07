@@ -217,7 +217,7 @@ public sealed class TrinoRegexp
             return new ExactLiteralTrinoRegexp(compiledPattern);
         }
         if (compiledPattern.mayHaveFixedWidthByteSpanMatcher()) {
-            TrinoRegexp fixedWidthByteRegexp = FixedWidthByteSpanMatcher.createTrinoRegexp(compiledPattern);
+            TrinoRegexp fixedWidthByteRegexp = FixedWidthByteSpanMatcher.createTrinoRegexp(compiledPattern, parsed.regexp());
             if (fixedWidthByteRegexp != null) {
                 return fixedWidthByteRegexp;
             }
