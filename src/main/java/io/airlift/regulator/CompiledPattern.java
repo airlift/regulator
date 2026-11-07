@@ -194,7 +194,6 @@ abstract sealed class CompiledPattern
             Compiler.Dialect compilerDialect,
             boolean longestMatch,
             Slice pattern,
-            Regexp regexp,
             ExpressionAnalysis expressionAnalysis,
             Regexp suffixRegexp,
             Regexp normalizedReverseRegexp,
@@ -226,7 +225,6 @@ abstract sealed class CompiledPattern
     private final int flags;
     private final long maxMemory;
     private final Slice pattern;
-    private final Regexp regexp;
     private final ExpressionAnalysis expressionAnalysis;
     private final Prog partialProg;
     private final boolean longestMatch;
@@ -234,10 +232,21 @@ abstract sealed class CompiledPattern
     private final Map<Integer, String> capturingGroupNames;
     private volatile Map<String, Integer> namedCapturingGroups;
 
-    // AST-specialized analyzers retain the semantic suffix. Reverse compilation separately
-    // retains the normalized semantic or lowered form.
-    private final Regexp suffixRegexp;
-    private final Regexp normalizedReverseRegexp;
+    // A compiled pattern keeps no parse tree. The reverse program's input, the normalized
+    // semantic or lowered suffix, is kept until that program is compiled on first use, and only
+    // where it fits the reverse share by itself; a pattern whose input does not fit, or whose
+    // reverse program could never run, keeps none and has no reverse program. This pattern's
+    // lock keeps the input, the program, and the computed flag consistent with each other.
+    private Regexp normalizedReverseRegexp;
+    // The input of Trino's lazily built repeat matcher, the members of a greedy zero-or-more
+    // one-byte repeat, captured from a Trino pattern's suffix where its shape and the program
+    // allow it, or null.
+    private final SingleByteRepeatMatcher.Repeat singleByteRepeat;
+    // Whether the suffix is a greedy class repeat that the class counter takes, where the
+    // program allows it.
+    private final boolean hasClassRepeat;
+    // The class and bounds the lazily built class counter reads, or null.
+    private final BoundedCharacterClassCounter.Repeat classRepeat;
     private final byte[] requiredPrefix;
     private final boolean requiredPrefixFoldCase;
     private final int matchLength;
@@ -281,10 +290,8 @@ abstract sealed class CompiledPattern
         this.maxMemory = analysis.maxMemory();
         this.longestMatch = analysis.longestMatch();
         this.pattern = requireNonNull(analysis.pattern(), "pattern is null");
-        this.regexp = analysis.regexp();
         this.expressionAnalysis = requireNonNull(analysis.expressionAnalysis(), "expressionAnalysis is null");
-        this.suffixRegexp = analysis.suffixRegexp();
-        this.normalizedReverseRegexp = analysis.normalizedReverseRegexp();
+        Regexp suffixRegexp = analysis.suffixRegexp();
         this.requiredPrefix = analysis.requiredPrefix();
         this.requiredPrefixFoldCase = analysis.requiredPrefixFoldCase();
         this.matchLength = analysis.matchLength();
@@ -302,7 +309,30 @@ abstract sealed class CompiledPattern
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
         // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
         // single class's counter serves matchers alone.
-        this.boundedCharacterClassCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS ? matcherClassCounter : analysis.compactBoundedCharacterClass();
+        boolean holdsClassRepeatCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS;
+        this.boundedCharacterClassCounter = holdsClassRepeatCounter ? matcherClassCounter : analysis.compactBoundedCharacterClass();
+        // Only Trino builds the repeat matcher.
+        this.singleByteRepeat = compilerDialect == Compiler.Dialect.TRINO && requiredPrefix == null && !partialProg.hasTextDependentAssertions()
+                ? SingleByteRepeatMatcher.analyze(suffixRegexp, expressionAnalysis.caseFolding())
+                : null;
+        // A counter held from the start is never built lazily, so only a pattern without one
+        // analyzes its suffix for the lazy counter's input.
+        this.classRepeat = boundedCharacterClassCounter == null && requiredPrefix == null &&
+                !partialProg.anchorStart() &&
+                !partialProg.anchorEnd() &&
+                !partialProg.hasTextDependentAssertions()
+                ? BoundedCharacterClassCounter.analyzeRepeat(suffixRegexp)
+                : null;
+        this.hasClassRepeat = holdsClassRepeatCounter || classRepeat != null;
+        // The reverse DFA cannot run assertions the forward DFA cannot, or full case folding.
+        Prog loweredProgram = booleanPlans.loweredProgram();
+        Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
+        Regexp reverseRegexp = forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasFullCaseFold() ? null : analysis.normalizedReverseRegexp();
+        long reverseShare = reverseProgramMemory();
+        if (reverseRegexp != null && reverseRegexp.estimatedRetainedSize(reverseShare) > reverseShare) {
+            reverseRegexp = null;
+        }
+        this.normalizedReverseRegexp = reverseRegexp;
         // Every shape other than the engine answers its operations on the assumption that no
         // match is empty.
         if (analysis.shape() != Shape.ENGINE && canMatchEmpty()) {
@@ -335,14 +365,14 @@ abstract sealed class CompiledPattern
         this.flags = pattern.flags;
         this.maxMemory = pattern.maxMemory;
         this.pattern = pattern.pattern;
-        this.regexp = pattern.regexp;
         this.expressionAnalysis = pattern.expressionAnalysis;
         this.partialProg = pattern.partialProg;
         this.longestMatch = pattern.longestMatch;
         this.capturingGroupCount = pattern.capturingGroupCount;
         this.capturingGroupNames = pattern.capturingGroupNames;
-        this.suffixRegexp = pattern.suffixRegexp;
-        this.normalizedReverseRegexp = pattern.normalizedReverseRegexp;
+        this.singleByteRepeat = pattern.singleByteRepeat;
+        this.hasClassRepeat = pattern.hasClassRepeat;
+        this.classRepeat = pattern.classRepeat;
         this.requiredPrefix = pattern.requiredPrefix;
         this.requiredPrefixFoldCase = pattern.requiredPrefixFoldCase;
         this.matchLength = pattern.matchLength;
@@ -352,8 +382,13 @@ abstract sealed class CompiledPattern
         this.hasPreEngineMatcher = pattern.hasPreEngineMatcher;
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
         this.hasAnchoredSubmatchRoute = !clearsGroupsBeforeMatch && pattern.hasAnchoredSubmatchRoute;
-        this.reverseProg = pattern.reverseProg;
-        this.reverseProgComputed = pattern.reverseProgComputed;
+        // The reverse program's compile releases its input under the lock, so the copy takes the
+        // input, program, and computed flag as one consistent state.
+        synchronized (pattern) {
+            this.normalizedReverseRegexp = pattern.normalizedReverseRegexp;
+            this.reverseProg = pattern.reverseProg;
+            this.reverseProgComputed = pattern.reverseProgComputed;
+        }
         this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
         this.matcherClassCounter = pattern.matcherClassCounter;
         this.requiredBytes = pattern.requiredBytes;
@@ -464,7 +499,6 @@ abstract sealed class CompiledPattern
                 Compiler.Dialect.TRINO,
                 false,
                 pattern,
-                entireRegexp,
                 expressionAnalysis,
                 entireRegexp,
                 null,
@@ -541,7 +575,6 @@ abstract sealed class CompiledPattern
                     compilerDialect,
                     false,
                     pattern,
-                    entireRegexp,
                     expressionAnalysis,
                     entireRegexp,
                     null,
@@ -560,11 +593,9 @@ abstract sealed class CompiledPattern
         // For "^literal...", compile only the suffix and check the required prefix before matching.
         // Retain the suffix AST so reverse-program construction also avoids the stripped literal.
         Regexp suffixRegexp;
-        byte[] requiredPrefix = null;
         boolean prefixFoldCase = false;
         Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix(caseFolding);
         if (prefixResult != null) {
-            requiredPrefix = prefixResult.prefix().getBytes();
             prefixFoldCase = prefixResult.foldCase();
             suffixRegexp = prefixResult.suffix();
         }
@@ -582,6 +613,7 @@ abstract sealed class CompiledPattern
         // suffix whose expansion passed that check, so simplifying it needs no budget of its own.
         Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding);
         ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
+        byte[] requiredPrefix = prefixResult == null ? null : requiredPrefixBytes(prefixResult.prefix(), expressionAnalysis.literalSequence());
         // The whole-expression analysis describes the entire expression, so a split-off suffix
         // needs its own length.
         int encodedMatchLength = prefixResult != null ? MatchLength.analyze(suffixRegexp, caseFolding).encoded() : expressionAnalysis.length().encoded();
@@ -795,7 +827,6 @@ abstract sealed class CompiledPattern
                 compilerDialect,
                 longestMatch,
                 pattern,
-                entireRegexp,
                 expressionAnalysis,
                 suffixRegexp,
                 loweredBooleanProgram == null ? normalizedSuffixRegexp : loweredBooleanProgram.normalizedRegexp(),
@@ -811,6 +842,19 @@ abstract sealed class CompiledPattern
                 requiredBytes);
     }
 
+    /// Returns the bytes of `prefix`, sharing the literal sequence's first literal when it holds
+    /// them, as it does for a prefix that a gap or class follows, so a pattern keeps one copy.
+    private static byte[] requiredPrefixBytes(Slice prefix, ExpressionAnalysis.LiteralSequence literalSequence)
+    {
+        if (literalSequence != null && literalSequence.literalCount() != 0) {
+            Slice literal = literalSequence.retainedLiteral(0);
+            if (literal.equals(prefix)) {
+                return literal.byteArray();
+            }
+        }
+        return prefix.getBytes();
+    }
+
     /// Returns the analysis of a pattern with its shape and routes selected. Selection reserves the
     /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
     /// budget, and of the required bytes from the program that holds the forward DFA budget,
@@ -821,7 +865,6 @@ abstract sealed class CompiledPattern
             Compiler.Dialect compilerDialect,
             boolean longestMatch,
             Slice pattern,
-            Regexp regexp,
             ExpressionAnalysis expressionAnalysis,
             Regexp suffixRegexp,
             Regexp normalizedReverseRegexp,
@@ -951,7 +994,6 @@ abstract sealed class CompiledPattern
                 compilerDialect,
                 longestMatch,
                 pattern,
-                regexp,
                 expressionAnalysis,
                 suffixRegexp,
                 normalizedReverseRegexp,
@@ -1126,13 +1168,6 @@ abstract sealed class CompiledPattern
         return capturingGroupNames;
     }
 
-    /// Package-private accessor for prefilter extraction (not for general use).
-    /// Matches upstream RE2::Regexp() const.
-    Regexp regexp()
-    {
-        return regexp;
-    }
-
     /// Returns the case folding of the pattern language. The expression analysis carries it, which
     /// keeps it off the compiled-pattern layout.
     CaseFolding caseFolding()
@@ -1268,14 +1303,19 @@ abstract sealed class CompiledPattern
         return reverseProg;
     }
 
+    synchronized boolean hasReverseProgramInputForDiagnostics()
+    {
+        return normalizedReverseRegexp != null;
+    }
+
     boolean hasRequiredPrefixForDiagnostics()
     {
         return requiredPrefix != null;
     }
 
-    Slice exactLiteralForDiagnostics()
+    byte[] requiredPrefixForDiagnostics()
     {
-        return regexp.exactLiteral();
+        return requiredPrefix;
     }
 
     LiteralSearchKernel literalSearchForDiagnostics()
@@ -1298,6 +1338,11 @@ abstract sealed class CompiledPattern
     LiteralSetSpanMatcher literalSetSpanMatcherForDiagnostics()
     {
         return booleanPlans.literalSet();
+    }
+
+    FixedWidthByteSpanMatcher fixedWidthByteSpanMatcherForDiagnostics()
+    {
+        return booleanPlans.fixedWidthByteMatcher();
     }
 
     /// Returns the span search that a group-zero [RegexpMatcher#find()] runs in place of the
@@ -1372,7 +1417,9 @@ abstract sealed class CompiledPattern
         return true;
     }
 
-    FixedWidthByteSpanMatcher createFixedWidthByteSpanMatcher()
+    /// Returns the fixed-width matcher this pattern retains, or else one analyzed from `regexp`,
+    /// the parse tree this pattern was compiled from, which it does not keep, or `null`.
+    FixedWidthByteSpanMatcher createFixedWidthByteSpanMatcher(Regexp regexp)
     {
         FixedWidthByteSpanMatcher retainedMatcher = booleanPlans.fixedWidthByteMatcher();
         if (retainedMatcher != null) {
@@ -2604,11 +2651,6 @@ abstract sealed class CompiledPattern
         return singleByteMatcher != null;
     }
 
-    boolean mayHaveSingleByteMatcher()
-    {
-        return mayHaveSingleByteMatcher(requiredPrefix, partialProg, matchLength);
-    }
-
     private static boolean mayHaveSingleByteMatcher(byte[] requiredPrefix, Prog partialProg, int matchLength)
     {
         return requiredPrefix == null &&
@@ -2616,17 +2658,9 @@ abstract sealed class CompiledPattern
                 MatchLength.fixed(matchLength) == 1;
     }
 
-    boolean supportsSingleByteMatcherForDiagnostics()
-    {
-        return mayHaveSingleByteMatcher() && SingleByteMatcher.supports(suffixRegexp, caseFolding());
-    }
-
     SingleByteRepeatMatcher createSingleByteRepeatMatcher()
     {
-        if (requiredPrefix != null || partialProg.hasTextDependentAssertions()) {
-            return null;
-        }
-        return SingleByteRepeatMatcher.analyze(suffixRegexp, caseFolding());
+        return singleByteRepeat == null ? null : SingleByteRepeatMatcher.create(singleByteRepeat);
     }
 
     BoundedCharacterClassCounter createBoundedCharacterClassCounter()
@@ -2634,23 +2668,17 @@ abstract sealed class CompiledPattern
         if (usesCompactBoundedCharacterClassForDiagnostics()) {
             return boundedCharacterClassCounter;
         }
-        if (requiredPrefix != null ||
-                partialProg.anchorStart() ||
-                partialProg.anchorEnd() ||
-                partialProg.hasTextDependentAssertions()) {
+        if (!hasClassRepeat) {
             return null;
         }
-        return BoundedCharacterClassCounter.analyze(suffixRegexp);
+        // A class repeat's matcher counter, which this pattern holds in place of its input, is
+        // the counter that input builds.
+        return classRepeat == null ? matcherClassCounter : BoundedCharacterClassCounter.create(classRepeat);
     }
 
     boolean hasCharacterClassSpan()
     {
-        return usesCompactBoundedCharacterClassForDiagnostics() ||
-                (requiredPrefix == null &&
-                        !partialProg.anchorStart() &&
-                        !partialProg.anchorEnd() &&
-                        !partialProg.hasTextDependentAssertions() &&
-                        BoundedCharacterClassCounter.supports(suffixRegexp));
+        return usesCompactBoundedCharacterClassForDiagnostics() || hasClassRepeat;
     }
 
     /// Returns the counter that finds this pattern's group-zero matches directly: the compact
@@ -3925,6 +3953,8 @@ abstract sealed class CompiledPattern
         synchronized (this) {
             if (!reverseProgComputed) {
                 reverseProg = compileReverse();
+                // The program, or its failure, replaces its input.
+                normalizedReverseRegexp = null;
                 reverseProgComputed = true;
             }
         }
@@ -3939,6 +3969,9 @@ abstract sealed class CompiledPattern
     /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search), less
     ///   what an inner literal search retains
     ///
+    /// The program replaces the retained input it is compiled from, which fit the share by
+    /// itself, so the program alone must fit the share.
+    ///
     /// The `reversed=true` flag causes:
     /// - Right-to-left byte scanning in Dfa.search
     /// - Anchor flag swapping (^ becomes $, $ becomes ^)
@@ -3950,28 +3983,30 @@ abstract sealed class CompiledPattern
     /// @return compiled reverse program, or null if compilation failed
     private Prog compileReverse()
     {
-        Prog loweredProgram = booleanPlans.loweredProgram();
-        Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
-        if (normalizedReverseRegexp == null ||
-                forwardProgram.hasDfaUnsupportedAssertions() ||
-                forwardProgram.hasFullCaseFold()) {
+        if (normalizedReverseRegexp == null) {
             return null;
-        }
-        long reverseMemory = Math.max(1, maxMemory / 3);
-        // An inner literal search already holds part of the reverse budget.
-        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        if (innerLiteralSearch != null) {
-            reverseMemory = Math.max(1, reverseMemory - innerLiteralSearch.estimatedRetainedSize());
         }
         // Compile from the stored normalized suffix instead of re-parsing or re-simplifying.
         Prog prog;
         try {
-            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseMemory, compilerDialect(), caseFolding());
+            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseProgramMemory(), compilerDialect(), caseFolding());
         }
         catch (RegexpCompileMemoryLimitException ignored) {
             return null;
         }
         return prog;
+    }
+
+    /// Returns the reverse share of `maxMemory`, less what an inner literal search, which already
+    /// holds part of it, retains.
+    private long reverseProgramMemory()
+    {
+        long reverseMemory = Math.max(1, maxMemory / 3);
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        if (innerLiteralSearch != null) {
+            reverseMemory = Math.max(1, reverseMemory - innerLiteralSearch.estimatedRetainedSize());
+        }
+        return reverseMemory;
     }
 
     private static FanoutResult fanout(Prog prog)

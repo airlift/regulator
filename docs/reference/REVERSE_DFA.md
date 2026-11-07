@@ -64,9 +64,11 @@ not change.
 ## Lifetime and memory
 
 The reverse program is compiled lazily because boolean and capture-engine paths
-do not always need it. `Re2` stores the parsed required-prefix suffix so lazy
-compilation does not parse the pattern again. An inner literal search's reverse
-prefix program is compiled eagerly with the pattern.
+do not always need it. `Re2` keeps the simplified required-prefix suffix as that
+program's input only when it fits the reverse share by itself, and releases it
+after the first compile attempt; a pattern that keeps no input has no reverse
+program. An inner literal search's reverse prefix program is compiled eagerly
+with the pattern.
 
 Following upstream RE2:
 

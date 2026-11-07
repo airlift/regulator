@@ -224,7 +224,7 @@ public class TestBenchmarkPatternDispatch
             }
             case "DOT_STAR_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(compiled instanceof JavaRegexp ? GENERAL : CONTAINS);
             case "SINGLE_BYTE" -> {
-                assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isTrue();
+                assertThat(compiled.sharedSingleByteMatcher()).as(description).isNotNull();
                 assertThat(matcher.singleByteMatcherForDiagnostics()).as(description).isSameAs(compiled.sharedSingleByteMatcher());
                 // A find with at least 64 bytes left, on LONG rows, runs the forward cursor.
                 assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).as(description).isTrue();
@@ -240,8 +240,8 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.literalSetSpanMatcherForDiagnostics().skipsRootBytes(1024)).as(description).isEqualTo(VectorSupport.isAvailable());
             }
             case "FIXED_WIDTH" -> {
-                assertThat(compiled.hasRetainedFixedWidthByteSpanMatcher()).as(description).isTrue();
-                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createFixedWidthByteSpanMatcher());
+                assertThat(compiled.fixedWidthByteSpanMatcherForDiagnostics()).as(description).isNotNull();
+                assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.fixedWidthByteSpanMatcherForDiagnostics());
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
             case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
@@ -250,7 +250,7 @@ public class TestBenchmarkPatternDispatch
                 assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
             }
             case "GENERAL" -> {
-                assertThat(compiled.supportsSingleByteMatcherForDiagnostics()).as(description).isFalse();
+                assertThat(compiled.sharedSingleByteMatcher()).as(description).isNull();
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNull();
             }
             default -> {}

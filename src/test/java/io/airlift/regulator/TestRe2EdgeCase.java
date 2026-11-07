@@ -194,6 +194,6 @@ public class TestRe2EdgeCase
 
     private static String format(String pattern, Re2.Options options)
     {
-        return RegexpToString.toString(Re2.compile(utf8(pattern), options).regexp());
+        return RegexpToString.toString(RegexpParser.parse(utf8(pattern), options.parseFlags()).regexp());
     }
 }

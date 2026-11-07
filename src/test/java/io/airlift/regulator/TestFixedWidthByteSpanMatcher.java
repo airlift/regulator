@@ -89,8 +89,8 @@ public class TestFixedWidthByteSpanMatcher
         Slice expression = utf8Slice("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
         long maxMemory = 4 * 1024;
         TrinoCompiledPattern pattern = TrinoRegexp.compile(expression, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
-        FixedWidthByteSpanMatcher matcher = pattern.createFixedWidthByteSpanMatcher();
-        assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).isTrue();
+        FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
+        assertThat(matcher).isNotNull();
         assertThat(Compiler.estimatedProgramMemory(pattern.forwardProgramForDiagnostics()) + matcher.estimatedRetainedSize())
                 .isLessThanOrEqualTo(maxMemory - (maxMemory / 3));
 
@@ -138,8 +138,7 @@ public class TestFixedWidthByteSpanMatcher
         });
         assertSpan(matcher, malformed, 0, 6, 11);
 
-        Re2 latin1Pattern = Re2.compile(utf8Slice("[0-9]{2}-[0-9]{2}"), Re2.Options.latin1());
-        FixedWidthByteSpanMatcher latin1 = latin1Pattern.createFixedWidthByteSpanMatcher();
+        FixedWidthByteSpanMatcher latin1 = optionalMatcher("[0-9]{2}-[0-9]{2}", Re2.Options.latin1());
         assertThat(latin1).isNotNull();
         assertSpan(latin1, wrappedBuffer(new byte[] {(byte) 0xFF, '1', '2', '-', '3', '4'}), 0, 1, 6);
     }
@@ -202,7 +201,7 @@ public class TestFixedWidthByteSpanMatcher
 
         for (String expression : patterns) {
             Re2 pattern = Re2.compile(utf8Slice(expression));
-            FixedWidthByteSpanMatcher matcher = pattern.createFixedWidthByteSpanMatcher();
+            FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
             assertThat(matcher).as(expression).isNotNull();
             for (Slice input : inputs) {
                 for (int start = 0; start <= input.length(); start++) {
@@ -395,7 +394,13 @@ public class TestFixedWidthByteSpanMatcher
 
     private static FixedWidthByteSpanMatcher optionalMatcher(String pattern)
     {
-        return Re2.compile(utf8Slice(pattern)).createFixedWidthByteSpanMatcher();
+        return optionalMatcher(pattern, Re2.Options.defaults());
+    }
+
+    private static FixedWidthByteSpanMatcher optionalMatcher(String pattern, Re2.Options options)
+    {
+        Slice expression = utf8Slice(pattern);
+        return Re2.compile(expression, options).createFixedWidthByteSpanMatcher(RegexpParser.parse(expression, options.parseFlags()).regexp());
     }
 
     private static long span(int start, int end)

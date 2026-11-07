@@ -308,7 +308,7 @@ public class TestExpressionAnalysis
             Re2 re2 = Re2.compile(utf8Slice(pattern));
             assertThat(re2.expressionAnalysisForDiagnostics().literalSequence().exactLiteral())
                     .as("exact literal: %s", pattern)
-                    .isEqualTo(re2.exactLiteralForDiagnostics());
+                    .isEqualTo(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp().exactLiteral());
             if (!pattern.isEmpty()) {
                 Slice input = utf8Slice("x" + pattern.replace("(", "").replace(")", "") + "x");
                 assertThat(re2.forwardProgramForDiagnostics().prefixAccel(input.byteArray(), input.byteArrayOffset(), input.length()))
@@ -319,12 +319,15 @@ public class TestExpressionAnalysis
 
         for (String pattern : List.of("^abc", "^abc.*", "\\Aabc(?s:.*)")) {
             Re2 re2 = Re2.compile(utf8Slice(pattern));
-            Regexp.RequiredPrefixResult currentPrefix = re2.regexp().requiredPrefix(re2.caseFolding());
+            Regexp.RequiredPrefixResult currentPrefix = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp().requiredPrefix(re2.caseFolding());
             assertThat(currentPrefix).as("current prefix: %s", pattern).isNotNull();
             assertThat(re2.expressionAnalysisForDiagnostics().literalSequence().requiredPrefix())
                     .as("shared prefix: %s", pattern)
                     .isEqualTo(currentPrefix.prefix());
         }
+        // The compiled prefix is the literal analysis's copy, not a second one.
+        Re2 prefixed = Re2.compile(utf8Slice("^abc[0-9]"));
+        assertThat(prefixed.requiredPrefixForDiagnostics()).isSameAs(prefixed.expressionAnalysisForDiagnostics().literalSequence().retainedLiteral(0).byteArray());
 
         for (String pattern : List.of("abc.*", "abc(?s:.*)", "abc[0-9]")) {
             Re2 re2 = Re2.compile(utf8Slice(pattern));
@@ -355,12 +358,13 @@ public class TestExpressionAnalysis
     @Test
     public void testPrefilterLiteralEquivalence()
     {
-        Re2 re2 = Re2.compile(utf8Slice("(?s:foo.*bar.*baz)"));
+        Slice pattern = utf8Slice("(?s:foo.*bar.*baz)");
+        Re2 re2 = Re2.compile(pattern);
         ExpressionAnalysis.LiteralSequence sequence = re2.expressionAnalysisForDiagnostics().literalSequence();
         assertThat(sequence.literalCount()).isEqualTo(3);
 
         List<Slice> atoms = new ArrayList<>();
-        collectAtoms(Prefilter.fromRe2(re2), atoms);
+        collectAtoms(Prefilter.fromRegexp(RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp()), atoms);
         assertThat(atoms).containsExactlyInAnyOrder(utf8Slice("foo"), utf8Slice("bar"), utf8Slice("baz"));
         for (int literalIndex = 0; literalIndex < sequence.literalCount(); literalIndex++) {
             assertThat(atoms).contains(sequence.literal(literalIndex));

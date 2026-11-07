@@ -76,7 +76,7 @@ public class TestWildcardAlternation
             for (String expression : List.of("(?s:a|.)", "(?s:.|a)", "(?s:[a-z]|.)")) {
                 Re2 actual = Re2.compile(utf8Slice(expression), options);
                 assertThat(actual.forwardProgramForDiagnostics().dump()).isEqualTo(wildcard.forwardProgramForDiagnostics().dump());
-                assertThat(actual.regexp().op()).isEqualTo(RegexpOp.ANY_CHAR);
+                assertThat(RegexpParser.parse(utf8Slice(expression), options.parseFlags()).regexp().op()).isEqualTo(RegexpOp.ANY_CHAR);
             }
         }
     }
