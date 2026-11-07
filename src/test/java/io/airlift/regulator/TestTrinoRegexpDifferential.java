@@ -35,6 +35,14 @@ import java.util.Random;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.TestingPatternGenerator.TEXT_CHARACTERS;
+import static io.airlift.regulator.TestingTrinoJoni.ASCII_SYMBOLS;
+import static io.airlift.regulator.TestingTrinoJoni.FULL_FOLD_CHARACTERS;
+import static io.airlift.regulator.TestingTrinoJoni.LITERAL_ESCAPE_LETTERS;
+import static io.airlift.regulator.TestingTrinoJoni.NON_ASCII_CONTROL_OPERANDS;
+import static io.airlift.regulator.TestingTrinoJoni.POSIX_BRACKET_NAMES;
+import static io.airlift.regulator.TestingTrinoJoni.PROPERTY_NAMES;
+import static io.airlift.regulator.TestingTrinoJoni.SHORT_PROPERTY_NAMES;
 import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
 import static io.airlift.regulator.TestingTrinoJoni.joniPattern;
 import static io.airlift.regulator.TestingTrinoJoni.verifyOperations;
@@ -64,84 +72,7 @@ public class TestTrinoRegexpDifferential
     private static final int MAX_DEPTH = 3;
     private static final int MAX_INPUT_CHARACTERS = 12;
 
-    // Characters whose properties are unchanged since Unicode 6.1, the version of pinned Joni's
-    // property tables, and whose simple case folds are unchanged since Unicode 4.1, the version of
-    // its fold tables. Capital sharp s, U+1DF95, and the glottal stops, whose folds changed, are
-    // left out: REGULATOR_DECISIONS.md, Pinned Unicode Properties, Pinned Unicode Case Folding,
-    // and Trino Text-Dependent Assertions And Full Case Folding. Arabic-Indic digits, which pinned
-    // Joni's tables put in the Common script, are left out for the same reason; Devanagari three
-    // stands for non-ASCII digits.
-    private static final List<String> TEXT_CHARACTERS = List.of(
-            "a",
-            "b",
-            "c",
-            "k",
-            "s",
-            "x",
-            "z",
-            "A",
-            "B",
-            "K",
-            "S",
-            "Z",
-            "0",
-            "1",
-            "7",
-            "_",
-            "-",
-            ".",
-            ",",
-            "!",
-            "'",
-            " ",
-            "\t",
-            "\n",
-            "\r",
-            "é",
-            "É",
-            "ñ",
-            "ü",
-            "µ",
-            "\u00A0",
-            "²",
-            "α",
-            "σ",
-            "Σ",
-            "ς",
-            "ω",
-            "Ω",
-            "Ж",
-            "ж",
-            "東",
-            "中",
-            "あ",
-            "💰",
-            "𐐀",
-            "𐐨",
-            "\u0301",
-            "\u212A",
-            "\u017F",
-            "\u01C5",
-            "\u2126",
-            "\u2028",
-            "\u0085",
-            "३",
-            "Ａ");
-
-    // Trino's pinned Joni leaves these out of [[:punct:]], and Regulator includes them as modern
-    // Joni does: TRINO_REGEXP.md, Unicode data and case folding. Inputs of a pattern that uses
-    // the bracket punct class leave them out.
-    private static final List<String> ASCII_SYMBOLS = List.of("$", "+", "<", "=", ">", "^", "`", "|", "~");
-
-    // Characters whose full case folding has more than one code point. A case-insensitive pattern
-    // keeps them out of both the pattern and its inputs, so pinned Joni's tokenization artifacts
-    // and Regulator's literal-run rule never meet: TRINO_REGEXP.md, Other matching differences
-    // from Joni, and REGULATOR_DECISIONS.md, Trino Text-Dependent Assertions And Full Case Folding.
-    private static final List<String> FULL_FOLD_CHARACTERS = List.of("ß", "ﬁ", "İ", "ŉ", "ΐ");
     private static final List<String> FULL_FOLD_AND_TEXT_CHARACTERS = Stream.concat(TEXT_CHARACTERS.stream(), FULL_FOLD_CHARACTERS.stream()).toList();
-
-    // Letters that Joni reads as themselves after a backslash.
-    private static final List<String> LITERAL_ESCAPE_LETTERS = List.of("C", "E", "H", "R", "V", "X", "h", "q");
 
     // The simple case-fold orbits of the pattern characters, so a sample of a case-insensitive
     // literal can use another spelling.
@@ -169,156 +100,6 @@ public class TestTrinoRegexpDifferential
             List.of("Ａ", "ａ"));
 
     private static final Map<String, List<String>> CASE_ORBIT_BY_CHARACTER = caseOrbitByCharacter();
-
-    // Joni keeps bits 7 and 0-4 of the whole character after \c, so a non-ASCII text character
-    // can write a control character: \c中 is a carriage return, and \cǅ (U+01C5) is U+0085.
-    private static final Map<Integer, List<String>> NON_ASCII_CONTROL_OPERANDS = nonAsciiControlOperands();
-
-    // Property names TrinoRegexp and pinned Joni both accept with the same members on the text
-    // characters. Olck, Sundanese, and Saurashtra are left out: pinned Joni reads them as ASCII
-    // \s, \d, and \w, a recorded difference (REGULATOR_DECISIONS.md, Trino Compatibility Adapter).
-    private static final List<String> PROPERTY_NAMES = List.of(
-            "L",
-            "Lu",
-            "Ll",
-            "Lt",
-            "Lm",
-            "Lo",
-            "M",
-            "Mn",
-            "Mc",
-            "N",
-            "Nd",
-            "Nl",
-            "No",
-            "P",
-            "Pc",
-            "Pd",
-            "Ps",
-            "Pe",
-            "Po",
-            "S",
-            "Sm",
-            "Sc",
-            "Sk",
-            "So",
-            "Z",
-            "Zs",
-            "Zl",
-            "C",
-            "Cc",
-            "Cf",
-            "lu",
-            "nd",
-            "Latin",
-            "Greek",
-            "Cyrillic",
-            "Han",
-            "Common",
-            "Inherited",
-            "Hiragana",
-            "Deseret",
-            "Arabic",
-            "greek",
-            "Latn",
-            "InBasicLatin",
-            "InGreekandCoptic",
-            "InCyrillic",
-            "InCJKUnifiedIdeographs",
-            "InCombiningDiacriticalMarks",
-            "InMiscellaneousSymbolsandPictographs",
-            "InLetterlikeSymbols",
-            "InGeneralPunctuation",
-            "InHiragana",
-            "InDeseret",
-            "InHalfwidthandFullwidthForms",
-            "InArabic",
-            "Alphabetic",
-            "Uppercase",
-            "Lowercase",
-            "WhiteSpace",
-            "Ideographic",
-            "Letter",
-            "Punctuation",
-            "Control",
-            "Digit",
-            "Assigned",
-            "Any",
-            "NoncharacterCodePoint",
-            "JoinControl",
-            "javaLowerCase",
-            "javaUpperCase",
-            "javaDigit",
-            "javaLetter",
-            "javaWhitespace",
-            "javaAlphabetic",
-            "javaTitleCase",
-            "javaMirrored",
-            "javaLetterOrDigit",
-            "javaSpaceChar",
-            "javaISOControl",
-            "javaJavaIdentifierStart",
-            "javaUnicodeIdentifierPart",
-            "javaIdentifierIgnorable",
-            "javaDefined",
-            "javaIdeographic",
-            "Alpha",
-            "Alnum",
-            "Upper",
-            "Lower",
-            "Space",
-            "Punct",
-            "Word",
-            "XDigit",
-            "Blank",
-            "Cntrl",
-            "Graph",
-            "Print",
-            "ASCII",
-            "HexDigit",
-            "alpha",
-            "LC",
-            "CasedLetter",
-            "Qaac",
-            "InLatin1Supplement",
-            "InGreek",
-            "InNoBlock",
-            "WSpace",
-            "AHex",
-            "Dash",
-            "Math",
-            "XIDContinue",
-            "OAlpha",
-            "Ideo",
-            "Newline",
-            "age=1.1",
-            "age=3.0",
-            "age=6.1",
-            "L1",
-            "LD",
-            "all",
-            "perlHorizontalWhiteSpace",
-            "perlVerticalWhiteSpace",
-            "javaJavaIdentifierPart",
-            "javaUnicodeIdentifierStart");
-
-    private static final List<String> SHORT_PROPERTY_NAMES = List.of("L", "N", "P", "S", "Z", "M", "C", "l");
-
-    private static final List<String> POSIX_BRACKET_NAMES = List.of(
-            "alpha",
-            "digit",
-            "alnum",
-            "upper",
-            "lower",
-            "space",
-            "punct",
-            "word",
-            "xdigit",
-            "blank",
-            "cntrl",
-            "graph",
-            "print",
-            "ascii");
 
     private static final Corpus CORPUS = generateCorpus();
 
@@ -522,18 +303,6 @@ public class TestTrinoRegexpDifferential
     private static List<String> codePoints(String value)
     {
         return value.codePoints().mapToObj(Character::toString).toList();
-    }
-
-    private static Map<Integer, List<String>> nonAsciiControlOperands()
-    {
-        Map<Integer, List<String>> operands = new HashMap<>();
-        for (String character : TEXT_CHARACTERS) {
-            int codePoint = character.codePointAt(0);
-            if (codePoint >= 0x80) {
-                operands.computeIfAbsent(codePoint & 0x9F, _ -> new ArrayList<>()).add(character);
-            }
-        }
-        return Map.copyOf(operands);
     }
 
     private static Map<String, List<String>> caseOrbitByCharacter()

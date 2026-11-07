@@ -57,6 +57,13 @@ public final class GoldenJsonl
         return objects;
     }
 
+    /// Parses one JSON object line, such as a line a golden tool writes, which is line
+    /// `lineNumber` of `source`.
+    static JsonObject parseObject(String source, int lineNumber, String line)
+    {
+        return parseLine(source, lineNumber, line);
+    }
+
     private static JsonObject parseLine(String resourcePath, int lineNo, String line)
     {
         int index = skipWhitespace(line, 0);

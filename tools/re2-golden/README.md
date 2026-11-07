@@ -9,7 +9,8 @@ under `src/test/resources` so ordinary Java tests can check against them.
 
 ## Pinned dependencies
 
-The build scripts fetch exact source revisions into `target/`:
+The build scripts fetch exact source revisions into
+`target/re2-golden-dependencies`:
 
 - RE2: `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
 - Abseil: `d38452e1ee03523a208362186fd42248ff2609f6`
@@ -32,7 +33,8 @@ fixture commands below run from the repository root.
 ./build.sh
 ```
 
-This builds `target/re2-golden-build/re2_golden` from pinned source dependencies.
+This builds `target/re2-golden-build/re2_golden` from pinned source
+dependencies. Override `RE2_GOLDEN_BUILD_DIR` to build in another directory.
 
 ## Usage
 
@@ -80,6 +82,46 @@ Each non-comment input line has nine tab-separated fields:
 Hex encoding allows the corpus to contain arbitrary bytes without conversion
 through a platform string encoding. Output group ranges use
 `start:end,start:end` with `-1:-1` for unmatched groups.
+
+### Options goldens
+
+`--mode=options_match` takes eighteen fields: the identifier, pattern, text,
+start, end, and anchor as above, then the encoding, the ten booleans `posix`,
+`longest`, `literal`, `never_nl`, `dot_nl`, `never_capture`,
+`case_sensitive`, `perl_classes`, `word_boundary`, and `one_line`, and the
+requested group count, which includes group zero. It reports the first match
+in the window. Output fields echo the input as `id`, `patternHex`, `textHex`,
+`start`, `end`, `anchor`, `encoding`, the ten booleans in camel case, and
+`groupCount`, then add `ok`, `matched`, `groups` (the group ranges as above),
+and `error`.
+
+`--mode=options_replace` takes fifteen fields: the identifier, pattern hex,
+text hex, encoding, the same ten booleans, and a rewrite as hex. It runs
+`RE2::Replace`, `RE2::GlobalReplace`, and `RE2::Extract` with the rewrite on
+the text. Output fields are `ok`, `error`, `groupCount` (the capturing
+groups, without group zero) and `groupNames` (`name=index` pairs,
+comma-separated), `rewriteOk` and `rewriteError` (empty when the rewrite is
+valid), `replaceMatched` and `replaceHex`, `globalCount` and `globalHex` (empty
+when nothing was replaced), and `extractMatched` and `extractHex`. The
+differential fuzzer uses it as its oracle for replacement; `RE2::GlobalReplace`
+is the one upstream API that iterates over matches.
+
+`--mode=options_find_all` takes eighteen fields: the identifier, pattern hex,
+text hex, window start and end, the encoding, the same ten booleans, the
+requested group count, which includes group zero, and a match limit. It finds
+successive matches in the window, which is all the context each search sees,
+stepping as Regulator's `RegexpMatcher` does: after a nonempty match the next
+search starts at its end, an empty match at the end of the window is the last,
+and after any other empty match the next search starts one byte later in
+Latin-1, or in UTF-8 past the character there as Slice's
+`lengthOfCodePointSafe` measures it, so a malformed sequence still makes
+progress. Output fields are `ok`, `error`, `matches` (each match's group
+ranges as above, separated by `;`, at most the limit), and `more`, whether
+another match follows the last one reported. The differential fuzzer uses it
+to judge a matcher's find-all and `count`.
+
+These modes compile a pattern once for consecutive rows with the same pattern
+and options.
 
 ### Committed fixtures
 

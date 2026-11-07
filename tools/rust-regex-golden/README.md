@@ -30,13 +30,13 @@ plain `regex` build.
 
 `rust-toolchain.toml` pins rustc 1.99.0 (`b940084d7 2026-09-28`).
 
-`fetch-dependencies.sh` fetches the `regex` tag into `target/`, verifies that it
-resolves to the pinned commit, and checks it out. The upstream fixture reads
-the TOML corpus in its `testdata/` directory. Override
-`RUST_REGEX_GOLDEN_DEPENDENCY_DIR` to fetch into another directory, or set
-`RUST_REGEX_DIR` to use an existing checkout, which is never fetched or
-changed. Either way, generation fails unless the checkout is at the pinned
-commit with no modified or untracked files under `testdata/`.
+`fetch-dependencies.sh` fetches the `regex` tag into
+`target/rust-regex-golden-dependencies`, verifies that it resolves to the pinned
+commit, and checks it out. The upstream fixture reads the TOML corpus in its
+`testdata/` directory. Override `RUST_REGEX_GOLDEN_DEPENDENCY_DIR` to fetch into
+another directory, or set `RUST_REGEX_DIR` to use an existing checkout, which is
+never fetched or changed. Either way, generation fails unless the checkout is at
+the pinned commit with no modified or untracked files under `testdata/`.
 
 ### Unicode versions
 
@@ -78,8 +78,9 @@ tools/rust-regex-golden/generate.sh
 
 The script fetches the pinned `regex` source, builds
 `target/rust-regex-golden-build/release/rust-regex-golden` with `--locked`, and
-writes all five fixtures. Each fixture is written to a temporary file first,
-so a failed generation never truncates a committed fixture.
+writes all five fixtures. Override `RUST_REGEX_GOLDEN_BUILD_DIR` to build in
+another directory. Each fixture is written to a temporary file first, so a
+failed generation never truncates a committed fixture.
 
 The generator has four modes. Run them from the repository root, with
 `RUST_REGEX_DIR` set to the crate checkout that `fetch-dependencies.sh` prints:

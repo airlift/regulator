@@ -4,13 +4,17 @@ Each language's tests check Regulator against that language's authority:
 
 | Language | Oracle | Fixtures | Tests |
 |---|---|---|---|
-| RE2 | Pinned C++ RE2 goldens from `tools/re2-golden` | `upstream_public_match.jsonl`, `upstream_public_options.jsonl`, `testing/native_longest_boundary.jsonl`, `testing/random_agreement_*.tsv.gzip` | `TestUpstreamPublicMatch`, `TestUpstreamPublicOptions`, `TestNativeLongestBoundaryAgreement`, `TestRandomAgreement`, and the upstream tests below |
-| Trino regexp | Trino's Joni, `io.airlift:joni:2.1.5.3`, as a live test dependency, and checked-in Trino function results | `trino-function-cases.tsv` | `TestTrinoRegexpLanguage`, `TestTrinoRegexpMatcher`, `TestTrinoRegexpFunctions` |
-| Java | The running JDK's `java.util.regex`, `Character`, and `String` | None | `TestJavaRegexpDifferential`, `TestJdkUnicodeAgreement` |
-| Rust | Pinned `regex` crate goldens from `tools/rust-regex-golden` | `rust-regex-*.jsonl` | `TestRustRegexpGolden` |
-| Trino LIKE | Pinned Trino `LikeMatcher` results with optimization disabled; the corpus also records optimized results | `trino-like-corpus.tsv` | `TestTrinoLikeCorpus` |
+| RE2 | Pinned C++ RE2 goldens from `tools/re2-golden` | `upstream_public_match.jsonl`, `upstream_public_options.jsonl`, `testing/native_longest_boundary.jsonl`, `testing/random_agreement_*.tsv.gzip` | `TestUpstreamPublicMatch`, `TestUpstreamPublicOptions`, `TestNativeLongestBoundaryAgreement`, `TestRandomAgreement`, `TestRe2Fuzz`, and the upstream tests below |
+| Trino regexp | Trino's Joni, `io.airlift:joni:2.1.5.3`, as a live test dependency, and checked-in Trino function results | `trino-function-cases.tsv` | `TestTrinoRegexpLanguage`, `TestTrinoRegexpMatcher`, `TestTrinoRegexpFunctions`, `TestTrinoRegexpDifferential`, `TestTrinoRegexpFuzz` |
+| Java | The running JDK's `java.util.regex`, `Character`, and `String` | None | `TestJavaRegexpDifferential`, `TestJdkUnicodeAgreement`, `TestJavaRegexpFuzz` |
+| Rust | Pinned `regex` crate goldens from `tools/rust-regex-golden` | `rust-regex-*.jsonl` | `TestRustRegexpGolden`, `TestRustRegexpFuzz` |
+| Trino LIKE | Pinned Trino `LikeMatcher` results with optimization disabled; the corpus also records optimized results | `trino-like-corpus.tsv` | `TestTrinoLikeCorpus`, `TestTrinoLikeFuzz` |
 
-Fixtures are under `src/test/resources/io/airlift/regulator`.
+Fixtures are under `src/test/resources/io/airlift/regulator`. The `*Fuzz`
+tests compare random patterns across each language's compile variants and
+against the same authority run live: the JDK and Joni always, and RE2's and
+the crate's golden tools and Trino's `LikeMatcher` when a property names them;
+see [testing](../testing.md).
 `TestTrinoRegexpSyntax` and `TestJavaRegexpSyntax` check
 `trino-syntax-cases.tsv` and `java-syntax-cases.tsv`, which record the
 constructs Regulator supports rather than authority results; constructs
