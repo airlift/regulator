@@ -280,9 +280,12 @@ Upstream's own never-capture test uses only unnamed groups.
 - Java's `$`, `\Z`, multiline anchors, and combining-aware word boundaries use
   frontend-specific empty-width predicates, and a scan plan checks the same
   final-terminator rule for `$` and `\Z`. In the ordinary engine, programs
-  containing `$`, `\Z`, or a multiline anchor use BitState or NFA; protected DFA
-  transition loops do not contain Java-language branches. The word boundaries
-  run on the DFA as Rust's Unicode word assertions do (see
+  containing `$`, `\Z`, or a multiline anchor stay off the DFA; protected DFA
+  transition loops do not contain Java-language branches. OnePass evaluates `$`
+  and `\Z`, as
+  [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
+  describes; a multiline anchor keeps a program on BitState or NFA. The word
+  boundaries run on the DFA as Rust's Unicode word assertions do (see
   [Rust Frontend](#rust-frontend)): between ASCII bytes and region edges each
   is its ASCII form, because the JDK's word characters there are
   `[0-9A-Za-z_]` in both character-class modes and a nonspacing mark is never
@@ -1611,10 +1614,13 @@ scan is the cost to watch, on the rows that decision names: Holmes
 reused contains on r8i, and lh3lh3 date.
 
 The fact only saves work, so its memory gives way. It is reserved after
-compilation's routes, from the program that holds the forward DFA allowance
-(the lowered boolean program where there is one). It is kept only if every
-first-match and longest-match DFA that could initialize before the charge,
-start-byte tables included, still can. Trino's ordered-literal matcher, which
+compilation's routes and after the OnePass tables of a program with a
+final-line end anchor (see
+[Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)),
+from the program that holds the forward DFA allowance (the lowered boolean
+program where there is one). It is kept only if every first-match and
+longest-match DFA that could initialize before the charge, start-byte tables
+included, still can. Trino's ordered-literal matcher, which
 its frontend reserves later, takes its memory first, with the fact's memory
 handed back, and the fact stays only where the same rule holds after both
 charges. The charge follows the
@@ -2707,8 +2713,23 @@ at least half its budget instead of three quarters.
 
 A OnePass condition holds RE2's six empty-width bits and a match-priority bit,
 and the rest of the 32-bit word holds the capture actions and the next node, so
-Rust's assertions and Java's and Trino's word boundaries do not fit. One-pass
-programs whose only text-dependent assertions are those additionally build
+Rust's assertions, Java's and Trino's word boundaries, and the Java `$` and
+`\Z` and Trino `$` that also match before a final line terminator do not fit.
+OnePass evaluates them with the predicates BitState and the NFA use, on the
+same context, and a one-pass program has a single path, so Java's priority
+rules cannot select a different match. Java's multiline anchors and Trino's
+multiline `^` and `$` keep a program off OnePass. Release 2.0 built no OnePass
+tables for a program with one of these end anchors, so such a program's tables
+[yield to the forward DFAs](#memory-budgets-and-dfa-caching) of the lowered
+boolean program when there is one; the program's own DFAs never run, since they
+cannot evaluate those anchors. The tables take their memory after every plan and
+route has reserved its own, so they never change which plans, routes, and lowered
+programs a maxMemory builds, and ahead of the
+[short-window required bytes](#short-window-required-bytes-reject), which give
+way to them. A program that drops them runs on BitState or the NFA. A program
+release 2.0 also made one-pass keeps its charge.
+One-pass programs whose only
+text-dependent assertions are those it evaluates additionally build
 parallel EmptyOp masks for match and transition actions. The masks are charged
 to the OnePass share of the compiled memory budget. A condition that needs one
 of those assertions carries one marker bit among the six, so the loops call the
@@ -2755,9 +2776,9 @@ its ASCII form, because Joni's word characters there are `[0-9A-Za-z_]` and its
 six extra Latin-1 numbers are outside ASCII. A search that reaches one next to
 any other byte quits to the fallback engines. Other text-dependent assertions,
 except Rust's and the Java word boundaries, remain ineligible for DFA
-execution. OnePass
-evaluates only Rust's assertions and the Java and Trino word boundaries, so
-these Trino line anchors keep a program off OnePass.
+execution. OnePass evaluates the final-line `$` (see
+[Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)),
+while multiline `^` and `$` keep a program off OnePass.
 
 Non-nullable counts containing only the Trino line assertions use the same DFA
 route and do not allocate a matcher. The exact multiline begin-line expression
@@ -2884,13 +2905,14 @@ bytes byte-for-byte, Regulator rejects such a pattern. Neither rule exposes a
 separate Latin-1 fallback language.
 
 Pinned Joni also misses the empty match of a nullable expression before `$` or
-`\z` at the end of an input whose last character is multibyte and longer in
-bytes than the expression can match, so `q?$` does not match `Ω`, while Java
-`Pattern` finds it. Its search optimizer moves the first search position to the
-expression's maximum length in bytes before the end, rounds a position inside
-that character up to the end, and then tries no position at all. This is
-treated as a Joni search-optimizer defect rather than a Trino language rule;
-Oniguruma
+`\z` at the end of an input when the expression's maximum length is at least
+one byte and shorter than the input's last UTF-8 character, so `q?$` does not
+match `Ω`, while Java `Pattern` finds it; plain `$` is unaffected, and modern
+Joni 2.1.31 keeps the defect. Its search optimizer moves the first search
+position to the expression's maximum length in bytes before the end, rounds a
+position inside that character up to the end, and then tries no position at
+all. This is treated as a Joni search-optimizer defect rather than a Trino
+language rule; Oniguruma
 [b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092)
 fixed it ([Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
 `TrinoRegexp` follows the Java semantics and has a direct regression test for

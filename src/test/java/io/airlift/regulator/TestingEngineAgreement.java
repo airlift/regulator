@@ -27,6 +27,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /// programs whose text-dependent assertions those engines evaluate.
 final class TestingEngineAgreement
 {
+    /// The fields of the Unicode character data line benchmark, a line of `UnicodeData.txt`, up to
+    /// its end anchor; the benchmark pattern is `^` and these fields.
+    static final String UNICODE_DATA_LINE_FIELDS = "([A-Z0-9]+);([^;]+);([^;]+);([0-9]+);([^;]+);([^;]*);([0-9]*);([0-9]*);([-0-9/]*);([YN]);([^;]*);([^;]*);([^;]*);([^;]*);([^;]*)$";
+
     private TestingEngineAgreement() {}
 
     /// Returns every text of up to four bytes over `alphabet`.
