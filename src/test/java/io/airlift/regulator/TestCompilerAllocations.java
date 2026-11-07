@@ -340,6 +340,26 @@ public class TestCompilerAllocations
     }
 
     @Test
+    public void testLatin1FoldedClassesAreRejectedWithinBudget()
+    {
+        // Case folding in a Latin-1 pattern added each of the 158,172 letters of \p{L} one at a
+        // time before the class was clipped to Latin-1, about 3.8 MB per class, so these 100
+        // classes allocated 381 MB before the memory limit applied. Latin-1 folding now adds each
+        // range once, a few tens of KB per class. One class compiles first so loading the shared
+        // Unicode tables is not counted.
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        Re2.compile(utf8Slice("(?i)\\p{L}"), Re2.Options.latin1());
+        Slice pattern = utf8Slice("(?i)" + "\\p{L}".repeat(100));
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        assertThatThrownBy(() -> Re2.compile(pattern, Re2.Options.latin1().setMaxMemory(64 << 10))).isInstanceOf(RegexpCompileMemoryLimitException.class);
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes).isLessThan(8_000_000);
+    }
+
+    @Test
     public void testLargeUnicodeClassCompileAllocation()
     {
         // Unicode \w compiles to hundreds of byte ranges. The ceiling guards the combined savings of
