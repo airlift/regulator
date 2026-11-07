@@ -35,6 +35,9 @@ final class Compiler
     {
         RE2,
         TRINO,
+        // RE2's program for the Rust frontend, flattened to keep the crate's priority on loops
+        // over a body that can match the empty string (see repeatUnbounded).
+        RUST,
     }
 
     private static final int RUNES_SELF = 0x80;
@@ -213,8 +216,13 @@ final class Compiler
 
     static Prog compileNormalizedForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
+        return compileNormalizedForBenchmark(regexp, reversed, maxMemory, stage, Dialect.RE2, CaseFolding.RE2);
+    }
+
+    static Prog compileNormalizedForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage, Dialect dialect, CaseFolding caseFolding)
+    {
         // Benchmark-only hook to isolate stages after AST normalization.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
+        return compileInternal(regexp, reversed, maxMemory, stage, false, true, dialect, caseFolding, ByteFrequencies.uniform());
     }
 
     private static Prog compileInternal(
@@ -976,6 +984,13 @@ final class Compiler
         {
             if (dialect == Dialect.TRINO && fragment.nullable && !nonGreedy) {
                 return trinoGreedyNullableLoop(fragment, zeroIterationsAllowed);
+            }
+            // The crate compiles a loop of a body that can match the empty string as RE2 does but
+            // searches that program unflattened, so the forward program keeps that priority when
+            // flattened. A reverse program finds the longest match, which priority does not
+            // change.
+            if (dialect == Dialect.RUST && fragment.nullable && !reversed) {
+                program.setKeepsNullableLoopPriority(true);
             }
             return zeroIterationsAllowed ? star(fragment, nonGreedy) : plus(fragment, nonGreedy);
         }
