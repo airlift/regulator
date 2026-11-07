@@ -168,6 +168,8 @@ separate native-access and pure-Java results.
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [FAQ](docs/FAQ.md)
+- [Why Regulator is fast](docs/WHY_FAST.md)
 - [API guide](docs/reference/REGULATOR_API.md)
 - [Pattern languages](docs/integrations/REGEXP_LANGUAGES.md)
 - [RE2 language](docs/reference/languages/RE2.md)

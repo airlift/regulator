@@ -10,6 +10,8 @@ and intermediate benchmark reports are not kept here.
 - [Pattern languages](integrations/REGEXP_LANGUAGES.md): choose the right compiler.
 - [Maintenance guide](MAINTAINING_REGULATOR.md): validate changes, measure performance, and prepare a release.
 - [Design decisions](../REGULATOR_DECISIONS.md): accepted trade-offs, each language's authority, and differences from those authorities.
+- [FAQ](FAQ.md): native code, performance against RE2 and Rust, linear time, memory, thread safety, and optional flags.
+- [Why Regulator is fast](WHY_FAST.md): the main performance mechanisms, and where Regulator does not win.
 
 ## Language reference
 
@@ -54,6 +56,8 @@ and intermediate benchmark reports are not kept here.
 | [Measurement quality](benchmarks/MEASUREMENT_QUALITY.md) | Timing uncertainty, native controls, repaired protocols and reproduction |
 | [Regulator 1.0 benchmark results](benchmarks/RESULTS_1.0.md) | Released-artifact coverage, findings, limitations, and evidence retrieval |
 | [`benchmarks/SCAN_PLAN.md`](benchmarks/SCAN_PLAN.md) | Specialized scan-plan design for Trino, RE2, Java, and Rust patterns, eligibility, and benchmarks |
+| [`WHY_FAST.md`](WHY_FAST.md) | How the main performance mechanisms work, and where Regulator does not win |
+| [`reference/OPTIMIZATION_CATALOG.md`](reference/OPTIMIZATION_CATALOG.md) | Regulator's optimizations, where each applies, and where it came from |
 | [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | Important upstream and Java-specific optimization inventory |
 | [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
 
