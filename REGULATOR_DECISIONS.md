@@ -355,14 +355,16 @@ Upstream's own never-capture test uses only unnamed groups.
   engines unchanged. Each entry is a copy of the body's start, which holds the
   entries of the loops nested in it, so in both languages a nest of such loops
   grows with the square of its depth: the default memory budget rejects a nest
-  several hundred loops deep, which the JDK and Joni run. A
-  counted repetition that still has two or more copies after the simplifier
-  drops an empty body and cuts an assertion-only body to one copy stays
-  counted, and the compiler gives each copy an exit from the repetition that
-  it takes when it consumes nothing. When such a body matches empty only
-  through an assertion and the minimum count is two or more, what the pattern
-  matches can depend on the reading direction, as in `(?:^a?){2}`, so the
-  pattern compiles no reverse program.
+  several hundred loops deep, which the JDK and Joni run. In Java, the
+  simplifier drops a repeated empty group and cuts any other body that
+  matches only the empty string, such as an assertion or `\b+$`, to one copy,
+  since the JDK never runs its second iteration. A counted repetition of two
+  or more copies of any other nullable body stays counted, and the compiler
+  gives each copy an exit from the repetition that it takes when it consumes
+  nothing. When that body matches empty only through an assertion and the
+  minimum count is two or more, what the pattern matches can depend on the
+  reading direction, as in `(?:^a?){2}`, so the pattern compiles no reverse
+  program.
 - `\G`, `\R`, nullable repeated captures, canonical equivalence, lookaround,
   backreferences, atomic groups, and possessive quantifiers remain deterministic
   compile-time rejections because their observable semantics do not map to the

@@ -376,6 +376,12 @@ public class TestCompilerAllocations
         // fit in 0.8 MB.
         JavaRegexp nestedCounts = JavaRegexp.compile(utf8Slice("(?:(?:(?:a?){2,}){30,49}){1,8}"), JavaRegexp.Options.defaults().setMaxMemory(800_000));
         assertThat(nestedCounts.matcher(utf8Slice("a".repeat(60))).matches()).isTrue();
+
+        // A body that matches only the empty string ends the repetition on its first iteration,
+        // so its count compiles one copy. A thousand copies of \b+, which is not a lone assertion,
+        // needed a 0.9 MB budget; one fits in 4 KB.
+        JavaRegexp zeroWidthBody = JavaRegexp.compile(utf8Slice("a(?:\\b+){1000}"), JavaRegexp.Options.defaults().setMaxMemory(4_000));
+        assertThat(zeroWidthBody.matcher(utf8Slice("a")).matches()).isTrue();
     }
 
     @Test

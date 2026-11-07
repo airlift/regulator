@@ -129,7 +129,9 @@ configured memory-budget failure rather than JVM heap exhaustion.
 
 In every language, the budget counts counted repetition as written out: `x{n}`
 costs n copies of `x`. Copies in a branch that simplification removes because
-it can never match are not counted.
+it can never match are not counted, nor are the copies after the first of a
+repeated assertion or, in Java, of any body that matches only the empty string,
+which simplification cuts to one copy.
 
 Compiled patterns are immutable and safe to share across threads. They do not
 need to be closed. Lazily built DFA caches belong to the compiled pattern and
