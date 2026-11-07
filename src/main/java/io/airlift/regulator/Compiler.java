@@ -150,6 +150,14 @@ final class Compiler
         }
     }
 
+    /// Returns how many instructions a program compiled with a positive `maxMemory` may hold
+    /// before it is flattened. It is not positive when `maxMemory` cannot hold the program's
+    /// overhead and one instruction.
+    static long maxUnflattenedInstructions(long maxMemory)
+    {
+        return Math.min(MAX_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES);
+    }
+
     /// Returns how many instructions a program compiled with `maxMemory` may hold once it is
     /// flattened.
     static int maxFlattenedInstructions(long maxMemory)
@@ -191,7 +199,7 @@ final class Compiler
         compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.setAnchorBoth = anchorBoth;
 
-        Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding);
+        Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding, maxMemory);
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
 
         compiler.program.setAnchorStart(true);
@@ -236,7 +244,7 @@ final class Compiler
 
         // Match upstream compile.cc: compiler runs Regexp::Simplify() first,
         // primarily to eliminate counted repetitions (and later to expand named classes).
-        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp, caseFolding);
+        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp, caseFolding, maxMemory);
 
         // Match upstream compile.cc: record whether the compiled program is anchored by
         // BeginText/EndText ops and remove those anchors from the AST for optimization.
@@ -667,14 +675,11 @@ final class Compiler
                 throw new RegexpCompileMemoryLimitException(maxMemory);
             }
 
-            long availableInstructionCount = (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES;
+            long availableInstructionCount = maxUnflattenedInstructions(maxMemory);
             if (availableInstructionCount <= 0) {
                 // Upstream leaves max_ninst_ at zero here and every allocation fails, which surfaces
                 // as a compile failure rather than an argument error.
                 throw new RegexpCompileMemoryLimitException(maxMemory);
-            }
-            if (availableInstructionCount >= MAX_INSTRUCTIONS) {
-                availableInstructionCount = MAX_INSTRUCTIONS;
             }
             maxInstructions = (int) availableInstructionCount;
         }

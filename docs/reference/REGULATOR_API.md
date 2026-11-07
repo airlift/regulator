@@ -127,6 +127,10 @@ Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
 configured memory-budget failure rather than JVM heap exhaustion.
 
+In every language, the budget counts counted repetition as written out: `x{n}`
+costs n copies of `x`. Copies in a branch that simplification removes because
+it can never match are not counted.
+
 Compiled patterns are immutable and safe to share across threads. They do not
 need to be closed. Lazily built DFA caches and optional native transition
 storage belong to the compiled pattern and are reclaimed when it is no longer
