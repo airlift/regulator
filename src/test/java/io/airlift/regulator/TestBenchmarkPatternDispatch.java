@@ -29,6 +29,7 @@ import static io.airlift.regulator.BenchmarkPatternDispatch.expression;
 import static io.airlift.regulator.BenchmarkPatternDispatch.targets;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.CONTAINS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.GENERAL;
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.ORDERED_LITERALS;
 import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.STARTS_WITH;
 import static io.airlift.regulator.CompiledPattern.Shape.BYTE_TABLE;
 import static io.airlift.regulator.CompiledPattern.Shape.CLASS_RUN;
@@ -38,6 +39,7 @@ import static io.airlift.regulator.CompiledPattern.Shape.FIXED_WIDTH;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_ALTERNATION;
 import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
+import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -151,6 +153,23 @@ public class TestBenchmarkPatternDispatch
     }
 
     @Test
+    public void testOrderedLiteralsOnByteGaps()
+    {
+        // The ORDERED_LITERALS target's gaps read any bytes in RE2's Latin-1 option and, with
+        // `(?-u)`, in Rust's bytes API, so full-Slice find runs the ordered-literal find plan there.
+        String expression = expression("ORDERED_LITERALS");
+        List<CompiledPattern> patterns = List.of(
+                Re2.compile(utf8Slice(expression), Re2.Options.latin1()),
+                RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
+        for (CompiledPattern compiled : patterns) {
+            assertThat(shape(compiled)).as(compiled.getClass().getSimpleName()).isEqualTo(LITERAL_KERNEL);
+            assertThat(compiled.findPlanForDiagnostics()).as(compiled.getClass().getSimpleName()).isEqualTo(ORDERED_LITERALS);
+            assertThat(compiled.find(utf8Slice("xxaxxbxxcxx"))).as(compiled.getClass().getSimpleName()).isTrue();
+            assertNoProgramSearch(compiled, compiled.getClass().getSimpleName());
+        }
+    }
+
+    @Test
     public void testSharedSiteRunsEveryTarget()
             throws NoSuchFieldException
     {
@@ -202,10 +221,14 @@ public class TestBenchmarkPatternDispatch
             // A Rust `\s` is Unicode, so it is no byte run.
             case "BYTE_TABLE" -> compiled instanceof RustRegexp ? ENGINE : BYTE_TABLE;
             // `[Kk]` simplifies to a folded literal, which keeps FOLDED_PAIR_SEQUENCE off the
-            // fixed-width route in every language, and ordered literals have no find plan.
-            case "GENERAL", "FOLDED_PAIR_SEQUENCE", "ORDERED_LITERALS" -> ENGINE;
+            // fixed-width route in every language.
+            case "GENERAL", "FOLDED_PAIR_SEQUENCE" -> ENGINE;
             // The literal set serves only the matcher's find.
             case "LITERAL_SET" -> ENGINE;
+            // The ordered-literal find plan takes only gaps that match any bytes, and a UTF-8
+            // `(?s:.)` matches no malformed UTF-8 in RE2, Java, or Rust, so these gaps keep the
+            // general engine; see testOrderedLiteralsOnByteGaps.
+            case "ORDERED_LITERALS" -> ENGINE;
             // An inner literal of two or more bytes keeps the DFA's inner literal search instead
             // of the fixed-width matcher, which answers only short counts and matcher finds.
             case "INNER_LITERAL_FIXED_WIDTH" -> ENGINE;
@@ -255,7 +278,10 @@ public class TestBenchmarkPatternDispatch
                 assertThat(matcher.spanSearchForDiagnostics()).as(description).isSameAs(compiled.createFixedWidthByteSpanMatcher());
             }
             case "ANCHORED_LITERAL" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(STARTS_WITH);
-            case "ORDERED_LITERALS" -> assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
+            case "ORDERED_LITERALS" -> {
+                assertThat(compiled.findPlanForDiagnostics()).as(description).isEqualTo(GENERAL);
+                assertThat(compiled.orderedLiteralMatcherForDiagnostics()).as(description).isNull();
+            }
             case "INNER_LITERAL_FIXED_WIDTH" -> {
                 assertThat(compiled.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
                 assertThat(compiled.shortFixedWidthByteMatcher()).as(description).isNotNull();
