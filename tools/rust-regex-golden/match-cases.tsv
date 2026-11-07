@@ -268,6 +268,8 @@ nullable_group_inside_star_unset	283f3a782861293f292a	-	786178	-	-
 nullable_word_boundary_loop	285c62292a61	-	61	-	-
 nullable_anchor_loop	285e292a61	-	61	-	-
 nullable_anchor_loop_after_start	285e292a62	-	6162	-	-
+nullable_star_of_empty_or_plus_after_byte	61283f3a7c622b292a	-	6162	-	-
+nullable_star_of_lazy_optional_of_lazy_plus	283f3a627c283f3a612b3f293f3f292a	-	62616161	-	-
 
 # Alternation preference
 alternation_shorter_first	617c6162	-	6162	-	-
