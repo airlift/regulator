@@ -642,6 +642,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to reverse search: a lazily compiled reverse program, less what an
   eagerly compiled inner literal search retains from that third.
+  The reverse program's input, the simplified expression kept until that
+  program is compiled, is kept only when it fits the reverse third by itself,
+  and is released once the program is built; when it does not fit, the pattern
+  has no reverse program. A compiled pattern does not keep its parse tree.
 - A program is charged in two steps after a fixed 512 bytes, with references
   counted at eight bytes. Before flattening, each instruction is charged 120
   bytes: a 56-byte instruction object, 16 bytes of instruction array that
@@ -2321,12 +2325,13 @@ initialization. Keep the public counting APIs with these trade-offs and retain
 the existing matcher paths. A future change to counting initialization or
 fallback routing requires its own qualification.
 
-## Retained Regexp Tree
+## Prefilter Source Tree
 
-`Re2` retains the immutable parsed `Regexp` tree and exposes it only within the
-package. `Prefilter` consumes that exact tree, and lazy reverse compilation reuses
-the required-prefix suffix instead of parsing the pattern again. The retained
-reference is an intentional memory-for-consistency tradeoff.
+`FilteredRe2` builds each pattern's prefilter from the parse tree it compiles
+that pattern from, so the prefilter and the program see the same tree. A
+compiled `Re2` does not keep its tree; see
+[Memory Budgets And DFA Caching](#memory-budgets-and-dfa-caching) for what
+it keeps for its reverse program.
 
 ## Match-Every-Byte Shortcut
 

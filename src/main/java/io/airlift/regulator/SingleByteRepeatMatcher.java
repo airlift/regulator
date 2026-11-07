@@ -47,7 +47,10 @@ final class SingleByteRepeatMatcher
         this.latin1 = latin1;
     }
 
-    static SingleByteRepeatMatcher analyze(Regexp regexp, CaseFolding caseFolding)
+    /// Returns the one-byte members and encoding of `regexp`, a greedy zero-or-more repeat of one
+    /// byte under optional captures, or `null`. A compiled pattern keeps them in place of its tree,
+    /// and [#create] builds its matcher from them on first use.
+    static Repeat analyze(Regexp regexp, CaseFolding caseFolding)
     {
         while (regexp.op() == CAPTURE) {
             regexp = regexp.child(0);
@@ -62,7 +65,20 @@ final class SingleByteRepeatMatcher
         if (analysis.length() != 1 || analysis.isEmpty()) {
             return null;
         }
-        return new SingleByteRepeatMatcher(analysis, (regexp.parseFlags() & LATIN1) != 0);
+        return new Repeat(analysis, (regexp.parseFlags() & LATIN1) != 0);
+    }
+
+    record Repeat(SingleByteMatcher.Analysis members, boolean latin1)
+    {
+        Repeat
+        {
+            requireNonNull(members, "members is null");
+        }
+    }
+
+    static SingleByteRepeatMatcher create(Repeat repeat)
+    {
+        return new SingleByteRepeatMatcher(repeat.members(), repeat.latin1());
     }
 
     static SingleByteRepeatMatcher unsupported()

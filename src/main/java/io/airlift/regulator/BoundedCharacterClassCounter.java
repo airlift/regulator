@@ -184,19 +184,6 @@ final class BoundedCharacterClassCounter
         words[lastWord] |= lastMask;
     }
 
-    static BoundedCharacterClassCounter analyze(Regexp regexp)
-    {
-        Analysis analysis = analyzePattern(regexp);
-        if (analysis == null) {
-            return null;
-        }
-        return new BoundedCharacterClassCounter(
-                analysis.ranges(),
-                analysis.minimum(),
-                analysis.maximum(),
-                analysis.latin1());
-    }
-
     static BoundedCharacterClassCounter analyzeCompactRoute(Regexp regexp)
     {
         if ((regexp.parseFlags() & (LATIN1 | NON_GREEDY | Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) != 0) {
@@ -212,7 +199,7 @@ final class BoundedCharacterClassCounter
             return null;
         }
 
-        Analysis analysis = analyzePattern(regexp);
+        Repeat analysis = analyzeRepeat(regexp);
         if (analysis == null || !isLargeUnicodeClass(regexp.child(0))) {
             return null;
         }
@@ -247,7 +234,7 @@ final class BoundedCharacterClassCounter
         if (longestMatch) {
             return null;
         }
-        Analysis analysis = analyzePattern(regexp);
+        Repeat analysis = analyzeRepeat(regexp);
         // A byte class retains a 256-bit set whatever its ranges.
         if (analysis == null || (!analysis.latin1() && needsLastPlaneBitset(analysis.ranges()))) {
             return null;
@@ -291,12 +278,10 @@ final class BoundedCharacterClassCounter
         return INSTANCE_SIZE + SizeOf.sizeOf(matchingCodePoints) + SizeOf.sizeOf(memberStartBytes) + SizeOf.sizeOf(memberStartByteNibbleTables);
     }
 
-    static boolean supports(Regexp regexp)
-    {
-        return analyzePattern(regexp) != null;
-    }
-
-    private static Analysis analyzePattern(Regexp regexp)
+    /// Returns the class, bounds, and encoding of `regexp`, a greedy repeat of one class under
+    /// optional captures, or `null`. A compiled pattern keeps them in place of its tree, and
+    /// [#create] builds its counter from them on first use.
+    static Repeat analyzeRepeat(Regexp regexp)
     {
         while (regexp.op() == CAPTURE) {
             regexp = regexp.child(0);
@@ -328,23 +313,24 @@ final class BoundedCharacterClassCounter
         // A parser keeps a dot that matches newline, or a full class, as ANY_CHAR, and a Rust bytes
         // dot as ANY_BYTE.
         if (atom.op() == ANY_CHAR) {
-            return new Analysis(ALL_CHARACTERS, minimum, maximum, (atom.parseFlags() & LATIN1) != 0);
+            return new Repeat(ALL_CHARACTERS, minimum, maximum, (atom.parseFlags() & LATIN1) != 0);
         }
         if (atom.op() == ANY_BYTE) {
-            return new Analysis(ALL_BYTES, minimum, maximum, true);
+            return new Repeat(ALL_BYTES, minimum, maximum, true);
         }
         if (atom.op() != CHAR_CLASS || atom.charClass().isEmpty()) {
             return null;
         }
         // A Rust bytes pattern marks only its byte classes, so the class decides the encoding.
-        return new Analysis(
-                atom.charClass().ranges(),
-                minimum,
-                maximum,
-                (atom.parseFlags() & LATIN1) != 0);
+        return new Repeat(atom.charClass().ranges(), minimum, maximum, (atom.parseFlags() & LATIN1) != 0);
     }
 
-    private record Analysis(RuneRange[] ranges, int minimum, int maximum, boolean latin1) {}
+    record Repeat(RuneRange[] ranges, int minimum, int maximum, boolean latin1) {}
+
+    static BoundedCharacterClassCounter create(Repeat repeat)
+    {
+        return new BoundedCharacterClassCounter(repeat.ranges(), repeat.minimum(), repeat.maximum(), repeat.latin1());
+    }
 
     static BoundedCharacterClassCounter unsupported()
     {

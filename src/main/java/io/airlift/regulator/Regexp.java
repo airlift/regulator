@@ -14,18 +14,22 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
 import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.RandomAccess;
+import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
 
@@ -355,6 +359,57 @@ final class Regexp
     Regexp child(int childIndex)
     {
         return children[childIndex];
+    }
+
+    /// Returns the bytes this expression retains, counting each node, child array, rune array, and
+    /// class once however many nodes share it, or a value above `limit` once the count passes it,
+    /// so a large expression costs about `limit` bytes of counting. A class counts each of its
+    /// ranges, though ranges can be shared with the Unicode tables. A capture name counts its
+    /// slice but not the pattern bytes it views.
+    long estimatedRetainedSize(long limit)
+    {
+        Set<Object> counted = Collections.newSetFromMap(new IdentityHashMap<>());
+        ArrayDeque<Regexp> pending = new ArrayDeque<>();
+        counted.add(this);
+        pending.add(this);
+        // A node is counted when it is queued, so the queue holds no more nodes than the limit
+        // pays for, however many children one node has.
+        long size = RetainedSizes.INSTANCE_SIZE;
+        while (!pending.isEmpty() && size <= limit) {
+            Regexp regexp = pending.removeLast();
+            if (regexp.children.length != 0 && counted.add(regexp.children)) {
+                size += SizeOf.sizeOf(regexp.children);
+            }
+            if (regexp.runes != null && counted.add(regexp.runes)) {
+                size += SizeOf.sizeOf(regexp.runes);
+            }
+            if (regexp.charClass != null && counted.add(regexp.charClass)) {
+                int rangeCount = regexp.charClass.rangeCount();
+                size += RetainedSizes.CHAR_CLASS_INSTANCE_SIZE + SizeOf.sizeOfObjectArray(rangeCount) + (long) rangeCount * RetainedSizes.RUNE_RANGE_INSTANCE_SIZE;
+            }
+            if (regexp.name != null) {
+                size += RetainedSizes.SLICE_INSTANCE_SIZE;
+            }
+            for (int index = 0; index < regexp.children.length && size <= limit; index++) {
+                Regexp child = regexp.children[index];
+                if (counted.add(child)) {
+                    size += RetainedSizes.INSTANCE_SIZE;
+                    pending.add(child);
+                }
+            }
+        }
+        return size;
+    }
+
+    // Loaded only when a size is estimated: parsing never sizes objects, and TeaVM cannot.
+    private static final class RetainedSizes
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(Regexp.class);
+        private static final int CHAR_CLASS_INSTANCE_SIZE = SizeOf.instanceSize(CharClass.class);
+        private static final int RUNE_RANGE_INSTANCE_SIZE = SizeOf.instanceSize(RuneRange.class);
+        private static final int SLICE_INSTANCE_SIZE = SizeOf.instanceSize(Slice.class);
+
+        private RetainedSizes() {}
     }
 
     // Allocates a view per call; the array is never mutated, so the view is always current.

@@ -356,7 +356,22 @@ public sealed class Re2
 
     private static Re2 compile(Slice pattern, Options options, ScanPlanMode scanPlanMode)
     {
-        Re2 compiled = compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanMode);
+        int parseFlags = options.parseFlags();
+        return compileParsed(pattern, RegexpParser.parse(pattern, parseFlags), parseFlags, options, scanPlanMode);
+    }
+
+    /// Compiles `parsed`, the parse of `pattern` under `parseFlags`, as
+    /// [#compile(Slice,Options)] compiles `pattern`. A compiled pattern does not keep its parse
+    /// tree, so FilteredRe2 parses the pattern itself and builds its prefilter from the tree. The
+    /// caller passes a private snapshot that it never mutates.
+    static Re2 compileParsed(Slice pattern, ParseResult parsed, int parseFlags, Options options)
+    {
+        return compileParsed(pattern, parsed, parseFlags, options, ScanPlanMode.DEFAULT);
+    }
+
+    private static Re2 compileParsed(Slice pattern, ParseResult parsed, int parseFlags, Options options, ScanPlanMode scanPlanMode)
+    {
+        Re2 compiled = create(build(pattern, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), options.longestMatch(), Compiler.Dialect.RE2, ScanPlan.Language.RE2, scanPlanMode));
         if (options.generateBytecode()) {
             Re2 generated = CompiledScanRe2.create(compiled);
             if (generated != null) {
