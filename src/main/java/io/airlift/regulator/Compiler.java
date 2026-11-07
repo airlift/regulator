@@ -13,8 +13,10 @@
  */
 package io.airlift.regulator;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
 
 import static java.util.Objects.requireNonNull;
@@ -148,6 +150,79 @@ final class Compiler
         if (maxMemory > 0 && estimatedProgramMemory(program) > maxMemory) {
             throw new RegexpCompileMemoryLimitException(maxMemory);
         }
+    }
+
+    private record ExpansionFrame(Regexp regexp, long copies) {}
+
+    /// Throws [RegexpCompileMemoryLimitException], reporting `maxMemory`, when a conservative
+    /// estimate of the size of the expression that simplification expands `regexp` into exceeds
+    /// the instructions a program compiled with `maxMemory` may hold. `regexp` is a parsed
+    /// expression that still holds its counted repetitions.
+    ///
+    /// Simplification and the analyses before compilation walk every copy of a repeated
+    /// expression, and read a class's ranges at each, so a frontend whose counts can expand
+    /// beyond a constant factor of the pattern calls this first: an expansion too large for the
+    /// budget fails after one walk of the unexpanded expression. The size bounds those walks, not
+    /// the program, so a specialized route can still match an expansion the compiler could not
+    /// hold, and an expansion that passes can still exceed the budget in the compiler.
+    static void requireExpansionFits(Regexp regexp, long maxMemory)
+    {
+        long maxSize = maxUnflattenedInstructions(maxMemory);
+        // Each pending node carries how many copies of it the expansion holds, capped at one more
+        // than the largest size that fits, so no product overflows.
+        long size = 0;
+        Deque<ExpansionFrame> pending = new ArrayDeque<>();
+        pending.push(new ExpansionFrame(regexp, 1));
+        while (!pending.isEmpty()) {
+            ExpansionFrame frame = pending.pop();
+            Regexp current = frame.regexp();
+            long copies = frame.copies();
+            size += copies * switch (current.op()) {
+                // A concatenation's size is its children's.
+                case CONCAT -> 0;
+                // The repeated expression's copies are charged through its children; the
+                // repetition adds the nodes simplification builds around them.
+                case REPEAT -> repetitionWrapperSize(current.min(), current.max());
+                case LITERAL_STRING -> current.runes().length;
+                // Every pass reads a class's ranges at each copy.
+                case CHAR_CLASS -> Math.max(current.charClass().rangeCount(), 1);
+                // A capture records its start and its end.
+                case CAPTURE -> 2;
+                default -> 1;
+            };
+            if (size > maxSize) {
+                throw new RegexpCompileMemoryLimitException(maxMemory);
+            }
+            if (current.op() == RegexpOp.REPEAT) {
+                // x{n,m} expands to m copies of x, and x{n,} to n copies, at least one.
+                long count = current.max() < 0 ? Math.max(current.min(), 1) : current.max();
+                copies = Math.min(copies * count, maxSize + 1);
+            }
+            for (Regexp child : current.children()) {
+                pending.push(new ExpansionFrame(child, copies));
+            }
+        }
+    }
+
+    /// Returns the nodes that [Simplifier#simplifyRepeat] builds around the copies of
+    /// `x{min,max}`, and must change with that rewrite. `x{2,5}` becomes `xx(x(x(x)?)?)?`: a
+    /// question mark and a concatenation per optional copy, and a concatenation of the required
+    /// copies. `x{4,}` becomes `xxxx+`: the plus and the concatenation that holds it. `x{0,m}` is
+    /// charged one concatenation more than is built.
+    private static long repetitionWrapperSize(int min, int max)
+    {
+        if (max < 0) {
+            return min >= 2 ? 2 : 1;
+        }
+        return 2L * (max - min) + (min >= 2 ? 1 : 0);
+    }
+
+    /// Returns how many instructions a program compiled with a positive `maxMemory` may hold
+    /// before it is flattened. It is not positive when `maxMemory` cannot hold the program's
+    /// overhead and one instruction.
+    private static long maxUnflattenedInstructions(long maxMemory)
+    {
+        return Math.min(MAX_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Returns how many instructions a program compiled with `maxMemory` may hold once it is
@@ -667,14 +742,11 @@ final class Compiler
                 throw new RegexpCompileMemoryLimitException(maxMemory);
             }
 
-            long availableInstructionCount = (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES;
+            long availableInstructionCount = maxUnflattenedInstructions(maxMemory);
             if (availableInstructionCount <= 0) {
                 // Upstream leaves max_ninst_ at zero here and every allocation fails, which surfaces
                 // as a compile failure rather than an argument error.
                 throw new RegexpCompileMemoryLimitException(maxMemory);
-            }
-            if (availableInstructionCount >= MAX_INSTRUCTIONS) {
-                availableInstructionCount = MAX_INSTRUCTIONS;
             }
             maxInstructions = (int) availableInstructionCount;
         }

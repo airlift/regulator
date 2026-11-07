@@ -13,10 +13,12 @@
  */
 package io.airlift.regulator;
 
+import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
@@ -80,13 +82,62 @@ public class TestRustRegexp
                 .isInstanceOf(RegexpParseException.class)
                 .hasMessage("unsupported regular-expression construct: UnsupportedLookAround at byte offset 0");
 
-        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a{1001}")))
-                .isInstanceOf(RegexpParseException.class)
-                .hasMessage("repetition size exceeds the supported limit: repetition count above 1000 at byte offset 0");
-
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(a)"), RustRegexp.Options.defaults().setNestLimit(0)))
                 .isInstanceOf(RegexpParseException.class)
                 .hasMessage("pattern exceeds the supported parser limit: NestLimitExceeded at byte offset 0");
+    }
+
+    @Test
+    public void testRepetitionCountsLimitedOnlyByMemoryBudget()
+    {
+        // As in the crate, a count above 1,000 compiles when its expansion fits the memory budget.
+        RustRegexp regexp = RustRegexp.compile(utf8Slice("a{20,1024}"));
+        int[] groups = new int[2];
+        assertThat(regexp.findInto(utf8Slice("a".repeat(1030)), groups)).isTrue();
+        assertThat(groups).containsExactly(0, 1024);
+        assertThat(regexp.find(utf8Slice("a".repeat(19)))).isFalse();
+        assertThat(RustRegexp.compile(utf8Slice("[0-9A-Za-z_-]{20,1024}")).find(utf8Slice("key=" + "x".repeat(20)))).isTrue();
+
+        // Beyond the repetition limit, compiling charges the size of the expansion before building
+        // it, and a pattern too large for the forward program's share of the budget fails after
+        // one walk of the pattern, which parsing never expands. Each case crosses that share only
+        // through the charge named beside it; without that charge, it builds its expansion.
+        String doubled = "a";
+        for (int depth = 0; depth < 19; depth++) {
+            doubled = "(?:" + doubled + "){2,}";
+        }
+        List<String> patterns = List.of(
+                // the question mark and concatenation around each optional copy
+                "a{0,200000}",
+                // the plus and concatenation around each open-ended copy
+                doubled,
+                // two for each copy of a capture
+                "(a){200000}",
+                // each class copy's ranges
+                "\\p{L}{1001}",
+                // nested counts multiplied, last because without it the expansion is the largest
+                "(?:(?:a{1000}){1000}){1000}");
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+        long threadId = Thread.currentThread().threadId();
+        for (String pattern : patterns) {
+            Slice slice = utf8Slice(pattern);
+            assertThat(RustRegexp.parse(slice)).as(pattern).isNotNull();
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            // 67108864 bytes is the forward program's share of the default 96 MiB budget.
+            assertThatThrownBy(() -> RustRegexp.compile(slice))
+                    .as(pattern)
+                    .isInstanceOf(RegexpCompileMemoryLimitException.class)
+                    .hasMessage("regular expression compilation exceeded the 67108864 byte memory limit");
+            assertThat(threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore).as(pattern).isLessThan(16_000_000);
+        }
+
+        // A pattern within the repetition limit skips the charge, although charging its copies up
+        // front would exceed these small budgets: simplification merges a*a*, and compilation
+        // strips an anchored literal prefix.
+        assertThat(RustRegexp.compile(utf8Slice("(?:a*a*){600}"), RustRegexp.Options.defaults().setMaxMemory(262_144)).find(utf8Slice("b"))).isTrue();
+        assertThat(RustRegexp.compile(utf8Slice("^" + "a".repeat(100)), RustRegexp.Options.defaults().setMaxMemory(8192)).find(utf8Slice("a".repeat(100)))).isTrue();
     }
 
     @Test

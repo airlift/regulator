@@ -40,9 +40,6 @@ import static java.util.Objects.requireNonNull;
 /// builds a private syntax tree shaped like the crate's, checks the nesting limit, and translates
 /// the tree into a [Regexp]. Every phase walks the tree with an explicit stack, so nesting
 /// depth does not consume thread stack.
-///
-/// Constructs the crate accepts but Regulator does not support are recorded during translation
-/// and reported only after translation succeeds, so a later crate error still takes precedence.
 final class RustRegexpParser
 {
     // Syntax options, kept separate from Regexp parse flags because the crate scopes them itself.
@@ -71,7 +68,26 @@ final class RustRegexpParser
 
     private RustRegexpParser() {}
 
+    /// A parsed pattern, and whether it exceeds the repetition limit: a count above 1,000
+    /// ([Regexp#MAX_REPEAT]), or nested counts whose product exceeds 1,000, the limit RE2, Java,
+    /// and Trino enforce. Rust accepts such counts, and only a pattern that exceeds the limit can
+    /// expand beyond a constant factor of its own size.
+    record Parsed(ParseResult result, boolean exceedsRepeatLimit)
+    {
+        Parsed
+        {
+            requireNonNull(result, "result is null");
+        }
+    }
+
     static ParseResult parse(Slice pattern, int syntaxFlags, int nestLimit)
+    {
+        return parseForCompile(pattern, syntaxFlags, nestLimit).result();
+    }
+
+    /// Parses as [#parse(Slice,int,int)] does, and reports whether the pattern exceeds the
+    /// repetition limit, which compilation needs before it expands the repetitions.
+    static Parsed parseForCompile(Slice pattern, int syntaxFlags, int nestLimit)
     {
         requireNonNull(pattern, "pattern is null");
         if ((syntaxFlags & ~ALL_SYNTAX_FLAGS) != 0 || nestLimit < 0) {
@@ -88,11 +104,11 @@ final class RustRegexpParser
         parser.checkNestLimit(ast);
         Translator translator = new Translator(parser, syntaxFlags);
         Regexp regexp = translator.translate(ast);
-        translator.throwUnsupported();
         Regexp simplifiedRegexp = Simplifier.simplifyForParse(regexp, CASE_FOLDING);
         // Simplification can remove a group that never matches, but the group keeps its name.
         Map<Integer, String> capturingGroupNames = parser.captureNames.isEmpty() ? Map.of() : regexp.captureNames();
-        return new ParseResult(simplifiedRegexp, Translator.capturingGroupCount(regexp), capturingGroupNames, CASE_FOLDING);
+        ParseResult result = new ParseResult(simplifiedRegexp, Translator.capturingGroupCount(regexp), capturingGroupNames, CASE_FOLDING);
+        return new Parsed(result, translator.exceedsRepeatLimit);
     }
 
     // The crate's error kinds, each mapped to the closest Regulator error code.
@@ -535,15 +551,10 @@ final class RustRegexpParser
 
         RegexpParseException error(ErrorKind kind, int start, int end)
         {
-            return error(kind.code, kind.detail, start, end);
-        }
-
-        RegexpParseException error(RegexpParseErrorCode code, String detail, int start, int end)
-        {
             int byteStart = byteOffsets[start];
             int byteEnd = byteOffsets[end];
             Slice segment = byteEnd > byteStart ? pattern.slice(byteStart, byteEnd - byteStart) : null;
-            return new RegexpParseException(code, segment, byteStart, detail);
+            return new RegexpParseException(kind.code, segment, byteStart, kind.detail);
         }
 
         private RegexpParseException errorAtCurrent(ErrorKind kind)
@@ -1449,29 +1460,14 @@ final class RustRegexpParser
         // The crate's utf8 translation option, which only the bytes API turns off.
         private final boolean utf8;
         private int flags;
-        private RegexpParseException unsupported;
+        // Whether the pattern exceeds the repetition limit, as Parsed defines it.
+        private boolean exceedsRepeatLimit;
 
         Translator(Parser parser, int syntaxFlags)
         {
             this.parser = parser;
             this.utf8 = (syntaxFlags & BYTES) == 0;
             this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL | BYTES);
-        }
-
-        void throwUnsupported()
-        {
-            if (unsupported != null) {
-                throw unsupported;
-            }
-        }
-
-        // Records the first construct Regulator cannot express and keeps translating, because a
-        // later crate error takes precedence.
-        private void recordUnsupported(RegexpParseErrorCode code, String feature, int start, int end)
-        {
-            if (unsupported == null) {
-                unsupported = parser.error(code, feature, start, end);
-            }
         }
 
         private boolean enabled(int flag)
@@ -1671,15 +1667,15 @@ final class RustRegexpParser
             if (min == 0 && max == 1) {
                 return Regexp.quest(nodeFlags, child);
             }
-            if (min > MAX_REPEAT || max > MAX_REPEAT) {
-                recordUnsupported(RegexpParseErrorCode.REPEAT_SIZE, "repetition count above " + MAX_REPEAT, repetition.start(), repetition.end());
-                return child;
+            // Rust accepts any u32 count, so a pattern that exceeds the repetition limit is only
+            // marked for the expansion check before compilation. The nested check runs only when
+            // both counts are within the limit, so its int casts are exact. A count beyond the int
+            // range reads as the int maximum, which still expands past every memory budget,
+            // because the repeated expression is not empty width.
+            if (!exceedsRepeatLimit && (min > MAX_REPEAT || max > MAX_REPEAT || wouldExceedRepeatLimit(child, (int) min, (int) max))) {
+                exceedsRepeatLimit = true;
             }
-            if (wouldExceedRepeatLimit(child, (int) min, (int) max)) {
-                recordUnsupported(RegexpParseErrorCode.REPEAT_SIZE, "nested repetition count above " + MAX_REPEAT, repetition.start(), repetition.end());
-                return child;
-            }
-            return Regexp.repeat(nodeFlags, child, (int) min, (int) max);
+            return Regexp.repeat(nodeFlags, child, (int) Math.min(min, Integer.MAX_VALUE), (int) Math.min(max, Integer.MAX_VALUE));
         }
 
         // Whether the translated node can match only the empty string, the crate's maximum length

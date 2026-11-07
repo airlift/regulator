@@ -28,8 +28,10 @@ import static java.util.Objects.requireNonNull;
 /// `regex::bytes::Regex`, which matches arbitrary bytes. In both modes, iteration skips an
 /// empty match adjacent to the previous match, and a search of a range or matcher region sees the
 /// input outside it as assertion context, as in the crate's `Input::range`. Unicode
-/// properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
-/// compilation. Match offsets are byte offsets, as in the crate.
+/// properties read Regulator's Unicode database. As in the crate, repetition counts above 1,000
+/// are accepted; compilation fails, before it expands the repetitions, when their expansion is
+/// larger than the forward program's share of the memory budget. Match offsets are byte offsets,
+/// as in the crate.
 public sealed class RustRegexp
         extends CompiledPattern
         permits RustRegexp.ByteTableRustRegexp,
@@ -335,7 +337,14 @@ public sealed class RustRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
-        ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
+        RustRegexpParser.Parsed parseOutcome = RustRegexpParser.parseForCompile(patternCopy, options.syntaxFlags(), options.nestLimit());
+        ParseResult parsed = parseOutcome.result();
+        // A pattern beyond the repetition limit can expand past a constant factor of its size, so
+        // its expansion must fit the forward program's share of the budget before any pass builds
+        // it. A pattern within the limit skips the check.
+        if (parseOutcome.exceedsRepeatLimit()) {
+            Compiler.requireExpansionFits(parsed.regexp(), forwardMemory(options.maxMemory()));
+        }
         int compileFlags = options.compileFlags();
         // Byte mode keeps its scan plan. A plan never matches empty, so byte mode's one-byte advance
         // past an empty match never applies, and the analysis declines every byte construct that

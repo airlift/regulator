@@ -26,7 +26,7 @@ or silently switch to an engine with different resource guarantees.
 | Nullable repeated captures | Java resets captures within repeated nullable groups according to rules not represented by the current capture program. |
 | Canonical equivalence | Supporting canonical normalization equivalence requires a defined expansion, matching, and resource policy. |
 | Raw byte and lone surrogate escapes | No UTF-8 text contains a lone surrogate, so a lone surrogate escape could match only malformed input. Java patterns represent Unicode code points, and Trino does not assign portable character semantics to raw byte escapes. Patterns must also be valid UTF-8, so a malformed byte cannot appear as literal pattern text either. |
-| Repetition counts above 1,000 | The compiler limit bounds program expansion and follows RE2's implementation restriction. |
+| Repetition counts above 1,000 | The compiler limit bounds program expansion and follows RE2's implementation restriction. Rust patterns take any `u32` count the crate's size limit allows, bounded instead by `maxMemory`. |
 
 The limits have different causes. General backreferences conflict with the
 engine model. Features such as `\R`, `\G`, restricted lookaround, and Java's
