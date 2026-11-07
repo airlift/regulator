@@ -212,19 +212,21 @@ so the automata run only where a match can be.
 - **Origin:** First described by Hyperscan
   ([noodle_engine_sse.c][hs-noodle-caseless]); Inspired by the Rust regex
   crate ([#85]). Regulator: case masks on the prefix's first and last bytes,
-  in SWAR and vector forms ([#85], [design][d-folded-prefix]); base RE2
-  [O-PROG-006].
+  in SWAR and vector forms ([#85], [design][d-folded-prefix]), and the vector
+  form's counted loop ([#195]); base RE2 [O-PROG-006].
 - **Where:** `Prog.prefixAccelFoldCaseFrontAndBack`, `Prog.foldCaseMatches`,
   `VectorPrefixScanner.findFoldCase`
 - **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned with first- and last-byte masks a SWAR word or vector at a time: the
-  vector form ORs `0x20` into letter bytes, and the SWAR form matches both
+  vector form ORs `0x20` into letter bytes and tests whole vectors in a counted
+  loop that verifies candidates after it exits, and the SWAR form matches both
   case broadcasts. RE2 scans it with a ShiftDFA. Rust, RE2, and Java
   `name-sherlock-casei` and Rust `name-sherlock-holmes-casei` take 0.17 to
   0.20 of their earlier time on Graviton and 0.09 to 0.13 on Intel, and
   `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77 and 0.62 to
-  0.64 ([#85]).
+  0.64 ([#85]). The counted loop takes `(?i)Sherlock Holmes` in Rust and Java
+  to 0.75 to 0.83 of its earlier time on Graviton and Intel ([#195]).
 
 ### Rare-byte probe
 
@@ -1732,6 +1734,7 @@ change is described.
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
 [#194]: https://github.com/airlift/regulator/pull/194
+[#195]: https://github.com/airlift/regulator/pull/195
 [#201]: https://github.com/airlift/regulator/pull/201
 [#202]: https://github.com/airlift/regulator/pull/202
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
