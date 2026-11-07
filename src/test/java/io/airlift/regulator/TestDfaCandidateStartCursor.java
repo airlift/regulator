@@ -241,15 +241,16 @@ public class TestDfaCandidateStartCursor
     {
         // A check that reaches the end of the text alive and unmatched has read every later
         // candidate, so from 16 bytes on, the forward search takes over rather than the cursor
-        // checking them again.
+        // checking them again. The text starts with the `=` every match holds, ahead of the
+        // candidate, so the short-window check lets the cursor run.
         Re2 pattern = compile("[0-9]+.*=.*");
-        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8("1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 1)), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8("=1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 1)), null);
 
         assertThat(matcher.find()).isFalse();
         assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
         assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isFalse();
 
-        matcher.reset(utf8("1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 2)));
+        matcher.reset(utf8("=1" + "y".repeat(Dfa.MINIMUM_UNMATCHED_CANDIDATE_FALLBACK_BYTES - 2)));
         assertThat(matcher.find()).isFalse();
         assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
         assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
