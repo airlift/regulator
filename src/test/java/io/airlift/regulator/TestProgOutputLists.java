@@ -32,7 +32,7 @@ public class TestProgOutputLists
         assertThat(prog).isNotNull();
         assertThat(prog.didFlatten()).isTrue();
         assertThat(prog.canBitState()).isTrue();
-        assertThat(prog.bitStateTextMaxSize()).isGreaterThan(0);
+        assertThat(prog.anchoredBitStateTextMaxSize()).isGreaterThan(0);
         assertOutputLists(prog);
     }
 

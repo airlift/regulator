@@ -103,7 +103,7 @@ public class TestNfaWorkspace
         Slice input = Slices.utf8Slice("a".repeat(1000) + "b".repeat(1000) + "c".repeat(1000) + "d".repeat(1000) + "e".repeat(1000) + "f".repeat(1000));
         Re2 pattern = Re2.compile(Slices.utf8Slice(patternText));
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
-        assertThat(input.length()).isGreaterThan(pattern.forwardProgramForDiagnostics().bitStateTextMaxSize());
+        assertThat(input.length()).isGreaterThan(pattern.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize());
 
         RegexpMatcher matcher = pattern.matcher(input);
         Field workspaceField = RegexpMatcher.class.getDeclaredField("nfaWorkspace");

@@ -732,8 +732,8 @@ text, so the pair scan rejects little that a first-byte scan would not.
   spare.
   Upstream RE2 and the Rust crate bound neither the capture NFA's threads nor
   their slots.
-- A direct BitState capture search also stays within the forward share:
-  compilation lowers the program's BitState text limit until the search fits.
+- A BitState capture search also stays within the forward share: compilation
+  lowers the program's BitState text limit until the search fits.
   See [Bounded Direct BitState Capture](#bounded-direct-bitstate-capture).
 - An optional plan or fact, which only saves work, reserves memory only when the
   allowance covers it; otherwise the pattern compiles without it, with the same
@@ -2346,32 +2346,46 @@ byte sequence: `\C*` in UTF-8 mode and dot-all `.*` in Latin-1 mode. UTF-8 dot-a
 
 ## Bounded Direct BitState Capture
 
-Eligible unanchored leftmost-first searches through a reusable matcher that
-request subgroup captures run BitState directly when the input is within the
-program's BitState text limit. This single pass replaces forward and reverse DFA
-boundary searches followed by an anchored NFA capture pass. Inputs above the
-limit, programs that cannot use BitState, and stateless caller-buffer
+A leftmost-first unanchored search through a reusable matcher that asks for
+groups beyond group zero runs BitState directly when the program is not
+one-pass and the search window is at least 4 KiB and within the program's
+unanchored BitState text limit. This single pass replaces forward and reverse
+DFA boundary searches followed by an anchored capture pass. Windows outside
+those bounds, programs that cannot use BitState, and stateless caller-buffer
 operations retain the ordinary engine cascade.
 
-Upstream caps the visited bitmap at 256 Kibit (32 KiB). The Java port allows
-256 KiB because it targets server workloads where a larger bitmap is small
-compared with input pages and can replace multiple boundary and capture passes.
+Upstream caps the visited bitmap at 256 Kibit (32 KiB). Unanchored searches (the
+direct route above, and the capture fallback over the whole window when the DFA
+cannot find the match's span) keep that cap. Each unanchored search clears its
+bitmap over its whole window, and a find-all, count, or replace searches the
+rest of the text once per match, so its work is quadratic in the window.
+Anchored searches allow 256 KiB. The capture pass reads only the span the DFA
+found, and an explicitly anchored operation may read its whole bounded window,
+but a find-all never repeats an anchored search from each match the way it
+repeats an unanchored one. The Java port targets server workloads, where a
+larger bitmap is small compared with input pages and lets BitState rather than
+the NFA capture a longer span. With one bit for each list at each position, a
+program of L lists gets an anchored text limit of 2 Mibit / L − 1 bytes (the
+256 KiB bitmap), and an unanchored limit of 256 Kibit / L − 1 bytes, never more
+than the anchored limit after the lowering below. So the direct route exists
+only for programs of at most 63 lists, whose unanchored limit reaches 4 KiB.
+
 The bitmap is not the whole bound: a search's job stack grows with the input and
 the program's captures, to 67 MB for `(?:(a)|a)*` on the 419,429 bytes the
-bitmap alone allows. The visited bitmap admits each list at each position once,
-so a search over n bytes holds at most `1 + (n + 1) × J` jobs on its stack at
-once, where J counts a job for each BYTE_RANGE with a hint and each CAPTURE,
-EMPTY_WIDTH, or NOP that is not last, and one more for each CAPTURE's undo.
-Compilation lowers the text limit until the visited bitmap, capture slots and
-job stack, at the capacity its doubling reaches, and the search's objects fit
-the forward share, the allowance the capture NFA plans against. A search's stack
-starts at sixteen jobs, or at its maximum when that is no more than the modeled
-first capacity, and grows within that count, taking its maximum at once near the
-end, so a deep search can hold its maximum where the modeled doubling would have
-stopped short. A longer input takes the engine it would take without BitState.
-As in the capture NFA, a search tracks only the slots through the program's
-highest surviving CAPTURE, so a trailing group the simplifier removes costs it
-nothing.
+anchored bitmap alone allows. The visited bitmap admits each list at each
+position once, so a search over n bytes holds at most `1 + (n + 1) × J` jobs on
+its stack at once, where J counts a job for each BYTE_RANGE with a hint and each
+CAPTURE, EMPTY_WIDTH, or NOP that is not last, and one more for each CAPTURE's
+undo. Compilation lowers the anchored text limit until the visited bitmap,
+capture slots and job stack, at the capacity its doubling reaches, and the
+search's objects fit the forward share, the allowance the capture NFA plans
+against. A search's stack starts at sixteen jobs, or at its maximum when that is
+no more than the modeled first capacity, and grows within that count, taking its
+maximum at once near the end, so a deep search can hold its maximum where the
+modeled doubling would have stopped short. A longer input takes the engine it
+would take without BitState. As in the capture NFA, a search tracks only the
+slots through the program's highest surviving CAPTURE, so a trailing group the
+simplifier removes costs it nothing.
 
 Upstream gives list heads, and so BitState, only to programs of at most 512
 instructions. Regulator gives output list ids to every program with at most

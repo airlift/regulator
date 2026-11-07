@@ -121,6 +121,41 @@ public class TestBitStateWorkspace
     }
 
     @Test
+    public void testUnanchoredSearchesKeepUpstreamBitmap()
+    {
+        // An unanchored search clears its visited bitmap over its whole window, and each find
+        // searches the rest of the text, so the bitmap words a find-all clears grow with the square
+        // of the window.
+        // Unanchored searches take upstream's 256 Kibit bitmap, an eighth of the anchored one.
+        Re2 direct = Re2.compile(Slices.utf8Slice("(a|ab)(c|bcd)?"));
+        Prog directProgram = direct.forwardProgramForDiagnostics();
+        assertThat(directProgram.listCount()).isEqualTo(12);
+        assertThat(directProgram.anchoredBitStateTextMaxSize()).isGreaterThan(21_845);
+        assertThat(directProgram.unanchoredBitStateTextMaxSize()).isEqualTo(21_844);
+
+        // Past that window, a find with groups runs the DFA before BitState captures the span it
+        // found, rather than the direct BitState capture route, which builds no reverse program.
+        RegexpMatcher matcher = direct.matcher(Slices.utf8Slice("a".repeat(21_845)));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.end(1)).isEqualTo(1);
+        assertThat(direct.isReverseProgramComputed()).isTrue();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+
+        // The submatch fallback, here for an assertion the DFA does not support, takes the NFA.
+        JavaRegexp lines = JavaRegexp.compile(Slices.utf8Slice("(?m)^"));
+        Prog linesProgram = lines.forwardProgramForDiagnostics();
+        assertThat(linesProgram.hasDfaUnsupportedAssertions()).isTrue();
+        assertThat(linesProgram.listCount()).isEqualTo(4);
+        assertThat(linesProgram.unanchoredBitStateTextMaxSize()).isEqualTo(65_535);
+        RegexpMatcher linesMatcher = lines.matcher(Slices.utf8Slice("\n".repeat(65_536)));
+        assertThat(linesMatcher.find()).isTrue();
+        assertThat(linesMatcher.start()).isZero();
+        assertThat(linesMatcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(linesMatcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
+    }
+
+    @Test
     public void testJobStackStartsAtSixteenAndGrownStackIsRetained()
             throws ReflectiveOperationException
     {

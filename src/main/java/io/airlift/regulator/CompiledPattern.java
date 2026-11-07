@@ -1549,7 +1549,7 @@ abstract sealed class CompiledPattern
         if (canOnePass && length <= ONE_PASS_SUBMATCH_MAXIMUM_LENGTH) {
             return OnePass.search(prog, text, 0, length, true, matchKind, groups, matcher.onePassWorkspace());
         }
-        if (!canOnePass && prog.canBitState() && length <= prog.bitStateTextMaxSize()) {
+        if (!canOnePass && prog.canBitState() && length <= prog.anchoredBitStateTextMaxSize()) {
             return BitState.search(prog, text, 0, length, true, matchKind, groups, matcher.bitStateWorkspace());
         }
         return matchOnOrdinaryEngine(prog, text, 0, length, 0, length, Anchor.UNANCHORED, groups, matcher);
@@ -1578,7 +1578,7 @@ abstract sealed class CompiledPattern
                 captureCount > 1 &&
                 !prog.isOnePass() &&
                 prog.canBitState() &&
-                searchLength <= prog.bitStateTextMaxSize();
+                searchLength <= prog.unanchoredBitStateTextMaxSize();
     }
 
     FanoutResult programFanout()
@@ -3187,8 +3187,8 @@ abstract sealed class CompiledPattern
         boolean writingCallerGroups = groupOffsets != null;
         int captureCount = (mutableGroupOffsets == null) ? 0 : (mutableGroupOffsets.length / 2);
 
-        // A bounded BitState search can extract all groups in one pass. For eligible long inputs,
-        // this avoids forward and reverse DFA boundary searches followed by an NFA capture pass.
+        // A bounded BitState search can extract all groups in one pass. For eligible windows, this
+        // avoids forward and reverse DFA boundary searches followed by an anchored capture pass.
         if (anchorMode == Anchor.UNANCHORED &&
                 mutableGroupOffsets != null &&
                 hasBitStateWorkspace(workspaces) &&
@@ -3381,7 +3381,7 @@ abstract sealed class CompiledPattern
         else if (anchorMode == Anchor.ANCHOR_START || anchorMode == Anchor.ANCHOR_BOTH) {
             boolean canOnePass = prog.isOnePass() && prog.supportsOnePassCaptureSlots(captureCount * 2);
             boolean canBitState = prog.canBitState();
-            int bitStateMaxSize = prog.bitStateTextMaxSize();
+            int bitStateMaxSize = prog.anchoredBitStateTextMaxSize();
 
             // Skip DFA if we have fast engines and need submatches. takesAnchoredSubmatchRoute and
             // matchAnchoredSubmatch make the same engine choice for a start-anchored find with
@@ -3764,7 +3764,9 @@ abstract sealed class CompiledPattern
         }
 
         boolean canBitState = prog.canBitState();
-        int bitStateMaxSize = prog.bitStateTextMaxSize();
+        // An unanchored search clears its visited bitmap over the whole window, and each find
+        // searches the rest of the text, so it keeps upstream's smaller window.
+        int bitStateMaxSize = submatchAnchored ? prog.anchoredBitStateTextMaxSize() : prog.unanchoredBitStateTextMaxSize();
         if (canBitState && end - start <= bitStateMaxSize) {
             return BitState.search(
                     prog,

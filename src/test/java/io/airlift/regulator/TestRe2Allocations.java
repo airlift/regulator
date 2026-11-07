@@ -908,15 +908,16 @@ public class TestRe2Allocations
         long forwardMemory = Re2.Options.DEFAULT_MAX_MEMORY - (Re2.Options.DEFAULT_MAX_MEMORY / 3);
         long threadId = Thread.currentThread().threadId();
 
-        // BitState still takes the longest text it accepts, and its search allocates within the share.
+        // An anchored search still takes the longest text BitState accepts, and allocates within
+        // the share. An unanchored search takes a shorter text.
         Re2 edge = Re2.compile(pattern);
-        int edgeLength = edge.forwardProgramForDiagnostics().bitStateTextMaxSize();
-        assertThat(edge.canUseDirectBitStateCapture(edge.forwardProgramForDiagnostics(), edgeLength, 2)).isTrue();
+        int edgeLength = edge.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize();
         RegexpMatcher edgeMatcher = edge.matcher(Slices.utf8Slice("a".repeat(edgeLength)));
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        boolean edgeFound = edgeMatcher.find();
+        boolean edgeMatched = edgeMatcher.matches();
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-        assertThat(edgeFound).isTrue();
+        assertThat(edgeMatched).isTrue();
+        assertThat(edgeMatcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
         assertThat(edge.isReverseProgramComputed()).isFalse();
         assertThat(allocatedBytes).isLessThanOrEqualTo(forwardMemory);
 
@@ -929,9 +930,10 @@ public class TestRe2Allocations
         Re2.Options exactShareOptions = Re2.Options.defaults().setMaxMemory(1_579_008);
         long exactForwardMemory = 1_579_008 - (1_579_008 / 3);
         Re2 exactShare = Re2.compile(pattern, exactShareOptions);
-        int exactShareLength = exactShare.forwardProgramForDiagnostics().bitStateTextMaxSize();
+        int exactShareLength = exactShare.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize();
         Slice exactShareText = Slices.utf8Slice("a".repeat(exactShareLength));
         assertThat(exactShare.canUseDirectBitStateCapture(exactShare.forwardProgramForDiagnostics(), exactShareLength, 2)).isTrue();
+        assertThat(exactShare.canUseDirectBitStateCapture(exactShare.forwardProgramForDiagnostics(), exactShareLength + 1, 2)).isFalse();
         assertThat(Re2.compile(pattern, exactShareOptions).matcher(exactShareText).find()).isTrue();
         RegexpMatcher exactShareMatcher = exactShare.matcher(exactShareText);
         allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
@@ -994,7 +996,7 @@ public class TestRe2Allocations
         // together with compressed references makes its objects larger and its limit 83,739.
         if (TestCompilerAllocations.compressedClassPointers()) {
             Re2 keyValue = Re2.compile(TestingEverydayTrinoRegexpBenchmarkInputs.create("keyValue").pattern());
-            assertThat(keyValue.forwardProgramForDiagnostics().bitStateTextMaxSize()).isEqualTo(161_318);
+            assertThat(keyValue.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize()).isEqualTo(161_318);
         }
 
         // This program has 48 instructions and pushes up to 19 jobs per position, so a search over
@@ -1052,7 +1054,7 @@ public class TestRe2Allocations
                     continue;
                 }
                 long mostOverModel = Long.MIN_VALUE;
-                for (int length = 0; length <= program.bitStateTextMaxSize(); length++) {
+                for (int length = 0; length <= program.anchoredBitStateTextMaxSize(); length++) {
                     mostOverModel = Math.max(mostOverModel, BitState.jobStackBytesForTesting(program, length) - BitState.modelJobStackBytes(program, length));
                 }
                 assertThat(mostOverModel).as("%s at %s bytes", pattern, maxMemory).isLessThanOrEqualTo(0);

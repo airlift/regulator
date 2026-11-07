@@ -139,8 +139,9 @@ public class TestJavaRegexpDifferential
     @Test
     public void testLongTextSkipsToLiteralBehindLineAssertion()
     {
-        // The DFA cannot run these Java line assertions, and text past BitState's limit takes the
-        // Pike VM, which skips to the literal behind the leading assertion when no thread is live.
+        // The DFA cannot run these Java line assertions, and text past BitState's unanchored limit
+        // takes the Pike VM, which skips to the literal behind the leading assertion when no thread
+        // is live.
         for (String pattern : List.of("(?d)^ab|ab$", "(?d)^ab|ab\\Z", "(?m)^Sherlock Holmes|Sherlock Holmes$")) {
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             Pattern jdk = Pattern.compile(pattern);
@@ -148,7 +149,7 @@ public class TestJavaRegexpDifferential
             assertThat(prog.canSkipToStartCandidate()).as(pattern).isTrue();
             String literal = pattern.contains("Sherlock") ? "Sherlock Holmes" : "ab";
             String fillerUnit = "filler text, ";
-            String filler = fillerUnit.repeat(prog.bitStateTextMaxSize() / fillerUnit.length() + 1);
+            String filler = fillerUnit.repeat(prog.unanchoredBitStateTextMaxSize() / fillerUnit.length() + 1);
             for (String end : List.of("", "\n", "\r\n")) {
                 String input = literal + " x" + literal + "\r\n" + literal + "\n" + filler + literal + "\r\nx" + literal + end;
                 Matcher expected = jdk.matcher(input);
@@ -322,8 +323,8 @@ public class TestJavaRegexpDifferential
         Prog program = Compiler.compile(JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags()).regexp());
         assertThat(program.hasTextDependentAssertions()).isTrue();
 
-        // Exceed BitState's bitmap limit so the public matcher also exercises NFA assertions.
-        String input = "a".repeat(program.bitStateTextMaxSize() + 1) + "\n";
+        // Exceed BitState's unanchored limit so the public matcher also exercises NFA assertions.
+        String input = "a".repeat(program.unanchoredBitStateTextMaxSize() + 1) + "\n";
         RegexpMatcher actual = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice(input));
         Matcher expected = Pattern.compile(pattern).matcher(input);
         while (expected.find()) {
