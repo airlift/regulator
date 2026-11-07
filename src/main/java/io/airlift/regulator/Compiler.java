@@ -57,13 +57,19 @@ final class Compiler
     // - 16: the instruction array slot, doubled because the array grows by doubling.
     // - 48: the flattening pass's scratch, which lives beside the program: the reachable set's
     //   two ints, the work stack's int, the root map's three ints, the predecessor lists' first
-    //   edge and, for up to two edges per instruction, an id and a next link in arrays that
-    //   grow by doubling, and the root index map's int.
+    //   edge, which the root index map borrows once the lists are done, and, for up to two edges
+    //   per instruction, an id and a next link in arrays sized to the edge count. The last 4
+    //   bytes cover the unused part of the last flattened instruction block and, on a program of
+    //   a thousand instructions or more, fixed arrays such as the hint colors.
     static final int UNFLATTENED_INSTRUCTION_BYTES = 56 + 16 + (8 + 4 + 12 + 4 + 16 + 4);
-    // The heap a flattened program retains per instruction, with references counted at eight
-    // bytes as above:
+    // The heap a flattened program retains per instruction, plus the block slot flattening emits
+    // it into, with references counted at eight bytes as above:
     // - 56: the instruction object, as above.
-    // - 16: the instruction array slot, as above.
+    // - 16: the instruction array slot, which flattening sizes exactly, and the slot of the block
+    //   that held the instruction while flattening emitted it. The blocks' headers and the copies
+    //   of their directory add about 2 bytes per instruction, which compressed references leave
+    //   room for in the slots. Without compressed references they add about 3 bytes, which the 39
+    //   bytes of tables and words below cover, as flattening finishes before those are built.
     // - 2: the instruction's output list id, which BitState indexes its visited set by.
     // - 31: the no-submatch NFA tables, which the first no-submatch NFA search builds and the
     //   program keeps: one byte, seven ints and two booleans.

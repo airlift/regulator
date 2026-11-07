@@ -27,7 +27,6 @@ import java.util.stream.IntStream;
 
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
 import static io.airlift.slice.SizeOf.instanceSize;
-import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -159,23 +158,43 @@ public class TestCompilerAllocations
         ThreadMXBean threadBean = allocatedMemoryBean();
         long threadId = Thread.currentThread().threadId();
         // A literal flattens to one list per instruction, and the alternations give instructions
-        // two predecessors.
-        for (String pattern : List.of("a".repeat(20_000), "(?:ab|cd)".repeat(10_000))) {
-            Regexp regexp = Simplifier.simplify(RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp(), CaseFolding.RE2);
+        // two predecessors. The nests compile to little more than alternations, each adding two
+        // predecessor edges, and where a nullable loop keeps its priority they make nearly every
+        // instruction a root.
+        String optionalsAndLazyLoops = "a";
+        String optionalsOfAlternatingGreed = "a";
+        for (int depth = 0; depth < 1025; depth++) {
+            optionalsAndLazyLoops = "(?:" + optionalsAndLazyLoops + ")" + (depth % 2 == 0 ? "?" : "+?");
+            optionalsOfAlternatingGreed = "(?:" + optionalsOfAlternatingGreed + ")" + (depth % 2 == 0 ? "?" : "??");
+        }
+        Slice nested = utf8Slice(optionalsAndLazyLoops);
+
+        record Case(String name, ParseResult parsed, Compiler.Dialect dialect) {}
+
+        List<Case> cases = List.of(
+                new Case("literal", RegexpParser.parse(utf8Slice("a".repeat(20_000)), Regexp.LIKE_PERL), Compiler.Dialect.RE2),
+                new Case("alternations", RegexpParser.parse(utf8Slice("(?:ab|cd)".repeat(10_000)), Regexp.LIKE_PERL), Compiler.Dialect.RE2),
+                new Case("RE2 optionals and lazy loops", RegexpParser.parse(nested, Regexp.LIKE_PERL), Compiler.Dialect.RE2),
+                new Case("Java optionals and lazy loops", JavaRegexpParser.parse(nested, JavaRegexp.Options.defaults().parseFlags()), Compiler.Dialect.RE2),
+                new Case("Trino optionals and lazy loops", TrinoRegexpParser.parse(nested, Regexp.LIKE_PERL), Compiler.Dialect.TRINO),
+                new Case("Rust optionals and lazy loops", RustRegexpParser.parse(nested, RustRegexp.Options.defaults().syntaxFlags(), 10_000), Compiler.Dialect.RUST),
+                new Case("Rust lazy loop of optionals of alternating greed", RustRegexpParser.parse(utf8Slice("(?:" + optionalsOfAlternatingGreed + ")+?"), RustRegexp.Options.defaults().syntaxFlags(), 10_000), Compiler.Dialect.RUST));
+        for (Case scratchCase : cases) {
+            CaseFolding caseFolding = scratchCase.parsed().caseFolding();
+            Regexp regexp = Simplifier.simplify(scratchCase.parsed().regexp(), caseFolding);
             long scratchBytes = Long.MAX_VALUE;
             long tablesBytes = Long.MAX_VALUE;
             long wordsBytes = Long.MAX_VALUE;
             for (int run = 0; run < 5; run++) {
-                Prog program = Compiler.compileNormalizedForBenchmark(regexp, false, 64 << 20, Compiler.CompileStage.OPTIMIZED);
+                Prog program = Compiler.compileNormalizedForBenchmark(regexp, false, 64 << 20, Compiler.CompileStage.OPTIMIZED, scratchCase.dialect(), caseFolding);
                 int unflattenedSize = program.size();
 
                 long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
                 program.flatten();
                 long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
                 int size = program.size();
-                assertThat(size).isLessThanOrEqualTo(unflattenedSize);
-                assertThat(sizeOf(program.outputLists()) - sizeOf(new short[0])).isEqualTo(2L * size);
-                // Flattening allocates the copies, their array, their output list ids and its scratch.
+                assertThat(program.outputLists()).hasSize(size);
+                // Flattening allocates the copies, their array and block slots, their output list ids and its scratch.
                 long copiesBytes = size * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
                 scratchBytes = Math.min(scratchBytes, (flattenBytes - copiesBytes) / unflattenedSize);
 
@@ -187,49 +206,19 @@ public class TestCompilerAllocations
                 program.getOrCreateCaptureInstructionWords();
                 wordsBytes = Math.min(wordsBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore - (8L * size));
             }
-            assertThat(scratchBytes).as("scratch bytes per instruction for %s", pattern.substring(0, 9)).isLessThanOrEqualTo(48);
+            assertThat(scratchBytes).as("scratch bytes per instruction for %s", scratchCase.name()).isLessThanOrEqualTo(48);
             // What remains past the per-instruction bytes is array headers.
             assertThat(tablesBytes).isLessThan(1024);
             assertThat(wordsBytes).isLessThan(64);
         }
 
-        // The Rust loop pass runs on the flattening scratch every program has, so even nested
-        // optionals that put every instruction on one cycle allocate nothing more. The allowance
-        // covers the pairs of partition bounds that sorting the extra roots allocates until the
-        // JIT compiles the sort, about 300 bytes here.
-        String nest = "a";
-        for (int depth = 0; depth < 1025; depth++) {
-            nest = "(?:" + nest + ")" + (depth % 2 == 0 ? "?" : "??");
-        }
-        ParseResult parsed = RustRegexpParser.parse(utf8Slice("(?:" + nest + ")+?"), RustRegexp.Options.defaults().syntaxFlags(), 4096);
-        Regexp nestRegexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
-        long loopPassScratchBytes = Long.MAX_VALUE;
-        long scratchBytes = Long.MAX_VALUE;
-        for (int run = 0; run < 5; run++) {
-            for (boolean keepsNullableLoopPriority : List.of(true, false)) {
-                Prog program = Compiler.compileNormalizedForBenchmark(nestRegexp, false, 64 << 20, Compiler.CompileStage.OPTIMIZED, Compiler.Dialect.RUST, parsed.caseFolding());
-                program.setKeepsNullableLoopPriority(keepsNullableLoopPriority);
-                long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-                program.flatten();
-                long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-                long copiesBytes = program.size() * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
-                if (keepsNullableLoopPriority) {
-                    loopPassScratchBytes = Math.min(loopPassScratchBytes, flattenBytes - copiesBytes);
-                }
-                else {
-                    scratchBytes = Math.min(scratchBytes, flattenBytes - copiesBytes);
-                }
-            }
-        }
-        assertThat(loopPassScratchBytes).isLessThanOrEqualTo(scratchBytes + 512);
-
         // Trino compiles a greedy nullable loop with a clone of its body for the empty-iteration
         // check, so nested empty loops compile to 391 instructions that flatten to 42. The program
-        // must still keep an instruction array within the flattened charge's doubling allowance.
+        // keeps an instruction array of exactly its flattened size.
         Prog shrunk = TrinoRegexp.compile(utf8Slice("(".repeat(13) + ")" + ")*".repeat(12))).re2().forwardProgramForDiagnostics();
         Field instructions = Prog.class.getDeclaredField("insts");
         instructions.setAccessible(true);
-        assertThat(((Prog.Inst[]) instructions.get(shrunk)).length).isLessThanOrEqualTo(2 * shrunk.size());
+        assertThat(((Prog.Inst[]) instructions.get(shrunk)).length).isEqualTo(shrunk.size());
     }
 
     @Test
