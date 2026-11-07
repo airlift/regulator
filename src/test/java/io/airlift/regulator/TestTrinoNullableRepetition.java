@@ -47,7 +47,7 @@ public class TestTrinoNullableRepetition
     }
 
     @Test
-    public void testGreedyNullableRepetitionMatchesPinnedJoni()
+    public void testNullableRepetitionMatchesPinnedJoni()
     {
         for (String pattern : new String[] {
                 "(?:a?|b)*",
@@ -62,6 +62,8 @@ public class TestTrinoNullableRepetition
                 "(?:a?|b)*?",
                 "(?:a?|b)+?",
                 "(?:a?|b){1,}?",
+                "(?:a*?|ab)*?b",
+                "(?:a*?|ab)*?(b*)$",
                 "(?:a?|b){0,3}",
                 "(?:a?|\\b)*",
                 "a(?:^)*b",
@@ -78,6 +80,7 @@ public class TestTrinoNullableRepetition
                     utf8Slice("a"),
                     utf8Slice("ab"),
                     utf8Slice("aab"),
+                    utf8Slice("aabb"),
                     utf8Slice("b"),
                     utf8Slice("x💰aab"),
             }) {
