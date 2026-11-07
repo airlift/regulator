@@ -16,11 +16,15 @@ package io.airlift.regulator;
 import io.airlift.regulator.Prefilter.PrefilterOp;
 import io.airlift.slice.Slice;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /// Deduplicates prefilter nodes and determines which regular expressions may
 /// match after their required atoms are found.
@@ -81,39 +85,130 @@ final class PrefilterTree
         return regexpIndex;
     }
 
+    // Decides whether a prefilter can guard its regexp, removing from each AND the children that
+    // cannot. An AND is kept when any child is; an OR only when every child is, so its walk stops
+    // at the first child that is not. Nested alternations build prefilters tens of thousands of
+    // levels deep, so this walk and the others over prefilters keep their nesting on the heap.
     private boolean keepNode(Prefilter prefilter)
     {
         if (prefilter == null) {
             return false;
         }
+        if (prefilter.op() != PrefilterOp.AND && prefilter.op() != PrefilterOp.OR) {
+            return keepLeaf(prefilter);
+        }
 
+        Deque<KeepFrame> frames = new ArrayDeque<>();
+        frames.addLast(new KeepFrame(prefilter));
+        while (true) {
+            KeepFrame frame = frames.getLast();
+            boolean isAnd = frame.prefilter.op() == PrefilterOp.AND;
+            if (frame.nextChildIndex < frame.children.size() && (isAnd || !frame.anyChildDropped)) {
+                Prefilter child = frame.children.get(frame.nextChildIndex++);
+                if (child.op() == PrefilterOp.AND || child.op() == PrefilterOp.OR) {
+                    frames.addLast(new KeepFrame(child));
+                }
+                else {
+                    frame.childVisited(child, keepLeaf(child));
+                }
+                continue;
+            }
+
+            boolean kept = isAnd ? frame.prefilter.retainChildren(frame.keptChildren::contains) : !frame.anyChildDropped;
+            frames.removeLast();
+            if (frames.isEmpty()) {
+                return kept;
+            }
+            frames.getLast().childVisited(frame.prefilter, kept);
+        }
+    }
+
+    private boolean keepLeaf(Prefilter prefilter)
+    {
         return switch (prefilter.op()) {
             case ALL, NONE -> false;
             case ATOM -> prefilter.atom().length() >= minimumAtomLength;
-            case AND -> prefilter.retainChildren(this::keepNode);
-            case OR -> prefilter.children().stream().allMatch(this::keepNode);
+            case AND, OR -> throw new IllegalArgumentException("not a leaf: " + prefilter.op());
         };
     }
 
+    private static final class KeepFrame
+    {
+        private final Prefilter prefilter;
+        private final List<Prefilter> children;
+        // Only an AND removes children, so only its frame holds the kept child objects, which
+        // Prefilter compares by identity.
+        private final Set<Prefilter> keptChildren;
+        private int nextChildIndex;
+        private boolean anyChildDropped;
+
+        private KeepFrame(Prefilter prefilter)
+        {
+            this.prefilter = prefilter;
+            this.children = prefilter.children();
+            this.keptChildren = prefilter.op() == PrefilterOp.AND ? new HashSet<>() : null;
+        }
+
+        private void childVisited(Prefilter child, boolean kept)
+        {
+            if (!kept) {
+                anyChildDropped = true;
+            }
+            else if (keptChildren != null) {
+                keptChildren.add(child);
+            }
+        }
+    }
+
+    // Adds the entries of a kept prefilter, each after its children's, and returns the root's index.
     private int addInternal(Prefilter prefilter)
     {
         if (prefilter.op() == PrefilterOp.ATOM) {
             return addAtomEntry(prefilter.atom());
         }
 
-        List<Integer> childIndexes = new ArrayList<>();
-        for (Prefilter subPrefilter : prefilter.children()) {
-            childIndexes.add(addInternal(subPrefilter));
-        }
+        Deque<AddFrame> frames = new ArrayDeque<>();
+        frames.addLast(new AddFrame(prefilter));
+        while (true) {
+            AddFrame frame = frames.getLast();
+            if (frame.childIndexes.size() < frame.children.size()) {
+                Prefilter child = frame.children.get(frame.childIndexes.size());
+                if (child.op() == PrefilterOp.ATOM) {
+                    frame.childIndexes.add(addAtomEntry(child.atom()));
+                }
+                else {
+                    frames.addLast(new AddFrame(child));
+                }
+                continue;
+            }
 
-        PrefilterKey key = new PrefilterKey(prefilter.op(), null, childIndexes);
+            int entryIndex = addOperatorEntry(frame.prefilter.op(), frame.childIndexes);
+            frames.removeLast();
+            if (frames.isEmpty()) {
+                return entryIndex;
+            }
+            frames.getLast().childIndexes.add(entryIndex);
+        }
+    }
+
+    private record AddFrame(Prefilter prefilter, List<Prefilter> children, List<Integer> childIndexes)
+    {
+        private AddFrame(Prefilter prefilter)
+        {
+            this(prefilter, prefilter.children(), new ArrayList<>());
+        }
+    }
+
+    private int addOperatorEntry(PrefilterOp operation, List<Integer> childIndexes)
+    {
+        PrefilterKey key = new PrefilterKey(operation, null, childIndexes);
         Integer existingEntryIndex = entriesByKey.get(key);
         if (existingEntryIndex != null) {
             return existingEntryIndex;
         }
 
         int entryIndex = entries.size();
-        PrefilterEntry entry = new PrefilterEntry(prefilter.op(), childIndexes);
+        PrefilterEntry entry = new PrefilterEntry(operation, childIndexes);
         entries.add(entry);
         entriesByKey.put(key, entryIndex);
 
@@ -193,9 +288,12 @@ final class PrefilterTree
                 continue;
             }
             for (int entryIndex : entryIndexesByAtom.get(matchedAtomIndex)) {
-                propagateMatch(entryIndex, matchedEntries, remainingChildCounts);
+                if (!matchedEntries.hasIndex(entryIndex)) {
+                    matchedEntries.set(entryIndex, 1);
+                }
             }
         }
+        propagateMatches(matchedEntries, remainingChildCounts);
 
         int regexpCount = 0;
         for (int regexpIndex = 0; regexpIndex < regexpRootIndexes.size(); regexpIndex++) {
@@ -208,24 +306,26 @@ final class PrefilterTree
         return Arrays.copyOf(regexpIndices, regexpCount);
     }
 
-    private void propagateMatch(int entryIndex, SparseIntArray matchedEntries, SparseIntArray remainingChildCounts)
+    // Marks every ancestor whose match the matched atom entries complete: an OR when any child
+    // matches, an AND when all of its children have. The matched entries are also the work queue:
+    // entries matched here are visited later in this loop, and each entry is visited once.
+    private void propagateMatches(SparseIntArray matchedEntries, SparseIntArray remainingChildCounts)
     {
-        if (matchedEntries.hasIndex(entryIndex)) {
-            return;
-        }
-        matchedEntries.set(entryIndex, 1);
-
-        PrefilterEntry entry = entries.get(entryIndex);
-        for (int parentIndex : entry.parentIndexes) {
-            PrefilterEntry parent = entries.get(parentIndex);
-            if (parent.operation == PrefilterOp.OR) {
-                propagateMatch(parentIndex, matchedEntries, remainingChildCounts);
-            }
-            else if (parent.operation == PrefilterOp.AND) {
-                int remainingChildren = remainingChildCounts.getExisting(parentIndex) - 1;
-                remainingChildCounts.setExisting(parentIndex, remainingChildren);
-                if (remainingChildren == 0) {
-                    propagateMatch(parentIndex, matchedEntries, remainingChildCounts);
+        for (int position = 0; position < matchedEntries.size(); position++) {
+            PrefilterEntry entry = entries.get(matchedEntries.denseIndexAt(position));
+            for (int parentIndex : entry.parentIndexes) {
+                PrefilterEntry parent = entries.get(parentIndex);
+                boolean parentMatched = false;
+                if (parent.operation == PrefilterOp.OR) {
+                    parentMatched = true;
+                }
+                else if (parent.operation == PrefilterOp.AND) {
+                    int remainingChildren = remainingChildCounts.getExisting(parentIndex) - 1;
+                    remainingChildCounts.setExisting(parentIndex, remainingChildren);
+                    parentMatched = remainingChildren == 0;
+                }
+                if (parentMatched && !matchedEntries.hasIndex(parentIndex)) {
+                    matchedEntries.set(parentIndex, 1);
                 }
             }
         }

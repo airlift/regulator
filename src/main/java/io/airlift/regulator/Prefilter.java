@@ -32,6 +32,9 @@ import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
 /// Extracts byte-string guards from a regular expression.
 final class Prefilter
 {
+    // Upstream's visit limit for building a regexp's guard information.
+    private static final int MAX_VISITS = 100_000;
+
     enum PrefilterOp
     {
         ALL(0),
@@ -99,8 +102,11 @@ final class Prefilter
         // Only RE2 patterns build prefilters, so atoms fold with RE2's rule, the rule
         // FilteredRe2.canonicalizeText applies to the searched text.
         Regexp regexp = Simplifier.simplify(re2.regexp(), CaseFolding.RE2);
-        boolean latin1 = (regexp.parseFlags() & Regexp.LATIN1) != 0;
-        return buildInfo(regexp, latin1).takeMatch();
+        Info info = buildInfo(regexp);
+        if (info == null) {
+            return null;
+        }
+        return info.takeMatch();
     }
 
     private Prefilter simplify()
@@ -198,23 +204,66 @@ final class Prefilter
         }
     }
 
-    private static Info buildInfo(Regexp regexp, boolean latin1)
+    /// Returns the guard information for a simplified regexp, or null when the walk takes more
+    /// than [#MAX_VISITS] visits, which leaves the regexp unfiltered as in upstream. A shared
+    /// node counts once per reference to it. The walk keeps its nesting on the heap, because
+    /// deep group nesting and expanded repetition chains leave simplified regexps thousands of
+    /// levels deep.
+    private static Info buildInfo(Regexp regexp)
     {
-        return switch (regexp.op()) {
-            case NO_MATCH -> Info.noMatch();
-            case EMPTY_MATCH, BEGIN_LINE, END_LINE, BEGIN_TEXT, END_TEXT, WORD_BOUNDARY, NO_WORD_BOUNDARY -> Info.emptyString();
-            case LITERAL -> Info.literal(regexp.rune(), latin1);
-            case LITERAL_STRING -> literalString(regexp.runes(), latin1);
-            case CONCAT -> concat(regexp.children(), latin1);
-            case ALTERNATE -> alternate(regexp.children(), latin1);
-            case STAR -> Info.star(buildInfo(regexp.child(0), latin1));
-            case QUEST -> Info.quest(buildInfo(regexp.child(0), latin1));
-            case PLUS -> Info.plus(buildInfo(regexp.child(0), latin1));
-            case ANY_CHAR, ANY_BYTE -> Info.anyMatch();
-            case CHAR_CLASS -> Info.characterClass(regexp.charClass(), latin1);
-            case CAPTURE -> buildInfo(regexp.child(0), latin1);
-            case REPEAT, HAVE_MATCH -> Info.anyMatch();
-        };
+        InfoWalker walker = new InfoWalker((regexp.parseFlags() & Regexp.LATIN1) != 0);
+        Info info = walker.walkExponential(regexp, null, MAX_VISITS);
+        if (walker.stoppedEarly) {
+            return null;
+        }
+        return info;
+    }
+
+    private static final class InfoWalker
+            extends RegexpWalker<Info>
+    {
+        private static final PreVisitResult<Info> CONTINUE = new PreVisitResult<>(null, false);
+
+        private final boolean latin1;
+        private boolean stoppedEarly;
+
+        private InfoWalker(boolean latin1)
+        {
+            this.latin1 = latin1;
+        }
+
+        @Override
+        protected PreVisitResult<Info> preVisit(Regexp regexp, Info parentValue)
+        {
+            return CONTINUE;
+        }
+
+        @Override
+        protected Info postVisit(Regexp regexp, Info parentValue, Info preValue, List<Info> childInfos)
+        {
+            return switch (regexp.op()) {
+                case NO_MATCH -> Info.noMatch();
+                case EMPTY_MATCH, BEGIN_LINE, END_LINE, BEGIN_TEXT, END_TEXT, WORD_BOUNDARY, NO_WORD_BOUNDARY -> Info.emptyString();
+                case LITERAL -> Info.literal(regexp.rune(), latin1);
+                case LITERAL_STRING -> literalString(regexp.runes(), latin1);
+                case CONCAT -> concat(childInfos);
+                case ALTERNATE -> alternate(childInfos);
+                case STAR -> Info.star(childInfos.getFirst());
+                case QUEST -> Info.quest(childInfos.getFirst());
+                case PLUS -> Info.plus(childInfos.getFirst());
+                case ANY_CHAR, ANY_BYTE -> Info.anyMatch();
+                case CHAR_CLASS -> Info.characterClass(regexp.charClass(), latin1);
+                case CAPTURE -> childInfos.getFirst();
+                case REPEAT, HAVE_MATCH -> Info.anyMatch();
+            };
+        }
+
+        @Override
+        protected Info shortVisit(Regexp regexp, Info parentValue)
+        {
+            stoppedEarly = true;
+            return Info.anyMatch();
+        }
     }
 
     private static Info literalString(int[] runes, boolean latin1)
@@ -230,12 +279,11 @@ final class Prefilter
         return result;
     }
 
-    private static Info concat(List<Regexp> children, boolean latin1)
+    private static Info concat(List<Info> childInfos)
     {
         Info result = null;
         Info exact = null;
-        for (Regexp child : children) {
-            Info childInfo = buildInfo(child, latin1);
+        for (Info childInfo : childInfos) {
             if (!childInfo.isExact || (exact != null && childInfo.exact.size() * exact.exact.size() > 16)) {
                 result = Info.and(result, exact);
                 exact = null;
@@ -248,11 +296,11 @@ final class Prefilter
         return Info.and(result, exact);
     }
 
-    private static Info alternate(List<Regexp> children, boolean latin1)
+    private static Info alternate(List<Info> childInfos)
     {
-        Info result = buildInfo(children.getFirst(), latin1);
-        for (int childIndex = 1; childIndex < children.size(); childIndex++) {
-            result = Info.alternate(result, buildInfo(children.get(childIndex), latin1));
+        Info result = childInfos.getFirst();
+        for (int childIndex = 1; childIndex < childInfos.size(); childIndex++) {
+            result = Info.alternate(result, childInfos.get(childIndex));
         }
         return result;
     }
