@@ -369,8 +369,11 @@ final class CharClassBuilder
             return;
         }
 
-        // If folding case, add fold-equivalent characters too.
-        if ((parseFlags & Regexp.ASCII_FOLD_CASE) != 0) {
+        // If folding case, add fold-equivalent characters too. Latin-1 folding pairs only ASCII
+        // letters, as ASCII folding does, so it adds each range once. Upstream walks the range code
+        // point by code point before the parser clips the class to Latin-1.
+        boolean latin1FoldCase = (parseFlags & Regexp.FOLD_CASE) != 0 && (parseFlags & Regexp.LATIN1) != 0;
+        if ((parseFlags & Regexp.ASCII_FOLD_CASE) != 0 || latin1FoldCase) {
             addRange(low, high);
             int upperLow = max(low, 'A');
             int upperHigh = min(high, 'Z');
@@ -385,30 +388,11 @@ final class CharClassBuilder
             return;
         }
         if ((parseFlags & Regexp.FOLD_CASE) != 0) {
-            if ((parseFlags & Regexp.LATIN1) != 0) {
-                addFoldedRangeLatin1(low, high);
-            }
-            else {
-                addFoldedRange(low, high, caseFolding);
-            }
+            addFoldedRange(low, high, caseFolding);
             return;
         }
 
         addRange(low, high);
-    }
-
-    private void addFoldedRangeLatin1(int low, int high)
-    {
-        while (low <= high) {
-            addRange(low, low);
-            if ('A' <= low && low <= 'Z') {
-                addRange(low - 'A' + 'a', low - 'A' + 'a');
-            }
-            if ('a' <= low && low <= 'z') {
-                addRange(low - 'a' + 'A', low - 'a' + 'A');
-            }
-            low++;
-        }
     }
 
     private void addFoldedRange(int low, int high, CaseFolding caseFolding)
