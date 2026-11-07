@@ -573,6 +573,10 @@ abstract sealed class CompiledPattern
         // The suffix is the program compiled below, so simplify it first, checking that its
         // expansion can fit before expanding anything.
         Regexp normalizedSuffixRegexp = Simplifier.simplify(suffixRegexp, caseFolding, forwardMemory);
+        // The program is compiled before the expression is analyzed: the check counts each copy of
+        // a class as one instruction, and the analysis reads every range of the class at each
+        // copy, so only the compiler's limits keep that reading proportional to the budget.
+        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         // The entire expression adds only its leading anchors and the stripped literal prefix to a
         // suffix whose expansion passed that check, so simplifying it needs no budget of its own.
         Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding);
@@ -580,9 +584,6 @@ abstract sealed class CompiledPattern
         // The whole-expression analysis describes the entire expression, so a split-off suffix
         // needs its own length.
         int encodedMatchLength = prefixResult != null ? MatchLength.analyze(suffixRegexp, caseFolding).encoded() : expressionAnalysis.length().encoded();
-
-        // Compute captures from the entire regexp (named groups come from the full pattern).
-        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
                 ? null

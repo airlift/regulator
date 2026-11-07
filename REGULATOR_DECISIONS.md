@@ -662,10 +662,15 @@ text, so the pair scan rejects little that a first-byte scan would not.
   same budget: twice the instruction limit in node visits, and the instruction
   limit in instructions. The count never exceeds what the compiler counts for
   the result, so the check rejects no pattern the compiler would accept, and a
-  repetition too large to compile fails before its copies take the heap.
-  Copies in a branch that the simplifier removes because it never matches are
-  never built or counted, although upstream's compiler emits and counts that
-  branch.
+  repetition whose count passes those limits fails before its copies take the
+  heap. Copies in a branch that the simplifier removes because it never
+  matches are never built or counted, although upstream's compiler emits and
+  counts that branch. The count charges each copy of a class one instruction,
+  so an expansion under the count can still be built and then fail in the
+  compiler, as `\p{L}{1000}x` does at the default budget. The expression
+  analysis reads every range of the class at each copy, so the program is
+  compiled before the expression is analyzed, and the compiler's limits bound
+  that reading.
 - A long leading literal keeps a prefix shift table, configured after
   flattening from what the flatten charge left. A forward program whose table
   does not fit its share fails to compile.
