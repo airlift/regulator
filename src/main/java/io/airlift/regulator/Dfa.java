@@ -855,19 +855,35 @@ final class Dfa
         long count = 0;
         boolean requiresExclusiveSearch = false;
         long observedCacheVersion = 0;
+        // The reset count a lock-free count began with when it handed resets it saw to the lock,
+        // or -1.
+        int handedOffResetCount = -1;
         while (true) {
             boolean exclusiveSearch = requiresExclusiveSearch;
             if (!exclusiveSearch) {
                 observedCacheVersion = dfa.cacheVersion();
             }
             CacheTables tables = dfa.beginSearch(exclusiveSearch);
-            if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
-                dfa.cancelExclusiveSearch();
-                requiresExclusiveSearch = false;
-                continue;
+            if (exclusiveSearch) {
+                if (handedOffResetCount >= 0) {
+                    // The cache changed with the resets handed over, so they are judged under
+                    // the lock rather than forgiven. Giving the table back changes no tables, so
+                    // the count searches again on the ones it just read.
+                    if (dfa.countResetsTooOften(handedOffResetCount, true)) {
+                        dfa.recordCountSearchBailedWhenSlow();
+                        dfa.cancelExclusiveSearch();
+                        return COUNT_UNSUPPORTED;
+                    }
+                }
+                else if (dfa.cacheVersion() != observedCacheVersion) {
+                    dfa.cancelExclusiveSearch();
+                    requiresExclusiveSearch = false;
+                    continue;
+                }
             }
             try {
-                int initialResetCount = dfa.resetCount();
+                // A locked count that took over resets goes on counting from the same start.
+                int initialResetCount = handedOffResetCount >= 0 ? handedOffResetCount : dfa.resetCount();
                 while (textBegin <= contextEnd) {
                     long matchEnd = searchForwardForCount(
                             dfa,
@@ -899,7 +915,19 @@ final class Dfa
                         resampleStartByteScanSet = false;
                     }
                     matchEnd &= COUNT_MATCH_LENGTH_MASK;
-                    if (byteScanRejected && dfa.resetCount() - initialResetCount >= 2) {
+                    if (byteScanRejected && dfa.countResetsTooOften(initialResetCount, exclusiveSearch)) {
+                        // A lock-free count cannot reset, so the resets it saw are other searches',
+                        // and the pointer table may have caused them. Giving the table back needs
+                        // the lock, so the count hands the decision to it, keeping the matches
+                        // already counted; the locked count searches again from the previous match's
+                        // end and finds this match again.
+                        // It hands over only while the table is held or withheld and not given
+                        // back, or when another search gave it back after these resets were judged;
+                        // a DFA that never had one, or gave it back before, gives up here as before.
+                        if (!exclusiveSearch && dfa.countHandsResetsToLock(initialResetCount)) {
+                            handedOffResetCount = initialResetCount;
+                            throw RETRY_SEARCH;
+                        }
                         dfa.recordCountSearchBailedWhenSlow();
                         return COUNT_UNSUPPORTED;
                     }
@@ -2684,7 +2712,10 @@ final class Dfa
 
                 // Cache exhaustion: save/reset/restore
                 position++;
-                if (dfaShouldBailWhenSlow && resetPosition >= 0 && (position - resetPosition) < 10 * dfa.stateCount) {
+                if (dfaShouldBailWhenSlow &&
+                        resetPosition >= 0 &&
+                        (position - resetPosition) < 10 * dfa.stateCount &&
+                        !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
                     return SEARCH_FAILED;
                 }
                 resetPosition = position;
@@ -3267,7 +3298,10 @@ final class Dfa
             }
 
             position++;
-            if (dfaShouldBailWhenSlow && resetPosition >= 0 && (position - resetPosition) < 10 * dfa.stateCount) {
+            if (dfaShouldBailWhenSlow &&
+                    resetPosition >= 0 &&
+                    (position - resetPosition) < 10 * dfa.stateCount &&
+                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
                 return SEARCH_FAILED;
             }
             resetPosition = position;
@@ -3522,7 +3556,10 @@ final class Dfa
 
             // Cache exhaustion
             position++;
-            if (dfaShouldBailWhenSlow && resetPosition >= 0 && (position - resetPosition) < 10 * dfa.stateCount) {
+            if (dfaShouldBailWhenSlow &&
+                    resetPosition >= 0 &&
+                    (position - resetPosition) < 10 * dfa.stateCount &&
+                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
                 return SEARCH_FAILED;
             }
             resetPosition = position;
@@ -3852,7 +3889,10 @@ final class Dfa
             }
 
             position++;
-            if (dfaShouldBailWhenSlow && resetPosition >= 0 && (position - resetPosition) < 10 * dfa.stateCount) {
+            if (dfaShouldBailWhenSlow &&
+                    resetPosition >= 0 &&
+                    (position - resetPosition) < 10 * dfa.stateCount &&
+                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
                 return SEARCH_FAILED;
             }
             resetPosition = position;
@@ -4057,7 +4097,10 @@ final class Dfa
 
             // Cache exhaustion
             position--;
-            if (dfaShouldBailWhenSlow && resetPosition >= 0 && Math.abs(position - resetPosition) < 10 * dfa.stateCount) {
+            if (dfaShouldBailWhenSlow &&
+                    resetPosition >= 0 &&
+                    Math.abs(position - resetPosition) < 10 * dfa.stateCount &&
+                    !dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
                 return SEARCH_FAILED;
             }
             resetPosition = position;
@@ -5373,15 +5416,27 @@ final class Dfa
         private long pairedContentVersion = -1;
         private int shortPairedSearchCount;
         private boolean absolutePointerTransitionsRequested;
+        // A pointer table has been published to the tables. It stays set through resets and the
+        // release. A request whose first allocation failed leaves it clear, since no reset of that
+        // DFA was the table's.
+        private boolean absolutePointerTransitionsPublished;
         private boolean absolutePointerTransitionsUnavailable;
         // The requested pointer table is absent from the current tables: superseded segments still
         // await collection, or its native memory could not be allocated. It stays requested, and
-        // paired rows stay disabled, until an exclusive search allocates it again, so a warm cache
-        // may run on object rows until its next exclusive search or reset.
+        // paired rows stay disabled, until an exclusive search allocates it again or a search
+        // about to give up gives it back, so a warm cache may run on object rows until its next
+        // exclusive search or reset.
         private boolean absolutePointerTransitionsWithheld;
         // A pointer table allocation has failed since the last reset; none is attempted again until
         // the next one.
         private boolean absolutePointerTransitionAllocationFailed;
+        // A search or count about to give up for resetting too often gave the pointer table back.
+        // The table may still grow until the next reset drops it; nothing allocates one after that,
+        // and paired transitions stay disabled.
+        private boolean absolutePointerTransitionsReleased;
+        // The reset count once the first reset after that release has run; from there the tables
+        // hold no pointer table.
+        private int releasedAbsolutePointerResetCount;
         // Pointer tables a reset or growth superseded, linked until the collector finds them
         // unreachable and enqueues them, and their native bytes not yet released from the count.
         // The list and count are guarded by the cache mutation lock.
@@ -6622,6 +6677,7 @@ final class Dfa
 
             availableStateMemory -= allocatedBytes;
             absolutePointerTransitionCount = transitionCount;
+            absolutePointerTransitionsPublished = true;
             this.tables = pointerTables;
             absolutePointerTransitionsWithheld = false;
             pairedTransitionsDisabled = true;
@@ -7654,7 +7710,8 @@ final class Dfa
         // Publishes empty tables at the initial capacity. Searches still reading the superseded
         // tables keep them, unchanged, until they finish; the superseded tables are no longer
         // charged. A pointer table moves to a new segment of the same size, or is withheld when
-        // superseded segments fill their cap or the segment cannot be allocated.
+        // superseded segments fill their cap or the segment cannot be allocated; a table a search
+        // gave back is dropped.
         private void resetCache()
         {
             // Every allocation precedes the first write to the DFA, so a failure that propagates
@@ -7666,7 +7723,7 @@ final class Dfa
             AbsolutePointerTransitions supersededPointers = tables.absolutePointerTransitions;
             AbsolutePointerTransitions absolutePointers = null;
             boolean allocationFailed = false;
-            if (supersededPointers != null) {
+            if (supersededPointers != null && !absolutePointerTransitionsReleased) {
                 long allocatedBytes = supersededPointers.allocatedBytes();
                 if (consumeTestingFailurePoint(TestingFailurePoint.NATIVE_TRANSITION_RESET)) {
                     allocationFailed = true;
@@ -7696,9 +7753,9 @@ final class Dfa
             // A failed allocation, including this reset's, is retried only after a later reset.
             absolutePointerTransitionAllocationFailed = allocationFailed;
             if (supersededPointers != null) {
-                absolutePointerTransitionsWithheld = absolutePointers == null;
+                absolutePointerTransitionsWithheld = absolutePointers == null && !absolutePointerTransitionsReleased;
             }
-            pairedTransitionsDisabled = absolutePointers != null || absolutePointerTransitionsWithheld;
+            pairedTransitionsDisabled = absolutePointers != null || absolutePointerTransitionsWithheld || absolutePointerTransitionsReleased;
             tables = resetTables;
             absolutePointerTransitionCount = 0;
             nextFreeOffset = nextSize;
@@ -7715,6 +7772,57 @@ final class Dfa
             }
 
             resetCount++;
+        }
+
+        // Called under the cache mutation lock by a search or an exclusive count that would give up
+        // for resetting too often. A DFA that holds a pointer table, or has one withheld, gives the
+        // table back instead, so later resets leave room for the states object rows hold, and the
+        // search goes on; it gives up only if it resets that often again. Whether the table is held
+        // or withheld depends on when the collector finds superseded tables, so both give it back.
+        // A DFA that never requested a table, or could not size one, has nothing to give back.
+        // Returns whether the search goes on.
+        boolean releaseAbsolutePointerTransitionsForSlowReset()
+        {
+            if (absolutePointerTransitionsReleased ||
+                    (tables.absolutePointerTransitions == null && !absolutePointerTransitionsWithheld)) {
+                return false;
+            }
+            absolutePointerTransitionsReleased = true;
+            absolutePointerTransitionsUnavailable = true;
+            absolutePointerTransitionsWithheld = false;
+            releasedAbsolutePointerResetCount = resetCount + 1;
+            return true;
+        }
+
+        // Whether a count that began at `initialResetCount` has seen the DFA reset too often. The
+        // allowance counts only the resets after the one that drops a pointer table given back, by
+        // a search or a count: the table stays in the current tables until that reset, and resets
+        // with it come sooner because it fits fewer states. An exclusive count gives the table back
+        // instead, and gives up only when it has nothing to give back.
+        boolean countResetsTooOften(int initialResetCount, boolean exclusiveSearch)
+        {
+            return resetCount - Math.max(initialResetCount, releasedAbsolutePointerResetCount) >= 2 &&
+                    (!exclusiveSearch || !releaseAbsolutePointerTransitionsForSlowReset());
+        }
+
+        // Whether a lock-free count that saw two resets hands them to the lock: while the DFA has
+        // held a pointer table, now in its tables or withheld, and not given it back, or when
+        // another search gave it back after the count judged its resets, leaving fewer than two
+        // resets after the one that drops it. It reads the release once, and only through that
+        // reset, so a release the count sees in part, or after its judgement, costs one locked
+        // count rather than a give-up for good.
+        boolean countHandsResetsToLock(int initialResetCount)
+        {
+            int releasedResetCount = releasedAbsolutePointerResetCount;
+            return releasedResetCount == 0
+                    ? absolutePointerTransitionsPublished
+                    : resetCount - Math.max(initialResetCount, releasedResetCount) < 2;
+        }
+
+        // Read after `resetCount()`, which publishes it with the reset that drops the table.
+        int releasedAbsolutePointerResetCount()
+        {
+            return releasedAbsolutePointerResetCount;
         }
 
         public void resetCacheExternal()

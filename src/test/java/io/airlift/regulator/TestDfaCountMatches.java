@@ -27,6 +27,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntConsumer;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -228,6 +230,229 @@ public class TestDfaCountMatches
         assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
         assertThat(dfa.byteScanFallbackCount()).isZero();
         assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+    }
+
+    @Test
+    public void testPointerTableThrashingKeepsDfa()
+    {
+        // These texts reach about 2,700 DFA states. A 2 MiB budget holds them all on object rows,
+        // where the DFA never resets, but not beside the native pointer table, which a fresh DFA
+        // keeps through its first two resets whenever the collector runs. A count that resets too
+        // often while the DFA has the table gives the table back instead of leaving the count, and
+        // later finds, to the NFA.
+        Slice patternText = utf8Slice("[ab]*a[ab]{12}c");
+        Re2 reference = Re2.compile(patternText);
+        Random random = new Random(1);
+        String[] blocks = new String[100];
+        for (int index = 0; index < blocks.length; index++) {
+            StringBuilder block = new StringBuilder();
+            for (int position = 0; position < 40; position++) {
+                block.append(random.nextBoolean() ? 'a' : 'b');
+            }
+            blocks[index] = block.toString();
+        }
+        // The count resets twice between matches, or within its search through the blocks no c
+        // completes; there the search gives the table back, and the matches after it must not
+        // count the resets it made with the table.
+        Slice manyMatches = utf8Slice(blockText(random, blocks, 3_000, 'c'));
+        Slice longSearch = utf8Slice(blockText(random, blocks, 200, 'c') + blockText(random, blocks, 3_000, 'e') + blockText(random, blocks, 3_000, 'c'));
+
+        for (Slice input : List.of(manyMatches, longSearch)) {
+            // The first finds build the table without a reset.
+            Re2 pattern = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(2L << 20));
+            RegexpMatcher firstMatches = pattern.matcher(input);
+            for (int match = 0; match < 80; match++) {
+                assertThat(firstMatches.find()).isTrue();
+            }
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(dfa.resetCount()).isZero();
+
+            assertThat(pattern.count(input)).isEqualTo(reference.count(input));
+            assertThat(dfa.resetCount() >= 2).isEqualTo(Dfa.nativeAccessEnabled());
+            RegexpMatcher matcher = pattern.matcher(input);
+            assertThat(findCount(matcher)).isEqualTo(findCount(reference.matcher(input)));
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        }
+    }
+
+    @Test
+    public void testLockFreeCountHandsPointerTableResetsToLock()
+            throws Exception
+    {
+        // A count over cached states runs without the lock, and between two of its matches finds
+        // on another text reset the DFA twice while it holds the pointer table; neither find
+        // resets often enough itself to give the table back. With the table the count goes on
+        // under the lock, which gives the table back, and reports each match end once; on object
+        // rows it gives up as before.
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
+        Prog program = pattern.forwardProgramForDiagnostics();
+        Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
+        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
+        int[] matchEnds = {0};
+
+        long result = Dfa.countMatches(program, cached, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
+            if (matchEnds[0]++ == 0) {
+                assertThat(dfa.cacheMutationLockedForTesting()).isFalse();
+                resetTwice(dfa, growth);
+                assertThat(dfa.releasedAbsolutePointerResetCount()).isZero();
+            }
+            return true;
+        }, null);
+
+        assertThat(dfa.countSearchBailedWhenSlow()).isEqualTo(!Dfa.nativeAccessEnabled());
+        if (Dfa.nativeAccessEnabled()) {
+            assertThat(result).isEqualTo(4_000L << Integer.SIZE | cached.length());
+            assertThat(matchEnds[0]).isEqualTo(4_000);
+            assertThat(dfa.releasedAbsolutePointerResetCount()).isPositive();
+        }
+        else {
+            assertThat(result).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+        }
+
+        // Now the DFA has no table to give back: it gave it back above, or never had one. A count
+        // that sees two foreign resets gives up without the lock, which this thread holds from
+        // the resets until the count returns.
+        dfa.resetCacheExternal();
+        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
+        CountDownLatch resetsMade = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<Long> count = executor.submit(() -> Dfa.countMatches(program, cached, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
+                if (resetsMade.getCount() != 0) {
+                    resetTwice(dfa, growth);
+                    resetsMade.countDown();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!dfa.cacheMutationLockedForTesting()) {
+                        if (Thread.interrupted() || System.nanoTime() >= deadline) {
+                            throw new AssertionError("The cache mutation lock was not taken");
+                        }
+                        Thread.onSpinWait();
+                    }
+                }
+                return true;
+            }, null));
+            try {
+                assertThat(resetsMade.await(10, TimeUnit.SECONDS)).isTrue();
+                dfa.beginSearch(true);
+                try {
+                    assertThat(count.get(10, TimeUnit.SECONDS)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+                }
+                finally {
+                    dfa.cancelExclusiveSearch();
+                }
+            }
+            finally {
+                executor.shutdownNow();
+            }
+        }
+        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
+    }
+
+    @Test
+    public void testLockFreeCountHandsOffResetsJudgedBeforeRelease()
+    {
+        // Another search can give the table back between a lock-free count's judgement that its
+        // resets came too often and its choice to give up. No reset after the one that drops the
+        // table has come yet, so the count hands the resets to the lock rather than giving up.
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
+        Prog program = pattern.forwardProgramForDiagnostics();
+        Slice cached = utf8Slice(("x".repeat(15) + "a".repeat(14) + "x").repeat(4_000));
+        assertThat(Dfa.countMatches(program, cached, Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int initialResetCount = dfa.resetCount();
+        resetTwice(dfa, pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024))));
+        assertThat(dfa.countResetsTooOften(initialResetCount, false)).isTrue();
+
+        dfa.beginSearch(true);
+        try {
+            assertThat(dfa.releaseAbsolutePointerTransitionsForSlowReset()).isEqualTo(Dfa.nativeAccessEnabled());
+        }
+        finally {
+            dfa.endSearch(true);
+        }
+        assertThat(dfa.countHandsResetsToLock(initialResetCount)).isEqualTo(Dfa.nativeAccessEnabled());
+    }
+
+    @Test
+    public void testLockedCountKeepsHandedOffResets()
+            throws Exception
+    {
+        // A count without the lock hands two resets to the lock while another search holds it.
+        // Before the count gets the lock, that search gives the table back, makes the reset that
+        // drops it, and one more. The count must count that reset, so it gives up at the first
+        // reset its own searches make under the lock. On object rows it gives up without the lock.
+        Re2 pattern = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{13}x"), Re2.Options.latin1().setMaxMemory(512L << 10));
+        Prog program = pattern.forwardProgramForDiagnostics();
+        String match = "x".repeat(15) + "a".repeat(14) + "x";
+        assertThat(Dfa.countMatches(program, utf8Slice(match.repeat(4_000)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(4_000);
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        // After the cached matches, short pieces of state growth between matches make the count's
+        // own searches reset the DFA, each piece at most once; the matches after each piece keep
+        // the byte scans sampled, so the matches between pieces are judged.
+        Random random = new Random(7);
+        byte[] alphabet = "abcdefghijklmnopqrst \n,.;0123456789".getBytes(US_ASCII);
+        StringBuilder text = new StringBuilder(match.repeat(4_000));
+        for (int piece = 0; piece < 40; piece++) {
+            for (int index = 0; index < 300; index++) {
+                text.append((char) alphabet[random.nextInt(alphabet.length)]);
+            }
+            text.append(match.repeat(20));
+        }
+        text.append(match.repeat(4_000));
+        Slice input = utf8Slice(text.toString());
+        RegexpMatcher growth = pattern.matcher(Slices.wrappedBuffer(stateExplosionInput(1024 * 1024)));
+        int startResetCount = dfa.resetCount();
+
+        CountDownLatch resetsMade = new CountDownLatch(1);
+        AtomicReference<Thread> countThread = new AtomicReference<>();
+        long result;
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<Long> count = executor.submit(() -> Dfa.countMatches(program, input, 0, Prog.MatchKind.FIRST_MATCH, _ -> {
+                if (resetsMade.getCount() != 0) {
+                    resetTwice(dfa, growth);
+                    countThread.set(Thread.currentThread());
+                    resetsMade.countDown();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!dfa.cacheMutationLockedForTesting()) {
+                        if (Thread.interrupted() || System.nanoTime() >= deadline) {
+                            throw new AssertionError("The cache mutation lock was not taken");
+                        }
+                        Thread.onSpinWait();
+                    }
+                }
+                return true;
+            }, null));
+            try {
+                assertThat(resetsMade.await(10, TimeUnit.SECONDS)).isTrue();
+                dfa.beginSearch(true);
+                try {
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                    while (!count.isDone() && LockSupport.getBlocker(countThread.get()) == null) {
+                        assertThat(System.nanoTime()).isLessThan(deadline);
+                        Thread.onSpinWait();
+                    }
+                    if (!count.isDone() && dfa.releaseAbsolutePointerTransitionsForSlowReset()) {
+                        dfa.resetCacheExternal();
+                        dfa.resetCacheExternal();
+                    }
+                }
+                finally {
+                    dfa.cancelExclusiveSearch();
+                }
+                result = count.get(10, TimeUnit.SECONDS);
+            }
+            finally {
+                executor.shutdownNow();
+            }
+        }
+
+        assertThat(result).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
+        int releasedResetCount = dfa.releasedAbsolutePointerResetCount();
+        assertThat(releasedResetCount != 0).isEqualTo(Dfa.nativeAccessEnabled());
+        assertThat(dfa.resetCount() - Math.max(startResetCount, releasedResetCount)).isEqualTo(2);
     }
 
     @Test
@@ -1166,6 +1391,35 @@ public class TestDfaCountMatches
             input[index] = index % 997 == 996 ? (byte) 'x' : alphabet[random.nextInt(alphabet.length)];
         }
         return input;
+    }
+
+    // Picks `count` of the blocks at random, each followed by the separator.
+    private static String blockText(Random random, String[] blocks, int count, char separator)
+    {
+        StringBuilder text = new StringBuilder();
+        for (int index = 0; index < count; index++) {
+            text.append(blocks[random.nextInt(blocks.length)]).append(separator);
+        }
+        return text.toString();
+    }
+
+    // Resets the DFA twice with finds on another text, counting only the resets after the one
+    // that drops a pointer table given back, as the count rule does.
+    private static void resetTwice(Dfa.DfaInstance dfa, RegexpMatcher growth)
+    {
+        int resetCount = dfa.resetCount();
+        while (dfa.resetCount() - Math.max(resetCount, dfa.releasedAbsolutePointerResetCount()) < 2) {
+            assertThat(growth.find()).isTrue();
+        }
+    }
+
+    private static int findCount(RegexpMatcher matcher)
+    {
+        int count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     // Paired rows block the pointer table, so once an ordinary search has built them, count
