@@ -64,7 +64,9 @@ public class TestInnerLiteralSearch
             "\\s(?:foo|barbaz)\\d",
             "\\s[a-z]{0,12}(?:ing|ment)\\s",
             "[\"'][^\"']{0,30}[?!.][\"']",
-            DATE);
+            DATE,
+            // Outside RE2 the class is empty, so the program can never match.
+            "\\s\\*[a&&b]{1,2}");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -620,7 +622,10 @@ public class TestInnerLiteralSearch
                 "a@b.c x@y ".repeat(110),
                 "Hollys ".repeat(150) + "a Holmes b c@d.e singing",
                 // Dates, and slashes after letters or before a non-digit, near the start and later.
-                "a/1 on 1/2/2024 x/y 12/25/24 3/4/ 99/99/9999 1/23/456 /1/2 7//8\n".repeat(4))) {
+                "a/1 on 1/2/2024 x/y 12/25/24 3/4/ 99/99/9999 1/23/456 /1/2 7//8\n".repeat(4),
+                // Literals before a class that is empty outside RE2, in a text long enough that find
+                // and spans skip the minimum-length check.
+                "x *a y *& z *b * ".repeat(256))) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, so filler keeps the search
             // and its later candidates in play.
