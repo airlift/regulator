@@ -1792,7 +1792,11 @@ take no memory beyond the instance size the search's budget already charges.
 A pattern without a gate keeps the search loop without the check, and a gated
 pattern runs a copy of the loop with it. With the check in one shared loop,
 patterns without a gate measured up to about 4% slower, on lh3lh3 uri
-(Graviton) and lh3lh3 email (Intel) before their prefixes were gated. Measured
+(Graviton) and lh3lh3 email (Intel) before their prefixes were gated. The gated
+copy finds the first hit before it enters the loop, so a window without one, as
+most lines of a grep are, returns without paying for the loop's entry: entered
+for every line, it made lh3lh3 email 3–7% slower on Graviton and 5–7% on Intel
+than with no gate. Measured
 3 hosts a side, the gates take `ing-suffix-limited-space` to 0.78x on r8i and
 0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x, `before-after-holmes` to
 0.71x and 0.76x, and `mariomka/email` to 0.91x and 0.90x.
