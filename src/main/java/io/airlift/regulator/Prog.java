@@ -334,6 +334,7 @@ final class Prog
     private boolean hasEmptyWidthAssertions;
     private int textDependentAssertions;
     private boolean hasFullCaseFold;
+    private boolean hasDirectionalRepetition;
 
     /// Whether this program is compiled for reverse (right-to-left) search.
     ///
@@ -630,6 +631,19 @@ final class Prog
     public void setHasFullCaseFold(boolean hasFullCaseFold)
     {
         this.hasFullCaseFold = hasFullCaseFold;
+    }
+
+    /// Returns whether this program holds a Java counted repetition for which what the pattern
+    /// matches can depend on the reading direction, so it has no reverse program. See
+    /// [Compiler.CompilerState#javaCountedLoop].
+    public boolean hasDirectionalRepetition()
+    {
+        return hasDirectionalRepetition;
+    }
+
+    public void setHasDirectionalRepetition(boolean hasDirectionalRepetition)
+    {
+        this.hasDirectionalRepetition = hasDirectionalRepetition;
     }
 
     /// Returns whether this program is compiled for reverse (right-to-left) search.

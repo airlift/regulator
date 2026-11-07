@@ -442,8 +442,8 @@ final class ScanPlan
     /// attempt, so tests can run the continuation on every input.
     static ScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
-        // so their plans read characters as RE2's classes do.
+        // The RE2, Java, and Rust frontends compile characters to the same byte ranges, so their
+        // plans read characters as RE2's classes do.
         boolean re2Characters = switch (language) {
             case TRINO -> false;
             case RE2, JAVA, RUST -> true;
