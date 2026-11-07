@@ -76,6 +76,7 @@ and the complete campaign is preserved privately.
   4. Implement the fix
   5. Test must pass - fix is NOT complete until test passes
   See `docs/MAINTAINING_REGULATOR.md` for the correctness and performance gates.
+- **Catalog every optimization worth knowing.** An optimization that meets the catalog's bar (a mechanism, with a measured win cited, that someone building another engine would want to know) adds its entry to `docs/reference/OPTIMIZATION_CATALOG.md` in the same change, crediting any earlier source found by a prior-art search, and a change that alters or removes an optimization updates or deletes its entry. Gates, fallbacks, and variants extend the entry they serve; defaults, budgets, limits, and other configuration go in `docs/reference/REGULATOR_API.md`; minor techniques get no entry. See Release and measurement policy in `docs/MAINTAINING_REGULATOR.md`.
 
 ## Upstream Source
 
