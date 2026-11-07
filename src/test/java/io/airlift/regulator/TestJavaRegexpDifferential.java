@@ -185,6 +185,8 @@ public class TestJavaRegexpDifferential
         String literalAlternationSpan = "b|ab";
         assertThat(JavaRegexp.compile(utf8Slice(fixedWidthSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(FixedWidthByteSpanMatcher.class);
         assertThat(JavaRegexp.compile(utf8Slice(literalAlternationSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(LiteralAlternationSpanMatcher.class);
+        String dotStarSpan = "(?d).*ab.*";
+        assertThat(JavaRegexp.compile(utf8Slice(dotStarSpan)).matcher(utf8Slice("")).spanSearchForDiagnostics()).isInstanceOf(DotStarLiteralSpanMatcher.class);
         List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
         for (String pattern : List.of(
                 "^",
@@ -217,7 +219,8 @@ public class TestJavaRegexpDifferential
                 startAnchoredPlan,
                 unanchoredPlan,
                 fixedWidthSpan,
-                literalAlternationSpan)) {
+                literalAlternationSpan,
+                dotStarSpan)) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
             RegexpMatcher actual = regexp.matcher(utf8Slice(""));

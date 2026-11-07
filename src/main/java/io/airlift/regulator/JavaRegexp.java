@@ -336,6 +336,12 @@ public sealed class JavaRegexp
         }
 
         @Override
+        long countMatches(Slice text)
+        {
+            return countOnLiteralKernel(text);
+        }
+
+        @Override
         public boolean matches(Slice input)
         {
             return matchesOnLiteralKernel(input);

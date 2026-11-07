@@ -99,22 +99,51 @@ public class TestPublicEngineAgreement
                     RustRegexp.compile(utf8Slice(expression)),
                     RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
             for (CompiledPattern pattern : patterns) {
-                String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8();
-                assertThat(pattern.groupZeroSpanSearch()).as(label).isInstanceOf(entry.getValue());
-                assertThat(pattern.matcher(input).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
-                assertThat(pattern.matcher(input, 0).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
-                assertThat(findSpans(pattern.matcher(input))).as(label).isNotEmpty();
-                assertNoProgramSearch(pattern, label);
-                assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).as(label).isNull();
-                RegexpMatcher matcher = pattern.matcher(input, 0);
-                RegexpMatcher generic = pattern.genericGroupZeroMatcherForDiagnostics(input);
-                for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
-                    for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
-                        assertThat(findSpans(matcher.reset(input, regionStart, regionEnd)))
-                                .as("%s region %s-%s", label, regionStart, regionEnd)
-                                .isEqualTo(findSpans(generic.reset(input, regionStart, regionEnd)));
-                    }
-                }
+                assertSpanSearchRegions(pattern, entry.getValue(), input);
+            }
+        }
+    }
+
+    @Test
+    public void testDotStarLiteralSpanRegions()
+    {
+        // A group-zero matcher of `.*literal.*` finds on the dot-star literal matcher in RE2, Java
+        // with UNIX_LINES, whose dot is `[^\n]`, and Rust, in UTF-8 and bytes mode, and its spans
+        // are the generic matcher's in every region: a region end inside the trailing dots ends the
+        // match there, one inside the literal leaves no match, and the dots stop at a line feed
+        // and, in UTF-8, at the malformed byte at the #.
+        byte[] bytes = utf8Slice("!!xERRORy\nzERRORβ ERR ERROR\u2028tail ERRO#ERRORz é?").getBytes();
+        bytes[bytes.length - 11] = (byte) 0xFF;
+        Slice input = wrappedBuffer(bytes, 2, bytes.length - 3);
+        List<CompiledPattern> patterns = List.of(
+                Re2.compile(utf8Slice(".*ERROR.*")),
+                Re2.compile(utf8Slice(".*ERROR.*"), Re2.Options.latin1()),
+                JavaRegexp.compile(utf8Slice("(?d).*ERROR.*")),
+                RustRegexp.compile(utf8Slice(".*ERROR.*")),
+                RustRegexp.compile(utf8Slice("(?-u).*ERROR.*"), RustRegexp.Options.bytes()));
+        for (CompiledPattern pattern : patterns) {
+            assertSpanSearchRegions(pattern, DotStarLiteralSpanMatcher.class, input);
+        }
+    }
+
+    /// Requires `pattern`'s group-zero matchers to find on its span search, an instance of
+    /// `spanSearch`, and to report the generic matcher's spans in every region of `input`.
+    private static void assertSpanSearchRegions(CompiledPattern pattern, Class<?> spanSearch, Slice input)
+    {
+        String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8();
+        assertThat(pattern.groupZeroSpanSearch()).as(label).isInstanceOf(spanSearch);
+        assertThat(pattern.matcher(input).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
+        assertThat(pattern.matcher(input, 0).spanSearchForDiagnostics()).as(label).isSameAs(pattern.groupZeroSpanSearch());
+        assertThat(findSpans(pattern.matcher(input))).as(label).isNotEmpty();
+        assertNoProgramSearch(pattern, label);
+        assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).as(label).isNull();
+        RegexpMatcher matcher = pattern.matcher(input, 0);
+        RegexpMatcher generic = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+            for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                assertThat(findSpans(matcher.reset(input, regionStart, regionEnd)))
+                        .as("%s region %s-%s", label, regionStart, regionEnd)
+                        .isEqualTo(findSpans(generic.reset(input, regionStart, regionEnd)));
             }
         }
     }

@@ -61,6 +61,7 @@ public class TestHotMethodSize
                 "matchOnScanPlan",
                 "countOnEngine",
                 "countOnExactLiteral",
+                "countOnLiteralKernel",
                 "countOnLiteralAlternation",
                 "countOnFixedWidth",
                 "countOnClassRun",
