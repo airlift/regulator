@@ -32,6 +32,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -212,14 +213,14 @@ public class TestCompilerAllocations
         String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
         assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
         assertCompileRejectedWithinBudget(() -> RustRegexp.compile(utf8Slice(nullableLoops)));
-        // A Java count ends on an iteration that consumes nothing, so its copies' closures stay
-        // apart, and the pattern compiles within the budget. Written out, the copies chain as the
-        // other languages' counts do.
+        // Java loops and counts end on an iteration that consumes nothing, so the closures stay
+        // apart, and the pattern compiles within the budget, written out too.
         assertThat(JavaRegexp.compile(utf8Slice(nullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
         String writtenOutNullableLoops = "(?:(?:" + "(?:a?)*?".repeat(1000) + ")*?)+";
-        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)));
-        // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
-        assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
+        assertThat(JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
+        // Trino loops end the same way, so a lazy +? that Joni's quantifier reduction keeps under
+        // a greedy * compiles within the budget too.
+        assertThatCode(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*"))).doesNotThrowAnyException();
     }
 
     @Test
