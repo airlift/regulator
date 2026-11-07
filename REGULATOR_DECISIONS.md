@@ -256,6 +256,16 @@ data; groups now differ from upstream only where Unicode 18.0 assigned or
 reclassified code points, such as the scripts added since 15.1, including
 Garay, Jurchen, Proto_Cuneiform, and Seal.
 
+## RE2 Never-Capture Option
+
+`Re2.Options.setNeverCapture(true)` makes every group non-capturing, named
+groups included, so `(?P<name>a)(b)` has no capturing groups and no names.
+This follows upstream's documented option, "parse all parens as
+non-capturing", rather than its parser: upstream's `parse.cc` checks the flag
+only for a bare `(`, and its `(?P<name>` and `(?<name>` path calls
+`DoLeftParen(name)` without it, so upstream reports one group named `name`.
+Upstream's own never-capture test uses only unnamed groups.
+
 ## Java Regular-Subset Frontend
 
 - `JavaRegexp` is a separate compiler for the documented regular subset of

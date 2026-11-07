@@ -77,6 +77,8 @@ leftmost-first matching, and the default memory budget.
 The chainable options can also control the memory budget, syntax mode, encoding,
 literal parsing, newline behavior, captures, case sensitivity, Perl classes,
 word boundaries, one-line mode, and leftmost-longest matching.
+`setNeverCapture` makes every group non-capturing, named groups included,
+where upstream RE2's parser keeps named groups capturing.
 `setByteFrequencies` chooses which literal byte an unanchored search scans for;
 it affects speed, not results. See
 [Byte frequencies](../REGULATOR_API.md#byte-frequencies).
