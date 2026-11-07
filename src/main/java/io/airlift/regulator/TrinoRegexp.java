@@ -174,7 +174,12 @@ public sealed class TrinoRegexp
     /// searches the plan would run use the ordinary engine.
     static TrinoRegexp compileWithoutScanPlanForTesting(Slice pattern)
     {
-        return compile(pattern, Options.defaults(), ScanPlanMode.DISABLED);
+        return compileWithoutScanPlanForTesting(pattern, Options.defaults());
+    }
+
+    static TrinoRegexp compileWithoutScanPlanForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, ScanPlanMode.DISABLED);
     }
 
     private static TrinoRegexp compile(Slice pattern, Options options, ScanPlanMode scanPlanMode)

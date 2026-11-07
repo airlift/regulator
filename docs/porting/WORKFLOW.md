@@ -62,8 +62,12 @@ When behavior can vary by execution path, compare as many of these as apply:
 - unmatched and excess capture slots
 - public `Re2`, DFA, NFA, BitState, OnePass, and testing Backtrack
 
-`io.airlift.regulator.Tester` is the shared differential harness. Extend
-it instead of creating a standalone diagnostic program.
+`io.airlift.regulator.Tester` is the shared differential harness for RE2's
+engines: it runs chosen patterns and inputs through each engine and compares
+them. Extend it instead of creating a standalone diagnostic program.
+`TestingDifferentialFuzzer` serves the language fuzzers instead: it generates
+random patterns and inputs, compares a language's compile variants with one
+another and with its oracle, and shrinks each disagreement to a replay line.
 
 ## Source mapping
 

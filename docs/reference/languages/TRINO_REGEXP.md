@@ -207,6 +207,10 @@ a documented Joni incompatibility, not a compile-time rejection. A specialized
 capture-aware engine is intentionally deferred unless practical Trino workloads
 require exact Joni behavior for this form.
 
+Pinned Joni can throw an `ArrayIndexOutOfBoundsException` on a multiline `^`
+after an optional one-character prefix, as in `\W?(?m)^b` on `abaaaa\nb`,
+where Regulator returns the JDK's match, bytes 6 to 8.
+
 Modern Joni's Java syntax changed three behaviors that Trino's pinned Joni
 and Java's `Pattern` share. They are intended Trino behavior, so `TrinoRegexp`
 keeps them: `\d`, `\s`, and `\w` are ASCII, while modern Joni makes them

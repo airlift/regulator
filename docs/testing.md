@@ -45,6 +45,39 @@ or protected matching loops require the benchmark evidence defined in
 
 `TestDfaCopyOnResetStress` runs for `-Dregulator.stress.seconds=N` seconds (default 5).
 
+`TestJavaRegexpFuzz`, `TestTrinoRegexpFuzz`, `TestRe2Fuzz`,
+`TestRustRegexpFuzz`, and `TestTrinoLikeFuzz` compare random patterns and inputs
+across each language's compile variants and against its oracle, and by default
+run 600 patterns from a fixed seed and fail on the first disagreement. With
+`-Dregulator.fuzz.seconds=N` they run for `N` seconds from
+`-Dregulator.fuzz.seed=S` (default random), write each distinct shrunk
+disagreement with a replay line and a summary to `-Dregulator.fuzz.output=DIR`
+(default `target/fuzz`), and fail at the end if they found any. A run shrinks at
+most eight disagreements of each signature and writes at most 100 reports, so a
+long run's reports sample what it found rather than list it all.
+
+The JDK and Joni oracles are always on the classpath. The other three are
+built outside Maven and named by a property; without it, the test compares the
+compiles with one another only:
+
+- `TestRe2Fuzz`: `-Dregulator.fuzz.re2Oracle=PATH` names the `re2_golden`
+  binary, which `tools/re2-golden/build.sh` builds at
+  `target/re2-golden-build/re2_golden`.
+- `TestRustRegexpFuzz`: `-Dregulator.fuzz.rustOracle=PATH` names the
+  `rust-regex-golden` binary. `tools/rust-regex-golden/generate.sh` builds it
+  at `target/rust-regex-golden-build/release/rust-regex-golden`, or, without
+  regenerating the fixtures, run
+  `cargo build --release --locked --target-dir ../../target/rust-regex-golden-build`
+  in `tools/rust-regex-golden`.
+- `TestTrinoLikeFuzz`: `-Dregulator.fuzz.likeMatcherClasspath=PATHS` lists,
+  separated by the platform path separator, the classes that
+  `tools/trino-like-golden/generate.sh --check` compiles into
+  `target/trino-like-golden-build/classes` and the Guava and fastutil jars it
+  fetches into `target/trino-like-golden-dependencies/lib`.
+
+Each tool's README names the variables that move its dependencies and build
+output elsewhere.
+
 CI runs the complete suite on Java 25 and the current feature release with
 native access both disabled and enabled. To reproduce the native-access mode
 locally:

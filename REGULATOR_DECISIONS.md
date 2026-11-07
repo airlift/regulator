@@ -318,7 +318,7 @@ Upstream's own never-capture test uses only unnamed groups.
   iteration: on `aaa`, `(?:(a){1,2})*` reports 1:2 where Regulator reports
   2:3. A linear engine keeps no record of abandoned iterations, and the JDK's
   own answer changes under equivalent rewrites such as `(?:(a|a))*ab`, which
-  reports 0:1.
+  reports 0:1. The differential fuzzer leaves those groups uncompared.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. When every path from
@@ -362,8 +362,9 @@ original pattern, including when quoting rewrites it before parsing.
   characters that differ between the crate's Unicode 16.0 tables and the
   pinned Unicode 18.0 database; see the
   [Rust language reference](docs/reference/languages/RUST_REGEXP.md#unicode-properties).
-  The pinned crate is the authority, recorded in committed fixtures; the crate
-  never runs in the Maven build.
+  The pinned crate is the authority, recorded in committed fixtures; the Maven
+  build never builds the crate's golden tool, and runs it only when
+  `-Dregulator.fuzz.rustOracle` names it.
 - `RustRegexpParser` builds a private syntax tree shaped like the crate's and
   checks the nest limit before translating, so the crate's error precedence is
   preserved. Each crate error kind maps to a `RegexpParseErrorCode`, and the
