@@ -22,12 +22,15 @@ import org.junit.jupiter.api.Test;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.stream.IntStream;
 
+import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -72,6 +75,37 @@ public class TestCompilerAllocations
 
         assertThat(analysis.literalSequence().exactLiteral()).isEqualTo(utf8Slice("y".repeat(500) + "x".repeat(50_000)));
         assertThat(allocatedBytes).isLessThan(64_000_000);
+    }
+
+    @Test
+    public void testPrefilterBuildStaysLinear()
+    {
+        // Joining a literal's runes one at a time, or a concatenation's one-string children one at
+        // a time, copies the whole string at each step: about 210 MB for this 20,000-rune literal
+        // and 110 MB for these 10,000 captures. Merging an alternation's sets into a new set at
+        // each alternative copies the whole set: about 320 MB for these 4,000 alternatives.
+        // Merging each nested OR into its parent copies the whole growing child list: about 30 MB
+        // for these 1,600 levels.
+        Prefilter literal = prefilterWithinAllocation("ab".repeat(10_000), 16_000_000);
+        assertThat(literal.atom()).isEqualTo(utf8Slice("ab".repeat(10_000)));
+
+        Prefilter captures = prefilterWithinAllocation("(ab)".repeat(10_000), 16_000_000);
+        assertThat(captures.atom()).isEqualTo(utf8Slice("ab".repeat(10_000)));
+
+        // Distinct first characters keep the parser from factoring the alternatives, and the
+        // trailing q keeps the single-rune alternatives from merging into one character class.
+        String alternation = IntStream.range(0, 4_000)
+                .mapToObj(index -> Character.toString(0x4E00 + index) + "q")
+                .collect(joining("|"));
+        Prefilter alternatives = prefilterWithinAllocation(alternation, 16_000_000);
+        assertThat(alternatives.op()).isEqualTo(OR);
+        assertThat(alternatives.children()).hasSize(4_000);
+
+        Prefilter guards = prefilterWithinAllocation("aaa.*|bbb.*|(".repeat(1_600) + "ccc.*" + ")".repeat(1_600), 24_000_000);
+        assertThat(guards.op()).isEqualTo(OR);
+        assertThat(guards.children()).hasSize(3_201);
+        assertThat(guards.children().getFirst().atom()).isEqualTo(utf8Slice("aaa"));
+        assertThat(guards.children().getLast().atom()).isEqualTo(utf8Slice("ccc"));
     }
 
     @Test
@@ -360,6 +394,20 @@ public class TestCompilerAllocations
             assertThat(program.isOnePass()).isFalse();
             assertThat(allocatedBytes).isLessThan(300_000);
         }
+    }
+
+    private static Prefilter prefilterWithinAllocation(String pattern, long maxAllocatedBytes)
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        Re2 re2 = Re2.compile(utf8Slice(pattern));
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        Prefilter prefilter = Prefilter.fromRe2(re2);
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes).as(pattern.substring(0, 8)).isLessThan(maxAllocatedBytes);
+        return prefilter;
     }
 
     private static void assertTrinoCompileAllocation(String pattern, int instructionCount, long maxAllocatedBytes)
