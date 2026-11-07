@@ -158,16 +158,16 @@ one-byte literal, uses `Slice.indexOf`, nor any language's dot-star literal
 spans, which share that search, nor ordered literals such as `a(?s:.*)b` in any
 language whose gaps there read any bytes, which use the same scan, nor the start
 literal filter of a pattern that begins with a few literals, an inner literal
-search's set filter, its choice of a rare class pair, or the short-window check
-of the bytes every match holds, which always estimate with English text
-frequencies, nor the literal behind a leading assertion, which scans for its
-first and last bytes, or, in vector scans of a literal led by a multibyte UTF-8
-character that ends before the literal's last byte, that character's last byte
-and the literal's last byte. A distribution that does not match the data can
-make literal scans several times slower per byte than first-byte scanning,
-because it moves the scan onto bytes that are common in the searched text; it
-never changes what matches, and the cost stays linear in the input. The choices
-are:
+search's set filter, its choice of a rare class pair, or the choice and
+short-window scan of the bytes every match holds, which always estimate with
+English text frequencies, nor the literal behind a leading assertion, which
+scans for its first and last bytes, or, in vector scans of a literal led by a
+multibyte UTF-8 character that ends before the literal's last byte, that
+character's last byte and the literal's last byte. A distribution that does not
+match the data can make literal scans several times slower per byte than
+first-byte scanning, because it moves the scan onto bytes that are common in the
+searched text; it never changes what matches, and the cost stays linear in the
+input. The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole

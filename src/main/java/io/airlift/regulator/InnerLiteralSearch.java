@@ -308,7 +308,7 @@ final class InnerLiteralSearch
     // not capture, so the rest are the copies it makes of a counted repetition, which the crate
     // keeps whole. Past the depth limit a group stays one element too, which only hides
     // literals inside it. RequiredBytes finds its literal with these elements and the literal
-    // helpers below, so a change to them changes which short windows it rejects too.
+    // helpers below, so a change to them changes which windows, short or long, it rejects too.
     static void addConcatenationElements(Regexp concatenation, List<Regexp> elements, int depth)
     {
         for (Regexp child : concatenation.children()) {

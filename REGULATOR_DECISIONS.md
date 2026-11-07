@@ -1715,6 +1715,20 @@ The fact takes one of two shapes:
   Case-insensitive letters compare through a mask. A literal that starts with a
   case-insensitive letter, as in `\s+(?i:noqa)`, is not used; whether its
   masked scan repays itself is unmeasured.
+  Without such an element, the literal may span elements: the exact ASCII
+  suffix every match of one element ends with, the bytes of the elements after
+  it that each match one exact string, and the exact prefix every match of the
+  next element starts with. Assertions consume nothing, so they join the bytes
+  on either side, and a case-insensitive letter ends a run. A group, a
+  concatenation, and a repetition of at least one give their parts' prefixes
+  and suffixes; an optional or alternated element gives none. Each run of at
+  least two bytes is cut to its first 64 bytes, and of those the run least
+  likely in English text, taking its bytes as independent, is kept.
+  Simplification copies a counted capture into the top-level concatenation, so
+  `(.*?,){13}z` has the one-byte elements `,` and `z` but every match ends with
+  `,z`; a counted group that does not capture stays whole, and in `(?:\d+,){2}y`
+  its suffix `,` joins `y`. An element literal still takes precedence, even over
+  a rarer run.
 - Otherwise, unless the pattern has an inner literal search (which already
   rejects such a window before any engine setup), up to three ASCII bytes of
   which every match holds one, such as `/` and `@` for
@@ -1749,9 +1763,12 @@ Windows of 256 bytes or more skip the check. Most lines of a line search are
 shorter, and there the scan costs less than the find and engine setup it saves.
 A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
-setup. A pattern whose every match spans at least 256 bytes, counting a
-required prefix, keeps no fact: no window the check would read can hold a
-match.
+setup. An exact literal of a pattern with no other literal route checks long
+windows too, with a literal search and the bounds described in
+[Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
+A pattern whose every match spans at least 256 bytes, counting a required
+prefix, keeps no fact: no short window can hold such a match, so such a
+pattern goes without the long-window check too.
 
 Two hooks run the check, both before any engine setup: the matcher's general
 find route, on the rest of its region right after the minimum-length check,
@@ -1888,6 +1905,114 @@ than with no gate. Measured
 3 hosts a side, the gates take `ing-suffix-limited-space` to 0.78x on r8i and
 0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x, `before-after-holmes` to
 0.71x and 0.76x, and `mariomka/email` to 0.91x and 0.90x.
+
+## Required Literal Absence On Long Windows
+
+rebar's `leipzig/bounded-strings-ending-z`, `(.*?,){13}z` over 16 MB of
+English news, has no match. Every language ran one forward DFA pass over the
+whole text, while Hyperscan, whose reverse vermicelli scan proves the literal
+`,z` absent, answered about 21 times faster. A window that lacks a literal every
+match consumes holds no match, so a pattern whose
+[required bytes](#short-window-required-bytes-reject) are an exact literal also
+checks a window of 256 bytes or more for it before any engine runs, and reports
+no match when it is absent.
+
+The check is left to patterns where it can pay. The literal must be exact: the
+search compares exact bytes, so a case-insensitive literal is out. The pattern
+must have no other route that already searches for a literal at least as fast.
+So it has no required prefix, exact literal, literal kernel or literal search,
+inner literal search, scan plan, class counter, literal set or alternation,
+span, byte-run, word-run, or disjoint suffix-repeat matcher, or whole-input
+capture plan. Neither its forward nor its lowered program has a prefix scan or
+a transparent start literal, and neither is anchored at either end: a
+start-anchored search fails at the first byte that cannot continue, and an
+end-anchored one runs the reverse DFA from the end, so either can stop long
+before a scan of the whole window would. A pattern with a single-byte table
+keeps no required bytes at all.
+
+Compilation decides this once, and the literal's search takes its memory in the
+required bytes' charge. Where that larger charge does not fit, at compile time
+or once a frontend route such as Trino's ordered-literal matcher is charged
+ahead of it, the pattern keeps the short-window check alone if its smaller
+charge fits, and otherwise keeps neither.
+
+Four hooks run the check before any engine setup:
+
+- The matcher's general find, after the short-window check, on the rest of the
+  region. The matcher remembers the occurrence its last scan found, and a find
+  that has not passed it reuses it, so a find loop scans once per match. Only a
+  found occurrence is reused: it only lets the engine run, so it stays right
+  even if the caller changes the input between finds, while a scan that found
+  nothing is not kept, and a matcher rereads its input on every find, as the
+  engine does. After eight scans in a row find the literal within 256 bytes of
+  their start, the matcher stops scanning until the next reset: on a region
+  that dense, the engine reads those bytes anyway and each scan pays its vector
+  setup for nothing.
+- The engine shape's full-Slice `find`, in place of the short-window check.
+- Count, before the DFA count, which the class-counter and anchored counts do
+  not reach.
+- The shared entry of the one-shot unanchored searches: `find` and `findInto`
+  with a range, `findInto`, and `findResult`; RE2's `replaceFirst`, `extract`,
+  and `replaceAll`, which calls it once per match, with no back-off; and each
+  retry of a Rust search after an empty match that splits a character. A
+  matcher's searches take another entry after their own check, so no search
+  scans twice.
+
+A match lies inside the rest of the region, whatever context a Rust search or
+a Java region after a CR reads, so a literal every match consumes lies inside
+it too. The check is therefore sound for every language, region, and context
+mode, for leftmost-first and longest-match searches alike, and it leaves
+captures alone: with no match there is nothing to capture. A window that holds
+the literal is scanned only up to its first occurrence, which the engine must
+read before it reports a match or proves there is none, so the check adds one
+more pass over the bytes before that occurrence.
+
+Measured against the base without the check, in time as a fraction of the
+base's, r9g / r8i. Bulk rows are JMH average time on two hosts a side.
+Constructed rows run each line of about 300 or 1,100 bytes through a full-Slice
+find, RE2 and Rust in the rebar runner and Java and Trino in JMH:
+
+| Row | RE2 | Java | Trino | Rust |
+|---|---|---|---|---|
+| `leipzig/bounded-strings-ending-z` | 0.04 / 0.04 | 0.02 / 0.03 | 0.04 / 0.04 | 0.04 / 0.04 |
+| `rsc/reallyhard0-1k`, literal at the end | 1.02 / 1.03 | 1.03 / 1.02 | 1.03 / 1.02 | 1.02 / 1.03 |
+| `rsc/reallyhard0-1mb`, literal at the end | 1.00 / 1.02 | 1.02 / 1.02 | 1.01 / 1.02 | 1.02 / 1.02 |
+| `opt/reverse-suffix/no-quadratic` | 1.02 / 1.13 | 1.02 / 1.14 | 1.04 / 1.17 | 1.02 / 1.13 |
+| `sherlock/ing-suffix`, find loop | 0.95 / 1.01 | 0.97 / 0.99 | 0.99 / 1.01 | 0.96 / 1.01 |
+| 300-byte lines without `,z` | 0.24 / 0.19 | 0.07 / 0.08 | 0.11 / 0.07 | 0.24 / 0.22 |
+| 300-byte lines ending in a match | 1.09 / 1.09 | 1.06 / 1.10 | 1.08 / 1.11 | 1.10 / 1.09 |
+| 300-byte lines with `,z` but no match | 1.04 / 1.02 | 1.04 / 1.03 | 1.02 / 1.04 | 1.03 / 1.03 |
+| 1,100-byte lines ending in a match | 1.03 / 1.64 | 1.01 / 1.03 | 1.04 / 1.04 | 1.04 / 1.64 |
+| `leipzig` lines, under 256 bytes | 0.93 / 1.01 | 0.80 / 0.92 | 0.76 / 0.92 | 0.93 / 0.99 |
+
+The target row now finishes in about 0.5 ms, ahead of Hyperscan's 0.73 ms on r9g
+and level with its 0.53 ms on r8i. `leipzig/ing`, `leipzig/word-ending-nn`,
+`10-bounded-repeat/context` and dense find loops stay within 3%: each pattern
+either holds its required literal in every match, so a scan stops by the next
+match, or takes another literal route. None of the check-set rows, chosen before
+the A/B to catch side effects on other techniques, moves. The short `leipzig`
+lines gain because the joined literal `,z` replaces the single-byte fact `z`.
+
+The costs are the scan ahead of the first occurrence. A window that holds the
+literal only at its end pays up to 4% from 1,024 bytes up, where the vector
+scan starts, and 6–11% on 300-byte lines, below that minimum; the r8i 1.64
+below has its own cause. A 300-byte line without the literal is rejected 4–14
+times faster, and the 16 MB target text 25–50 times. The floor stays at 256
+bytes, since a required literal that is rare enough to be worth checking is
+missing from most windows. On r8i the 512-bit scan costs about 10–13 ns to
+start, which shows on the 8,000-byte `no-quadratic` rows, whose engine rejects
+them in 80–100 ns, still more than a hundred times faster than the crate. The
+rebar runner's r8i 1,100-byte row (1.64) is a slow JIT compile of the paired
+DFA loop, not the check: in fresh runner launches the candidate ran in the slow
+mode in all 25 and the base in none, with or without a young collection. The
+slow compile keeps both of the loop's cold exits, the miss path and the
+self-loop run, and the register allocator then holds the row reference in a
+vector register, so each two-byte step runs about 30% more instructions, with
+stack spills. Whether the warm-up profile prunes an exit depends on when the
+compile happens, which the check moves; the base already pays the same slow
+mode on 2,000-byte lines in 17 of 22 launches (6.7 ms against 4.4 ms). Flags
+that change the compiled code, 64-byte object alignment or a preserved frame
+pointer, run both fast. JMH measures the 1,100-byte row at 1.03–1.04.
 
 ## Trino LIKE Frontend
 
