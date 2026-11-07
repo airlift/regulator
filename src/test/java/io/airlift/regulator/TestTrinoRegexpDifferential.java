@@ -149,13 +149,13 @@ public class TestTrinoRegexpDifferential
     {
         // The candidate cursor verifies each occurrence of the literal behind a multiline ^ from
         // the byte before it. Trino's final-line $ keeps the other patterns off the DFA, and text
-        // past BitState's limit takes the Pike VM, which skips to the literal behind ^ or \A when
-        // no thread is live.
+        // past BitState's unanchored limit takes the Pike VM, which skips to the literal behind ^
+        // or \A when no thread is live.
         String fillerUnit = "filler text, ";
         for (String pattern : List.of("(?m)^Sherlock Holmes|Sherlock Holmes$", "(?m)^ab|ab$", "^ab|ab$", "\\Aab|ab$")) {
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
             Prog prog = regexp.re2().forwardProgramForDiagnostics();
-            String filler = fillerUnit.repeat(Math.max(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES, prog.bitStateTextMaxSize()) / fillerUnit.length() + 1);
+            String filler = fillerUnit.repeat(Math.max(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES, prog.unanchoredBitStateTextMaxSize()) / fillerUnit.length() + 1);
             String literal = pattern.contains("Sherlock") ? "Sherlock Holmes" : "ab";
             List<Slice> sources = new ArrayList<>();
             for (String terminator : List.of("\n", "\r\n", "\r")) {

@@ -420,7 +420,7 @@ bool CanBitState() { return list_heads_.data() != NULL; }
 // Populated when size_ <= 512
 ```
 
-**Runtime text limit**: `256KB / list_count - 1`
+**Runtime text limit**: `256 Kibit / list_count - 1`
 
 ---
 
