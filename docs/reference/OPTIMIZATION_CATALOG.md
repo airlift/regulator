@@ -94,23 +94,42 @@ answer, or reject the input before any engine runs.
 ### Short-window required bytes
 
 - **Origin:** First described by PCRE ([changelog][pcre-changelog] 4.0;
-  [pcre2_match.c][pcre2-req-cu]), and for the word test by Muła (2016)
-  ([simd-strfind][mula-strfind]); Inspired by the Rust regex crate
+  [pcre2_match.c][pcre2-req-cu]), for the word test by Muła (2016)
+  ([simd-strfind][mula-strfind]), and for joined literals by the Rust regex
+  crate ([literal.rs][rs-literal]); Inspired by the Rust regex crate
   ([strategy.rs][ra-strategy]). Regulator: the 256-byte window, the
   one-of-three-bytes form, and the conditional last-byte load ([#147], [#154],
   [design][d-required-bytes]).
-- **Where:** `RequiredBytes.analyze`, `RequiredBytes.containsLiteral`,
-  `RequiredBytes.containsOneOf`,
+- **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
+  `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
   `CompiledPattern.shortWindowLacksRequiredBytes`
 - **Applies when:** Windows under 256 bytes, every regex language; not kept
   for patterns with a [single-byte table](#single-byte-table); a pattern with
   an inner literal search keeps no one-of form; dropped when its memory would
   keep a forward DFA from initializing
 - **What it does:** A pattern may record bytes every match holds: an ASCII
-  literal of two or more bytes, or up to three ASCII bytes of which every
-  match holds one. A window that lacks it returns no match before any engine
-  runs. The test reads 8-byte words; when the first byte is rare, it loads the
-  last byte's word only for a word that holds the first byte.
+  literal of two or more bytes, from one element or joined across adjacent
+  ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
+  every match holds one. A window that lacks it returns no match before any
+  engine runs. The test reads 8-byte words; when the first byte is rare, it
+  loads the last byte's word only for a word that holds the first byte.
+
+### Long-window required literal
+
+- **Origin:** Adapted from PCRE2 ([required code unit][pcre2-match]);
+  Inspired by Hyperscan ([double vermicelli][hs-vermicelli]). Regulator
+  ([#188], [design][d-required-absence]).
+- **Where:** `CompiledPattern.checksRequiredLiteralOnLongWindows`,
+  `CompiledPattern.longWindowLacksRequiredLiteral`,
+  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`
+- **Applies when:** Windows of 256 bytes or more in find, count, and the
+  one-shot range searches, all four regex languages; unanchored patterns whose
+  required bytes are an exact literal and that have no other literal search
+- **What it does:** The search scans for the required literal before any
+  engine runs, with the vector pair scan from 1 KiB, and a window without it
+  has no match. A matcher reuses an occurrence it found until a find passes
+  it, and stops scanning after eight scans in a row find the literal within
+  256 bytes of their start.
 
 ### Anchored find straight to its engine
 
@@ -2748,6 +2767,7 @@ registry entry holds the trigger.
 [#165]: https://github.com/airlift/regulator/pull/165
 [#173]: https://github.com/airlift/regulator/pull/173
 [#176]: https://github.com/airlift/regulator/pull/176
+[#188]: https://github.com/airlift/regulator/pull/188
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2773,6 +2793,7 @@ registry entry holds the trigger.
 [d-paired]: ../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
 [d-regions]: ../../REGULATOR_DECISIONS.md#allocation-free-matcher-regions
+[d-required-absence]: ../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
 [d-row-index]: ../../REGULATOR_DECISIONS.md#dfa-row-index-without-a-divide
 [d-self-loop-skips]: ../../REGULATOR_DECISIONS.md#self-loop-exit-byte-skips-outside-counting
@@ -2922,6 +2943,7 @@ registry entry holds the trigger.
 [hs-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L110-L118
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
+[hs-vermicelli]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/vermicelli.h#L463-L516
 [jcodings-unicode]: https://github.com/jruby/jcodings/blob/jcodings-1.0.58/src/org/jcodings/unicode/UnicodeEncoding.java
 [jdk-arraylist]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/ArrayList.java
 [jdk-cowal]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/java.base/share/classes/java/util/concurrent/CopyOnWriteArrayList.java
