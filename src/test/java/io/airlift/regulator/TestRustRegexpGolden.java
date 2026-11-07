@@ -16,18 +16,15 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.DynamicTest;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,15 +38,6 @@ public class TestRustRegexpGolden
     private static final String RANDOM_FIXTURE = "io/airlift/regulator/rust-regex-random.jsonl";
     private static final String UPSTREAM_FIXTURE = "io/airlift/regulator/rust-regex-upstream.jsonl";
     private static final String UPSTREAM_BYTES_FIXTURE = "io/airlift/regulator/rust-regex-upstream-bytes.jsonl";
-    private static final List<String> FIXTURES = List.of(SYNTAX_FIXTURE, MATCH_FIXTURE, RANDOM_FIXTURE, UPSTREAM_FIXTURE, UPSTREAM_BYTES_FIXTURE);
-
-    // Patterns the crate accepts that Regulator rejects by design, by fixture.
-    private static final Map<String, Map<Gap, Integer>> GAP_COUNTS = Map.of(
-            SYNTAX_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1),
-            MATCH_FIXTURE, Map.of(),
-            RANDOM_FIXTURE, Map.of(),
-            UPSTREAM_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1),
-            UPSTREAM_BYTES_FIXTURE, Map.of());
 
     // Cases naming a property or value that Regulator's Unicode 18.0 database holds and the crate's
     // Unicode 16.0 tables lack, by fixture and case ID, with the reason. The crate rejects each
@@ -102,23 +90,8 @@ public class TestRustRegexpGolden
             entry("UnsupportedBackreference", RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT),
             entry("UnsupportedLookAround", RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT));
 
-    // A pattern the crate accepts that Regulator rejects by design.
-    private enum Gap
-    {
-        REPETITION_COUNT;
-
-        static Gap of(RegexpParseException exception)
-        {
-            String message = exception.getMessage();
-            return switch (exception.errorCode()) {
-                case REPEAT_SIZE -> message.contains("repetition count above 1000") ? REPETITION_COUNT : null;
-                default -> null;
-            };
-        }
-    }
-
     // A case's pattern compiled once: the compiled pattern, or Regulator's rejection of it.
-    private record Compilation(Slice pattern, RustRegexp regexp, RegexpParseException rejection)
+    private record Compilation(Slice pattern, RustRegexp regexp, RuntimeException rejection)
     {
         static Compilation of(GoldenJsonl.JsonObject testCase)
         {
@@ -126,15 +99,9 @@ public class TestRustRegexpGolden
             try {
                 return new Compilation(pattern, RustRegexp.compile(pattern, options(testCase.getString("options"))), null);
             }
-            catch (RegexpParseException e) {
+            catch (RegexpParseException | RegexpCompileMemoryLimitException e) {
                 return new Compilation(pattern, null, e);
             }
-        }
-
-        // The gap that rejects a pattern the crate accepts, or null when there is none.
-        Gap gap(GoldenJsonl.JsonObject testCase)
-        {
-            return testCase.getBoolean("ok") && rejection != null ? Gap.of(rejection) : null;
         }
     }
 
@@ -168,24 +135,6 @@ public class TestRustRegexpGolden
         return cases(UPSTREAM_BYTES_FIXTURE);
     }
 
-    @Test
-    public void testGapCounts()
-    {
-        Map<String, Map<Gap, Integer>> gapCounts = new TreeMap<>();
-        for (String fixture : FIXTURES) {
-            Map<Gap, Integer> counts = new EnumMap<>(Gap.class);
-            for (GoldenJsonl.JsonObject testCase : GoldenJsonl.readObjects(fixture)) {
-                Gap gap = Compilation.of(testCase).gap(testCase);
-                if (gap != null) {
-                    counts.merge(gap, 1, Integer::sum);
-                }
-            }
-            gapCounts.put(fixture, counts);
-        }
-        assertThat(gapCounts).isEqualTo(GAP_COUNTS);
-    }
-
-    // Cases that a gap rejects are left out; testGapCounts pins how many there are.
     private static List<DynamicTest> cases(String fixture)
     {
         Map<String, String> expectedDifferences = EXPECTED_DIFFERENCES.getOrDefault(fixture, Map.of());
@@ -202,7 +151,7 @@ public class TestRustRegexpGolden
                     assertThat(compilation.rejection()).as("expected difference: " + difference).isNull();
                 }));
             }
-            else if (compilation.gap(testCase) == null) {
+            else {
                 tests.add(DynamicTest.dynamicTest(id, () -> assertCase(testCase, compilation)));
             }
         }
@@ -232,15 +181,19 @@ public class TestRustRegexpGolden
     private static void assertRejection(GoldenJsonl.JsonObject testCase, Compilation compilation)
     {
         String error = testCase.getString("error");
-        RegexpParseException exception = compilation.rejection();
-        if (exception == null) {
+        RuntimeException rejection = compilation.rejection();
+        if (rejection == null) {
             fail("accepted a pattern the crate rejects with " + error + " " + testCase.getString("errorKind"));
         }
+        // Each size_limit case in the fixtures also exceeds Regulator's default memory budget, which
+        // fails compilation rather than parsing.
         if (error.equals("size_limit")) {
-            assertThat(exception.errorCode()).as("error code").isEqualTo(RegexpParseErrorCode.REPEAT_SIZE);
+            assertThat(rejection).as("size limit").isInstanceOf(RegexpCompileMemoryLimitException.class);
             return;
         }
         String errorKind = testCase.getString("errorKind");
+        assertThat(rejection).as("rejection for " + errorKind).isInstanceOf(RegexpParseException.class);
+        RegexpParseException exception = (RegexpParseException) rejection;
         assertThat(exception.errorCode()).as("error code for " + errorKind).isEqualTo(ERROR_CODES.get(errorKind));
         int errorStart = Integer.parseInt(testCase.getString("errorStart"));
         int errorEnd = Integer.parseInt(testCase.getString("errorEnd"));

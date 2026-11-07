@@ -80,13 +80,20 @@ public class TestRustRegexp
                 .isInstanceOf(RegexpParseException.class)
                 .hasMessage("unsupported regular-expression construct: UnsupportedLookAround at byte offset 0");
 
-        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a{1001}")))
-                .isInstanceOf(RegexpParseException.class)
-                .hasMessage("repetition size exceeds the supported limit: repetition count above 1000 at byte offset 0");
-
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(a)"), RustRegexp.Options.defaults().setNestLimit(0)))
                 .isInstanceOf(RegexpParseException.class)
                 .hasMessage("pattern exceeds the supported parser limit: NestLimitExceeded at byte offset 0");
+    }
+
+    @Test
+    public void testRepetitionCountsAboveOneThousand()
+    {
+        // As in the crate, a count above 1,000 compiles when its expansion fits the memory budget.
+        RustRegexp regexp = RustRegexp.compile(utf8Slice("a{20,1024}"));
+        int[] groups = new int[2];
+        assertThat(regexp.findInto(utf8Slice("a".repeat(1030)), groups)).isTrue();
+        assertThat(groups).containsExactly(0, 1024);
+        assertThat(regexp.find(utf8Slice("a".repeat(19)))).isFalse();
     }
 
     @Test

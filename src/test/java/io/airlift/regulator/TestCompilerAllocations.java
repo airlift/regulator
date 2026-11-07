@@ -242,13 +242,20 @@ public class TestCompilerAllocations
         // copies count as other literal runes do.
         String foldedRuns = "(?i:" + "f".repeat(10_000) + "){1000}";
         assertCompileRejectedWithin(() -> TrinoRegexp.compile(utf8Slice(foldedRuns), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
-        // Adjacent repetitions coalesce into one, here a{0,700000}. That count is past every
-        // parser's repetition limit, and the repetition fails before any copy of it is built.
+        // Adjacent repetitions coalesce into one, here a{0,700000}. That count is past the RE2,
+        // Java, and Trino parsers' repetition limit, and the repetition fails before any copy of it
+        // is built.
         String coalescedRuns = "a{0,1000}".repeat(700);
         assertCompileRejectedWithin(() -> Re2.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
         assertCompileRejectedWithin(() -> JavaRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
         assertCompileRejectedWithin(() -> RustRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
         assertCompileRejectedWithin(() -> TrinoRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
+        // Rust's parser takes any count, as the crate does, so the budget alone bounds one. This
+        // count is under the instruction limit, and the question mark and concatenation around
+        // each optional copy decide it.
+        assertCompileRejectedWithin(() -> RustRegexp.compile(utf8Slice("a{0,500000}")), maxAllocatedBytes);
+        // Nested counts multiply, here into a billion copies of a.
+        assertCompileRejectedWithin(() -> RustRegexp.compile(utf8Slice("(?:(?:a{1000}){1000}){1000}")), maxAllocatedBytes);
         // A small budget rejects a short pattern that coalesces into one long repeat.
         assertCompileRejectedWithin(() -> Re2.compile(utf8Slice("a{0,1000}".repeat(256)), Re2.Options.defaults().setMaxMemory(4_096)), maxAllocatedBytes);
         // Copies of a large repeated expression count at its full size. Here ten groups of 200
