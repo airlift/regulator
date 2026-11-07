@@ -203,9 +203,11 @@ public class TestInnerLiteralSearch
                 "[a-z]{3}#(?i:noqa)",
                 // A rare class pair counts its two bytes.
                 "[a-z][?!.][\"']x",
-                // A common byte, a prefix the program accelerates, and no literal.
+                // A common byte, a prefix the program accelerates, a folded run it accelerates
+                // behind the Kelvin sign's wider lead, and no literal.
                 "[a-z] [a-z]",
                 "ab[0-9]shing",
+                "(?i)k-9 unit[0-9]",
                 "[a-z]{4}")) {
             ParseResult parsed = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
             int predicted = InnerLiteralSearch.predictMinimumLiteralLength(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), parsed.caseFolding());

@@ -401,14 +401,23 @@ final class BitState
                 return trySearch(textBegin);
             }
 
-            // Unanchored search from each possible text position.
+            // Unanchored search from each possible text position. A folded run behind a lead of
+            // varying width answers the prefix scans after its result up to the lead's spread, as
+            // Prog.prefixAccel describes, so the search skips them. A plain prefix, with no
+            // spread, never tests or writes the bound.
+            int prefixLeadSpread = prog.prefixAccelMaximumLead() - prog.prefixAccelMinimumLead();
+            int prefixScanCoversThrough = -1;
             for (int position = textBegin; position <= textEnd; position++) {
-                if (position < textEnd && prog.canPrefixAccel()) {
+                if (position < textEnd && prog.canPrefixAccel() &&
+                        (prefixLeadSpread == 0 || position > prefixScanCoversThrough)) {
                     int found = prog.prefixAccel(bytes, position, textEnd - position);
                     if (found < 0) {
                         position = textEnd;
                     }
                     else {
+                        if (prefixLeadSpread != 0 && found > position) {
+                            prefixScanCoversThrough = found + prefixLeadSpread;
+                        }
                         position = found;
                     }
                 }

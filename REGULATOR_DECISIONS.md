@@ -2474,6 +2474,87 @@ start. With the counted loop, the pair took RE2's Latin-1 `(?i)Sherlock
 Holmes` to 0.71x and 0.53x the earlier scan's time on r9g and r8i, `(?i)Twain`
 to 0.56x and 0.68x, and CPython's `timeout` to 0.45x and 0.52x.
 
+Under Unicode case folding, some letters fold to characters outside ASCII: `k`
+and `s` also match the Kelvin sign and the long `s`, three and two bytes in
+UTF-8, Java's Unicode case also matches `i` with the dotted and dotless i, and
+Trino's full case folding also matches characters such as `ß` for `ss` and the
+`ﬁ` ligature for `fi`, so no folded prefix reaches past them: upstream scans
+nothing for `(?i)Sherlock Holmes` in UTF-8. Regulator instead scans for a folded
+run of four to nine bytes that every match holds behind a lead whose width lies
+within a known range. A run's lead is every byte before it, earlier runs
+included. Besides run bytes, it is made of literal characters that match one
+byte sequence, classes that hold exactly one fold orbit, which take their
+members' widths in the program's encoding, and, in a Trino literal, stretches of
+characters whose orbits leave ASCII or that a multi-character fold covers, which
+take the widths their folds take. In a Trino literal, the first character
+outside ASCII ends the runs, read in the folded literal, where `ß` continues as
+`ss`, only when the literal needs a multi-character fold. A lead whose widths
+differ by more than eight bytes also ends them. A case-sensitive ASCII letter
+also ends the runs, and a run must hold an ASCII letter: exact bytes are what
+inner literal search and the case-sensitive scans serve, and a run scan takes
+their place. Without these two rules, `(?i:k)ey = value` over CPython scanned
+for ` = ` behind the Kelvin sign's lead instead of searching for its inner
+literal, 5.7x and 10.4x main's time on r8i and r9g in RE2, Rust, and Java, and
+`[Éé]: \d+ ERROR` over a log scanned for `: `, 1.04x to 1.13x. Trino finds no
+inner literal in `(?i:k)ey = value`, so there the run had been faster than main;
+it now matches main. Runs of two and three bytes, such as the `le` after the
+`fi` of Trino's `(?i)file`, the `elf` of `(?i)self`, and the `thi` of
+`(?i)this`, are common in real text, more common than the English pair model
+rates them, so their scan stopped far more often than the DFA's start bytes.
+Over 8 MiB of CPython source, Trino's `(?i)file` stopped at `le` 113,529 times
+against 9,438 for main's start literal filter, and took 6.93x and 9.89x main's
+time on r9g and r8i. On r9g, Trino's `(?i)user` over a log took 1.25x, RE2's
+Unicode `(?i)user` 1.51x, counting the spans of `(?i)self` 1.35x, and Trino's
+`(?i)this` 1.08x. The wins came from runs of four or more, such as ` holme`,
+`word`, `proce`, and `thin`, so shorter runs are left out. The scan starts the
+least lead past the search start and returns the first run it finds less the
+greatest lead, never before the search start; no match can start earlier, so the
+result is a skip like a prefix scan's. With no prefix, the run with the rarest
+pair under the rule above is chosen, earliest on ties. A folded prefix yields
+only to a run with a rarer pair behind a lead of varying width, which only
+Unicode folds produce, so every folded prefix of an ASCII-folding language
+stays. `(?i)Sherlock Holmes` scans for ` holme` 8 to 11 bytes in, probing `h`
+and `m`, and `(?i)password` for `word` 4 to 6 bytes in, in RE2, Rust, Java with
+Unicode case, and Trino. Like any prefix scan, the run takes the place of the
+DFA's start-byte scan. The engine returns to its start state at each byte it
+steps before it reaches the run, where a new scan would find the same run and
+return the position it was given, through the run less the least lead, so the
+DFA, NFA, and BitState searches skip those scans. A run that every match starts
+with, with no folded prefix, keeps the start bytes beside it, and a find loop
+without captures whose start bytes carry a start literal filter keeps verifying
+their candidates, which yields each match's start and end in one pass where a
+match found from the run needs a reverse pass for its start. On the run,
+counting the spans of Trino's `(?i)think` over English had taken 1.037x main's
+time on r9g, and with the filter it takes 0.996x; `(?i)Holmes` and
+`(?i)process`, whose start bytes carry no filter, keep the run in every search
+and take 0.10x and 0.67x. The
+[long-window required-literal check](#required-literal-absence-on-long-windows)
+judges a program whose run stands in for no prefix as the program without the
+run, counting the start literal filter its start bytes would carry, while a run
+that replaces a prefix counts as that prefix scan. So wherever the first-match
+DFA initializes, or fails to, alike with and without the run, the run changes no
+pattern's check; in the band of a few hundred bytes where the run's smaller
+start-byte tables decide whether it initializes, the check and its reservation
+judge the DFA the search runs.
+With JDK 25, `(?i)password` over CPython source took 0.43x to 0.46x
+the earlier search's time in RE2, Rust, and Java with Unicode case and 0.12x to
+0.16x in Trino, and `(?i)Sherlock Holmes` over English 0.80x to 0.89x. Literals
+that start with `k` or `s`, such as `(?i)k-9 unit` and `(?i)s\.append\(`, took
+0.07x to 0.44x, and 0.01x to 0.03x in Trino. Where vectors hold 64 bytes, a run
+that every match starts with, with no folded prefix, is left out, and the DFA
+keeps its start-byte route. There, as with AVX-512 on r8i, the run took 1.23x
+main's time for Trino's count of `(?i)Holmes` and 1.52x and 1.59x for `(?i)this`
+and `(?i)think` over 595 KB of English, and 3.68x and 3.81x for `(?i)class` and
+`(?i)process` over 8 MiB of CPython source. Keeping the start-byte route
+returned all of them to 0.99x to 1.01x, and gave up the run's wins for
+`(?i)works` (0.73x) and `(?i)watson` (0.95x), which return to main's time. On
+r9g's 16-byte vectors, measured on one host, the same runs took 0.10x to 0.70x
+main's time, and 1.04x for `(?i)this` and `(?i)think`, so there the run stays.
+These measurements predate the four-byte rule above, under which `(?i)this` and
+`(?i)class`, whose runs `thi` and `cla` hold three bytes, get no run. The choice
+follows the vector width, and 32-byte vectors, as with AVX2 or 256-bit SVE, were
+not measured.
+
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
 independent loads and parallel masks, which fits HotSpot code generation better
@@ -2707,8 +2788,9 @@ scan of a prefix led by a multibyte UTF-8 character that ends before the
 prefix's last byte, that character's last byte. This is a performance-only
 deviation.
 
-Case-folded prefixes instead pair two folded bytes ranked by the caller's
-distribution, or by `englishText()` under the default, as
+Case-folded prefixes, and the folded runs that stand in for them, instead pair
+two folded bytes ranked by the caller's distribution, or by `englishText()`
+under the default, which also ranks the runs, as
 [Folded Prefix Candidate Scan](#folded-prefix-candidate-scan) describes, so
 their choice is on by default where a case-sensitive probe is opt-in. The
 reason is that a folded prefix's first and last bytes are often among the

@@ -1228,8 +1228,15 @@ abstract sealed class CompiledPattern
     /// disjoint suffix-repeat matcher, or whole-input capture plan. Neither its forward nor its
     /// lowered program is anchored at either end, where the engine can stop early, or has a
     /// prefix scan, a transparent start literal, or a start literal filter that its first-match
-    /// DFA can run. A pattern with a single-byte table is not checked here: the caller keeps no
-    /// required bytes for it at all.
+    /// DFA can run. A program whose folded run stands in for no prefix is judged as without the
+    /// run: the run is no prefix scan, and the start literal filter is the one its start bytes
+    /// would carry; see [Prog#prefixRunAddsPrefixScan]. Whether the first-match DFA initializes
+    /// is still judged on the program the search runs, whose start-byte tables the run replaces,
+    /// so in the few hundred bytes of budget between the two programs' initialization charges the
+    /// decision can differ from the program without the run. Such a program has no transparent
+    /// start literal either way, since that needs an assertion before the first byte, where
+    /// [Regexp#foldedRunsForAccel] stops. A pattern with a single-byte table is not checked here:
+    /// the caller keeps no required bytes for it at all.
     private static boolean checksRequiredLiteralOnLongWindows(
             BooleanPlans booleanPlans,
             byte[] requiredPrefix,
@@ -1269,16 +1276,22 @@ abstract sealed class CompiledPattern
     // are reserved later, and only where they leave every DFA that initializes now able to, so the
     // budget is judged without them. The DFA kind decides the start bytes only for a program that
     // can match empty, which has no start literal filter, so one kind answers for every search.
+    // For a folded run that stands in for no prefix, the filter is the one the program's start
+    // bytes would carry without the run.
     private static boolean searchesStartLiteralFilter(Prog program)
     {
         return !program.hasDfaUnsupportedAssertions() &&
                 program.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
-                Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH);
+                (program.prefixRunAddsPrefixScan()
+                        ? program.prefixRunHidesStartLiteralFilter()
+                        : Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
     }
 
     private static boolean readsWholeWindowWithoutLiteralScan(Prog program)
     {
-        return !program.anchorStart() && !program.anchorEnd() && !program.canPrefixAccel() && program.transparentStartLiteral() == null;
+        return !program.anchorStart() && !program.anchorEnd() &&
+                (!program.canPrefixAccel() || program.prefixRunAddsPrefixScan()) &&
+                program.transparentStartLiteral() == null;
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
@@ -2562,6 +2575,17 @@ abstract sealed class CompiledPattern
         }
         if (MatchLength.fixed(matchLength) >= 0 || partialProg.hasEmptyWidthAssertions()) {
             return null;
+        }
+        // A folded run that every match starts with takes the place of a start-byte scan, but not
+        // of the start literal filter, whose candidates the cursor verifies into both boundaries
+        // of a match where the run's match needs a reverse pass for its start. The DFA is the one
+        // the cursor would read, built here if it is not yet, so the choice is the same whenever
+        // a matcher makes it.
+        if (partialProg.prefixRunStartsEveryMatch()) {
+            Dfa.DfaInstance dfa = partialProg.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            if (dfa == null || dfa.startLiteralFilter() == null) {
+                return null;
+            }
         }
         return Dfa.createCandidateStartCursor(partialProg);
     }

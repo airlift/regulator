@@ -434,12 +434,28 @@ final class Prog
     // elsewhere in the prefix; prefixAccelFoldCaseFrontAndBackSWAR's comment gives the
     // measurement.
     private boolean prefixFoldCaseEndPair;
+    // A folded prefix may be a run that every match holds after a lead of prefixMinimumLead
+    // through prefixMaximumLead bytes, rather than at its start; see configureFoldCasePrefixRun.
+    // Both are 0 for a prefix.
+    private int prefixMinimumLead;
+    private int prefixMaximumLead;
+    // Whether the folded run is one that every match starts with, configured because the program
+    // has no folded prefix. The DFA keeps its start-byte tables beside such a run, so a find loop
+    // can keep verifying candidates from them; see prefixAccelReplacesStartBytes.
+    private boolean prefixRunStartsEveryMatch;
+    // Whether the folded run stands in for no prefix, configured because the program has no
+    // folded prefix or an empty one, so without the run it would have no prefix scan; see
+    // prefixRunAddsPrefixScan.
+    private boolean prefixRunAddsPrefixScan;
+    // Whether the start bytes of the program without such a run would carry a start literal
+    // filter; see prefixRunHidesStartLiteralFilter.
+    private boolean prefixRunHidesStartLiteralFilter;
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
     // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
     private long prefixShiftsCharge;
-    private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
+    static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
 
     // The literal every match begins with behind a leading assertion, and its search; see
     // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
@@ -980,7 +996,7 @@ final class Prog
     byte[] buildStartByteCandidates(int[] stack, boolean firstMatch)
     {
         boolean nullable = canMatchEmpty;
-        if (reversed || anchorStart || (nullable && anchorEnd) || canPrefixAccel() || start() == 0) {
+        if (reversed || anchorStart || (nullable && anchorEnd) || prefixAccelReplacesStartBytes() || start() == 0) {
             return null;
         }
 
@@ -1081,7 +1097,7 @@ final class Prog
     /// and past [#MAXIMUM_START_POSITION_PATHS] paths.
     long[][] buildStartPositionByteSets(int[] stack, int positionCount)
     {
-        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0) {
+        if (reversed || anchorStart || canMatchEmpty || prefixAccelReplacesStartBytes() || start() == 0) {
             return null;
         }
 
@@ -1322,7 +1338,8 @@ final class Prog
 
     /// Returns the absolute index in `data` of the first possible match start in the range, or
     /// `-1`: the next prefix acceleration candidate, or the next occurrence of the transparent
-    /// start literal. Requires [#canSkipToStartCandidate].
+    /// start literal. Requires [#canSkipToStartCandidate]. A caller walking forward skips the
+    /// calls [#prefixAccel] describes, which for the literal are none past the result.
     int skipToStartCandidate(byte[] data, int offset, int length)
     {
         if (canPrefixAccel()) {
@@ -1618,6 +1635,63 @@ final class Prog
         return prefixFoldCaseSecondOffset;
     }
 
+    /// Returns the folded bytes the prefix scan searches for, a prefix or a run behind a lead.
+    byte[] prefixAccelFoldCaseBytesForDiagnostics()
+    {
+        return prefixFoldCase ? Arrays.copyOf(prefix, prefixSize) : null;
+    }
+
+    /// Returns the fewest bytes a match takes before the folded run the prefix scan searches for,
+    /// 0 for a prefix.
+    int prefixAccelMinimumLead()
+    {
+        return prefixMinimumLead;
+    }
+
+    /// Returns the most bytes a match takes before the folded run the prefix scan searches for,
+    /// 0 for a prefix.
+    int prefixAccelMaximumLead()
+    {
+        return prefixMaximumLead;
+    }
+
+    /// Returns whether the prefix scan searches for a folded run that every match starts with,
+    /// configured because the program has no folded prefix. The DFA keeps its start-byte tables
+    /// beside such a run.
+    boolean prefixRunStartsEveryMatch()
+    {
+        return prefixRunStartsEveryMatch;
+    }
+
+    /// Returns whether the prefix scan searches for a folded run that stands in for no prefix,
+    /// configured because the program has no folded prefix or an empty one. The long-window
+    /// required-literal check, which leaves out a program with a prefix scan, decides for such a
+    /// program as for the program without the run: on a window without the literal, its one
+    /// literal scan returns where the run's scan and the DFA would read the window.
+    boolean prefixRunAddsPrefixScan()
+    {
+        return prefixRunAddsPrefixScan;
+    }
+
+    /// Returns whether the start bytes of the program without its folded run would carry a start
+    /// literal filter, as [Dfa.DfaInstance#searchesStartLiteralFilter] decides for the first-match
+    /// DFA, or false unless [#prefixRunAddsPrefixScan]. A run behind a lead takes the place of the
+    /// start-byte tables, so the long-window required-literal check reads this rather than the
+    /// tables, which the DFA no longer builds.
+    boolean prefixRunHidesStartLiteralFilter()
+    {
+        return prefixRunHidesStartLiteralFilter;
+    }
+
+    /// Whether the prefix scan takes the place of the start-byte tables, so the DFA builds none.
+    /// Every prefix scan does except a folded run that every match starts with: the tables'
+    /// candidates are then match starts, which a find loop can verify without the reverse pass
+    /// that a match found from the run needs to find its start.
+    private boolean prefixAccelReplacesStartBytes()
+    {
+        return canPrefixAccel() && !prefixRunStartsEveryMatch;
+    }
+
     /// Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
     /// Keeps the scan path branch-free with respect to foldCase/prefix mode.
     int prefixAccelSingleByteNoFoldCase(byte[] data, int offset, int length)
@@ -1660,6 +1734,29 @@ final class Prog
         configurePrefixAccelBytes(prefix.byteArray(), foldCase, byteFrequencies);
     }
 
+    /// Scans for a folded run of four to nine bytes that every match holds after a lead of
+    /// `minimumLead` through `maximumLead` bytes, as [Regexp#foldedRunsForAccel] finds it. A
+    /// match can start no earlier than `maximumLead` bytes before the first run at or after
+    /// `minimumLead` bytes into the search, so [#prefixAccel] returns that position.
+    /// `addsPrefixScan` tells whether the run stands in for no prefix, on a program with no
+    /// prefix scan yet; see [#prefixRunAddsPrefixScan].
+    void configureFoldCasePrefixRun(byte[] run, int minimumLead, int maximumLead, boolean addsPrefixScan, ByteFrequencies byteFrequencies)
+    {
+        if (minimumLead < 0 || maximumLead < minimumLead) {
+            throw new IllegalArgumentException("folded run lead must satisfy 0 <= minimum <= maximum: [" + minimumLead + "," + maximumLead + "]");
+        }
+        // Decided before the run is configured, while the program still builds its start bytes.
+        boolean hidesStartLiteralFilter = addsPrefixScan && Dfa.DfaInstance.searchesStartLiteralFilter(this, Dfa.DfaInstance.Kind.FIRST_MATCH);
+        configurePrefixAccelBytes(run, true, byteFrequencies);
+        this.prefixMinimumLead = minimumLead;
+        this.prefixMaximumLead = maximumLead;
+        // A run behind no lead is chosen only when there is no folded prefix; see
+        // Compiler.foldedRunForAccel.
+        this.prefixRunStartsEveryMatch = maximumLead == 0;
+        this.prefixRunAddsPrefixScan = addsPrefixScan;
+        this.prefixRunHidesStartLiteralFilter = hidesStartLiteralFilter;
+    }
+
     private void configurePrefixAccelBytes(byte[] bytes, boolean foldCase, ByteFrequencies byteFrequencies)
     {
         this.prefixProbeOffset = 0;
@@ -1669,6 +1766,11 @@ final class Prog
         this.prefixFoldCaseFirstOffset = 0;
         this.prefixFoldCaseSecondOffset = 0;
         this.prefixFoldCaseEndPair = false;
+        this.prefixMinimumLead = 0;
+        this.prefixMaximumLead = 0;
+        this.prefixRunStartsEveryMatch = false;
+        this.prefixRunAddsPrefixScan = false;
+        this.prefixRunHidesStartLiteralFilter = false;
         this.prefixShifts = null;
         this.dfaMemory += prefixShiftsCharge;
         this.prefixShiftsCharge = 0;
@@ -1720,8 +1822,14 @@ final class Prog
         updateStartCandidateSkip();
     }
 
-    /// Returns the absolute index in `data` of the first possible prefix match,
-    /// or `-1` if no match is found.
+    /// Returns an absolute index `p` in `data` such that no match starts in `[offset, p)`, or `-1`
+    /// if no match starts at or after `offset`. For a prefix, `p` is the first place the prefix
+    /// matches. For a folded run behind a lead, it is the first run found less the widest lead,
+    /// never before `offset`, and can precede the match: `(?i)Sherlock Holmes` under Unicode
+    /// folding scans for ` holme` 8 to 11 bytes in, so on `xxxxxxxxxxSherlock Holmes` it returns
+    /// 7, while the match starts at 10. When `p` is past `offset`, a call from any position from
+    /// `p` through `p` plus [#prefixAccelMaximumLead] less [#prefixAccelMinimumLead] finds the same
+    /// run and returns the position it was given, so a caller walking forward skips those calls.
     ///
     /// Uses different strategies depending on configuration:
     /// - Masks of two folded prefix bytes for folded prefixes, a vector at a time on long windows;
@@ -1750,6 +1858,9 @@ final class Prog
         }
 
         if (prefixFoldCase) {
+            if (prefixMaximumLead != 0) {
+                return prefixAccelFoldCaseBehindLead(data, offset, length);
+            }
             return prefixAccelFoldCase(data, offset, length);
         }
 
@@ -1957,6 +2068,20 @@ final class Prog
             }
         }
         return -1;
+    }
+
+    // Every match holds the folded run after a lead of prefixMinimumLead through
+    // prefixMaximumLead bytes, so a match starting at or after offset puts the run at or after
+    // offset + prefixMinimumLead, and the first run found there, at found, rules out every start
+    // before found - prefixMaximumLead.
+    private int prefixAccelFoldCaseBehindLead(byte[] data, int offset, int length)
+    {
+        int scanLength = length - prefixMinimumLead;
+        if (scanLength < prefixSize) {
+            return -1;
+        }
+        int found = prefixAccelFoldCase(data, offset + prefixMinimumLead, scanLength);
+        return found < 0 ? -1 : Math.max(offset, found - prefixMaximumLead);
     }
 
     private int prefixAccelFoldCase(byte[] data, int offset, int length)

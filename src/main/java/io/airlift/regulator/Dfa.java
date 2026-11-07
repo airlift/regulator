@@ -100,6 +100,8 @@ final class Dfa
     private static final int CANDIDATE_NO_MATCH = -1;
     private static final int CANDIDATE_FALLBACK = -2;
     private static final int PREFIX_SCAN = -1;
+    // A prefix scan for a folded run behind a lead of varying width; see searchForwardScanAcceleration.
+    private static final int PREFIX_RUN_SCAN = -2;
     // The scan set of a start byte set that only the nibble tables of [#findByteSet] take.
     static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
     private static final int START_LITERAL_FILTER_MARKER = Integer.MIN_VALUE + 1;
@@ -3578,6 +3580,14 @@ final class Dfa
 
         Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         Object[] startRefs = stateRefs;
+        // A folded run behind a lead of varying width answers the prefix scans after its result
+        // up to the lead's spread, as Prog.prefixAccel describes, so the search skips them. The
+        // choice is made once here as its own scan kind, so a plain prefix scans exactly as it
+        // would without the bound: no added test, and the bound is never written on its path.
+        if (byteCandidateOffset == PREFIX_SCAN && prog.prefixAccelMaximumLead() != prog.prefixAccelMinimumLead()) {
+            byteCandidateOffset = PREFIX_RUN_SCAN;
+        }
+        int prefixScanCoversThrough = -1;
 
         // Generic scan acceleration for sparse start bytes, start literal filters, start class
         // filters, and literal prefixes other than the single-byte fast path. Keep scanner control
@@ -3599,6 +3609,18 @@ final class Dfa
                 int next;
                 if (byteCandidateOffset == PREFIX_SCAN) {
                     next = prog.prefixAccel(bytes, position, textEnd - position);
+                }
+                else if (byteCandidateOffset == PREFIX_RUN_SCAN) {
+                    if (position <= prefixScanCoversThrough) {
+                        next = position;
+                    }
+                    else {
+                        dfa.prefixRunScanCount++;
+                        next = prog.prefixAccel(bytes, position, textEnd - position);
+                        if (next > position) {
+                            prefixScanCoversThrough = next + prog.prefixAccelMaximumLead() - prog.prefixAccelMinimumLead();
+                        }
+                    }
                 }
                 else {
                     if (byteCandidateOffset >= textEnd - position) {
@@ -5862,6 +5884,7 @@ final class Dfa
         private int matchingSelfLoopExitByteScanCount;
         private int reverseSelfLoopExitByteScanCount;
         private int fixedDistanceShortSkipFallbackCount;
+        private int prefixRunScanCount;
 
         public DfaInstance(Prog prog, Kind kind, long maxMemory)
         {
@@ -6309,6 +6332,13 @@ final class Dfa
         int startLiteralFilterScanCount()
         {
             return startLiteralFilterScanCount;
+        }
+
+        /// Returns how many times forward searches called [Prog#prefixAccel] for a folded run
+        /// behind a lead of varying width.
+        int prefixRunScanCount()
+        {
+            return prefixRunScanCount;
         }
 
         StartLiteralFilter startLiteralFilter()

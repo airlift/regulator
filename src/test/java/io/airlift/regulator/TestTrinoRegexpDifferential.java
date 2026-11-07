@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.joni.NameEntry;
 import io.airlift.joni.Regex;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -192,6 +193,42 @@ public class TestTrinoRegexpDifferential
                     sources.add(utf8Slice(body + end));
                 }
             }
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+    }
+
+    @Test
+    public void testFoldedRunBehindVariableLeadMatchesJoni()
+    {
+        // Full case folding matches the long s, the Kelvin sign, and the characters that fold to
+        // more than one, such as sharp s for ss and the ligatures for st, ff, fi, and ffi, so
+        // these patterns scan for a run of folded bytes behind a lead of varying width.
+        Map<String, List<String>> spellings = Map.of(
+                "Sherlock Holmes", List.of("Sherlock Holmes", "\u017Fherloc\u212A HOLME\u017F", "SHERLOCK holmes"),
+                "password", List.of("password", "pa\u00DFword", "PA\u00DFWORD", "pa\u017F\u017Fword", "paS\u017Fword"),
+                "affidavit", List.of("affidavit", "a\uFB03davit", "a\uFB00idavit", "af\uFB01davit", "AFFIDAVIT"),
+                "stockholm", List.of("stockholm", "\uFB06ockholm", "\uFB05ockholm", "\u017Ftoc\u212Aholm"));
+        Map<String, String> nearMisses = Map.of("Sherlock Holmes", "Xherlock Holmes", "password", "pa\u00DF\u00DFword", "affidavit", "a\uFB03\uFB01davit", "stockholm", "\uFB06\uFB06ockholm");
+        for (String literal : spellings.keySet()) {
+            String pattern = "(?i)" + literal;
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            assertThat(regexp.re2().forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern).isPositive();
+            List<Slice> sources = TestPrefixProbeAcceleration.foldedRunTexts(spellings.get(literal), nearMisses.get(literal)).stream()
+                    .map(Slices::utf8Slice)
+                    .toList();
+            Regex oracle = joniPattern(pattern);
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+        // Text past BitState's unanchored limit takes the Pike VM, with and without a group.
+        String fillerUnit = "filler text, ";
+        for (String pattern : List.of("(?i)password", "(?i)(password)")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            Prog prog = regexp.re2().forwardProgramForDiagnostics();
+            String filler = fillerUnit.repeat(prog.unanchoredBitStateTextMaxSize() / fillerUnit.length() + 1);
+            List<Slice> sources = List.of(
+                    utf8Slice(filler + "pa\u00DFword" + filler + "pa\u00DF\u00DFword PA\u017FSWORD"),
+                    utf8Slice("password " + filler + "paS\u017Fword" + filler));
+            Regex oracle = joniPattern(pattern);
             verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
         }
     }

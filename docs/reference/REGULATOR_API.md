@@ -204,12 +204,12 @@ such as a plain literal pattern or a pattern's leading literal, probe its first
 byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 `Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
 `RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
-first-byte scanning. The distribution also ranks the folded byte pairs that
-case-insensitive prefix scans probe, using English text frequencies under the
-default. A distribution that matches the searched data lets the search scan for
-a rarer byte of the literal instead. Outside scan plans,
-`RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a multi-byte
-literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
+first-byte scanning. The distribution also ranks the folded byte pairs and
+folded runs that case-insensitive prefix scans probe, using English text
+frequencies under the default. A distribution that matches the searched data
+lets the search scan for a rarer byte of the literal instead. Outside scan
+plans, `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a
+multi-byte literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
 move it for a plan's leading literal led by a non-ASCII byte. Byte frequencies
 do not affect any language's contains of a contained literal such as `.*lit.*`,
 which scans for the first and last bytes of a literal of two or more bytes

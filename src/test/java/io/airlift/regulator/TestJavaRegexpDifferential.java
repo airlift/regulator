@@ -166,6 +166,37 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testFoldedRunBehindVariableLeadMatchesJdk()
+    {
+        // Under Unicode case folding, s, k, and i also match the long s, the Kelvin sign, and the
+        // dotted and dotless i, which take more bytes, so these patterns scan for a run of folded
+        // bytes behind a lead of varying width.
+        Map<String, List<String>> spellings = Map.of(
+                "Sherlock Holmes", List.of("Sherlock Holmes", "\u017Fherloc\u212A HOLME\u017F", "SHERLOCK holmes"),
+                "kiss the sky", List.of("kiss the sky", "\u212A\u0131\u017F\u017F THE \u017F\u212Ay", "\u212A\u0130ss the sky"),
+                "password", List.of("password", "pa\u017F\u017Fword", "PAS\u017FWORD"));
+        Map<String, String> nearMisses = Map.of("Sherlock Holmes", "Xherlock Holmes", "kiss the sky", "kis the sky", "password", "pa\u00DFword");
+        for (String pattern : spellings.keySet()) {
+            Pattern jdk = Pattern.compile(pattern, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern), OptionProfile.UNICODE_CASE_INSENSITIVE.newJavaOptions());
+            assertThat(regexp.forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern).isPositive();
+            for (String input : TestPrefixProbeAcceleration.foldedRunTexts(spellings.get(pattern), nearMisses.get(pattern))) {
+                Matcher expected = jdk.matcher(input);
+                RegexpMatcher actual = regexp.matcher(utf8Slice(input));
+                int count = 0;
+                while (expected.find()) {
+                    assertThat(actual.find()).as("%s input=%s", pattern, input).isTrue();
+                    assertThat(actual.start()).as("%s input=%s", pattern, input).isEqualTo(utf8Slice(input.substring(0, expected.start())).length());
+                    assertThat(actual.end()).as("%s input=%s", pattern, input).isEqualTo(utf8Slice(input.substring(0, expected.end())).length());
+                    count++;
+                }
+                assertThat(actual.find()).as("extra match: %s input=%s", pattern, input).isFalse();
+                assertThat(regexp.count(utf8Slice(input))).as("%s input=%s", pattern, input).isEqualTo(count);
+            }
+        }
+    }
+
+    @Test
     public void testRegionsRangesAndFindStartMatchJdk()
     {
         // A matcher region reads as a JDK region with default bounds, so its assertions see only

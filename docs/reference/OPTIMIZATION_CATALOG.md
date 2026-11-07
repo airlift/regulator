@@ -213,13 +213,24 @@ so the automata run only where a match can be.
   ([noodle_engine_sse.c][hs-noodle-caseless]); Inspired by the Rust regex
   crate ([#85]); Adapted from memchr's packed pair, which probes a needle's
   two rarest bytes by a rank table ([packedpair][memchr-packedpair],
-  [default_rank.rs][memchr-rank]), for the pair choice. Regulator: case masks
-  on two folded prefix bytes, in SWAR and vector forms ([#85],
-  [design][d-folded-prefix]), the English ranking under the uniform default,
-  and the vector form's counted loop ([#195]); base RE2 [O-PROG-006].
+  [default_rank.rs][memchr-rank]), for the pair choice, and from Hyperscan's
+  offset acceleration ([accel.c][hs-accel]) and .NET 7's fixed-distance sets
+  ([RegexFindOptimizations.cs][dotnet7-fixed-distance]) for the folded run.
+  Regulator: case masks on two folded prefix bytes, in SWAR and vector forms
+  ([#85], [design][d-folded-prefix]), the English ranking under the uniform
+  default, the vector form's counted loop, and a run behind a lead whose width
+  lies within a range, under Unicode and full case folding, with the skip
+  bound the engines share ([#195]); base RE2 [O-PROG-006].
 - **Where:** `Prog.prefixAccelFoldCase`, `Prog.foldCaseMatches`,
-  `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`
-- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB
+  `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`,
+  `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
+  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`
+- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB. Folded
+  runs: case-insensitive patterns under Unicode case folding with no folded
+  prefix, or whose folded prefix stops at a letter whose fold leaves ASCII,
+  such as `k` or `s`, which also match the Kelvin sign and the long s, when
+  the run's pair is rarer; a run that every match starts with only where
+  vectors hold fewer than 64 bytes
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned for two of its folded bytes a SWAR word or vector at a time. The
   pair is the prefix's first and last bytes unless two bytes at least two
@@ -231,14 +242,25 @@ so the automata run only where a match can be.
   1.05 to 1.08 and login lines at 0.93. The vector form ORs `0x20` into letter
   bytes and tests whole vectors in a counted loop that verifies candidates
   after it exits, and the SWAR forms match both case broadcasts. RE2 scans it
-  with a ShiftDFA. Rust, RE2, and Java `name-sherlock-casei` and Rust
+  with a ShiftDFA. Where a Unicode fold ends the prefix, the compiler finds
+  the runs of four to nine folded bytes that every match holds behind a lead
+  of known least and greatest width, and scans for the run with the rarest
+  pair in place of the folded prefix. The scan starts the least lead past the
+  search start and returns the run less the greatest lead, and the DFA, NFA,
+  and BitState searches skip the scans that would find the same run again. A
+  run that every match starts with keeps the DFA's start bytes beside it, and
+  a find loop whose start bytes carry a start literal filter verifies their
+  candidates instead, without a reverse pass. RE2 scans nothing past such a
+  fold. Rust, RE2, and Java `name-sherlock-casei` and Rust
   `name-sherlock-holmes-casei` take 0.17 to 0.20 of their earlier time on
   Graviton and 0.09 to 0.13 on Intel, and `the-casei`, with a candidate about
   every 60 bytes, 0.73 to 0.77 and 0.62 to 0.64 ([#85]). The counted loop
   takes `(?i)Sherlock Holmes` in Rust and Java to 0.75 to 0.83 of its earlier
-  time on Graviton and Intel, and the rarer pair takes RE2's Latin-1
+  time on Graviton and Intel, the rarer pair takes RE2's Latin-1
   `(?i)Sherlock Holmes` to 0.71 on Graviton and 0.53 on Intel, and `(?i)Twain`
-  and CPython's `timeout` to 0.45 to 0.68 ([#195]).
+  and CPython's `timeout` to 0.45 to 0.68, and the folded run takes
+  `(?i)password` over CPython source to 0.43 to 0.46 in RE2, Rust, and Java
+  with Unicode case and 0.12 to 0.16 in Trino ([#195]).
 
 ### Rare-byte probe
 
