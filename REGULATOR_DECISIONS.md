@@ -2450,6 +2450,39 @@ and CPython's `timeout` on r9g. On r8i, whose 64-byte vectors hold a candidate
 of a common pair far more often, it took 1.11x to 1.22x for those two and for
 RE2's Latin-1 `(?i)Sherlock Holmes`.
 
+The counted loop leaves its test loop at every vector that holds a candidate, so
+where candidates are dense it loses to verifying inside the loop: with 64-byte
+vectors, the `e` and `r` of CPython's `error` put a candidate in a fifth to two
+thirds of all vectors. Each folded program therefore predicts the share of
+vectors that hold a candidate, 1 - (1 - p)^n for the probe pair's folded
+probability product p under the distribution that ranked the pair and the
+preferred vector's byte count n, and at 15% or more scans with a kernel that
+verifies inside its vector loop. That kernel fits the inline limit and inlines
+into the DFA scan, as the earlier scan did. It steps the first probe's position
+and loads the second at a fixed distance from it: stepping the candidate start
+and adding both offsets kept them live, and inlined into the DFA scan on r8i C2
+left them on the stack, 1.20x the earlier scan's time for `(?i)secret` over a
+log. One rule serves both platforms through the vector width: none of the
+measured rows crosses it with r9g's 16-byte vectors, and CPython's `error`,
+`(?i)secret` over a log, and Java's Unicode `(?i)Twain` cross it with r8i's
+64-byte vectors, where with JDK 25 they run at 0.94x to 1.06x the earlier scan's
+time. The threshold sits above 10% for the rows rated just above it: `(?i)login`
+over a log, rated at 11.3% of 64-byte vectors, took 1.03x to 1.06x the earlier
+scan's time with the in-loop kernel and takes 0.95x to 0.98x with the counted
+loop, and `(?i)the` on r9g, rated at 10.4% of 16-byte vectors, 1.01x to 1.03x
+against 0.93x to 0.94x. A pair that English rates rarer than a text holds it
+stays on the counted loop and pays for it on r8i: CPython's `self`, rated at
+5.7% of 64-byte vectors but found in 24%, takes 0.99x to 1.06x the earlier
+scan's time, Trino's `elf` of it, rated at 10% but found in 26%, took 1.13x,
+measured before three-byte runs were left out, `(?i)Holmes` over English, rated
+at 11.8% but found in 20%, takes 1.10x, and `(?i)file` over CPython, rated at
+10% but found in 16%, 1.06x to 1.11x. `(?i)slave` over a log takes 0.82x to
+0.98x. On r8i the in-loop kernel, whose loop has main's shape, takes 1.02x to
+1.07x for `(?i)error` and `(?i)info` over a log, a cost not yet separated from
+code layout, and 1.10x to 1.14x for `(?i)that` over English, which some JVMs run
+faster than main as the layout of the inlined vector kernel varies. On r9g each
+of these rows takes 0.79x to 0.96x.
+
 The two probe bytes are the pair, at least two bytes apart, whose folded
 probabilities have the smallest product; an ASCII letter's folded probability
 is the sum of its two cases. Ties go to the wider pair, then the earlier one. The pair

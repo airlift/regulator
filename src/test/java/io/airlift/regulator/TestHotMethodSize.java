@@ -224,6 +224,18 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the folded prefix scan for dense probe pairs, which verifies candidates inside its
+    /// vector loop, small enough for C2 to inline into the folded prefix scan in `Prog`, as the
+    /// folded scan of that shape was measured.
+    @Test
+    public void testDenseFoldedPrefixScanFitsInlineSize()
+    {
+        assertThat(codeLength(VectorPrefixScanner.class, "findFoldCaseDense"))
+                .as("VectorPrefixScanner.findFoldCaseDense bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+    }
+
     /// Keeps the literal and folded prefix scans larger than FreqInlineSize, so every caller calls
     /// their compiled methods rather than inlined copies, as "Literal Prefix Vector Scan" in
     /// REGULATOR_DECISIONS.md records, and caps each at the size it was measured at: growing it

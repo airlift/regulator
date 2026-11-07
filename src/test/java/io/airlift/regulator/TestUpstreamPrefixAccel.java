@@ -153,7 +153,7 @@ public class TestUpstreamPrefixAccel
                         .as("%s at offset %s length %s", prefix, offset, length)
                         .isEqualTo(expected);
 
-                // Both pair scans find the same start whichever two prefix bytes they probe.
+                // Every pair scan finds the same start whichever two prefix bytes it probes.
                 int firstOffset = random.nextInt(acceleratedPrefixLength - 1);
                 int secondOffset = firstOffset + 1 + random.nextInt(acceleratedPrefixLength - firstOffset - 1);
                 assertThat(Prog.findFoldCaseSwar(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
@@ -162,6 +162,9 @@ public class TestUpstreamPrefixAccel
                 if (VectorSupport.isAvailable()) {
                     assertThat(VectorPrefixScanner.findFoldCase(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
                             .as("vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
+                            .isEqualTo(expected);
+                    assertThat(VectorPrefixScanner.findFoldCaseDense(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                            .as("dense vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
                             .isEqualTo(expected);
                 }
             }

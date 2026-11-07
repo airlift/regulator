@@ -83,6 +83,22 @@ public class TestPrefixProbeAcceleration
     }
 
     @Test
+    public void testDenseFoldedPairVerifiesInVectorLoop()
+    {
+        // The folded vector scan verifies candidates inside its vector loop when at least 15% of
+        // its vectors are predicted to hold the English probe pair: e and r of "error" in 7.5% of
+        // 16-byte vectors but 27% of 64-byte ones, t and e of "the" in 10.4% of 16-byte ones, t
+        // and the space of "the " in 16.4% of them, a and h of "at the " in 14.4% of 64-byte
+        // ones, and m and u of "timeout" in 2.8% of them.
+        assertDenseFoldCaseScan("(?i)error", 16, false);
+        assertDenseFoldCaseScan("(?i)error", 64, true);
+        assertDenseFoldCaseScan("(?i)the", 16, false);
+        assertDenseFoldCaseScan("(?i)the ", 16, true);
+        assertDenseFoldCaseScan("(?i)at the ", 64, false);
+        assertDenseFoldCaseScan("(?i)timeout", 64, false);
+    }
+
+    @Test
     public void testFoldedRunBehindVariableLead()
     {
         // Under Unicode folding, s and k also match the long s and the Kelvin sign, two and three
@@ -492,6 +508,19 @@ public class TestPrefixProbeAcceleration
         }
         assertThat(found).as(description).isEqualTo(matches);
         assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(candidateCursor ? matches : 0);
+    }
+
+    private static void assertDenseFoldCaseScan(String pattern, int lanes, boolean dense)
+    {
+        Prog program = Re2.compile(Slices.utf8Slice(pattern)).forwardProgramForDiagnostics();
+        byte[] folded = program.prefixAccelFoldCaseBytesForDiagnostics();
+        ByteFrequencies english = ByteFrequencies.englishText();
+        double probability = english.foldedProbePairProbability(folded, english.foldedProbePair(folded, folded.length));
+        assertThat(Prog.usesDenseFoldCaseScan(probability, lanes)).as("%s at %s lanes", pattern, lanes).isEqualTo(dense);
+        // The compiled program takes the kernel the rule chooses for this JVM's vectors.
+        assertThat(program.prefixAccelFoldCaseDense())
+                .as(pattern)
+                .isEqualTo(VectorSupport.isAvailable() && Prog.usesDenseFoldCaseScan(probability, VectorSupport.preferredByteLanes()));
     }
 
     private static void assertFoldedRun(CompiledPattern pattern, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)

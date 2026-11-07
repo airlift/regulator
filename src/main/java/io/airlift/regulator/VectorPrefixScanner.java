@@ -117,6 +117,10 @@ final class VectorPrefixScanner
     // need both probe bytes, at firstOffset and secondOffset within the prefix, before the whole
     // folded prefix is compared. The prefix holds at most nine bytes, so failed comparisons stay
     // bounded and the scan needs no KMP budget.
+    //
+    // Prog chooses this kernel when few vectors are predicted to hold a candidate of the probe
+    // pair, and findFoldCaseDense otherwise; see Prog.usesDenseFoldCaseScan. With sparse
+    // candidates the counted test loop runs long stretches without leaving.
     static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
@@ -178,6 +182,66 @@ final class VectorPrefixScanner
             }
             position += SPECIES.length();
         }
+        return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // Finds what findFoldCase finds, verifying each vector's candidates inside the vector loop.
+    //
+    // Prog chooses this kernel when many vectors are predicted to hold a candidate of the probe
+    // pair, as for a common pair in 64-byte vectors; see Prog.usesDenseFoldCaseScan. There the
+    // counted loop leaves and re-enters on many vectors, and its exit, candidate rebuild, and
+    // re-entry cost more than testing and verifying each vector in one loop. Keep this method
+    // within FreqInlineSize, as TestHotMethodSize checks, and every vector and mask inside it: a
+    // vector or mask passed to or returned from a helper C2 leaves out of line is boxed.
+    static int findFoldCaseDense(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        int candidateCount = length - prefixSize + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int vectorEnd = offset + SPECIES.loopBound(candidateCount);
+        // The case bits and probes are those of findFoldCase.
+        byte firstLowerCase = asciiLower(prefix[firstOffset]);
+        byte secondLowerCase = asciiLower(prefix[secondOffset]);
+        ByteVector firstCaseBit = ByteVector.broadcast(SPECIES, caseBit(firstLowerCase));
+        ByteVector secondCaseBit = ByteVector.broadcast(SPECIES, caseBit(secondLowerCase));
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, firstLowerCase);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, secondLowerCase);
+        // The loop steps the first probe's position and loads the second probe a fixed distance
+        // from it, so the loop holds one index and one distance, as findFoldCase's front and back
+        // loads did before the pair could move. Stepping the candidate start instead keeps both
+        // offsets live in the loop; inlined into the DFA scan, C2 left them on the stack and
+        // reloaded the array from it on every vector, about 20% slower on 64-byte vectors.
+        int distance = secondOffset - firstOffset;
+        int probePosition = offset + firstOffset;
+        int probeEnd = vectorEnd + firstOffset;
+
+        for (; probePosition < probeEnd; probePosition += SPECIES.length()) {
+            VectorMask<Byte> candidates = ByteVector.fromArray(SPECIES, data, probePosition)
+                    .or(firstCaseBit)
+                    .compare(VectorOperators.EQ, firstVector)
+                    .and(ByteVector.fromArray(SPECIES, data, probePosition + distance)
+                            .or(secondCaseBit)
+                            .compare(VectorOperators.EQ, secondVector));
+            long candidateBits = candidates.toLong();
+            while (candidateBits != 0) {
+                int candidate = probePosition - firstOffset + Long.numberOfTrailingZeros(candidateBits);
+                // Keep sparse verification in this method. When composed with the DFA,
+                // C2 otherwise treats this call site as cold and leaves it out of line.
+                int prefixIndex = 0;
+                while (prefixIndex < prefixSize && asciiLower(data[candidate + prefixIndex]) == asciiLower(prefix[prefixIndex])) {
+                    prefixIndex++;
+                }
+                if (prefixIndex == prefixSize) {
+                    return candidate;
+                }
+                candidateBits &= candidateBits - 1;
+            }
+        }
+        int position = probePosition - firstOffset;
         return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
     }
 
