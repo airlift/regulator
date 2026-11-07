@@ -721,8 +721,9 @@ through one volatile field:
   exclusive retry
 - writers never wait for readers, and a reader never retries because a writer
   ran: it retries as an exclusive search only when a cache entry it needs is
-  missing, or to request paired rows or the pointer table, which only an
-  exclusive search selects
+  missing, to request paired rows or the pointer table, which only an
+  exclusive search selects, or, as a count, to judge other searches' resets
+  where the pointer table can be given back
 - the inner literal search runs its reverse prefix search and forward
   confirmation in one pass over one captured root per DFA; when the pass cannot
   finish, for example at a missing transition, the two searches run separately
@@ -1119,7 +1120,61 @@ and retries, per reset.
 Failure to fund the next geometric expansion from the budget remains ordinary
 DFA budget exhaustion and follows the existing reset and matcher-fallback
 policy. Apart from a withheld table, once an instance selects this native
-table, it does not switch to object rows as the DFA grows.
+table, it does not switch to object rows as the DFA grows, with one exception.
+
+The table's per-state charge leaves room for fewer states per reset than object
+rows, and whether a reset keeps or withholds the table depends on whether a
+collection has already found the superseded segments, so the same search could
+reset often enough to fall back with the table and keep going without it.
+Two rules give up for resetting too often: a search whose reset follows the
+previous one too closely, and a count that resets twice during a rejected byte
+scan, which then leaves later counts and group-zero finds to the other engines.
+While the DFA holds the table or has it withheld, either rule gives the table
+back instead and the search or count goes on. The next reset publishes tables
+without it, and the count's two resets are counted after that reset. So the
+table's charge never causes a fallback by itself: a DFA gives up for resetting
+too often only by counting resets that ran on object rows.
+
+Giving the table back records the release on the instance under the cache
+mutation lock and changes no published generation or table. A search reads the
+table only through the generation it captured, checks that generation's table
+before any flag, and leaves the table for object rows of the same generation,
+so a reader still on an older generation keeps using that generation's table,
+and a stale flag costs at most one exclusive retry. A count counts its two
+resets from the start of its current attempt or, once the table is given back,
+from the reset that drops it; a retry for any other reason starts a new
+attempt, as before. A count that does not hold the lock cannot reset or give
+the table back, so the resets it sees are other searches'. When two of them
+come, a count on a DFA that has held the table and not given it back, or gave
+it back after the count judged those resets and before two resets followed the
+one that drops it, hands the decision to the lock, keeping the matches it
+counted and its start: under the lock it judges the same resets, gives the
+table back if it still holds it, and searches again from the match where it
+stopped. A count without the lock on a DFA that never held the table, or gave
+it back before those resets, gives up as before.
+
+The table stays given back for the instance's life, which is the compiled
+pattern's: each program has one DFA instance per match kind, shared by every
+matcher and thread that uses the pattern. Later searches on that DFA run on
+object rows with paired transitions disabled, including searches the table
+would have made faster, and the table stays given back even when the search
+that gave it back falls back anyway. That later slowdown is accepted in place
+of an NFA fallback now.
+
+Where those object-row resets begin still follows the history before the
+release, and that history depends on collection timing: the cap can withhold the
+table at one reset and keep it at the next, so the release, and the resets after
+it, land at different input positions. A search or count right at a threshold
+can therefore fall back in one run and not in another. Results are identical
+either way; the residual changes only which engine runs at a threshold. The
+`([a-q][^u-z]{23}x)` sequence at a 16 MiB budget is the known example: whether
+the collector has run decides whether the count's next two-reset check finds
+more or less than the byte scan's 64 KiB minimum remaining, so later counts and
+finds run on the NFA and BitState in one run and on the DFA in the other.
+Removing the residual means making states per reset independent of collection
+timing, which changes the superseded cap that copy-on-reset's native memory
+bound rests on; that is left to a separate change.
+
 Explicitly unlimited DFAs remain object-based because they have no finite
 native-allocation budget. Paired transitions remain disabled across later
 resets because pairing was evaluated first.
