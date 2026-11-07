@@ -1703,11 +1703,21 @@ final class RustRegexpParser
             return Regexp.repeat(nodeFlags, child, (int) min, (int) max);
         }
 
-        // A translation for testing keeps a repetition of a repetition nested, as the crate's
-        // HIR does, where Regexp.star, plus, and quest squash it.
+        /// Builds `*`, `+`, or `?` over `child`. The crate keeps a repetition of a repetition as
+        /// two nodes, and RE2's constructors squash two with the same greed into one, which keeps
+        /// the crate's priority except where a lazy `??` repeats a lazy `+?`, or a lazy loop
+        /// repeats a lazy `??`: squashing `(?:x+?)??`, `(?:x??)*?`, or `(?:x??)+?` to `x*?` lets
+        /// a repetition around it, as in `(?:b|(?:a+?)??)*`, revisit the lazy body before the
+        /// squashed loop's own exit. Those stay two nodes. The other squashes explore the same
+        /// paths in the same order, and they keep a lazy loop of a lazy loop, as in
+        /// `(?:(?:a?)*?)+?`, from flattening to a reverse program that grows with the square of
+        /// the nesting; the forward program's loop roots keep it near its own size either way.
+        /// A translation for testing keeps every repetition of a repetition nested, as the
+        /// crate's HIR does.
         private Regexp unaryRepetition(RegexpOp op, int nodeFlags, Regexp child)
         {
-            if (keepNestedRepetitions) {
+            boolean optionalMeetsLoop = op == RegexpOp.QUEST ? child.op() == RegexpOp.PLUS : child.op() == RegexpOp.QUEST;
+            if (keepNestedRepetitions || (optionalMeetsLoop && (nodeFlags & Regexp.NON_GREEDY) != 0)) {
                 return Regexp.rawUnary(op, nodeFlags, child);
             }
             return switch (op) {

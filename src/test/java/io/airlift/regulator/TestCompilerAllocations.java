@@ -192,6 +192,36 @@ public class TestCompilerAllocations
             assertThat(wordsBytes).isLessThan(64);
         }
 
+        // The Rust loop pass runs on the flattening scratch every program has, so even nested
+        // optionals that put every instruction on one cycle allocate nothing more. The allowance
+        // covers the pairs of partition bounds that sorting the extra roots allocates until the
+        // JIT compiles the sort, about 300 bytes here.
+        String nest = "a";
+        for (int depth = 0; depth < 1025; depth++) {
+            nest = "(?:" + nest + ")" + (depth % 2 == 0 ? "?" : "??");
+        }
+        ParseResult parsed = RustRegexpParser.parse(utf8Slice("(?:" + nest + ")+?"), RustRegexp.Options.defaults().syntaxFlags(), 4096);
+        Regexp nestRegexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        long loopPassScratchBytes = Long.MAX_VALUE;
+        long scratchBytes = Long.MAX_VALUE;
+        for (int run = 0; run < 5; run++) {
+            for (boolean keepsNullableLoopPriority : List.of(true, false)) {
+                Prog program = Compiler.compileNormalizedForBenchmark(nestRegexp, false, 64 << 20, Compiler.CompileStage.OPTIMIZED, Compiler.Dialect.RUST, parsed.caseFolding());
+                program.setKeepsNullableLoopPriority(keepsNullableLoopPriority);
+                long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                program.flatten();
+                long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+                long copiesBytes = program.size() * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
+                if (keepsNullableLoopPriority) {
+                    loopPassScratchBytes = Math.min(loopPassScratchBytes, flattenBytes - copiesBytes);
+                }
+                else {
+                    scratchBytes = Math.min(scratchBytes, flattenBytes - copiesBytes);
+                }
+            }
+        }
+        assertThat(loopPassScratchBytes).isLessThanOrEqualTo(scratchBytes + 512);
+
         // Trino compiles a greedy nullable loop with a clone of its body for the empty-iteration
         // check, so nested empty loops compile to 391 instructions that flatten to 42. The program
         // must still keep an instruction array within the flattened charge's doubling allowance.
@@ -207,11 +237,14 @@ public class TestCompilerAllocations
         // Flattening copies each list's epsilon closure, and a lazy loop over a nullable body puts
         // the loops inside it in many closures, so the flattened program grows with the square of
         // the program the instruction limit bounds. Unchecked, the a? pattern allocated 309 MB to
-        // compile. Each language now stops at the forward program's share of the default budget.
+        // compile. Oversized flattened programs stop at the forward program's share of the
+        // default budget; RE2, Java and Trino reach it here.
         String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
         assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
         assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(nullableLoops)));
-        assertCompileRejectedWithinBudget(() -> RustRegexp.compile(utf8Slice(nullableLoops)));
+        // Rust gives each alternation on a loop's cycle a list of its own, so no closure runs
+        // through the loops inside it and the program flattens to about 6,009 instructions.
+        assertThat(RustRegexp.compile(utf8Slice(nullableLoops)).forwardProgramForDiagnostics().size()).isLessThan(7_000);
         // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
         assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
     }

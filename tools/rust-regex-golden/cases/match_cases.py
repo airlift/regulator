@@ -262,6 +262,8 @@ for name, pattern, text in [
     ("word_boundary_loop", "(\\b)*a", "a"),
     ("anchor_loop", "(^)*a", "a"),
     ("anchor_loop_after_start", "(^)*b", "ab"),
+    ("star_of_empty_or_plus_after_byte", "a(?:|b+)*", "ab"),
+    ("star_of_lazy_optional_of_lazy_plus", "(?:b|(?:a+?)??)*", "baaa"),
 ]:
     case(f"nullable_{name}", pattern, text)
 

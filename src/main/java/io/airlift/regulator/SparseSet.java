@@ -76,6 +76,15 @@ final class SparseSet
         size = Math.min(size, newMaxSize);
     }
 
+    /// Clears the set and returns its dense array, whose contents are unspecified, for use as
+    /// scratch until the set is next used. `Prog.markLoopRoots` borrows it from the flattening
+    /// pass's reachable set for its search indexes.
+    int[] clearAndBorrowDense()
+    {
+        size = 0;
+        return dense;
+    }
+
     public boolean contains(int indexValue)
     {
         if (indexValue < 0 || indexValue >= maxSize()) {

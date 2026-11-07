@@ -451,6 +451,24 @@ original pattern, including when quoting rewrites it before parsing.
   Above the default limit, classes keep two parse costs that `RuneRangeSet`
   accepts: n log² n for nested unions whose operand weights stay just past its
   balanced-merge ratio, and the class size per `~~` toggle of wide ranges.
+- A repetition of a body that can match the empty string keeps the crate's
+  priority, which is crate parity rather than a new difference. The crate
+  compiles `x*` as `(?:x+)?`, as RE2 does, but searches that program
+  unflattened. Upstream RE2's flattening enters the loop's list as if fresh
+  from inside an iteration, so a lower-priority branch of the iteration runs
+  ahead of the loop's exit: C++ RE2 matches `ab` with `a(?:|b+)*` where the
+  crate matches `a`. A forward Rust program with such a loop, greedy or lazy,
+  gives each alternation on a cycle of instructions that consume no input a
+  list of its own, which a search visits once, and so flattens to about its
+  own size. RE2 programs keep upstream's flattening. Trino ends a greedy loop
+  on an empty iteration, as Joni does (see the
+  [Trino language reference](docs/reference/languages/TRINO_REGEXP.md#other-matching-differences-from-joni)),
+  so its program has no such cycle, and Java's loops follow the JDK's
+  own rule instead (see
+  [Java Regular-Subset Frontend](#java-regular-subset-frontend)). For the
+  same reason the parser keeps a lazy repetition of a different lazy
+  repetition, such as `(?:a+?)??`, rather than squashing it to `a*?` as RE2
+  does; the squashes that keep priority stay.
 - The crate's 10 MiB compiled-size limit is not reproduced, because an
   approximation of the crate's size estimate would disagree near the limit.
   Compilation is bounded by `maxMemory` instead; the
