@@ -227,14 +227,15 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
-    public void testNullableLoopsEndOnEmptyIterationMatchJdk()
+    public void testNullableLoopsMatchJdk()
     {
-        // The JDK's Loop node repeats a body that can match the empty string, and it ends the
-        // repetition on an iteration that consumes nothing, even below the minimum count. That
-        // decides the spans of greedy loops, the groups after them, and which counted iterations
-        // run. The JDK's backtracker can move its resume point after a failure inside a count, a
-        // recorded difference, so the finds after an exhausted find, lookingAt, and matches are
-        // not compared.
+        // The JDK's Loop and LazyLoop nodes repeat a body that can match the empty string. They
+        // end the repetition on an iteration that consumes nothing, even below the minimum count,
+        // and start each iteration afresh, so a loop nested in the body starts over. That decides
+        // the spans of the loops, the groups after them, and which counted iterations run. The
+        // JDK's backtracker can move its resume
+        // point after a failure inside a count, a recorded difference, so the finds after an
+        // exhausted find, lookingAt, and matches are not compared.
         for (Map.Entry<String, String> entry : List.of(
                 Map.entry("(?:|[^z])*\\p{IsL}", "!aa"),
                 Map.entry("(?:\\H|\\D??)*", "a\t"),
@@ -245,6 +246,9 @@ public class TestJavaRegexpDifferential
                 Map.entry("(?:\\Bß?){2}", "ßßa"),
                 Map.entry("(?:a|){0,2}?a", "aa"),
                 Map.entry("(?:a|){2,}", "aaa"),
+                Map.entry("(?:a*?|ab)*?b", "aabb"),
+                Map.entry("(?:a*?|ab)*?(b*)$", "aab"),
+                Map.entry("(?:a*?|ab){2,}?b", "aaabb"),
                 // The body matches empty only through \B, so the pattern has no reverse program,
                 // and find locates each match start without one.
                 Map.entry("x(?:\\Ba?){2}y", "zzzxay xy xaay"))) {

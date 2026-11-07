@@ -47,7 +47,7 @@ public class TestTrinoNullableRepetition
     }
 
     @Test
-    public void testGreedyNullableRepetitionMatchesPinnedJoni()
+    public void testNullableRepetitionMatchesPinnedJoni()
     {
         for (String pattern : new String[] {
                 "(?:a?|b)*",
@@ -62,6 +62,8 @@ public class TestTrinoNullableRepetition
                 "(?:a?|b)*?",
                 "(?:a?|b)+?",
                 "(?:a?|b){1,}?",
+                "(?:a*?|ab)*?b",
+                "(?:a*?|ab)*?(b*)$",
                 "(?:a?|b){0,3}",
                 "(?:a?|\\b)*",
                 "a(?:^)*b",
@@ -78,6 +80,7 @@ public class TestTrinoNullableRepetition
                     utf8Slice("a"),
                     utf8Slice("ab"),
                     utf8Slice("aab"),
+                    utf8Slice("aabb"),
                     utf8Slice("b"),
                     utf8Slice("x💰aab"),
             }) {
@@ -316,8 +319,9 @@ public class TestTrinoNullableRepetition
         String pattern = "(?:a?|b)";
         for (int depth = 0; depth < 24; depth++) {
             // The optional branch prevents simplification from collapsing the nested loops. Each
-            // loop may clone its epsilon-reachable prefix, but never the post-consumption graph.
-            pattern = "(?:(?:" + pattern + ")*|c?)";
+            // loop, greedy or lazy, may clone its epsilon-reachable prefix, but never the
+            // post-consumption graph.
+            pattern = "(?:(?:" + pattern + ")*" + (depth % 2 == 0 ? "" : "?") + "|c?)";
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
             int size = regexp.re2().programSize();
             assertThat(size).isLessThan((depth + 8) * (depth + 8));
