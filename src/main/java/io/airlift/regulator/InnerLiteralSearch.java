@@ -484,21 +484,29 @@ final class InnerLiteralSearch
         return forward;
     }
 
-    // The search loop of a pattern with a byte gate: as in search, with each hit first checked
-    // against the gates, so the fallbacks see only the hits that pass.
+    // The search of a pattern with a byte gate. A window without a hit, as most lines of a grep
+    // are, returns here without entering the loop; see REGULATOR_DECISIONS.md, Inner Literal Byte
+    // Gates.
     private long searchGated(Slice text, int contextStart, int contextEnd, int start, int end)
+    {
+        int literalStart = nextLiteral(text, start, end);
+        if (literalStart < 0) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+        return searchGatedFrom(text, contextStart, contextEnd, start, end, literalStart);
+    }
+
+    // The search loop of a pattern with a byte gate, from the hit at `firstLiteralStart`: as in
+    // search, with each hit first checked against the gates, so the fallbacks see only the hits
+    // that pass.
+    private long searchGatedFrom(Slice text, int contextStart, int contextEnd, int start, int end, int firstLiteralStart)
     {
         // The reverse search may read back to the end of the previous candidate, and a candidate
         // may not start inside the text the previous confirmation read.
         int minimumMatchStart = start;
         int minimumLiteralStart = start;
-        int scanStart = start;
         boolean firstCandidate = true;
-        while (end - scanStart >= minimumLiteralLength) {
-            int literalStart = findLiteral(text, scanStart, end - scanStart);
-            if (literalStart < 0) {
-                return Dfa.SEARCH_NO_MATCH;
-            }
+        for (int literalStart = firstLiteralStart; literalStart >= 0; literalStart = nextLiteral(text, literalStart + 1, end)) {
             if (!passesByteGates(text, start, literalStart, end)) {
                 // No match uses the literal here, which is all a rejection by the DFAs would tell
                 // the loop, so the scan moves on as after a DFA rejection. No reverse search ran,
@@ -508,7 +516,6 @@ final class InnerLiteralSearch
                 // slash after a letter would send a short line holding a date to the ordinary
                 // engine, or inside text a confirmation read, since a skipped hit runs no DFA to
                 // read that text again.
-                scanStart = literalStart + 1;
                 continue;
             }
             if (firstCandidate && literalStart - start < MINIMUM_SKIPPED_BYTES) {
@@ -529,10 +536,15 @@ final class InnerLiteralSearch
             if (candidate != Dfa.SEARCH_NO_MATCH) {
                 minimumLiteralStart = Dfa.anchoredStopPosition(candidate);
             }
-            scanStart = literalStart + 1;
             minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // The first hit in `[scanStart, end)`, or -1 when there is none.
+    private int nextLiteral(Slice text, int scanStart, int end)
+    {
+        return end - scanStart < minimumLiteralLength ? -1 : findLiteral(text, scanStart, end - scanStart);
     }
 
     // Whether the bytes next to the literal at `literalStart` can be those of a match in
