@@ -524,7 +524,7 @@ abstract sealed class CompiledPattern
             Prog partialProgram = placeholderProgram;
             if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
-                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, availableMemory);
                     Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
@@ -556,13 +556,9 @@ abstract sealed class CompiledPattern
                     null);
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
-        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
-
         // For "^literal...", compile only the suffix and check the required prefix before matching.
         // Retain the suffix AST so reverse-program construction also avoids the stripped literal.
         Regexp suffixRegexp;
-        int encodedMatchLength;
         byte[] requiredPrefix = null;
         boolean prefixFoldCase = false;
         Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix(caseFolding);
@@ -570,15 +566,20 @@ abstract sealed class CompiledPattern
             requiredPrefix = prefixResult.prefix().getBytes();
             prefixFoldCase = prefixResult.foldCase();
             suffixRegexp = prefixResult.suffix();
-            // The whole-expression analysis describes the entire expression, so the split-off
-            // suffix needs its own length.
-            encodedMatchLength = MatchLength.analyze(suffixRegexp, caseFolding).encoded();
         }
         else {
             suffixRegexp = entireRegexp;
-            encodedMatchLength = expressionAnalysis.length().encoded();
         }
-        Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp, caseFolding);
+        // The suffix is the program compiled below, so simplify it first, checking that its
+        // expansion can fit before expanding anything.
+        Regexp normalizedSuffixRegexp = Simplifier.simplify(suffixRegexp, caseFolding, forwardMemory);
+        // The entire expression adds only its leading anchors and the stripped literal prefix to a
+        // suffix whose expansion passed that check, so simplifying it needs no budget of its own.
+        Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding);
+        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
+        // The whole-expression analysis describes the entire expression, so a split-off suffix
+        // needs its own length.
+        int encodedMatchLength = prefixResult != null ? MatchLength.analyze(suffixRegexp, caseFolding).encoded() : expressionAnalysis.length().encoded();
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
         Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
@@ -1029,9 +1030,10 @@ abstract sealed class CompiledPattern
             return null;
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding);
+        Regexp normalizedRegexp;
         Prog program;
         try {
+            normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding, forwardMemory);
             program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         }
         catch (RegexpCompileException ignored) {

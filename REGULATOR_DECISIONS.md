@@ -656,6 +656,16 @@ text, so the pair scan rejects little that a first-byte scan would not.
   compressed class pointers, which a heap of 32 GB or more keeps; only with
   them explicitly turned off, deprecated in JDK 25 and obsolete in JDK 27, is
   an instruction 64 bytes and the charges 1 to 3 percent short.
+- Simplification expands counted repetition into copies before the compiler
+  counts anything. It counts the expansion as it builds it and fails with the
+  memory-limit exception once the count passes the compiler's limits for the
+  same budget: twice the instruction limit in node visits, and the instruction
+  limit in instructions. The count never exceeds what the compiler counts for
+  the result, so the check rejects no pattern the compiler would accept, and a
+  repetition too large to compile fails before its copies take the heap.
+  Copies in a branch that the simplifier removes because it never matches are
+  never built or counted, although upstream's compiler emits and counts that
+  branch.
 - A long leading literal keeps a prefix shift table, configured after
   flattening from what the flatten charge left. A forward program whose table
   does not fit its share fails to compile.

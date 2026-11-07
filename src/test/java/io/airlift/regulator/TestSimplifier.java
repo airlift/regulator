@@ -19,6 +19,7 @@ import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestSimplifier
 {
@@ -109,6 +110,53 @@ public class TestSimplifier
     }
 
     @Test
+    public void testCoalescedRepeatCountsSaturate()
+    {
+        // Coalescing summed repeat counts in an int, so two repeats of a billion overflowed into
+        // a negative count. The sum now saturates, and the budget rejects it before expansion.
+        Regexp half = Regexp.repeat(Regexp.LIKE_PERL, Regexp.literal(Regexp.LIKE_PERL, 'a'), 1 << 30, 1 << 30);
+        Regexp halves = Regexp.concat(Regexp.LIKE_PERL, List.of(half, half));
+        Regexp coalesced = Simplifier.Coalescer.coalesce(halves, CaseFolding.RE2);
+        assertThat(coalesced.op()).isEqualTo(RegexpOp.REPEAT);
+        assertThat(coalesced.min()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(coalesced.max()).isEqualTo(Integer.MAX_VALUE);
+        assertThatThrownBy(() -> Simplifier.simplify(halves, CaseFolding.RE2, Re2.Options.DEFAULT_MAX_MEMORY))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+    }
+
+    @Test
+    public void testExpansionBudgetAcceptsWhatTheCompilerAccepts()
+    {
+        // The expansion count is a lower bound on what the compiler counts for the same budget, so
+        // a repetition whose expansion compiles is never rejected for its size while it expands.
+        List<String> patterns = List.of(
+                "a{40}",
+                "(?:abc){20,30}",
+                "(?i:abc){25}",
+                "(?:[a-c]x){10,}",
+                "(?:(a)|b\\b){15}",
+                "(?:x*){12}",
+                "(?:a+){3,9}?",
+                "(?:(?:ab){2,4}){6}",
+                "^(?:\\w\\d?){1,20}$",
+                "(?:é|Ā){18}",
+                "(?:\\p{L}a){12}",
+                "(?:ß|ss){10,20}",
+                "(?:a{0,3}b){8}",
+                // Bound by the visit limit: the never-matching branch is visited but emits nothing.
+                "(?:x|([^\\s\\S])){100}",
+                // The never-matching branch discards its copies of a, which count nothing.
+                "(?:a{0,1000}(?:[^\\s\\S]|[^\\s\\S]){1})|z",
+                // Every rune folded, and ß folded in full to ss.
+                "(?i:straße){12}");
+        for (String pattern : patterns) {
+            assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.RE2, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL));
+            assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.RE2, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.LATIN1));
+            assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.TRINO, TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.FOLD_CASE));
+        }
+    }
+
+    @Test
     public void testSimplifyReturnsUnchangedNodes()
     {
         for (String pattern : List.of("(a+)x*[b-d]", "(?:ab)?[0-9]+z", "(x[a-f]+)+")) {
@@ -122,5 +170,35 @@ public class TestSimplifier
     private static Regexp parse(String pattern)
     {
         return RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+    }
+
+    private static void assertExpansionFitsWhereCompileFits(String pattern, Compiler.Dialect dialect, ParseResult parsed)
+    {
+        Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        // No program fits in the compiler's fixed 512-byte overhead.
+        long rejected = 512;
+        long compiled = 1 << 24;
+        assertThat(compiles(simplified, compiled, dialect, parsed.caseFolding())).as(pattern).isTrue();
+        while (compiled - rejected > 1) {
+            long budget = (rejected + compiled) >>> 1;
+            if (compiles(simplified, budget, dialect, parsed.caseFolding())) {
+                compiled = budget;
+            }
+            else {
+                rejected = budget;
+            }
+        }
+        Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), compiled);
+    }
+
+    private static boolean compiles(Regexp simplified, long maxMemory, Compiler.Dialect dialect, CaseFolding caseFolding)
+    {
+        try {
+            Compiler.compileNormalized(simplified, false, maxMemory, dialect, caseFolding);
+            return true;
+        }
+        catch (RegexpCompileMemoryLimitException ignored) {
+            return false;
+        }
     }
 }
