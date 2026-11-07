@@ -113,7 +113,10 @@ final class VectorPrefixScanner
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds the first occurrence of the first prefixSize bytes of prefix under the folded
-    // prefix rule: both sides map A-Z to a-z, and every other byte compares exactly.
+    // prefix rule: both sides map A-Z to a-z, and every other byte compares exactly. Candidates
+    // need both the first and last bytes before the whole folded prefix is compared. The prefix
+    // holds at most nine bytes, so failed comparisons stay bounded and the scan needs no KMP
+    // budget.
     static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize)
     {
         int candidateCount = length - prefixSize + 1;
@@ -134,14 +137,33 @@ final class VectorPrefixScanner
         ByteVector backVector = ByteVector.broadcast(SPECIES, backLowerCase);
         int position = offset;
 
-        for (; position < vectorEnd; position += SPECIES.length()) {
-            VectorMask<Byte> candidates = ByteVector.fromArray(SPECIES, data, position)
-                    .or(frontCaseBit)
-                    .compare(VectorOperators.EQ, frontVector)
-                    .and(ByteVector.fromArray(SPECIES, data, position + backOffset)
-                            .or(backCaseBit)
-                            .compare(VectorOperators.EQ, backVector));
-            long candidateBits = candidates.toLong();
+        while (position < vectorEnd) {
+            // Each pass counts the whole vectors left and runs a loop that only tests each one for
+            // a candidate; candidates are verified after it breaks, as in find, so C2 can compile
+            // the test loop as an innermost counted loop.
+            //
+            // The candidate test compares and ANDs on every platform: "Candidate Masks on SVE" in
+            // REGULATOR_DECISIONS.md records that the XOR form lost for this scan on r9g. Keep
+            // every vector and mask in this method: a vector or mask returned from a helper C2
+            // leaves out of line is boxed on every search.
+            int steps = (vectorEnd - position) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position + step * SPECIES.length();
+                if (ByteVector.fromArray(SPECIES, data, stepPosition).or(frontCaseBit).compare(VectorOperators.EQ, frontVector)
+                        .and(ByteVector.fromArray(SPECIES, data, stepPosition + backOffset).or(backCaseBit).compare(VectorOperators.EQ, backVector))
+                        .anyTrue()) {
+                    break;
+                }
+            }
+            position += step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            // Rebuild this vector's candidates as bits.
+            long candidateBits = ByteVector.fromArray(SPECIES, data, position).or(frontCaseBit).compare(VectorOperators.EQ, frontVector)
+                    .and(ByteVector.fromArray(SPECIES, data, position + backOffset).or(backCaseBit).compare(VectorOperators.EQ, backVector))
+                    .toLong();
             while (candidateBits != 0) {
                 int candidate = position + Long.numberOfTrailingZeros(candidateBits);
                 // Keep sparse verification in this method. When composed with the DFA,
@@ -155,6 +177,7 @@ final class VectorPrefixScanner
                 }
                 candidateBits &= candidateBits - 1;
             }
+            position += SPECIES.length();
         }
         return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
     }

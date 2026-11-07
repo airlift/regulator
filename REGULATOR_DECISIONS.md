@@ -2436,6 +2436,20 @@ Shorter searches, and longer ones without vector scanning, use eight-byte SWAR
 words, so short scans pay no vector setup. A single folded byte keeps its SWAR
 byte search. Vector linkage stays in `VectorPrefixScanner`.
 
+Like the [literal prefix scan](#literal-prefix-vector-scan), each pass of the
+folded vector scan counts the whole vectors left, runs a loop that only tests
+each one for a candidate, and verifies candidates after it breaks, so C2 can
+compile the test loop as an innermost counted loop; the earlier scan verified
+inside its vector loop. The scan no longer fits C2's 325-byte inline limit and
+runs out of line from Prog, as the literal prefix scan does, and
+`TestHotMethodSize` caps its size. Failed candidates need no comparison budget,
+because the folded prefix holds at most nine bytes. With JDK 25 the counted
+loop alone took 0.75x to 0.83x the earlier scan's time for `(?i)Sherlock
+Holmes` in Rust and Java on both platforms, and 0.73x to 0.83x for `(?i)Twain`
+and CPython's `timeout` on r9g. On r8i, whose 64-byte vectors hold a candidate
+of a common pair far more often, it took 1.11x to 1.22x for those two and for
+RE2's Latin-1 `(?i)Sherlock Holmes`.
+
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
 independent loads and parallel masks, which fits HotSpot code generation better

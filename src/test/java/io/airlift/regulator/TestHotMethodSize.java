@@ -211,9 +211,9 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
-    /// Keeps the literal prefix scan larger than FreqInlineSize, so every caller calls its
-    /// compiled method rather than an inlined copy, as "Literal Prefix Vector Scan" in
-    /// REGULATOR_DECISIONS.md records, and caps it at the size it was measured at: growing it
+    /// Keeps the literal and folded prefix scans larger than FreqInlineSize, so every caller calls
+    /// their compiled methods rather than inlined copies, as "Literal Prefix Vector Scan" in
+    /// REGULATOR_DECISIONS.md records, and caps each at the size it was measured at: growing it
     /// further changes code that was measured only at this size. Keep every vector and mask inside
     /// the method or in helpers C2 inlines at each call site: one returned from a helper that C2
     /// left out of line was boxed on every search.
@@ -224,6 +224,11 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.find bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(469);
+        // The folded prefix scan has the same counted-loop shape and runs out of line the same way.
+        assertThat(codeLength(VectorPrefixScanner.class, "findFoldCase"))
+                .as("VectorPrefixScanner.findFoldCase bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(405);
     }
 
     /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the
