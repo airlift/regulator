@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -609,6 +610,48 @@ public class TestFilteredRe2
         assertThat(actualAtoms)
                 .as("EmptyStringInStringSetBug")
                 .isEqualTo(expectedAtoms);
+    }
+
+    @Test
+    public void testDeepPatternsAreStackSafe()
+            throws InterruptedException
+    {
+        List<String> patterns = List.of(
+                // Coalesces to a{0,3000}, a chain of optional repetitions 3,000 levels deep.
+                "a{0,1000}a{0,1000}a{0,1000}",
+                // Deep group nesting survives simplification.
+                "(".repeat(10_000) + "abc" + ")".repeat(10_000),
+                // Alternations nested in concatenations build a prefilter 2,001 levels deep.
+                "(?:(?:abc)+(?:".repeat(1_000) + "def" + ")|xyz)".repeat(1_000),
+                // Past upstream's limit on visits to the simplified regexp, so it is unfiltered although
+                // it requires abc.
+                "abc" + "x{0,1000}".repeat(40));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread builderThread = new Thread(null, () -> {
+            try {
+                FilteredRe2.Builder builder = FilteredRe2.builder();
+                for (String pattern : patterns) {
+                    builder.add(utf8(pattern), Re2.Options.defaults());
+                }
+                FilteredRe2 filteredRe2 = builder.build();
+                List<Slice> atoms = filteredRe2.atoms();
+                assertThat(atoms).extracting(Slice::toStringUtf8).containsExactlyInAnyOrder("abc", "def", "xyz");
+
+                assertThat(filteredRe2.potentialPatternIds(new int[0])).containsExactly(0, 3);
+                assertThat(filteredRe2.matchingPatternIds(utf8("zabc"), findAtomIndices(atoms, List.of("abc")))).containsExactly(0, 1, 3);
+                assertThat(filteredRe2.matchingPatternIds(utf8("xyz"), findAtomIndices(atoms, List.of("xyz")))).containsExactly(0, 2);
+                int[] nestedAtomIds = findAtomIndices(atoms, List.of("abc", "def"));
+                assertThat(filteredRe2.matchingPatternIds(utf8("abc".repeat(1_000) + "def"), nestedAtomIds)).containsExactly(0, 1, 2, 3);
+            }
+            catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, "filtered-re2-small-stack", 256 * 1024);
+
+        builderThread.start();
+        builderThread.join();
+
+        assertThat(failure.get()).isNull();
     }
 
     private static Slice textBytes(String value)

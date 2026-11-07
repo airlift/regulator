@@ -2337,6 +2337,9 @@ pattern-ID arrays instead of caller-mutated boxed lists. A `FilteredRe2`
 collection uses one encoding and exposes its immutable canonical atom list.
 Callers scan `canonicalizeText(input)` and pass primitive atom IDs from the
 external scanner; mixed UTF-8 and Latin-1 patterns are rejected by the builder.
+Building a pattern's prefilter stops after upstream's 100,000 visits of the
+simplified regexp, and such a pattern is left unfiltered, always a candidate, as
+upstream does.
 
 ## Bounded Candidate-Start Cursor
 
