@@ -222,52 +222,89 @@ public class TestJavaRegexpDifferential
                 fixedWidthSpan,
                 literalAlternationSpan,
                 dotStarSpan)) {
-            Pattern jdk = Pattern.compile(pattern);
-            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
-            RegexpMatcher actual = regexp.matcher(utf8Slice(""));
-            for (String input : inputs) {
-                Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
-                String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
-                // Every input character is in the BMP, so every UTF-16 offset is a code point boundary.
-                for (int start = 0; start <= input.length(); start++) {
-                    for (int end = start; end <= input.length(); end++) {
-                        String description = "%s on [%s] [%s, %s)".formatted(pattern, escaped, start, end);
-                        int byteStart = utf8Offset(input, start);
-                        int byteEnd = utf8Offset(input, end);
-                        Matcher expected = jdk.matcher(input).region(start, end);
-                        actual.reset(source, byteStart, byteEnd);
-                        while (expected.find()) {
-                            assertSameMatch(description + " find", input, true, expected, actual.find() ? actual.toMatchResult() : null);
-                        }
-                        assertThat(actual.find()).as(description + " extra find").isFalse();
-                        assertSameMatch(description + " find after failure", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
-                        assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
-                        assertSameMatch(description + " find after lookingAt", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
-                        assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
-                        assertSameMatch(description + " find after matches", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
-                        for (int findStart = 0; findStart <= input.length(); findStart++) {
-                            Matcher restarted = jdk.matcher(input).region(start, end);
-                            actual.reset(source, byteStart, byteEnd);
-                            boolean actualFound = actual.find(utf8Offset(input, findStart));
-                            assertSameMatch(description + " find(" + findStart + ")", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
-                            assertSameMatch(description + " find after find(" + findStart + ")", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
-                            // find(int) must forget the last match even when the region already covers the whole input.
-                            actualFound = actual.find(utf8Offset(input, findStart));
-                            assertSameMatch(description + " find(" + findStart + ") again", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
-                            assertSameMatch(description + " find after find(" + findStart + ") again", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
-                        }
+            assertEveryRegionMatchesJdk(pattern, inputs, true);
+        }
+    }
 
-                        Matcher transparent = jdk.matcher(input).region(start, end).useTransparentBounds(true).useAnchoringBounds(false);
-                        boolean found = transparent.find();
-                        assertThat(regexp.find(source, byteStart, byteEnd)).as(description + " ranged find").isEqualTo(found);
-                        assertSameMatch(description + " ranged find", input, found, transparent, regexp.findResult(source, byteStart, byteEnd));
-                        boolean lookingAt = transparent.lookingAt();
-                        assertThat(regexp.lookingAt(source, byteStart, byteEnd)).as(description + " ranged lookingAt").isEqualTo(lookingAt);
-                        assertSameMatch(description + " ranged lookingAt", input, lookingAt, transparent, regexp.lookingAtResult(source, byteStart, byteEnd));
-                        boolean matches = transparent.matches();
-                        assertThat(regexp.matches(source, byteStart, byteEnd)).as(description + " ranged matches").isEqualTo(matches);
-                        assertSameMatch(description + " ranged matches", input, matches, transparent, regexp.matchesResult(source, byteStart, byteEnd));
+    @Test
+    public void testNullableLoopsEndOnEmptyIterationMatchJdk()
+    {
+        // The JDK's Loop node repeats a body that can match the empty string, and it ends the
+        // repetition on an iteration that consumes nothing, even below the minimum count. That
+        // decides the spans of greedy loops, the groups after them, and which counted iterations
+        // run. The JDK's backtracker can move its resume point after a failure inside a count, a
+        // recorded difference, so the finds after an exhausted find, lookingAt, and matches are
+        // not compared.
+        for (Map.Entry<String, String> entry : List.of(
+                Map.entry("(?:|[^z])*\\p{IsL}", "!aa"),
+                Map.entry("(?:\\H|\\D??)*", "a\t"),
+                Map.entry("(?:[^-]??)*\\b", "Ÿa"),
+                Map.entry(".[^ΐ](?:σ||.)*", "aaaaaσa"),
+                Map.entry("(?:\\D??)*([^\\p{IsCyrillic}]|)", "aa"),
+                Map.entry("(?:|\\H)*(?:|B())", "aB"),
+                Map.entry("(?:\\Bß?){2}", "ßßa"),
+                Map.entry("(?:a|){0,2}?a", "aa"),
+                Map.entry("(?:a|){2,}", "aaa"),
+                // The body matches empty only through \B, so the pattern has no reverse program,
+                // and find locates each match start without one.
+                Map.entry("x(?:\\Ba?){2}y", "zzzxay xy xaay"))) {
+            assertEveryRegionMatchesJdk(entry.getKey(), List.of(entry.getValue()), false);
+        }
+    }
+
+    private static void assertEveryRegionMatchesJdk(String pattern, List<String> inputs, boolean compareFindsAfterFailure)
+    {
+        Pattern jdk = Pattern.compile(pattern);
+        JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+        RegexpMatcher actual = regexp.matcher(utf8Slice(""));
+        for (String input : inputs) {
+            Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
+            String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
+            // Every input character is in the BMP, so every UTF-16 offset is a code point boundary.
+            for (int start = 0; start <= input.length(); start++) {
+                for (int end = start; end <= input.length(); end++) {
+                    String description = "%s on [%s] [%s, %s)".formatted(pattern, escaped, start, end);
+                    int byteStart = utf8Offset(input, start);
+                    int byteEnd = utf8Offset(input, end);
+                    Matcher expected = jdk.matcher(input).region(start, end);
+                    actual.reset(source, byteStart, byteEnd);
+                    while (expected.find()) {
+                        assertSameMatch(description + " find", input, true, expected, actual.find() ? actual.toMatchResult() : null);
                     }
+                    assertThat(actual.find()).as(description + " extra find").isFalse();
+                    if (compareFindsAfterFailure) {
+                        assertSameMatch(description + " find after failure", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
+                    }
+                    assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
+                    if (compareFindsAfterFailure) {
+                        assertSameMatch(description + " find after lookingAt", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
+                    }
+                    assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
+                    if (compareFindsAfterFailure) {
+                        assertSameMatch(description + " find after matches", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
+                    }
+                    for (int findStart = 0; findStart <= input.length(); findStart++) {
+                        Matcher restarted = jdk.matcher(input).region(start, end);
+                        actual.reset(source, byteStart, byteEnd);
+                        boolean actualFound = actual.find(utf8Offset(input, findStart));
+                        assertSameMatch(description + " find(" + findStart + ")", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
+                        assertSameMatch(description + " find after find(" + findStart + ")", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
+                        // find(int) must forget the last match even when the region already covers the whole input.
+                        actualFound = actual.find(utf8Offset(input, findStart));
+                        assertSameMatch(description + " find(" + findStart + ") again", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
+                        assertSameMatch(description + " find after find(" + findStart + ") again", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
+                    }
+
+                    Matcher transparent = jdk.matcher(input).region(start, end).useTransparentBounds(true).useAnchoringBounds(false);
+                    boolean found = transparent.find();
+                    assertThat(regexp.find(source, byteStart, byteEnd)).as(description + " ranged find").isEqualTo(found);
+                    assertSameMatch(description + " ranged find", input, found, transparent, regexp.findResult(source, byteStart, byteEnd));
+                    boolean lookingAt = transparent.lookingAt();
+                    assertThat(regexp.lookingAt(source, byteStart, byteEnd)).as(description + " ranged lookingAt").isEqualTo(lookingAt);
+                    assertSameMatch(description + " ranged lookingAt", input, lookingAt, transparent, regexp.lookingAtResult(source, byteStart, byteEnd));
+                    boolean matches = transparent.matches();
+                    assertThat(regexp.matches(source, byteStart, byteEnd)).as(description + " ranged matches").isEqualTo(matches);
+                    assertSameMatch(description + " ranged matches", input, matches, transparent, regexp.matchesResult(source, byteStart, byteEnd));
                 }
             }
         }

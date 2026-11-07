@@ -38,15 +38,22 @@ final class Simplifier
 
     static Regexp simplify(Regexp regexp, CaseFolding caseFolding)
     {
-        return simplify(regexp, caseFolding, 0);
+        return simplify(regexp, caseFolding, Compiler.Dialect.RE2, 0);
     }
 
-    /// Simplifies an expression for a program compiled with `maxMemory`. Simplification expands
-    /// counted repetition into copies. RE2, Java, and Trino limit each count to 1,000, but
-    /// adjacent repetitions coalesce first into a count that can exceed it, and Rust counts have
-    /// no such limit. The compiler checks its instruction and node visit limits only as it
-    /// compiles the expansion, so this counts the expansion as it is built (see
-    /// [ExpansionBudget]) and fails once it passes either limit.
+    static Regexp simplify(Regexp regexp, CaseFolding caseFolding, long maxMemory)
+    {
+        return simplify(regexp, caseFolding, Compiler.Dialect.RE2, maxMemory);
+    }
+
+    /// Simplifies an expression for a program compiled in `dialect` with `maxMemory`.
+    /// Simplification expands counted repetition into copies. RE2, Java, and Trino limit each
+    /// count to 1,000, but adjacent repetitions coalesce first into a count that can exceed it,
+    /// and Rust counts have no such limit. The compiler checks its instruction and node visit
+    /// limits only as it compiles the expansion, so this counts the expansion as it is built (see
+    /// [ExpansionBudget]) and fails once it passes either limit. The Java dialect keeps a counted
+    /// repetition of two or more copies of a body that can match the empty string, which the
+    /// compiler lowers with the JDK's loop rule; every other repetition is expanded.
     ///
     /// A non-positive `maxMemory` sets no limit, and the expansion is not checked. A compile
     /// without a budget still has a node visit limit, which the expansion can reach before the
@@ -54,23 +61,25 @@ final class Simplifier
     ///
     /// @throws RegexpCompileMemoryLimitException if a compile with `maxMemory` cannot fit the
     ///         expansion
-    static Regexp simplify(Regexp regexp, CaseFolding caseFolding, long maxMemory)
+    static Regexp simplify(Regexp regexp, CaseFolding caseFolding, Compiler.Dialect dialect, long maxMemory)
     {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(caseFolding, "caseFolding is null");
+        requireNonNull(dialect, "dialect is null");
         // Upstream simplify.cc runs a coalescing pass before simplification.
         Regexp coalesced = Coalescer.coalesce(regexp, caseFolding);
         // The compiler compiles a Latin-1 program when the expression it is given carries LATIN1.
         ExpansionBudget budget = new ExpansionBudget(coalesced, maxMemory, (regexp.parseFlags() & Regexp.LATIN1) != 0);
-        return simplifyInternal(coalesced, Mode.FULL, budget, caseFolding);
+        return simplifyInternal(coalesced, dialect == Compiler.Dialect.JAVA ? Mode.JAVA_FULL : Mode.FULL, budget, caseFolding);
     }
 
     /// Parse-time canonicalization that intentionally preserves counted repetitions (`{n,m}`),
     /// matching upstream RE2 parse.cc behavior (parse dumps still contain `rep{...}` nodes).
     ///
-    /// Compiler pipelines eliminate counted repeats with [#simplify(Regexp,CaseFolding,long)] (FULL),
-    /// passing the program's memory budget. Analyses may use the unbudgeted
-    /// [#simplify(Regexp,CaseFolding)].
+    /// Compiler pipelines eliminate counted repeats with
+    /// [#simplify(Regexp,CaseFolding,Compiler.Dialect,long)], passing the program's memory budget,
+    /// apart from the nullable ones the Java dialect keeps for its compiler. Analyses may use the
+    /// unbudgeted [#simplify(Regexp,CaseFolding)].
     static Regexp simplifyForParse(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
@@ -80,7 +89,11 @@ final class Simplifier
 
     private enum Mode
     {
-        PARSE, FULL
+        PARSE,
+        FULL,
+        // FULL, except that a counted repetition of two or more copies of a nullable body stays
+        // for the Java compiler.
+        JAVA_FULL,
     }
 
     // A full simplification counts its expansion against `budget`; a parse-mode one has none.
@@ -131,7 +144,7 @@ final class Simplifier
             case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
             case REPEAT -> discardsChild(mode, regexp)
                     ? simplifyZeroRepeat(flags, regexp)
-                    : simplifyRepeat(mode, budget, flags, regexp, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1));
+                    : simplifyRepeat(mode, budget, caseFolding, flags, regexp, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1));
             case CONCAT -> {
                 // Set up here rather than in a helper, so each nesting level takes no extra frame.
                 ConcatBuilder builder = new ConcatBuilder(caseFolding);
@@ -139,7 +152,7 @@ final class Simplifier
             }
             case ALTERNATE -> (mode == Mode.PARSE)
                     ? toRegexp(simplifyAlternativeForParse(regexp, caseFolding, depth, false))
-                    : simplifyAlternateRecursive(budget, caseFolding, flags, regexp, depth);
+                    : simplifyAlternateRecursive(mode, budget, caseFolding, flags, regexp, depth);
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
@@ -309,7 +322,7 @@ final class Simplifier
                 case QUEST -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.QUEST, regexp);
                 case REPEAT -> discardsChild(mode, regexp)
                         ? simplifyZeroRepeat(flags, regexp)
-                        : simplifyRepeat(mode, budget, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
+                        : simplifyRepeat(mode, budget, caseFolding, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
                 case CONCAT -> {
                     Object lone = loneValue(simplifiedChildren);
                     if (parentValue instanceof Regexp parent && parent.op() == RegexpOp.CONCAT) {
@@ -401,7 +414,7 @@ final class Simplifier
         };
     }
 
-    private static Regexp simplifyRepeat(Mode mode, ExpansionBudget budget, int flags, Regexp regexp, Regexp childRegexp)
+    private static Regexp simplifyRepeat(Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int flags, Regexp regexp, Regexp childRegexp)
     {
         int min = regexp.min();
         int max = regexp.max();
@@ -423,6 +436,14 @@ final class Simplifier
             max = Math.min(max, 1);
         }
         budget.addRepeat(flags, childRegexp, min, max);
+
+        // The JDK ends a repetition on any iteration that matches empty, even below the minimum,
+        // so a Java repetition of a nullable body keeps its count for the compiler. One copy
+        // needs no count: x{0,} and x{1,} compile as STAR and PLUS, and x{0,1} is a JDK Ques.
+        // The repeat limit nests at most nine counts of two or more, so these body walks stay linear.
+        if (mode == Mode.JAVA_FULL && (max == -1 ? min : max) >= 2 && MatchLength.analyze(childRegexp, caseFolding).minimum() == 0) {
+            return childRegexp == regexp.child(0) ? regexp : Regexp.repeat(flags, childRegexp, min, max);
+        }
 
         // x{n,} means at least n matches of x.
         if (max == -1) {
@@ -478,7 +499,7 @@ final class Simplifier
     // unsimplified rather than expand repetition inside it only to discard it.
     private static boolean discardsChild(Mode mode, Regexp regexp)
     {
-        return mode == Mode.FULL && regexp.op() == RegexpOp.REPEAT && regexp.max() == 0;
+        return mode != Mode.PARSE && regexp.op() == RegexpOp.REPEAT && regexp.max() == 0;
     }
 
     // An empty child is kept as the result, as simplifyRepeat keeps it. Upstream simplifies the
@@ -535,9 +556,10 @@ final class Simplifier
     /// would pass either limit fails before it is built.
     ///
     /// The compiler visits a node once for each reference to it, so the count charges each
-    /// reference. A repetition charges its child's copies beyond the first at the child's size,
-    /// and the operators and concatenations it nests them in, so copies of a shared child are
-    /// charged without being walked.
+    /// reference. It visits the child of a repetition that Java's simplification keeps once for
+    /// each copy it compiles, so that child is charged once per copy. A repetition charges its
+    /// child's copies beyond the first at the child's size, and the operators and concatenations
+    /// it nests them in, so copies of a shared child are charged without being walked.
     ///
     /// The count must never reject what compiles, so for an expansion that reaches the compiler
     /// it is at most what the compiler visits and emits. A copy keeps its nodes and runes when its
@@ -659,10 +681,13 @@ final class Simplifier
                     pending.pop();
                     long nodeVisits = 1;
                     long nodeInstructions = instructions(node);
+                    // Only Java's simplification keeps a repetition, which the compiler compiles
+                    // with its child once per copy.
+                    long copies = node.op() == RegexpOp.REPEAT ? (node.max() == -1 ? node.min() : node.max()) : 1;
                     for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
                         Size childSize = sizes.get(node.child(childIndex));
-                        nodeVisits += childSize.visits();
-                        nodeInstructions += childSize.instructions();
+                        nodeVisits = addCopies(nodeVisits, copies, childSize.visits(), maxVisits);
+                        nodeInstructions = addCopies(nodeInstructions, copies, childSize.instructions(), maxInstructions);
                     }
                     sizes.put(node, new Size(nodeVisits, nodeInstructions));
                 }
@@ -682,8 +707,8 @@ final class Simplifier
                     boolean matchesBytes = latin1 || (regexp.parseFlags() & Regexp.LATIN1) != 0;
                     yield (!charClass.isEmpty() && (!matchesBytes || charClass.range(0).low() <= 0xFF)) ? 1 : 0;
                 }
-                // A no-match and a concatenation emit nothing of their own, and a simplified
-                // child holds no repetition.
+                // A no-match and a concatenation emit nothing of their own, and a repetition
+                // that Java's simplification keeps counts only its child's copies.
                 case NO_MATCH, CONCAT, REPEAT -> 0;
                 // A capture or an alternation emits instructions, but none around a body or for a
                 // branch that never matches, so they count none on purpose.
@@ -1164,11 +1189,11 @@ final class Simplifier
         return Regexp.alternate(flags, merged);
     }
 
-    private static Regexp simplifyAlternateRecursive(ExpansionBudget budget, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
+    private static Regexp simplifyAlternateRecursive(Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
     {
         List<Regexp> simplifiedAlternatives = new ArrayList<>();
         for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, Mode.FULL, budget, caseFolding, depth + 1);
+            Regexp simplifiedChild = simplifyRecursive(child, mode, budget, caseFolding, depth + 1);
             if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
                 continue;
             }
@@ -1932,7 +1957,7 @@ final class Simplifier
         if (charClass.isEmpty()) {
             return Regexp.noMatch(flags);
         }
-        if (mode == Mode.FULL) {
+        if (mode != Mode.PARSE) {
             // A full character class can be represented more compactly as '.' (ANY_CHAR)
             // or '\C' (ANY_BYTE) depending on the rune range in effect.
             if (charClass.rangeCount() == 1) {

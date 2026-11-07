@@ -148,12 +148,33 @@ public class TestSimplifier
                 // The never-matching branch discards its copies of a, which count nothing.
                 "(?:a{0,1000}(?:[^\\s\\S]|[^\\s\\S]){1})|z",
                 // Every rune folded, and ß folded in full to ss.
-                "(?i:straße){12}");
+                "(?i:straße){12}",
+                // Java keeps the inner repetitions of a body that can match empty, and compiles
+                // their bodies once per copy inside each copy of the outer one.
+                "(?:(?:a?){10}b){100}",
+                "(?:x(?:a?|b?){3,7}){20}",
+                "(?:(?:a?){4,}b){30}",
+                "(?:(?:a?){2,6}?c){25}",
+                "(?:(?:a?){10}){100}");
         for (String pattern : patterns) {
             assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.RE2, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL));
             assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.RE2, RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.LATIN1));
             assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.TRINO, TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL | Regexp.FOLD_CASE));
+            assertExpansionFitsWhereCompileFits(pattern, Compiler.Dialect.JAVA, JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags()));
         }
+    }
+
+    @Test
+    public void testJavaExpansionBudgetCountsKeptRepetitionCopies()
+    {
+        // Java's simplification keeps the inner repetition, whose body can match empty, and the
+        // compiler compiles that body ten times in each of the hundred copies of the outer one.
+        // The count charged that body once in each outer copy instead of ten times, so
+        // simplification accepted a budget the compiler rejects only later.
+        String pattern = "(?:(?:a?){10}b){100}";
+        ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
+        assertThatThrownBy(() -> Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), Compiler.Dialect.JAVA, 65_536))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
     }
 
     @Test
@@ -174,7 +195,7 @@ public class TestSimplifier
 
     private static void assertExpansionFitsWhereCompileFits(String pattern, Compiler.Dialect dialect, ParseResult parsed)
     {
-        Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), dialect, 0);
         // No program fits in the compiler's fixed 512-byte overhead.
         long rejected = 512;
         long compiled = 1 << 24;
@@ -188,7 +209,7 @@ public class TestSimplifier
                 rejected = budget;
             }
         }
-        Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), compiled);
+        Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), dialect, compiled);
     }
 
     private static boolean compiles(Regexp simplified, long maxMemory, Compiler.Dialect dialect, CaseFolding caseFolding)

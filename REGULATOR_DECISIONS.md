@@ -334,6 +334,18 @@ Upstream's own never-capture test uses only unnamed groups.
   contract.
 - `JavaRegexp.Options` exposes the supported compile flags as mutable chainable
   options. Compilation snapshots their values and copies the pattern bytes.
+- A repetition of a body that can match the empty string follows the JDK's
+  loop rule, which is JDK parity rather than a new difference: an iteration
+  that consumes nothing ends the repetition, even below its minimum count.
+  Greedy `*` and `+` loops share Trino's input-progress lowering, and lazy
+  ones keep RE2's program, since a lazy loop tries its exit before another
+  iteration. A counted repetition that still has two or more copies after the
+  simplifier drops an empty body and cuts an assertion-only body to one copy
+  stays counted, and the compiler gives each copy an exit from the repetition
+  that it takes when it consumes nothing. When such a body matches empty only
+  through an assertion and the minimum count is two or more, what the pattern
+  matches can depend on the reading direction, as in `(?:^a?){2}`, so the
+  pattern compiles no reverse program.
 - `\G`, `\R`, nullable repeated captures, canonical equivalence, lookaround,
   backreferences, atomic groups, and possessive quantifiers remain deterministic
   compile-time rejections because their observable semantics do not map to the
@@ -503,7 +515,7 @@ original pattern, including when quoting rewrites it before parsing.
   rather than routing syntax through the RE2 parser or a dialect enum.
   Unsupported constructs and same-text/different-meaning collisions are
   rejected explicitly, apart from the documented differences below.
-- Greedy unbounded repetition of a nullable body uses a Trino-only input-progress
+- Greedy unbounded repetition of a nullable body uses an input-progress
   lowering: once an iteration succeeds without consuming input, the repetition
   stops instead of reconsidering lower-priority alternatives. The lowering
   represents pre-consumption and post-consumption execution with ordinary
@@ -518,7 +530,9 @@ original pattern, including when quoting rewrites it before parsing.
   and Oniguruma
   [7dde69a](https://github.com/kkos/oniguruma/commit/7dde69aef839ffa7ab12f5c14133f8c7dd28d237)
   removed them as bugs ([Ruby #17341](https://bugs.ruby-lang.org/issues/17341)),
-  so `(?:a+?)+` matches all of `aa`, where Trino matches each `a`.
+  so `(?:a+?)+` matches all of `aa`, where Trino matches each `a`. The Java
+  frontend shares the input-progress lowering (see
+  [Java Regular-Subset Frontend](#java-regular-subset-frontend)).
 - Capture-sensitive nullable loops can differ from Joni after that no-progress
   point. Joni's backtracking engine retains capture histories and may reconsider
   a different iteration path to extend the match; Regulator's bounded Thompson
