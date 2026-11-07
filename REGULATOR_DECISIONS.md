@@ -360,11 +360,23 @@ original pattern, including when quoting rewrites it before parsing.
   Rust `regex` crate. Its results must match the crate's on valid UTF-8 input,
   and in byte mode on any input, except for Unicode property names and
   characters that differ between the crate's Unicode 16.0 tables and the
-  pinned Unicode 18.0 database; see the
-  [Rust language reference](docs/reference/languages/RUST_REGEXP.md#unicode-properties).
+  pinned Unicode 18.0 database (see the
+  [Rust language reference](docs/reference/languages/RUST_REGEXP.md#unicode-properties)),
+  and for the alternation rule recorded below.
   The pinned crate is the authority, recorded in committed fixtures; the Maven
   build never builds the crate's golden tool, and runs it only when
   `-Dregulator.fuzz.rustOracle` names it.
+- Alternation is leftmost-first as the crate documents it: in `x|y`, `x` is
+  preferred, so `a*a|a*b` on `ab` matches `a`. The pinned crate's HIR
+  constructors lift a prefix common to every alternative out of the
+  alternation, so the crate matches `a*a|a*b` as `a*(?:a|b)` and reports
+  `ab`. That differs from its own rule whenever the lifted prefix can match
+  more than one length. Upstream tracks it as
+  [rust-lang/regex#1400](https://github.com/rust-lang/regex/issues/1400), and
+  its fix, [#1401](https://github.com/rust-lang/regex/pull/1401), is
+  unreleased. Regulator departs from the crate here and follows the
+  documented rule, as it does for RE2's `[Kk]|x`, so an alternation means
+  the same thing whatever its alternatives share.
 - `RustRegexpParser` builds a private syntax tree shaped like the crate's and
   checks the nest limit before translating, so the crate's error precedence is
   preserved. Each crate error kind maps to a `RegexpParseErrorCode`, and the

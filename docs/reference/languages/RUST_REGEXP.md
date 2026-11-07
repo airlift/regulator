@@ -9,7 +9,9 @@ Results match the crate on valid UTF-8 input, and in byte mode on any input,
 for every pattern both accept, except where they depend on Unicode data:
 properties, the Unicode `\d`, `\s`, and `\w` classes, word boundaries, and case
 folding follow Regulator's Unicode 18.0 database rather than the crate's
-Unicode 16.0 tables; see [Unicode properties](#unicode-properties).
+Unicode 16.0 tables; see [Unicode properties](#unicode-properties). They also
+differ on an alternation whose alternatives share a prefix that can match more
+than one length; see [Matching](#matching).
 Compilation rejects every pattern the crate rejects as invalid, plus the
 [unsupported features](#unsupported-features) below. Regulator can accept a
 pattern the crate refuses as too large; see
@@ -41,8 +43,11 @@ The compiled-pattern operations have the same signatures as `JavaRegexp`:
 boolean `find`, `lookingAt`, and `matches`; `count`; caller-owned capture
 arrays through `findInto`, `lookingAtInto`, and `matchesInto`; immutable
 `MatchResult` values; and reusable `RegexpMatcher` instances with an optional
-retained prefix of capturing groups. Matching is leftmost-first, as in the
-crate. Captures are zero-copy Slice views.
+retained prefix of capturing groups. Matching is leftmost-first, as the crate
+documents it. Where the crate's HIR constructors break that rule, as in
+`a*a|a*b`, which the crate matches as `a*(?:a|b)`, Regulator follows the rule;
+see [Rust Frontend](../../../REGULATOR_DECISIONS.md#rust-frontend). Captures
+are zero-copy Slice views.
 
 `RustRegexp` returns the shared `RegexpMatcher`, which applies the crate's
 search rules to Rust patterns:
@@ -71,7 +76,8 @@ parses Rust strings; an invalid pattern fails with `BAD_UTF8`.
 
 `RustRegexp.Options.bytes()`, or `setBytes(true)`, compiles the pattern as the
 crate's `regex::bytes::Regex`, which matches arbitrary bytes. Results match the
-crate on every input, including bytes that are not UTF-8:
+crate on every input, including bytes that are not UTF-8, apart from the
+alternation difference in [Matching](#matching):
 
 - Without Unicode mode, `.`, negated classes, `\W`, `\D`, `\S`, and the escapes
   `\x80` through `\xFF` match single bytes: `(?-u:.)` matches the byte `0xFF`,

@@ -46,6 +46,7 @@ import io.airlift.regulator.TestingPatternTree.Repeat;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -66,6 +67,7 @@ import static io.airlift.regulator.TestingPatternTree.foldsAddedAfter;
 import static io.airlift.regulator.TestingPatternTree.quantifier;
 import static io.airlift.regulator.TestingPatternTree.rangeHolds;
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /// Differential fuzzing of [RustRegexp] against the pinned `regex` crate, through the
@@ -494,6 +496,320 @@ public class TestRustRegexpFuzz
     /// A pattern the crate compiled: its row fields and capture metadata.
     record RustCompiled(String patternHex, String options, String groupCount, String groupNames) {}
 
+    // The crate's HIR, its high-level intermediate representation of a parsed pattern, as the
+    // crate's HIR constructors build it, modelled as far as they decide which alternation
+    // prefixes the crate lifts. They flatten concatenations and nested alternations, join
+    // adjacent literals, and lift a prefix that every alternative shares.
+    private static final class CrateHir
+    {
+        // A count of characters with no bound
+        private static final long UNBOUNDED = Long.MAX_VALUE;
+
+        private boolean liftsVariablePrefix;
+
+        private CrateHir() {}
+
+        /// Whether the crate's HIR constructors lift a prefix that can match more than one
+        /// length out of an alternation, from the tree RustRegexpParser translates before
+        /// Regulator's simplification reshapes it.
+        static boolean liftsVariablePrefix(Regexp translated)
+        {
+            CrateHir hir = new CrateHir();
+            hir.build(translated);
+            return hir.liftsVariablePrefix;
+        }
+
+        // The translation already drops groups that do not capture and applies the crate's
+        // repetition rules, so a node maps to the HIR node of the same kind.
+        private Hir build(Regexp regexp)
+        {
+            return switch (regexp.op()) {
+                case EMPTY_MATCH -> new HirEmpty();
+                case LITERAL -> literal(regexp, new int[] {regexp.rune()});
+                case LITERAL_STRING -> literal(regexp, regexp.runes());
+                case CHAR_CLASS -> hirClass(regexp.charClass().rangeView(), (regexp.parseFlags() & Regexp.LATIN1) != 0);
+                case ANY_CHAR -> hirClass(List.of(new RuneRange(0, CharClass.RUNEMAX)), false);
+                case ANY_BYTE -> hirClass(List.of(new RuneRange(0, 0xFF)), true);
+                case STAR -> repetition(regexp, 0, -1);
+                case PLUS -> repetition(regexp, 1, -1);
+                case QUEST -> repetition(regexp, 0, 1);
+                case REPEAT -> repetition(regexp, regexp.min(), regexp.max());
+                case CAPTURE -> new HirCapture(regexp.captureIndex(), build(regexp.child(0)));
+                case CONCAT -> concat(regexp.children().stream().map(this::build).toList());
+                case ALTERNATE -> alternation(regexp.children().stream().map(this::build).toList());
+                case BEGIN_LINE, END_LINE, BEGIN_TEXT, END_TEXT, WORD_BOUNDARY, NO_WORD_BOUNDARY -> new HirLook(regexp);
+                // The crate's expression that never matches is an empty class.
+                case NO_MATCH -> hirClass(List.of(), false);
+                case HAVE_MATCH -> throw new IllegalArgumentException("a translated pattern has no match instruction");
+            };
+        }
+
+        private Hir repetition(Regexp regexp, int min, int max)
+        {
+            return new HirRepetition(min, max, (regexp.parseFlags() & Regexp.NON_GREEDY) == 0, build(regexp.child(0)));
+        }
+
+        // The crate's literals are bytes: a byte string's own, or else the UTF-8 of its characters.
+        private static Hir literal(Regexp regexp, int[] runes)
+        {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            for (int rune : runes) {
+                if ((regexp.parseFlags() & Regexp.LATIN1) != 0) {
+                    bytes.write(rune);
+                }
+                else {
+                    bytes.writeBytes(Character.toString(rune).getBytes(UTF_8));
+                }
+            }
+            return new HirLiteral(byteString(bytes.toByteArray()));
+        }
+
+        // A class of one member is that literal.
+        private static Hir hirClass(List<RuneRange> ranges, boolean bytes)
+        {
+            CharClassBuilder builder = new CharClassBuilder();
+            for (RuneRange range : ranges) {
+                builder.addRange(range.low(), range.high());
+            }
+            List<RuneRange> normalized = builder.toCharClass().rangeView();
+            if (normalized.size() == 1 && normalized.getFirst().low() == normalized.getFirst().high()) {
+                int member = normalized.getFirst().low();
+                return new HirLiteral(bytes ? Character.toString(member) : byteString(Character.toString(member).getBytes(UTF_8)));
+            }
+            return new HirClass(List.copyOf(normalized), bytes);
+        }
+
+        // Flattens a nested concatenation, drops empty items, and joins adjacent literals.
+        private static Hir concat(List<Hir> subs)
+        {
+            List<Hir> items = new ArrayList<>();
+            for (Hir sub : subs) {
+                for (Hir item : sub instanceof HirConcat concat ? concat.items() : List.of(sub)) {
+                    if (item instanceof HirEmpty) {
+                        continue;
+                    }
+                    if (item instanceof HirLiteral literal && !items.isEmpty() && items.getLast() instanceof HirLiteral prior) {
+                        items.set(items.size() - 1, new HirLiteral(prior.bytes() + literal.bytes()));
+                        continue;
+                    }
+                    items.add(item);
+                }
+            }
+            return switch (items.size()) {
+                case 0 -> new HirEmpty();
+                case 1 -> items.getFirst();
+                default -> new HirConcat(List.copyOf(items));
+            };
+        }
+
+        // Flattens nested alternations, joins alternatives that are all single characters, all
+        // single bytes, or all classes into one class, and otherwise lifts the prefix that every
+        // alternative shares, when each is a concatenation.
+        private Hir alternation(List<Hir> subs)
+        {
+            List<Hir> alternatives = new ArrayList<>();
+            for (Hir sub : subs) {
+                alternatives.addAll(sub instanceof HirAlternation alternation ? alternation.alternatives() : List.of(sub));
+            }
+            if (alternatives.size() == 1) {
+                return alternatives.getFirst();
+            }
+            Hir joined = joinedClass(alternatives);
+            if (joined != null) {
+                return joined;
+            }
+            if (alternatives.stream().allMatch(HirConcat.class::isInstance)) {
+                List<List<Hir>> concats = alternatives.stream().map(alternative -> ((HirConcat) alternative).items()).toList();
+                List<Hir> first = concats.getFirst();
+                int common = first.size();
+                for (List<Hir> concat : concats) {
+                    int shared = 0;
+                    while (shared < Math.min(common, concat.size()) && first.get(shared).equals(concat.get(shared))) {
+                        shared++;
+                    }
+                    common = shared;
+                }
+                if (common > 0) {
+                    List<Hir> prefix = first.subList(0, common);
+                    if (!prefix.stream().allMatch(CrateHir::fixedLength)) {
+                        liftsVariablePrefix = true;
+                    }
+                    int length = common;
+                    List<Hir> items = new ArrayList<>(prefix);
+                    items.add(alternation(concats.stream().map(concat -> concat(concat.subList(length, concat.size()))).toList()));
+                    return concat(items);
+                }
+            }
+            return new HirAlternation(List.copyOf(alternatives));
+        }
+
+        private static Hir joinedClass(List<Hir> alternatives)
+        {
+            if (alternatives.stream().allMatch(alternative -> alternative instanceof HirLiteral literal && characterCount(literal) == 1)) {
+                return hirClass(alternatives.stream().map(alternative -> character((HirLiteral) alternative)).toList(), false);
+            }
+            if (alternatives.stream().allMatch(alternative -> alternative instanceof HirLiteral literal && literal.bytes().length() == 1)) {
+                return hirClass(alternatives.stream().map(alternative -> singleton(((HirLiteral) alternative).bytes().charAt(0))).toList(), true);
+            }
+            if (!alternatives.stream().allMatch(HirClass.class::isInstance)) {
+                return null;
+            }
+            List<HirClass> classes = alternatives.stream().map(HirClass.class::cast).toList();
+            List<RuneRange> ranges = classes.stream().flatMap(hirClass -> hirClass.ranges().stream()).toList();
+            // A union holds characters, or bytes when a byte class in it is not ASCII; it cannot
+            // hold both a byte and a character outside ASCII.
+            boolean bytes = classes.stream().anyMatch(hirClass -> hirClass.bytes() && !hirClass.ascii());
+            if (bytes && classes.stream().anyMatch(hirClass -> !hirClass.bytes() && !hirClass.ascii())) {
+                return null;
+            }
+            return hirClass(ranges, bytes);
+        }
+
+        private static RuneRange character(HirLiteral literal)
+        {
+            return singleton(new String(byteArray(literal.bytes()), UTF_8).codePointAt(0));
+        }
+
+        private static RuneRange singleton(int codePoint)
+        {
+            return new RuneRange(codePoint, codePoint);
+        }
+
+        // A literal or a class matches a fixed number of bytes; anything else does when it
+        // matches a fixed number of characters.
+        private static boolean fixedLength(Hir hir)
+        {
+            if (hir instanceof HirLiteral || hir instanceof HirClass) {
+                return true;
+            }
+            Length length = length(hir);
+            return length != null && length.min() == length.max();
+        }
+
+        // The fewest and most characters `hir` matches, or null when a byte that is not a
+        // whole character leaves the count of characters unknown.
+        private static Length length(Hir hir)
+        {
+            return switch (hir) {
+                case HirEmpty _, HirLook _ -> new Length(0, 0);
+                case HirLiteral literal -> {
+                    int count = characterCount(literal);
+                    yield count < 0 ? null : new Length(count, count);
+                }
+                case HirClass hirClass -> hirClass.bytes() && !hirClass.ascii() ? null : new Length(1, 1);
+                case HirCapture capture -> length(capture.sub());
+                case HirRepetition repetition -> {
+                    Length sub = length(repetition.sub());
+                    yield sub == null ? null : new Length(times(repetition.min(), sub.min()), times(repetition.max() < 0 ? UNBOUNDED : repetition.max(), sub.max()));
+                }
+                case HirConcat concat -> {
+                    long min = 0;
+                    long max = 0;
+                    for (Hir item : concat.items()) {
+                        Length itemLength = length(item);
+                        if (itemLength == null) {
+                            yield null;
+                        }
+                        min = plus(min, itemLength.min());
+                        max = plus(max, itemLength.max());
+                    }
+                    yield new Length(min, max);
+                }
+                case HirAlternation alternation -> {
+                    long min = UNBOUNDED;
+                    long max = 0;
+                    for (Hir alternative : alternation.alternatives()) {
+                        Length alternativeLength = length(alternative);
+                        if (alternativeLength == null) {
+                            yield null;
+                        }
+                        min = Math.min(min, alternativeLength.min());
+                        max = Math.max(max, alternativeLength.max());
+                    }
+                    yield new Length(min, max);
+                }
+            };
+        }
+
+        // The characters of a literal, or -1 when its bytes are not UTF-8.
+        private static int characterCount(HirLiteral literal)
+        {
+            byte[] bytes = byteArray(literal.bytes());
+            String text = new String(bytes, UTF_8);
+            return Arrays.equals(text.getBytes(UTF_8), bytes) ? text.codePointCount(0, text.length()) : -1;
+        }
+
+        // A literal's bytes are held as a string of one Latin-1 character per byte.
+        private static String byteString(byte[] bytes)
+        {
+            return new String(bytes, ISO_8859_1);
+        }
+
+        private static byte[] byteArray(String byteString)
+        {
+            return byteString.getBytes(ISO_8859_1);
+        }
+
+        private static long times(long count, long length)
+        {
+            if (count == 0 || length == 0) {
+                return 0;
+            }
+            return count == UNBOUNDED || length == UNBOUNDED ? UNBOUNDED : count * length;
+        }
+
+        private static long plus(long left, long right)
+        {
+            return left == UNBOUNDED || right == UNBOUNDED ? UNBOUNDED : left + right;
+        }
+
+        private sealed interface Hir
+                permits HirAlternation,
+                        HirCapture,
+                        HirClass,
+                        HirConcat,
+                        HirEmpty,
+                        HirLiteral,
+                        HirLook,
+                        HirRepetition {}
+
+        private record HirEmpty()
+                implements Hir {}
+
+        // The literal's bytes, one Latin-1 character per byte
+        private record HirLiteral(String bytes)
+                implements Hir {}
+
+        private record HirClass(List<RuneRange> ranges, boolean bytes)
+                implements Hir
+        {
+            boolean ascii()
+            {
+                return ranges.isEmpty() || ranges.getLast().high() < 0x80;
+            }
+        }
+
+        // An assertion, compared as the translated node
+        private record HirLook(Regexp look)
+                implements Hir {}
+
+        // A repetition, with -1 for no maximum
+        private record HirRepetition(int min, int max, boolean greedy, Hir sub)
+                implements Hir {}
+
+        private record HirCapture(int index, Hir sub)
+                implements Hir {}
+
+        private record HirConcat(List<Hir> items)
+                implements Hir {}
+
+        private record HirAlternation(List<Hir> alternatives)
+                implements Hir {}
+
+        // The fewest and most characters a node matches, UNBOUNDED for no most
+        private record Length(long min, long max) {}
+    }
+
     /// The pinned crate as the oracle, through `rust-regex-golden --mode=match`. A pattern
     /// compiles as a search of the empty text; each case asks for the whole input and for the
     /// region.
@@ -570,7 +886,30 @@ public class TestRustRegexpFuzz
                 }
                 throw new IllegalArgumentException(json.getString("error") + " " + json.getString("errorKind"));
             }
+            // The crate's HIR constructors lift a prefix that every alternative shares out of the
+            // alternation, so the crate prefers a later alternative where the prefix can match
+            // more than one length, as in a*a|a*b; Regulator keeps leftmost-first
+            // (REGULATOR_DECISIONS.md, Rust Frontend).
+            if (liftsVariablePrefix(pattern, options)) {
+                throw new OracleSkipException("crate lifts an alternation prefix");
+            }
             return new RustCompiled(patternHex, optionsField, json.getString("groupCount"), json.getString("groupNames"));
+        }
+
+        // Whether the crate lifts a prefix that can match more than one length out of an
+        // alternation; see CrateHir.
+        private static boolean liftsVariablePrefix(String pattern, int options)
+        {
+            RustRegexp.Options rustOptions = options(options);
+            Regexp translated;
+            try {
+                translated = RustRegexpParser.translateForTesting(utf8Slice(pattern), rustOptions.syntaxFlags(), rustOptions.nestLimit());
+            }
+            catch (RegexpParseException _) {
+                // The compile comparison reports a pattern only the crate accepts.
+                return false;
+            }
+            return CrateHir.liftsVariablePrefix(translated);
         }
 
         @Override

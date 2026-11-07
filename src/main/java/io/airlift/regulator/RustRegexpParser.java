@@ -73,6 +73,23 @@ final class RustRegexpParser
 
     static ParseResult parse(Slice pattern, int syntaxFlags, int nestLimit)
     {
+        Translation translation = translation(pattern, syntaxFlags, nestLimit, false);
+        Regexp regexp = translation.regexp();
+        Regexp simplifiedRegexp = Simplifier.simplifyForParse(regexp, CASE_FOLDING);
+        // Simplification can remove a group that never matches, but the group keeps its name.
+        Map<Integer, String> capturingGroupNames = translation.namesCaptures() ? regexp.captureNames() : Map.of();
+        return new ParseResult(simplifiedRegexp, Translator.capturingGroupCount(regexp), capturingGroupNames, CASE_FOLDING);
+    }
+
+    /// Returns the crate-shaped translation of `pattern`, before simplification. Like the
+    /// crate's HIR, a repetition of a repetition stays nested, as in `(?:a*)?`.
+    static Regexp translateForTesting(Slice pattern, int syntaxFlags, int nestLimit)
+    {
+        return translation(pattern, syntaxFlags, nestLimit, true).regexp();
+    }
+
+    private static Translation translation(Slice pattern, int syntaxFlags, int nestLimit, boolean keepNestedRepetitions)
+    {
         requireNonNull(pattern, "pattern is null");
         if ((syntaxFlags & ~ALL_SYNTAX_FLAGS) != 0 || nestLimit < 0) {
             throw new RegexpParseException(RegexpParseErrorCode.INTERNAL_ERROR, null, -1);
@@ -86,14 +103,14 @@ final class RustRegexpParser
         Parser parser = new Parser(pattern, syntaxFlags, nestLimit);
         Ast ast = parser.parse();
         parser.checkNestLimit(ast);
-        Translator translator = new Translator(parser, syntaxFlags);
+        Translator translator = new Translator(parser, syntaxFlags, keepNestedRepetitions);
         Regexp regexp = translator.translate(ast);
         translator.throwUnsupported();
-        Regexp simplifiedRegexp = Simplifier.simplifyForParse(regexp, CASE_FOLDING);
-        // Simplification can remove a group that never matches, but the group keeps its name.
-        Map<Integer, String> capturingGroupNames = parser.captureNames.isEmpty() ? Map.of() : regexp.captureNames();
-        return new ParseResult(simplifiedRegexp, Translator.capturingGroupCount(regexp), capturingGroupNames, CASE_FOLDING);
+        return new Translation(regexp, !parser.captureNames.isEmpty());
     }
+
+    // A translated pattern, and whether the parser saw a capture name.
+    private record Translation(Regexp regexp, boolean namesCaptures) {}
 
     // The crate's error kinds, each mapped to the closest Regulator error code.
     private enum ErrorKind
@@ -1448,13 +1465,17 @@ final class RustRegexpParser
         private final Parser parser;
         // The crate's utf8 translation option, which only the bytes API turns off.
         private final boolean utf8;
+        // Whether a repetition of a repetition stays nested, as in the crate's HIR, instead of
+        // squashing the way Regexp.star, plus, and quest do.
+        private final boolean keepNestedRepetitions;
         private int flags;
         private RegexpParseException unsupported;
 
-        Translator(Parser parser, int syntaxFlags)
+        Translator(Parser parser, int syntaxFlags, boolean keepNestedRepetitions)
         {
             this.parser = parser;
             this.utf8 = (syntaxFlags & BYTES) == 0;
+            this.keepNestedRepetitions = keepNestedRepetitions;
             this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL | BYTES);
         }
 
@@ -1666,10 +1687,10 @@ final class RustRegexpParser
             boolean greedy = repetition.greedy() != enabled(SWAP_GREED);
             int nodeFlags = greedy ? NODE_FLAGS : NODE_FLAGS | Regexp.NON_GREEDY;
             if (max < 0 && min <= 1) {
-                return min == 0 ? Regexp.star(nodeFlags, child) : Regexp.plus(nodeFlags, child);
+                return unaryRepetition(min == 0 ? RegexpOp.STAR : RegexpOp.PLUS, nodeFlags, child);
             }
             if (min == 0 && max == 1) {
-                return Regexp.quest(nodeFlags, child);
+                return unaryRepetition(RegexpOp.QUEST, nodeFlags, child);
             }
             if (min > MAX_REPEAT || max > MAX_REPEAT) {
                 recordUnsupported(RegexpParseErrorCode.REPEAT_SIZE, "repetition count above " + MAX_REPEAT, repetition.start(), repetition.end());
@@ -1680,6 +1701,20 @@ final class RustRegexpParser
                 return child;
             }
             return Regexp.repeat(nodeFlags, child, (int) min, (int) max);
+        }
+
+        // A translation for testing keeps a repetition of a repetition nested, as the crate's
+        // HIR does, where Regexp.star, plus, and quest squash it.
+        private Regexp unaryRepetition(RegexpOp op, int nodeFlags, Regexp child)
+        {
+            if (keepNestedRepetitions) {
+                return Regexp.rawUnary(op, nodeFlags, child);
+            }
+            return switch (op) {
+                case STAR -> Regexp.star(nodeFlags, child);
+                case PLUS -> Regexp.plus(nodeFlags, child);
+                default -> Regexp.quest(nodeFlags, child);
+            };
         }
 
         // Whether the translated node can match only the empty string, the crate's maximum length
