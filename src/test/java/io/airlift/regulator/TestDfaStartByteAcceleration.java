@@ -418,6 +418,126 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testBackwardByteSetVectorScannersMatchScalarReference()
+    {
+        // The reverse self-loop skip passes findLast any exit bytes and findLastHighBitOr only
+        // ASCII ones, so the random candidates are drawn the same way.
+        Random random = new Random(96);
+        for (int iteration = 0; iteration < 1_000; iteration++) {
+            int offset = random.nextInt(8);
+            int length = random.nextInt(4_097);
+            byte[] data = new byte[offset + length + random.nextInt(8)];
+            for (int index = 0; index < data.length; index++) {
+                data[index] = (byte) (random.nextInt(64) == 0 ? random.nextInt(256) : random.nextInt(128));
+            }
+            int candidateCount = random.nextInt(4);
+            byte first = (byte) random.nextInt(256);
+            byte second = (byte) random.nextInt(256);
+            byte third = (byte) random.nextInt(256);
+            assertFindLastMatchesScalarReference(data, offset, length, first, second, third, candidateCount);
+            byte asciiFirst = (byte) random.nextInt(128);
+            byte asciiSecond = (byte) random.nextInt(128);
+            byte asciiThird = (byte) random.nextInt(128);
+            assertFindLastHighBitOrMatchesScalarReference(data, offset, length, asciiFirst, asciiSecond, asciiThird, candidateCount);
+        }
+
+        byte[] hits = {(byte) 0x80, (byte) 0xFF, 'x', 'y', 'z'};
+        for (int candidateCount = 0; candidateCount <= 3; candidateCount++) {
+            // Long spans without a hit cover every full vector. Hits just outside the range must not
+            // be found.
+            for (int length : new int[] {4_096, 4_097}) {
+                for (int offset : new int[] {0, 3}) {
+                    byte[] data = new byte[offset + length + 5];
+                    Arrays.fill(data, (byte) 'x');
+                    Arrays.fill(data, offset, offset + length, (byte) 'a');
+                    assertFindLastMatchesScalarReference(data, offset, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount);
+                    assertFindLastHighBitOrMatchesScalarReference(data, offset, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount);
+                }
+            }
+            // A single hit in the first byte of an odd length lies before the last
+            // SPECIES.loopBound(length) bytes, so it falls to the scalar head at every supported
+            // vector width.
+            for (int length : new int[] {1, 15, 17, 33, 4_097, 4_111, 4_159}) {
+                for (byte hit : hits) {
+                    byte[] data = new byte[length + 3];
+                    Arrays.fill(data, (byte) 'a');
+                    data[2] = hit;
+                    assertFindLastMatchesScalarReference(data, 2, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount);
+                    assertFindLastHighBitOrMatchesScalarReference(data, 2, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount);
+                }
+            }
+        }
+
+        // Ã's lead byte C3 differs in sign from ASCII bytes, so the two- and three-byte vector scans
+        // must take the unsigned minimum of their XORs. Each hit lies inside a full vector.
+        for (byte[] candidates : new byte[][] {{'x', (byte) 0xC3, 'z'}, {'x', 'y', (byte) 0xC3}}) {
+            for (int candidateCount = 2; candidateCount <= 3; candidateCount++) {
+                for (byte hit : new byte[] {'x', (byte) 0xC3}) {
+                    for (int hitPosition : new int[] {100, 4_095}) {
+                        byte[] data = new byte[4_096];
+                        Arrays.fill(data, (byte) 'a');
+                        data[hitPosition] = hit;
+                        assertFindLastMatchesScalarReference(data, 0, data.length, candidates[0], candidates[1], candidates[2], candidateCount);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertFindLastMatchesScalarReference(
+            byte[] data,
+            int offset,
+            int length,
+            byte first,
+            byte second,
+            byte third,
+            int candidateCount)
+    {
+        // findLast takes one to three candidates.
+        if (candidateCount == 0) {
+            return;
+        }
+        int expected = -1;
+        for (int position = offset + length - 1; position >= offset; position--) {
+            byte value = data[position];
+            if (value == first ||
+                    (candidateCount >= 2 && value == second) ||
+                    (candidateCount >= 3 && value == third)) {
+                expected = position;
+                break;
+            }
+        }
+        assertThat(VectorByteSetScanner.findLast(data, offset, length, first, second, third, candidateCount))
+                .as("offset=%s length=%s candidateCount=%s", offset, length, candidateCount)
+                .isEqualTo(expected);
+    }
+
+    private static void assertFindLastHighBitOrMatchesScalarReference(
+            byte[] data,
+            int offset,
+            int length,
+            byte first,
+            byte second,
+            byte third,
+            int candidateCount)
+    {
+        int expected = -1;
+        for (int position = offset + length - 1; position >= offset; position--) {
+            byte value = data[position];
+            if (value < 0 ||
+                    (candidateCount >= 1 && value == first) ||
+                    (candidateCount >= 2 && value == second) ||
+                    (candidateCount >= 3 && value == third)) {
+                expected = position;
+                break;
+            }
+        }
+        assertThat(VectorByteSetScanner.findLastHighBitOr(data, offset, length, first, second, third, candidateCount))
+                .as("offset=%s length=%s candidateCount=%s", offset, length, candidateCount)
+                .isEqualTo(expected);
+    }
+
+    @Test
     public void testDenseSmallStartByteSetUsesWidthAppropriateScanner()
     {
         Prog program = compile("[xy][0-9]{4}");
