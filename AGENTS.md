@@ -76,6 +76,7 @@ and the complete campaign is preserved privately.
   4. Implement the fix
   5. Test must pass - fix is NOT complete until test passes
   See `docs/MAINTAINING_REGULATOR.md` for the correctness and performance gates.
+- **Catalog every optimization.** A new optimization adds its row to `docs/reference/OPTIMIZATION_CATALOG.md` in the same change, filling the columns its table uses, and a change that alters or removes an optimization updates or deletes its row. See Release and measurement policy in `docs/MAINTAINING_REGULATOR.md`.
 
 ## Upstream Source
 
