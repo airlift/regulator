@@ -884,7 +884,7 @@ fused count keeps the root it began with for the whole current attempt.
 Each root reaches at most one allowance of Java memory plus the paired rows it
 carried. Releasing paired rows refunds their charge, and states built afterward
 fill arrays an older root still shares, so a root that carried paired rows can
-reach one allowance plus those rows, at most 64 KiB. A superseded root becomes
+reach one allowance plus those rows, at most 32 KiB. A superseded root becomes
 eligible for collection once no search retains it. A charge would require
 knowing when the last reader of a generation finishes, which is the reader
 registration this design removes; as with the member table under
@@ -925,14 +925,27 @@ for small DFA graphs. The table is demand-built only after a search of at least
 and is charged against the DFA state budget. Normal state allocation discards
 the table before reporting budget exhaustion.
 
-Eligibility uses a 64 KiB retained-size estimate with eight-byte references and
-includes row overhead. This conservative absolute cap is independent of the
-configured memory budget: larger budgets must not enable cache-hostile global
-transition expansion. When the complete graph does not fit, partial pairing is
-limited to exactly two selected rows and 16 KiB. Selection considers cached
-forward entry states before states with observed self-loops. Broader and larger
-partial tables remain on the compact path to bound retained memory and avoid
-cache-hostile global transition expansion.
+The table is one flat `int` array with a row for each selected state, holding
+the offset of the row each pair of byte classes reaches and then the state's
+own offset, plus an array of each state's row offset. A step is one load of an
+integer offset. With a separate object for each row, a step loaded a reference
+to the next row and checked it, and the JIT compiled the loop in one of two
+forms depending on its warm-up profile: where both cold exits stayed live, the
+register allocator held the row reference in a vector register, and fresh r8i
+JVMs ran the same search 1.5–1.6 times slower. The integer offset stays in a
+general register in every compile measured.
+Eligibility charges both arrays' retained sizes, and the caps bound that size to
+32 KiB, which keeps the table within an Intel L1 data cache. The earlier
+estimate, with eight-byte references and a header for each row, came to about
+twice the real size, so the halved caps admit about the same tables; a DFA near
+a cap, or one limited by a small remaining budget, can get a different table,
+which changes its speed but never its results. This absolute cap is independent
+of the configured memory budget: larger budgets must not enable cache-hostile
+global transition expansion. When the complete graph does not fit, partial
+pairing is limited to exactly two selected rows and 8 KiB. Selection considers
+cached forward entry states before states with observed self-loops. Broader and
+larger partial tables remain on the compact path to bound retained memory and
+avoid cache-hostile global transition expansion.
 
 The paired loop decodes already-computed normal, dead, full-match, and match
 transitions directly. After a first-match candidate, it preserves the candidate
@@ -947,7 +960,7 @@ state or stops matching: it steps the first 32 bytes, then may finish the run
 with a [vector scan for the state's exit bytes](#self-loop-exit-byte-skips-outside-counting).
 It records the match boundary the consumed bytes imply and leaves the first
 exceptional byte to the existing paired decoder. This avoids repeatedly
-decoding a deliberately null paired reference without adding another
+decoding a deliberately missing paired transition without adding another
 transition representation.
 
 The reverse search and the inner literal search's anchored confirmation scan a
@@ -2012,7 +2025,8 @@ stack spills. Whether the warm-up profile prunes an exit depends on when the
 compile happens, which the check moves; the base already pays the same slow
 mode on 2,000-byte lines in 17 of 22 launches (6.7 ms against 4.4 ms). Flags
 that change the compiled code, 64-byte object alignment or a preserved frame
-pointer, run both fast. JMH measures the 1,100-byte row at 1.03–1.04.
+pointer, run both fast. JMH measures the 1,100-byte row at 1.03–1.04. The flat
+[paired table](#bounded-paired-dfa-transitions) removes the slow mode.
 
 ## Trino LIKE Frontend
 

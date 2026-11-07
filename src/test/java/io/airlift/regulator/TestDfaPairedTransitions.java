@@ -59,7 +59,7 @@ public class TestDfaPairedTransitions
                 .isEqualTo(matchingInput.length());
 
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
-        assertThat(dfa.pairedTransitionMemory()).isBetween(1L, 64L * 1024);
+        assertThat(dfa.pairedTransitionMemory()).isBetween(1L, Dfa.MAX_PAIRED_TRANSITION_MEMORY);
         assertThat(dfa.pairedTransitionRowCount()).isEqualTo(dfa.stateCount);
         assertThat(dfa.pairedTransitionCount()).isPositive();
 
@@ -370,7 +370,7 @@ public class TestDfaPairedTransitions
         // The unanchored start state consumes nearly all input through a self-loop.
         // Pairing the entry and self-loop rows preserves the fast path without
         // expanding the 28 suffix states that are visited once.
-        assertThat(dfa.pairedTransitionMemory()).isBetween(1L, 16L * 1024);
+        assertThat(dfa.pairedTransitionMemory()).isBetween(1L, Dfa.MAX_PARTIAL_PAIRED_TRANSITION_MEMORY);
         assertThat(dfa.pairedTransitionRowCount()).isEqualTo(2);
         assertThat(dfa.pairedTransitionCount()).isPositive();
         assertThat(dfa.selfLoopTransitionCount()).isPositive();
