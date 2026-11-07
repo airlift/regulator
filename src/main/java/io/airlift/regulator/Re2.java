@@ -601,19 +601,22 @@ public sealed class Re2
         if (position >= end) {
             return 0;
         }
-        if (utf8) {
-            long decoded = Utf8.decode(bytes, position, end);
-            int width = Utf8.decodedWidth(decoded);
-            int cp = Utf8.decodedCodePoint(decoded);
-            if (width > 0) {
-                if (!(width == 1 && cp == Utf8.RUNE_ERROR && (bytes[position] & 0xFF) >= 0x80)) {
-                    appendBytes(out, bytes, position, width);
-                    return width;
-                }
-            }
+        int width = utf8 ? globalReplaceRuneWidth(bytes, position, end) : 1;
+        appendBytes(out, bytes, position, width);
+        return width;
+    }
+
+    /// Returns the width of the rune at `position`, which must be before `end`, as upstream
+    /// `RE2::GlobalReplace` reads it to step past an empty match at the previous match end. It
+    /// steps 1 byte where `fullrune` or `chartorune` from `util/rune.cc` reports a decoding error,
+    /// or where its own check finds a value above U+10FFFF. That rejects what [Utf8#decode]
+    /// rejects, except that an encoded surrogate is read as one rune.
+    private static int globalReplaceRuneWidth(byte[] bytes, int position, int end)
+    {
+        if (Utf8.isEncodedSurrogate(bytes, position, end)) {
+            return 3;
         }
-        appendBytes(out, bytes, position, 1);
-        return 1;
+        return Utf8.decodedWidth(Utf8.decode(bytes, position, end));
     }
 
     private static void appendBytes(DynamicSliceOutput out, Slice slice, int offset, int length)

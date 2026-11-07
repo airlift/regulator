@@ -181,11 +181,18 @@ final class Utf8
                 return pack(0x80, width);
             }
         }
-        else if ((bytes[index] & 0xFF) == 0xED && end - index >= 3 && (bytes[index + 1] & 0xE0) == 0xA0 && (bytes[index + 2] & 0xC0) == 0x80) {
+        else if (isEncodedSurrogate(bytes, index, end)) {
             int surrogate = 0xD000 | ((bytes[index + 1] & 0x3F) << 6) | (bytes[index + 2] & 0x3F);
             return pack(surrogate, 3);
         }
         return pack(-1, 1);
+    }
+
+    /// Returns whether the three bytes at `index` encode a surrogate code point, which [#decode]
+    /// rejects.
+    static boolean isEncodedSurrogate(byte[] bytes, int index, int end)
+    {
+        return (bytes[index] & 0xFF) == 0xED && end - index >= 3 && (bytes[index + 1] & 0xE0) == 0xA0 && (bytes[index + 2] & 0xC0) == 0x80;
     }
 
     static int decodedWidth(long decoded)
