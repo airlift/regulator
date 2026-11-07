@@ -153,34 +153,11 @@ final class DisjointSuffixRepeatMatcher
         if (repeatedLatin1) {
             return containsRepeated(bytes[end - 1] & 0xFF) ? end - 1 : -1;
         }
-        int previous = Utf8.previousRuneStart(bytes, start, end);
-        if (previous >= 0) {
-            return containsRepeated(Utf8.decodedCodePoint(Utf8.decode(bytes, previous, end))) ? previous : -1;
-        }
-        long malformed = previousMalformedCharacter(bytes, start, end);
-        return malformed >= 0 && containsRepeated(Utf8.decodedCodePoint(malformed)) ? end - Utf8.decodedWidth(malformed) : -1;
-    }
-
-    /// Returns the candidate character that ends at `end` and starts at or after `start` when
-    /// [Utf8#previousRuneStart] finds no valid character there, read as B's byte ranges would read it
-    /// and packed as [Utf8#decode] packs it, or `-1` when none ends there. The caller checks that
-    /// B holds it.
-    private long previousMalformedCharacter(byte[] bytes, int start, int end)
-    {
-        // Every non-ASCII byte sequence B accepts is a lead byte and at most three continuation
-        // bytes, so the nearest lead byte is the only place the character can start.
-        int position = end - 1;
-        int minimum = Math.max(start, end - 4);
-        while (position > minimum && (bytes[position] & 0xC0) == 0x80) {
-            position--;
-        }
-        if (bytes[position] >= 0 || Utf8.decodedWidth(Utf8.decode(bytes, position, end)) != 1) {
-            // An ASCII byte or a valid character that does not end at `end`.
-            return -1;
-        }
-        long decoded = Utf8.re2DecodeMalformed(bytes, position, end, repeatedMatchesAllNonAscii);
-        int width = Utf8.decodedWidth(decoded);
-        return width > 1 && position + width == end ? decoded : -1;
+        // B's byte ranges read a character as Utf8.re2DecodeClassCharacter does, so the only
+        // character that can end at `end` starts at the nearest byte that is not a continuation.
+        int previous = Utf8.previousCharacterStart(bytes, start, end);
+        long decoded = Utf8.re2DecodeClassCharacter(bytes, previous, end, repeatedMatchesAllNonAscii);
+        return previous + Utf8.decodedWidth(decoded) == end && containsRepeated(Utf8.decodedCodePoint(decoded)) ? previous : -1;
     }
 
     private boolean containsRepeated(int rune)

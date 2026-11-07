@@ -189,6 +189,37 @@ final class Utf8
         return pack(-1, 1);
     }
 
+    /// Reads the character at `index`, which must be before `end`, as the compiler's UTF-8 byte
+    /// ranges for an RE2 class read it, and returns the code point and width packed as [#decode]
+    /// packs them: a valid character as [#decode] reads it, and other bytes as
+    /// [#re2DecodeMalformed] reads them, with code point `-1`, which no class holds, where the
+    /// class accepts nothing. Every sequence such a class accepts begins with a byte that is not
+    /// a continuation byte, and any bytes after it are continuation bytes, so the character that
+    /// ends at a position starts at [#previousCharacterStart].
+    static long re2DecodeClassCharacter(byte[] bytes, int index, int end, boolean matchesAllNonAscii)
+    {
+        long decoded = decode(bytes, index, end);
+        if (bytes[index] >= 0 || decodedWidth(decoded) > 1) {
+            return decoded;
+        }
+        return re2DecodeMalformed(bytes, index, end, matchesAllNonAscii);
+    }
+
+    /// Returns where the character that [#re2DecodeClassCharacter] would read ending at `end`
+    /// starts: the last byte before `end` that is not a continuation byte, at or after `start`
+    /// and at most four bytes back, or else the earliest of those bytes, where no character can
+    /// start. Requires `start < end`. The caller reads the character there and checks that it
+    /// ends at `end`.
+    static int previousCharacterStart(byte[] bytes, int start, int end)
+    {
+        int position = end - 1;
+        int minimum = Math.max(start, end - 4);
+        while (position > minimum && (bytes[position] & 0xC0) == 0x80) {
+            position--;
+        }
+        return position;
+    }
+
     /// Returns whether the three bytes at `index` encode a surrogate code point, which [#decode]
     /// rejects.
     static boolean isEncodedSurrogate(byte[] bytes, int index, int end)

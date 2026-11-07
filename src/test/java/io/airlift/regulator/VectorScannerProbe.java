@@ -111,11 +111,12 @@ public final class VectorScannerProbe
                 2);
 
         // The DFA's mixed start-byte scan uses the same nibble-table lookup for texts of at least 1 KiB.
-        // A boolean find runs on the forward longest-match DFA.
-        Re2 mixedSet = Re2.compile(utf8Slice("[hxyz]\\d{3}"));
-        check(mixedSet.find(utf8Slice("-".repeat(2000) + "x123" + "-".repeat(10))), "[hxyz]\\d{3}: find failed");
+        // The unbounded repeat keeps the pattern off the fixed-width matcher, so a boolean find runs
+        // on the forward longest-match DFA.
+        Re2 mixedSet = Re2.compile(utf8Slice("[hxyz]\\d+"));
+        check(mixedSet.find(utf8Slice("-".repeat(2000) + "x123" + "-".repeat(10))), "[hxyz]\\d+: find failed");
         Dfa.DfaInstance mixedSetDfa = mixedSet.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH);
-        check((mixedSetDfa.mixedByteSetScanCount() > 0) == expectedVectorScans, "[hxyz]\\d{3}: unexpected mixed byte set strategy");
+        check((mixedSetDfa.mixedByteSetScanCount() > 0) == expectedVectorScans, "[hxyz]\\d+: unexpected mixed byte set strategy");
 
         // A generated scan-plan kernel scans for its run's candidates with the same nibble-table lookup.
         TrinoRegexp generated = TrinoRegexp.compile(utf8Slice("[hxyz](\\d+)"), TrinoRegexp.Options.defaults().setGenerateBytecode(true));

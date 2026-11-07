@@ -24,8 +24,9 @@ import static java.util.Objects.requireNonNull;
 /// offsets. The options default to [#uniform()], which gives every byte the same
 /// probability, so every literal scan that chooses a probe probes its first byte. The start
 /// literal filter of a pattern that begins with a few literals, an inner literal search's set
-/// filter, its choice of a rare class pair, and the short-window check of the bytes every match
-/// holds ignore the option and always use [#englishText()].
+/// filter, its choice of a rare class pair, the short-window check of the bytes every match
+/// holds, and a fixed-width pattern's choice of candidate position ignore the option and always
+/// use [#englishText()].
 ///
 /// A single-probe scan for a literal stops at every occurrence of its probe byte, so probing a
 /// rare byte hands fewer candidates to verification. The probe leaves the first byte only for a
@@ -64,8 +65,12 @@ import static java.util.Objects.requireNonNull;
 ///
 /// Each preset is the unweighted mean of its sources' add-one smoothed distributions and may probe
 /// any ASCII byte. Each byte at or above 0x80 has the probability of the most common ASCII byte,
-/// so presets probe only ASCII bytes. Every table is regenerated from pinned public sources by
-/// `tools/byte-frequencies/generate-byte-frequencies.py` in the source repository.
+/// so presets probe only ASCII bytes. A fixed-width pattern's choice of candidate position instead
+/// rates each such byte at the rarest ASCII byte's probability, close to how rarely English text
+/// holds a byte above ASCII, and takes a candidate position that can begin with such a byte only
+/// when no position whose first bytes are all ASCII is rare enough. Every table is regenerated from
+/// pinned public sources by `tools/byte-frequencies/generate-byte-frequencies.py` in the source
+/// repository.
 ///
 /// Instances are immutable and thread-safe.
 public final class ByteFrequencies

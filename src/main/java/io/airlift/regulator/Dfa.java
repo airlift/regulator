@@ -53,7 +53,7 @@ final class Dfa
     private static final int MIN_PAIRED_SEARCH_BYTES = 256;
     private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
     static final int MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES = 1024;
-    private static final int MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES = 4 * 1024;
+    static final int MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES = 4 * 1024;
     static final int MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES = 64 * 1024;
     static final int BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES = MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES;
     static final int BYTE_SCAN_SAMPLE_SIZE = 64;
@@ -1953,7 +1953,7 @@ final class Dfa
                 (startFlags & FLAG_EMPTY_MASK) == 0;
     }
 
-    private static int selectByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
+    static int selectByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
     {
         // On long inputs the start-scan productivity check samples the filter's own candidates,
         // and a single-byte scan would stop at every start byte the filter skips.
@@ -1981,7 +1981,7 @@ final class Dfa
     // scalar scan for every byte, so a count of every match settles a borderline sample with a
     // wider one. A clearly dense sample keeps the scalar scan without it, since dense text pays
     // every extra sampled byte.
-    private static int selectEveryMatchCountByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
+    static int selectEveryMatchCountByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
     {
         int selected = selectByteScanSet(byteScanSet, candidates, bytes, position, textEnd);
         if (selected != 0 ||
@@ -5287,7 +5287,7 @@ final class Dfa
 
     // A sample spreads its windows over the whole remaining text, so a sample taken this close to
     // an earlier one reads nearly the same bytes.
-    private static int nextProductivityCheckPosition(int position, int textEnd)
+    static int nextProductivityCheckPosition(int position, int textEnd)
     {
         return position + Math.min(BYTE_SCAN_PRODUCTIVITY_RECHECK_BYTES, textEnd - position);
     }
@@ -5805,6 +5805,14 @@ final class Dfa
         {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
             return minimumMemory(prog, kind) + StartByteTables.build(prog, kind, new int[stackLength(prog, nmark)]).estimatedRetainedSize();
+        }
+
+        /// Returns whether a DFA of `kind` over `prog` searches for its start literal filter in
+        /// place of its start bytes, which this builds the start-byte tables to answer.
+        static boolean searchesStartLiteralFilter(Prog prog, Kind kind)
+        {
+            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            return StartByteTables.build(prog, kind, new int[stackLength(prog, nmark)]).literalFilter() != null;
         }
 
         // The work queues, the stack, and fixed fields, without the start-byte tables.
