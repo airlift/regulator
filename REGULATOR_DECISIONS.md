@@ -297,6 +297,18 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   in the JDK. The JDK's `start()` and `end()` then still report that empty
   match while `group()` returns null; Regulator throws, as after any failed
   `find()`.
+- A capture inside a repeated group reports the last iteration the match
+  used. The JDK differs where it runs a repetition of a group whose body has
+  no alternation, optional part, or variable count as a group loop, and
+  Regulator does not follow it. That loop never restores the captures inside
+  the group, so they can keep values from abandoned iterations, back-offs, or
+  failed attempts: on `aab`, `(?:(a))*ab` reports group 1 at 1:2 where
+  Regulator reports 0:1. A greedy variable count of a capturing group inside
+  another repetition writes the group again as it backs off, over a later
+  iteration: on `aaa`, `(?:(a){1,2})*` reports 1:2 where Regulator reports
+  2:3. A linear engine keeps no record of abandoned iterations, and the JDK's
+  own answer changes under equivalent rewrites such as `(?:(a|a))*ab`, which
+  reports 0:1.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. When every path from

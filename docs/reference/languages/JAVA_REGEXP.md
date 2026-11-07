@@ -61,6 +61,22 @@ end, `find()` and every later `find()` fail without searching, as in the JDK.
 The JDK's `start()` and `end()` then still report that empty match while
 `group()` returns null; Regulator throws, as after any failed `find()`.
 
+A capture inside a repeated group reports the last iteration the match used.
+The JDK runs a repetition of a group whose body has no alternation, optional
+part, or variable count as a group loop that never restores the captures
+inside it, so they can keep values from abandoned iterations, back-offs, or
+failed attempts: on `aab`, `(?:(a))*ab` reports group 1 at `[1, 2)` in the
+JDK and `[0, 1)` here. A greedy variable count of a capturing group inside
+another repetition writes the group again as it backs off, over a later
+iteration: on `aaa`, `(?:(a){1,2})*` reports `[1, 2)` in the JDK and `[2, 3)`
+here. A linear-time engine keeps no record of abandoned iterations, so
+Regulator does not reproduce these values, and the JDK's own answer changes
+under equivalent rewrites: `(?:(a|a))*ab` reports `[0, 1)` there too.
+
+Positions are UTF-8 byte offsets, so a match the JDK finds only between the
+surrogates of a supplementary character, such as `(?U)\B` on U+10400, is not
+found.
+
 ## Supported constructs
 
 | Category | Constructs |
