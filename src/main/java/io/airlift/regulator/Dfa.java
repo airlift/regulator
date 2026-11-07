@@ -5441,7 +5441,7 @@ final class Dfa
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
             this.stack = new int[stackLength(prog, nmark)];
-            StartByteTables startByteTables = StartByteTables.build(prog, stack);
+            StartByteTables startByteTables = StartByteTables.build(prog, kind, stack);
             this.startByteCandidates = startByteTables.candidates();
             this.nullableStartByteCandidates = startByteTables.nullableCandidates();
             this.startLiteralFilter = startByteTables.literalFilter();
@@ -5549,7 +5549,7 @@ final class Dfa
         static long initializationMemory(Prog prog, Kind kind)
         {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
-            return minimumMemory(prog, kind) + StartByteTables.build(prog, new int[stackLength(prog, nmark)]).estimatedRetainedSize();
+            return minimumMemory(prog, kind) + StartByteTables.build(prog, kind, new int[stackLength(prog, nmark)]).estimatedRetainedSize();
         }
 
         // The work queues, the stack, and fixed fields, without the start-byte tables.
@@ -5576,9 +5576,9 @@ final class Dfa
         // filter taken for rare start bytes serves only vector searches.
         private record StartByteTables(byte[] candidates, boolean nullableCandidates, int scanSet, StartLiteralFilter literalFilter, boolean literalFilterVectorOnly, byte[] nibbleTables)
         {
-            static StartByteTables build(Prog prog, int[] stack)
+            static StartByteTables build(Prog prog, Kind kind, int[] stack)
             {
-                byte[] candidates = prog.buildStartByteCandidates(stack);
+                byte[] candidates = prog.buildStartByteCandidates(stack, kind == Kind.FIRST_MATCH);
                 boolean nullableCandidates = candidates != null && prog.canMatchEmpty();
                 int byteScanSet = buildStartByteScanSet(candidates);
                 StartLiteralFilterChoice literalFilterChoice = !nullableCandidates && VectorSupport.isAvailable()

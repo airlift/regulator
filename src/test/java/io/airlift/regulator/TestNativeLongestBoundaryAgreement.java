@@ -113,6 +113,11 @@ public class TestNativeLongestBoundaryAgreement
                 case UNANCHORED -> {
                     assertThat(regexp.find(text)).as("find").isEqualTo(expectedMatched);
                     assertResult(regexp.findResult(text), expectedMatched, expectedGroups);
+                    RegexpMatcher matcher = regexp.matcher(text);
+                    assertThat(matcher.find()).as("matcher find").isEqualTo(expectedMatched);
+                    if (expectedMatched) {
+                        assertResult(matcher.toMatchResult(), true, expectedGroups);
+                    }
                 }
                 case ANCHOR_BOTH -> {
                     assertThat(regexp.matches(text)).as("matches").isEqualTo(expectedMatched);
