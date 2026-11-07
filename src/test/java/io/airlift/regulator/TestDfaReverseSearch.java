@@ -132,6 +132,9 @@ public class TestDfaReverseSearch
 
         assertThat(counted.hasLoop()).isFalse();
         assertThat(repeated.hasLoop()).isTrue();
+        // A Java count of a body that can match empty stays counted, and an unbounded one loops on
+        // its last copy.
+        assertThat(JavaRegexp.compile(Slices.utf8Slice("(?:a?b?){2,}c")).forwardProgramForDiagnostics().hasLoop()).isTrue();
     }
 
     private static void assertReverseSkip(Prog reverse, Slice text, int start, long expected, boolean skips)

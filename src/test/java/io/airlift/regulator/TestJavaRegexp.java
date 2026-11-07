@@ -236,8 +236,8 @@ public class TestJavaRegexp
     private static Prog compileJavaProgram(String pattern, boolean reversed)
     {
         ParseResult parsed = JavaRegexpParser.parse(utf8Slice(pattern), JavaRegexp.Options.defaults().parseFlags());
-        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
-        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.RE2, parsed.caseFolding());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), Compiler.Dialect.JAVA, 0);
+        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.JAVA, parsed.caseFolding());
     }
 
     private static Stream<MatchCase> matchCases()
@@ -367,7 +367,12 @@ public class TestJavaRegexp
                 new MatchCase("(?U-U)\\w+", "élan", Operation.MATCHES, false),
                 new MatchCase("[\\v-z]", "a", Operation.MATCHES, true),
                 new MatchCase("\\d+", "123", Operation.LOOKING_AT, true),
-                new MatchCase("\\w+", "abc_123", Operation.MATCHES, true));
+                new MatchCase("\\w+", "abc_123", Operation.MATCHES, true),
+                // The JDK ends a repetition on an iteration that consumes nothing, even below its
+                // minimum count. Once the greedy first iteration's a leaves the second ^ failing,
+                // the empty first iteration at ^ ends the repetition, and no iteration takes the a.
+                new MatchCase("(?:^a?){2}b", "ab", Operation.FIND, false),
+                new MatchCase("(?:^[^Ÿ]?){2}", "a", Operation.MATCHES, false));
     }
 
     private enum Operation

@@ -231,13 +231,18 @@ public class TestCompilerAllocations
         // the loops inside it in many closures, so the flattened program grows with the square of
         // the program the instruction limit bounds. Unchecked, the a? pattern allocated 309 MB to
         // compile. Oversized flattened programs stop at the forward program's share of the
-        // default budget; RE2, Java and Trino reach it here.
+        // default budget; RE2 and Trino reach it here.
         String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
         assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
-        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(nullableLoops)));
         // Rust gives each alternation on a loop's cycle a list of its own, so no closure runs
         // through the loops inside it and the program flattens to about 6,009 instructions.
         assertThat(RustRegexp.compile(utf8Slice(nullableLoops)).forwardProgramForDiagnostics().size()).isLessThan(7_000);
+        // A Java count ends on an iteration that consumes nothing, so its copies' closures stay
+        // apart, and the pattern compiles within the budget. Written out, the copies chain as
+        // RE2's count does.
+        assertThat(JavaRegexp.compile(utf8Slice(nullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
+        String writtenOutNullableLoops = "(?:(?:" + "(?:a?)*?".repeat(1000) + ")*?)+";
+        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)));
         // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
         assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
     }
@@ -354,6 +359,15 @@ public class TestCompilerAllocations
         assertThat(admitted.hasReverseProgramInputForDiagnostics()).isTrue();
         assertThat(admitted.reverseProgramSize()).isPositive();
         assertThat(admitted.hasReverseProgramInputForDiagnostics()).isFalse();
+    }
+
+    @Test
+    public void testJavaCountedCopiesAreChargedAgainstTheInstructionBudget()
+    {
+        // A Java count over a nullable body compiles a copy of the body per iteration, so a wide
+        // body stops at the instruction budget.
+        String wideNullableBody = "a?|b?|c?|d?|e?|f?|g?|h?|i?|j?|k?|l?|m?|n?|o?|p?|q?|r?|s?|t?|u?|v?|w?|x?|y?|z?|".repeat(8) + "A?";
+        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice("(?:" + wideNullableBody + "){1000}")));
     }
 
     @Test

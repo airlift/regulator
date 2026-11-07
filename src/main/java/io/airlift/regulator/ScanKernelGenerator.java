@@ -87,8 +87,8 @@ import static java.util.Objects.requireNonNull;
 /// [TrinoRegexp.CompiledScanTrinoRegexp] and declares a public entry for each operation the
 /// pattern routes to the plan, so the pattern a caller holds is an instance of it.
 ///
-/// An RE2, Java, or Rust pattern, compiled in the RE2 dialect, gets a smaller class from the same
-/// attempt loop: a pattern class, which extends its language's `CompiledScan…` class, such as
+/// An RE2, Java, or Rust pattern gets a smaller class from the same attempt loop: a pattern
+/// class, which extends its language's `CompiledScan…` class, such as
 /// [Re2.CompiledScanRe2]. It declares full-Slice `find`, `count`, `matches`, and `lookingAt`
 /// for the operations that reach the plan and overrides the engine hooks that every other plan
 /// call runs through, each with its route fixed when the class is generated. The instance of that

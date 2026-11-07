@@ -327,10 +327,13 @@ abstract sealed class CompiledPattern
                 ? BoundedCharacterClassCounter.analyzeRepeat(suffixRegexp)
                 : null;
         this.hasClassRepeat = holdsClassRepeatCounter || classRepeat != null;
-        // The reverse DFA cannot run assertions the forward DFA cannot, or full case folding.
+        // The reverse DFA cannot run assertions the forward DFA cannot, or full case folding, and
+        // a Java count whose match depends on the reading direction compiles no reverse program.
         Prog loweredProgram = booleanPlans.loweredProgram();
         Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
-        Regexp reverseRegexp = forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasFullCaseFold() ? null : analysis.normalizedReverseRegexp();
+        Regexp reverseRegexp = forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasFullCaseFold() || forwardProgram.hasDirectionalRepetition()
+                ? null
+                : analysis.normalizedReverseRegexp();
         long reverseShare = reverseProgramMemory();
         if (reverseRegexp != null && reverseRegexp.estimatedRetainedSize(reverseShare) > reverseShare) {
             reverseRegexp = null;
@@ -407,9 +410,10 @@ abstract sealed class CompiledPattern
     }
 
     /// Analyzes a parsed pattern: an RE2 pattern compiled from its parse result, or a pattern that
-    /// the Java or Rust frontend parsed. A Rust pattern compiles in the Rust dialect and the others
-    /// in the RE2 dialect. The caller passes a private snapshot that it never mutates.
-    /// `scanPlanMode` decides whether the scan plan of an eligible shape is built, and how it runs.
+    /// the Java or Rust frontend parsed. A Java pattern compiles in the Java dialect, a Rust pattern
+    /// in the Rust dialect, and an RE2 pattern in the RE2 dialect. The caller passes a private
+    /// snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an eligible
+    /// shape is built, and how it runs.
     static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlan.Language language, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
@@ -418,7 +422,11 @@ abstract sealed class CompiledPattern
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        Compiler.Dialect compilerDialect = language == ScanPlan.Language.RUST ? Compiler.Dialect.RUST : Compiler.Dialect.RE2;
+        Compiler.Dialect compilerDialect = switch (language) {
+            case JAVA -> Compiler.Dialect.JAVA;
+            case RUST -> Compiler.Dialect.RUST;
+            default -> Compiler.Dialect.RE2;
+        };
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, compilerDialect, language, scanPlanMode);
     }
 
@@ -439,7 +447,7 @@ abstract sealed class CompiledPattern
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
                 : null;
         if (fixedWidthMatcher != null) {
-            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, Compiler.Dialect.TRINO, 0);
             // A fixed-width pattern has no assertion, so its expression predicts, before any
             // program compiles, whether find would try a multi-byte inner literal search. That
             // search runs on a compiled program, so the full analysis decides such a pattern, as
@@ -562,7 +570,7 @@ abstract sealed class CompiledPattern
             Prog partialProgram = placeholderProgram;
             if (RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
-                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, availableMemory);
+                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, compilerDialect, availableMemory);
                     Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
@@ -607,14 +615,14 @@ abstract sealed class CompiledPattern
         }
         // The suffix is the program compiled below, so simplify it first, checking that its
         // expansion can fit before expanding anything.
-        Regexp normalizedSuffixRegexp = Simplifier.simplify(suffixRegexp, caseFolding, forwardMemory);
+        Regexp normalizedSuffixRegexp = Simplifier.simplify(suffixRegexp, caseFolding, compilerDialect, forwardMemory);
         // The program is compiled before the expression is analyzed: the check counts each copy of
         // a class as one instruction, and the analysis reads every range of the class at each
         // copy, so only the compiler's limits keep that reading proportional to the budget.
         Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         // The entire expression adds only its leading anchors and the stripped literal prefix to a
         // suffix whose expansion passed that check, so simplifying it needs no budget of its own.
-        Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding);
+        Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding, compilerDialect, 0);
         ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
         byte[] requiredPrefix = prefixResult == null ? null : requiredPrefixBytes(prefixResult.prefix(), expressionAnalysis.literalSequence());
         // The whole-expression analysis describes the entire expression, so a split-off suffix
@@ -1124,7 +1132,7 @@ abstract sealed class CompiledPattern
         Regexp normalizedRegexp;
         Prog program;
         try {
-            normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding, forwardMemory);
+            normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding, compilerDialect, forwardMemory);
             program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         }
         catch (RegexpCompileException ignored) {
@@ -1173,7 +1181,12 @@ abstract sealed class CompiledPattern
 
     private Compiler.Dialect compilerDialect()
     {
-        return (flags & TRINO_COMPILER_DIALECT_FLAG) == 0 ? Compiler.Dialect.RE2 : Compiler.Dialect.TRINO;
+        if ((flags & TRINO_COMPILER_DIALECT_FLAG) != 0) {
+            return Compiler.Dialect.TRINO;
+        }
+        // Every Java pattern is a JavaRegexp, a sealed root, so Java's dialect needs no flag bit;
+        // the only free parse-flag bit stays free.
+        return this instanceof JavaRegexp ? Compiler.Dialect.JAVA : Compiler.Dialect.RE2;
     }
 
     /// Returns whether this compiled pattern has a class generated for it. Each language

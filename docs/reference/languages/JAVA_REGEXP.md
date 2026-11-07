@@ -121,6 +121,12 @@ As in the JDK, a count with no atom before it repeats the empty match, so
 `{2}x` matches `x`. A count in atom position does so even right after another
 repetition, so `x{2}{3}` matches `xx`. Leading `*`, `+`, and `?` are errors.
 
+As in the JDK, a repetition whose body can match the empty string ends on an
+iteration that consumes nothing, even before its minimum count is reached. So
+`(?:^a?){2}b` does not match `ab`: the greedy first iteration takes the `a`,
+but then the second iteration's `^` fails. The first iteration then matches
+empty at `^`, which ends the repetition, and `b` does not match the `a`.
+
 Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.
