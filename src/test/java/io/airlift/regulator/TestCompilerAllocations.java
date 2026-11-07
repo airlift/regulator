@@ -216,8 +216,8 @@ public class TestCompilerAllocations
             assertThat(wordsBytes).isLessThan(64);
         }
 
-        // Trino compiles a greedy nullable loop with a clone of its body for the empty-iteration
-        // check, so nested empty loops compile to 391 instructions that flatten to 42. The program
+        // Trino splits each greedy nullable loop's empty paths off its body for the empty-iteration
+        // check, so nested empty loops compile to 67 instructions that flatten to 42. The program
         // keeps an instruction array of exactly its flattened size.
         Prog shrunk = TrinoRegexp.compile(utf8Slice("(".repeat(13) + ")" + ")*".repeat(12))).re2().forwardProgramForDiagnostics();
         Field instructions = Prog.class.getDeclaredField("insts");
@@ -369,6 +369,13 @@ public class TestCompilerAllocations
         // body stops at the instruction budget.
         String wideNullableBody = "a?|b?|c?|d?|e?|f?|g?|h?|i?|j?|k?|l?|m?|n?|o?|p?|q?|r?|s?|t?|u?|v?|w?|x?|y?|z?|".repeat(8) + "A?";
         assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice("(?:" + wideNullableBody + "){1000}")));
+
+        // Each copy splits off its paths that consume nothing. Cloning every instruction before
+        // the first byte left originals no path reaches, and gave each copy its own exit, so the
+        // nested counts needed a 1.31 MB budget, four times what RE2 needs for them; they now
+        // fit in 0.8 MB.
+        JavaRegexp nestedCounts = JavaRegexp.compile(utf8Slice("(?:(?:(?:a?){2,}){30,49}){1,8}"), JavaRegexp.Options.defaults().setMaxMemory(800_000));
+        assertThat(nestedCounts.matcher(utf8Slice("a".repeat(60))).matches()).isTrue();
     }
 
     @Test
@@ -450,8 +457,8 @@ public class TestCompilerAllocations
     @Test
     public void testTrinoSiblingNullableLoopsAllocateWithTheirProgram()
     {
-        // The program grows linearly with the loops, and the clone table must not grow with the
-        // square of the loop count.
+        // The program grows linearly with the loops, and the clone table and walk set must not
+        // grow with the square of the loop count.
         assertTrinoCompileAllocation("(?:a|)*".repeat(4_000), 8_003, 32_000_000);
     }
 
@@ -459,8 +466,8 @@ public class TestCompilerAllocations
     public void testTrinoNestedNullableLoopsAllocateWithTheirProgram()
     {
         // Each loop, greedy or lazy, clones the epsilon-reachable part of the loops inside it, so
-        // the program grows with the square of the depth, and the clone table must not grow with
-        // the depth cubed.
+        // the program grows with the square of the depth, and the clone table and walk set must
+        // not grow with the depth cubed.
         String pattern = "(?:^|a?)";
         for (int depth = 0; depth < 320; depth++) {
             pattern = "(?:a?|" + pattern + ")*" + (depth % 2 == 0 ? "" : "?");
