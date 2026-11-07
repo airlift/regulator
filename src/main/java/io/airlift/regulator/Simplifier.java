@@ -51,9 +51,10 @@ final class Simplifier
     /// count to 1,000, but adjacent repetitions coalesce first into a count that can exceed it,
     /// and Rust counts have no such limit. The compiler checks its instruction and node visit
     /// limits only as it compiles the expansion, so this counts the expansion as it is built (see
-    /// [ExpansionBudget]) and fails once it passes either limit. The Java dialect keeps a counted
-    /// repetition of two or more copies of a body that can match the empty string, which the
-    /// compiler lowers with the JDK's loop rule; every other repetition is expanded.
+    /// [ExpansionBudget]) and fails once it passes either limit. The Java dialect cuts a repetition
+    /// of a body that matches only the empty string to one copy, and keeps a counted repetition of
+    /// two or more copies of any other body that can match the empty string, which the compiler
+    /// lowers with the JDK's loop rule; every other repetition is expanded.
     ///
     /// A non-positive `maxMemory` sets no limit, and the expansion is not checked. A compile
     /// without a budget still has a node visit limit, which the expansion can reach before the
@@ -91,8 +92,9 @@ final class Simplifier
     {
         PARSE,
         FULL,
-        // FULL, except that a counted repetition of two or more copies of a nullable body stays
-        // for the Java compiler.
+        // FULL, except that a repetition of a body that matches only the empty string is cut to
+        // one copy, and a counted repetition of two or more copies of any other nullable body
+        // stays for the Java compiler.
         JAVA_FULL,
     }
 
@@ -435,13 +437,22 @@ final class Simplifier
             min = Math.min(min, 1);
             max = Math.min(max, 1);
         }
-        budget.addRepeat(flags, childRegexp, min, max);
 
         // The JDK ends a repetition on any iteration that matches empty, even below the minimum,
-        // so a Java repetition of a nullable body keeps its count for the compiler. One copy
-        // needs no count: x{0,} and x{1,} compile as STAR and PLUS, and x{0,1} is a JDK Ques.
-        // The repeat limit nests at most nine counts of two or more, so these body walks stay linear.
-        if (mode == Mode.JAVA_FULL && (max == -1 ? min : max) >= 2 && MatchLength.analyze(childRegexp, caseFolding).minimum() == 0) {
+        // so a Java repetition of a body that matches only the empty string runs at most once,
+        // and its count is capped at 1 like an assertion's. The repeat limit nests at most nine
+        // counts of two or more, so these body walks stay linear.
+        MatchLength.Analysis javaBodyLength = (mode == Mode.JAVA_FULL && (max == -1 ? min : max) >= 2) ? MatchLength.analyze(childRegexp, caseFolding) : null;
+        if (javaBodyLength != null && javaBodyLength.fixed() == 0) {
+            min = Math.min(min, 1);
+            max = Math.min(max, 1);
+        }
+        budget.addRepeat(flags, childRegexp, min, max);
+
+        // A Java count that still allows two or more copies of a body that can match empty, and
+        // can also consume, keeps its count for the compiler. One copy needs no count: x{0,} and
+        // x{1,} compile as STAR and PLUS, and x{0,1} is a JDK Ques.
+        if (javaBodyLength != null && (max == -1 ? min : max) >= 2 && javaBodyLength.minimum() == 0) {
             return childRegexp == regexp.child(0) ? regexp : Regexp.repeat(flags, childRegexp, min, max);
         }
 
