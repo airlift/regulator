@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,14 +58,17 @@ public class TestRe2BugRegression
     }
 
     /// Bug 3061120 - Case folding issue with Kelvin sign and Latin long s.
-    /// (?i)\W should not match word characters like 'x', 'k', or 's'.
+    /// (?i)\W should not match word characters like 'x', 'k', or 's', with or without brackets.
     @Test
     public void testBug3061120CaseFold()
     {
-        Re2 re = Re2.compile(utf8("(?i)\\W"), Re2.Options.defaults());
-        assertThat(re.find(utf8("x"))).isFalse();
-        assertThat(re.find(utf8("k"))).isFalse();  // broke because of kelvin
-        assertThat(re.find(utf8("s"))).isFalse();  // broke because of latin long s
+        for (String pattern : List.of("(?i)\\W", "(?i)[\\W]")) {
+            Re2 re = Re2.compile(utf8(pattern), Re2.Options.defaults());
+            assertThat(re.find(utf8("x"))).as(pattern).isFalse();
+            assertThat(re.find(utf8("k"))).as(pattern).isFalse();  // broke because of kelvin
+            assertThat(re.find(utf8("s"))).as(pattern).isFalse();  // broke because of latin long s
+            assertThat(re.find(utf8("!"))).as(pattern).isTrue();
+        }
     }
 
     /// Bug 10131674 - Some octal escapes describe values that do not fit in a byte.

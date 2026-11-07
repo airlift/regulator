@@ -69,6 +69,8 @@ final class RegexpParser
         // Capture names permit Lu, Ll, Lt, Lm, Lo, Nl, Mn, Mc, Nd, and Pc categories.
         private static final CharClass VALID_CAPTURE_NAME = buildValidCaptureNameCharClass();
         private static final CharClass PERL_DIGITS_CLASS = buildPerlDigitsCharClass();
+        private static final CharClass PERL_SPACES_CLASS = buildPerlSpacesCharClass();
+        private static final CharClass PERL_WORD_CLASS = buildPerlWordCharClass();
 
         private final byte[] bytes;
         private final int start;
@@ -807,24 +809,21 @@ final class RegexpParser
                 // Note: This is separate from parseEscape() since class escapes expand to ranges.
                 if (nextByte == '\\' && index + 1 < end) {
                     int escapedByte = bytes[index + 1] & 0xFF;
-                    CharClass characterClass = switch (escapedByte) {
-                        case 'd' -> perlDigitsCharClass(nodeFlags, false);
-                        case 'D' -> perlDigitsCharClass(nodeFlags, true);
-                        case 's' -> perlSpacesCharClass(nodeFlags, false);
-                        case 'S' -> perlSpacesCharClass(nodeFlags, true);
-                        case 'w' -> perlWordCharClass(nodeFlags, false);
-                        case 'W' -> perlWordCharClass(nodeFlags, true);
+                    CharClass group = switch (escapedByte) {
+                        case 'd', 'D' -> PERL_DIGITS_CLASS;
+                        case 's', 'S' -> PERL_SPACES_CLASS;
+                        case 'w', 'W' -> PERL_WORD_CLASS;
                         default -> null;
                     };
-                    if (characterClass != null) {
+                    if (group != null) {
                         if ((nodeFlags & Regexp.PERL_CLASSES) == 0) {
                             throw error(RegexpParseErrorCode.BAD_ESCAPE, null);
                         }
                         // consume '\' + escape char
                         index += 2;
-                        for (RuneRange runeRange : characterClass.ranges()) {
-                            characterClassBuilder.addRangeFlags(runeRange.low(), runeRange.high(), nodeFlags, caseFolding);
-                        }
+                        // Pass the positive group and its sign, as upstream AddUGroup does.
+                        int sign = (escapedByte == 'D' || escapedByte == 'S' || escapedByte == 'W') ? -1 : 1;
+                        addGroup(characterClassBuilder, group, sign, nodeFlags, caseFolding);
                         continue;
                     }
                 }
@@ -1225,17 +1224,17 @@ final class RegexpParser
             if (!negate) {
                 return Regexp.charClass(flags & ~Regexp.FOLD_CASE, PERL_DIGITS_CLASS);
             }
-            return perlCharClass(flags, negate, perlDigitsCharClass(flags, false));
+            return perlCharClass(flags, negate, PERL_DIGITS_CLASS);
         }
 
         private Regexp perlSpaces(int flags, boolean negate)
         {
-            return perlCharClass(flags, negate, perlSpacesCharClass(flags, false));
+            return perlCharClass(flags, negate, PERL_SPACES_CLASS);
         }
 
         private Regexp perlWord(int flags, boolean negate)
         {
-            return perlCharClass(flags, negate, perlWordCharClass(flags, false));
+            return perlCharClass(flags, negate, PERL_WORD_CLASS);
         }
 
         private Regexp perlCharClass(int flags, boolean negate, CharClass group)
@@ -1246,20 +1245,6 @@ final class RegexpParser
             return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
         }
 
-        private static CharClass perlDigitsCharClass(int flags, boolean negate)
-        {
-            if (!negate) {
-                return PERL_DIGITS_CLASS;
-            }
-            CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            characterClassBuilder.addRange('0', '9');
-            if (negate) {
-                characterClassBuilder.negate();
-                characterClassBuilder.removeAbove(Regexp.maxRune(flags));
-            }
-            return characterClassBuilder.toCharClass();
-        }
-
         private static CharClass buildPerlDigitsCharClass()
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
@@ -1267,7 +1252,7 @@ final class RegexpParser
             return characterClassBuilder.toCharClass();
         }
 
-        private static CharClass perlSpacesCharClass(int flags, boolean negate)
+        private static CharClass buildPerlSpacesCharClass()
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
             characterClassBuilder.addRange(' ', ' ');
@@ -1275,24 +1260,16 @@ final class RegexpParser
             characterClassBuilder.addRange('\n', '\n');
             characterClassBuilder.addRange('\r', '\r');
             characterClassBuilder.addRange('\f', '\f');
-            if (negate) {
-                characterClassBuilder.negate();
-                characterClassBuilder.removeAbove(Regexp.maxRune(flags));
-            }
             return characterClassBuilder.toCharClass();
         }
 
-        private static CharClass perlWordCharClass(int flags, boolean negate)
+        private static CharClass buildPerlWordCharClass()
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
             characterClassBuilder.addRange('0', '9');
             characterClassBuilder.addRange('A', 'Z');
             characterClassBuilder.addRange('a', 'z');
             characterClassBuilder.addRange('_', '_');
-            if (negate) {
-                characterClassBuilder.negate();
-                characterClassBuilder.removeAbove(Regexp.maxRune(flags));
-            }
             return characterClassBuilder.toCharClass();
         }
 
