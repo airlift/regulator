@@ -6,8 +6,13 @@ support would require.
 
 ## Current execution contract
 
-Regulator's shared engine matches in linear time with bounded memory. It avoids
-the catastrophic worst cases of general ordered-backtracking engines.
+Regulator's shared engine runs each search in time linear in its input, with
+bounded memory. It avoids the catastrophic worst cases of general
+ordered-backtracking engines. Operations over every match, such as `count`,
+find loops, and replace, repeat the search from each match end, or one
+character past an empty match, so their total can be quadratic when each search
+reads far past its match, as `a+b|a` does over a long run of `a`. RE2 and the
+Rust crate behave the same way.
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` reject recognized
 unsupported constructs at compilation. They do not retry with another language

@@ -2214,11 +2214,14 @@ backtracker.
 
 ## Matcher-Owned Capture Workspaces
 
-`RegexpMatcher` owns reusable BitState and NFA scratch storage. BitState reuses
-its visited bitmap, capture scratch, and bounded initial traversal jobs. NFA
-reuses its sparse queues, traversal stacks, best-match storage, and primitive
-capture thread arena. These workspaces are private to the non-thread-safe
-matcher and never retain input bytes or caller group arrays.
+`RegexpMatcher` owns reusable OnePass, BitState, and NFA scratch storage.
+BitState reuses its visited bitmap, capture scratch, and bounded initial
+traversal jobs. NFA reuses its sparse queues, traversal stacks, best-match
+storage, and primitive capture thread arena. These workspaces are private to the
+non-thread-safe matcher and never retain input bytes or caller group arrays.
+Each stays within the forward program's share of the budget, but a matcher keeps
+one workspace per engine: once it has run both BitState and the NFA, it retains
+both, up to about twice the share.
 
 An exceptional NFA exit invalidates its workspace before propagating the
 failure. This prevents a later search from observing partially live capture

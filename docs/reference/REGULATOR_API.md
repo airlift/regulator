@@ -114,14 +114,16 @@ Re2 pattern = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=(?<value>[0-9]+)"));
 ```
 
 Compilation copies the pattern bytes and snapshots the mutable `Re2.Options`.
-The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching, and
-a 96 MiB compilation, DFA-cache and capture-search budget. A non-positive public
-memory budget is rejected. Each capture search in progress also holds at most
-the forward program's two-thirds share of the budget in working memory at once,
-beside what the compiled pattern retains, plus a copy of at most 64 capture slots
-when a caller buffer is longer than the pattern's groups. The budget does not
-include caller-owned input, result objects, matcher capture buffers, replacement
-output, or collections returned by aggregate APIs.
+The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching,
+and a 96 MiB compilation, DFA-cache and capture-search budget. A non-positive
+public memory budget is rejected. Each capture search in progress also holds at
+most the forward program's two-thirds share of the budget in working memory at
+once, beside what the compiled pattern retains, plus a copy of at most 64
+capture slots when a caller buffer is longer than the pattern's groups. A
+`RegexpMatcher` keeps the workspace of each capture engine it has used, so one
+that has run both the backtracker and the NFA can retain up to about twice that
+share. The budget does not include caller-owned input, result objects, matcher
+capture buffers, replacement output, or collections returned by aggregate APIs.
 
 Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
@@ -400,7 +402,7 @@ The APIs are familiar, but their representations and capabilities differ:
 | Repeated matching | Mutable `Matcher` | Mutable `RegexpMatcher` with reusable captures and execution workspaces |
 | Replacement grammar | `$1`, `${name}`, and backslash escaping | Native RE2 grammar in `Re2`; Trino's Java-style grammar in `TrinoRegexp`; no replacement API in `JavaRegexp` or `RustRegexp` |
 | Convenience adapters | Splits, streams, predicates, and `CharSequence` regions | Allocation-conscious Slice matching, caller-owned capture buffers, multi-pattern matching, and Trino operations |
-| Worst-case execution | Ordered backtracking can take exponential time | RE2 execution uses bounded memory and linear-time algorithms |
+| Worst-case execution | Ordered backtracking can take exponential time | RE2 execution uses bounded memory, and each search is linear in its input; operations over every match repeat it from each match end, or one character past an empty match (see the [execution contract](languages/UNSUPPORTED_FEATURES.md#current-execution-contract)) |
 
 ### Pattern languages
 
