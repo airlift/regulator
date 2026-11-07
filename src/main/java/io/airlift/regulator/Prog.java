@@ -841,8 +841,9 @@ final class Prog
     /// Non-nullable searches may scan past other bytes while the DFA remains in
     /// its start state. Nullable searches may return the current empty match when
     /// the current byte is outside the set. Assertions and dense sets deliberately
-    /// use the normal DFA.
-    byte[] buildStartByteCandidates(int[] stack)
+    /// use the normal DFA. `firstMatch` is set for the leftmost-first DFA, where a match
+    /// outranks the threads after it; longest-match and many-match DFAs must also consider them.
+    byte[] buildStartByteCandidates(int[] stack, boolean firstMatch)
     {
         boolean nullable = canMatchEmpty;
         if (reversed || anchorStart || (nullable && anchorEnd) || canPrefixAccel() || start() == 0) {
@@ -850,7 +851,7 @@ final class Prog
         }
 
         byte[] candidates = new byte[256];
-        int candidateCount = walkStartBytes(stack, candidates, nullable);
+        int candidateCount = walkStartBytes(stack, candidates, nullable, firstMatch);
         // Dense candidate sets spend more time handing off to the DFA than they save scanning.
         if (candidateCount >= 0 && candidateCount <= 64 && (candidateCount > 0 || nullable)) {
             return candidates;
@@ -860,8 +861,9 @@ final class Prog
 
     /// Marks in `candidates` every byte that can begin a non-empty match from [#start()] and
     /// returns how many it marked, or -1 when the walk reaches an assertion, or reaches a match
-    /// while `nullable` is false.
-    private int walkStartBytes(int[] stack, byte[] candidates, boolean nullable)
+    /// while `nullable` is false. With `firstMatch`, it skips the threads a match outranks;
+    /// the flag matters only when `nullable` is true.
+    private int walkStartBytes(int[] stack, byte[] candidates, boolean nullable, boolean firstMatch)
     {
         boolean[] visited = new boolean[size()];
         int stackPointer = 0;
@@ -905,6 +907,11 @@ final class Prog
                 case MATCH -> {
                     if (!nullable) {
                         return -1;
+                    }
+                    // Leftmost-first prefers this match to the threads after it in the list;
+                    // longest-match and many-match searches go on to them.
+                    if (!firstMatch && !instruction.last()) {
+                        stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case FAIL -> {
@@ -2603,7 +2610,7 @@ final class Prog
         anchoredStartBytes = null;
         if (anchorStart && !reversed && !canMatchEmpty && start() != 0) {
             byte[] candidates = new byte[256];
-            int count = walkStartBytes(new int[3 * size() + 1], candidates, false);
+            int count = walkStartBytes(new int[3 * size() + 1], candidates, false, true);
             if (count > 0 && count < 256) {
                 anchoredStartBytes = candidates;
             }
