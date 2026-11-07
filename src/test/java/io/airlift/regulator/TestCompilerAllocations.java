@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.function.IntFunction;
 import java.util.stream.IntStream;
 
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
@@ -214,6 +215,77 @@ public class TestCompilerAllocations
         assertCompileRejectedWithinBudget(() -> RustRegexp.compile(utf8Slice(nullableLoops)));
         // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
         assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
+    }
+
+    @Test
+    public void testRepetitionIsRejectedBeforeItExpands()
+    {
+        // Simplification expanded counted repetition before the compiler checked its limits, so
+        // this 36 KB pattern, far past them, exhausted the heap before it could be rejected. Each
+        // language now counts the expansion as it builds it, and rejects the pattern before
+        // expanding past the limits of its budget.
+        String optionalRuns = optionalRuns(4_000);
+        long maxMemory = 8 << 20;
+        long maxAllocatedBytes = 32_000_000;
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice(optionalRuns), Re2.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> JavaRegexp.compile(utf8Slice(optionalRuns), JavaRegexp.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> RustRegexp.compile(utf8Slice(optionalRuns), RustRegexp.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> TrinoRegexp.compile(utf8Slice(optionalRuns), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        // A required literal prefix splits the runs off as the suffix, and the runs are still
+        // rejected before the entire expression is simplified.
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice("^abc" + optionalRuns), Re2.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        // Capturing groups nested past the simplifier's recursion limit reach the runs through its
+        // iterative walk. Non-capturing groups would leave no node to nest.
+        String nestedRuns = "(".repeat(300) + optionalRuns + ")".repeat(300);
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice(nestedRuns), Re2.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        // A case-folded literal still compiles each rune to at least one instruction, so its
+        // copies count as other literal runes do.
+        String foldedRuns = "(?i:" + "f".repeat(10_000) + "){1000}";
+        assertCompileRejectedWithin(() -> TrinoRegexp.compile(utf8Slice(foldedRuns), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)), maxAllocatedBytes);
+        // Adjacent repetitions coalesce into one, here a{0,700000}. That count is past every
+        // parser's repetition limit, and the repetition fails before any copy of it is built.
+        String coalescedRuns = "a{0,1000}".repeat(700);
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> JavaRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> RustRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
+        assertCompileRejectedWithin(() -> TrinoRegexp.compile(utf8Slice(coalescedRuns)), maxAllocatedBytes);
+        // A small budget rejects a short pattern that coalesces into one long repeat.
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice("a{0,1000}".repeat(256)), Re2.Options.defaults().setMaxMemory(4_096)), maxAllocatedBytes);
+        // Copies of a large repeated expression count at its full size. Here ten groups of 200
+        // two-rune branches and a letter, (?:一q|丁q|...|a){0,1000}(?:...|b){0,1000}...
+        String alternationRuns = optionalGroups(10, group -> IntStream.range(0, 200)
+                .mapToObj(branch -> Character.toString(0x4E00 + group * 200 + branch) + "q")
+                .collect(joining("|", "", "|" + (char) ('a' + group))));
+        assertCompileRejectedWithin(() -> Re2.compile(utf8Slice(alternationRuns)), maxAllocatedBytes);
+
+        // Repetition that simplification discards is never expanded, so it neither counts nor
+        // fills the heap: under x{0}, or in a branch that never matches. The classes never match,
+        // so their branch discards the runs in front of them. Rust's parser drops the branch.
+        String discardedRuns = "(?:" + optionalRuns + "(?:[^\\x00-\\x{10FFFF}]|[^\\x00-\\x{10FFFF}]){1})|z";
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        assertThat(Re2.compile(utf8Slice("(?:" + optionalRuns + "){0}x")).matches(utf8Slice("x"))).isTrue();
+        Re2 re2 = Re2.compile(utf8Slice(discardedRuns), Re2.Options.defaults().setMaxMemory(maxMemory));
+        assertThat(re2.find(utf8Slice("xzx"))).isTrue();
+        assertThat(re2.find(utf8Slice("abc"))).isFalse();
+        JavaRegexp java = JavaRegexp.compile(utf8Slice(discardedRuns), JavaRegexp.Options.defaults().setMaxMemory(maxMemory));
+        assertThat(java.find(utf8Slice("xzx"))).isTrue();
+        assertThat(java.find(utf8Slice("abc"))).isFalse();
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(discardedRuns), TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+        assertThat(trino.contains(utf8Slice("xzx"))).isTrue();
+        assertThat(trino.contains(utf8Slice("abc"))).isFalse();
+        // A required literal prefix splits the branch off as the suffix, and the entire
+        // expression, simplified without a budget, does not expand it either.
+        Re2 prefixed = Re2.compile(utf8Slice("^abc(?:" + discardedRuns + ")"), Re2.Options.defaults().setMaxMemory(maxMemory));
+        assertThat(prefixed.find(utf8Slice("abcz"))).isTrue();
+        // A small budget holds the alternative beside a branch that discards a{0,700000}.
+        Re2 small = Re2.compile(utf8Slice("(?:" + coalescedRuns + "(?:[^\\x00-\\x{10FFFF}]){1}|abc)"), Re2.Options.defaults().setMaxMemory(4_096));
+        assertThat(small.matches(utf8Slice("abc"))).isTrue();
+        assertThat(small.matches(utf8Slice("a"))).isFalse();
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes).isLessThan(maxAllocatedBytes);
     }
 
     @Test
@@ -448,14 +520,38 @@ public class TestCompilerAllocations
 
     private static void assertCompileRejectedWithinBudget(ThrowingCallable compile)
     {
+        // The rejected compile builds at most the forward share of the budget, plus its scratch.
+        assertCompileRejectedWithin(compile, 2L * Re2.Options.DEFAULT_MAX_MEMORY);
+    }
+
+    private static void assertCompileRejectedWithin(ThrowingCallable compile, long maxAllocatedBytes)
+    {
         ThreadMXBean threadBean = allocatedMemoryBean();
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         assertThatThrownBy(compile).isInstanceOf(RegexpCompileMemoryLimitException.class);
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
-        // The rejected compile builds at most the forward share of the budget, plus its scratch.
-        assertThat(allocatedBytes).isLessThan(2L * Re2.Options.DEFAULT_MAX_MEMORY);
+        assertThat(allocatedBytes).isLessThan(maxAllocatedBytes);
+    }
+
+    // Optional runs of distinct letters, which do not coalesce into one repeat.
+    private static String optionalRuns(int count)
+    {
+        StringBuilder pattern = new StringBuilder();
+        for (int run = 0; run < count; run++) {
+            pattern.append((char) ('a' + run % 26)).append("{0,1000}");
+        }
+        return pattern.toString();
+    }
+
+    private static String optionalGroups(int count, IntFunction<String> group)
+    {
+        StringBuilder pattern = new StringBuilder();
+        for (int index = 0; index < count; index++) {
+            pattern.append("(?:").append(group.apply(index)).append("){0,1000}");
+        }
+        return pattern.toString();
     }
 
     static boolean compressedClassPointers()

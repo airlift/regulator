@@ -16,12 +16,15 @@ package io.airlift.regulator;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 
 import static java.util.Objects.requireNonNull;
@@ -35,21 +38,44 @@ final class Simplifier
 
     static Regexp simplify(Regexp regexp, CaseFolding caseFolding)
     {
+        return simplify(regexp, caseFolding, 0);
+    }
+
+    /// Simplifies an expression for a program compiled with `maxMemory`. Simplification expands
+    /// counted repetition, which multiplies the size of a pattern by up to the parsers' repetition
+    /// limit. Adjacent repetitions coalesce first, and a coalesced count can exceed that limit.
+    /// The compiler checks its instruction and node visit limits only as it compiles the
+    /// expansion, so this counts the expansion as it is built (see [ExpansionBudget]) and fails
+    /// once it passes either limit.
+    ///
+    /// A non-positive `maxMemory` sets no limit, and the expansion is not checked. A compile
+    /// without a budget still has a node visit limit, which the expansion can reach before the
+    /// instruction limit, and reports passing it as a failure that is not a memory-limit failure.
+    ///
+    /// @throws RegexpCompileMemoryLimitException if a compile with `maxMemory` cannot fit the
+    ///         expansion
+    static Regexp simplify(Regexp regexp, CaseFolding caseFolding, long maxMemory)
+    {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(caseFolding, "caseFolding is null");
         // Upstream simplify.cc runs a coalescing pass before simplification.
-        return simplifyInternal(Coalescer.coalesce(regexp, caseFolding), Mode.FULL, caseFolding);
+        Regexp coalesced = Coalescer.coalesce(regexp, caseFolding);
+        // The compiler compiles a Latin-1 program when the expression it is given carries LATIN1.
+        ExpansionBudget budget = new ExpansionBudget(coalesced, maxMemory, (regexp.parseFlags() & Regexp.LATIN1) != 0);
+        return simplifyInternal(coalesced, Mode.FULL, budget, caseFolding);
     }
 
     /// Parse-time canonicalization that intentionally preserves counted repetitions (`{n,m}`),
     /// matching upstream RE2 parse.cc behavior (parse dumps still contain `rep{...}` nodes).
     ///
-    /// Compiler pipelines must call [#simplify(Regexp,CaseFolding)] (FULL) to eliminate counted repeats.
+    /// Compiler pipelines eliminate counted repeats with [#simplify(Regexp,CaseFolding,long)] (FULL),
+    /// passing the program's memory budget. Analyses may use the unbudgeted
+    /// [#simplify(Regexp,CaseFolding)].
     static Regexp simplifyForParse(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(caseFolding, "caseFolding is null");
-        return simplifyInternal(regexp, Mode.PARSE, caseFolding);
+        return simplifyInternal(regexp, Mode.PARSE, null, caseFolding);
     }
 
     private enum Mode
@@ -57,15 +83,19 @@ final class Simplifier
         PARSE, FULL
     }
 
-    private static Regexp simplifyInternal(Regexp regexp, Mode mode, CaseFolding caseFolding)
+    // A full simplification counts its expansion against `budget`; a parse-mode one has none.
+    private static Regexp simplifyInternal(Regexp regexp, Mode mode, ExpansionBudget budget, CaseFolding caseFolding)
     {
-        return simplifyRecursive(regexp, mode, caseFolding, 0);
+        return simplifyRecursive(regexp, mode, budget, caseFolding, 0);
     }
 
-    private static Regexp simplifyRecursive(Regexp regexp, Mode mode, CaseFolding caseFolding, int depth)
+    private static Regexp simplifyRecursive(Regexp regexp, Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int depth)
     {
+        if (neverMatches(budget, regexp)) {
+            return neverMatchingResult(regexp);
+        }
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return toRegexp(new SimplifyWalker(mode, caseFolding).walk(regexp, null));
+            return toRegexp(new SimplifyWalker(mode, budget, caseFolding).walk(regexp, null));
         }
 
         int flags = regexp.parseFlags();
@@ -93,21 +123,23 @@ final class Simplifier
             }
 
             case CAPTURE -> {
-                Regexp child = simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1);
+                Regexp child = simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1);
                 yield child == regexp.child(0) ? regexp : Regexp.capture(flags, child, regexp.captureIndex(), regexp.name());
             }
-            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.STAR, regexp);
-            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.PLUS, regexp);
-            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
-            case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1));
+            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1), UnaryOp.STAR, regexp);
+            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1), UnaryOp.PLUS, regexp);
+            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
+            case REPEAT -> discardsChild(mode, regexp)
+                    ? simplifyZeroRepeat(flags, regexp)
+                    : simplifyRepeat(mode, budget, flags, regexp, simplifyRecursive(regexp.child(0), mode, budget, caseFolding, depth + 1));
             case CONCAT -> {
                 // Set up here rather than in a helper, so each nesting level takes no extra frame.
                 ConcatBuilder builder = new ConcatBuilder(caseFolding);
-                yield addConcatChildrenRecursive(builder, regexp, mode, caseFolding, depth) ? builder.build(flags, regexp) : Regexp.noMatch(flags);
+                yield addConcatChildrenRecursive(builder, regexp, mode, budget, caseFolding, depth) ? builder.build(flags, regexp) : Regexp.noMatch(flags);
             }
             case ALTERNATE -> (mode == Mode.PARSE)
                     ? toRegexp(simplifyAlternativeForParse(regexp, caseFolding, depth, false))
-                    : simplifyAlternateRecursive(caseFolding, flags, regexp, depth);
+                    : simplifyAlternateRecursive(budget, caseFolding, flags, regexp, depth);
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
@@ -119,7 +151,7 @@ final class Simplifier
     private static Object simplifyAlternativeForParse(Regexp regexp, CaseFolding caseFolding, int depth, boolean pending)
     {
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return new SimplifyWalker(Mode.PARSE, caseFolding).walk(regexp, pending ? SimplifyWalker.PENDING_PARENT : null);
+            return new SimplifyWalker(Mode.PARSE, null, caseFolding).walk(regexp, pending ? SimplifyWalker.PENDING_PARENT : null);
         }
         int flags = regexp.parseFlags();
         if (regexp.op() == RegexpOp.ALTERNATE) {
@@ -136,7 +168,7 @@ final class Simplifier
             }
             return concat.build(flags, regexp);
         }
-        return simplifyRecursive(regexp, Mode.PARSE, caseFolding, depth + 1);
+        return simplifyRecursive(regexp, Mode.PARSE, null, caseFolding, depth + 1);
     }
 
     // Adds the simplified children of a concatenation in an alternative, as
@@ -155,7 +187,7 @@ final class Simplifier
             }
             else if (!concat.add((child.op() == RegexpOp.ALTERNATE || child.op() == RegexpOp.CONCAT)
                     ? simplifyAlternativeForParse(child, caseFolding, depth + 1, true)
-                    : simplifyRecursive(child, Mode.PARSE, caseFolding, depth + 1))) {
+                    : simplifyRecursive(child, Mode.PARSE, null, caseFolding, depth + 1))) {
                 return false;
             }
         }
@@ -214,11 +246,13 @@ final class Simplifier
         private static final Object EMPTY = new Object();
 
         private final Mode mode;
+        private final ExpansionBudget budget;
         private final CaseFolding caseFolding;
 
-        private SimplifyWalker(Mode mode, CaseFolding caseFolding)
+        private SimplifyWalker(Mode mode, ExpansionBudget budget, CaseFolding caseFolding)
         {
             this.mode = mode;
+            this.budget = budget;
             this.caseFolding = caseFolding;
         }
 
@@ -226,7 +260,7 @@ final class Simplifier
         protected PreVisitResult<Object> preVisit(Regexp regexp, Object parentValue)
         {
             // Children receive their parent node as their parent value.
-            return new PreVisitResult<>(regexp, false);
+            return new PreVisitResult<>(regexp, discardsChild(mode, regexp) || neverMatches(budget, regexp));
         }
 
         @Override
@@ -239,6 +273,9 @@ final class Simplifier
         @SuppressWarnings("unchecked")
         protected Object postVisit(Regexp regexp, Object parentValue, Object preValue, List<Object> simplifiedChildren)
         {
+            if (neverMatches(budget, regexp)) {
+                return neverMatchingResult(regexp);
+            }
             int flags = regexp.parseFlags();
 
             return switch (regexp.op()) {
@@ -270,7 +307,9 @@ final class Simplifier
                 case STAR -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.STAR, regexp);
                 case PLUS -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.PLUS, regexp);
                 case QUEST -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.QUEST, regexp);
-                case REPEAT -> simplifyRepeat(mode, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
+                case REPEAT -> discardsChild(mode, regexp)
+                        ? simplifyZeroRepeat(flags, regexp)
+                        : simplifyRepeat(mode, budget, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
                 case CONCAT -> {
                     Object lone = loneValue(simplifiedChildren);
                     if (parentValue instanceof Regexp parent && parent.op() == RegexpOp.CONCAT) {
@@ -362,7 +401,7 @@ final class Simplifier
         };
     }
 
-    private static Regexp simplifyRepeat(Mode mode, int flags, Regexp regexp, Regexp childRegexp)
+    private static Regexp simplifyRepeat(Mode mode, ExpansionBudget budget, int flags, Regexp regexp, Regexp childRegexp)
     {
         int min = regexp.min();
         int max = regexp.max();
@@ -371,6 +410,7 @@ final class Simplifier
             // Preserve counted repeats in parse results (upstream parse_test.cc expects rep{...}).
             return childRegexp == regexp.child(0) ? regexp : Regexp.repeat(flags, childRegexp, min, max);
         }
+        // Match upstream SimplifyWalker::PostVisit(), which keeps a repeated empty match as it is,
         // and SimplifyWalker::SimplifyRepeat().
         if (childRegexp.op() == RegexpOp.EMPTY_MATCH) {
             return childRegexp;
@@ -382,6 +422,7 @@ final class Simplifier
             min = Math.min(min, 1);
             max = Math.min(max, 1);
         }
+        budget.addRepeat(flags, childRegexp, min, max);
 
         // x{n,} means at least n matches of x.
         if (max == -1) {
@@ -399,11 +440,6 @@ final class Simplifier
             }
             repeatedChildren.add(Regexp.plus(flags, childRegexp));
             return Regexp.concat(flags, repeatedChildren);
-        }
-
-        // Special case: (x){0} matches only empty string.
-        if (min == 0 && max == 0) {
-            return Regexp.emptyMatch(flags);
         }
 
         // Special case: x{1} is just x.
@@ -438,6 +474,40 @@ final class Simplifier
         return result;
     }
 
+    // Full simplification turns x{0} into an empty match whatever x is, so it leaves x
+    // unsimplified rather than expand repetition inside it only to discard it.
+    private static boolean discardsChild(Mode mode, Regexp regexp)
+    {
+        return mode == Mode.FULL && regexp.op() == RegexpOp.REPEAT && regexp.max() == 0;
+    }
+
+    // An empty child is kept as the result, as simplifyRepeat keeps it. Upstream simplifies the
+    // child first and keeps it when it simplifies to an empty match, so skipping the child changes
+    // only the flags of the empty match returned, which nothing observes.
+    private static Regexp simplifyZeroRepeat(int flags, Regexp regexp)
+    {
+        Regexp childRegexp = regexp.child(0);
+        return childRegexp.op() == RegexpOp.EMPTY_MATCH ? childRegexp : Regexp.emptyMatch(flags);
+    }
+
+    // Full simplification turns a node that never matches into a no-match, discarding everything
+    // under it, so it returns that no-match without simplifying the node's children.
+    private static boolean neverMatches(ExpansionBudget budget, Regexp regexp)
+    {
+        return budget != null && budget.neverMatches(regexp);
+    }
+
+    // The no-match that full simplification returns for a node that never matches: x{1} returns
+    // what x returns, a no-match returns itself, and any other node a no-match with its own flags.
+    private static Regexp neverMatchingResult(Regexp regexp)
+    {
+        Regexp node = regexp;
+        while (node.op() == RegexpOp.REPEAT) {
+            node = node.child(0);
+        }
+        return node.op() == RegexpOp.NO_MATCH ? node : Regexp.noMatch(node.parseFlags());
+    }
+
     private static boolean isEmptyOp(Regexp regexp)
     {
         return switch (regexp.op()) {
@@ -457,6 +527,229 @@ final class Simplifier
             }
         }
         return true;
+    }
+
+    /// Counts the expansion of counted repetition in one simplification against the compiler's
+    /// limits for the same budget. The compiler emits at most its instruction limit in
+    /// instructions. It visits at most twice that limit in nodes. A repetition whose expansion
+    /// would pass either limit fails before it is built.
+    ///
+    /// The compiler visits a node once for each reference to it, so the count charges each
+    /// reference. A repetition charges its child's copies beyond the first at the child's size,
+    /// and the operators and concatenations it nests them in, so copies of a shared child are
+    /// charged without being walked.
+    ///
+    /// The count must never reject what compiles, so for an expansion that reaches the compiler
+    /// it is at most what the compiler visits and emits. A copy keeps its nodes and runes when its
+    /// concatenation is flattened into an enclosing one, or its last literal joins the next one,
+    /// and the concatenation around the copies is not charged. Each node counts one visit and at
+    /// most the instructions the compiler emits for it; a node that compiles to nothing around a
+    /// body that never matches, or a class in a Latin-1 program with no member up to 0xFF, counts
+    /// none.
+    ///
+    /// The count never drops, so copies that a never-matching node discards would count although
+    /// they never reach the compiler. The budget finds those nodes before simplification starts,
+    /// and simplification returns their no-match without expanding anything under them.
+    private static final class ExpansionBudget
+    {
+        private final long maxVisits;
+        private final long maxInstructions;
+        // Not positive when the expansion is not checked.
+        private final long maxMemory;
+        private final boolean latin1;
+        // Null when no node never matches, as in most patterns.
+        private final Set<Regexp> neverMatching;
+        // The size of every node under a repeated child, which may be shared by earlier copies.
+        // Allocated by the first repetition with more than one copy.
+        private Map<Regexp, Size> sizes;
+        private long visits;
+        private long instructions;
+
+        private ExpansionBudget(Regexp regexp, long maxMemory, boolean latin1)
+        {
+            this.maxMemory = maxMemory;
+            this.latin1 = latin1;
+            maxInstructions = Compiler.maxUnflattenedInstructions(maxMemory);
+            maxVisits = 2 * maxInstructions;
+            neverMatching = findNeverMatching(regexp);
+        }
+
+        /// Whether full simplification turns `regexp`, a node of the expression being simplified,
+        /// into a no-match.
+        private boolean neverMatches(Regexp regexp)
+        {
+            return neverMatching != null && neverMatching.contains(regexp);
+        }
+
+        /// Charges what [#simplifyRepeat] builds for `child{min,max}`, after it caps the bounds.
+        private void addRepeat(int flags, Regexp child, int min, int max)
+        {
+            if (maxMemory <= 0) {
+                return;
+            }
+            // Over an operator with the same flags, the star, plus or question mark that wraps the
+            // last copy is squashed into it.
+            boolean squashed = (child.op() == RegexpOp.STAR || child.op() == RegexpOp.PLUS || child.op() == RegexpOp.QUEST) && child.parseFlags() == flags;
+            long copies;
+            long operators;
+            long nestedOptionals = 0;
+            if (max == -1) {
+                // x{n,} is n copies, the last under a plus, and x{0,} is x*.
+                copies = Math.max(min, 1);
+                operators = squashed ? 0 : 1;
+            }
+            else if (max == min) {
+                copies = min;
+                operators = 0;
+            }
+            else {
+                // x{2,5} is xx(x(x(x)?)?)?: each optional copy but the innermost adds a question
+                // mark and a concatenation.
+                copies = max;
+                nestedOptionals = (long) max - min - 1;
+                operators = nestedOptionals + (squashed ? 0 : 1);
+            }
+            if (copies > 1) {
+                Size size = size(child);
+                visits = addCopies(visits, copies - 1, size.visits(), maxVisits);
+                instructions = addCopies(instructions, copies - 1, size.instructions(), maxInstructions);
+            }
+            visits += operators + nestedOptionals;
+            instructions += operators;
+            if (visits > maxVisits || instructions > maxInstructions) {
+                throw new RegexpCompileMemoryLimitException(maxMemory);
+            }
+        }
+
+        private long addCopies(long total, long copies, long size, long limit)
+        {
+            // Copies only fit if one does, and then the product stays far from overflowing.
+            if (size > limit) {
+                throw new RegexpCompileMemoryLimitException(maxMemory);
+            }
+            return total + copies * size;
+        }
+
+        private Size size(Regexp regexp)
+        {
+            if (sizes == null) {
+                sizes = new IdentityHashMap<>();
+            }
+            Size known = sizes.get(regexp);
+            if (known != null) {
+                return known;
+            }
+            Deque<Regexp> pending = new ArrayDeque<>();
+            pending.push(regexp);
+            while (!pending.isEmpty()) {
+                Regexp node = pending.peek();
+                // A child referenced more than once may be queued again after it was sized.
+                if (sizes.containsKey(node)) {
+                    pending.pop();
+                    continue;
+                }
+                boolean childrenSized = true;
+                for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
+                    if (!sizes.containsKey(node.child(childIndex))) {
+                        pending.push(node.child(childIndex));
+                        childrenSized = false;
+                    }
+                }
+                if (childrenSized) {
+                    pending.pop();
+                    long nodeVisits = 1;
+                    long nodeInstructions = instructions(node);
+                    for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
+                        Size childSize = sizes.get(node.child(childIndex));
+                        nodeVisits += childSize.visits();
+                        nodeInstructions += childSize.instructions();
+                    }
+                    sizes.put(node, new Size(nodeVisits, nodeInstructions));
+                }
+            }
+            return sizes.get(regexp);
+        }
+
+        // At most the instructions the compiler emits for the node itself.
+        private long instructions(Regexp regexp)
+        {
+            return switch (regexp.op()) {
+                case LITERAL_STRING -> regexp.runes().length;
+                // A class matches bytes, as the compiler decides, when the program is Latin-1 or
+                // the node carries LATIN1, and then emits nothing for members past 0xFF.
+                case CHAR_CLASS -> {
+                    CharClass charClass = regexp.charClass();
+                    boolean matchesBytes = latin1 || (regexp.parseFlags() & Regexp.LATIN1) != 0;
+                    yield (!charClass.isEmpty() && (!matchesBytes || charClass.range(0).low() <= 0xFF)) ? 1 : 0;
+                }
+                // A no-match and a concatenation emit nothing of their own, and a simplified
+                // child holds no repetition.
+                case NO_MATCH, CONCAT, REPEAT -> 0;
+                // A capture or an alternation emits instructions, but none around a body or for a
+                // branch that never matches, so they count none on purpose.
+                case CAPTURE, ALTERNATE -> 0;
+                default -> 1;
+            };
+        }
+
+        private record Size(long visits, long instructions) {}
+
+        // Finds the nodes that full simplification turns into a no-match, in one post-order walk
+        // that allocates the set only once it finds one. The rules follow what simplification
+        // does with a no-match child: a concatenation becomes a no-match, and so does a plus or
+        // x{1}, while an alternation drops the branch and becomes one only when every branch is
+        // one. A capture keeps its no-match body, a star or question mark of one matches empty,
+        // and every other repetition keeps the copies in operators and concatenations.
+        private static Set<Regexp> findNeverMatching(Regexp root)
+        {
+            Set<Regexp> neverMatching = null;
+            // The open nodes from the root down, each with its next child to walk and how many of
+            // its children walked so far never match.
+            Regexp[] nodes = new Regexp[16];
+            int[] nextChildren = new int[16];
+            int[] neverMatchingChildren = new int[16];
+            int top = 0;
+            nodes[0] = root;
+            while (true) {
+                Regexp node = nodes[top];
+                int childIndex = nextChildren[top];
+                if (childIndex < node.childCount()) {
+                    nextChildren[top]++;
+                    top++;
+                    if (top == nodes.length) {
+                        nodes = Arrays.copyOf(nodes, 2 * top);
+                        nextChildren = Arrays.copyOf(nextChildren, 2 * top);
+                        neverMatchingChildren = Arrays.copyOf(neverMatchingChildren, 2 * top);
+                    }
+                    nodes[top] = node.child(childIndex);
+                    nextChildren[top] = 0;
+                    neverMatchingChildren[top] = 0;
+                    continue;
+                }
+                int neverMatchingChildCount = neverMatchingChildren[top];
+                boolean nodeNeverMatches = switch (node.op()) {
+                    case NO_MATCH -> true;
+                    case CHAR_CLASS -> node.charClass().isEmpty();
+                    case CONCAT, PLUS -> neverMatchingChildCount > 0;
+                    case ALTERNATE -> neverMatchingChildCount == node.childCount();
+                    case REPEAT -> node.min() == 1 && node.max() == 1 && neverMatchingChildCount > 0;
+                    default -> false;
+                };
+                if (nodeNeverMatches) {
+                    if (neverMatching == null) {
+                        neverMatching = Collections.newSetFromMap(new IdentityHashMap<>());
+                    }
+                    neverMatching.add(node);
+                }
+                if (top == 0) {
+                    return neverMatching;
+                }
+                top--;
+                if (nodeNeverMatches) {
+                    neverMatchingChildren[top]++;
+                }
+            }
+        }
     }
 
     private static Regexp simplifyConcat(int flags, Regexp regexp, List<Object> simplifiedChildren, CaseFolding caseFolding)
@@ -490,18 +783,18 @@ final class Simplifier
 
     // Adds the simplified children of a concatenation. A concatenation child within the recursion
     // limit adds its own children in place, so a deep nesting is not flattened again at every level.
-    private static boolean addConcatChildrenRecursive(ConcatBuilder builder, Regexp regexp, Mode mode, CaseFolding caseFolding, int depth)
+    private static boolean addConcatChildrenRecursive(ConcatBuilder builder, Regexp regexp, Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int depth)
     {
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
             Regexp child = regexp.child(childIndex);
             if (child.op() == RegexpOp.CONCAT && depth + 1 < MAX_RECURSIVE_DEPTH) {
                 builder.beginNested();
-                if (!addConcatChildrenRecursive(builder, child, mode, caseFolding, depth + 1)) {
+                if (!addConcatChildrenRecursive(builder, child, mode, budget, caseFolding, depth + 1)) {
                     return false;
                 }
                 builder.endNested();
             }
-            else if (!builder.add(simplifyRecursive(child, mode, caseFolding, depth + 1))) {
+            else if (!builder.add(simplifyRecursive(child, mode, budget, caseFolding, depth + 1))) {
                 return false;
             }
         }
@@ -871,11 +1164,11 @@ final class Simplifier
         return Regexp.alternate(flags, merged);
     }
 
-    private static Regexp simplifyAlternateRecursive(CaseFolding caseFolding, int flags, Regexp regexp, int depth)
+    private static Regexp simplifyAlternateRecursive(ExpansionBudget budget, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
     {
         List<Regexp> simplifiedAlternatives = new ArrayList<>();
         for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, Mode.FULL, caseFolding, depth + 1);
+            Regexp simplifiedChild = simplifyRecursive(child, Mode.FULL, budget, caseFolding, depth + 1);
             if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
                 continue;
             }
@@ -2723,30 +3016,30 @@ final class Simplifier
                     return Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, -1);
                 }
                 if (followingExpression.op() == RegexpOp.PLUS) {
-                    minRepetitions++;
+                    minRepetitions = addRepetitions(minRepetitions, 1);
                     return Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, -1);
                 }
                 if (followingExpression.op() == RegexpOp.QUEST) {
                     if (maxRepetitions != -1) {
-                        maxRepetitions++;
+                        maxRepetitions = addRepetitions(maxRepetitions, 1);
                     }
                     return Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, maxRepetitions);
                 }
                 if (followingExpression.op() == RegexpOp.REPEAT) {
-                    minRepetitions += followingExpression.min();
+                    minRepetitions = addRepetitions(minRepetitions, followingExpression.min());
                     if (followingExpression.max() == -1) {
                         maxRepetitions = -1;
                     }
                     else if (maxRepetitions != -1) {
-                        maxRepetitions += followingExpression.max();
+                        maxRepetitions = addRepetitions(maxRepetitions, followingExpression.max());
                     }
                     return Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, maxRepetitions);
                 }
                 if (followingExpression.op() == RegexpOp.LITERAL || followingExpression.op() == RegexpOp.CHAR_CLASS ||
                         followingExpression.op() == RegexpOp.ANY_CHAR || followingExpression.op() == RegexpOp.ANY_BYTE) {
-                    minRepetitions++;
+                    minRepetitions = addRepetitions(minRepetitions, 1);
                     if (maxRepetitions != -1) {
-                        maxRepetitions++;
+                        maxRepetitions = addRepetitions(maxRepetitions, 1);
                     }
                     return Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, maxRepetitions);
                 }
@@ -2758,9 +3051,9 @@ final class Simplifier
                     while (repeatedPrefixLength < literalStringRunes.length && literalStringRunes[repeatedPrefixLength] == repeatedRune) {
                         repeatedPrefixLength++;
                     }
-                    minRepetitions += repeatedPrefixLength;
+                    minRepetitions = addRepetitions(minRepetitions, repeatedPrefixLength);
                     if (maxRepetitions != -1) {
-                        maxRepetitions += repeatedPrefixLength;
+                        maxRepetitions = addRepetitions(maxRepetitions, repeatedPrefixLength);
                     }
 
                     Regexp coalescedRepeat = Regexp.repeat(repeatedExpression.parseFlags(), repeatedAtom, minRepetitions, maxRepetitions);
@@ -2774,6 +3067,15 @@ final class Simplifier
                 }
 
                 throw new IllegalStateException("unexpected followingExpression op: " + followingExpression.op());
+            }
+
+            // The parsers limit each repetition, but nothing limits how many adjacent repetitions
+            // coalesce, so a sum saturates rather than overflow. Every copy of an atom costs the
+            // compiler at least one node visit, so a saturated count is far past any program's
+            // visit limit, and a budgeted simplification rejects it before expanding it.
+            private static int addRepetitions(int count, int addend)
+            {
+                return (int) Math.min((long) count + addend, Integer.MAX_VALUE);
             }
         }
     }
