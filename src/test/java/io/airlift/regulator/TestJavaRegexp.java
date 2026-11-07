@@ -303,6 +303,12 @@ public class TestJavaRegexp
                 new MatchCase("a\\b\u0301", "a\u0301", Operation.FIND, false),
                 new MatchCase("a\\B\u0301", "a\u0301", Operation.FIND, true),
                 new MatchCase("(?U)\\b\u0301", "\u0301", Operation.FIND, true),
+                // The JDK reads U+10400 before the mark, and U+1D167 just before the boundary, as lone low
+                // surrogates, so neither mark has a base; it reads U+1D167 just after the boundary whole, so
+                // `a` is its base. None of the three finds a boundary.
+                new MatchCase("\\b", "\uD801\uDC00\u0301", Operation.FIND, false),
+                new MatchCase("a\uD834\uDD67\\b", "a\uD834\uDD67", Operation.FIND, false),
+                new MatchCase("a\\b\uD834\uDD67", "a\uD834\uDD67", Operation.FIND, false),
                 new MatchCase("a+?", "aaa", Operation.MATCHES, true),
                 new MatchCase("a{01,003}", "aa", Operation.MATCHES, true),
                 new MatchCase("\\Aabc\\z", "abc", Operation.MATCHES, true),

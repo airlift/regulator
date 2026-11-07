@@ -349,23 +349,31 @@ final class EmptyOp
         if (unicodeCharacterClass ? UnicodeGroups.isWord(codePoint) : isAsciiWord(codePoint)) {
             return true;
         }
+        // Java ignores a nonspacing mark for boundary purposes unless a preceding letter or digit gives it a base.
+        // The JDK reads a mark after the boundary whole, but starts its walk at the last UTF-16 unit of a mark
+        // before it, which for a supplementary mark is a lone low surrogate that gives no base.
         return UnicodeGroups.isNonspacingMark(codePoint) &&
+                (right || !Character.isSupplementaryCodePoint(codePoint)) &&
                 hasJavaBoundaryBaseCharacter(bytes, begin, end, codePointStart);
     }
 
-    private static boolean hasJavaBoundaryBaseCharacter(byte[] bytes, int begin, int end, int position)
+    private static boolean hasJavaBoundaryBaseCharacter(byte[] bytes, int begin, int end, int markStart)
     {
-        // Java ignores a nonspacing mark for boundary purposes unless a preceding letter or digit gives it a base.
-        int codePointStart = position;
-        while (codePointStart >= begin) {
+        // The JDK walks back one UTF-16 unit at a time, so it reads any supplementary character it steps onto as a
+        // lone low surrogate, which ends the walk with no base.
+        int codePointStart = markStart;
+        while (codePointStart > begin) {
+            codePointStart = previousCodePointStart(bytes, begin, codePointStart);
             int codePoint = nextCodePoint(bytes, end, codePointStart);
+            if (Character.isSupplementaryCodePoint(codePoint)) {
+                return false;
+            }
             if (UnicodeGroups.isLetterOrDigit(codePoint)) {
                 return true;
             }
-            if (!UnicodeGroups.isNonspacingMark(codePoint) || codePointStart == begin) {
+            if (!UnicodeGroups.isNonspacingMark(codePoint)) {
                 return false;
             }
-            codePointStart = previousCodePointStart(bytes, begin, codePointStart);
         }
         return false;
     }
