@@ -19,7 +19,6 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -29,6 +28,9 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.airlift.regulator.TestingAllocations.MAXIMUM_WINDOW_RUNS;
+import static io.airlift.regulator.TestingAllocations.assertAllocatesAtMostOnceCompiled;
+import static io.airlift.regulator.TestingAllocations.assertAllocatesNothingOnceCompiled;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
@@ -38,8 +40,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2Allocations
 {
-    private static final int MAXIMUM_ALLOCATION_RUNS = 1_000;
-
     @Test
     public void testBooleanPlansDoNotAllocate()
     {
@@ -372,10 +372,6 @@ public class TestRe2Allocations
     @Test
     public void testTrinoScanPlansDoNotAllocate()
     {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
         TrinoCompiledPattern anchored = TrinoRegexp.compile(Slices.utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$")).re2();
         TrinoCompiledPattern folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)^content-type: ([^;]+);.*$")).re2();
         TrinoCompiledPattern unanchored = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/")).re2();
@@ -395,7 +391,7 @@ public class TestRe2Allocations
             assertThat(runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups)).isEqualTo(120_000);
         }
 
-        assertAllocatesNothingOnceCompiled("testTrinoScanPlansDoNotAllocate", 120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
+        assertAllocatesNothingOnceCompiled("testTrinoScanPlansDoNotAllocate", MAXIMUM_WINDOW_RUNS, 120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
 
         assertThat(groups).containsExactly(4, 23, 11, 22);
     }
@@ -403,10 +399,6 @@ public class TestRe2Allocations
     @Test
     public void testScanPlanCountDoesNotAllocate()
     {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
         // Rows of the everyday keyValue and specialized queryParameterNames workloads, a plan led
         // by a whole literal, and an ASCII-folded plan, which has no generated class. The key-value
         // and folded inputs hold a match start inside a value, which a count skips only by
@@ -438,7 +430,7 @@ public class TestRe2Allocations
                 assertThat(counts.getAsLong()).isEqualTo(13);
             }
 
-            assertAllocatesNothingOnceCompiled("testScanPlanCountDoesNotAllocate, generateBytecode=" + generateBytecode, 130_000, () -> {
+            assertAllocatesNothingOnceCompiled("testScanPlanCountDoesNotAllocate, generateBytecode=" + generateBytecode, MAXIMUM_WINDOW_RUNS, 130_000, () -> {
                 long matchCount = 0;
                 for (int iteration = 0; iteration < 10_000; iteration++) {
                     matchCount += counts.getAsLong();
@@ -551,52 +543,6 @@ public class TestRe2Allocations
         return minimumAllocatedBytes;
     }
 
-    private static void assertAllocatesNothingOnceCompiled(String name, long expectedResult, LongSupplier operations)
-    {
-        assertAllocatesAtMostOnceCompiled(name, expectedResult, 0, operations);
-    }
-
-    /// Runs `operations` until one run allocates at most `maximumBytes` on the current thread,
-    /// checking each result, and fails if no run does within [#MAXIMUM_ALLOCATION_RUNS]. A fixed
-    /// warm-up can end before C2 compiles the measured code. Until it does, the code runs in C1 or
-    /// the interpreter, where every Vector API value is an object, so the first runs can allocate
-    /// more. An allocation on every call recurs in every run and still fails. Prints the bytes of
-    /// every run, so a build log shows how long the compiled code took to arrive.
-    private static void assertAllocatesAtMostOnceCompiled(String name, long expectedResult, long maximumBytes, LongSupplier operations)
-    {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        long threadId = Thread.currentThread().threadId();
-        List<Long> runBytes = new ArrayList<>();
-        while (runBytes.size() < MAXIMUM_ALLOCATION_RUNS && (runBytes.isEmpty() || runBytes.getLast() > maximumBytes)) {
-            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-            long result = operations.getAsLong();
-            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-            assertThat(result).isEqualTo(expectedResult);
-            runBytes.add(allocatedBytes);
-        }
-
-        // Consecutive equal counts print once with their count, as in "[768 x3, 0]".
-        StringBuilder report = new StringBuilder(name).append(": bytes allocated per run [");
-        int start = 0;
-        while (start < runBytes.size()) {
-            int end = start + 1;
-            while (end < runBytes.size() && runBytes.get(end).equals(runBytes.get(start))) {
-                end++;
-            }
-            if (start > 0) {
-                report.append(", ");
-            }
-            report.append(runBytes.get(start));
-            if (end - start > 1) {
-                report.append(" x").append(end - start);
-            }
-            start = end;
-        }
-        report.append(']');
-        System.out.println(report);
-        assertThat(runBytes.getLast()).as(report.toString()).isLessThanOrEqualTo(maximumBytes);
-    }
-
     private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
     {
         int matchCount = 0;
@@ -654,10 +600,6 @@ public class TestRe2Allocations
     @Test
     public void testCallerBufferCaptureDoesNotAllocate()
     {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
         Re2 pattern = Re2.compile(Slices.utf8Slice("([a-z]+)-([0-9]+)"));
         byte[] sourceBytes = new byte[32_768];
         Arrays.fill(sourceBytes, (byte) '.');
@@ -670,7 +612,7 @@ public class TestRe2Allocations
             assertThat(pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)).isTrue();
         }
 
-        long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
+        assertAllocatesNothingOnceCompiled("testCallerBufferCaptureDoesNotAllocate", MAXIMUM_WINDOW_RUNS, 10_000, () -> {
             int matchCount = 0;
             for (int iteration = 0; iteration < 10_000; iteration++) {
                 if (pattern.matchInto(source, CompiledPattern.Anchor.UNANCHORED, groups)) {
@@ -681,7 +623,6 @@ public class TestRe2Allocations
         });
 
         assertThat(groups).containsExactly(16_384, 16_391, 16_384, 16_387, 16_388, 16_391);
-        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -1094,10 +1035,6 @@ public class TestRe2Allocations
     @Test
     public void testMatcherBitStateCaptureAllocatesOnlyInvocationState()
     {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
         Re2 pattern = Re2.compile(Slices.utf8Slice("(a)(b)(c)(d)(e)"));
         Slice source = Slices.utf8Slice("abcde");
         RegexpMatcher matcher = pattern.matcher(source);
@@ -1107,28 +1044,21 @@ public class TestRe2Allocations
             assertThat(matcher.matches()).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matcher.reset(source);
-            if (matcher.matches()) {
-                matchCount++;
+        assertAllocatesAtMostOnceCompiled("testMatcherBitStateCaptureAllocatesOnlyInvocationState", MAXIMUM_WINDOW_RUNS, 10_000, 128L * 10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matcher.reset(source);
+                if (matcher.matches()) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(matchCount).isEqualTo(10_000);
-        assertThat(allocatedBytes).isLessThanOrEqualTo(128L * 10_000);
+            return matchCount;
+        });
     }
 
     @Test
     public void testMatcherNfaCaptureAllocatesOnlyInvocationState()
     {
-        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
-        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
-        threadBean.setThreadAllocatedMemoryEnabled(true);
-
         Re2 pattern = Re2.compile(Slices.utf8Slice("(a{100})(b{100})(c{100})(d{100})(e{100})(f{100})"));
         Slice source = Slices.utf8Slice(
                 "a".repeat(100) +
@@ -1144,18 +1074,15 @@ public class TestRe2Allocations
             assertThat(matcher.matches()).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matcher.reset(source);
-            if (matcher.matches()) {
-                matchCount++;
+        assertAllocatesAtMostOnceCompiled("testMatcherNfaCaptureAllocatesOnlyInvocationState", MAXIMUM_WINDOW_RUNS, 10_000, 128L * 10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matcher.reset(source);
+                if (matcher.matches()) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(matchCount).isEqualTo(10_000);
-        assertThat(allocatedBytes).isLessThanOrEqualTo(128L * 10_000);
+            return matchCount;
+        });
     }
 }

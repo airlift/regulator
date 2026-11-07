@@ -29,6 +29,8 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
+import static io.airlift.regulator.TestingAllocations.MAXIMUM_WINDOW_RUNS;
+import static io.airlift.regulator.TestingAllocations.assertAllocatesAtMostOnceCompiled;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.Slices.utf8Slice;
@@ -44,22 +46,20 @@ public class TestCompilerAllocations
     @Test
     public void testExpressionAnalysisAvoidsPerNodeStreamAllocation()
     {
-        ThreadMXBean threadBean = allocatedMemoryBean();
         Regexp regexp = RegexpParser.parse(utf8Slice("(.*)-(\\d+)-of-(\\d+)"), Regexp.LIKE_PERL).regexp();
         Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
         for (int iteration = 0; iteration < 10_000; iteration++) {
             ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(allocatedBytes / iterations).isLessThan(4_000);
+        assertAllocatesAtMostOnceCompiled("testExpressionAnalysisAvoidsPerNodeStreamAllocation", MAXIMUM_WINDOW_RUNS, iterations, 4_000L * iterations - 1, () -> {
+            long analysisCount = 0;
+            for (int iteration = 0; iteration < iterations; iteration++) {
+                analysisCount += ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2) != null ? 1 : 0;
+            }
+            return analysisCount;
+        });
     }
 
     @Test
@@ -115,24 +115,19 @@ public class TestCompilerAllocations
     @Test
     public void testFlatteningReusesHintScratchSpace()
     {
-        ThreadMXBean threadBean = allocatedMemoryBean();
-
         Regexp regexp = RegexpParser.parse(utf8Slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ$"), Regexp.LIKE_PERL).regexp();
         for (int iteration = 0; iteration < 10_000; iteration++) {
             Compiler.compile(regexp);
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int instructionCount = 0;
         int iterations = 10_000;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            instructionCount += Compiler.compile(regexp).size();
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(instructionCount).isEqualTo(300_000);
-        assertThat(allocatedBytes / iterations).isLessThan(40_000);
+        assertAllocatesAtMostOnceCompiled("testFlatteningReusesHintScratchSpace", MAXIMUM_WINDOW_RUNS, 300_000, 40_000L * iterations - 1, () -> {
+            long instructionCount = 0;
+            for (int iteration = 0; iteration < iterations; iteration++) {
+                instructionCount += Compiler.compile(regexp).size();
+            }
+            return instructionCount;
+        });
     }
 
     @Test
@@ -381,7 +376,6 @@ public class TestCompilerAllocations
     @Test
     public void testScanPlanContinuationAnalysisUsesCompactStorage()
     {
-        ThreadMXBean threadBean = allocatedMemoryBean();
         ParseResult parsed = TrinoRegexpParser.parse(
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
@@ -389,21 +383,19 @@ public class TestCompilerAllocations
             assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform())).isNotNull();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform());
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(allocatedBytes / iterations).isLessThan(8_000);
+        assertAllocatesAtMostOnceCompiled("testScanPlanContinuationAnalysisUsesCompactStorage", MAXIMUM_WINDOW_RUNS, iterations, 8_000L * iterations - 1, () -> {
+            long planCount = 0;
+            for (int iteration = 0; iteration < iterations; iteration++) {
+                planCount += ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform()) != null ? 1 : 0;
+            }
+            return planCount;
+        });
     }
 
     @Test
     public void testScanPlanRejectsUnsupportedUnanchoredStartBeforeAllocation()
     {
-        ThreadMXBean threadBean = allocatedMemoryBean();
         List<ParseResult> expressions = List.of(
                 TrinoRegexpParser.parse(utf8Slice("(?:www\\.)?([^/]+)/"), Regexp.LIKE_PERL),
                 TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
@@ -415,23 +407,21 @@ public class TestCompilerAllocations
             }
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int iterations = 10_000;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            for (ParseResult expression : expressions) {
-                ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform());
+        long analyses = 10_000L * expressions.size();
+        assertAllocatesAtMostOnceCompiled("testScanPlanRejectsUnsupportedUnanchoredStartBeforeAllocation", MAXIMUM_WINDOW_RUNS, analyses, 128 * analyses - 1, () -> {
+            long rejectedCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                for (ParseResult expression : expressions) {
+                    rejectedCount += ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform()) == null ? 1 : 0;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(allocatedBytes / (iterations * (long) expressions.size())).isLessThan(128);
+            return rejectedCount;
+        });
     }
 
     @Test
     public void testSimpleLikePatternsCopyOnlyTheirLiteral()
     {
-        ThreadMXBean threadBean = allocatedMemoryBean();
         // A simple pattern copies only its literal, and a contains kernel holds that copy and, for
         // a literal whose first byte does not recur, the shared shift table.
         List<Slice> patterns = List.of(utf8Slice("https://%"), utf8Slice("%.example.com"), utf8Slice("%coolfunctionname%"));
@@ -441,17 +431,16 @@ public class TestCompilerAllocations
             }
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int iterations = 10_000;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            for (Slice pattern : patterns) {
-                TrinoLikePattern.compile(pattern);
+        long compiles = 10_000L * patterns.size();
+        assertAllocatesAtMostOnceCompiled("testSimpleLikePatternsCopyOnlyTheirLiteral", MAXIMUM_WINDOW_RUNS, compiles, 232 * compiles - 1, () -> {
+            long compiledCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                for (Slice pattern : patterns) {
+                    compiledCount += TrinoLikePattern.compile(pattern).matches(pattern) ? 1 : 0;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(allocatedBytes / (iterations * (long) patterns.size())).isLessThan(232);
+            return compiledCount;
+        });
     }
 
     @Test
@@ -551,25 +540,23 @@ public class TestCompilerAllocations
     {
         // Unicode \w compiles to hundreds of byte ranges. The ceiling guards the combined savings of
         // the byte-map, member-table and one-pass changes: a compile allocates about 1.56 MB, and
-        // about 1.67 MB when the JIT has not applied escape analysis, so it leaves about 10% over
-        // the larger. About 300 KB of that is the one-pass step table, 8 bytes for each of the
-        // program's 37,500 actions.
+        // about 1.67 MB when C2 has not applied escape analysis, so it leaves about 10% over the
+        // larger. About 300 KB of that is the one-pass step table, 8 bytes for each of the
+        // program's 37,500 actions. C1 code allocates about 1.755 MB, also within the ceiling.
         assumeTrue(((ThreadMXBean) ManagementFactory.getThreadMXBean()).isThreadAllocatedMemorySupported(), "requires thread allocation counting");
-        ThreadMXBean threadBean = allocatedMemoryBean();
         Slice pattern = utf8Slice("^(\\w+)-(\\d+)/");
         for (int iteration = 0; iteration < 1_000; iteration++) {
             assertThat(RustRegexp.compile(pattern).pattern()).isEqualTo(pattern);
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 100;
-        for (int iteration = 0; iteration < iterations; iteration++) {
-            RustRegexp.compile(pattern);
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
-
-        assertThat(allocatedBytes / iterations).isLessThan(1_840_000);
+        assertAllocatesAtMostOnceCompiled("testLargeUnicodeClassCompileAllocation", MAXIMUM_WINDOW_RUNS, iterations, 1_840_000L * iterations - 1, () -> {
+            long compiledCount = 0;
+            for (int iteration = 0; iteration < iterations; iteration++) {
+                compiledCount += RustRegexp.compile(pattern).pattern().equals(pattern) ? 1 : 0;
+            }
+            return compiledCount;
+        });
     }
 
     @Test
