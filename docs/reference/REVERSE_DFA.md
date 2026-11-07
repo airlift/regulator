@@ -15,6 +15,21 @@ For an ordinary unanchored search, `CompiledPattern.matchOnOrdinaryEngine` perfo
 3. A capture engine only when the caller requested captures not already known
    from the two boundaries.
 
+Some searches skip the reverse pass:
+
+- When every match has the same byte length, the start is the end minus that
+  length. A search for group zero alone whose match is empty at the search
+  start knows that start.
+- When the pattern allows it, a matcher that asks only for group zero runs a
+  forward cursor. Besides those cases, a nullable pattern with no assertions
+  starts its match where the search started, and a one-character match that
+  ends in a valid UTF-8 character starts at that character's lead byte. Other
+  cursor matches still run the reverse pass.
+- A leftmost-first unanchored search through a matcher that asks for groups
+  beyond group zero runs one BitState pass instead of the forward, reverse, and
+  capture passes, when OnePass cannot run the program and the search window is
+  at least 4 KiB and within the program's unanchored BitState text limit.
+
 A pattern with an inner literal search first scans for the literal, skips a
 hit whose neighboring bytes no match can hold, runs a reverse DFA of the prefix
 anchored at each other hit, and confirms forward; it falls back to steps 1–3.

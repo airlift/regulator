@@ -24,7 +24,7 @@ or silently switch to an engine with different resource guarantees.
 |---|---|
 | Backreferences | A match depends on text captured earlier, not only on finite automaton state. General backreferences do not fit the current linear-time engine contract. |
 | Lookaround | Some restricted assertions can be supported without backtracking, but complete Java or Trino semantics require additional assertion, capture, and context handling. |
-| Atomic groups and possessive quantifiers | Their behavior controls where backtracking may occur, while the current engine does not backtrack. |
+| Atomic groups and possessive quantifiers | They mark a boundary past which a backtracking search drops the alternatives it saved inside the group. Regulator's compiled programs have no instruction for such a boundary. The DFA and NFA follow every alternative at once, and BitState, a bounded backtracker, saves pending alternatives on a stack but has no way to drop the ones saved inside a group. |
 | `\G` | The assertion depends on mutable state from the preceding match operation, not only on the current input position. |
 | `\R` | Java requires CRLF to behave as one atomic linebreak under repetition. The current character-class representation is insufficient. |
 | Java grapheme clusters | `\X` and `\b{g}` follow Unicode's grapheme cluster segmentation rules, a separate algorithm that no Regulator engine implements. |
