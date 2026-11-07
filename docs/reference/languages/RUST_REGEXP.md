@@ -108,7 +108,7 @@ alternation difference in [Matching](#matching):
 |---|---|
 | Atoms | Literals, `.`, and character classes |
 | Composition | Concatenation and ordered alternation with `|` |
-| Repetition | Greedy and lazy `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}`, with counts up to 1,000 |
+| Repetition | Greedy and lazy `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}`, with any count the crate accepts |
 | Groups | Numbered captures, `(?P<name>...)`, `(?<name>...)`, and noncapturing groups, with the crate's capture-name rules |
 | Anchors | `\A`, `\z`, `^`, and `$`, with multi-line and CRLF modes |
 | Boundaries | `\b`, `\B`, `\<`, `\>`, `\b{start}`, `\b{end}`, `\b{start-half}`, and `\b{end-half}`, in Unicode and ASCII forms |
@@ -155,7 +155,17 @@ The crate rejects a pattern whose compiled program exceeds its 10 MiB
 `size_limit`, such as `\w{1000}`. Regulator does not reproduce that estimate.
 It accepts such a pattern unless compiling it exceeds `maxMemory`, which throws
 `RegexpCompileMemoryLimitException` rather than a parse error. A pattern the
-crate refuses as too large has no crate result to differ from.
+crate refuses as too large has no crate result to differ from. Under a
+`maxMemory` smaller than the default, Regulator can also reject a pattern the
+crate accepts.
+
+Repetition counts above 1,000 are accepted, as in the crate, and so are nested
+counts whose product exceeds 1,000. As in every language, the budget counts a
+repetition as written out, as [compiled patterns](../REGULATOR_API.md#compiled-patterns)
+describes. Compilation throws `RegexpCompileMemoryLimitException` when the
+expansion does not fit `maxMemory`, and the shared budget rejects most
+oversized expansions before building them, so `(?:a{1000}){1000}`, a million
+copies of `a`, fails at the default budget.
 
 Without octal syntax, any escaped digit is a backreference and fails with
 `UNSUPPORTED_CONSTRUCT`. With it, `\0` through `\777` are code points of up to
@@ -211,8 +221,6 @@ The following crate features are not offered:
 - the `line_terminator` setting; `^`, `$`, and `.` use `\n`, or `\r` and `\n`
   in CRLF mode, as with the crate's default
 - the `size_limit` estimate; see [Compilation options](#compilation-options)
-- repetition counts above 1,000, and nested repetitions whose counts multiply
-  past 1,000
 
 See [Unsupported Regular-Expression Features](UNSUPPORTED_FEATURES.md) for the
 design reasons and future-support policy.
@@ -228,12 +236,9 @@ Regulator category: `BAD_ESCAPE` for escape errors, `MISSING_PAREN` for an
 unclosed group, `UNSUPPORTED_CONSTRUCT` for lookaround and backreferences,
 `PATTERN_TOO_LARGE` for the nest limit, and so on.
 
-Regulator adds rejections of its own: repetition counts above 1,000 fail with
-`REPEAT_SIZE`, as do nested repetitions whose counts multiply past 1,000, such
-as `(a{40}){40}`. They are reported only after the whole pattern
-translates, so any error the crate would report wins. Exceeding `maxMemory`
-throws `RegexpCompileMemoryLimitException`. There is no fallback to another
-language.
+Exceeding `maxMemory`, including by a repetition whose expansion is too large
+for it, throws `RegexpCompileMemoryLimitException`. There is no fallback to
+another language.
 
 ## Performance
 

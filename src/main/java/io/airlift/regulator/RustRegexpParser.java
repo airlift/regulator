@@ -24,11 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static io.airlift.regulator.Regexp.MAX_REPEAT;
 import static io.airlift.regulator.RegexpParserSupport.addFoldedRangeLatin1;
 import static io.airlift.regulator.RegexpParserSupport.decodeHexDigit;
 import static io.airlift.regulator.RegexpParserSupport.makeLiteralString;
-import static io.airlift.regulator.RegexpParserSupport.wouldExceedRepeatLimit;
 import static java.util.Objects.requireNonNull;
 
 /// Parses the pattern language of the Rust `regex` crate, pinned at regex 1.13.1 with
@@ -40,9 +38,6 @@ import static java.util.Objects.requireNonNull;
 /// builds a private syntax tree shaped like the crate's, checks the nesting limit, and translates
 /// the tree into a [Regexp]. Every phase walks the tree with an explicit stack, so nesting
 /// depth does not consume thread stack.
-///
-/// Constructs the crate accepts but Regulator does not support are recorded during translation
-/// and reported only after translation succeeds, so a later crate error still takes precedence.
 final class RustRegexpParser
 {
     // Syntax options, kept separate from Regexp parse flags because the crate scopes them itself.
@@ -105,7 +100,6 @@ final class RustRegexpParser
         parser.checkNestLimit(ast);
         Translator translator = new Translator(parser, syntaxFlags, keepNestedRepetitions);
         Regexp regexp = translator.translate(ast);
-        translator.throwUnsupported();
         return new Translation(regexp, !parser.captureNames.isEmpty());
     }
 
@@ -552,15 +546,10 @@ final class RustRegexpParser
 
         RegexpParseException error(ErrorKind kind, int start, int end)
         {
-            return error(kind.code, kind.detail, start, end);
-        }
-
-        RegexpParseException error(RegexpParseErrorCode code, String detail, int start, int end)
-        {
             int byteStart = byteOffsets[start];
             int byteEnd = byteOffsets[end];
             Slice segment = byteEnd > byteStart ? pattern.slice(byteStart, byteEnd - byteStart) : null;
-            return new RegexpParseException(code, segment, byteStart, detail);
+            return new RegexpParseException(kind.code, segment, byteStart, kind.detail);
         }
 
         private RegexpParseException errorAtCurrent(ErrorKind kind)
@@ -1469,7 +1458,6 @@ final class RustRegexpParser
         // squashing the way Regexp.star, plus, and quest do.
         private final boolean keepNestedRepetitions;
         private int flags;
-        private RegexpParseException unsupported;
 
         Translator(Parser parser, int syntaxFlags, boolean keepNestedRepetitions)
         {
@@ -1477,22 +1465,6 @@ final class RustRegexpParser
             this.utf8 = (syntaxFlags & BYTES) == 0;
             this.keepNestedRepetitions = keepNestedRepetitions;
             this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL | BYTES);
-        }
-
-        void throwUnsupported()
-        {
-            if (unsupported != null) {
-                throw unsupported;
-            }
-        }
-
-        // Records the first construct Regulator cannot express and keeps translating, because a
-        // later crate error takes precedence.
-        private void recordUnsupported(RegexpParseErrorCode code, String feature, int start, int end)
-        {
-            if (unsupported == null) {
-                unsupported = parser.error(code, feature, start, end);
-            }
         }
 
         private boolean enabled(int flag)
@@ -1692,15 +1664,10 @@ final class RustRegexpParser
             if (min == 0 && max == 1) {
                 return unaryRepetition(RegexpOp.QUEST, nodeFlags, child);
             }
-            if (min > MAX_REPEAT || max > MAX_REPEAT) {
-                recordUnsupported(RegexpParseErrorCode.REPEAT_SIZE, "repetition count above " + MAX_REPEAT, repetition.start(), repetition.end());
-                return child;
-            }
-            if (wouldExceedRepeatLimit(child, (int) min, (int) max)) {
-                recordUnsupported(RegexpParseErrorCode.REPEAT_SIZE, "nested repetition count above " + MAX_REPEAT, repetition.start(), repetition.end());
-                return child;
-            }
-            return Regexp.repeat(nodeFlags, child, (int) min, (int) max);
+            // Rust accepts any u32 count. A count beyond the int range reads as the int maximum,
+            // which still expands past every memory budget, because the repeated expression is not
+            // empty width.
+            return Regexp.repeat(nodeFlags, child, (int) Math.min(min, Integer.MAX_VALUE), (int) Math.min(max, Integer.MAX_VALUE));
         }
 
         /// Builds `*`, `+`, or `?` over `child`. The crate keeps a repetition of a repetition as

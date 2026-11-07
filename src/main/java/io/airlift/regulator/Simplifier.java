@@ -42,11 +42,11 @@ final class Simplifier
     }
 
     /// Simplifies an expression for a program compiled with `maxMemory`. Simplification expands
-    /// counted repetition, which multiplies the size of a pattern by up to the parsers' repetition
-    /// limit. Adjacent repetitions coalesce first, and a coalesced count can exceed that limit.
-    /// The compiler checks its instruction and node visit limits only as it compiles the
-    /// expansion, so this counts the expansion as it is built (see [ExpansionBudget]) and fails
-    /// once it passes either limit.
+    /// counted repetition into copies. RE2, Java, and Trino limit each count to 1,000, but
+    /// adjacent repetitions coalesce first into a count that can exceed it, and Rust counts have
+    /// no such limit. The compiler checks its instruction and node visit limits only as it
+    /// compiles the expansion, so this counts the expansion as it is built (see
+    /// [ExpansionBudget]) and fails once it passes either limit.
     ///
     /// A non-positive `maxMemory` sets no limit, and the expansion is not checked. A compile
     /// without a budget still has a node visit limit, which the expansion can reach before the
@@ -3069,10 +3069,10 @@ final class Simplifier
                 throw new IllegalStateException("unexpected followingExpression op: " + followingExpression.op());
             }
 
-            // The parsers limit each repetition, but nothing limits how many adjacent repetitions
-            // coalesce, so a sum saturates rather than overflow. Every copy of an atom costs the
-            // compiler at least one node visit, so a saturated count is far past any program's
-            // visit limit, and a budgeted simplification rejects it before expanding it.
+            // Nothing limits how many adjacent repetitions coalesce, and a Rust count can already
+            // be the int maximum, so a sum saturates rather than overflow. Every copy of an atom
+            // costs the compiler at least one node visit, so a saturated count is far past any
+            // program's visit limit, and a budgeted simplification rejects it before expanding it.
             private static int addRepetitions(int count, int addend)
             {
                 return (int) Math.min((long) count + addend, Integer.MAX_VALUE);

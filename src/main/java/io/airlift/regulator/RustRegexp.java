@@ -28,8 +28,10 @@ import static java.util.Objects.requireNonNull;
 /// `regex::bytes::Regex`, which matches arbitrary bytes. In both modes, iteration skips an
 /// empty match adjacent to the previous match, and a search of a range or matcher region sees the
 /// input outside it as assertion context, as in the crate's `Input::range`. Unicode
-/// properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
-/// compilation. Match offsets are byte offsets, as in the crate.
+/// properties read Regulator's Unicode database. As in the crate, repetition counts above 1,000
+/// are accepted; compilation throws [RegexpCompileMemoryLimitException] when the expansion does not
+/// fit the memory budget, and rejects most oversized expansions before building them. Match
+/// offsets are byte offsets, as in the crate.
 public sealed class RustRegexp
         extends CompiledPattern
         permits RustRegexp.ByteTableRustRegexp,

@@ -37,8 +37,10 @@ abstract class RegexpWalker<T>
     protected abstract T shortVisit(Regexp regexp, T parentValue);
 
     /// Visits every node once per reference to it, with no visit limit. Parse output is a tree, and
-    /// simplification adds references only by expanding counted repetitions, which the parsers'
-    /// repetition limits keep within a constant factor of the pattern, so the visits stay linear.
+    /// simplification adds references only by expanding counted repetitions. Simplification for a
+    /// compile fails once that expansion passes the compiler's limits for the memory budget (see
+    /// [Simplifier#simplify(Regexp,CaseFolding,long)]), so the visits of its result stay
+    /// proportional to the budget.
     final T walk(Regexp regexp, T initialValue)
     {
         return walkInternal(regexp, initialValue, true, 0);
