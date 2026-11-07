@@ -65,6 +65,9 @@ final class Compiler
     //   per instruction, an id and a next link in arrays sized to the edge count. The last 4
     //   bytes cover the unused part of the last flattened instruction block and, on a program of
     //   a thousand instructions or more, fixed arrays such as the hint colors.
+    //   Before flattening, the same bytes hold the Trino and Java nullable-loop workspace, which
+    //   compilation drops before flattening: the clone table's three ints and the walk set's
+    //   two ints for each of two states, at most 42 bytes as both grow by half.
     static final int UNFLATTENED_INSTRUCTION_BYTES = 56 + 16 + (8 + 4 + 12 + 4 + 16 + 4);
     // The heap a flattened program retains per instruction, plus the block slot flattening emits
     // it into, with references counted at eight bytes as above:
@@ -81,6 +84,10 @@ final class Compiler
     static final int FLATTENED_INSTRUCTION_BYTES = 56 + 16 + 2 + 31 + 8;
     private static final int DOMINATOR_ELISION_MINIMUM_INSTRUCTIONS = 1024;
     private static final int DOMINATOR_ELISION_MAXIMUM_VISITS = 1_000_000;
+    // Bounds a nullable loop's walk of its body after the first byte, which nested loops repeat
+    // for the bodies inside them, at this many states per state before the first byte; past it,
+    // the loop clones its whole prefix.
+    private static final int NULLABLE_LOOP_WALK_STATES_PER_PREFIX_STATE = 32;
 
     static Prog compile(Regexp regexp)
     {
@@ -666,9 +673,11 @@ final class Compiler
         private final RuneCache runeCache = new RuneCache();
         private final Fragment runeRange = new Fragment();
         private final CaseFolding caseFolding;
-        // Trino and Java nullable loops share one clone table, grown by doubling, so its allocation
-        // stays proportional to the program however many loops the pattern has.
+        // Trino and Java nullable loops share one clone table and one walk set, each grown by
+        // half, so their allocation stays proportional to the program however many loops the
+        // pattern has, and they fit the scratch an unflattened instruction is charged for.
         private SparseIntArray nullableLoopClones;
+        private SparseSet nullableLoopWalk;
         // Whether the pattern compiled a repetition loop. An unanchored search's leading loop is
         // not the pattern's, and does not count.
         private boolean compiledLoop;
@@ -754,6 +763,10 @@ final class Compiler
                 childFragmentCount = firstChildIndex;
                 nodes[--depth] = null;
                 if (depth == 0) {
+                    // The nullable-loop workspace is done; drop it so it does not stay live
+                    // through flattening.
+                    nullableLoopClones = null;
+                    nullableLoopWalk = null;
                     return fragment;
                 }
                 if (childFragmentCount == childFragments.length) {
@@ -1046,13 +1059,14 @@ final class Compiler
         /// Compiles a loop over a nullable body, which ends when an iteration consumes nothing.
         /// Only an iteration that consumed input reaches the choice between another iteration
         /// and the exit; a greedy loop tries another iteration first, and a lazy one the exit. A
-        /// new iteration enters the body through the loop's own clone of
-        /// the body's start, which [#progressIteration] makes, so it shares no state with a loop
-        /// nested in the body that the previous iteration is still repeating.
+        /// new iteration enters the body through the loop's pre-consumption copy of the body's
+        /// start, which [#progressIteration] makes, so it shares no instruction with a loop nested
+        /// in the body that the previous iteration is still repeating.
         private Fragment nullableLoop(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
         {
-            ProgressIteration iteration = progressIteration(fragment, false);
-            Fragment optionalIteration = quest(new Fragment(iteration.entry(), iteration.emptyEnd(), true), nonGreedy);
+            Fragment emptyExit = noOperation();
+            ProgressIteration iteration = progressIteration(fragment, emptyExit.begin, false);
+            Fragment optionalIteration = quest(new Fragment(iteration.entry(), emptyExit.end, true), nonGreedy);
             PatchList.patch(program, iteration.consumedEnd(), optionalIteration.begin);
             if (zeroIterationsAllowed) {
                 return optionalIteration;
@@ -1088,6 +1102,9 @@ final class Compiler
             int begin = 0;
             long consumedEnd = PatchList.EMPTY;
             long exits = PatchList.EMPTY;
+            // The finite copies' paths that consume nothing share one exit, made with the first of
+            // them; a lone unbounded copy is a loop with its own exit.
+            int emptyExit = -1;
             for (int copyIndex = 0; copyIndex < copyCount; copyIndex++) {
                 Fragment copy = copies[firstCopyIndex + copyIndex];
                 int entry;
@@ -1100,8 +1117,13 @@ final class Compiler
                     exits = PatchList.append(program, exits, loop.end);
                 }
                 else {
+                    if (emptyExit < 0) {
+                        Fragment exit = noOperation();
+                        emptyExit = exit.begin;
+                        exits = PatchList.append(program, exits, exit.end);
+                    }
                     // Every copy is the same body, so the first one answers for all.
-                    ProgressIteration iteration = progressIteration(copy, copyIndex == 0 && min >= 2);
+                    ProgressIteration iteration = progressIteration(copy, emptyExit, copyIndex == 0 && min >= 2);
                     if (iteration.emptyOnlyThroughAssertion()) {
                         if (reversed) {
                             throw new RegexpCompileException("Java counted repetitions of a body that matches empty only through an assertion do not support reverse compilation");
@@ -1110,7 +1132,6 @@ final class Compiler
                     }
                     entry = iteration.entry();
                     nextConsumedEnd = iteration.consumedEnd();
-                    exits = PatchList.append(program, exits, iteration.emptyEnd());
                 }
                 if (copyIndex >= min) {
                     Fragment optionalCopy = quest(new Fragment(entry, PatchList.EMPTY, true), nonGreedy);
@@ -1128,32 +1149,36 @@ final class Compiler
             return new Fragment(begin, PatchList.append(program, exits, consumedEnd), true);
         }
 
-        /// One iteration of a nullable body, split by progress. The body's instructions up to its
-        /// first byte are cloned, and the clones start at `entry`, so the paths that consume
-        /// nothing end at `emptyEnd`, and the paths that consume reach `consumedEnd` through the
-        /// original instructions. When asked, `emptyOnlyThroughAssertion` reports whether every path to
-        /// `emptyEnd` passes an assertion.
-        private record ProgressIteration(int entry, long consumedEnd, long emptyEnd, boolean emptyOnlyThroughAssertion) {}
+        /// One iteration of a nullable body, split by progress. The paths from `entry` that consume
+        /// nothing end at the caller's empty exit, and the paths that consume reach `consumedEnd`.
+        /// The paths that have consumed nothing yet run through a pre-consumption copy of the
+        /// body's instructions up to its first byte. An instruction a path also reaches after
+        /// consuming, through a loop inside the body, is cloned for that copy; every other one is
+        /// reused in place and relinked, as nothing reaches it except through the copy. When the
+        /// walk that tells them apart gives up, every one is cloned. When asked,
+        /// `emptyOnlyThroughAssertion` reports whether every path to the empty exit passes an
+        /// assertion.
+        private record ProgressIteration(int entry, long consumedEnd, boolean emptyOnlyThroughAssertion) {}
 
-        private ProgressIteration progressIteration(Fragment fragment, boolean checkEmptyPaths)
+        private ProgressIteration progressIteration(Fragment fragment, int emptyExit, boolean checkEmptyPaths)
         {
             Fragment consumedExit = noOperation();
             PatchList.patch(program, fragment.end, consumedExit.begin);
 
-            Fragment emptyExit = noOperation();
             int originalInstructionLimit = program.size();
+            SparseSet bodyStates = markBodyStates(fragment.begin, consumedExit.begin);
             if (nullableLoopClones == null) {
                 nullableLoopClones = new SparseIntArray(originalInstructionLimit);
             }
             else if (nullableLoopClones.maxSize() < originalInstructionLimit) {
-                nullableLoopClones.resize(Math.max(originalInstructionLimit, nullableLoopClones.maxSize() * 2));
+                nullableLoopClones.resize(Math.max(originalInstructionLimit, nullableLoopClones.maxSize() + nullableLoopClones.maxSize() / 2));
             }
             SparseIntArray clones = nullableLoopClones;
             clones.clear();
-            int entry = clonePreConsumptionInstruction(fragment.begin, consumedExit.begin, emptyExit.begin, clones, originalInstructionLimit);
+            int entry = clonePreConsumptionInstruction(fragment.begin, consumedExit.begin, emptyExit, clones, bodyStates, originalInstructionLimit);
 
             // The clone table is also the work queue: clones made while linking are visited later in
-            // this loop.
+            // this loop. An instruction reused in place is read and relinked in the same step.
             for (int cloneIndex = 0; cloneIndex < clones.size(); cloneIndex++) {
                 int originalId = clones.denseIndexAt(cloneIndex);
                 Prog.Inst original = program.inst(originalId);
@@ -1163,21 +1188,24 @@ final class Compiler
                         clone.setOut(clonePreConsumptionInstruction(
                                 original.out(),
                                 consumedExit.begin,
-                                emptyExit.begin,
+                                emptyExit,
                                 clones,
+                                bodyStates,
                                 originalInstructionLimit));
                         clone.setOut1(clonePreConsumptionInstruction(
                                 original.out1(),
                                 consumedExit.begin,
-                                emptyExit.begin,
+                                emptyExit,
                                 clones,
+                                bodyStates,
                                 originalInstructionLimit));
                     }
                     case CAPTURE, EMPTY_WIDTH, NOP -> clone.setOut(clonePreConsumptionInstruction(
                             original.out(),
                             consumedExit.begin,
-                            emptyExit.begin,
+                            emptyExit,
                             clones,
+                            bodyStates,
                             originalInstructionLimit));
                     case BYTE_RANGE -> {
                         // A byte clone keeps its original successor.
@@ -1185,42 +1213,107 @@ final class Compiler
                     case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
                 }
             }
-            boolean emptyOnlyThroughAssertion = checkEmptyPaths && !reachesWithoutAssertion(entry, emptyExit.begin, originalInstructionLimit);
-            return new ProgressIteration(entry, consumedExit.end, emptyExit.end, emptyOnlyThroughAssertion);
+            // The check reuses the walk set, so it runs only once the copy is linked.
+            boolean emptyOnlyThroughAssertion = checkEmptyPaths && !reachesWithoutAssertion(entry, emptyExit);
+            return new ProgressIteration(entry, consumedExit.end, emptyOnlyThroughAssertion);
         }
 
-        /// Returns whether a path of the clones from `firstClone` on leads from `entry` to `target`
-        /// through no assertion.
-        private boolean reachesWithoutAssertion(int entry, int target, int firstClone)
+        /// Returns the walk set holding each state `id << 1 | consumed` that a path of the body from
+        /// `entry` reaches, where `consumed` is 1 once the path has consumed a byte. Returns null
+        /// when the walk gives up; the iteration then clones every instruction before the first
+        /// byte. The body's paths leave it only through `consumedExit`, where the walk stops.
+        ///
+        /// The walk first follows the paths that have consumed nothing, the part the iteration
+        /// copies, and then the paths after a byte. A nested loop's body holds the bodies inside
+        /// it, which their own iterations already walked, so the second part stops after a
+        /// constant times the first part's states, keeping a pattern's walks within a constant
+        /// factor of its copies.
+        private SparseSet markBodyStates(int entry, int consumedExit)
         {
-            int cloneCount = program.size() - firstClone;
-            boolean[] visited = new boolean[cloneCount];
-            int[] pending = new int[2 * cloneCount + 1];
-            int pendingCount = 0;
-            pending[pendingCount++] = entry;
-            while (pendingCount > 0) {
-                int id = pending[--pendingCount];
+            SparseSet states = clearedNullableLoopWalk(2 * program.size());
+            // The set is also the work queue of both passes: states found while walking are
+            // visited later in the same pass. A state after a byte waits for the second pass.
+            states.insert(entry << 1);
+            int prefixStates = 0;
+            for (int stateIndex = 0; stateIndex < states.size(); stateIndex++) {
+                int state = states.denseAt(stateIndex);
+                if ((state & 1) == 0) {
+                    prefixStates++;
+                    insertSuccessorStates(states, state, consumedExit);
+                }
+            }
+            long maxConsumedStates = (long) NULLABLE_LOOP_WALK_STATES_PER_PREFIX_STATE * prefixStates;
+            int consumedStates = 0;
+            for (int stateIndex = 0; stateIndex < states.size(); stateIndex++) {
+                int state = states.denseAt(stateIndex);
+                if ((state & 1) != 0) {
+                    if (++consumedStates > maxConsumedStates) {
+                        return null;
+                    }
+                    insertSuccessorStates(states, state, consumedExit);
+                }
+            }
+            return states;
+        }
+
+        private void insertSuccessorStates(SparseSet states, int state, int consumedExit)
+        {
+            int id = state >> 1;
+            if (id == consumedExit) {
+                return;
+            }
+            int consumed = state & 1;
+            Prog.Inst instruction = program.inst(id);
+            switch (instruction.opcode()) {
+                case ALT -> {
+                    states.insert(instruction.out() << 1 | consumed);
+                    states.insert(instruction.out1() << 1 | consumed);
+                }
+                case CAPTURE, EMPTY_WIDTH, NOP -> states.insert(instruction.out() << 1 | consumed);
+                case BYTE_RANGE -> states.insert(instruction.out() << 1 | 1);
+                default -> {
+                    // FAIL ends this path, and a body holds no match instruction.
+                }
+            }
+        }
+
+        /// Returns whether a path of the pre-consumption copy leads from `entry` to `target`
+        /// through no assertion.
+        private boolean reachesWithoutAssertion(int entry, int target)
+        {
+            SparseSet visited = clearedNullableLoopWalk(program.size());
+            // The set is also the work queue.
+            visited.insert(entry);
+            for (int visitIndex = 0; visitIndex < visited.size(); visitIndex++) {
+                int id = visited.denseAt(visitIndex);
                 if (id == target) {
                     return true;
                 }
-                // Every other edge out of the clones leads to FAIL.
-                if (id < firstClone || visited[id - firstClone]) {
-                    continue;
-                }
-                visited[id - firstClone] = true;
                 Prog.Inst instruction = program.inst(id);
                 switch (instruction.opcode()) {
                     case ALT -> {
-                        pending[pendingCount++] = instruction.out();
-                        pending[pendingCount++] = instruction.out1();
+                        visited.insert(instruction.out());
+                        visited.insert(instruction.out1());
                     }
-                    case CAPTURE, NOP -> pending[pendingCount++] = instruction.out();
+                    case CAPTURE, NOP -> visited.insert(instruction.out());
                     default -> {
-                        // An assertion ends the search of this path, and a byte consumes.
+                        // An assertion or FAIL ends the search of this path, and a byte consumes.
                     }
                 }
             }
             return false;
+        }
+
+        private SparseSet clearedNullableLoopWalk(int maxSize)
+        {
+            if (nullableLoopWalk == null) {
+                nullableLoopWalk = new SparseSet(maxSize);
+            }
+            else if (nullableLoopWalk.maxSize() < maxSize) {
+                nullableLoopWalk.resize(Math.max(maxSize, nullableLoopWalk.maxSize() + nullableLoopWalk.maxSize() / 2));
+            }
+            nullableLoopWalk.clear();
+            return nullableLoopWalk;
         }
 
         private int clonePreConsumptionInstruction(
@@ -1228,6 +1321,7 @@ final class Compiler
                 int consumedExit,
                 int emptyExit,
                 SparseIntArray clones,
+                SparseSet bodyStates,
                 int originalInstructionLimit)
         {
             if (originalId == consumedExit) {
@@ -1245,6 +1339,12 @@ final class Compiler
                 return clones.getExisting(originalId);
             }
 
+            // No path reaches this instruction after consuming, so once the iteration enters
+            // through the copy, only the copy reaches it. When the walk gave up, it is cloned.
+            if (bodyStates != null && !bodyStates.contains(originalId << 1 | 1)) {
+                clones.setNew(originalId, originalId);
+                return originalId;
+            }
             Prog.Inst original = program.inst(originalId);
             Prog.Inst clone = original.copy();
             switch (original.opcode()) {
