@@ -35,7 +35,9 @@ import static java.util.Objects.requireNonNull;
         justification = "Prog is mutated during single-threaded compilation and safely published before matching")
 final class Prog
 {
-    private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    private static final long ANCHORED_BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    // Upstream's visited bitmap bound, 256 Kibit, which caps unanchored BitState searches.
+    private static final long UNANCHORED_BIT_STATE_BITMAP_MAXIMUM_BYTES = 32L * 1024L;
     // The most instructions a flattened program may hold: a packed capture instruction word keeps
     // an output in 28 bits, as upstream's `Prog::Inst` does.
     static final int MAX_FLATTENED_INSTRUCTIONS = (1 << 28) - 1;
@@ -382,7 +384,8 @@ final class Prog
     private short[] outputLists;
     // The list id of the start instruction, or -1 when the program cannot run BitState.
     private int startList;
-    private int bitStateTextMaxSize;
+    private int anchoredBitStateTextMaxSize;
+    private int unanchoredBitStateTextMaxSize;
     private int bitStateJobsPerPosition;
 
     // Instruction counts by opcode, populated by flatten().
@@ -779,9 +782,21 @@ final class Prog
         return startList;
     }
 
-    public int bitStateTextMaxSize()
+    /// Returns the longest text an anchored BitState search takes, such as the capture pass over a
+    /// span the DFA found.
+    public int anchoredBitStateTextMaxSize()
     {
-        return bitStateTextMaxSize;
+        return anchoredBitStateTextMaxSize;
+    }
+
+    /// Returns the longest text an unanchored BitState search takes:
+    /// [#anchoredBitStateTextMaxSize()], capped where upstream caps the visited bitmap, at 256
+    /// Kibit. An unanchored search clears its bitmap over its whole window, and each find searches
+    /// the rest of the text, so the bitmap words a find-all clears grow with the square of this
+    /// window.
+    int unanchoredBitStateTextMaxSize()
+    {
+        return unanchoredBitStateTextMaxSize;
     }
 
     /// Returns the jobs a BitState search may push for each position of its text; see
@@ -792,13 +807,27 @@ final class Prog
         return bitStateJobsPerPosition;
     }
 
-    /// Lowers the BitState text limit so that a search's visited bitmap, capture slots, job stack,
-    /// and objects fit in `allowance` bytes. Only valid after [#flatten()] has been called.
+    /// Lowers the anchored BitState text limit, and with it the unanchored one, so that a search's
+    /// visited bitmap, capture slots, job stack, and objects fit in `allowance` bytes. Only valid
+    /// after [#flatten()] has been called.
     void limitBitStateMemory(long allowance)
     {
         if (outputLists != null) {
-            bitStateTextMaxSize = BitState.maxTextLength(this, bitStateTextMaxSize, allowance);
+            setAnchoredBitStateTextMaxSize(BitState.maxTextLength(this, anchoredBitStateTextMaxSize, allowance));
         }
+    }
+
+    // Sets the anchored BitState text limit and derives the unanchored limit from it.
+    private void setAnchoredBitStateTextMaxSize(int textMaxSize)
+    {
+        anchoredBitStateTextMaxSize = textMaxSize;
+        unanchoredBitStateTextMaxSize = Math.min(textMaxSize, textMaxSizeForBitmap(UNANCHORED_BIT_STATE_BITMAP_MAXIMUM_BYTES));
+    }
+
+    // BitState allocates a bitmap of listCount * (text.size()+1) bits.
+    private int textMaxSizeForBitmap(long maximumBitmapBytes)
+    {
+        return (int) (maximumBitmapBytes * Byte.SIZE / Math.max(1, listCount) - 1);
     }
 
     /// Returns a 256-entry table that is nonzero for each byte that can begin a match of this
@@ -3423,17 +3452,17 @@ final class Prog
 
         this.outputLists = null;
         startList = -1;
-        bitStateTextMaxSize = 0;
+        anchoredBitStateTextMaxSize = 0;
+        unanchoredBitStateTextMaxSize = 0;
         bitStateJobsPerPosition = 0;
         if (outputLists != null) {
             this.outputLists = outputLists;
             startList = startRootId;
 
-            // BitState allocates a bitmap of size listCount * (text.size()+1). The Java server
-            // implementation accepts a larger fixed bound than upstream when that avoids three
-            // complete capture passes over a long input.
-            long maximumBitmapBits = BIT_STATE_BITMAP_MAXIMUM_BYTES * Byte.SIZE;
-            bitStateTextMaxSize = (int) (maximumBitmapBits / Math.max(1, listCount) - 1);
+            // The Java server implementation accepts a larger bitmap than upstream for anchored
+            // searches, so BitState rather than the NFA captures a longer span. Unanchored
+            // searches keep upstream's bound.
+            setAnchoredBitStateTextMaxSize(textMaxSizeForBitmap(ANCHORED_BIT_STATE_BITMAP_MAXIMUM_BYTES));
             bitStateJobsPerPosition = BitState.jobsPerPosition(this);
         }
 
