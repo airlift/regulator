@@ -16,8 +16,10 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;
@@ -58,7 +60,7 @@ final class Prefilter
 
     private PrefilterOp op;
     private final Slice atom;
-    private final List<Prefilter> children;
+    private final Deque<Prefilter> children;
 
     private Prefilter(PrefilterOp op)
     {
@@ -69,7 +71,7 @@ final class Prefilter
     {
         this.op = op;
         this.atom = atom;
-        this.children = new ArrayList<>();
+        this.children = new ArrayDeque<>(2);
     }
 
     PrefilterOp op()
@@ -153,8 +155,17 @@ final class Prefilter
         }
 
         if (left.op == operation && right.op == operation) {
-            left.children.addAll(right.children);
-            return left;
+            // The left's children come first, as upstream. Upstream appends the right's to the
+            // left's, which copies the whole growing side at each level when nested guards grow
+            // on the right, so here the smaller list moves into the larger.
+            if (left.children.size() >= right.children.size()) {
+                left.children.addAll(right.children);
+                return left;
+            }
+            for (Prefilter child : left.children.reversed()) {
+                right.children.addFirst(child);
+            }
+            return right;
         }
         if (right.op == operation) {
             Prefilter swap = left;
@@ -272,28 +283,40 @@ final class Prefilter
             return Info.noMatch();
         }
 
-        Info result = Info.literal(runes[0], latin1);
-        for (int runeIndex = 1; runeIndex < runes.length; runeIndex++) {
-            result = Info.concat(result, Info.literal(runes[runeIndex], latin1));
-        }
-        return result;
+        // Each rune yields one canonical string, so upstream's rune-by-rune concatenation yields
+        // one string. It is built at once rather than by repeated concatenation, which copies the
+        // whole string at each rune.
+        return Info.exactString(runesToSlice(runes, latin1));
     }
 
     private static Info concat(List<Info> childInfos)
     {
         Info result = null;
         Info exact = null;
+        // A child with one string appends the same suffix to every string of the exact run, which
+        // leaves the run's size, and so the size check, unchanged. Such suffixes are joined when the
+        // run's strings are next needed, rather than copying every string once per child.
+        List<Slice> pendingSuffixes = new ArrayList<>();
         for (Info childInfo : childInfos) {
-            if (!childInfo.isExact || (exact != null && childInfo.exact.size() * exact.exact.size() > 16)) {
-                result = Info.and(result, exact);
+            if (!childInfo.isExact || (exact != null && !exactCrossProductFits(childInfo.exact.size(), exact.exact.size()))) {
+                result = Info.and(result, Info.appendSuffixes(exact, pendingSuffixes));
                 exact = null;
                 result = Info.and(result, childInfo);
             }
+            else if (exact != null && childInfo.exact.size() == 1) {
+                pendingSuffixes.add(childInfo.exact.getFirst());
+            }
             else {
-                exact = Info.concat(exact, childInfo);
+                exact = Info.concat(Info.appendSuffixes(exact, pendingSuffixes), childInfo);
             }
         }
-        return Info.and(result, exact);
+        return Info.and(result, Info.appendSuffixes(exact, pendingSuffixes));
+    }
+
+    // Whether two exact sets may form a cross product; long because huge sets would overflow int.
+    static boolean exactCrossProductFits(int leftSize, int rightSize)
+    {
+        return (long) leftSize * rightSize <= 16;
     }
 
     private static Info alternate(List<Info> childInfos)
@@ -315,13 +338,28 @@ final class Prefilter
 
     private static Slice runeToSlice(int rune, boolean latin1)
     {
+        return runesToSlice(new int[] {rune}, latin1);
+    }
+
+    private static Slice runesToSlice(int[] runes, boolean latin1)
+    {
         if (latin1) {
-            return Slices.wrappedBuffer((byte) FilteredRe2.canonicalizeLatin1Byte(rune));
+            byte[] bytes = new byte[runes.length];
+            for (int runeIndex = 0; runeIndex < runes.length; runeIndex++) {
+                bytes[runeIndex] = (byte) FilteredRe2.canonicalizeLatin1Byte(runes[runeIndex]);
+            }
+            return Slices.wrappedBuffer(bytes);
         }
         // Atoms apply only the simple fold; multi-character folds are not canonicalized.
-        int canonicalCodePoint = FilteredRe2.canonicalizeUnicodeCodePoint(rune);
-        byte[] bytes = new byte[Utf8.encodedLength(canonicalCodePoint)];
-        Utf8.encode(bytes, 0, canonicalCodePoint);
+        int length = 0;
+        for (int rune : runes) {
+            length += Utf8.encodedLength(FilteredRe2.canonicalizeUnicodeCodePoint(rune));
+        }
+        byte[] bytes = new byte[length];
+        int offset = 0;
+        for (int rune : runes) {
+            offset = Utf8.encode(bytes, offset, FilteredRe2.canonicalizeUnicodeCodePoint(rune));
+        }
         return Slices.wrappedBuffer(bytes);
     }
 
@@ -361,6 +399,33 @@ final class Prefilter
             return result;
         }
 
+        // Appends the joined suffixes to every string of an exact run, consuming them.
+        private static Info appendSuffixes(Info exact, List<Slice> suffixes)
+        {
+            if (suffixes.isEmpty()) {
+                return exact;
+            }
+
+            int suffixLength = 0;
+            for (Slice suffix : suffixes) {
+                suffixLength += suffix.length();
+            }
+            Slice joinedSuffix = Slices.allocate(suffixLength);
+            int offset = 0;
+            for (Slice suffix : suffixes) {
+                joinedSuffix.setBytes(offset, suffix);
+                offset += suffix.length();
+            }
+            suffixes.clear();
+
+            Info result = new Info();
+            for (Slice string : exact.exact) {
+                result.exact.add(concatSlices(string, joinedSuffix));
+            }
+            result.isExact = true;
+            return result;
+        }
+
         private static Info and(Info left, Info right)
         {
             if (left == null) {
@@ -377,15 +442,18 @@ final class Prefilter
 
         private static Info alternate(Info left, Info right)
         {
-            Info result = new Info();
             if (left.isExact && right.isExact) {
-                result.exact.addAll(left.exact);
-                result.exact.addAll(right.exact);
-                result.isExact = true;
+                // As upstream, the larger set takes in the smaller, so a wide alternation does not
+                // copy its whole set at each alternative. Each Info has one owner, which passes it
+                // here and does not use it again, so the larger can be reused.
+                Info larger = left.exact.size() >= right.exact.size() ? left : right;
+                Info smaller = larger == left ? right : left;
+                larger.exact.addAll(smaller.exact);
+                return larger;
             }
-            else {
-                result.match = Prefilter.or(left.takeMatch(), right.takeMatch());
-            }
+
+            Info result = new Info();
+            result.match = Prefilter.or(left.takeMatch(), right.takeMatch());
             return result;
         }
 
@@ -408,8 +476,13 @@ final class Prefilter
 
         private static Info literal(int rune, boolean latin1)
         {
+            return exactString(runeToSlice(rune, latin1));
+        }
+
+        private static Info exactString(Slice string)
+        {
             Info result = new Info();
-            result.exact.add(runeToSlice(rune, latin1));
+            result.exact.add(string);
             result.isExact = true;
             return result;
         }
@@ -446,10 +519,7 @@ final class Prefilter
 
         private static Info emptyString()
         {
-            Info result = new Info();
-            result.exact.add(Slices.EMPTY_SLICE);
-            result.isExact = true;
-            return result;
+            return exactString(Slices.EMPTY_SLICE);
         }
     }
 }

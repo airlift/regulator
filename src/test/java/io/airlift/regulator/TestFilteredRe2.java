@@ -654,6 +654,15 @@ public class TestFilteredRe2
         assertThat(failure.get()).isNull();
     }
 
+    @Test
+    public void testExactCrossProductCheckDoesNotOverflow()
+    {
+        // 46,341 squared exceeds Integer.MAX_VALUE, so an int product wraps negative.
+        assertThat(Prefilter.exactCrossProductFits(46_341, 46_341)).isFalse();
+        assertThat(Prefilter.exactCrossProductFits(4, 4)).isTrue();
+        assertThat(Prefilter.exactCrossProductFits(17, 1)).isFalse();
+    }
+
     private static Slice textBytes(String value)
     {
         return Slices.utf8Slice(value);
