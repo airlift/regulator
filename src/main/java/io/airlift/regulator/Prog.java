@@ -3245,7 +3245,8 @@ final class Prog
             }
         }
         else {
-            PredecessorLists predecessors = new PredecessorLists(size());
+            // Each reachable instruction adds at most two edges.
+            PredecessorLists predecessors = new PredecessorLists(size(), 2 * reachable.size());
             for (int index = 0; index < reachable.size(); index++) {
                 int id = reachable.denseAt(index);
                 Inst instruction = inst(id);
@@ -3383,8 +3384,7 @@ final class Prog
         int[] hintColors = new int[256];
         // First pass: mark successor roots and predecessors.
         SparseIntArray rootIdsByInstruction = new SparseIntArray(size());
-        PredecessorLists predecessorLists = new PredecessorLists(size());
-        markSuccessors(rootIdsByInstruction, predecessorLists, reachable, stack);
+        PredecessorLists predecessorLists = markSuccessors(rootIdsByInstruction, reachable, stack);
         int successorRootCount = rootIdsByInstruction.size();
         // Loop roots, for a program that keeps nullable loop priority.
         if (keepsNullableLoopPriority) {
@@ -3393,22 +3393,22 @@ final class Prog
         // Second pass: mark dominator roots.
         long dominatorEdgesScanned = 0;
         if (!skipDominatorPass) {
-            int[] sortedRootInstructionIds = new int[rootIdsByInstruction.size()];
-            for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
-                sortedRootInstructionIds[rootIndex] = rootIdsByInstruction.denseIndexAt(rootIndex);
-            }
-            Arrays.sort(sortedRootInstructionIds);
-            for (int rootIndex = sortedRootInstructionIds.length - 1; rootIndex > 0; rootIndex--) {
-                int id = sortedRootInstructionIds[rootIndex];
-                if (id != startUnanchored() && id != start()) {
+            // Visit the roots marked so far from the highest instruction id down to the FAIL
+            // instruction's root, which is never visited. A root this pass marks has a root id past
+            // the ones marked so far and is not visited either.
+            int markedRootCount = rootIdsByInstruction.size();
+            for (int id = size() - 1; id > 0; id--) {
+                if (rootIdsByInstruction.hasIndex(id) && rootIdsByInstruction.getExisting(id) < markedRootCount && id != startUnanchored() && id != start()) {
                     dominatorEdgesScanned += markDominator(
                             id, rootIdsByInstruction, predecessorLists, reachable, stack);
                 }
             }
         }
         int finalRootCount = rootIdsByInstruction.size();
-        // Third pass: emit lists and map each root to its flattened instruction index.
-        int[] flattenedIndexesByRoot = new int[rootIdsByInstruction.size()];
+        // Third pass: emit lists and map each root to its flattened instruction index. The map
+        // borrows the predecessor lists' first edges, which hold an int per instruction and so
+        // one per root, because the dominator pass is done with them.
+        int[] flattenedIndexesByRoot = predecessorLists.borrowFirstEdges();
         InstList flattenedInstructions = new InstList(size(), maxInstructionCount, maxMemory);
         for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
             int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
@@ -3974,11 +3974,10 @@ final class Prog
         return match;
     }
 
-    private void markSuccessors(
-            SparseIntArray rootIdsByInstruction,
-            PredecessorLists predecessorLists,
-            SparseSet reachable,
-            IntStack stack)
+    /// Marks successor roots in the root map, and returns the predecessor lists of the
+    /// instructions the unanchored start reaches. Those lists hold only the alternations' two
+    /// edges each, added in the order the traversal reached the alternations.
+    private PredecessorLists markSuccessors(SparseIntArray rootIdsByInstruction, SparseSet reachable, IntStack stack)
     {
         // Mark the FAIL instruction.
         rootIdsByInstruction.setNew(0, rootIdsByInstruction.size());
@@ -3994,6 +3993,7 @@ final class Prog
         reachable.clear();
         stack.clear();
         stack.push(startUnanchored());
+        int edgeCount = 0;
         while (!stack.isEmpty()) {
             int id = stack.pop();
             while (true) {
@@ -4005,9 +4005,7 @@ final class Prog
                 Inst instruction = inst(id);
                 switch (instruction.opcode()) {
                     case ALT_MATCH, ALT -> {
-                        // Mark this instruction as a predecessor of each out.
-                        predecessorLists.add(instruction.out(), id);
-                        predecessorLists.add(instruction.out1(), id);
+                        edgeCount += 2;
                         stack.push(instruction.out1());
                         id = instruction.out();
                     }
@@ -4028,6 +4026,20 @@ final class Prog
                 }
             }
         }
+
+        // Count the edges first so the arrays are sized exactly. The reachable set holds the
+        // instructions in the order the traversal reached them.
+        PredecessorLists predecessorLists = new PredecessorLists(size(), edgeCount);
+        for (int index = 0; index < reachable.size(); index++) {
+            int id = reachable.denseAt(index);
+            Inst instruction = inst(id);
+            if (instruction.opcode() == InstOp.ALT || instruction.opcode() == InstOp.ALT_MATCH) {
+                // Mark this instruction as a predecessor of each out.
+                predecessorLists.add(instruction.out(), id);
+                predecessorLists.add(instruction.out1(), id);
+            }
+        }
+        return predecessorLists;
     }
 
     private static final int LOOP_FRAME_COMPONENT_ROOT = 0b100;
@@ -4624,19 +4636,25 @@ final class Prog
         }
     }
 
-    // Growable instruction array used while emitting flattened lists.
+    /// Growable instruction list used while emitting flattened lists. The flattened size is not
+    /// known until emission, so the list grows a block at a time and never copies a block. With
+    /// the exact array the program keeps, the list holds each flattened instruction in two slots,
+    /// its block's and the kept array's, and leaves less than one block unused, a block being a
+    /// sixteenth of the unflattened size and at least 16 slots.
     private static final class InstList
     {
         private final int maxSize;
         private final long maxMemory;
-        private Inst[] instructions;
+        private final int blockShift;
+        private Inst[][] blocks = new Inst[16][];
         private int size;
 
-        InstList(int capacity, int maxSize, long maxMemory)
+        InstList(int unflattenedSize, int maxSize, long maxMemory)
         {
             this.maxSize = maxSize;
             this.maxMemory = maxMemory;
-            instructions = new Inst[Math.max(1, capacity)];
+            // The largest power of two at most a sixteenth of the unflattened size, and at least 16.
+            blockShift = Math.max(4, 27 - Integer.numberOfLeadingZeros(unflattenedSize));
         }
 
         void add(Inst instruction)
@@ -4644,20 +4662,26 @@ final class Prog
             if (size == maxSize) {
                 throw new RegexpCompileMemoryLimitException(maxMemory);
             }
-            if (size == instructions.length) {
-                instructions = Arrays.copyOf(instructions, (int) Math.min(size * 2L, maxSize));
+            int block = size >>> blockShift;
+            if (size == block << blockShift) {
+                if (block == blocks.length) {
+                    blocks = Arrays.copyOf(blocks, block * 2);
+                }
+                blocks[block] = new Inst[1 << blockShift];
             }
-            instructions[size++] = instruction;
+            blocks[block][size - (block << blockShift)] = instruction;
+            size++;
         }
 
         Inst get(int index)
         {
-            return instructions[index];
+            int block = index >>> blockShift;
+            return blocks[block][index - (block << blockShift)];
         }
 
         Inst getLast()
         {
-            return instructions[size - 1];
+            return get(size - 1);
         }
 
         int size()
@@ -4665,13 +4689,13 @@ final class Prog
             return size;
         }
 
-        /// The instructions for the program to keep. The array starts at the unflattened size, and
-        /// a program that flattens to less than half of that would keep more slots than the
-        /// flattened charge's doubling allowance covers, so it gets an exact copy instead.
+        /// The instructions for the program to keep, in an array of exactly their count.
         Inst[] retainedInstructions()
         {
-            if (instructions.length > 2L * size) {
-                return Arrays.copyOf(instructions, size);
+            Inst[] instructions = new Inst[size];
+            int blockSize = 1 << blockShift;
+            for (int begin = 0; begin < size; begin += blockSize) {
+                System.arraycopy(blocks[begin >>> blockShift], 0, instructions, begin, Math.min(blockSize, size - begin));
             }
             return instructions;
         }
@@ -4748,25 +4772,21 @@ final class Prog
     private static final class PredecessorLists
     {
         private final int[] firstEdges;
-        private int[] predecessorInstructionIds;
-        private int[] nextEdges;
+        private final int[] predecessorInstructionIds;
+        private final int[] nextEdges;
         private int edgeCount;
 
-        PredecessorLists(int instructionCount)
+        /// Holds at most `edgeCapacity` edges, which the caller bounds or counts before adding them.
+        PredecessorLists(int instructionCount, int edgeCapacity)
         {
             firstEdges = new int[instructionCount];
             Arrays.fill(firstEdges, -1);
-            predecessorInstructionIds = new int[Math.max(4, instructionCount)];
-            nextEdges = new int[predecessorInstructionIds.length];
+            predecessorInstructionIds = new int[edgeCapacity];
+            nextEdges = new int[edgeCapacity];
         }
 
         void add(int outputInstructionId, int predecessorInstructionId)
         {
-            if (edgeCount == predecessorInstructionIds.length) {
-                int newSize = predecessorInstructionIds.length * 2;
-                predecessorInstructionIds = Arrays.copyOf(predecessorInstructionIds, newSize);
-                nextEdges = Arrays.copyOf(nextEdges, newSize);
-            }
             predecessorInstructionIds[edgeCount] = predecessorInstructionId;
             nextEdges[edgeCount] = firstEdges[outputInstructionId];
             firstEdges[outputInstructionId] = edgeCount;
@@ -4776,6 +4796,13 @@ final class Prog
         int firstEdge(int outputInstructionId)
         {
             return firstEdges[outputInstructionId];
+        }
+
+        /// Returns the first-edge array, an int per instruction whose contents are unspecified,
+        /// for use as scratch. The caller must not use the lists afterwards.
+        int[] borrowFirstEdges()
+        {
+            return firstEdges;
         }
 
         int nextEdge(int edge)
