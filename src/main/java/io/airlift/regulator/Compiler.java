@@ -1024,12 +1024,14 @@ final class Compiler
         private Fragment repeatUnbounded(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
         {
             compiledLoop = true;
-            // Trino and the JDK both end a greedy loop on an iteration that consumes nothing: Joni
-            // stops at a no-progress iteration, and the JDK's Loop node, which runs a greedy `*` or
-            // `+` of a nondeterministic body, continues past the loop when an iteration ends where
-            // it began. A lazy loop already tries its exit before another iteration.
-            if ((dialect == Dialect.TRINO || dialect == Dialect.JAVA) && fragment.nullable && !nonGreedy) {
-                return greedyNullableLoop(fragment, zeroIterationsAllowed);
+            // Trino and the JDK both end a loop, greedy or lazy, on an iteration that consumes
+            // nothing: Joni's null check after the body skips the jump or push that would start
+            // another iteration, and the JDK's Loop and LazyLoop nodes, which run a `*` or `+`
+            // of a nondeterministic body, continue past the loop when an iteration ends where
+            // it began. In both, each iteration runs the body from its start, so a nested loop
+            // starts its count over.
+            if (fragment.nullable && (dialect == Dialect.TRINO || dialect == Dialect.JAVA)) {
+                return nullableLoop(fragment, nonGreedy, zeroIterationsAllowed);
             }
             // The crate compiles a loop of a body that can match the empty string as RE2 does but
             // searches that program unflattened, so the forward program keeps that priority when
@@ -1041,10 +1043,16 @@ final class Compiler
             return zeroIterationsAllowed ? star(fragment, nonGreedy) : plus(fragment, nonGreedy);
         }
 
-        private Fragment greedyNullableLoop(Fragment fragment, boolean zeroIterationsAllowed)
+        /// Compiles a loop over a nullable body, which ends when an iteration consumes nothing.
+        /// Only an iteration that consumed input reaches the choice between another iteration
+        /// and the exit; a greedy loop tries another iteration first, and a lazy one the exit. A
+        /// new iteration enters the body through the loop's own clone of
+        /// the body's start, which [#progressIteration] makes, so it shares no state with a loop
+        /// nested in the body that the previous iteration is still repeating.
+        private Fragment nullableLoop(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
         {
             ProgressIteration iteration = progressIteration(fragment, false);
-            Fragment optionalIteration = quest(new Fragment(iteration.entry(), iteration.emptyEnd(), true), false);
+            Fragment optionalIteration = quest(new Fragment(iteration.entry(), iteration.emptyEnd(), true), nonGreedy);
             PatchList.patch(program, iteration.consumedEnd(), optionalIteration.begin);
             if (zeroIterationsAllowed) {
                 return optionalIteration;
@@ -1086,7 +1094,7 @@ final class Compiler
                 long nextConsumedEnd;
                 if (unbounded && copyIndex == copyCount - 1) {
                     compiledLoop = true;
-                    Fragment loop = nonGreedy ? plus(copy, true) : greedyNullableLoop(copy, false);
+                    Fragment loop = nullableLoop(copy, nonGreedy, false);
                     entry = loop.begin;
                     nextConsumedEnd = PatchList.EMPTY;
                     exits = PatchList.append(program, exits, loop.end);

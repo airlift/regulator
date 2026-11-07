@@ -339,13 +339,27 @@ Upstream's own never-capture test uses only unnamed groups.
   options. Compilation snapshots their values and copies the pattern bytes.
 - A repetition of a body that can match the empty string follows the JDK's
   loop rule, which is JDK parity rather than a new difference: an iteration
-  that consumes nothing ends the repetition, even below its minimum count.
-  Greedy `*` and `+` loops share Trino's input-progress lowering, and lazy
-  ones keep RE2's program, since a lazy loop tries its exit before another
-  iteration. A counted repetition that still has two or more copies after the
-  simplifier drops an empty body and cuts an assertion-only body to one copy
-  stays counted, and the compiler gives each copy an exit from the repetition
-  that it takes when it consumes nothing. When such a body matches empty only
+  that consumes nothing ends the repetition, even below its minimum count. The
+  JDK's Loop and LazyLoop nodes also start each iteration afresh, so a loop
+  nested in the body starts over on every iteration instead of continuing
+  where the previous one left it. Joni's unbounded loops end and start their
+  iterations the same way, so Java and Trino lower every unbounded loop over a
+  body that can match empty alike, greedy or lazy, with an input-progress
+  lowering: each iteration enters the body through the loop's own entry, an
+  iteration that consumes nothing goes to the exit, and only one that consumes
+  reaches the choice between another iteration and the exit, where a lazy loop
+  tries the exit first. The lowering represents pre-consumption and
+  post-consumption execution with ordinary program counters, clones each
+  epsilon-reachable instruction at most once per loop, charges every retained
+  instruction to the existing program budget, and leaves the shared execution
+  engines unchanged. Each entry is a copy of the body's start, which holds the
+  entries of the loops nested in it, so in both languages a nest of such loops
+  grows with the square of its depth: the default memory budget rejects a nest
+  several hundred loops deep, which the JDK and Joni run. A
+  counted repetition that still has two or more copies after the simplifier
+  drops an empty body and cuts an assertion-only body to one copy stays
+  counted, and the compiler gives each copy an exit from the repetition that
+  it takes when it consumes nothing. When such a body matches empty only
   through an assertion and the minimum count is two or more, what the pattern
   matches can depend on the reading direction, as in `(?:^a?){2}`, so the
   pattern compiles no reverse program.
@@ -482,8 +496,8 @@ original pattern, including when quoting rewrites it before parsing.
   crate matches `a`. A forward Rust program with such a loop, greedy or lazy,
   gives each alternation on a cycle of instructions that consume no input a
   list of its own, which a search visits once, and so flattens to about its
-  own size. RE2 programs keep upstream's flattening. Trino ends a greedy loop
-  on an empty iteration, as Joni does (see the
+  own size. RE2 programs keep upstream's flattening. Trino ends a loop, greedy
+  or lazy, on an empty iteration, as Joni does (see the
   [Trino language reference](docs/reference/languages/TRINO_REGEXP.md#other-matching-differences-from-joni)),
   so its program has no such cycle, and Java's loops follow the JDK's
   own rule instead (see
@@ -518,24 +532,18 @@ original pattern, including when quoting rewrites it before parsing.
   rather than routing syntax through the RE2 parser or a dialect enum.
   Unsupported constructs and same-text/different-meaning collisions are
   rejected explicitly, apart from the documented differences below.
-- Greedy unbounded repetition of a nullable body uses an input-progress
-  lowering: once an iteration succeeds without consuming input, the repetition
-  stops instead of reconsidering lower-priority alternatives. The lowering
-  represents pre-consumption and post-consumption execution with ordinary
-  program counters. It clones each epsilon-reachable instruction at most once
-  per loop, charges every retained instruction to the existing program budget,
-  and leaves the shared execution engines unchanged. Directly nested `?`, `*`,
-  and `+` quantifiers, in greedy or reluctant form, first use modern Joni's
-  parser reduction table in the Trino parser before counted repetitions are
-  expanded. Trino's pinned Joni also reduced `(?:x+?)+` to `x+?` and
+- Unbounded repetition of a nullable body, greedy or lazy, uses the
+  input-progress lowering that
+  [Java Regular-Subset Frontend](#java-regular-subset-frontend) describes.
+  Directly nested `?`, `*`, and `+` quantifiers, greedy or lazy, first use
+  modern Joni's parser reduction table in the Trino parser before counted
+  repetitions are expanded. Trino's pinned Joni also reduced `(?:x+?)+` to `x+?` and
   `(?:x+?)*` to `(?:x+?)?`, which change what the pattern matches; Joni
   [f757501](https://github.com/jruby/joni/commit/f7575010f3ca4deff55642f34062a9ea09783091)
   and Oniguruma
   [7dde69a](https://github.com/kkos/oniguruma/commit/7dde69aef839ffa7ab12f5c14133f8c7dd28d237)
   removed them as bugs ([Ruby #17341](https://bugs.ruby-lang.org/issues/17341)),
-  so `(?:a+?)+` matches all of `aa`, where Trino matches each `a`. The Java
-  frontend shares the input-progress lowering (see
-  [Java Regular-Subset Frontend](#java-regular-subset-frontend)).
+  so `(?:a+?)+` matches all of `aa`, where Trino matches each `a`.
 - Capture-sensitive nullable loops can differ from Joni after that no-progress
   point. Joni's backtracking engine retains capture histories and may reconsider
   a different iteration path to extend the match; Regulator's bounded Thompson
@@ -733,8 +741,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
   Regulator stops flattening when the charge of the emitted instructions
   exceeds the program's share. A forward program then fails to compile, and a
   reverse program is dropped, as any reverse program that does not fit is.
-- Trino programs reach the same growth through Joni's quantifier reduction
-  table, which keeps a lazy `+?` under a greedy quantifier, as in `(?:x+?)*`.
+- Java and Trino loops over a body that can match empty end on an iteration
+  that consumes nothing, so flattening keeps their closures apart and does not
+  multiply them. Their nests grow before flattening instead, as
+  [Java Regular-Subset Frontend](#java-regular-subset-frontend) describes.
 - The DFA caches receive what the flatten charge leaves: the program's share
   less the fixed bytes, 113 bytes per flattened instruction, and what one-pass
   and prefix tables retain. Internal compilation with a non-positive budget

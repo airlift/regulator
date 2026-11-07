@@ -35,6 +35,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -231,20 +232,20 @@ public class TestCompilerAllocations
         // the loops inside it in many closures, so the flattened program grows with the square of
         // the program the instruction limit bounds. Unchecked, the a? pattern allocated 309 MB to
         // compile. Oversized flattened programs stop at the forward program's share of the
-        // default budget; RE2 and Trino reach it here.
+        // default budget; RE2 reaches it here.
         String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
         assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
         // Rust gives each alternation on a loop's cycle a list of its own, so no closure runs
         // through the loops inside it and the program flattens to about 6,009 instructions.
         assertThat(RustRegexp.compile(utf8Slice(nullableLoops)).forwardProgramForDiagnostics().size()).isLessThan(7_000);
-        // A Java count ends on an iteration that consumes nothing, so its copies' closures stay
-        // apart, and the pattern compiles within the budget. Written out, the copies chain as
-        // RE2's count does.
+        // Java loops and counts end on an iteration that consumes nothing, so the closures stay
+        // apart, and the pattern compiles within the budget, written out too.
         assertThat(JavaRegexp.compile(utf8Slice(nullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
         String writtenOutNullableLoops = "(?:(?:" + "(?:a?)*?".repeat(1000) + ")*?)+";
-        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)));
-        // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
-        assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
+        assertThat(JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
+        // Trino loops end the same way, so a lazy +? that Joni's quantifier reduction keeps under
+        // a greedy * compiles within the budget too.
+        assertThatCode(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*"))).doesNotThrowAnyException();
     }
 
     @Test
@@ -457,11 +458,12 @@ public class TestCompilerAllocations
     @Test
     public void testTrinoNestedNullableLoopsAllocateWithTheirProgram()
     {
-        // Each loop clones the epsilon-reachable part of the loops inside it, so the program grows
-        // with the square of the depth, and the clone table must not grow with the depth cubed.
+        // Each loop, greedy or lazy, clones the epsilon-reachable part of the loops inside it, so
+        // the program grows with the square of the depth, and the clone table must not grow with
+        // the depth cubed.
         String pattern = "(?:^|a?)";
         for (int depth = 0; depth < 320; depth++) {
-            pattern = "(?:a?|" + pattern + ")*";
+            pattern = "(?:a?|" + pattern + ")*" + (depth % 2 == 0 ? "" : "?");
         }
         assertTrinoCompileAllocation(pattern, 52_324, 128_000_000);
     }
