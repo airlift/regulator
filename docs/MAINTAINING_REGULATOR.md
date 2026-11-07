@@ -20,6 +20,17 @@ Do not start speculative optimization work. A new optimization requires either
 a material gap in the latest published release campaign or representative
 production evidence.
 
+Each new optimization adds a row to the
+[optimization catalog](reference/OPTIMIZATION_CATALOG.md) in the same change,
+in the section that fits it, and fills that table's columns, using the terms
+the catalog defines for the Origin column. A row cites the
+[registry](reference/OPTIMIZATION_REGISTRY.md) IDs of the RE2 mechanisms it
+ports or changes, adding a registry entry when a mechanism has none. An RE2
+mechanism used as ported gets its row in
+[RE2 optimizations used as ported](reference/OPTIMIZATION_CATALOG.md#re2-optimizations-used-as-ported),
+which leaves its trigger to the registry. A change that alters or removes an
+optimization updates or deletes its row.
+
 ## Protected areas
 
 Treat these as performance-sensitive unless analysis proves otherwise:
