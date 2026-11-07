@@ -2423,15 +2423,15 @@ supports changing it.
 ## Folded Prefix Candidate Scan
 
 Case-insensitive prefix acceleration keeps upstream's maximum nine-byte prefix
-but replaces ShiftDFA with fused first-byte and last-byte candidate masks,
-evaluated a SWAR word or a vector of candidate starts at a time. Only positions
-surviving both folded boundary-byte masks run the complete folded-prefix
+but replaces ShiftDFA with fused candidate masks of two of the prefix's folded
+bytes, evaluated a SWAR word or a vector of candidate starts at a time. Only
+positions surviving both folded byte masks run the complete folded-prefix
 comparison; the few starts left after the last word or vector are compared
 directly. Multi-byte prefix searches of at least 1 KiB use the platform's
 preferred Vector API species when the application resolves
 `jdk.incubator.vector` and that species holds 16 to 64 bytes. There, when a
-boundary byte is an ASCII letter, each input byte is ORed with `0x20` before it
-is compared with the lowercase letter; other boundary bytes compare exactly.
+probe byte is an ASCII letter, each input byte is ORed with `0x20` before it
+is compared with the lowercase letter; other probe bytes compare exactly.
 Shorter searches, and longer ones without vector scanning, use eight-byte SWAR
 words, so short scans pay no vector setup. A single folded byte keeps its SWAR
 byte search. Vector linkage stays in `VectorPrefixScanner`.
@@ -2449,6 +2449,30 @@ Holmes` in Rust and Java on both platforms, and 0.73x to 0.83x for `(?i)Twain`
 and CPython's `timeout` on r9g. On r8i, whose 64-byte vectors hold a candidate
 of a common pair far more often, it took 1.11x to 1.22x for those two and for
 RE2's Latin-1 `(?i)Sherlock Holmes`.
+
+The two probe bytes are the pair, at least two bytes apart, whose folded
+probabilities have the smallest product; an ASCII letter's folded probability
+is the sum of its two cases. Ties go to the wider pair, then the earlier one. The pair
+leaves the first and last bytes only when its product is less than a quarter of
+theirs, the factor of [Literal Probe Byte Selection](#literal-probe-byte-selection),
+and prefixes of two or three bytes keep their ends. Adjacent bytes are left
+out because the bytes of a text are not independent: an adjacent pair would
+probe the digram `th` of `the`, which a model of candidate counts put at 18.8
+per KiB of rebar's sampled English against 11.7 for `t` and `e`. The probabilities come
+from the caller's `ByteFrequencies`, or from `englishText()` when the caller
+keeps the default `uniform()`. A uniform distribution rates each ASCII letter,
+counting both cases, at twice any other byte, so no pair is ever more than four
+times rarer than the first and last bytes, and the strict rule would always
+keep them; English stands in for it, as it does for the start literal filter
+and the short-window required-byte check, which always use `englishText()`. `(?i)Sherlock Holmes` in RE2 Latin-1 probes the `l` and `k` of
+`sherlock ` instead of its `s` and space, and `(?i)Twain` probes `w` and `n`
+instead of `t` and `n`. Over six English, log, and source haystacks the model
+never put the chosen pair above the first and last bytes, and put it 5 to 80
+times below them for most of 15 literals. The pair never changes what
+matches; the complete folded prefix is still compared from each candidate's
+start. With the counted loop, the pair took RE2's Latin-1 `(?i)Sherlock
+Holmes` to 0.71x and 0.53x the earlier scan's time on r9g and r8i, `(?i)Twain`
+to 0.56x and 0.68x, and CPython's `timeout` to 0.45x and 0.52x.
 
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
@@ -2677,10 +2701,28 @@ they may probe any byte after offset 0, including punctuation, digits, and
 bytes at or above `0x80`.
 
 Under every distribution, fused pair strategies, paired candidate scans,
-case-folded prefixes and literals, required-literal checks, and single-byte
-literals keep their default bytes: the first byte, or, for a pair scan of a
-prefix led by a multibyte UTF-8 character that ends before the prefix's last
-byte, that character's last byte. This is a performance-only deviation. Randomized tests
+case-folded literals other than prefixes, required-literal checks, and
+single-byte literals keep their default bytes: the first byte, or, for a pair
+scan of a prefix led by a multibyte UTF-8 character that ends before the
+prefix's last byte, that character's last byte. This is a performance-only
+deviation.
+
+Case-folded prefixes instead pair two folded bytes ranked by the caller's
+distribution, or by `englishText()` under the default, as
+[Folded Prefix Candidate Scan](#folded-prefix-candidate-scan) describes, so
+their choice is on by default where a case-sensitive probe is opt-in. The
+reason is that a folded prefix's first and last bytes are often among the
+commonest bytes of English text, such as the `s` and space of `sherlock `,
+and a uniform distribution always keeps them. The cost falls on text
+whose bytes are not distributed like English, such as logs, source code, and
+other scripts: there the English choice can probe a pair that is commoner than
+the first and last bytes, so the scan stops at more candidates than it did.
+The factor of four keeps the ends whenever the estimate is close, the choice
+never changes what matches, and the cost stays linear in the input. A caller
+who searches such text can pass a distribution learned from it. Measured cost:
+no material slowdown. Over rebar's Russian and Chinese texts, CPython source,
+and logs, the English pair took 0.94x to 1.08x the time of the first and last
+bytes on r9g and r8i, and no slower row was material. Randomized tests
 compare the RE2 site with scalar literal searches in UTF-8 and Latin-1, and the
 Trino site with Joni, under a distribution learned from a short JSON sample and
 under a supplied distribution that probes punctuation, digits, and UTF-8 bytes;

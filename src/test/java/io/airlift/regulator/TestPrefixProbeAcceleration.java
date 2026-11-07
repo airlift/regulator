@@ -62,6 +62,26 @@ public class TestPrefixProbeAcceleration
     }
 
     @Test
+    public void testFoldedPrefixProbesRarePair()
+    {
+        // Latin-1 folds stay in Latin-1, so the folded literal is the prefix, cut to "sherlock ".
+        // The default uniform distribution leaves the pair to englishText(), which pairs l with
+        // k, where the first and last bytes are s and a space.
+        Re2.Options latin1 = Re2.Options.latin1();
+        assertFoldedProbePair(Re2.compile(Slices.utf8Slice("(?i)Sherlock Holmes"), latin1), 4, 7);
+        // A chosen distribution is used as given; in this one every letter and the space are
+        // common and = is rare, so the pair holds the = of "key=value" and its last byte.
+        assertFoldedProbePair(Re2.compile(Slices.utf8Slice("(?i)key=value"), latin1.setByteFrequencies(RARE_NON_LETTERS)), 3, 8);
+        // Without Unicode, the crate leaves the space unfolded, so the folded prefix ends at
+        // "sherlock", whose s and k are less than four times as likely as l and k.
+        RustRegexp.Options asciiFolds = RustRegexp.Options.bytes().setUnicode(false).setCaseInsensitive(true);
+        assertFoldedProbePair(RustRegexp.compile(Slices.utf8Slice("Sherlock Holmes"), asciiFolds), 0, 7);
+        // Java's CASE_INSENSITIVE without UNICODE_CASE also folds ASCII only, so its s and k match
+        // no long s or Kelvin sign, and its folded prefix is the same "sherlock".
+        assertFoldedProbePair(JavaRegexp.compile(Slices.utf8Slice("Sherlock Holmes"), JavaRegexp.Options.defaults().setCaseInsensitive(true)), 0, 7);
+    }
+
+    @Test
     public void testCompiledProgramsInBothEncodings()
     {
         Re2.Options utf8Json = Re2.Options.defaults().setByteFrequencies(JSON_RECORDS);
@@ -315,6 +335,14 @@ public class TestPrefixProbeAcceleration
         assertThat(asciiNonLetterProbe).isTrue();
         assertThat(nonAsciiProbe).isTrue();
         assertThat(trinoProbe).isTrue();
+    }
+
+    private static void assertFoldedProbePair(CompiledPattern pattern, int firstOffset, int secondOffset)
+    {
+        Prog program = pattern.forwardProgramForDiagnostics();
+        assertThat(program.usesFoldCasePrefixCandidateScan()).isTrue();
+        assertThat(program.prefixAccelFoldCaseFirstOffset()).isEqualTo(firstOffset);
+        assertThat(program.prefixAccelFoldCaseSecondOffset()).isEqualTo(secondOffset);
     }
 
     private static int search(String literal, String text, int offset)

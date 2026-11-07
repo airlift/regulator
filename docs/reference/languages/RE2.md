@@ -80,8 +80,9 @@ word boundaries, one-line mode, and leftmost-longest matching.
 `setNeverCapture` makes every group non-capturing, named groups included,
 where upstream RE2's parser keeps named groups capturing.
 `setByteFrequencies` chooses which literal byte an unanchored search scans for;
-it affects speed, not results. See
-[Byte frequencies](../REGULATOR_API.md#byte-frequencies).
+it affects speed, not results. It also ranks the folded byte pairs that
+case-insensitive prefix scans probe, using English text frequencies under the
+default. See [Byte frequencies](../REGULATOR_API.md#byte-frequencies).
 `setGenerateBytecode` compiles an eligible pattern's case-sensitive scan plan
 into its own class; it also affects speed, not results. Latin-1 and
 longest-match patterns have no scan plan, so the option leaves them unchanged.

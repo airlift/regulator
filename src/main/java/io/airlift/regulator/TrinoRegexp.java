@@ -82,7 +82,9 @@ public sealed class TrinoRegexp
 
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
         /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
-        /// [ByteFrequencies#uniform()], keeps first-byte scanning.
+        /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
+        /// folded byte pairs that case-insensitive prefix scans probe, with
+        /// [ByteFrequencies#englishText()] in place of the default.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");

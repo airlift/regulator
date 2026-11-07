@@ -113,13 +113,20 @@ public class TestUpstreamPrefixAccel
         Random random = new Random(1);
         // Spaces, digits, punctuation, and non-ASCII bytes compare exactly, including as the
         // first or last byte; setting bit 0x20 must not alias '@' with '`'. "Sherlock Holmes" is
-        // cut to nine bytes and ends with a space.
+        // cut to nine bytes and ends with a space. Short windows scan a pair at the prefix's first
+        // and last bytes, like that of "ab", with fixed offsets, and a pair inside it, like the l
+        // and k of "Sherlock Holmes", with the configured ones.
+        boolean endPairs = false;
+        boolean innerPairs = false;
         for (String prefix : List.of("ab", "aaaa", "abababa", "Sherlock Holmes", "ABCDEFGHIJKLMNO", "sherlock2", "1 x", "€uro", "@_`{")) {
             byte[] literal = prefix.getBytes(StandardCharsets.UTF_8);
             Prog program = compile("x");
             program.configurePrefixAccel(Slices.wrappedBuffer(literal), true);
             assertThat(program.canPrefixAccel()).as(prefix).isTrue();
             int acceleratedPrefixLength = Math.min(literal.length, 9);
+            boolean endPair = program.prefixAccelFoldCaseFirstOffset() == 0 && program.prefixAccelFoldCaseSecondOffset() == acceleratedPrefixLength - 1;
+            endPairs |= endPair;
+            innerPairs |= !endPair;
 
             // Lengths on both sides of the vector cutoff. Half the texts are drawn mostly from the
             // prefix's bytes in either case, so many candidate positions fail the complete prefix
@@ -141,11 +148,26 @@ public class TestUpstreamPrefixAccel
 
                 int offset = random.nextInt(4);
                 int length = data.length - offset - random.nextInt(4);
+                int expected = referenceFoldCaseSearch(data, offset, length, literal, acceleratedPrefixLength);
                 assertThat(program.prefixAccel(data, offset, length))
                         .as("%s at offset %s length %s", prefix, offset, length)
-                        .isEqualTo(referenceFoldCaseSearch(data, offset, length, literal, acceleratedPrefixLength));
+                        .isEqualTo(expected);
+
+                // Both pair scans find the same start whichever two prefix bytes they probe.
+                int firstOffset = random.nextInt(acceleratedPrefixLength - 1);
+                int secondOffset = firstOffset + 1 + random.nextInt(acceleratedPrefixLength - firstOffset - 1);
+                assertThat(Prog.findFoldCaseSwar(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                        .as("SWAR %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
+                        .isEqualTo(expected);
+                if (VectorSupport.isAvailable()) {
+                    assertThat(VectorPrefixScanner.findFoldCase(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                            .as("vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
+                            .isEqualTo(expected);
+                }
             }
         }
+        assertThat(endPairs).isTrue();
+        assertThat(innerPairs).isTrue();
     }
 
     private static byte randomCase(Random random, byte value)

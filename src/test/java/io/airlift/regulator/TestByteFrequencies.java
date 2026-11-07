@@ -49,6 +49,42 @@ public class TestByteFrequencies
     }
 
     @Test
+    public void testFoldedProbePair()
+    {
+        // In English, the nine-byte folded prefix of "sherlock holmes" pairs l with k, where its
+        // first and last bytes are s and a space; three bytes probe the ends, as do two.
+        assertFoldedProbePair(ByteFrequencies.englishText(), "sherlock holmes", 9, 4, 7);
+        assertFoldedProbePair(ByteFrequencies.englishText(), "the", 3, 0, 2);
+        assertFoldedProbePair(ByteFrequencies.englishText(), "ab", 2, 0, 1);
+
+        // Smoothed, 0, 1, 2, and every other byte are 100, 25, 24, and 1 parts.
+        long[] counts = new long[256];
+        counts['0'] = 99;
+        counts['1'] = 24;
+        counts['2'] = 23;
+        ByteFrequencies frequencies = ByteFrequencies.fromCounts(counts);
+        // A pair exactly four times rarer than the ends keeps the ends; more than four times
+        // rarer moves.
+        assertFoldedProbePair(frequencies, "0110", 4, 0, 3);
+        assertFoldedProbePair(frequencies, "0220", 4, 0, 2);
+        // Ties go to the wider pair, then the earlier one, and pairs are at least two apart.
+        assertFoldedProbePair(frequencies, "0ab00", 5, 1, 4);
+        assertFoldedProbePair(frequencies, "0ab0", 4, 0, 2);
+        assertFoldedProbePair(frequencies, "0ab0000", 4, 0, 2);
+        // Any byte other than an ASCII letter keeps its own probability: @ stays rare though `,
+        // which differs from it only in bit 0x20, is as common as 0.
+        counts['`'] = 99;
+        frequencies = ByteFrequencies.fromCounts(counts);
+        assertFoldedProbePair(frequencies, "0@a0", 4, 1, 3);
+        // A letter counts both of its cases: q alone would be rarer than z, but with Q it is not.
+        counts['Q'] = 49;
+        counts['z'] = 19;
+        frequencies = ByteFrequencies.fromCounts(counts);
+        assertFoldedProbePair(frequencies, "0qz0", 4, 0, 2);
+        assertFoldedProbePair(frequencies, "0QZ0", 4, 0, 2);
+    }
+
+    @Test
     public void testPresetsNeverProbeNonAsciiBytes()
     {
         for (ByteFrequencies frequencies : List.of(ByteFrequencies.englishText(), ByteFrequencies.json())) {
@@ -195,6 +231,13 @@ public class TestByteFrequencies
     {
         assertThat(probeOffset(ByteFrequencies.englishText(), literal)).as("englishText() %s", literal).isEqualTo(englishTextProbe);
         assertThat(probeOffset(ByteFrequencies.json(), literal)).as("json() %s", literal).isEqualTo(jsonProbe);
+    }
+
+    private static void assertFoldedProbePair(ByteFrequencies frequencies, String literal, int size, int firstOffset, int secondOffset)
+    {
+        assertThat(frequencies.foldedProbePair(literal.getBytes(UTF_8), size))
+                .as("%s of %s", size, literal)
+                .isEqualTo(new ByteFrequencies.FoldedProbePair(firstOffset, secondOffset));
     }
 
     private static int probeOffset(ByteFrequencies frequencies, String literal)

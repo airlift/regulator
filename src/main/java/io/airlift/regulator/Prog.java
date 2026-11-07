@@ -425,6 +425,15 @@ final class Prog
     // script, which most letters of a text share, while the character's last byte tells its
     // letters apart.
     private int prefixPairOffset;
+    // The folded pair scans test the bytes at these two offsets of a folded prefix, chosen by
+    // ByteFrequencies.foldedProbePair; see configurePrefixAccelBytes.
+    private int prefixFoldCaseFirstOffset;
+    private int prefixFoldCaseSecondOffset;
+    // Whether the folded pair is the prefix's first and last bytes, which short windows scan with
+    // prefixAccelFoldCaseFrontAndBackSWAR rather than findFoldCaseSwar, which serves pairs
+    // elsewhere in the prefix; prefixAccelFoldCaseFrontAndBackSWAR's comment gives the
+    // measurement.
+    private boolean prefixFoldCaseEndPair;
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
@@ -1595,6 +1604,20 @@ final class Prog
         return prefixProbeOffset;
     }
 
+    /// Returns the offset of the first of the two folded prefix bytes that the folded pair scans
+    /// test, chosen by [ByteFrequencies#foldedProbePair].
+    int prefixAccelFoldCaseFirstOffset()
+    {
+        return prefixFoldCaseFirstOffset;
+    }
+
+    /// Returns the offset of the second of the two folded prefix bytes that the folded pair
+    /// scans test.
+    int prefixAccelFoldCaseSecondOffset()
+    {
+        return prefixFoldCaseSecondOffset;
+    }
+
     /// Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
     /// Keeps the scan path branch-free with respect to foldCase/prefix mode.
     int prefixAccelSingleByteNoFoldCase(byte[] data, int offset, int length)
@@ -1643,6 +1666,9 @@ final class Prog
         this.prefixCheckOffset = 0;
         this.prefixProbeBroadcastMask = 0;
         this.prefixPairOffset = 0;
+        this.prefixFoldCaseFirstOffset = 0;
+        this.prefixFoldCaseSecondOffset = 0;
+        this.prefixFoldCaseEndPair = false;
         this.prefixShifts = null;
         this.dfaMemory += prefixShiftsCharge;
         this.prefixShiftsCharge = 0;
@@ -1661,6 +1687,12 @@ final class Prog
             // Limit to the same nine-byte prefix used by upstream ShiftDFA.
             this.prefixSize = Math.min(bytes.length, MAX_FOLD_CASE_PREFIX_BYTES);
             this.prefixFrontBroadcastMask = 0;
+            // The pair scans probe the pair ByteFrequencies.foldedProbePair chooses under the
+            // caller's distribution, or under English text in place of the default uniform one.
+            ByteFrequencies.FoldedProbePair pair = byteFrequencies.forFoldedPairs().foldedProbePair(bytes, prefixSize);
+            this.prefixFoldCaseFirstOffset = pair.firstOffset();
+            this.prefixFoldCaseSecondOffset = pair.secondOffset();
+            this.prefixFoldCaseEndPair = pair.firstOffset() == 0 && pair.secondOffset() == prefixSize - 1;
         }
         else if (bytes.length != 1) {
             this.prefixSize = bytes.length;
@@ -1692,7 +1724,8 @@ final class Prog
     /// or `-1` if no match is found.
     ///
     /// Uses different strategies depending on configuration:
-    /// - First-byte and last-byte masks for folded prefixes, a vector at a time on long windows
+    /// - Masks of two folded prefix bytes for folded prefixes, a vector at a time on long windows;
+    ///   see [ByteFrequencies#foldedProbePair]
     /// - Fused pair masks for non-folded multi-byte prefixes whose probe stays at the first byte:
     ///   the last byte with the first byte or, when the prefix starts with a multibyte UTF-8
     ///   character that ends before the last byte, with that character's last byte, in Vector
@@ -1717,7 +1750,7 @@ final class Prog
         }
 
         if (prefixFoldCase) {
-            return prefixAccelFoldCaseFrontAndBack(data, offset, length);
+            return prefixAccelFoldCase(data, offset, length);
         }
 
         // For single-byte prefix, just scan for that byte
@@ -1926,19 +1959,24 @@ final class Prog
         return -1;
     }
 
-    private int prefixAccelFoldCaseFrontAndBack(byte[] data, int offset, int length)
+    private int prefixAccelFoldCase(byte[] data, int offset, int length)
     {
         if (prefixSize == 1) {
             return indexOfFoldCase(data, offset, length, prefix[0]);
         }
         if (usesVectorForFoldCasePrefix(length)) {
-            return VectorPrefixScanner.findFoldCase(data, offset, length, prefix, prefixSize);
+            return VectorPrefixScanner.findFoldCase(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
         }
-        return prefixAccelFoldCaseFrontAndBackSWAR(data, offset, length);
+        if (prefixFoldCaseEndPair) {
+            return prefixAccelFoldCaseFrontAndBackSWAR(data, offset, length);
+        }
+        return findFoldCaseSwar(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
     }
 
-    // Short windows, and JVMs that do not resolve jdk.incubator.vector or whose preferred byte
-    // vector holds fewer than 16 or more than 64 bytes.
+    // Short windows whose folded pair is the prefix's first and last bytes; it scans as
+    // findFoldCaseSwar does, with fixed front and back loads. Scanning these pairs with
+    // findFoldCaseSwar, whose second offset is a variable, moved short log lines on r8i by 0.92x
+    // to 1.08x, with user and error lines 1.05x to 1.08x slower and login lines 0.93x.
     private int prefixAccelFoldCaseFrontAndBackSWAR(byte[] data, int offset, int length)
     {
         int candidateCount = length - prefixSize + 1;
@@ -1953,7 +1991,7 @@ final class Prog
                     foldCaseMatches(backBytes, prefix[backOffset]);
             while (candidates != 0) {
                 int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
-                if (foldCasePrefixMatchesAt(data, candidate)) {
+                if (foldCasePrefixMatchesAt(data, candidate, prefix, prefixSize)) {
                     return candidate;
                 }
                 candidates &= candidates - 1;
@@ -1964,7 +2002,43 @@ final class Prog
         for (; position < end; position++) {
             if (byteMatches(data[position], prefix[0], true) &&
                     byteMatches(data[position + backOffset], prefix[backOffset], true) &&
-                    foldCasePrefixMatchesAt(data, position)) {
+                    foldCasePrefixMatchesAt(data, position, prefix, prefixSize)) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    // Short windows, and JVMs that do not resolve jdk.incubator.vector or whose preferred byte
+    // vector holds fewer than 16 or more than 64 bytes. Finds what
+    // [VectorPrefixScanner#findFoldCase] finds: the first occurrence of the first `prefixSize`
+    // bytes of `prefix` under the folded prefix rule, with candidates that hold both probe bytes,
+    // at `firstOffset` and `secondOffset` within the prefix.
+    static int findFoldCaseSwar(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        int candidateCount = length - prefixSize + 1;
+        int wordEnd = offset + ((candidateCount / Long.BYTES) * Long.BYTES);
+        int position = offset;
+
+        for (; position < wordEnd; position += Long.BYTES) {
+            long firstBytes = (long) LONG_HANDLE.get(data, position + firstOffset);
+            long secondBytes = (long) LONG_HANDLE.get(data, position + secondOffset);
+            long candidates = foldCaseMatches(firstBytes, prefix[firstOffset]) &
+                    foldCaseMatches(secondBytes, prefix[secondOffset]);
+            while (candidates != 0) {
+                int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
+                if (foldCasePrefixMatchesAt(data, candidate, prefix, prefixSize)) {
+                    return candidate;
+                }
+                candidates &= candidates - 1;
+            }
+        }
+
+        int end = offset + candidateCount;
+        for (; position < end; position++) {
+            if (asciiLower(data[position + firstOffset] & 0xFF) == asciiLower(prefix[firstOffset] & 0xFF) &&
+                    asciiLower(data[position + secondOffset] & 0xFF) == asciiLower(prefix[secondOffset] & 0xFF) &&
+                    foldCasePrefixMatchesAt(data, position, prefix, prefixSize)) {
                 return position;
             }
         }
@@ -2141,7 +2215,7 @@ final class Prog
         return prefixSize;
     }
 
-    private boolean foldCasePrefixMatchesAt(byte[] data, int i)
+    private static boolean foldCasePrefixMatchesAt(byte[] data, int i, byte[] prefix, int prefixSize)
     {
         // ASCII case-insensitive comparison (matches RE2's byte-oriented foldCase hint).
         for (int j = 0; j < prefixSize; j++) {
