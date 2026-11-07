@@ -368,10 +368,10 @@ abstract sealed class CompiledPattern
         return (regexp.op() == RegexpOp.CHAR_CLASS || regexp.op() == RegexpOp.ANY_CHAR) && (regexp.parseFlags() & Regexp.LATIN1) == 0;
     }
 
-    /// Analyzes a parsed pattern that compiles in the RE2 dialect: an RE2 pattern compiled from
-    /// its parse result, or a pattern that the Java or Rust frontend parsed. The caller passes a
-    /// private snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an
-    /// eligible shape is built, and how it runs.
+    /// Analyzes a parsed pattern: an RE2 pattern compiled from its parse result, or a pattern that
+    /// the Java or Rust frontend parsed. A Java pattern compiles in the Java dialect and the others
+    /// in the RE2 dialect. The caller passes a private snapshot that it never mutates.
+    /// `scanPlanMode` decides whether the scan plan of an eligible shape is built, and how it runs.
     static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlan.Language language, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
@@ -380,7 +380,8 @@ abstract sealed class CompiledPattern
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, language, scanPlanMode);
+        Compiler.Dialect compilerDialect = language == ScanPlan.Language.JAVA ? Compiler.Dialect.JAVA : Compiler.Dialect.RE2;
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, compilerDialect, language, scanPlanMode);
     }
 
     /// Analyzes a pattern parsed by the Trino frontend. The caller passes a private snapshot that
@@ -400,7 +401,7 @@ abstract sealed class CompiledPattern
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
                 : null;
         if (fixedWidthMatcher != null) {
-            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, Compiler.Dialect.TRINO);
             // A fixed-width pattern has no assertion, so its expression predicts, before any
             // program compiles, whether find would try a multi-byte inner literal search. That
             // search runs on a compiled program, so the full analysis decides such a pattern, as
@@ -524,7 +525,7 @@ abstract sealed class CompiledPattern
             Prog partialProgram = placeholderProgram;
             if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
-                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, compilerDialect);
                     Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
@@ -556,7 +557,7 @@ abstract sealed class CompiledPattern
                     null);
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+        Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding, compilerDialect);
         ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
 
         // For "^literal...", compile only the suffix and check the required prefix before matching.
@@ -578,7 +579,7 @@ abstract sealed class CompiledPattern
             suffixRegexp = entireRegexp;
             encodedMatchLength = expressionAnalysis.length().encoded();
         }
-        Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp, caseFolding);
+        Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp, caseFolding, compilerDialect);
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
         Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
@@ -1029,7 +1030,7 @@ abstract sealed class CompiledPattern
             return null;
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding);
+        Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding, compilerDialect);
         Prog program;
         try {
             program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
@@ -1080,7 +1081,12 @@ abstract sealed class CompiledPattern
 
     private Compiler.Dialect compilerDialect()
     {
-        return (flags & TRINO_COMPILER_DIALECT_FLAG) == 0 ? Compiler.Dialect.RE2 : Compiler.Dialect.TRINO;
+        if ((flags & TRINO_COMPILER_DIALECT_FLAG) != 0) {
+            return Compiler.Dialect.TRINO;
+        }
+        // Every Java pattern is a JavaRegexp, a sealed root, so Java's dialect needs no flag bit;
+        // the only free parse-flag bit stays free.
+        return this instanceof JavaRegexp ? Compiler.Dialect.JAVA : Compiler.Dialect.RE2;
     }
 
     /// Returns whether this compiled pattern has a class generated for it. Each language
@@ -3945,9 +3951,7 @@ abstract sealed class CompiledPattern
     {
         Prog loweredProgram = booleanPlans.loweredProgram();
         Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
-        if (normalizedReverseRegexp == null ||
-                forwardProgram.hasDfaUnsupportedAssertions() ||
-                forwardProgram.hasFullCaseFold()) {
+        if (normalizedReverseRegexp == null || forwardProgram.hasDfaUnsupportedAssertions() || forwardProgram.hasFullCaseFold() || forwardProgram.hasDirectionalRepetition()) {
             return null;
         }
         long reverseMemory = Math.max(1, maxMemory / 3);

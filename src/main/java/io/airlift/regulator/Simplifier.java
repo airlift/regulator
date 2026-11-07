@@ -35,16 +35,26 @@ final class Simplifier
 
     static Regexp simplify(Regexp regexp, CaseFolding caseFolding)
     {
+        return simplify(regexp, caseFolding, Compiler.Dialect.RE2);
+    }
+
+    /// Simplifies a regexp for compilation in `dialect`. The Java dialect keeps a counted
+    /// repetition of two or more copies of a body that can match the empty string, which the
+    /// compiler lowers with the JDK's loop rule; every other repetition is expanded.
+    static Regexp simplify(Regexp regexp, CaseFolding caseFolding, Compiler.Dialect dialect)
+    {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(caseFolding, "caseFolding is null");
+        requireNonNull(dialect, "dialect is null");
         // Upstream simplify.cc runs a coalescing pass before simplification.
-        return simplifyInternal(Coalescer.coalesce(regexp, caseFolding), Mode.FULL, caseFolding);
+        return simplifyInternal(Coalescer.coalesce(regexp, caseFolding), dialect == Compiler.Dialect.JAVA ? Mode.JAVA_FULL : Mode.FULL, caseFolding);
     }
 
     /// Parse-time canonicalization that intentionally preserves counted repetitions (`{n,m}`),
     /// matching upstream RE2 parse.cc behavior (parse dumps still contain `rep{...}` nodes).
     ///
-    /// Compiler pipelines must call [#simplify(Regexp,CaseFolding)] (FULL) to eliminate counted repeats.
+    /// Compiler pipelines must call [#simplify(Regexp,CaseFolding,Compiler.Dialect)] to eliminate
+    /// counted repeats, apart from the nullable ones the Java dialect keeps for its compiler.
     static Regexp simplifyForParse(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
@@ -54,7 +64,11 @@ final class Simplifier
 
     private enum Mode
     {
-        PARSE, FULL
+        PARSE,
+        FULL,
+        // FULL, except that a counted repetition of two or more copies of a nullable body stays
+        // for the Java compiler.
+        JAVA_FULL,
     }
 
     private static Regexp simplifyInternal(Regexp regexp, Mode mode, CaseFolding caseFolding)
@@ -99,7 +113,7 @@ final class Simplifier
             case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.STAR, regexp);
             case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.PLUS, regexp);
             case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
-            case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1));
+            case REPEAT -> simplifyRepeat(mode, caseFolding, flags, regexp, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1));
             case CONCAT -> {
                 // Set up here rather than in a helper, so each nesting level takes no extra frame.
                 ConcatBuilder builder = new ConcatBuilder(caseFolding);
@@ -107,7 +121,7 @@ final class Simplifier
             }
             case ALTERNATE -> (mode == Mode.PARSE)
                     ? toRegexp(simplifyAlternativeForParse(regexp, caseFolding, depth, false))
-                    : simplifyAlternateRecursive(caseFolding, flags, regexp, depth);
+                    : simplifyAlternateRecursive(mode, caseFolding, flags, regexp, depth);
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
@@ -270,7 +284,7 @@ final class Simplifier
                 case STAR -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.STAR, regexp);
                 case PLUS -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.PLUS, regexp);
                 case QUEST -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.QUEST, regexp);
-                case REPEAT -> simplifyRepeat(mode, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
+                case REPEAT -> simplifyRepeat(mode, caseFolding, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
                 case CONCAT -> {
                     Object lone = loneValue(simplifiedChildren);
                     if (parentValue instanceof Regexp parent && parent.op() == RegexpOp.CONCAT) {
@@ -362,7 +376,7 @@ final class Simplifier
         };
     }
 
-    private static Regexp simplifyRepeat(Mode mode, int flags, Regexp regexp, Regexp childRegexp)
+    private static Regexp simplifyRepeat(Mode mode, CaseFolding caseFolding, int flags, Regexp regexp, Regexp childRegexp)
     {
         int min = regexp.min();
         int max = regexp.max();
@@ -381,6 +395,14 @@ final class Simplifier
         if (isEmptyOp(childRegexp) || isConcatOrAlternateOfEmptyOps(childRegexp)) {
             min = Math.min(min, 1);
             max = Math.min(max, 1);
+        }
+
+        // The JDK ends a repetition on any iteration that matches empty, even below the minimum,
+        // so a Java repetition of a nullable body keeps its count for the compiler. One copy
+        // needs no count: x{0,} and x{1,} compile as STAR and PLUS, and x{0,1} is a JDK Ques.
+        // The repeat limit nests at most nine counts of two or more, so these body walks stay linear.
+        if (mode == Mode.JAVA_FULL && (max == -1 ? min : max) >= 2 && MatchLength.analyze(childRegexp, caseFolding).minimum() == 0) {
+            return childRegexp == regexp.child(0) ? regexp : Regexp.repeat(flags, childRegexp, min, max);
         }
 
         // x{n,} means at least n matches of x.
@@ -871,11 +893,11 @@ final class Simplifier
         return Regexp.alternate(flags, merged);
     }
 
-    private static Regexp simplifyAlternateRecursive(CaseFolding caseFolding, int flags, Regexp regexp, int depth)
+    private static Regexp simplifyAlternateRecursive(Mode mode, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
     {
         List<Regexp> simplifiedAlternatives = new ArrayList<>();
         for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, Mode.FULL, caseFolding, depth + 1);
+            Regexp simplifiedChild = simplifyRecursive(child, mode, caseFolding, depth + 1);
             if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
                 continue;
             }
@@ -1639,7 +1661,7 @@ final class Simplifier
         if (charClass.isEmpty()) {
             return Regexp.noMatch(flags);
         }
-        if (mode == Mode.FULL) {
+        if (mode != Mode.PARSE) {
             // A full character class can be represented more compactly as '.' (ANY_CHAR)
             // or '\C' (ANY_BYTE) depending on the rune range in effect.
             if (charClass.rangeCount() == 1) {

@@ -207,13 +207,28 @@ public class TestCompilerAllocations
         // Flattening copies each list's epsilon closure, and a lazy loop over a nullable body puts
         // the loops inside it in many closures, so the flattened program grows with the square of
         // the program the instruction limit bounds. Unchecked, the a? pattern allocated 309 MB to
-        // compile. Each language now stops at the forward program's share of the default budget.
+        // compile. Each language whose closures grow so stops at the forward program's share of
+        // the default budget.
         String nullableLoops = "(?:(?:(?:(?:a?)*?){1000})*?)+";
         assertCompileRejectedWithinBudget(() -> Re2.compile(utf8Slice(nullableLoops)));
-        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(nullableLoops)));
         assertCompileRejectedWithinBudget(() -> RustRegexp.compile(utf8Slice(nullableLoops)));
+        // A Java count ends on an iteration that consumes nothing, so its copies' closures stay
+        // apart, and the pattern compiles within the budget. Written out, the copies chain as the
+        // other languages' counts do.
+        assertThat(JavaRegexp.compile(utf8Slice(nullableLoops)).matcher(utf8Slice("aaa")).matches()).isTrue();
+        String writtenOutNullableLoops = "(?:(?:" + "(?:a?)*?".repeat(1000) + ")*?)+";
+        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice(writtenOutNullableLoops)));
         // Joni's quantifier reduction keeps a lazy +? under a greedy *, so the growth reaches Trino.
         assertCompileRejectedWithinBudget(() -> TrinoRegexp.compile(utf8Slice("(?:(?:(?:(?:a|b?)*?){1000})+?)*")));
+    }
+
+    @Test
+    public void testJavaCountedCopiesAreChargedAgainstTheInstructionBudget()
+    {
+        // A Java count over a nullable body compiles a copy of the body per iteration, so a wide
+        // body stops at the instruction budget.
+        String wideNullableBody = "a?|b?|c?|d?|e?|f?|g?|h?|i?|j?|k?|l?|m?|n?|o?|p?|q?|r?|s?|t?|u?|v?|w?|x?|y?|z?|".repeat(8) + "A?";
+        assertCompileRejectedWithinBudget(() -> JavaRegexp.compile(utf8Slice("(?:" + wideNullableBody + "){1000}")));
     }
 
     @Test

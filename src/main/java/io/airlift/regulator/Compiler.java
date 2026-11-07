@@ -35,6 +35,10 @@ final class Compiler
     {
         RE2,
         TRINO,
+        // RE2's program for the Java frontend, except for repetitions of a body that can match
+        // the empty string, which follow the JDK's loop rule (see repeatUnbounded,
+        // javaCountedLoop, and Simplifier's JAVA_FULL mode).
+        JAVA,
     }
 
     private static final int RUNES_SELF = 0x80;
@@ -118,13 +122,17 @@ final class Compiler
         return compile(regexp, reversed, maxMemory, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
+    /// Compiles `regexp`, which [Simplifier#simplify(Regexp,CaseFolding,Compiler.Dialect)] has
+    /// simplified for `dialect`. Only the Java dialect's simplification keeps REPEAT nodes, and
+    /// only the Java dialect compiles them.
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding)
     {
         return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, ByteFrequencies.uniform());
     }
 
-    /// Compiles with `byteFrequencies` choosing the probe byte of a forward program's
-    /// literal prefix scan.
+    /// Compiles `regexp`, simplified for `dialect` as
+    /// [#compileNormalized(Regexp,boolean,long,Dialect,CaseFolding)] requires, with
+    /// `byteFrequencies` choosing the probe byte of a forward program's literal prefix scan.
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies);
@@ -191,7 +199,7 @@ final class Compiler
         compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.setAnchorBoth = anchorBoth;
 
-        Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding);
+        Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding, dialect);
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
 
         compiler.program.setAnchorStart(true);
@@ -236,7 +244,7 @@ final class Compiler
 
         // Match upstream compile.cc: compiler runs Regexp::Simplify() first,
         // primarily to eliminate counted repetitions (and later to expand named classes).
-        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp, caseFolding);
+        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp, caseFolding, dialect);
 
         // Match upstream compile.cc: record whether the compiled program is anchored by
         // BeginText/EndText ops and remove those anchors from the AST for optimization.
@@ -634,8 +642,8 @@ final class Compiler
         private final RuneCache runeCache = new RuneCache();
         private final Fragment runeRange = new Fragment();
         private final CaseFolding caseFolding;
-        // Trino nullable loops share one clone table, grown by doubling, so its allocation stays
-        // proportional to the program however many loops the pattern has.
+        // Trino and Java nullable loops share one clone table, grown by doubling, so its allocation
+        // stays proportional to the program however many loops the pattern has.
         private SparseIntArray nullableLoopClones;
 
         boolean reversed;
@@ -680,7 +688,8 @@ final class Compiler
         }
 
         /// Compiles every node after its children, in the same order and with the same visit limit as
-        /// [RegexpWalker#walkExponential], without allocating per-node walker state. When a node
+        /// [RegexpWalker#walkExponential], without allocating per-node walker state. A Java REPEAT
+        /// visits its body once per copy it compiles, where the walker visits it once. When a node
         /// is compiled, its children's fragments are the top `childCount` entries of the
         /// fragment stack.
         private Fragment compileTree(Regexp root, int maxVisits)
@@ -695,7 +704,7 @@ final class Compiler
             while (true) {
                 Regexp node = nodes[depth - 1];
                 int childIndex = nextChildIndexes[depth - 1];
-                if (childIndex < node.childCount()) {
+                if (childIndex < compiledChildCount(node)) {
                     nextChildIndexes[depth - 1] = childIndex + 1;
                     if (++visitCount > maxVisits) {
                         // A finite budget bounds the visit limit, so exceeding it is a budget failure.
@@ -708,13 +717,13 @@ final class Compiler
                         nodes = Arrays.copyOf(nodes, depth * 2);
                         nextChildIndexes = Arrays.copyOf(nextChildIndexes, depth * 2);
                     }
-                    nodes[depth] = node.child(childIndex);
+                    nodes[depth] = node.op() == RegexpOp.REPEAT ? node.child(0) : node.child(childIndex);
                     nextChildIndexes[depth] = 0;
                     depth++;
                     continue;
                 }
 
-                int childCount = node.childCount();
+                int childCount = compiledChildCount(node);
                 int firstChildIndex = childFragmentCount - childCount;
                 Fragment fragment = compileNode(node, childFragments, firstChildIndex, childCount);
                 Arrays.fill(childFragments, firstChildIndex, childFragmentCount, null);
@@ -728,6 +737,17 @@ final class Compiler
                 }
                 childFragments[childFragmentCount++] = fragment;
             }
+        }
+
+        /// Returns how many child fragments a node compiles from. A Java counted repetition, the only
+        /// REPEAT node simplification leaves, compiles its body once per copy that
+        /// [#javaCountedLoop] links; a REPEAT in any other dialect fails in [#compileNode].
+        private int compiledChildCount(Regexp node)
+        {
+            if (node.op() == RegexpOp.REPEAT && dialect == Dialect.JAVA) {
+                return node.max() == -1 ? node.min() : node.max();
+            }
+            return node.childCount();
         }
 
         private Fragment compileNode(Regexp regexp, Fragment[] childFragments, int firstChildIndex, int childCount)
@@ -759,7 +779,12 @@ final class Compiler
                 case STAR -> repeatUnbounded(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, true);
                 case PLUS -> repeatUnbounded(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, false);
                 case QUEST -> quest(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
-                case REPEAT -> throw new RegexpCompileException("REPEAT must be simplified before compilation");
+                case REPEAT -> {
+                    if (dialect != Dialect.JAVA) {
+                        throw new RegexpCompileException("REPEAT must be simplified before compilation");
+                    }
+                    yield javaCountedLoop(regexp, childFragments, firstChildIndex, childCount);
+                }
                 case CAPTURE -> capture(childFragments[firstChildIndex], regexp.captureIndex());
                 case LITERAL -> (regexp.parseFlags() & Regexp.FULL_CASE_FOLD) != 0
                         ? fullCaseFoldLiteral(new int[] {regexp.rune()})
@@ -974,13 +999,102 @@ final class Compiler
 
         private Fragment repeatUnbounded(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
         {
-            if (dialect == Dialect.TRINO && fragment.nullable && !nonGreedy) {
-                return trinoGreedyNullableLoop(fragment, zeroIterationsAllowed);
+            // Trino and the JDK both end a greedy loop on an iteration that consumes nothing: Joni
+            // stops at a no-progress iteration, and the JDK's Loop node, which runs a greedy `*` or
+            // `+` of a nondeterministic body, continues past the loop when an iteration ends where
+            // it began. A lazy loop already tries its exit before another iteration.
+            if ((dialect == Dialect.TRINO || dialect == Dialect.JAVA) && fragment.nullable && !nonGreedy) {
+                return greedyNullableLoop(fragment, zeroIterationsAllowed);
             }
             return zeroIterationsAllowed ? star(fragment, nonGreedy) : plus(fragment, nonGreedy);
         }
 
-        private Fragment trinoGreedyNullableLoop(Fragment fragment, boolean zeroIterationsAllowed)
+        private Fragment greedyNullableLoop(Fragment fragment, boolean zeroIterationsAllowed)
+        {
+            ProgressIteration iteration = progressIteration(fragment, false);
+            Fragment optionalIteration = quest(new Fragment(iteration.entry(), iteration.emptyEnd(), true), false);
+            PatchList.patch(program, iteration.consumedEnd(), optionalIteration.begin);
+            if (zeroIterationsAllowed) {
+                return optionalIteration;
+            }
+            // PLUS must enter the body once, but every boundary after a consuming iteration may
+            // stop if the structurally nullable body cannot match at the new input position.
+            return new Fragment(iteration.entry(), optionalIteration.end, true);
+        }
+
+        /// Compiles a Java repetition `x{min,max}` of a nullable body from one compiled copy of
+        /// the body per iteration, by the JDK's Loop rule: an iteration that consumes nothing ends
+        /// the whole repetition, even before `min` iterations. Each copy's paths that consume
+        /// nothing go to the exit, and only a copy that consumed input continues to the next one.
+        /// The copies from `min` on are optional, tried before the exit unless the repetition is
+        /// lazy, and the last copy of `x{min,}` is a nullable loop.
+        ///
+        /// When the body matches empty only through an assertion, what the pattern matches can
+        /// depend on the reading direction: `(?:^a?){2}` matches `a` read from the right, but not
+        /// from the left, as the JDK reads it. From the left, the greedy first iteration takes the
+        /// `a` and the second iteration's `^` fails; the first iteration then matches empty at
+        /// `^`, which ends the repetition with the `a` unmatched. With two or more required copies,
+        /// such a program has no reverse compilation. A body that can also match empty without an
+        /// assertion ends a repetition wherever a later required copy would, so what the pattern
+        /// matches does not change.
+        private Fragment javaCountedLoop(Regexp regexp, Fragment[] copies, int firstCopyIndex, int copyCount)
+        {
+            int min = regexp.min();
+            if (isNoMatch(copies[firstCopyIndex])) {
+                return min == 0 ? noOperation() : noMatch();
+            }
+            boolean nonGreedy = (regexp.parseFlags() & Regexp.NON_GREEDY) != 0;
+            boolean unbounded = regexp.max() == -1;
+            int begin = 0;
+            long consumedEnd = PatchList.EMPTY;
+            long exits = PatchList.EMPTY;
+            for (int copyIndex = 0; copyIndex < copyCount; copyIndex++) {
+                Fragment copy = copies[firstCopyIndex + copyIndex];
+                int entry;
+                long nextConsumedEnd;
+                if (unbounded && copyIndex == copyCount - 1) {
+                    Fragment loop = nonGreedy ? plus(copy, true) : greedyNullableLoop(copy, false);
+                    entry = loop.begin;
+                    nextConsumedEnd = PatchList.EMPTY;
+                    exits = PatchList.append(program, exits, loop.end);
+                }
+                else {
+                    // Every copy is the same body, so the first one answers for all.
+                    ProgressIteration iteration = progressIteration(copy, copyIndex == 0 && min >= 2);
+                    if (iteration.emptyOnlyThroughAssertion()) {
+                        if (reversed) {
+                            throw new RegexpCompileException("Java counted repetitions of a body that matches empty only through an assertion do not support reverse compilation");
+                        }
+                        program.setHasDirectionalRepetition(true);
+                    }
+                    entry = iteration.entry();
+                    nextConsumedEnd = iteration.consumedEnd();
+                    exits = PatchList.append(program, exits, iteration.emptyEnd());
+                }
+                if (copyIndex >= min) {
+                    Fragment optionalCopy = quest(new Fragment(entry, PatchList.EMPTY, true), nonGreedy);
+                    entry = optionalCopy.begin;
+                    exits = PatchList.append(program, exits, optionalCopy.end);
+                }
+                if (copyIndex == 0) {
+                    begin = entry;
+                }
+                else {
+                    PatchList.patch(program, consumedEnd, entry);
+                }
+                consumedEnd = nextConsumedEnd;
+            }
+            return new Fragment(begin, PatchList.append(program, exits, consumedEnd), true);
+        }
+
+        /// One iteration of a nullable body, split by progress. The body's instructions up to its
+        /// first byte are cloned, and the clones start at `entry`, so the paths that consume
+        /// nothing end at `emptyEnd`, and the paths that consume reach `consumedEnd` through the
+        /// original instructions. When asked, `emptyOnlyThroughAssertion` reports whether every path to
+        /// `emptyEnd` passes an assertion.
+        private record ProgressIteration(int entry, long consumedEnd, long emptyEnd, boolean emptyOnlyThroughAssertion) {}
+
+        private ProgressIteration progressIteration(Fragment fragment, boolean checkEmptyPaths)
         {
             Fragment consumedExit = noOperation();
             PatchList.patch(program, fragment.end, consumedExit.begin);
@@ -995,12 +1109,7 @@ final class Compiler
             }
             SparseIntArray clones = nullableLoopClones;
             clones.clear();
-            int loopEntry = clonePreConsumptionInstruction(
-                    fragment.begin,
-                    consumedExit.begin,
-                    emptyExit.begin,
-                    clones,
-                    originalInstructionLimit);
+            int entry = clonePreConsumptionInstruction(fragment.begin, consumedExit.begin, emptyExit.begin, clones, originalInstructionLimit);
 
             // The clone table is also the work queue: clones made while linking are visited later in
             // this loop.
@@ -1035,15 +1144,42 @@ final class Compiler
                     case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
                 }
             }
+            boolean emptyOnlyThroughAssertion = checkEmptyPaths && !reachesWithoutAssertion(entry, emptyExit.begin, originalInstructionLimit);
+            return new ProgressIteration(entry, consumedExit.end, emptyExit.end, emptyOnlyThroughAssertion);
+        }
 
-            Fragment optionalIteration = quest(new Fragment(loopEntry, emptyExit.end, true), false);
-            PatchList.patch(program, consumedExit.end, optionalIteration.begin);
-            if (zeroIterationsAllowed) {
-                return optionalIteration;
+        /// Returns whether a path of the clones from `firstClone` on leads from `entry` to `target`
+        /// through no assertion.
+        private boolean reachesWithoutAssertion(int entry, int target, int firstClone)
+        {
+            int cloneCount = program.size() - firstClone;
+            boolean[] visited = new boolean[cloneCount];
+            int[] pending = new int[2 * cloneCount + 1];
+            int pendingCount = 0;
+            pending[pendingCount++] = entry;
+            while (pendingCount > 0) {
+                int id = pending[--pendingCount];
+                if (id == target) {
+                    return true;
+                }
+                // Every other edge out of the clones leads to FAIL.
+                if (id < firstClone || visited[id - firstClone]) {
+                    continue;
+                }
+                visited[id - firstClone] = true;
+                Prog.Inst instruction = program.inst(id);
+                switch (instruction.opcode()) {
+                    case ALT -> {
+                        pending[pendingCount++] = instruction.out();
+                        pending[pendingCount++] = instruction.out1();
+                    }
+                    case CAPTURE, NOP -> pending[pendingCount++] = instruction.out();
+                    default -> {
+                        // An assertion ends the search of this path, and a byte consumes.
+                    }
+                }
             }
-            // PLUS must enter the body once, but every boundary after a consuming iteration may
-            // stop if the structurally nullable body cannot match at the new input position.
-            return new Fragment(loopEntry, optionalIteration.end, true);
+            return false;
         }
 
         private int clonePreConsumptionInstruction(
