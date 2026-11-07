@@ -172,6 +172,16 @@ public class TestRustRegexp
     }
 
     @Test
+    public void testAlternationIsLeftmostFirstOverSharedPrefix()
+    {
+        // The crate lifts the a* both alternatives share and matches all of "ab"; Regulator keeps
+        // leftmost-first (REGULATOR_DECISIONS.md, Rust Frontend).
+        int[] groups = new int[2];
+        assertThat(RustRegexp.compile(utf8Slice("a*a|a*b")).findInto(utf8Slice("ab"), 0, 2, groups)).isTrue();
+        assertThat(groups).containsExactly(0, 1);
+    }
+
+    @Test
     public void testRangeStartingInsideCharacter()
     {
         // The crate's Regex never reports an empty match that splits a character, and an
