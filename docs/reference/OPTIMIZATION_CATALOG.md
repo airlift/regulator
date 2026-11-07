@@ -218,18 +218,22 @@ so the automata run only where a match can be.
   ([RegexFindOptimizations.cs][dotnet7-fixed-distance]) for the folded run.
   Regulator: case masks on two folded prefix bytes, in SWAR and vector forms
   ([#85], [design][d-folded-prefix]), the English ranking under the uniform
-  default, the vector form's counted loop, and a run behind a lead whose width
-  lies within a range, under Unicode and full case folding, with the skip
-  bound the engines share ([#195]); base RE2 [O-PROG-006].
+  default, the vector form's counted loop and its in-loop kernel for dense
+  pairs, and a run behind a lead whose width lies within a range, under
+  Unicode and full case folding, with the skip bound the engines share
+  ([#195]); base RE2 [O-PROG-006].
 - **Where:** `Prog.prefixAccelFoldCase`, `Prog.foldCaseMatches`,
   `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`,
+  `Prog.usesDenseFoldCaseScan`, `VectorPrefixScanner.findFoldCaseDense`,
   `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
   `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`
-- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB. Folded
-  runs: case-insensitive patterns under Unicode case folding with no folded
-  prefix, or whose folded prefix stops at a letter whose fold leaves ASCII,
-  such as `k` or `s`, which also match the Kelvin sign and the long s, when
-  the run's pair is rarer; a run that every match starts with only where
+- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB, with
+  the in-loop kernel for probe pairs that the distribution that chose them
+  predicts in 15% or more of vectors, as for common pairs in 64-byte vectors.
+  Folded runs: case-insensitive patterns under Unicode case folding with no
+  folded prefix, or whose folded prefix stops at a letter whose fold leaves
+  ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
+  when the run's pair is rarer; a run that every match starts with only where
   vectors hold fewer than 64 bytes
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned for two of its folded bytes a SWAR word or vector at a time. The
@@ -241,17 +245,22 @@ so the automata run only where a match can be.
   lines on Intel to 0.92 to 1.08 of their time, with user and error lines at
   1.05 to 1.08 and login lines at 0.93. The vector form ORs `0x20` into letter
   bytes and tests whole vectors in a counted loop that verifies candidates
-  after it exits, and the SWAR forms match both case broadcasts. RE2 scans it
-  with a ShiftDFA. Where a Unicode fold ends the prefix, the compiler finds
-  the runs of four to nine folded bytes that every match holds behind a lead
-  of known least and greatest width, and scans for the run with the rarest
-  pair in place of the folded prefix. The scan starts the least lead past the
-  search start and returns the run less the greatest lead, and the DFA, NFA,
-  and BitState searches skip the scans that would find the same run again. A
-  run that every match starts with keeps the DFA's start bytes beside it, and
-  a find loop whose start bytes carry a start literal filter verifies their
-  candidates instead, without a reverse pass. RE2 scans nothing past such a
-  fold. Rust, RE2, and Java `name-sherlock-casei` and Rust
+  after it exits, and the SWAR forms match both case broadcasts. Each folded
+  program predicts the share of vectors that hold a candidate, `1 - (1 - p)^n`
+  for the pair's folded probability product `p` and the vector's byte count
+  `n`, and at 15% or more scans with a kernel that verifies candidates inside
+  its vector loop, where the counted loop would leave and re-enter on many
+  vectors; that kernel fits C2's inline limit, so it inlines into the DFA
+  scan. RE2 scans it with a ShiftDFA. Where a Unicode fold ends the prefix,
+  the compiler finds the runs of four to nine folded bytes that every match
+  holds behind a lead of known least and greatest width, and scans for the run
+  with the rarest pair in place of the folded prefix. The scan starts the
+  least lead past the search start and returns the run less the greatest lead,
+  and the DFA, NFA, and BitState searches skip the scans that would find the
+  same run again. A run that every match starts with keeps the DFA's start
+  bytes beside it, and a find loop whose start bytes carry a start literal
+  filter verifies their candidates instead, without a reverse pass. RE2 scans
+  nothing past such a fold. Rust, RE2, and Java `name-sherlock-casei` and Rust
   `name-sherlock-holmes-casei` take 0.17 to 0.20 of their earlier time on
   Graviton and 0.09 to 0.13 on Intel, and `the-casei`, with a candidate about
   every 60 bytes, 0.73 to 0.77 and 0.62 to 0.64 ([#85]). The counted loop
@@ -260,7 +269,10 @@ so the automata run only where a match can be.
   `(?i)Sherlock Holmes` to 0.71 on Graviton and 0.53 on Intel, and `(?i)Twain`
   and CPython's `timeout` to 0.45 to 0.68, and the folded run takes
   `(?i)password` over CPython source to 0.43 to 0.46 in RE2, Rust, and Java
-  with Unicode case and 0.12 to 0.16 in Trino ([#195]).
+  with Unicode case and 0.12 to 0.16 in Trino. With the in-loop kernel,
+  CPython's `error`, `(?i)secret` over a log, and Java's Unicode `(?i)Twain`
+  run at 0.94 to 1.06 of the earlier per-vector scan's time on Intel, where
+  the counted loop loses ([#195]).
 
 ### Rare-byte probe
 

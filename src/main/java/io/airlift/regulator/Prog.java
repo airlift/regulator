@@ -429,6 +429,9 @@ final class Prog
     // ByteFrequencies.foldedProbePair; see configurePrefixAccelBytes.
     private int prefixFoldCaseFirstOffset;
     private int prefixFoldCaseSecondOffset;
+    // Whether the folded vector scan takes VectorPrefixScanner.findFoldCaseDense rather than
+    // findFoldCase, chosen when the pair is configured; see usesDenseFoldCaseScan.
+    private boolean prefixFoldCaseDense;
     // Whether the folded pair is the prefix's first and last bytes, which short windows scan with
     // prefixAccelFoldCaseFrontAndBackSWAR rather than findFoldCaseSwar, which serves pairs
     // elsewhere in the prefix; prefixAccelFoldCaseFrontAndBackSWAR's comment gives the
@@ -456,6 +459,9 @@ final class Prog
     // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
     private long prefixShiftsCharge;
     static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
+    // The predicted share of vectors holding a folded pair candidate at and above which the
+    // folded vector scan verifies candidates inside its vector loop; see usesDenseFoldCaseScan.
+    static final double DENSE_FOLD_CASE_VECTOR_SHARE = 0.15;
 
     // The literal every match begins with behind a leading assertion, and its search; see
     // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
@@ -1594,8 +1600,8 @@ final class Prog
     }
 
     /// True when a folded multi-byte prefix scans `length` bytes with
-    /// [VectorPrefixScanner#findFoldCase], under the same cutoff as
-    /// [PrefixAccelStrategy#FUSED_VECTOR].
+    /// [VectorPrefixScanner#findFoldCase] or [VectorPrefixScanner#findFoldCaseDense], under the
+    /// same cutoff as [PrefixAccelStrategy#FUSED_VECTOR].
     boolean usesVectorForFoldCasePrefix(int length)
     {
         return prefixFoldCase && prefixSize > 1 && VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
@@ -1633,6 +1639,27 @@ final class Prog
     int prefixAccelFoldCaseSecondOffset()
     {
         return prefixFoldCaseSecondOffset;
+    }
+
+    /// Returns whether the folded vector scan takes [VectorPrefixScanner#findFoldCaseDense]
+    /// rather than [VectorPrefixScanner#findFoldCase], as [#usesDenseFoldCaseScan] chose it for
+    /// this JVM's vectors. It is false without the Vector API.
+    boolean prefixAccelFoldCaseDense()
+    {
+        return prefixFoldCaseDense;
+    }
+
+    /// Returns whether a folded vector scan whose probe pair occurs at a position with
+    /// `pairProbability`, as [ByteFrequencies#foldedProbePairProbability] estimates it, should
+    /// verify candidates inside its vector loop, given vectors of `lanes` bytes. The predicted
+    /// share of vectors that hold a candidate is `1 - (1 - pairProbability)^lanes`. At
+    /// [#DENSE_FOLD_CASE_VECTOR_SHARE] or more, the counted test loop of
+    /// [VectorPrefixScanner#findFoldCase] would leave and re-enter on so many vectors that the
+    /// verify-in-loop [VectorPrefixScanner#findFoldCaseDense] costs less. The rule is the same
+    /// on every platform; the lane count is its hardware input.
+    static boolean usesDenseFoldCaseScan(double pairProbability, int lanes)
+    {
+        return 1 - Math.pow(1 - pairProbability, lanes) >= DENSE_FOLD_CASE_VECTOR_SHARE;
     }
 
     /// Returns the folded bytes the prefix scan searches for, a prefix or a run behind a lead.
@@ -1765,6 +1792,7 @@ final class Prog
         this.prefixPairOffset = 0;
         this.prefixFoldCaseFirstOffset = 0;
         this.prefixFoldCaseSecondOffset = 0;
+        this.prefixFoldCaseDense = false;
         this.prefixFoldCaseEndPair = false;
         this.prefixMinimumLead = 0;
         this.prefixMaximumLead = 0;
@@ -1790,11 +1818,15 @@ final class Prog
             this.prefixSize = Math.min(bytes.length, MAX_FOLD_CASE_PREFIX_BYTES);
             this.prefixFrontBroadcastMask = 0;
             // The pair scans probe the pair ByteFrequencies.foldedProbePair chooses under the
-            // caller's distribution, or under English text in place of the default uniform one.
-            ByteFrequencies.FoldedProbePair pair = byteFrequencies.forFoldedPairs().foldedProbePair(bytes, prefixSize);
+            // caller's distribution, or under English text in place of the default uniform one,
+            // and the same distribution predicts how many vectors hold a candidate.
+            ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
+            ByteFrequencies.FoldedProbePair pair = pairFrequencies.foldedProbePair(bytes, prefixSize);
             this.prefixFoldCaseFirstOffset = pair.firstOffset();
             this.prefixFoldCaseSecondOffset = pair.secondOffset();
             this.prefixFoldCaseEndPair = pair.firstOffset() == 0 && pair.secondOffset() == prefixSize - 1;
+            this.prefixFoldCaseDense = VectorSupport.isAvailable() &&
+                    usesDenseFoldCaseScan(pairFrequencies.foldedProbePairProbability(bytes, pair), VectorSupport.preferredByteLanes());
         }
         else if (bytes.length != 1) {
             this.prefixSize = bytes.length;
@@ -2090,6 +2122,9 @@ final class Prog
             return indexOfFoldCase(data, offset, length, prefix[0]);
         }
         if (usesVectorForFoldCasePrefix(length)) {
+            if (prefixFoldCaseDense) {
+                return VectorPrefixScanner.findFoldCaseDense(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
+            }
             return VectorPrefixScanner.findFoldCase(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
         }
         if (prefixFoldCaseEndPair) {
