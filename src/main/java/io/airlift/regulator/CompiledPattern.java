@@ -368,6 +368,13 @@ abstract sealed class CompiledPattern
         return (regexp.op() == RegexpOp.CHAR_CLASS || regexp.op() == RegexpOp.ANY_CHAR) && (regexp.parseFlags() & Regexp.LATIN1) == 0;
     }
 
+    /// Returns the forward program's share of `maxMemory`, the budget that its compilation and
+    /// anything sized against it must fit. The reverse program gets the remaining third.
+    static long forwardMemory(long maxMemory)
+    {
+        return Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+    }
+
     /// Analyzes a parsed pattern that compiles in the RE2 dialect: an RE2 pattern compiled from
     /// its parse result, or a pattern that the Java or Rust frontend parsed. The caller passes a
     /// private snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an
@@ -394,7 +401,7 @@ abstract sealed class CompiledPattern
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
 
-        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        long forwardMemory = forwardMemory(maxMemory);
         Regexp entireRegexp = parsed.regexp();
         CaseFolding caseFolding = parsed.caseFolding();
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
@@ -455,7 +462,7 @@ abstract sealed class CompiledPattern
             ScanPlanMode scanPlanMode)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
-        long forwardMemory = Math.max(1, maxMemory - reverseMemory);
+        long forwardMemory = forwardMemory(maxMemory);
 
         Regexp entireRegexp = parsed.regexp();
         int capturingGroupCount = parsed.capturingGroupCount();

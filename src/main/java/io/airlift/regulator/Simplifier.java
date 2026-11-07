@@ -362,6 +362,8 @@ final class Simplifier
         };
     }
 
+    // Compiler.requireExpansionFits charges the nodes this builds around the copies of a counted
+    // repetition, and must change with it.
     private static Regexp simplifyRepeat(Mode mode, int flags, Regexp regexp, Regexp childRegexp)
     {
         int min = regexp.min();

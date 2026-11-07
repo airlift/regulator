@@ -186,7 +186,7 @@ public sealed class TrinoRegexp
         LiteralAlternationSpanMatcher literalAlternationMatcher = LiteralAlternationSpanMatcher.analyze(
                 parsed.regexp(),
                 parsed.capturingGroupCount());
-        long forwardMemory = Math.max(1, options.maxMemory() - Math.max(1, options.maxMemory() / 3));
+        long forwardMemory = CompiledPattern.forwardMemory(options.maxMemory());
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(patternCopy, literalAlternationMatcher);
         }

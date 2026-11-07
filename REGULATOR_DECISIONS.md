@@ -409,9 +409,16 @@ original pattern, including when quoting rewrites it before parsing.
   name Unicode added after the crate's tables, such as `Age=17.0`, is accepted
   ahead of the crate. The database holds every property the crate supports,
   so none is rejected or approximated.
-- Repetition counts above 1,000, including nested repetitions whose counts
-  multiply past 1,000, are rejected, keeping the existing program-size bound.
-  Any non-negative nest limit is accepted, because parsing, the nest-limit
+- Repetition counts above 1,000 are accepted, as in the crate, which takes
+  any `u32` count its size limit allows. A pattern within the repetition
+  limit RE2, Java, and Trino enforce, no count above 1,000 and no nested
+  counts whose product exceeds 1,000, expands within a constant factor of
+  the pattern and compiles without a charge. A pattern beyond it is first
+  charged the size of its expansion, without building any copy, and fails
+  with `RegexpCompileMemoryLimitException` when that exceeds the forward
+  program's share of `maxMemory`. `Compiler#requireExpansionFits` defines
+  the charge.
+- Any non-negative nest limit is accepted, because parsing, the nest-limit
   check, and translation all walk the syntax tree with explicit stacks.
   Above the default limit, classes keep two parse costs that `RuneRangeSet`
   accepts: n log² n for nested unions whose operand weights stay just past its
@@ -420,7 +427,10 @@ original pattern, including when quoting rewrites it before parsing.
   approximation of the crate's size estimate would disagree near the limit.
   Compilation is bounded by `maxMemory` instead; the
   [Rust language reference](docs/reference/languages/RUST_REGEXP.md#compilation-options)
-  describes the patterns this accepts.
+  describes the patterns this accepts. The two limits disagree in both
+  directions: Regulator accepts some patterns the crate rejects as too large,
+  and, under a memory budget smaller than the default, rejects some the crate
+  accepts.
 
 ## Trino Compatibility Adapter
 
