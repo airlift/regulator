@@ -193,6 +193,17 @@ public class TestRe2BugRegression
         Re2.ReplaceAllResult result3 = re3.replaceAll(utf8("\u4eba\u7c7b"), utf8("\u5c0f"));  // "people", "class" -> "small"
         assertThat(result3.replacementCount()).isEqualTo(3);
         assertThat(toString(result3.result())).isEqualTo("\u5c0f\u4eba\u5c0f\u7c7b\u5c0f");
+
+        // An encoded surrogate (malformed), which upstream's chartorune still reads as one rune
+        Re2 re4 = Re2.compile(utf8(""), Re2.Options.defaults());
+        Re2.ReplaceAllResult result4 = re4.replaceAll(Slices.wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80}), utf8("-"));
+        assertThat(result4.replacementCount()).isEqualTo(2);
+        assertThat(toByteArray(result4.result())).isEqualTo(new byte[] {'-', (byte) 0xED, (byte) 0xA0, (byte) 0x80, '-'});
+
+        // Cut short by the end of the text, it is stepped one byte at a time, with no read past the end
+        Re2.ReplaceAllResult result5 = re4.replaceAll(Slices.wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0}), utf8("-"));
+        assertThat(result5.replacementCount()).isEqualTo(3);
+        assertThat(toByteArray(result5.result())).isEqualTo(new byte[] {'-', (byte) 0xED, '-', (byte) 0xA0, '-'});
     }
 
     /// Issue 310 - (?:|a)* matched more text than (?:|a)+ did.
