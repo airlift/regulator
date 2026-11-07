@@ -336,6 +336,7 @@ final class Prog
     private boolean hasEmptyWidthAssertions;
     private int textDependentAssertions;
     private boolean hasFullCaseFold;
+    private boolean keepsNullableLoopPriority;
 
     /// Whether this program is compiled for reverse (right-to-left) search.
     ///
@@ -633,6 +634,13 @@ final class Prog
     public void setHasFullCaseFold(boolean hasFullCaseFold)
     {
         this.hasFullCaseFold = hasFullCaseFold;
+    }
+
+    /// Sets whether flattening keeps the priority of a loop over a body that can match the
+    /// empty string, as the Rust crate does. See [#markLoopRoots].
+    public void setKeepsNullableLoopPriority(boolean keepsNullableLoopPriority)
+    {
+        this.keepsNullableLoopPriority = keepsNullableLoopPriority;
     }
 
     /// Returns whether this program is compiled for reverse (right-to-left) search.
@@ -3359,6 +3367,10 @@ final class Prog
         PredecessorLists predecessorLists = new PredecessorLists(size());
         markSuccessors(rootIdsByInstruction, predecessorLists, reachable, stack);
         int successorRootCount = rootIdsByInstruction.size();
+        // Loop roots, for a program that keeps nullable loop priority.
+        if (keepsNullableLoopPriority) {
+            markLoopRoots(rootIdsByInstruction, successorRootCount, reachable, stack);
+        }
         // Second pass: mark dominator roots.
         long dominatorEdgesScanned = 0;
         if (!skipDominatorPass) {
@@ -3999,6 +4011,116 @@ final class Prog
         }
     }
 
+    private static final int LOOP_FRAME_COMPONENT_ROOT = 0b100;
+    private static final int LOOP_FRAME_OUTPUT = 0b11;
+    private static final int LOOP_COMPONENT_COMPLETE = Integer.MAX_VALUE;
+
+    /// Marks as a root each alternation on a cycle of instructions that consume no input, the
+    /// loop that a body able to match the empty string compiles to.
+    ///
+    /// A list is built as if entered fresh, but a search reaches it with the instructions it
+    /// already visited on the way. Entering a loop's list from inside an iteration, after an
+    /// earlier list started that iteration, visits the iteration's alternation again in the
+    /// loop's list, and its lower-priority branch then runs ahead of the loop's own exit: in
+    /// `a(?:|b+)*` on `ab`, a search would take `b` before stopping after `a`. With a list for
+    /// each such alternation, every copy jumps to the one list, which the search skips once it
+    /// has visited it, as the unflattened program skips the alternation. RE2 programs keep
+    /// upstream's flattening without these roots.
+    ///
+    /// Finds the cycles as strongly connected components of the instructions that consume no
+    /// input, by Pearce's single-index variant of Tarjan's algorithm, from each root that
+    /// [#markSuccessors] marked; every instruction is reachable from one without consuming
+    /// input. An instruction is a frame of the search while it is on the search's path and a
+    /// stacked member once it is finished but its component is still open, never both, so the
+    /// frames and members together fit the work stack's array, which holds one int per
+    /// instruction: the frames grow from its start and the members down from its end, as in
+    /// Pearce's algorithm. The indexes, one int per instruction, borrow the reachable set's
+    /// array, so the pass allocates nothing.
+    private void markLoopRoots(SparseIntArray rootIdsByInstruction, int successorRootCount, SparseSet reachable, IntStack stack)
+    {
+        // An instruction's index until its component is complete, then COMPLETE; zero until
+        // the search visits it. The indexes borrow the reachable set's dense array, which holds
+        // one int per instruction: markSuccessors is done with the set, and the passes after this
+        // one clear it before they use it.
+        int[] indexes = reachable.clearAndBorrowDense();
+        Arrays.fill(indexes, 0, size(), 0);
+        // The frames are pushed at the stack's start, and the instructions whose index a
+        // successor lowered, which belong to an open component, at its end.
+        int nextIndex = 1;
+        stack.clear();
+        for (int rootIndex = 0; rootIndex < successorRootCount; rootIndex++) {
+            int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
+            if (indexes[rootInstructionId] != 0) {
+                continue;
+            }
+            indexes[rootInstructionId] = nextIndex++;
+            // A frame is the instruction, whether no successor lowered its index, and the next
+            // output to follow.
+            stack.push(rootInstructionId << 3 | LOOP_FRAME_COMPONENT_ROOT);
+            while (!stack.isEmpty()) {
+                int frame = stack.pop();
+                int id = frame >>> 3;
+                boolean componentRoot = (frame & LOOP_FRAME_COMPONENT_ROOT) != 0;
+                int output = frame & LOOP_FRAME_OUTPUT;
+                if (output > 0) {
+                    int previous = epsilonOutput(id, output - 1);
+                    if (indexes[previous] < indexes[id]) {
+                        indexes[id] = indexes[previous];
+                        componentRoot = false;
+                    }
+                }
+                int next = epsilonOutput(id, output);
+                if (next >= 0) {
+                    stack.push(id << 3 | (componentRoot ? LOOP_FRAME_COMPONENT_ROOT : 0) | (output + 1));
+                    if (indexes[next] == 0) {
+                        indexes[next] = nextIndex++;
+                        stack.push(next << 3 | LOOP_FRAME_COMPONENT_ROOT);
+                    }
+                    continue;
+                }
+                if (!componentRoot) {
+                    stack.pushEnd(id);
+                    continue;
+                }
+                boolean cycle = false;
+                while (!stack.isEndEmpty() && indexes[stack.peekEnd()] >= indexes[id]) {
+                    int member = stack.popEnd();
+                    indexes[member] = LOOP_COMPONENT_COMPLETE;
+                    markLoopRoot(member, rootIdsByInstruction);
+                    cycle = true;
+                }
+                indexes[id] = LOOP_COMPONENT_COMPLETE;
+                if (cycle) {
+                    markLoopRoot(id, rootIdsByInstruction);
+                }
+            }
+        }
+    }
+
+    /// Returns an instruction's output that a search follows without consuming input, by
+    /// position, or -1 past the last.
+    private int epsilonOutput(int id, int output)
+    {
+        Inst instruction = inst(id);
+        return switch (instruction.opcode()) {
+            case ALT, ALT_MATCH -> switch (output) {
+                case 0 -> instruction.out();
+                case 1 -> instruction.out1();
+                default -> -1;
+            };
+            case CAPTURE, EMPTY_WIDTH, NOP -> output == 0 ? instruction.out() : -1;
+            case BYTE_RANGE, MATCH, FAIL -> -1;
+        };
+    }
+
+    private void markLoopRoot(int id, SparseIntArray rootIdsByInstruction)
+    {
+        InstOp opcode = inst(id).opcode();
+        if ((opcode == InstOp.ALT || opcode == InstOp.ALT_MATCH) && !rootIdsByInstruction.hasIndex(id)) {
+            rootIdsByInstruction.setNew(id, rootIdsByInstruction.size());
+        }
+    }
+
     /// Returns the number of predecessor edges scanned, which [#flattenForTesting()] reports.
     private int markDominator(
             int rootInstructionId,
@@ -4540,6 +4662,8 @@ final class Prog
     {
         private int[] values;
         private int size;
+        // A second stack, which grows down from the end of the array.
+        private int endSize;
 
         IntStack(int capacity)
         {
@@ -4549,6 +4673,7 @@ final class Prog
         void clear()
         {
             size = 0;
+            endSize = 0;
         }
 
         boolean isEmpty()
@@ -4558,8 +4683,8 @@ final class Prog
 
         void push(int v)
         {
-            if (size >= values.length) {
-                values = Arrays.copyOf(values, values.length * 2);
+            if (size + endSize >= values.length) {
+                grow();
             }
             values[size++] = v;
         }
@@ -4567,6 +4692,37 @@ final class Prog
         int pop()
         {
             return values[--size];
+        }
+
+        boolean isEndEmpty()
+        {
+            return endSize == 0;
+        }
+
+        void pushEnd(int v)
+        {
+            if (size + endSize >= values.length) {
+                grow();
+            }
+            endSize++;
+            values[values.length - endSize] = v;
+        }
+
+        int popEnd()
+        {
+            return values[values.length - endSize--];
+        }
+
+        int peekEnd()
+        {
+            return values[values.length - endSize];
+        }
+
+        private void grow()
+        {
+            int[] grown = Arrays.copyOf(values, values.length * 2);
+            System.arraycopy(values, values.length - endSize, grown, grown.length - endSize, endSize);
+            values = grown;
         }
     }
 

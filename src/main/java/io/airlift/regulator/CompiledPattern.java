@@ -368,10 +368,10 @@ abstract sealed class CompiledPattern
         return (regexp.op() == RegexpOp.CHAR_CLASS || regexp.op() == RegexpOp.ANY_CHAR) && (regexp.parseFlags() & Regexp.LATIN1) == 0;
     }
 
-    /// Analyzes a parsed pattern that compiles in the RE2 dialect: an RE2 pattern compiled from
-    /// its parse result, or a pattern that the Java or Rust frontend parsed. The caller passes a
-    /// private snapshot that it never mutates. `scanPlanMode` decides whether the scan plan of an
-    /// eligible shape is built, and how it runs.
+    /// Analyzes a parsed pattern: an RE2 pattern compiled from its parse result, or a pattern that
+    /// the Java or Rust frontend parsed. A Rust pattern compiles in the Rust dialect and the others
+    /// in the RE2 dialect. The caller passes a private snapshot that it never mutates.
+    /// `scanPlanMode` decides whether the scan plan of an eligible shape is built, and how it runs.
     static Analysis analyzeParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlan.Language language, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
@@ -380,7 +380,8 @@ abstract sealed class CompiledPattern
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, language, scanPlanMode);
+        Compiler.Dialect compilerDialect = language == ScanPlan.Language.RUST ? Compiler.Dialect.RUST : Compiler.Dialect.RE2;
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, compilerDialect, language, scanPlanMode);
     }
 
     /// Analyzes a pattern parsed by the Trino frontend. The caller passes a private snapshot that
