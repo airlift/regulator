@@ -211,22 +211,34 @@ so the automata run only where a match can be.
 
 - **Origin:** First described by Hyperscan
   ([noodle_engine_sse.c][hs-noodle-caseless]); Inspired by the Rust regex
-  crate ([#85]). Regulator: case masks on the prefix's first and last bytes,
-  in SWAR and vector forms ([#85], [design][d-folded-prefix]), and the vector
-  form's counted loop ([#195]); base RE2 [O-PROG-006].
-- **Where:** `Prog.prefixAccelFoldCaseFrontAndBack`, `Prog.foldCaseMatches`,
-  `VectorPrefixScanner.findFoldCase`
+  crate ([#85]); Adapted from memchr's packed pair, which probes a needle's
+  two rarest bytes by a rank table ([packedpair][memchr-packedpair],
+  [default_rank.rs][memchr-rank]), for the pair choice. Regulator: case masks
+  on two folded prefix bytes, in SWAR and vector forms ([#85],
+  [design][d-folded-prefix]), the English ranking under the uniform default,
+  and the vector form's counted loop ([#195]); base RE2 [O-PROG-006].
+- **Where:** `Prog.prefixAccelFoldCase`, `Prog.foldCaseMatches`,
+  `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`
 - **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
-  scanned with first- and last-byte masks a SWAR word or vector at a time: the
-  vector form ORs `0x20` into letter bytes and tests whole vectors in a counted
-  loop that verifies candidates after it exits, and the SWAR form matches both
-  case broadcasts. RE2 scans it with a ShiftDFA. Rust, RE2, and Java
-  `name-sherlock-casei` and Rust `name-sherlock-holmes-casei` take 0.17 to
-  0.20 of their earlier time on Graviton and 0.09 to 0.13 on Intel, and
-  `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77 and 0.62 to
-  0.64 ([#85]). The counted loop takes `(?i)Sherlock Holmes` in Rust and Java
-  to 0.75 to 0.83 of its earlier time on Graviton and Intel ([#195]).
+  scanned for two of its folded bytes a SWAR word or vector at a time. The
+  pair is the prefix's first and last bytes unless two bytes at least two
+  apart are more than four times rarer under the configured distribution, or
+  under English text in place of the uniform default. A first-and-last pair
+  keeps its own SWAR kernel with fixed offsets: scanning these pairs with the
+  kernel for other pairs, whose second offset is a variable, moved short log
+  lines on Intel to 0.92 to 1.08 of their time, with user and error lines at
+  1.05 to 1.08 and login lines at 0.93. The vector form ORs `0x20` into letter
+  bytes and tests whole vectors in a counted loop that verifies candidates
+  after it exits, and the SWAR forms match both case broadcasts. RE2 scans it
+  with a ShiftDFA. Rust, RE2, and Java `name-sherlock-casei` and Rust
+  `name-sherlock-holmes-casei` take 0.17 to 0.20 of their earlier time on
+  Graviton and 0.09 to 0.13 on Intel, and `the-casei`, with a candidate about
+  every 60 bytes, 0.73 to 0.77 and 0.62 to 0.64 ([#85]). The counted loop
+  takes `(?i)Sherlock Holmes` in Rust and Java to 0.75 to 0.83 of its earlier
+  time on Graviton and Intel, and the rarer pair takes RE2's Latin-1
+  `(?i)Sherlock Holmes` to 0.71 on Graviton and 0.53 on Intel, and `(?i)Twain`
+  and CPython's `timeout` to 0.45 to 0.68 ([#195]).
 
 ### Rare-byte probe
 

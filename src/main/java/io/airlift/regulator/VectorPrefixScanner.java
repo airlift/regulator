@@ -114,27 +114,26 @@ final class VectorPrefixScanner
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds the first occurrence of the first prefixSize bytes of prefix under the folded
     // prefix rule: both sides map A-Z to a-z, and every other byte compares exactly. Candidates
-    // need both the first and last bytes before the whole folded prefix is compared. The prefix
-    // holds at most nine bytes, so failed comparisons stay bounded and the scan needs no KMP
-    // budget.
-    static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize)
+    // need both probe bytes, at firstOffset and secondOffset within the prefix, before the whole
+    // folded prefix is compared. The prefix holds at most nine bytes, so failed comparisons stay
+    // bounded and the scan needs no KMP budget.
+    static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
         if (candidateCount <= 0) {
             return -1;
         }
 
-        int backOffset = prefixSize - 1;
         int vectorEnd = offset + SPECIES.loopBound(candidateCount);
         // Setting bit 0x20 maps both cases of an ASCII letter to its lower case. A probe that
         // is not a letter ORs in zero and compares exactly, since 0x20 would alias pairs such
         // as '@' and '`'.
-        byte frontLowerCase = asciiLower(prefix[0]);
-        byte backLowerCase = asciiLower(prefix[backOffset]);
-        ByteVector frontCaseBit = ByteVector.broadcast(SPECIES, caseBit(frontLowerCase));
-        ByteVector backCaseBit = ByteVector.broadcast(SPECIES, caseBit(backLowerCase));
-        ByteVector frontVector = ByteVector.broadcast(SPECIES, frontLowerCase);
-        ByteVector backVector = ByteVector.broadcast(SPECIES, backLowerCase);
+        byte firstLowerCase = asciiLower(prefix[firstOffset]);
+        byte secondLowerCase = asciiLower(prefix[secondOffset]);
+        ByteVector firstCaseBit = ByteVector.broadcast(SPECIES, caseBit(firstLowerCase));
+        ByteVector secondCaseBit = ByteVector.broadcast(SPECIES, caseBit(secondLowerCase));
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, firstLowerCase);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, secondLowerCase);
         int position = offset;
 
         while (position < vectorEnd) {
@@ -150,8 +149,8 @@ final class VectorPrefixScanner
             int step = 0;
             for (; step < steps; step++) {
                 int stepPosition = position + step * SPECIES.length();
-                if (ByteVector.fromArray(SPECIES, data, stepPosition).or(frontCaseBit).compare(VectorOperators.EQ, frontVector)
-                        .and(ByteVector.fromArray(SPECIES, data, stepPosition + backOffset).or(backCaseBit).compare(VectorOperators.EQ, backVector))
+                if (ByteVector.fromArray(SPECIES, data, stepPosition + firstOffset).or(firstCaseBit).compare(VectorOperators.EQ, firstVector)
+                        .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondOffset).or(secondCaseBit).compare(VectorOperators.EQ, secondVector))
                         .anyTrue()) {
                     break;
                 }
@@ -161,8 +160,8 @@ final class VectorPrefixScanner
                 break;
             }
             // Rebuild this vector's candidates as bits.
-            long candidateBits = ByteVector.fromArray(SPECIES, data, position).or(frontCaseBit).compare(VectorOperators.EQ, frontVector)
-                    .and(ByteVector.fromArray(SPECIES, data, position + backOffset).or(backCaseBit).compare(VectorOperators.EQ, backVector))
+            long candidateBits = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstCaseBit).compare(VectorOperators.EQ, firstVector)
+                    .and(ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondCaseBit).compare(VectorOperators.EQ, secondVector))
                     .toLong();
             while (candidateBits != 0) {
                 int candidate = position + Long.numberOfTrailingZeros(candidateBits);
