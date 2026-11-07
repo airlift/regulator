@@ -17,7 +17,8 @@ regular expressions, and Trino SQL LIKE.
 **docs/ directory (reference):**
 - `docs/README.md` -- Documentation index and authority rules
 - `docs/porting/WORKFLOW.md` -- Development workflow and conventions
-- `docs/integrations/TRINO.md` -- Current public API and Trino design research
+- `docs/reference/REGULATOR_API.md` -- Public API, ownership, matching, captures, and resources
+- `docs/integrations/TRINO.md` -- Trino compatibility boundary and adoption requirements
 - `docs/benchmarks/METHODOLOGY.md` -- Benchmarking and performance-analysis guide
 - `docs/benchmarks/QUALIFICATION_PLAN.md` -- Final candidate benchmark plan
 

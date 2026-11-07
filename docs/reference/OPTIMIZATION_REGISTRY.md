@@ -677,10 +677,9 @@ private static boolean matchesAnyByteString(Regexp regexp)
     if (regexp.op() != RegexpOp.STAR) {
         return false;
     }
-    Regexp operand = regexp.sub(0);
+    Regexp operand = regexp.child(0);
     return operand.op() == RegexpOp.ANY_BYTE ||
-            (operand.op() == RegexpOp.ANY_CHAR &&
-                    (operand.parseFlags() & Regexp.LATIN1) != 0);
+            (operand.op() == RegexpOp.ANY_CHAR && (operand.parseFlags() & Regexp.LATIN1) != 0);
 }
 ```
 
@@ -688,8 +687,8 @@ private static boolean matchesAnyByteString(Regexp regexp)
 ```java
 if (anchorMode == Anchor.ANCHOR_BOTH && prog.matchesAnyByteString() && captureCount <= 1) {
     if (mutableGroupOffsets != null && mutableGroupOffsets.length >= 2) {
-        mutableGroupOffsets[0] = start;
-        mutableGroupOffsets[1] = end;
+        mutableGroupOffsets[0] = start - contextStart - strippedPrefixLength;
+        mutableGroupOffsets[1] = end - contextStart;
     }
     return true;
 }

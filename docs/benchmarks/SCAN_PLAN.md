@@ -152,9 +152,9 @@ continuation's operations again, even in the boolean plan without capture saves
 described below. Without a boolean tail the attempt reads as far as the DFA, so
 on a short input the plan only adds dispatch. Longer inputs, and calls that
 return boundaries or captures, run the plan. Because the input length picks the
-engine, both engines must agree on every input, as for the density handoff
-below: an RE2, Java, or Rust plan always does, and a Trino plan does when every
-consuming operation accepts only ASCII bytes. The pattern's boolean route
+engine, both engines must agree on every input: an RE2, Java, or Rust plan
+always does, and a Trino plan does when every consuming operation accepts only
+ASCII bytes. The pattern's boolean route
 without a plan must also be the DFA, so a Trino final-line end or a Java
 final-terminator end, which the DFA cannot evaluate, keeps the plan. In
 `BenchmarkRe2ScanPlan`, `OPTIONALS`, `OPTIONAL_RETRY`, and the forked
@@ -192,14 +192,16 @@ position. This bounds inputs where every candidate rescans the same long run,
 such as `id=([^&]+)&x` over repeated `id=a`, so the work of each search is
 linear in its input. Anchored searches make one attempt and never hand off. Each
 search, including each step of a find loop and of `count`, starts with a fresh
-budget. The engines agree on valid UTF-8. On malformed input, a search that
-hands off may report the ordinary engine's match rather than the plan's.
-Boolean, boundary, capture, and count calls apply the same budget from the same
-search positions, and the density handoff and ranged boolean `find` apply only
-to plans on which both engines agree, so all calls still report one match
-sequence. As with the ordinary engine and upstream RE2, iterating over every
-match can still take quadratic time when each successful search reads far past
-the start of its match.
+budget. The engines agree on valid UTF-8, and an RE2, Java, or Rust plan agrees
+with the ordinary engine on malformed input too. On malformed input, a Trino
+search that hands off may report the ordinary engine's match rather than the
+plan's. Boolean, boundary, capture, and count calls apply the same budget from
+the same search positions, and the density handoff and ranged boolean `find`
+apply only to plans whose consuming operations accept only ASCII bytes, in
+every language, so all calls still report one match sequence. As with the
+ordinary engine and upstream RE2, iterating over every match can still take
+quadratic time when each successful search reads far past the start of its
+match.
 
 A run-leading unanchored plan records the longest case-sensitive literal that
 every match must consume: a literal after the leading run and after the skip
