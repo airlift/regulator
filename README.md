@@ -9,7 +9,7 @@ Regulator is a high-performance regular-expression engine for UTF-8
 [Slice](https://github.com/airlift/slice) data. It supports five pattern
 languages: RE2, Java `Pattern`, the Rust `regex` crate, and Trino regular
 expressions compile onto one engine, and Trino SQL `LIKE` has its own matcher.
-It matches in linear time with bounded memory, making it a good fit for
+Each search runs in linear time with bounded memory, making it a good fit for
 data-processing systems that compile patterns once and apply them repeatedly.
 
 For many common patterns, Regulator can also generate a dedicated JVM class at
