@@ -123,7 +123,7 @@ final class InnerLiteralSearch
     /// search, as [#estimatedRetainedSize] reports it, retains at most `retainedMemory`.
     static InnerLiteralSearch analyze(Regexp regexp, Prog forwardProgram, long prefixMemory, long retainedMemory, Compiler.Dialect dialect, CaseFolding caseFolding)
     {
-        if (forwardProgram.anchorStart() || forwardProgram.anchorEnd() || forwardProgram.canPrefixAccel() || forwardProgram.hasDfaUnsupportedAssertions()) {
+        if (forwardProgram.start() == 0 || forwardProgram.anchorStart() || forwardProgram.anchorEnd() || forwardProgram.canPrefixAccel() || forwardProgram.hasDfaUnsupportedAssertions()) {
             return null;
         }
         InnerLiteral innerLiteral = findInnerLiteral(regexp, caseFolding);
