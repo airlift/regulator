@@ -48,7 +48,8 @@ public final class RegexpMatcher
     private final GroupZeroSpanSearch spanSearch;
     private final BoundedCharacterClassCounter characterClassCounter;
     // Created by the constructor for a matcher with no single-byte table, span search, or class
-    // counter, and by a literal alternation's matcher on its first long search. See
+    // counter, by a literal alternation's matcher on its first long search, and by a fixed-width
+    // matcher on its first search that bails on dense candidates. See
     // createLongSearchCandidateStartCursor.
     private Dfa.CandidateStartCursor candidateStartCursor;
     private boolean longSearchCandidateStartCursorCreated;
@@ -258,7 +259,13 @@ public final class RegexpMatcher
             if (regionEnd - start >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && spanSearch == pattern.shortFixedWidthByteMatcher()) {
                 return rustSearch ? findRust() : findGeneral();
             }
-            span = ((FixedWidthByteSpanMatcher) spanSearch).findSpan(input, start, regionEnd);
+            // A search that bails on dense candidates runs again from its start on the program's
+            // search, as a find of the pattern without the matcher would.
+            span = ((FixedWidthByteSpanMatcher) spanSearch).findSpanOrBail(input, start, regionEnd);
+            if (span == FixedWidthByteSpanMatcher.BAILED) {
+                createLongSearchCandidateStartCursor();
+                return rustSearch ? findRust() : findGeneral();
+            }
         }
         if (span < 0) {
             return failFind();
@@ -320,11 +327,12 @@ public final class RegexpMatcher
         return false;
     }
 
-    /// Creates the candidate cursor the first time a literal alternation's matcher, whose span
-    /// search answers its short searches, searches a long region. Creating it builds the
-    /// program's DFA, so a matcher that searches only short regions builds none. An alternation
-    /// whose literals share one length has no candidate cursor and takes the group-zero forward
-    /// cursor instead.
+    /// Creates the candidate cursor the first time a span search hands a find to the program:
+    /// when a literal alternation's matcher, whose span search answers its short searches,
+    /// searches a long region, or when a fixed-width matcher's search bails on dense candidates.
+    /// Creating it builds the program's DFA, so a matcher whose span search answers every find
+    /// builds none. An alternation whose literals share one length has no candidate cursor and
+    /// takes the group-zero forward cursor instead.
     private void createLongSearchCandidateStartCursor()
     {
         if (!longSearchCandidateStartCursorCreated) {

@@ -1502,7 +1502,9 @@ When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
 matchers Trino uses. Trino's subtypes call these matchers directly because
 routing through the compiled pattern's dispatch measured about 9% more per
-call on Graviton. A group-zero `RegexpMatcher.find()` of such a pattern, or of
+call on Graviton; a fixed-width pattern whose search can bail takes no subtype
+and runs through the compiled pattern, which holds the program it bails to. A
+group-zero `RegexpMatcher.find()` of a fixed-width pattern, or of
 a [large literal alternation](#large-literal-alternations), searches the same
 matcher in every language, while Trino's span subtypes iterate theirs directly.
 A literal alternation's matcher searches the trie only while fewer than 64
@@ -1573,8 +1575,9 @@ admit a [start literal filter](#start-literal-filter), inputs of at least 64
 bytes may skip to the positions the filter accepts, unless the filter's stops
 are dense.
 
-The fixed-width matcher checks every occurrence of one byte, such as the `s` of
-`[a-z]shing`, which English text holds far more often than `shing`. Every
+The fixed-width matcher checks every occurrence of its candidate's first bytes,
+such as the `s` of `[a-z]shing`, which English text holds far more often than
+`shing`. Every
 language, Trino included, therefore keeps the DFA's inner literal search when
 its literal, or every literal of its set, has two or more bytes. A find whose
 input lacks the literal reports no match without running the DFA, and one whose
@@ -1586,12 +1589,12 @@ plain DFA measured Trino count 1.72-1.79x slower than the matcher on r9g and
 1.36-1.40x on r8i, and iteration 1.12-1.16x on r9g. The pattern keeps that
 matcher when it fits the forward DFA budget beside the search; full-Slice find
 stays on the DFA, whose check for the missing literal wins on short rows too. A
-Trino fixed-width pattern otherwise compiles no program, and the search needs
-one, so a pattern whose `maxMemory` leaves no room for its program keeps the
-matcher and compiles wherever the matcher fits. Where the program fits but
-neither the search nor the matcher fits beside it, as for `[a-z]shing` from 2567
-to 2797 bytes, the pattern also keeps the matcher on the route without a
-program.
+Trino pattern on its fixed-width subtype otherwise keeps no program, and the
+search needs one, so a pattern whose `maxMemory` leaves no room for its program
+keeps the matcher and compiles wherever the matcher fits. Where
+the program fits but neither the search nor the matcher fits beside it, as for
+`[a-z]shing` from 2567 to 2797 bytes, the pattern also keeps the matcher on the
+route without a program.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -1659,6 +1662,64 @@ reserves its memory whenever it fits, as it did; any other search [yields to
 the forward DFAs](#memory-budgets-and-dfa-caching). Scan-plan leading and
 required literals, capped at 256 bytes, still check every candidate; bounding
 them is a separate change.
+
+## Fixed-Width Rare Class Candidates
+
+A bounded repeat of classes such as `[a-q][^u-z]{80}[x\xE0-\xFF]` grows the
+lazy DFA's subset states until it gives up and the search runs the NFA. The
+fixed-width matcher therefore takes capture-free patterns of a fixed count of
+2 to 256 characters, other than exact literals, classes above ASCII included.
+Latin-1 and Rust byte patterns read a byte at a time. A UTF-8 position with
+members above ASCII reads one character as the compiled class's byte ranges
+read it, malformed input included. In UTF-8 every character a position accepts
+begins with a byte that is not a continuation byte, so a later match has its
+candidate character later too, and the first verified candidate is the
+leftmost match; in byte mode every position is one byte.
+
+The matcher verifies the other positions around each candidate, the character
+of one chosen position. An ASCII singleton pattern, at most 64 bytes of ASCII
+bytes and classes with a position of one member, takes that position's byte
+whatever its rate, found with `indexOf`. Any other pattern takes the position
+whose first bytes English text holds least, only when that is under once in
+100 bytes, preferring a position whose first bytes are all ASCII and rating
+bytes above ASCII at the rarest ASCII byte's rate. It finds a candidate of one
+first byte with `indexOf` and one of several with the DFA's small byte-set
+vector scans, sampling their productivity as the DFA's start-byte scan does.
+Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
+keeps that pattern as fast as the engine on Russian text; scanning the letter
+took 1.3-2.1x the time.
+
+Such a pattern, its short-search matcher included, yields to the engine where
+the engine has its own scan: when the program skips to a literal prefix, when a
+forward DFA would search a start literal filter, or, for a candidate with bytes
+above ASCII, when the class-run counter takes the pattern. Without the first
+two, `(?i)Шерлок Холмс` on Russian text took 89-234x the engine's time, since
+its filter's three bytes stop far less often than every Cyrillic lead byte;
+without the third, `[а-я]{5}` on Russian took 2.9-3.1x and `[一-龥]{3}` on
+Chinese 1.32-1.34x the counter's time. Trino compiles its program to decide the
+order, as every language does, and keeps none only on its fixed-width subtype,
+for a pattern whose candidate never bails.
+
+A candidate with bytes above ASCII can be dense in text of another script, so a
+search, one find or one whole count, that has failed on at least 64 candidates
+at more than one per 32 bytes hands the rest to the engine. A count keeps its
+matches and counts on from the last match end; a find restarts on the engine
+from its start. The bail holds for that search only, as upstream RE2's DFA
+falls back per search, so a dense stretch does not cost later searches the
+scan. Natural Russian text reaches it: without the bail, `[а-я]{3}[.,]` took
+2.5-2.8x the time, `[а-я]{2}[.,!?]` 1.9-2.1x, `[А-Я][а-я]{3}` 1.3-1.5x, and
+`[а-я]{4} [а-я]{4}` 2.9-3.1x, in every language on both platforms; with it,
+all four measure flat against the engine. English text keeps the scan: its
+candidates fail about once per KiB. ASCII candidates do not bail, since English
+frequencies rate them.
+
+Against the engine, on 2 r9g and 2 r8i Spot hosts (JMH average time, JDK
+25.0.4+7), the `[a-q][^u-z]{80}[x\xE0-\xFF]` targets count 740-1,390x
+faster on English text, `[a-q][^u-z]{80}x`, which the DFA kept, 5-34% faster,
+`[0-9]{4}` 19-34x, `[A-Z][0-9]{5}` 34-42x, `[一-龥]{2}[，。]` on Chinese
+2.7x, and `[0-9]{4}` on short rows 3.7-4.6x. Deciding Trino's order on its
+program makes its single-use contains of an ISO date 11-15% slower to compile
+and run once.
 
 ## Short-Window Inner Literal Check
 
