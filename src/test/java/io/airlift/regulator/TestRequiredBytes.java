@@ -379,13 +379,16 @@ public class TestRequiredBytes
         // A pattern whose literal another route already searches for, an inner literal search, a
         // prefix scan, or a start literal filter, or whose literal is case-insensitive, does not
         // scan for it on long windows. The DFA builds a start literal filter only with the Vector
-        // API.
+        // API. A folded run that stands in for no prefix counts as the start literal filter the
+        // program would have without it: (?i)kernel scans for ernel behind the Kelvin sign's
+        // lead where its start bytes would carry a filter.
         List<OtherRoute> otherRoutes = new ArrayList<>(List.of(
                 new OtherRoute("\\w+,\\bz", "ab,z", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
                 new OtherRoute("x(.*?,){3}z", "x,,,z", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()),
                 new OtherRoute("(.*?,){3}# [Nn]oqa", ",,,# Noqa", pattern -> !pattern.requiredBytesForDiagnostics().isExactLiteral())));
         if (VectorSupport.isAvailable()) {
             otherRoutes.add(new OtherRoute("(?:abc|def)(?:[a-q],){3}z", "abca,b,c,z", pattern -> Dfa.DfaInstance.searchesStartLiteralFilter(pattern.forwardProgramForDiagnostics(), Dfa.DfaInstance.Kind.FIRST_MATCH)));
+            otherRoutes.add(new OtherRoute("(?i)kernel.*?,#", "Kernel,#", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()));
         }
         for (OtherRoute otherRoute : otherRoutes) {
             Slice input = utf8Slice(LONG_FILLER + otherRoute.match());
@@ -401,6 +404,25 @@ public class TestRequiredBytes
                 assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(description).isZero();
             }
         }
+
+        // Otherwise a folded run that stands in for no prefix is no other route: Trino's
+        // (?i)Holmes, whose s also matches the long s, scans for its run and its literal. A run
+        // that replaces a prefix is one: RE2's (?i)password scans for word in place of pa. With
+        // 64-byte vectors (?i)Holmes has no run, and its rare start bytes take the two-literal
+        // start literal filter, another route, as on main.
+        CompiledPattern holmes = TrinoRegexp.compile(utf8Slice("(?i)Holmes[^\\n]{0,40}\\(\\)")).re2();
+        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
+            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isTrue();
+            assertThat(holmes.longWindowRequiredLiteral()).isNotNull();
+            RegexpMatcher holmesMatcher = holmes.matcher(utf8Slice(LONG_FILLER));
+            assertThat(holmesMatcher.find()).isFalse();
+            assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
+        }
+        else {
+            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            assertThat(holmes.longWindowRequiredLiteral()).isNull();
+        }
+        assertThat(Re2.compile(utf8Slice("(?i)password(?:.*?,){3}#")).longWindowRequiredLiteral()).isNull();
 
         // A start literal filter that no DFA search runs is no other route. Java's $ is an
         // assertion the DFA cannot run, so the pattern scans for its literal before BitState

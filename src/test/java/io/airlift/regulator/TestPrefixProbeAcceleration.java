@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.function.Function;
 
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -79,6 +80,140 @@ public class TestPrefixProbeAcceleration
         // Java's CASE_INSENSITIVE without UNICODE_CASE also folds ASCII only, so its s and k match
         // no long s or Kelvin sign, and its folded prefix is the same "sherlock".
         assertFoldedProbePair(JavaRegexp.compile(Slices.utf8Slice("Sherlock Holmes"), JavaRegexp.Options.defaults().setCaseInsensitive(true)), 0, 7);
+    }
+
+    @Test
+    public void testFoldedRunBehindVariableLead()
+    {
+        // Under Unicode folding, s and k also match the long s and the Kelvin sign, two and three
+        // bytes in UTF-8, so no folded prefix reaches past them. The scan instead searches for
+        // the run of folded bytes between them with the rarest pair, and steps back by the most
+        // bytes its lead can take. In password, ss is s and s or, in Trino, also sharp s.
+        List<Function<String, CompiledPattern>> languages = List.of(
+                pattern -> Re2.compile(Slices.utf8Slice("(?i)" + pattern)),
+                pattern -> RustRegexp.compile(Slices.utf8Slice(pattern), RustRegexp.Options.defaults().setCaseInsensitive(true)),
+                pattern -> JavaRegexp.compile(Slices.utf8Slice(pattern), JavaRegexp.Options.defaults().setCaseInsensitive(true).setUnicodeCase(true)),
+                pattern -> TrinoRegexp.compile(Slices.utf8Slice("(?i)" + pattern)).re2());
+        for (Function<String, CompiledPattern> language : languages) {
+            assertFoldedRun(language.apply("Sherlock Holmes"), " holme", 8, 11, 1, 4);
+            assertFoldedRun(language.apply("password"), "word", 4, 6, 0, 3);
+            // A run needs four bytes, so xyz is not scanned for. Leads that may differ by eight
+            // bytes still qualify; nine do not.
+            assertThat(language.apply("ssssssssxyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            assertFoldedRun(language.apply("ssssssssxyzw"), "xyzw", 8, 16, 0, 2);
+            assertThat(language.apply("sssssssssxyzw").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            // A run longer than nine bytes is split, and the lead of its second part counts the
+            // nine bytes of the first.
+            assertFoldedRun(language.apply("kabcdefghjqvwx"), "qvwx", 10, 12, 0, 3);
+        }
+        // A lead of fixed width qualifies when there is no prefix. In Latin-1 each character of the
+        // lead, the fold class included, takes one byte.
+        assertFoldedRun(Re2.compile(Slices.utf8Slice("(?i)\u00E9clair")), "clair", 2, 2, 0, 4);
+        assertFoldedRun(Re2.compile(latin1Slice("[\u00C9\u00E9]\u00C0(?i:xyzw)"), Re2.Options.latin1()), "xyzw", 2, 2, 0, 2);
+        // A one-byte folded prefix stops the scan wherever its byte is, so a run with a rarer
+        // pair displaces it.
+        assertFoldedRun(Re2.compile(Slices.utf8Slice("(?i)es the")), " the", 2, 3, 0, 3);
+        // A case-sensitive literal ends the runs, and a run must hold an ASCII letter: inner
+        // literal search serves these, as it would without the fold class in front.
+        for (String pattern : List.of("(?i:k)ey = value", "[\u00C9\u00E9]: \\d+ ERROR", "(?i:k)1234ERROR")) {
+            Re2 compiled = Re2.compile(Slices.utf8Slice(pattern));
+            assertThat(compiled.forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
+            assertThat(compiled.innerLiteralSearchForDiagnostics()).as(pattern).isNotNull();
+        }
+        // A class ends the runs unless it holds exactly one fold orbit: [A\x{10000}] lacks the a
+        // of the orbit of A, and [Aa\x{10000}] holds a character outside it.
+        for (String pattern : List.of("[A\\x{10000}](?i:xyzw)", "[Aa\\x{10000}](?i:xyzw)")) {
+            assertThat(Re2.compile(Slices.utf8Slice(pattern)).forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
+        }
+        // In Trino, the s of (?i)Holmes also matches the long s, so the literal has no folded
+        // prefix, and every match starts with its run holme. With 64-byte vectors the run is left
+        // out and the DFA keeps its start bytes.
+        CompiledPattern holmes = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2();
+        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
+            assertFoldedRun(holmes, "holme", 0, 0, 0, 3);
+        }
+        else {
+            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+        }
+        // In Trino, ffi is also the ffi ligature, the ff ligature and i, or f and the fi ligature.
+        // The first character outside ASCII ends the runs, read in the folded literal only when
+        // the literal needs a multi-character fold, as affidavit does.
+        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)affidavit")).re2(), "davit", 4, 5, 0, 2);
+        assertThat(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u00E9clair")).re2().forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+    }
+
+    @Test
+    public void testFoldedRunBehindVariableLeadFindsEveryMatch()
+    {
+        // The anchored searches of the reference never scan for the run, so they judge every
+        // start the unanchored scan skips.
+        List<CompiledPattern> patterns = List.of(
+                Re2.compile(Slices.utf8Slice("(?i)Sherlock Holmes")),
+                RustRegexp.compile(Slices.utf8Slice("Sherlock Holmes"), RustRegexp.Options.defaults().setCaseInsensitive(true)),
+                Re2.compile(Slices.utf8Slice("(?i)kiss the sky")),
+                RustRegexp.compile(Slices.utf8Slice("kiss the sky"), RustRegexp.Options.defaults().setCaseInsensitive(true)));
+        List<String> texts = new ArrayList<>();
+        texts.addAll(foldedRunTexts(List.of("Sherlock Holmes", "\u017Fherloc\u212A HOLME\u017F", "SHERLOCK holmes"), "Xherlock Holmes"));
+        texts.addAll(foldedRunTexts(List.of("kiss the sky", "\u212Ai\u017F\u017F THE \u017F\u212Ay", "KISS the SKY"), "kis the sky"));
+        for (CompiledPattern pattern : patterns) {
+            assertThat(pattern.forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern.pattern().toStringUtf8()).isPositive();
+            RegexpMatcher anchored = pattern.matcher(Slices.EMPTY_SLICE);
+            for (String text : texts) {
+                Slice input = Slices.utf8Slice(text);
+                List<int[]> expected = new ArrayList<>();
+                for (int start = 0; start < input.length(); start++) {
+                    if (anchored.reset(input, start, input.length()).lookingAt()) {
+                        expected.add(new int[] {start, anchored.end()});
+                        start = anchored.end() - 1;
+                    }
+                }
+                RegexpMatcher matcher = pattern.matcher(input);
+                for (int[] match : expected) {
+                    assertThat(matcher.find()).as("%s in %s", pattern.pattern().toStringUtf8(), text).isTrue();
+                    assertThat(new int[] {matcher.start(), matcher.end()}).as("%s in %s", pattern.pattern().toStringUtf8(), text).containsExactly(match);
+                }
+                assertThat(matcher.find()).as("%s in %s", pattern.pattern().toStringUtf8(), text).isFalse();
+                assertThat(pattern.count(input)).as("%s in %s", pattern.pattern().toStringUtf8(), text).isEqualTo(expected.size());
+            }
+        }
+    }
+
+    @Test
+    public void testFoldedRunBehindVariableLeadScansOncePerMatch()
+    {
+        // The scan for ` holme` steps back by the widest lead, three bytes before an ASCII
+        // match, and the DFA returns to its start state at each of them. A scan from any of
+        // them would find the same run, so a count runs the scan once per match and once more to
+        // find no further match.
+        String text = "filler text, Sherlock Holmes, ".repeat(100);
+        for (CompiledPattern pattern : List.of(
+                Re2.compile(Slices.utf8Slice("(?i)Sherlock Holmes")),
+                TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2())) {
+            Prog program = pattern.forwardProgramForDiagnostics();
+            assertThat(program.prefixAccelMaximumLead()).isGreaterThan(program.prefixAccelMinimumLead());
+            assertThat(pattern.count(Slices.utf8Slice(text))).isEqualTo(100);
+            assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).prefixRunScanCount()).isEqualTo(101);
+        }
+    }
+
+    @Test
+    public void testLeadingFoldedRunKeepsFilteredCandidateCursor()
+    {
+        // Every match of Trino's (?i)think and (?i)Holmes starts with its folded run, and the DFA
+        // keeps its start bytes beside the run. A find loop verifies candidates from them only
+        // where they carry the start literal filter, as think's do with the Vector API, which
+        // yields each match's start without a reverse pass; with 64-byte vectors there is no run
+        // and the start bytes serve as before. Holmes's start bytes carry no filter, so its find
+        // loop takes the run. The run of (?i)Sherlock Holmes lies behind a lead, so its DFA has
+        // no start bytes to verify.
+        String filler = "filler text, ".repeat(100);
+        Slice text = Slices.utf8Slice(filler + "I THINK " + filler + "Holmes thinks " + filler + "Sherlock HOLMES " + filler);
+        assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)think")).re2(), text, 2, VectorSupport.isAvailable());
+        CompiledPattern holmes = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2();
+        if (holmes.forwardProgramForDiagnostics().canPrefixAccel()) {
+            assertCandidateCursorFinds(holmes, text, 2, false);
+        }
+        assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2(), text, 1, false);
     }
 
     @Test
@@ -343,6 +478,56 @@ public class TestPrefixProbeAcceleration
         assertThat(program.usesFoldCasePrefixCandidateScan()).isTrue();
         assertThat(program.prefixAccelFoldCaseFirstOffset()).isEqualTo(firstOffset);
         assertThat(program.prefixAccelFoldCaseSecondOffset()).isEqualTo(secondOffset);
+        // A folded prefix starts every match.
+        assertThat(program.prefixAccelMaximumLead()).isZero();
+    }
+
+    private static void assertCandidateCursorFinds(CompiledPattern pattern, Slice text, int matches, boolean candidateCursor)
+    {
+        String description = pattern.pattern().toStringUtf8();
+        RegexpMatcher matcher = pattern.matcher(text);
+        int found = 0;
+        while (matcher.find()) {
+            found++;
+        }
+        assertThat(found).as(description).isEqualTo(matches);
+        assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(candidateCursor ? matches : 0);
+    }
+
+    private static void assertFoldedRun(CompiledPattern pattern, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)
+    {
+        assertFoldedRun(pattern.pattern().toStringUtf8(), pattern.forwardProgramForDiagnostics(), run, minimumLead, maximumLead, firstOffset, secondOffset);
+    }
+
+    private static void assertFoldedRun(String description, Prog program, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)
+    {
+        assertThat(program.usesFoldCasePrefixCandidateScan()).as(description).isTrue();
+        assertThat(program.prefixAccelFoldCaseBytesForDiagnostics()).as(description).isEqualTo(run.getBytes(UTF_8));
+        assertThat(program.prefixAccelMinimumLead()).as(description).isEqualTo(minimumLead);
+        assertThat(program.prefixAccelMaximumLead()).as(description).isEqualTo(maximumLead);
+        assertThat(program.prefixAccelFoldCaseFirstOffset()).as(description).isEqualTo(firstOffset);
+        assertThat(program.prefixAccelFoldCaseSecondOffset()).as(description).isEqualTo(secondOffset);
+    }
+
+    /// Texts that hold each spelling of a case-insensitive literal whose prefix scan searches for
+    /// a run behind a lead of varying width, with `nearMiss`, which holds the run behind a lead
+    /// no match takes, and the spelling without its first character, which holds the run but no
+    /// match: alone, back to back, and at the start, middle, and end of texts long enough for the
+    /// vector scan.
+    static List<String> foldedRunTexts(List<String> spellings, String nearMiss)
+    {
+        String filler = "filler text, ".repeat(100);
+        List<String> texts = new ArrayList<>();
+        for (String spelling : spellings) {
+            String shortLead = spelling.substring(spelling.offsetByCodePoints(0, 1));
+            texts.add(spelling);
+            texts.add(shortLead);
+            texts.add(nearMiss + spelling + spelling + shortLead);
+            texts.add(shortLead + " " + nearMiss + " " + spelling);
+            texts.add(spelling + filler + nearMiss + filler + spelling + filler + shortLead);
+            texts.add(shortLead + filler + spelling + nearMiss + spelling);
+        }
+        return texts;
     }
 
     private static int search(String literal, String text, int offset)

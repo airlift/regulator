@@ -326,7 +326,15 @@ final class Compiler
         // Match upstream: configure prefix acceleration on forward programs.
         if (configureForwardMetadata && !reversed) {
             Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel(caseFolding);
-            if (requiredPrefixForAccel != null) {
+            Regexp.FoldedRun foldedRun = requiredPrefixForAccel == null || requiredPrefixForAccel.foldCase()
+                    ? foldedRunForAccel(regexp, requiredPrefixForAccel, caseFolding, byteFrequencies)
+                    : null;
+            if (foldedRun != null) {
+                boolean addsPrefixScan = requiredPrefixForAccel == null || requiredPrefixForAccel.prefix().length() == 0;
+                compiledProgram.configureFoldCasePrefixRun(foldedRun.bytes(), foldedRun.minimumLead(), foldedRun.maximumLead(), addsPrefixScan, byteFrequencies);
+                requireProgramFits(compiledProgram, maxMemory);
+            }
+            else if (requiredPrefixForAccel != null) {
                 compiledProgram.configurePrefixAccel(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase(), byteFrequencies);
                 requireProgramFits(compiledProgram, maxMemory);
             }
@@ -342,6 +350,56 @@ final class Compiler
         }
 
         return compiledProgram;
+    }
+
+    /// Returns the folded run the prefix scan searches for in place of a folded prefix, or
+    /// `null` to keep the prefix. With no prefix, or an empty one, which scans for nothing, the
+    /// run with the rarest probe pair is chosen, earliest on ties, unless every match starts with
+    /// it and the preferred vectors have 64 lanes, which leave such runs to the DFA's start
+    /// bytes. A folded prefix yields only to a run with a rarer pair behind a lead of
+    /// varying width, so a pattern whose folds stay in ASCII keeps its prefix.
+    private static Regexp.FoldedRun foldedRunForAccel(Regexp regexp, Regexp.RequiredPrefixForAccelResult foldedPrefix, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    {
+        List<Regexp.FoldedRun> runs = regexp.foldedRunsForAccel(caseFolding);
+        if (runs.isEmpty()) {
+            return null;
+        }
+        ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
+        byte[] prefix = foldedPrefix == null ? new byte[0] : foldedPrefix.prefix().getBytes();
+        double bestProbability = Double.POSITIVE_INFINITY;
+        if (prefix.length > 0) {
+            int size = Math.min(prefix.length, Prog.MAX_FOLD_CASE_PREFIX_BYTES);
+            bestProbability = pairFrequencies.foldedProbePairProbability(prefix, pairFrequencies.foldedProbePair(prefix, size));
+        }
+        Regexp.FoldedRun best = null;
+        for (Regexp.FoldedRun run : runs) {
+            if (prefix.length > 0 && run.minimumLead() == run.maximumLead()) {
+                continue;
+            }
+            double probability = pairFrequencies.foldedProbePairProbability(run.bytes(), pairFrequencies.foldedProbePair(run.bytes(), run.bytes().length));
+            if (probability < bestProbability) {
+                best = run;
+                bestProbability = probability;
+            }
+        }
+        // A run that every match starts with, with no folded prefix, is left out with 64-byte
+        // vectors, as with AVX-512 on r8i, and the DFA keeps its start-byte route. There, with
+        // JDK 25, the run took 1.23x main's time for Trino's count of (?i)Holmes and 1.52x and
+        // 1.59x for (?i)this and (?i)think over 595 KB of English, and 3.68x and 3.81x for
+        // (?i)class and (?i)process over 8 MiB of CPython source. Keeping the start-byte route
+        // returned all of them to 0.99x to 1.01x, and gave up the run's wins for (?i)works (0.73x)
+        // and (?i)watson (0.95x), which return to main's time. On r9g's 16-byte vectors, measured
+        // on one host, the same runs took 0.10x to 0.70x main's time, and 1.04x for (?i)this and
+        // (?i)think, so narrower vectors keep the run; 32-byte vectors, as with AVX2 or 256-bit
+        // SVE, were not measured. The (?i)this and (?i)class figures were measured before
+        // three-byte runs were left out; their runs thi and cla hold three, so they now get no
+        // run. "Folded Prefix Candidate Scan" in REGULATOR_DECISIONS.md records the measurements.
+        // VectorSupport is checked first because preferredByteLanes loads the Vector API.
+        if (best != null && prefix.length == 0 && best.maximumLead() == 0 &&
+                VectorSupport.isAvailable() && VectorSupport.preferredByteLanes() >= 64) {
+            return null;
+        }
+        return best;
     }
 
     static boolean shouldSkipDominatorPass(Regexp regexp, boolean reversed, int instructionCount)

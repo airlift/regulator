@@ -52,6 +52,11 @@ public final class VectorPrefixScannerProbe
         check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorScans, "unexpected folded prefix strategy");
         check(foldCaseProgram.prefixAccel(foldCaseData, 0, foldCaseData.length) == foldCaseData.length - foldCaseMatch.length, "folded prefix scan failed");
 
+        // Trino's (?i)Holmes has no folded prefix, only a folded run that every match starts with,
+        // whose scan the compiler weighs against the preferred vector width.
+        TrinoRegexp foldedRunPattern = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes"));
+        check(foldedRunPattern.count(Slices.utf8Slice("Sherlock Holmes, HOLME\u017F, holmes")) == 3, "folded run count failed");
+
         // A common class after the start bytes keeps the start class filter off.
         ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[xy][b-z]{4}"), Regexp.LIKE_PERL);
         Prog smallSetProgram = Compiler.compile(parsed.regexp(), false, 0);

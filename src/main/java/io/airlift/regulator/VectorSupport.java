@@ -58,6 +58,13 @@ final class VectorSupport
         return AVAILABLE;
     }
 
+    /// Returns the number of lanes in the preferred byte vector. Call it only when
+    /// [#isAvailable()]: it loads the Vector API.
+    static int preferredByteLanes()
+    {
+        return PreferredSpecies.length();
+    }
+
     private static boolean isX86(String arch)
     {
         return "amd64".equals(arch) || "x86_64".equals(arch);
@@ -93,6 +100,11 @@ final class VectorSupport
         static boolean hasSixteenLanes()
         {
             return ByteVector.SPECIES_PREFERRED.length() == 16;
+        }
+
+        static int length()
+        {
+            return ByteVector.SPECIES_PREFERRED.length();
         }
     }
 

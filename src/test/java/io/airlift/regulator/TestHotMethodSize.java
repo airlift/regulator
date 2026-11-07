@@ -211,6 +211,19 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
     }
 
+    /// Keeps the prefix scan and the folded routes it takes small enough for C2 to inline into the
+    /// DFA, NFA, and BitState searches that call it.
+    @Test
+    public void testPrefixScanRoutesFitInlineSize()
+    {
+        for (String method : List.of("prefixAccel", "prefixAccelFoldCase", "prefixAccelFoldCaseBehindLead")) {
+            assertThat(codeLength(Prog.class, method))
+                    .as("Prog.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps the literal and folded prefix scans larger than FreqInlineSize, so every caller calls
     /// their compiled methods rather than inlined copies, as "Literal Prefix Vector Scan" in
     /// REGULATOR_DECISIONS.md records, and caps each at the size it was measured at: growing it

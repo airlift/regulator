@@ -44,14 +44,16 @@ import static java.util.Objects.requireNonNull;
 /// matches, and the cost stays linear in the input.
 ///
 /// Only a case-sensitive literal of more than one byte can probe a single later byte. A
-/// case-insensitive literal prefix is scanned for a pair of its folded bytes, which the chosen
-/// distribution picks, or [#englishText()] does in place of [#uniform()]: a uniform
-/// distribution rates each ASCII letter, both of its cases together, at twice any other byte,
-/// so no pair is ever more than {@value #PROBE_FACTOR} times rarer than the first and last
-/// bytes, and the rule would always keep them. Outside scan plans, Rust, RE2, and Java patterns
-/// move the single probe only when the literal's first byte is ASCII. Some Trino, RE2, Java,
-/// and Rust patterns that begin with a literal and capture what follows it run on a scan plan,
-/// which can also move the probe of a literal whose first byte is not ASCII.
+/// case-insensitive literal prefix is scanned for a pair of its folded bytes, and so, under
+/// Unicode case folding, is a run of folded bytes that every match holds within a known range
+/// of offsets from its start. The chosen distribution picks the pair and the run, or
+/// [#englishText()] does in place of [#uniform()]: a uniform distribution rates each ASCII
+/// letter, both of its cases together, at twice any other byte, so no pair is ever more than
+/// {@value #PROBE_FACTOR} times rarer than the first and last bytes, and the rule would always
+/// keep them. Outside scan plans, Rust, RE2, and Java patterns move the single probe only when
+/// the literal's first byte is ASCII. Some Trino, RE2, Java, and Rust patterns that begin with
+/// a literal and capture what follows it run on a scan plan, which can also move the probe of
+/// a literal whose first byte is not ASCII.
 ///
 /// A distribution learned with [#builder()] from the caller's own data is the most reliable
 /// choice. [#fromCounts(long\[\])] builds one from byte counts. Either measures the data it was
@@ -272,6 +274,19 @@ public final class ByteFrequencies
             return new FoldedProbePair(bestFirst, bestSecond);
         }
         return new FoldedProbePair(0, lastOffset);
+    }
+
+    /// Returns the product of the folded probabilities of the bytes of `literal` at `pair`, the
+    /// estimated share of positions where a scan probing that pair stops at a candidate. A
+    /// one-byte literal's pair is that byte twice, so the scan stops wherever it is, and its
+    /// folded probability is returned alone.
+    double foldedProbePairProbability(byte[] literal, FoldedProbePair pair)
+    {
+        double probability = foldedProbability(literal[pair.firstOffset()]);
+        if (pair.secondOffset() == pair.firstOffset()) {
+            return probability;
+        }
+        return probability * foldedProbability(literal[pair.secondOffset()]);
     }
 
     /// Returns the distribution that chooses folded pairs: this one, or [#englishText()] in place

@@ -20,6 +20,7 @@ import io.airlift.slice.Slices;
 
 import java.util.AbstractList;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
@@ -109,6 +110,19 @@ final class Regexp
     record RequiredPrefixResult(Slice prefix, boolean foldCase, Regexp suffix) {}
 
     record RequiredPrefixForAccelResult(Slice prefix, boolean foldCase) {}
+
+    /// Bytes that every match holds, compared under ASCII case folding, after leading elements
+    /// that take from `minimumLead` through `maximumLead` bytes; see [#foldedRunsForAccel].
+    record FoldedRun(byte[] bytes, int minimumLead, int maximumLead) {}
+
+    // A folded run holds at least four bytes: shorter runs, such as the le after the fi of
+    // Trino's (?i)file, are common enough in text that their scan stops far more often than the
+    // DFA's start bytes would. It holds at most the nine bytes of a folded prefix. Its lead may
+    // vary by at most eight bytes, which bounds how often a search finds the same run again while
+    // the engine steps through the lead.
+    private static final int MIN_FOLDED_RUN_BYTES = 4;
+    private static final int MAX_FOLDED_RUN_BYTES = Prog.MAX_FOLD_CASE_PREFIX_BYTES;
+    private static final int MAX_FOLDED_RUN_LEAD_SLACK = 8;
 
     private Regexp(
             RegexpOp op,
@@ -224,6 +238,236 @@ final class Regexp
         return new RequiredPrefixForAccelResult(Slices.wrappedBuffer(prefixBytes), foldCase);
     }
 
+    /// Returns the folded runs of four or more bytes in the leading elements of every match, in
+    /// order, each with the range of bytes its lead can take. Under Unicode folding, `k` and `s`
+    /// also match the Kelvin sign and the long s, which are wider in UTF-8, so no folded prefix
+    /// reaches past them, but the ASCII letters between them still form runs at a known range of
+    /// distances from the match start.
+    ///
+    /// The walk sees through captures and concatenations. A run byte is an ASCII byte of a
+    /// literal that is a case-folded ASCII letter, which matches its two cases, or a non-letter,
+    /// which matches only itself, and a run holds at least one folded ASCII letter: a run of
+    /// exact bytes, like a case-sensitive ASCII letter, is what the case-sensitive scans and inner
+    /// literal search serve, so the walk stops at a case-sensitive ASCII letter. A run's lead is
+    /// every byte before it, earlier runs included. Besides run bytes, a lead holds literal
+    /// characters outside ASCII, which take the one byte sequence they match, classes that hold
+    /// exactly one fold orbit, which take their members' widths in the program's encoding, and, in
+    /// a fully case-folded literal, stretches of characters whose orbits leave ASCII or that a
+    /// multi-character fold such as `ss` for `ß` covers, which take the widths their folds take.
+    /// The walk stops at any other element and once the leads may differ by more than eight bytes.
+    /// In a fully case-folded literal it also stops at the first character outside ASCII, read in
+    /// the folded literal, where `ß` continues as `ss`, only when the literal needs a
+    /// multi-character fold. Runs longer than nine bytes are split.
+    List<FoldedRun> foldedRunsForAccel(CaseFolding caseFolding)
+    {
+        FoldedRunBuilder builder = new FoldedRunBuilder();
+        boolean latin1Program = (parseFlags & LATIN1) != 0;
+        Deque<Regexp> stack = new ArrayDeque<>();
+        stack.addLast(this);
+        while (!stack.isEmpty() && !builder.stopped()) {
+            Regexp regexp = stack.removeLast();
+            switch (regexp.op) {
+                case CAPTURE -> stack.addLast(regexp.children[0]);
+                case CONCAT -> pushChildrenReversed(stack, regexp);
+                case LITERAL, LITERAL_STRING -> {
+                    int[] literalRunes = regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes;
+                    if ((regexp.parseFlags & FULL_CASE_FOLD) != 0) {
+                        addFullCaseFoldRuns(builder, literalRunes, caseFolding);
+                    }
+                    else {
+                        addLiteralRuns(builder, literalRunes, (regexp.parseFlags & FOLD_CASE) != 0, (regexp.parseFlags & LATIN1) != 0);
+                    }
+                }
+                case CHAR_CLASS -> addFoldOrbitLead(builder, regexp.charClass, caseFolding, latin1Program || (regexp.parseFlags & LATIN1) != 0);
+                default -> builder.stop();
+            }
+        }
+        return builder.finish();
+    }
+
+    // As the compiler matches a literal without full case folding: an ASCII letter in both cases
+    // when the literal folds case, any other ASCII byte as itself, and any other character as its
+    // one byte in Latin-1 or its UTF-8 sequence. Folded ASCII letters and ASCII non-letters are
+    // run bytes, a case-sensitive ASCII letter stops the walk, and any other character is a lead
+    // of its width.
+    private static void addLiteralRuns(FoldedRunBuilder builder, int[] literalRunes, boolean foldCase, boolean latin1)
+    {
+        for (int literalRune : literalRunes) {
+            if (literalRune >= 0x80) {
+                int width = latin1 ? 1 : Utf8.encodedLength(literalRune);
+                builder.lead(width, width);
+            }
+            else if (!foldCase && isAsciiLetter(literalRune)) {
+                builder.stop();
+                return;
+            }
+            else {
+                builder.runByte(literalRune);
+            }
+        }
+    }
+
+    // As the compiler matches a fully case-folded literal: each folded character matches its
+    // simple fold orbit, and each multi-character fold whose folded characters the literal holds
+    // also matches its sources in their place. A character whose orbit stays in ASCII and that no
+    // such fold covers matches its ASCII cases at its own place, so it is a run byte; every path
+    // passes it, since no fold spans it.
+    private static void addFullCaseFoldRuns(FoldedRunBuilder builder, int[] literalRunes, CaseFolding caseFolding)
+    {
+        boolean multiCharacter = caseFolding.requiresFullCaseFold(literalRunes);
+        int[] folded = multiCharacter ? caseFolding.fold(literalRunes) : literalRunes;
+        boolean[] variable = new boolean[folded.length];
+        for (int index = 0; index < folded.length; index++) {
+            if (multiCharacter) {
+                for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokensStartingWith(folded[index])) {
+                    if (token.matches(folded, index)) {
+                        Arrays.fill(variable, index, index + token.foldedRunes().length, true);
+                    }
+                }
+            }
+            if (!foldsWithinAscii(folded[index], caseFolding)) {
+                variable[index] = true;
+            }
+        }
+
+        int index = 0;
+        while (index < folded.length) {
+            if (!variable[index]) {
+                builder.runByte(isAsciiLetter(folded[index]) ? folded[index] | 0x20 : folded[index]);
+                index++;
+                continue;
+            }
+            int end = index + 1;
+            while (end < folded.length && variable[end]) {
+                end++;
+            }
+            int[] stretch = Arrays.copyOfRange(folded, index, end);
+            for (int rune : stretch) {
+                if (rune >= 0x80) {
+                    builder.stop();
+                    return;
+                }
+            }
+            UnicodeFullCaseFold.ByteLength width = caseFolding.byteLength(stretch);
+            builder.lead(width.minimum(), width.maximum());
+            if (builder.stopped()) {
+                return;
+            }
+            index = end;
+        }
+    }
+
+    private static boolean foldsWithinAscii(int rune, CaseFolding caseFolding)
+    {
+        int member = rune;
+        do {
+            if (member >= 0x80) {
+                return false;
+            }
+            member = caseFolding.cycleFoldRune(member);
+        }
+        while (member != rune);
+        return true;
+    }
+
+    // A class that holds exactly the fold orbit of two or more characters, as a case-folded
+    // character compiles under Unicode folding, takes the widths of its members.
+    private static void addFoldOrbitLead(FoldedRunBuilder builder, CharClass charClass, CaseFolding caseFolding, boolean latin1)
+    {
+        if (charClass.runeCount() < 2) {
+            builder.stop();
+            return;
+        }
+        int first = charClass.range(0).low();
+        int member = first;
+        int memberCount = 0;
+        int minimumWidth = Integer.MAX_VALUE;
+        int maximumWidth = 0;
+        do {
+            if (!charClass.contains(member) || memberCount == charClass.runeCount()) {
+                builder.stop();
+                return;
+            }
+            memberCount++;
+            int width = latin1 ? 1 : Utf8.encodedLength(member);
+            minimumWidth = Math.min(minimumWidth, width);
+            maximumWidth = Math.max(maximumWidth, width);
+            member = caseFolding.cycleFoldRune(member);
+        }
+        while (member != first);
+        if (memberCount != charClass.runeCount()) {
+            builder.stop();
+            return;
+        }
+        builder.lead(minimumWidth, maximumWidth);
+    }
+
+    private static boolean isAsciiLetter(int rune)
+    {
+        int lowerCase = rune | 0x20;
+        return lowerCase >= 'a' && lowerCase <= 'z';
+    }
+
+    private static final class FoldedRunBuilder
+    {
+        private final List<FoldedRun> runs = new ArrayList<>();
+        private final byte[] run = new byte[MAX_FOLDED_RUN_BYTES];
+        private int runLength;
+        private boolean runHoldsLetter;
+        // The range of bytes before the current run.
+        private int minimumLead;
+        private int maximumLead;
+        private boolean stopped;
+
+        boolean stopped()
+        {
+            return stopped;
+        }
+
+        void runByte(int value)
+        {
+            if (runLength == MAX_FOLDED_RUN_BYTES) {
+                closeRun();
+            }
+            run[runLength++] = (byte) value;
+            runHoldsLetter |= isAsciiLetter(value);
+        }
+
+        // Stops the walk once the leads of later runs would differ by more than the limit.
+        void lead(int minimum, int maximum)
+        {
+            closeRun();
+            minimumLead += minimum;
+            maximumLead += maximum;
+            if (maximumLead - minimumLead > MAX_FOLDED_RUN_LEAD_SLACK) {
+                stopped = true;
+            }
+        }
+
+        void stop()
+        {
+            closeRun();
+            stopped = true;
+        }
+
+        List<FoldedRun> finish()
+        {
+            closeRun();
+            return List.copyOf(runs);
+        }
+
+        private void closeRun()
+        {
+            if (runLength >= MIN_FOLDED_RUN_BYTES && runHoldsLetter) {
+                runs.add(new FoldedRun(Arrays.copyOf(run, runLength), minimumLead, maximumLead));
+            }
+            minimumLead += runLength;
+            maximumLead += runLength;
+            runLength = 0;
+            runHoldsLetter = false;
+        }
+    }
+
     private static boolean supportsAsciiFoldPrefix(Regexp regexp, CaseFolding caseFolding)
     {
         return supportsAsciiFold(regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes, caseFolding);
@@ -235,14 +479,9 @@ final class Regexp
     static boolean supportsAsciiFold(int[] literalRunes, CaseFolding caseFolding)
     {
         for (int literalRune : literalRunes) {
-            int foldedRune = literalRune;
-            do {
-                if (foldedRune > 0x7F) {
-                    return false;
-                }
-                foldedRune = caseFolding.cycleFoldRune(foldedRune);
+            if (!foldsWithinAscii(literalRune, caseFolding)) {
+                return false;
             }
-            while (foldedRune != literalRune);
         }
         return !caseFolding.requiresFullCaseFold(literalRunes);
     }

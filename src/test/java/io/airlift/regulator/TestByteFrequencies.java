@@ -71,6 +71,10 @@ public class TestByteFrequencies
         assertFoldedProbePair(frequencies, "0ab00", 5, 1, 4);
         assertFoldedProbePair(frequencies, "0ab0", 4, 0, 2);
         assertFoldedProbePair(frequencies, "0ab0000", 4, 0, 2);
+        // A scan for one folded byte stops at that byte alone, and a pair scan where both its
+        // bytes are.
+        assertThat(frequencies.foldedProbePairProbability("0".getBytes(UTF_8), new ByteFrequencies.FoldedProbePair(0, 0))).isCloseTo(100.0 / 402, within(1e-12));
+        assertThat(frequencies.foldedProbePairProbability("01".getBytes(UTF_8), new ByteFrequencies.FoldedProbePair(0, 1))).isCloseTo(100.0 * 25 / (402 * 402), within(1e-12));
         // Any byte other than an ASCII letter keeps its own probability: @ stays rare though `,
         // which differs from it only in bit 0x20, is as common as 0.
         counts['`'] = 99;
