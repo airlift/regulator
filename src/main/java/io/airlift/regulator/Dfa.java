@@ -3157,6 +3157,8 @@ final class Dfa
         // The run's transitions carry the match bit, so an accepted set is a matching one.
         int exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
         if (exitByteSet == 0) {
+            // Computing the loop's exit bytes may have published grown tables.
+            tables = dfa.tablesAfterWrite(tables);
             return stepMatchingSelfLoopTransitions(dfa, tables, bytes, runEnd, textEnd, stateOffset);
         }
         int exitPosition;

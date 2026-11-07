@@ -271,6 +271,33 @@ public class TestDfaPairedTransitions
     }
 
     @Test
+    public void testMatchingSelfLoopRunStepsOnGrownTables()
+    {
+        // The warm-ups fill the cache tables to just below their next growth. The `y` sits past the
+        // matching loop's stepped prefix, so the scan computes the loop's exit-byte set before the
+        // run reaches it; the set is rejected, and computing it grows the tables. `ay` gives `y` its
+        // own byte class, so the loop's `y` transition is first computed after that growth, and
+        // only the grown tables hold it. Stepping the rest of the run on them lets a single
+        // self-loop scan reach `!`. Without vectors the run steps without computing the set, stops
+        // at the uncomputed `y`, and a second scan finishes it.
+        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|ab[xy]*![A-Z]+|ab[xy]*\\B|ay)"));
+        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
+            pattern.matcher(utf8Slice(warm)).lookingAt();
+        }
+        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int transitionsLength = dfa.cacheTablesForTesting().transitions.length;
+        int matchingSelfLoopScanCount = dfa.matchingSelfLoopScanCount();
+        int exitByteScanCount = dfa.matchingSelfLoopExitByteScanCount();
+        Slice input = utf8Slice("ab" + "x".repeat(40) + "y" + "x".repeat(260) + "!AAA");
+        RegexpMatcher matcher = pattern.matcher(input);
+        assertThat(matcher.lookingAt()).isTrue();
+        assertThat(matcher.end()).isEqualTo(input.length());
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(transitionsLength);
+        assertThat(dfa.matchingSelfLoopExitByteScanCount()).isEqualTo(exitByteScanCount);
+        assertThat(dfa.matchingSelfLoopScanCount() - matchingSelfLoopScanCount).isEqualTo(VectorSupport.isAvailable() ? 1 : 2);
+    }
+
+    @Test
     public void testPairedMatchContinuationFallsBackFromPartialTable()
     {
         Prog program = compileProg("[ -~]*(ABCDEFGHIJKLMNOPQRST|A)");
