@@ -418,6 +418,30 @@ public class TestCompilerAllocations
     }
 
     @Test
+    public void testTrinoLiteralExpansionStaysWithinBudget()
+    {
+        // Each of the 120 levels prefixes ab to every word below it, so the literal set's
+        // extraction copied about 11 MB of literals before its result was checked against a
+        // 4 KiB budget, and now gives up once what it builds passes 8 times the forward share.
+        String words = IntStream.range(0, 500).mapToObj(word -> "w" + (1_000 + word)).collect(joining("|"));
+        Slice pattern = utf8Slice("ab(?:".repeat(120) + words + "|q)".repeat(120));
+        TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(4_096);
+
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBytes = Long.MAX_VALUE;
+        for (int run = 0; run < 5; run++) {
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            assertThatThrownBy(() -> TrinoRegexp.compile(pattern, options)).isInstanceOf(RegexpCompileMemoryLimitException.class);
+            allocatedBytes = Math.min(allocatedBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore);
+        }
+
+        // The parse and the rejected program allocate about 300 bytes per pattern byte, and the
+        // extraction a few times the budget, so 1 KB per pattern byte holds the compile.
+        assertThat(allocatedBytes).isLessThan(1_024L * pattern.length());
+    }
+
+    @Test
     public void testMemberTableOfManyPiecesStaysBounded()
     {
         ThreadMXBean threadBean = allocatedMemoryBean();

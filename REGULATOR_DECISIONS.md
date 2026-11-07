@@ -2742,12 +2742,22 @@ pattern's size. A choice before more text, such as `(?:a|b)c` or `[ab][cd]`,
 would expand to every combination, so it keeps the program. Extraction also
 stops past a fixed amount of work, which a long run of separately flagged
 literals or deeply nested choices would otherwise make quadratic in the pattern.
-The trie's extraction has the same bound, so such a pattern of 64 or fewer
-alternatives keeps the program too. Deliberate limits: RE2's longest-match mode
-keeps the program, because the automaton reports leftmost-first matches, and
-literals or classes carrying a case-folding flag keep the program. A class the
-parser has already case-folded, such as Rust's `[Kk\u{212A}]` for `(?i)k`, is an
-ordinary class.
+The expansion also stops once what it builds passes 8 times the forward share,
+since building literal lists costs a few times the set they make; past it, the
+set is built literal by literal, so it is admitted exactly when the finished set
+fits. Where a choice ends the pattern, the expansion skips each literal that
+equals or extends an earlier one, which can never match, but still counts it
+toward the route's 64-literal threshold. The set also goes to the
+literal-by-literal build when colliding hashes make that check's lookups step
+past more than 8 slots per lookup in all, plus a small allowance. The trie's
+extraction has the same work bound, so a pattern past it with 64 or fewer
+alternatives keeps the program too, but no memory bound: it stops at the first
+literal longer than the 64 bytes the trie takes, so it holds at most 64 such
+literals per nesting level. Deliberate limits: RE2's longest-match mode keeps
+the program, because the automaton reports leftmost-first matches, and literals
+or classes carrying a case-folding flag keep the program. A class the parser has
+already case-folded, such as Rust's `[Kk\u{212A}]` for `(?i)k`, is an ordinary
+class.
 
 ## Extended OnePass Captures
 

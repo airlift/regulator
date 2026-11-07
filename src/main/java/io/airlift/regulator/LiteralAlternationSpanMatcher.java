@@ -47,6 +47,17 @@ final class LiteralAlternationSpanMatcher
     // pattern even when each step stays under MAXIMUM_LITERAL_BYTES. A sorted dictionary of
     // 43,029 words charges about 2 million units, and one of 235,976 words about 7 million.
     private static final long MAXIMUM_EXTRACTION_WORK = 1L << 24;
+    // A large set's extraction charges each frame and literal array it builds, each entry it adds
+    // to a list of literals, and each duplicate table, as the DFA charges its states.
+    private static final long FRAME_BYTES = SizeOf.instanceSize(Frame.class);
+    private static final long REFERENCE_BYTES = (SizeOf.sizeOfObjectArray(8) - SizeOf.sizeOfObjectArray(0)) / 8;
+    // Building literal lists costs a few times the set they make, so a large set's extraction may
+    // build this many times the budget its caller admits the result by.
+    private static final long EXTRACTION_BUDGET_MULTIPLE = 8;
+    private static final int MINIMUM_DUPLICATE_TABLE_SLOTS = 16;
+    // A half-full table averages under one step per lookup, so more than 8 means colliding hashes.
+    private static final long MAXIMUM_TABLE_STEPS_PER_LOOKUP = 8;
+    private static final long TABLE_STEP_ALLOWANCE = 1_024;
     // A class the parsers merge from a dictionary's single-character alternatives holds a few
     // members, such as [ds] from word(?:d|s); a wider one, such as [!-~], is not a literal set.
     private static final int MAXIMUM_CLASS_RUNES = 16;
@@ -115,10 +126,12 @@ final class LiteralAlternationSpanMatcher
             return null;
         }
 
-        List<byte[]> literalAlternatives = extractLiteralAlternatives(expression, false, false);
-        if (literalAlternatives == null || literalAlternatives.size() < 2) {
+        // The trie's extraction charges no bytes; it stops at a literal longer than the trie takes.
+        ExtractedLiterals extracted = extractLiteralAlternatives(expression, false, false, Long.MAX_VALUE);
+        if (extracted == null || extracted.literals().size() < 2) {
             return null;
         }
+        List<byte[]> literalAlternatives = extracted.literals();
 
         int totalLiteralBytes = 0;
         for (byte[] literal : literalAlternatives) {
@@ -269,12 +282,30 @@ final class LiteralAlternationSpanMatcher
     }
 
     /// Expands `expression` into the literals of a large set for [LiteralSetSpanMatcher], in
-    /// leftmost-first priority order, or returns `null`.
-    static List<byte[]> extractLiteralSet(Regexp expression)
+    /// leftmost-first priority order. Returns `null` where it has no literal expansion within the
+    /// extraction's bounds, or [ExtractedLiterals#OVER_BUDGET] where what it builds would pass
+    /// [#EXTRACTION_BUDGET_MULTIPLE] times `maximumRetainedBytes`, or where its duplicate tables'
+    /// lookups step past more slots in all than [#MAXIMUM_TABLE_STEPS_PER_LOOKUP] per lookup plus
+    /// [#TABLE_STEP_ALLOWANCE], a cumulative bound under which one lookup may step past more.
+    static ExtractedLiterals extractLiteralSet(Regexp expression, long maximumRetainedBytes)
     {
         // The compiler reads a class as bytes when the whole program is Latin-1, so this does too.
         boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
-        return extractLiteralAlternatives(expression, true, latin1Program);
+        return extractLiteralAlternatives(expression, true, latin1Program, maximumRetainedBytes);
+    }
+
+    /// Adds the literals [#extractLiteralSet] would list for `expression` to a trie whose states
+    /// retain at most `maximumRetainedBytes`, one at a time in the same order, and returns the
+    /// trie, or `null` where the extraction would return `null`, list at most
+    /// [#MAXIMUM_ALTERNATIVES] literals or an empty one, or the trie outgrows its budget. It
+    /// applies the extraction's bounds to what the extraction would list, but keeps only the
+    /// trie and a frame per nesting level, so it serves an expression whose extraction passed its
+    /// memory bound.
+    static LiteralSetSpanMatcher.Trie spellLiteralSet(Regexp expression, long maximumRetainedBytes)
+    {
+        boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
+        LiteralSpeller speller = new LiteralSpeller(new LiteralSetSpanMatcher.Trie(MAXIMUM_LITERAL_BYTES, maximumRetainedBytes), latin1Program);
+        return speller.spell(expression) ? speller.trie : null;
     }
 
     /// Expands `expression` into its literals in leftmost-first priority order: a concatenation
@@ -284,40 +315,61 @@ final class LiteralAlternationSpanMatcher
     /// [#MAXIMUM_LITERAL_BYTES], and the whole extraction stops past [#MAXIMUM_EXTRACTION_WORK]
     /// or nesting more than [#MAXIMUM_ANALYSIS_DEPTH] levels deep. The walk keeps its nesting on
     /// an explicit stack, so a deeply nested pattern cannot overflow the thread's stack.
-    private static List<byte[]> extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program)
+    ///
+    /// A large set's extraction also stops once what it builds passes
+    /// [#EXTRACTION_BUDGET_MULTIPLE] times `maximumRetainedBytes`. The trie's charges no bytes and
+    /// stops instead at the first literal longer than [#MAXIMUM_TRIE_LITERAL_BYTES], which
+    /// [#analyze] would reject: it skips nothing, every finished child expansion holds a
+    /// literal, and concatenation and alternation only lengthen or keep a literal, so that one
+    /// reaches the end. Each list then holds at most [#MAXIMUM_ALTERNATIVES] literals of at most
+    /// that length.
+    ///
+    /// Where a large set's alternation ends the pattern, it skips each literal that equals or
+    /// extends an earlier one, which can never match and which [LiteralSetSpanMatcher]'s build
+    /// drops. Followed by more text, such as `(?:|a)b` in `ab` or `(?:ab|abc)d` in `abcd`, a
+    /// later alternative can still match, so a choice there keeps every literal.
+    private static ExtractedLiterals extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program, long maximumRetainedBytes)
     {
-        long[] work = new long[1];
+        ExtractionCharges charges = new ExtractionCharges(maximumRetainedBytes > Long.MAX_VALUE / EXTRACTION_BUDGET_MULTIPLE ? Long.MAX_VALUE : maximumRetainedBytes * EXTRACTION_BUDGET_MULTIPLE);
         Deque<Frame> stack = new ArrayDeque<>();
-        stack.addLast(new Frame(expression, largeSet, latin1Program));
+        stack.addLast(new Frame(expression, true, largeSet, latin1Program, charges));
         while (true) {
             Frame frame = stack.getLast();
             if (frame.literals == null) {
+                return charges.bytesLeft < 0 || !charges.tableStepsWithinBound() ? ExtractedLiterals.OVER_BUDGET : null;
+            }
+            Regexp child = frame.nextChild(charges);
+            if (frame.literals == null) {
                 return null;
             }
-            Regexp child = frame.nextChild();
             if (child != null) {
                 // The new frame's depth is the number of frames enclosing it.
                 if (stack.size() >= MAXIMUM_ANALYSIS_DEPTH) {
                     return null;
                 }
-                stack.addLast(new Frame(child, largeSet, latin1Program));
+                stack.addLast(new Frame(child, frame.childEndsPattern(), largeSet, latin1Program, charges));
                 continue;
             }
 
             stack.removeLast();
             if (stack.isEmpty()) {
-                return frame.literals;
+                return new ExtractedLiterals(frame.literals, frame.literals.size() + frame.skippedLiteralCount);
             }
-            stack.getLast().acceptChild(frame.literals, largeSet, work);
+            stack.getLast().acceptChild(frame, largeSet, charges);
         }
     }
 
-    private static List<byte[]> literal(Regexp expression, int[] runes)
+    private static List<byte[]> literal(Regexp expression, int[] runes, boolean largeSet)
     {
         if ((expression.parseFlags() & (FOLD_CASE | FULL_CASE_FOLD)) != 0) {
             return null;
         }
-        return List.of(Regexp.convertRunesToBytes((expression.parseFlags() & LATIN1) != 0, runes));
+        // Every rune spells at least one byte, so a trie literal of too many runes is too long.
+        if (!largeSet && runes.length > MAXIMUM_TRIE_LITERAL_BYTES) {
+            return null;
+        }
+        byte[] literal = Regexp.convertRunesToBytes((expression.parseFlags() & LATIN1) != 0, runes);
+        return !largeSet && literal.length > MAXIMUM_TRIE_LITERAL_BYTES ? null : List.of(literal);
     }
 
     // The ranges list every member, whatever CharClass.foldsAscii tells the compiler.
@@ -342,10 +394,11 @@ final class LiteralAlternationSpanMatcher
     }
 
     /// Appends each literal of a concatenation's next child to every prefix the concatenation's
-    /// earlier children spell, or returns `null`.
-    private static List<byte[]> concatenate(List<byte[]> prefixes, List<byte[]> suffixes, boolean largeSet, long[] work)
+    /// earlier children spell, or returns `null`. The bounds count the `skippedCount` literals of
+    /// `skippedBytes` bytes the child skipped.
+    private static List<byte[]> concatenate(List<byte[]> prefixes, List<byte[]> suffixes, long skippedCount, long skippedBytes, boolean largeSet, ExtractionCharges charges)
     {
-        long suffixBytes = totalLength(suffixes);
+        long suffixBytes = totalLength(suffixes) + skippedBytes;
         if (largeSet) {
             // A large set takes the factored prefixes of a dictionary, such as
             // word(?:s|ing|ed), whose choice of several literals ends the concatenation, so
@@ -360,12 +413,14 @@ final class LiteralAlternationSpanMatcher
                 return null;
             }
         }
-        else if ((long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES) {
+        else if ((long) prefixes.size() * suffixes.size() > MAXIMUM_ALTERNATIVES || maximumLength(prefixes) + maximumLength(suffixes) > MAXIMUM_TRIE_LITERAL_BYTES) {
             return null;
         }
         // Measured only now, so a skipped child does not rescan the prefixes.
-        long combinedBytes = totalLength(prefixes) * suffixes.size() + suffixBytes * prefixes.size();
-        if ((largeSet && combinedBytes > MAXIMUM_LITERAL_BYTES) || !charge(work, combinedBytes)) {
+        long combinedBytes = totalLength(prefixes) * (suffixes.size() + skippedCount) + suffixBytes * prefixes.size();
+        if ((largeSet && combinedBytes > MAXIMUM_LITERAL_BYTES) ||
+                !charges.chargeWork(combinedBytes) ||
+                (largeSet && !charges.chargeBytes(concatenatedBytes(prefixes, suffixes)))) {
             return null;
         }
 
@@ -380,10 +435,26 @@ final class LiteralAlternationSpanMatcher
         return combined;
     }
 
-    private static boolean charge(long[] work, long amount)
+    private static long maximumLength(List<byte[]> literals)
     {
-        work[0] += amount;
-        return work[0] <= MAXIMUM_EXTRACTION_WORK;
+        long length = 0;
+        for (byte[] literal : literals) {
+            length = Math.max(length, literal.length);
+        }
+        return length;
+    }
+
+    // Each literal concatenate builds and its list entry, rounded as alternate refunds a skipped
+    // literal.
+    private static long concatenatedBytes(List<byte[]> prefixes, List<byte[]> suffixes)
+    {
+        long bytes = 0;
+        for (byte[] prefix : prefixes) {
+            for (byte[] suffix : suffixes) {
+                bytes += REFERENCE_BYTES + SizeOf.sizeOfByteArray(prefix.length + suffix.length);
+            }
+        }
+        return bytes;
     }
 
     static long totalLength(List<byte[]> literals)
@@ -729,23 +800,82 @@ final class LiteralAlternationSpanMatcher
         return 0;
     }
 
+    /// What an extraction has charged against its bounds so far.
+    private static final class ExtractionCharges
+    {
+        // The work so far, bounded by MAXIMUM_EXTRACTION_WORK.
+        private long work;
+        // The bytes the extraction may still build, negative once it has built more.
+        private long bytesLeft;
+        // The duplicate tables' lookups, and the slots those lookups stepped past their first.
+        private long tableLookups;
+        private long tableSteps;
+
+        private ExtractionCharges(long bytesLeft)
+        {
+            this.bytesLeft = bytesLeft;
+        }
+
+        private boolean chargeWork(long amount)
+        {
+            work += amount;
+            return work <= MAXIMUM_EXTRACTION_WORK;
+        }
+
+        private boolean chargeBytes(long bytes)
+        {
+            bytesLeft -= bytes;
+            return bytesLeft >= 0;
+        }
+
+        private void refundBytes(long bytes)
+        {
+            bytesLeft += bytes;
+        }
+
+        private boolean tableStepsWithinBound()
+        {
+            return tableSteps <= MAXIMUM_TABLE_STEPS_PER_LOOKUP * tableLookups + TABLE_STEP_ALLOWANCE;
+        }
+    }
+
     /// An expression the extraction is expanding, with the literals it spells so far: a leaf's
     /// own, or those its walked children combine to.
     private static final class Frame
     {
+        // What a duplicate table lookup returns for a slot once its steps pass the bound.
+        private static final int NO_SLOT = -1;
+
         private final Regexp expression;
+        // True when nothing follows the expression, in it or in the expressions enclosing it.
+        private final boolean endsPattern;
+        // A large set's alternation that ends the pattern skips the literals that never match.
+        private final boolean skipsUnmatchable;
+        // The bytes the extraction could still build when the frame began, so the charges of the
+        // frame and everything below it are this less the bytes left once it ends.
+        private final long bytesLeftAtStart;
         private int nextChildIndex;
         // Null once the expression has no literal expansion within the bounds.
         private List<byte[]> literals;
+        // The literals the expansion would list beyond `literals`, which it skipped, and their bytes.
+        private long skippedLiteralCount;
+        private long skippedLiteralBytes;
         // The bytes of an alternation's literals so far.
         private long literalBytes;
+        private boolean holdsEmptyLiteral;
+        // An open-addressing table of each listed literal's index plus one, so a zero slot is
+        // empty, which finds the earlier literal a skipping alternation's literal equals or extends.
+        private int[] literalSlots;
 
-        private Frame(Regexp expression, boolean largeSet, boolean latin1Program)
+        private Frame(Regexp expression, boolean endsPattern, boolean largeSet, boolean latin1Program, ExtractionCharges charges)
         {
             this.expression = expression;
-            literals = switch (expression.op()) {
-                case LITERAL -> literal(expression, new int[] {expression.rune()});
-                case LITERAL_STRING -> literal(expression, expression.runes());
+            this.endsPattern = endsPattern;
+            this.skipsUnmatchable = largeSet && endsPattern && expression.op() == RegexpOp.ALTERNATE;
+            this.bytesLeftAtStart = charges.bytesLeft;
+            List<byte[]> startLiterals = switch (expression.op()) {
+                case LITERAL -> literal(expression, new int[] {expression.rune()}, largeSet);
+                case LITERAL_STRING -> literal(expression, expression.runes(), largeSet);
                 // An alternation starts with no literals, and a concatenation with the empty one.
                 case ALTERNATE -> new ArrayList<>();
                 case CONCAT -> List.of(new byte[0]);
@@ -753,45 +883,520 @@ final class LiteralAlternationSpanMatcher
                 case CHAR_CLASS -> largeSet ? characterClass(expression, latin1Program) : null;
                 default -> null;
             };
+            literals = startLiterals != null && (!largeSet || charges.chargeBytes(FRAME_BYTES + builtBytes(startLiterals))) ? startLiterals : null;
         }
 
-        private Regexp nextChild()
+        // The literals a frame starts with are new, so it charges their arrays and their list.
+        private static long builtBytes(List<byte[]> literals)
         {
-            if (nextChildIndex >= expression.childCount()) {
-                return null;
+            long bytes = SizeOf.sizeOfObjectArray(literals.size());
+            for (byte[] literal : literals) {
+                bytes += SizeOf.sizeOf(literal);
             }
-            return expression.child(nextChildIndex++);
+            return bytes;
+        }
+
+        // Returns the next child to expand, or `null` once there is none or the expansion is out of
+        // bounds, which leaves no literals.
+        private Regexp nextChild(ExtractionCharges charges)
+        {
+            while (nextChildIndex < expression.childCount()) {
+                Regexp child = expression.child(nextChildIndex++);
+                // An empty alternative after an empty literal is skipped unbuilt; any other skipped
+                // literal is built, and alternate refunds its charge.
+                if (skipsUnmatchable && holdsEmptyLiteral && child.op() == RegexpOp.EMPTY_MATCH) {
+                    skippedLiteralCount++;
+                    if (literals.size() + skippedLiteralCount > MAXIMUM_LITERAL_BYTES || !charges.chargeWork(1)) {
+                        literals = null;
+                        return null;
+                    }
+                    continue;
+                }
+                return child;
+            }
+            return null;
+        }
+
+        // An alternation's children end the pattern where it does, and a concatenation's last
+        // child where the concatenation does.
+        private boolean childEndsPattern()
+        {
+            return endsPattern && (expression.op() == RegexpOp.ALTERNATE || nextChildIndex == expression.childCount());
         }
 
         // Only alternations and concatenations start with literals and have children.
-        private void acceptChild(List<byte[]> childLiterals, boolean largeSet, long[] work)
+        private void acceptChild(Frame child, boolean largeSet, ExtractionCharges charges)
         {
+            long childSkippedCount = child.skippedLiteralCount;
+            long childSkippedBytes = child.skippedLiteralBytes;
             literals = switch (expression.op()) {
-                case ALTERNATE -> alternate(childLiterals, largeSet, work);
-                case CONCAT -> concatenate(literals, childLiterals, largeSet, work);
+                case ALTERNATE -> alternate(child, largeSet, charges);
+                case CONCAT -> {
+                    List<byte[]> combined = concatenate(literals, child.literals, childSkippedCount, childSkippedBytes, largeSet, charges);
+                    // Only the last child skips literals. Appended to a single prefix, each spells
+                    // a literal the expansion skipped; a child of empty literals adds nothing.
+                    if (combined != null && combined != literals) {
+                        skippedLiteralCount = literals.size() * childSkippedCount;
+                        skippedLiteralBytes = totalLength(literals) * childSkippedCount + childSkippedBytes * literals.size();
+                    }
+                    yield combined;
+                }
                 default -> throw new IllegalStateException("unexpected literal parent: " + expression.op());
             };
         }
 
         /// Adds an alternation child's literals after those of the children before it, or returns
-        /// `null`.
-        private List<byte[]> alternate(List<byte[]> childAlternatives, boolean largeSet, long[] work)
+        /// `null`. The bounds count the literals the child skipped and their bytes.
+        private List<byte[]> alternate(Frame child, boolean largeSet, ExtractionCharges charges)
         {
+            // What the child's frame and everything below it charged, measured before this charges.
+            long childBytes = child.bytesLeftAtStart - charges.bytesLeft;
+            List<byte[]> childAlternatives = child.literals;
+            long childCount = childAlternatives.size() + child.skippedLiteralCount;
             if (largeSet) {
-                literalBytes += totalLength(childAlternatives);
-                if (literals.size() + childAlternatives.size() > MAXIMUM_LITERAL_BYTES || literalBytes > MAXIMUM_LITERAL_BYTES) {
+                literalBytes += totalLength(childAlternatives) + child.skippedLiteralBytes;
+                if (literals.size() + skippedLiteralCount + childCount > MAXIMUM_LITERAL_BYTES || literalBytes > MAXIMUM_LITERAL_BYTES) {
                     return null;
                 }
             }
             else if (literals.size() + childAlternatives.size() > MAXIMUM_ALTERNATIVES) {
                 return null;
             }
-            if (!charge(work, childAlternatives.size())) {
+            if (!charges.chargeWork(childCount) || (largeSet && !charges.chargeBytes(childAlternatives.size() * REFERENCE_BYTES))) {
                 return null;
             }
-            literals.addAll(childAlternatives);
+            skippedLiteralCount += child.skippedLiteralCount;
+            skippedLiteralBytes += child.skippedLiteralBytes;
+            if (!skipsUnmatchable) {
+                literals.addAll(childAlternatives);
+                return literals;
+            }
+            if (!reserveLiteralSlots(literals.size() + childAlternatives.size(), charges)) {
+                return null;
+            }
+            // A skipped literal's array and list entry are garbage at once, and so is everything
+            // the child built when it lists nothing more.
+            int skipped = 0;
+            long skippedBytes = 0;
+            for (byte[] literal : childAlternatives) {
+                if (!addUnlessExtendingEarlier(literal, charges)) {
+                    skipped++;
+                    skippedBytes += SizeOf.sizeOf(literal) + REFERENCE_BYTES;
+                }
+                if (!charges.tableStepsWithinBound()) {
+                    return null;
+                }
+            }
+            charges.refundBytes(skipped == childAlternatives.size() ? childBytes + skipped * REFERENCE_BYTES : skippedBytes);
             return literals;
         }
+
+        // Keeps the duplicate table at most half full once it holds `literalCount` literals.
+        private boolean reserveLiteralSlots(int literalCount, ExtractionCharges charges)
+        {
+            if (literalSlots != null && literalCount * 2L <= literalSlots.length) {
+                return true;
+            }
+            int slotCount = Math.max(MINIMUM_DUPLICATE_TABLE_SLOTS, Integer.highestOneBit(literalCount) * 4);
+            if (!charges.chargeBytes(SizeOf.sizeOfIntArray(slotCount))) {
+                return false;
+            }
+            literalSlots = new int[slotCount];
+            for (int index = 0; index < literals.size(); index++) {
+                int slot = emptySlot(literalHash(literals.get(index)), charges);
+                if (slot == NO_SLOT) {
+                    return false;
+                }
+                literalSlots[slot] = index + 1;
+            }
+            return true;
+        }
+
+        // Lists `literal` unless it equals or extends an earlier literal, which matches wherever it
+        // would and first, as an empty literal does before everything after it. Its trie path
+        // passes through the earlier literal's match state. Each prefix's hash is a step of the
+        // literal's own, so the check looks up one hash per byte. Returns `false` at once when a
+        // lookup passes the bound on table steps.
+        private boolean addUnlessExtendingEarlier(byte[] literal, ExtractionCharges charges)
+        {
+            int hash = 0;
+            for (int length = 0; length <= literal.length; length++) {
+                if (length > 0) {
+                    hash = nextHash(hash, literal[length - 1]);
+                }
+                if (listsPrefix(literal, length, hash, charges)) {
+                    skippedLiteralCount++;
+                    skippedLiteralBytes += literal.length;
+                    return false;
+                }
+                if (!charges.tableStepsWithinBound()) {
+                    return false;
+                }
+            }
+            int slot = emptySlot(hash, charges);
+            if (slot == NO_SLOT) {
+                return false;
+            }
+            literals.add(literal);
+            literalSlots[slot] = literals.size();
+            holdsEmptyLiteral |= literal.length == 0;
+            return true;
+        }
+
+        // Each lookup counts toward the bound on the slots lookups step past, and stops, finding
+        // nothing, once its steps pass that bound.
+        private boolean listsPrefix(byte[] literal, int length, int hash, ExtractionCharges charges)
+        {
+            int slotMask = literalSlots.length - 1;
+            int slot = hash & slotMask;
+            charges.tableLookups++;
+            while (literalSlots[slot] != 0) {
+                byte[] listed = literals.get(literalSlots[slot] - 1);
+                if (listed.length == length && Arrays.equals(listed, 0, length, literal, 0, length)) {
+                    return true;
+                }
+                slot = (slot + 1) & slotMask;
+                charges.tableSteps++;
+                if (!charges.tableStepsWithinBound()) {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        // Returns `NO_SLOT` once the lookup's steps pass the bound.
+        private int emptySlot(int hash, ExtractionCharges charges)
+        {
+            int slotMask = literalSlots.length - 1;
+            int slot = hash & slotMask;
+            charges.tableLookups++;
+            while (literalSlots[slot] != 0) {
+                slot = (slot + 1) & slotMask;
+                charges.tableSteps++;
+                if (!charges.tableStepsWithinBound()) {
+                    return NO_SLOT;
+                }
+            }
+            return slot;
+        }
+
+        // Seeded, so a set of colliding literals cannot be worked out before the process picks
+        // its seed.
+        private static int literalHash(byte[] literal)
+        {
+            int hash = 0;
+            for (byte value : literal) {
+                hash = nextHash(hash, value);
+            }
+            return hash;
+        }
+
+        private static int nextHash(int hash, byte value)
+        {
+            return SeededHash.hash(((long) hash << 8) | (value & 0xFF));
+        }
+    }
+
+    /// Spells a large set's literals into a trie for [#spellLiteralSet]. Each literal is a path in
+    /// the trie from the state its prefix reached, so a concatenation keeps its prefix as one
+    /// state: its choice of several literals must end it, so the prefix before that choice is a
+    /// single literal. Until a concatenation's child spells a second literal, the child may be a
+    /// single literal the next child extends, a choice of empty literals that adds nothing, or
+    /// the choice that ends the concatenation. Its first literal's state is marked as a match
+    /// while the rest of the child spells, as the extraction lists that literal before them, and
+    /// unmarked when the child is not the choice.
+    private static final class LiteralSpeller
+    {
+        // The state of a literal whose path passed through an earlier literal's match state, which
+        // adds nothing to the trie, or of a child after the choice, which spells nothing.
+        private static final int NO_STATE = -1;
+
+        private final LiteralSetSpanMatcher.Trie trie;
+        private final boolean latin1Program;
+        private final List<SpellFrame> stack = new ArrayList<>();
+        private final byte[] encodedRune = new byte[4];
+        private long work;
+        private long literalCount;
+        private boolean failed;
+
+        private LiteralSpeller(LiteralSetSpanMatcher.Trie trie, boolean latin1Program)
+        {
+            this.trie = trie;
+            this.latin1Program = latin1Program;
+        }
+
+        private boolean spell(Regexp expression)
+        {
+            enter(expression, LiteralSetSpanMatcher.Trie.START, 0);
+            while (!failed && !stack.isEmpty()) {
+                SpellFrame frame = stack.getLast();
+                if (frame.nextChildIndex < frame.expression.childCount()) {
+                    Regexp child = frame.expression.child(frame.nextChildIndex++);
+                    if (stack.size() >= MAXIMUM_ANALYSIS_DEPTH) {
+                        return false;
+                    }
+                    frame.startChild();
+                    if (!enter(child, frame.childState(), frame.childLength()) && !failed) {
+                        frame.endChild();
+                    }
+                    continue;
+                }
+                stack.removeLast();
+                frame.finish();
+                if (!failed && !stack.isEmpty()) {
+                    stack.getLast().endChild();
+                }
+            }
+            return !failed && literalCount > MAXIMUM_ALTERNATIVES;
+        }
+
+        // Spells a leaf's literals at once, or pushes the frame of an expression with children
+        // and returns `true`.
+        private boolean enter(Regexp expression, int state, long length)
+        {
+            switch (expression.op()) {
+                case ALTERNATE, CONCAT -> {
+                    stack.add(new SpellFrame(expression, stack.size(), state, length));
+                    return true;
+                }
+                case LITERAL -> spellRunes(expression, new int[] {expression.rune()}, state, length);
+                case LITERAL_STRING -> spellRunes(expression, expression.runes(), state, length);
+                case EMPTY_MATCH -> deliver(stack.size(), state, length);
+                case CHAR_CLASS -> {
+                    List<byte[]> members = characterClass(expression, latin1Program);
+                    if (members == null) {
+                        failed = true;
+                        break;
+                    }
+                    for (byte[] member : members) {
+                        int memberState = state;
+                        for (byte value : member) {
+                            memberState = walk(memberState, value);
+                        }
+                        if (failed) {
+                            break;
+                        }
+                        deliver(stack.size(), memberState, length + member.length);
+                    }
+                }
+                default -> failed = true;
+            }
+            return false;
+        }
+
+        // Encodes the runes as the extraction does, one at a time, so a long literal string needs
+        // no copy.
+        private void spellRunes(Regexp expression, int[] runes, int state, long length)
+        {
+            if ((expression.parseFlags() & (FOLD_CASE | FULL_CASE_FOLD)) != 0) {
+                failed = true;
+                return;
+            }
+            boolean latin1 = (expression.parseFlags() & LATIN1) != 0;
+            for (int rune : runes) {
+                if (latin1) {
+                    state = walk(state, (byte) rune);
+                    length++;
+                }
+                else {
+                    int encodedLength = Utf8.encode(encodedRune, 0, rune);
+                    for (int index = 0; index < encodedLength; index++) {
+                        state = walk(state, encodedRune[index]);
+                    }
+                    length += encodedLength;
+                }
+                // A full trie fails the set at once; past an earlier literal's match, the walk
+                // only counts the bytes.
+                if (failed) {
+                    return;
+                }
+            }
+            deliver(stack.size(), state, length);
+        }
+
+        // The trie's build walks a literal the same way, stopping at an earlier literal's match.
+        private int walk(int state, byte value)
+        {
+            if (state == NO_STATE || trie.matchLength(state) != 0) {
+                return NO_STATE;
+            }
+            int next = trie.step(state, value);
+            if (next == LiteralSetSpanMatcher.Trie.FULL) {
+                failed = true;
+                return NO_STATE;
+            }
+            return next;
+        }
+
+        // Hands a literal ending at `state` to the frames below `level`, and adds it to the trie
+        // once the expression's own list takes it.
+        private void deliver(int level, int state, long length)
+        {
+            for (int index = level - 1; index >= 0; index--) {
+                if (!stack.get(index).accept(state, length)) {
+                    return;
+                }
+            }
+            literalCount++;
+            if (length == 0) {
+                // An empty literal matches everywhere, which the automaton's search does not report.
+                failed = true;
+            }
+            else if (state != NO_STATE) {
+                trie.setMatchLength(state, (int) length);
+            }
+        }
+
+        private boolean chargeCombination(long combinedBytes)
+        {
+            work += combinedBytes;
+            failed |= combinedBytes > MAXIMUM_LITERAL_BYTES || work > MAXIMUM_EXTRACTION_WORK;
+            return !failed;
+        }
+
+        /// An alternation or concatenation being spelled, with the counts the extraction's bounds
+        /// read. Lengths count from the start of the expression's whole literal.
+        private final class SpellFrame
+        {
+            private final Regexp expression;
+            private final boolean concatenation;
+            // The frame's index on the stack, below which it hands its literals.
+            private final int level;
+            private final int startState;
+            private final long startLength;
+            private int nextChildIndex;
+            // An alternation's literals so far and their bytes.
+            private long literalCount;
+            private long literalBytes;
+            // A concatenation's prefix: the state and length of its single literal, until the
+            // choice of several literals ends it.
+            private int prefixState;
+            private long prefixLength;
+            private boolean hasCompletedChoice;
+            // The concatenation's child being spelled: its literals and their bytes so far, and the
+            // first one's state, length, empty copies, and the match length its mark replaced.
+            private long childLiteralCount;
+            private long childBytes;
+            private boolean childIsChoice;
+            private int firstState;
+            private long firstLength;
+            private long firstCopies;
+            private int replacedMatchLength;
+
+            private SpellFrame(Regexp expression, int level, int startState, long startLength)
+            {
+                this.expression = expression;
+                this.concatenation = expression.op() == RegexpOp.CONCAT;
+                this.level = level;
+                this.startState = startState;
+                this.startLength = startLength;
+                this.prefixState = startState;
+                this.prefixLength = startLength;
+            }
+
+            private int childState()
+            {
+                if (!concatenation) {
+                    return startState;
+                }
+                return hasCompletedChoice ? NO_STATE : prefixState;
+            }
+
+            private long childLength()
+            {
+                return concatenation ? prefixLength : startLength;
+            }
+
+            private void startChild()
+            {
+                childLiteralCount = 0;
+                childBytes = 0;
+                childIsChoice = false;
+            }
+
+            // Returns whether the literal passes on to the frame below, as an alternation's do.
+            private boolean accept(int state, long length)
+            {
+                if (!concatenation) {
+                    literalCount++;
+                    literalBytes += length - startLength;
+                    work++;
+                    failed |= literalCount > MAXIMUM_LITERAL_BYTES || literalBytes > MAXIMUM_LITERAL_BYTES || work > MAXIMUM_EXTRACTION_WORK;
+                    return !failed;
+                }
+                long addedBytes = length - prefixLength;
+                childLiteralCount++;
+                childBytes += addedBytes;
+                if (hasCompletedChoice) {
+                    // After the choice of several literals, the extraction gives up on any child
+                    // that adds bytes.
+                    failed |= addedBytes > 0;
+                    return false;
+                }
+                if (childIsChoice) {
+                    return true;
+                }
+                if (childLiteralCount == 1) {
+                    firstState = state;
+                    firstLength = length;
+                    firstCopies = 1;
+                    if (state != NO_STATE) {
+                        replacedMatchLength = trie.matchLength(state);
+                        trie.setMatchLength(state, (int) length);
+                    }
+                    return false;
+                }
+                if (childBytes == 0) {
+                    firstCopies++;
+                    return false;
+                }
+                childIsChoice = true;
+                for (long copy = 0; copy < firstCopies && !failed; copy++) {
+                    deliver(level, firstState, firstLength);
+                }
+                if (!failed) {
+                    deliver(level, state, length);
+                }
+                return false;
+            }
+
+            private void endChild()
+            {
+                if (!concatenation || hasCompletedChoice) {
+                    return;
+                }
+                long prefixBytes = prefixLength - startLength;
+                if (childIsChoice) {
+                    hasCompletedChoice = chargeCombination(prefixBytes * childLiteralCount + childBytes);
+                    return;
+                }
+                if (childLiteralCount > 0 && firstState != NO_STATE) {
+                    trie.setMatchLength(firstState, replacedMatchLength);
+                }
+                // A child of empty literals adds nothing; a single literal extends the prefix.
+                if (childBytes > 0 && chargeCombination(prefixBytes + childBytes)) {
+                    prefixState = firstState;
+                    prefixLength = firstLength;
+                }
+            }
+
+            private void finish()
+            {
+                if (concatenation && !hasCompletedChoice) {
+                    deliver(level, prefixState, prefixLength);
+                }
+            }
+        }
+    }
+
+    /// The literals an expansion lists in priority order, and how many it would list counting
+    /// those it skipped because they can never match. The route is chosen by that count, so the
+    /// skipped literals count toward it.
+    record ExtractedLiterals(List<byte[]> literals, long literalCount)
+    {
+        /// What an extraction returns once what it builds passes its memory bound, or its
+        /// duplicate tables' lookups step past their bound.
+        static final ExtractedLiterals OVER_BUDGET = new ExtractedLiterals(List.of(), 0);
     }
 
     /// Counts the routes each search passed this object reads, for tests to check. Production

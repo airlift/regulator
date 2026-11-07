@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
@@ -94,10 +95,11 @@ sealed class LiteralSetSpanMatcher
     /// literal or class carrying a case-folding flag is not taken, but a class the parser has
     /// already case-folded, such as Rust's `[Kk\x{212A}]` for `(?i)k`, is an ordinary class. Its
     /// literals keep the alternation's leftmost-first priority order. `maximumRetainedBytes`
-    /// bounds the states the build adds but not the root's row or the object overhead, so a
-    /// caller admits the result by its [#estimatedRetainedSize()]. The root's skip is built only
-    /// where the matcher with it still retains at most `maximumRetainedBytes`, so a matcher a
-    /// caller admitted without it is admitted with it or built without it.
+    /// bounds the states the build adds, but not the root's row or the object overhead, so a
+    /// caller admits the result by its [#estimatedRetainedSize()]. The literals' extraction may
+    /// build a multiple of it; past that, the build takes the literals one at a time. The root's
+    /// skip is built only where the matcher with it still retains at most `maximumRetainedBytes`,
+    /// so a matcher a caller admitted without it is admitted with it or built without it.
     static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes)
     {
         requireNonNull(expression, "expression is null");
@@ -105,10 +107,17 @@ sealed class LiteralSetSpanMatcher
             return null;
         }
 
-        List<byte[]> literals = LiteralAlternationSpanMatcher.extractLiteralSet(expression);
-        if (literals == null || literals.size() <= LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES) {
+        ExtractedLiterals extracted = LiteralAlternationSpanMatcher.extractLiteralSet(expression, maximumRetainedBytes);
+        if (extracted == ExtractedLiterals.OVER_BUDGET) {
+            // Past the extraction's bound, the literals go into the trie one at a time as the
+            // expansion spells them, so the set is admitted exactly when the finished set fits.
+            Trie trie = LiteralAlternationSpanMatcher.spellLiteralSet(expression, maximumRetainedBytes);
+            return trie == null ? null : trie.build(maximumRetainedBytes);
+        }
+        if (extracted == null || extracted.literalCount() <= LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES) {
             return null;
         }
+        List<byte[]> literals = extracted.literals();
         for (byte[] literal : literals) {
             // An empty literal matches everywhere, which the automaton's search does not report.
             if (literal.length == 0) {
@@ -128,8 +137,13 @@ sealed class LiteralSetSpanMatcher
     /// priority order. Each state records the byte of its incoming edge and its children as a list
     /// sorted by byte, so the breadth-first pass emits sorted edges. A literal that passes through
     /// an earlier literal's match state adds nothing, since the earlier one always matches first.
-    private static final class Trie
+    static final class Trie
     {
+        /// The state every literal starts from.
+        static final int START = ROOT;
+        /// What [#step] returns once the trie holds all the states the budget can retain.
+        static final int FULL = -2;
+
         private final int maximumStates;
         private final int[] rootChildByByte = new int[256];
         private int capacity;
@@ -161,31 +175,52 @@ sealed class LiteralSetSpanMatcher
                 if (matchLength[state] != 0) {
                     return true;
                 }
-                int child = state == ROOT ? rootChildByByte[value & 0xFF] : findTrieChild(firstChild[state], value, nextSibling, incomingByte);
-                if (child == ROOT) {
-                    if (stateCount == capacity) {
-                        if (capacity == maximumStates) {
-                            return false;
-                        }
-                        capacity = (int) Math.min(maximumStates, 2L * capacity);
-                        firstChild = Arrays.copyOf(firstChild, capacity);
-                        nextSibling = Arrays.copyOf(nextSibling, capacity);
-                        incomingByte = Arrays.copyOf(incomingByte, capacity);
-                        matchLength = Arrays.copyOf(matchLength, capacity);
-                    }
-                    child = stateCount++;
-                    incomingByte[child] = value;
-                    if (state == ROOT) {
-                        rootChildByByte[value & 0xFF] = child;
-                    }
-                    else {
-                        insertTrieChild(state, child, firstChild, nextSibling, incomingByte);
-                    }
+                state = step(state, value);
+                if (state == FULL) {
+                    return false;
                 }
-                state = child;
             }
             matchLength[state] = literal.length;
             return true;
+        }
+
+        /// Returns the state `value` leads to from `state`, adding it if new, or [#FULL].
+        int step(int state, byte value)
+        {
+            int child = state == ROOT ? rootChildByByte[value & 0xFF] : findTrieChild(firstChild[state], value, nextSibling, incomingByte);
+            if (child != ROOT) {
+                return child;
+            }
+            if (stateCount == capacity) {
+                if (capacity == maximumStates) {
+                    return FULL;
+                }
+                capacity = (int) Math.min(maximumStates, 2L * capacity);
+                firstChild = Arrays.copyOf(firstChild, capacity);
+                nextSibling = Arrays.copyOf(nextSibling, capacity);
+                incomingByte = Arrays.copyOf(incomingByte, capacity);
+                matchLength = Arrays.copyOf(matchLength, capacity);
+            }
+            child = stateCount++;
+            incomingByte[child] = value;
+            if (state == ROOT) {
+                rootChildByByte[value & 0xFF] = child;
+            }
+            else {
+                insertTrieChild(state, child, firstChild, nextSibling, incomingByte);
+            }
+            return child;
+        }
+
+        /// The length of the literal ending at `state`, or `0` where none does.
+        int matchLength(int state)
+        {
+            return matchLength[state];
+        }
+
+        void setMatchLength(int state, int length)
+        {
+            matchLength[state] = length;
         }
 
         /// Builds the automaton of the literals added. `maximumRetainedBytes` decides only whether
