@@ -20,9 +20,12 @@ import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryMXBean;
+import java.lang.ref.Reference;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
@@ -289,6 +292,42 @@ public class TestCompilerAllocations
     }
 
     @Test
+    public void testCompiledPatternsRetainAboutTheirBudget()
+    {
+        // Each \PL{0} keeps a fresh 695-range complement in the parse tree, though simplification
+        // drops it, so 60 KB of pattern held 197 MB of tree at a 64 KB budget. A compiled pattern
+        // keeps no parse tree: its 60 KB text and a program within the 43 KB forward share retain
+        // about 61 KB, and 1 MB leaves room for what a full collection leaves uncounted.
+        String negatedClasses = "\\PL{0}".repeat(10_000);
+        assertThat(retainedHeapBytes(() -> Re2.compile(utf8Slice(negatedClasses), Re2.Options.defaults().setMaxMemory(65_536)))).isLessThan(1 << 20);
+        assertThat(retainedHeapBytes(() -> JavaRegexp.compile(utf8Slice("\\P{L}{0}".repeat(10_000)), JavaRegexp.Options.defaults().setMaxMemory(65_536)))).isLessThan(1 << 20);
+        assertThat(retainedHeapBytes(() -> TrinoRegexp.compile(utf8Slice(negatedClasses), TrinoRegexp.Options.defaults().setMaxMemory(65_536)))).isLessThan(1 << 20);
+
+        // The reverse program's input, a 7.2 MB simplified expression, is charged to the 5.6 MB
+        // reverse share, so it is not kept beside the 6.1 MB forward program and 6.3 MB tree that
+        // held 19.7 MB in all at a 16 MiB budget.
+        assertThat(retainedHeapBytes(() -> Re2.compile(utf8Slice("a?".repeat(45_000)), Re2.Options.defaults().setMaxMemory(16 << 20)))).isLessThan(16 << 20);
+    }
+
+    @Test
+    public void testReverseProgramInputIsKeptOnlyWhileItFitsTheReverseShare()
+    {
+        // A 7.2 MB simplified expression does not fit the 5.6 MB reverse share at 16 MiB, so the
+        // pattern does not keep it.
+        Re2 oversized = Re2.compile(utf8Slice("a?".repeat(45_000)), Re2.Options.defaults().setMaxMemory(16 << 20));
+        assertThat(oversized.hasReverseProgramInputForDiagnostics()).isFalse();
+        assertThat(oversized.reverseProgramSize()).isEqualTo(-1);
+
+        // At the default budget a 14 MB input and the reverse program compiled from it each fit
+        // the 32 MiB reverse share, though not together. The program replaces its input, so it
+        // needs the share only for itself.
+        Re2 admitted = Re2.compile(utf8Slice("a?".repeat(90_000)));
+        assertThat(admitted.hasReverseProgramInputForDiagnostics()).isTrue();
+        assertThat(admitted.reverseProgramSize()).isPositive();
+        assertThat(admitted.hasReverseProgramInputForDiagnostics()).isFalse();
+    }
+
+    @Test
     public void testScanPlanContinuationAnalysisUsesCompactStorage()
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
@@ -491,11 +530,11 @@ public class TestCompilerAllocations
     private static Prefilter prefilterWithinAllocation(String pattern, long maxAllocatedBytes)
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
-        Re2 re2 = Re2.compile(utf8Slice(pattern));
+        Regexp parsed = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        Prefilter prefilter = Prefilter.fromRe2(re2);
+        Prefilter prefilter = Prefilter.fromRegexp(parsed);
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(allocatedBytes).as(pattern.substring(0, 8)).isLessThan(maxAllocatedBytes);
@@ -563,6 +602,28 @@ public class TestCompilerAllocations
             // JDK 27 removes the option and always compresses class pointers.
             return true;
         }
+    }
+
+    /// Returns the heap a second compile retains across full collections; the first loads the
+    /// tables its patterns share.
+    private static long retainedHeapBytes(Supplier<?> compile)
+    {
+        assertThat(compile.get()).isNotNull();
+        long before = usedHeapAfterCollection();
+        Object compiled = compile.get();
+        try {
+            return usedHeapAfterCollection() - before;
+        }
+        finally {
+            Reference.reachabilityFence(compiled);
+        }
+    }
+
+    private static long usedHeapAfterCollection()
+    {
+        MemoryMXBean memoryBean = ManagementFactory.getMemoryMXBean();
+        memoryBean.gc();
+        return memoryBean.getHeapMemoryUsage().getUsed();
     }
 
     private static ThreadMXBean allocatedMemoryBean()

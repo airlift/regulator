@@ -26,15 +26,15 @@ public class TestRe2BooleanMatchOptimizations
     @Test
     public void testExactLiteralEligibility()
     {
-        assertThat(compile("(💰)").exactLiteralForDiagnostics()).isEqualTo(utf8("💰"));
-        assertThat(compile("(ab)(💰)").exactLiteralForDiagnostics()).isEqualTo(utf8("ab💰"));
-        assertThat(compile("").exactLiteralForDiagnostics()).isEqualTo(Slices.EMPTY_SLICE);
+        assertThat(exactLiteral("(💰)")).isEqualTo(utf8("💰"));
+        assertThat(exactLiteral("(ab)(💰)")).isEqualTo(utf8("ab💰"));
+        assertThat(exactLiteral("")).isEqualTo(Slices.EMPTY_SLICE);
 
-        assertThat(compile("(?i)abc").exactLiteralForDiagnostics()).isNull();
-        assertThat(compile("abc?").exactLiteralForDiagnostics()).isNull();
-        assertThat(compile("^abc").exactLiteralForDiagnostics()).isNull();
-        assertThat(compile("abc$").exactLiteralForDiagnostics()).isNull();
-        assertThat(compile("a|b").exactLiteralForDiagnostics()).isNull();
+        assertThat(exactLiteral("(?i)abc")).isNull();
+        assertThat(exactLiteral("abc?")).isNull();
+        assertThat(exactLiteral("^abc")).isNull();
+        assertThat(exactLiteral("abc$")).isNull();
+        assertThat(exactLiteral("a|b")).isNull();
     }
 
     @Test
@@ -58,8 +58,9 @@ public class TestRe2BooleanMatchOptimizations
     @Test
     public void testLatin1ExactLiteralPartialMatch()
     {
-        Re2 pattern = Re2.compile(Slices.wrappedBuffer(new byte[] {'(', (byte) 0xE9, ')'}), Re2.Options.latin1());
-        assertThat(pattern.exactLiteralForDiagnostics()).isEqualTo(Slices.wrappedBuffer(new byte[] {(byte) 0xE9}));
+        Slice expression = Slices.wrappedBuffer(new byte[] {'(', (byte) 0xE9, ')'});
+        Re2 pattern = Re2.compile(expression, Re2.Options.latin1());
+        assertThat(RegexpParser.parse(expression, Re2.Options.latin1().parseFlags()).regexp().exactLiteral()).isEqualTo(Slices.wrappedBuffer(new byte[] {(byte) 0xE9}));
         assertThat(pattern.find(Slices.wrappedBuffer(new byte[] {0, (byte) 0xE9, 1}))).isTrue();
         assertThat(pattern.find(Slices.wrappedBuffer(new byte[] {0, (byte) 0xE8, 1}))).isFalse();
     }
@@ -85,6 +86,12 @@ public class TestRe2BooleanMatchOptimizations
     private static Re2 compile(String pattern)
     {
         return Re2.compile(utf8(pattern));
+    }
+
+    // A compiled pattern keeps no parse tree, so eligibility is read from the parse.
+    private static Slice exactLiteral(String pattern)
+    {
+        return RegexpParser.parse(utf8(pattern), Re2.Options.defaults().parseFlags()).regexp().exactLiteral();
     }
 
     private static Slice utf8(String value)

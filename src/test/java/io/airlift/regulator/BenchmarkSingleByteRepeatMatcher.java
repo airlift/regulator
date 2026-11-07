@@ -81,7 +81,8 @@ public class BenchmarkSingleByteRepeatMatcher
             }
 
             re2 = Re2.compile(Slices.utf8Slice("x*"));
-            repeatMatcher = re2.createSingleByteRepeatMatcher();
+            // Only a Trino pattern builds the repeat matcher.
+            repeatMatcher = TrinoRegexp.compile(Slices.utf8Slice("x*")).re2().createSingleByteRepeatMatcher();
             source = Slices.wrappedBuffer(bytes);
         }
     }

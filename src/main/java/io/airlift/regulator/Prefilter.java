@@ -95,15 +95,13 @@ final class Prefilter
         return !children.isEmpty();
     }
 
-    static Prefilter fromRe2(Re2 re2)
+    /// Returns the prefilter of an RE2 pattern from `parsed`, the tree it was compiled from.
+    /// Upstream's FromRE2 reads that tree from the compiled pattern, which here does not keep it.
+    static Prefilter fromRegexp(Regexp parsed)
     {
-        if (re2 == null || re2.regexp() == null) {
-            return null;
-        }
-
         // Only RE2 patterns build prefilters, so atoms fold with RE2's rule, the rule
         // FilteredRe2.canonicalizeText applies to the searched text.
-        Regexp regexp = Simplifier.simplify(re2.regexp(), CaseFolding.RE2);
+        Regexp regexp = Simplifier.simplify(parsed, CaseFolding.RE2);
         Info info = buildInfo(regexp);
         if (info == null) {
             return null;

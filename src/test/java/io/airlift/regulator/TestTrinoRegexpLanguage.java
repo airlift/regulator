@@ -822,9 +822,10 @@ public class TestTrinoRegexpLanguage
         TrinoCompiledPattern ordinary = TrinoRegexp.compile(utf8Slice("(?i)hello|help")).re2();
         assertThat(ordinary.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         assertThat(ordinary.reverseProgramSize()).isGreaterThan(0);
-        assertThat(ordinary.regexp().op()).isEqualTo(RegexpOp.CONCAT);
-        assertThat(ordinary.regexp().child(0).runes()).containsExactly('h', 'e', 'l');
-        assertThat(ordinary.regexp().child(1).op()).isEqualTo(RegexpOp.ALTERNATE);
+        Regexp ordinaryTree = TrinoRegexpParser.parse(utf8Slice("(?i)hello|help"), Regexp.LIKE_PERL).regexp();
+        assertThat(ordinaryTree.op()).isEqualTo(RegexpOp.CONCAT);
+        assertThat(ordinaryTree.child(0).runes()).containsExactly('h', 'e', 'l');
+        assertThat(ordinaryTree.child(1).op()).isEqualTo(RegexpOp.ALTERNATE);
 
         for (String pattern : List.of("(?i)(ß|b)", "((?i:ß)|b)", "((?i:ssa)|sta)")) {
             Slice patternSlice = utf8Slice(pattern);
@@ -1085,7 +1086,7 @@ public class TestTrinoRegexpLanguage
         assertThat(finalLineClassFold.findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineClassFold.lookingAtPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.LOWERED_PROGRAM);
 
-        TrinoCompiledPattern nonAsciiSimpleFold = TrinoRegexp.compile(utf8Slice("(?i)seek")).re2();
+        ParseResult nonAsciiSimpleFold = TrinoRegexpParser.parse(utf8Slice("(?i)seek"), Regexp.LIKE_PERL);
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefix(nonAsciiSimpleFold.caseFolding())).isNull();
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefixForAccel(nonAsciiSimpleFold.caseFolding())).isNull();
     }
