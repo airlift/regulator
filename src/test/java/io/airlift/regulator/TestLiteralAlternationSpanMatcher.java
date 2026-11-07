@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
@@ -183,6 +184,51 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalLiteralSet("[a-p][a-p][a-p]")).isNull();
         assertThat(optionalLiteralSet(dictionary + "|b[xy](?:|)|(?:|)c[xy]")).isNotNull();
 
+        // Where a choice ends the pattern, the extraction skips each literal that equals or
+        // extends an earlier one, which can never match. Before more text a later alternative
+        // can still match, so each row keeps the route it takes with every literal.
+        for (List<String> row : List.of(
+                List.of("(?:|a)b", "ab", "0-2", "engine"),
+                List.of("x(?:|a)b", "xab", "0-3", "engine"),
+                List.of("b(?:|a)", "ba", "0-1", "set"),
+                List.of("(?:xa|xb|xa)y", "xay", "0-3", "engine"),
+                List.of("(?:ab|abc)d", "abcd", "0-4", "engine"))) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(dictionary + "|" + row.get(0)));
+            TrinoRegexpMatcher matcher = regexp.matcher(utf8Slice(row.get(1)));
+            assertThat(matcher.find()).as(row.get(0)).isTrue();
+            assertThat(matcher.start() + "-" + matcher.end()).as(row.get(0)).isEqualTo(row.get(2));
+            assertThat(regexp.usesLiteralSetMatcherForDiagnostics() ? "set" : "engine").as(row.get(0)).isEqualTo(row.get(3));
+        }
+        // Under 4 KiB, which leaves the set less still, a large dictionary's extraction passes its
+        // memory bound, so the set is spelled literal by literal. A concatenation child's first
+        // literal, here the empty one, holds its match while the rest of the child spells, so the
+        // literal extending it is dropped as the extraction skips it. Two-, three-, and four-byte
+        // runes spell as their UTF-8 bytes.
+        String largeDictionary = words(4096);
+        for (List<String> row : List.of(
+                List.of("xab|xabc", "xabc", "0-3"),
+                List.of("z(?:|q)", "zq", "0-1"),
+                List.of("é終💰|é終💰é", "xé終💰é", "1-10"))) {
+            String expression = largeDictionary + "|" + row.get(0);
+            assertThat(LiteralAlternationSpanMatcher.extractLiteralSet(TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL).regexp(), 4096)).as(row.get(0)).isSameAs(ExtractedLiterals.OVER_BUDGET);
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setMaxMemory(4096));
+            TrinoRegexpMatcher matcher = regexp.matcher(utf8Slice(row.get(1)));
+            assertThat(matcher.find()).as(row.get(0)).isTrue();
+            assertThat(matcher.start() + "-" + matcher.end()).as(row.get(0)).isEqualTo(row.get(2));
+            assertThat(regexp.usesLiteralSetMatcherForDiagnostics()).as(row.get(0)).isTrue();
+        }
+        // A Latin-1 program spells its literals and classes as bytes. Numbers of one width extend
+        // none of the others, so the extraction lists every one, and a budget that leaves the set
+        // more than it retains still leaves the extraction too little. Longest-match search keeps
+        // the program, so its forward budget is the one the set was analyzed under.
+        String latin1Dictionary = IntStream.range(1000, 5096).mapToObj(index -> "w" + index).collect(Collectors.joining("|")) + "|caf[\\xE9\\xE8]|na\\xEFve";
+        long latin1Budget = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(300_000).setLongestMatch(true)).forwardProgramForDiagnostics().dfaMemory();
+        assertThat(LiteralAlternationSpanMatcher.extractLiteralSet(RegexpParser.parse(utf8Slice(latin1Dictionary), Re2.Options.latin1().parseFlags()).regexp(), latin1Budget)).isSameAs(ExtractedLiterals.OVER_BUDGET);
+        Re2 latin1Pattern = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(300_000));
+        RegexpMatcher latin1Matcher = latin1Pattern.matcher(wrappedBuffer("caf\u00E8 na\u00EFve w1007".getBytes(ISO_8859_1)));
+        assertThat(latin1Matcher.spanSearchForDiagnostics()).isNotNull().isSameAs(latin1Pattern.literalSetSpanMatcherForDiagnostics());
+        assertThat(findSpans(latin1Matcher)).containsExactly("0-4", "5-10", "11-16");
+
         // Extraction stops past a bound on its work, which a run of separately flagged literals
         // or deeply nested choices makes quadratic in the pattern.
         String flagRun = "(?s:a)(?-s:a)".repeat(8_000);
@@ -193,6 +239,37 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalScanner("foo|" + flagRun)).isNull();
         assertThat(optionalLiteralSet(dictionary + "|" + flagRun)).isNull();
         assertThat(optionalLiteralSet(dictionary + "|" + nestedChoices)).isNull();
+    }
+
+    @Test
+    public void testCollidingLiteralsBuildLiteralByLiteral()
+    {
+        // Literals whose hashes all land on one slot of the skip's duplicate table make its
+        // lookups step past every earlier literal, so the extraction hands the set to the
+        // literal-by-literal build, which admits and searches it as the table would.
+        List<String> collidingLiterals = new ArrayList<>();
+        Random random = new Random(1);
+        while (collidingLiterals.size() < 256) {
+            // Leading bytes alternate, so the parser factors no prefix out of the alternation.
+            byte[] literal = new byte[8];
+            literal[0] = (byte) (collidingLiterals.size() % 2 == 0 ? 'a' : 'b');
+            int hash = SeededHash.hash(literal[0]);
+            for (int index = 1; index < literal.length; index++) {
+                literal[index] = (byte) ('a' + random.nextInt(26));
+                hash = SeededHash.hash(((long) hash << 8) | literal[index]);
+            }
+            if ((hash & 1023) == 0) {
+                collidingLiterals.add(new String(literal, UTF_8));
+            }
+        }
+        String collidingSet = String.join("|", collidingLiterals);
+        ParseResult collidingParse = TrinoRegexpParser.parse(utf8Slice(collidingSet), Regexp.LIKE_PERL);
+        assertThat(LiteralAlternationSpanMatcher.extractLiteralSet(collidingParse.regexp(), TrinoRegexp.Options.defaults().maxMemory())).isSameAs(ExtractedLiterals.OVER_BUDGET);
+        TrinoRegexp collidingRegexp = TrinoRegexp.compile(utf8Slice(collidingSet));
+        assertThat(collidingRegexp.usesLiteralSetMatcherForDiagnostics()).isTrue();
+        TrinoRegexpMatcher collidingMatcher = collidingRegexp.matcher(utf8Slice("zz " + collidingLiterals.getLast()));
+        assertThat(collidingMatcher.find()).isTrue();
+        assertThat(collidingMatcher.start() + "-" + collidingMatcher.end()).isEqualTo("3-11");
     }
 
     @Test
@@ -457,6 +534,20 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:foo)|bar")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("foo|")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("a".repeat(64) + "b|x")).literalAlternationSpanMatcher()).isNull();
+
+        // The trie's extraction builds many times the trie from single-byte pieces, so it stops
+        // only at a literal longer than the trie takes, and such a trie compiles under any
+        // budget its arrays fit. Each budget holds the trie, which needs 1,919 and 66,743 bytes,
+        // but is below 2,030 and 127,646, the least an 8 times bound on the extraction admits.
+        TrinoRegexp flaggedRun = TrinoRegexp.compile(utf8Slice("(?s:a)(?-s:a)".repeat(32) + "|b"), TrinoRegexp.Options.defaults().setMaxMemory(1_920));
+        assertThat(flaggedRun.literalAlternationSpanMatcher()).isNotNull();
+        TrinoRegexpMatcher flaggedRunMatcher = flaggedRun.matcher(utf8Slice("a".repeat(64) + "b"));
+        assertThat(flaggedRunMatcher.find()).isTrue();
+        assertThat(flaggedRunMatcher.start() + "-" + flaggedRunMatcher.end()).isEqualTo("0-64");
+        String flaggedChains = IntStream.range(0, 64)
+                .mapToObj(chain -> ("(?s:" + (char) ('a' + chain % 26) + ")(?-s:" + (char) ('A' + chain / 26) + ")").repeat(32))
+                .collect(Collectors.joining("|"));
+        assertThat(TrinoRegexp.compile(utf8Slice(flaggedChains), TrinoRegexp.Options.defaults().setMaxMemory(67_584)).literalAlternationSpanMatcher()).isNotNull();
 
         // With the Vector API, the filter's nibble tables and the stop compare's literals make the
         // matcher retain more than the general engine needs. The budget is half the size without
