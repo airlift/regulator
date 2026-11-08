@@ -439,6 +439,9 @@ public sealed class TrinoRegexp
         }
 
         RegexpMatcher matcher = newGroupZeroMatcher(source);
+        if (optimizedCount == Dfa.COUNT_BAILED) {
+            matcher.markSkipsForwardDfa();
+        }
         long count = 0;
         while (matcher.find()) {
             count++;

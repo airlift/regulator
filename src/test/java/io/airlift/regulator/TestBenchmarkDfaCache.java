@@ -131,6 +131,52 @@ public class TestBenchmarkDfaCache
     }
 
     @Test
+    public void testThrashingCountParameters()
+    {
+        BenchmarkDfaCache benchmark = new BenchmarkDfaCache();
+        BenchmarkDfaCache.ThrashingCountState state = new BenchmarkDfaCache.ThrashingCountState();
+        state.setup();
+        // The setup's count of the long row has already reset the shared DFA, and after that
+        // bailing count, a short row counts on the DFA.
+        Dfa.DfaInstance thrashingDfa = state.thrashingPattern().forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(thrashingDfa.resetCount()).isPositive();
+        assertThat(state.thrashingPattern().countMatches(state.shortRow())).isEqualTo(1);
+        assertThat(benchmark.countShortRowAfterThrashingCount(state)).isEqualTo(1);
+        // Pinned native RE2 finds 529 non-overlapping matches in the long row.
+        assertThat(state.thrashingPattern().countMatches(state.longRow())).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(benchmark.countThrashingRow(state)).isEqualTo(529);
+        Dfa.DfaInstance dfa = state.neverThrashingPattern().forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int resetCount = dfa.resetCount();
+        long neverThrashingCount = state.neverThrashingPattern().countMatches(state.longRow());
+        assertThat(neverThrashingCount).isPositive();
+        assertThat(benchmark.countNeverThrashingRow(state)).isEqualTo(neverThrashingCount);
+        assertThat(dfa.resetCount()).isEqualTo(resetCount);
+        // The DFA count that the fixed-width matcher hands the dense row to bails, and so does the
+        // candidate-cursor pattern's count of its row. With a 1 GiB budget, their DFA counts find
+        // 396 and 5 matches without bailing.
+        assertThat(state.fixedWidthThrashingPattern().fixedWidthByteSpanMatcherForDiagnostics()).isNotNull();
+        assertThat(state.fixedWidthThrashingPattern().countMatches(state.denseRareClassRow())).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(benchmark.countFixedWidthThrashingRow(state)).isEqualTo(396);
+        Re2 candidateCursorPattern = state.candidateCursorThrashingPattern();
+        assertThat(candidateCursorPattern.createCandidateStartCursor()).isNotNull();
+        // The count resets as often as its DFA count alone does from the same empty cache. That DFA
+        // count is the pattern's first bailing count and the benchmark's count is its second, so
+        // both try the DFA, and only the counts after them skip it. On this row the candidate start
+        // cursor would pass its productivity check and run the forward DFA, so the finds the count
+        // falls back to would reset it again if they did not skip the cursor.
+        Dfa.DfaInstance candidateCursorDfa = candidateCursorPattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        candidateCursorDfa.resetCacheExternal();
+        resetCount = candidateCursorDfa.resetCount();
+        assertThat(candidateCursorPattern.countMatches(state.candidateCursorRow())).isEqualTo(Dfa.COUNT_BAILED);
+        int dfaCountResets = candidateCursorDfa.resetCount() - resetCount;
+        assertThat(dfaCountResets).isPositive();
+        candidateCursorDfa.resetCacheExternal();
+        resetCount = candidateCursorDfa.resetCount();
+        assertThat(benchmark.countCandidateCursorThrashingRow(state)).isEqualTo(5);
+        assertThat(candidateCursorDfa.resetCount() - resetCount).isEqualTo(dfaCountResets);
+    }
+
+    @Test
     public void testNextInsertGrowthParameters()
     {
         BenchmarkDfaCache benchmark = new BenchmarkDfaCache();

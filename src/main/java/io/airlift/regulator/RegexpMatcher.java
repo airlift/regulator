@@ -101,6 +101,11 @@ public final class RegexpMatcher
     // Set when the current find's candidate cursor quit, so its fallback skips the DFA: the quit
     // already counted toward the streak.
     private boolean candidateStartCursorQuit;
+    // Set by a count whose DFA count bailed, so this matcher, which counts that call's matches,
+    // skips the forward DFA, the inner-literal search, the end-anchored reverse DFA, the candidate
+    // start cursor, and the group-zero forward cursor rather than filling the cache again for
+    // each match. Cleared at reset.
+    private boolean skipsForwardDfa;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
     // The region-relative start of the occurrence of the pattern's long-window required literal
     // that the last scan of the rest of the region found, or -1 when no scan has run since the
@@ -220,6 +225,7 @@ public final class RegexpMatcher
         candidateStartCursorQuit = false;
         requiredLiteralOccurrence = -1;
         nearRequiredLiteralScans = 0;
+        skipsForwardDfa = false;
         invalidateMatch();
     }
 
@@ -432,11 +438,13 @@ public final class RegexpMatcher
         }
 
         // After the quit streak reaches its limit, a cursor whose DFA can quit is skipped with the
-        // DFA until the next reset.
-        boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled() &&
+        // DFA until the next reset, and a matcher counting after its count's DFA bailed skips the
+        // cursor, which runs the forward DFA.
+        boolean candidateCursorEnabled = candidateStartCursor != null && candidateStartCursor.enabled() && !skipsForwardDfa &&
                 !(dfaQuitStreak >= CompiledPattern.DFA_QUIT_STREAK_LIMIT && candidateStartCursor.quitsOnNonAscii());
+        boolean groupZeroForwardCursorEnabled = enableGroupZeroForwardCursor && !skipsForwardDfa;
         // Where the inner literal lies matters only to a cursor the inner literal search would replace.
-        boolean searchesInnerLiteral = (candidateCursorEnabled || enableGroupZeroForwardCursor) && pattern.searchesInnerLiteral(input, regionStart + nextFindStart, regionEnd);
+        boolean searchesInnerLiteral = (candidateCursorEnabled || groupZeroForwardCursorEnabled) && pattern.searchesInnerLiteral(input, regionStart + nextFindStart, regionEnd);
         if (!searchesInnerLiteral && candidateCursorEnabled) {
             long candidateBoundary = Dfa.searchCandidateBoundary(
                     candidateStartCursor,
@@ -462,7 +470,7 @@ public final class RegexpMatcher
             }
         }
 
-        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = searchesInnerLiteral ? null : groupZeroForwardCursor();
+        Dfa.GroupZeroForwardCursor groupZeroForwardCursor = groupZeroForwardCursorEnabled && !searchesInnerLiteral ? groupZeroForwardCursor() : null;
         if (groupZeroForwardCursor != null) {
             long matchBoundary = pattern.findGroupZeroBoundary(
                     groupZeroForwardCursor,
@@ -864,6 +872,16 @@ public final class RegexpMatcher
     boolean candidateStartCursorQuit()
     {
         return candidateStartCursorQuit;
+    }
+
+    boolean skipsForwardDfa()
+    {
+        return skipsForwardDfa;
+    }
+
+    void markSkipsForwardDfa()
+    {
+        skipsForwardDfa = true;
     }
 
     boolean onePassWorkspaceInitializedForDiagnostics()

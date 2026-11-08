@@ -367,8 +367,8 @@ public class TestRustRegexp
         assertThat(Dfa.search(boundaries, nonAscii, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
         assertThat(Dfa.countMatches(boundaries, nonAscii, Prog.MatchKind.FIRST_MATCH)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
 
-        // A quit is not cache exhaustion, so later ASCII searches keep the DFA.
-        assertThat(Dfa.countSearchBailedWhenSlow(boundaries, Prog.MatchKind.FIRST_MATCH)).isFalse();
+        // A quit is not cache exhaustion, so the count does not bail, and later ASCII searches
+        // keep the DFA.
         assertThat(Dfa.countMatches(boundaries, utf8Slice("foo foo"), Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
         assertThat(Dfa.search(boundaries, utf8Slice("a foo"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(5);
 

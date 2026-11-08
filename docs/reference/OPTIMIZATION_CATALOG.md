@@ -1416,14 +1416,22 @@ These entries cover what Regulator changed or added in them.
   selects the vector scan. A start literal or class filter is kept without
   these samples, though long searches still sample its productivity.
 
-### Sticky NFA fallback
+### Per-count NFA fallback
 
-- **Origin:** Regulator; no prior art found; base RE2 [O-DFA-013].
-- **Where:** `Dfa.countMatches`
+- **Origin:** Adapted from RE2 [O-DFA-013], which gives up on the DFA one
+  search at a time; the skip after a streak of bails is Regulator's, no
+  earlier source found ([design][d-count-fallback]).
+- **Where:** `Dfa.countMatches`, `Dfa.DfaInstance.takeCountSkip`,
+  `Dfa.DfaInstance.recordCountBail`, `CompiledPattern.count`,
+  `TrinoRegexp.count`, `RegexpMatcher.findGeneral`
 - **Applies when:** `count`
-- **What it does:** When a count's DFA search gives up as too slow, the shared
-  DFA of that match kind is marked. Later counts skip it, and so do new
-  forward cursors and ordinary searches that ask only for group zero.
+- **What it does:** When a count's DFA search gives up as too slow, that count
+  counts its text with a matcher whose finds skip the forward DFA, the
+  candidate start cursor and the group-zero forward cursor, so its fallback
+  adds no cache resets. After two DFA counts in a row give up, the pattern's
+  next 16 DFA counts, on any matcher or thread, skip the DFA and fall back at
+  once; then one tries the DFA again. A DFA count that does not give up ends
+  the streak, and a find outside a count never skips the DFA for it.
 
 ### Retained-class count DFA
 
@@ -2864,6 +2872,7 @@ registry entry holds the trigger.
 [d-class-count]: ../../REGULATOR_DECISIONS.md#bounded-character-class-counting
 [d-class-pairs]: ../../REGULATOR_DECISIONS.md#inner-literal-class-pairs
 [d-concurrency]: ../../REGULATOR_DECISIONS.md#shared-dfa-concurrency
+[d-count-fallback]: ../../REGULATOR_DECISIONS.md#count-fallback-after-repeated-bails
 [d-count-self-loop]: ../../REGULATOR_DECISIONS.md#count-self-loop-exit-byte-scan
 [d-direct-bitstate]: ../../REGULATOR_DECISIONS.md#bounded-direct-bitstate-capture
 [d-fixed-width-rare]: ../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates

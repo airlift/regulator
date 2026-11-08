@@ -148,6 +148,11 @@ final class Dfa
     public static final long SEARCH_FAILED = Long.MIN_VALUE;
     public static final long SEARCH_NO_MATCH = -1;
     static final long COUNT_UNSUPPORTED = -1;
+    // A DFA count whose forward search returned SEARCH_FAILED or that reset too often, or one that
+    // skipped the DFA after a streak of such counts. Its caller counts the text without the DFA,
+    // with a matcher whose finds skip the forward DFA or with a counter of its own. The skip after
+    // a streak deviates from upstream RE2, which bails one search at a time.
+    static final long COUNT_BAILED = -2;
     static final long CANDIDATE_SEARCH_FALLBACK = Long.MIN_VALUE + 1;
     // A candidate search the text stopped: the DFA quit on a byte outside ASCII. The search falls
     // back as for CANDIDATE_SEARCH_FALLBACK, but the cursor always stays enabled, and the quit
@@ -815,16 +820,16 @@ final class Dfa
     /// Counts the matches from `start` to the end of `context` as
     /// [#countMatches(Prog,Slice,Prog.MatchKind)] counts all of it, with assertions seeing the
     /// whole context, and asks `continueCounting` at each match end whether to count on from
-    /// there. Returns [#COUNT_UNSUPPORTED], or the count and the Slice offset where counting
-    /// stopped, which is the context end when no match remains, packed for [#countStopCount(long)]
-    /// and [#countStopPosition(long)]. A retried search resumes at the last match end, so the
-    /// predicate sees each match end once. Reuses and records byte-scan sampling outcomes in
-    /// `sampling` when it is not null. A caller that counts one text in several calls, each
-    /// starting at or after where the previous one stopped, passes the same
-    /// [CountByteScanSampling] to every call. Without one, a call with at least
+    /// there. Returns [#COUNT_UNSUPPORTED]; [#COUNT_BAILED] when a search returns [#SEARCH_FAILED]
+    /// or the count resets too often, or when the call skips the DFA after a streak of such calls;
+    /// or the count and the Slice offset where counting stopped, which is the context end when no
+    /// match remains, packed for [#countStopCount(long)] and [#countStopPosition(long)]. A retried
+    /// search resumes at the last match end, so the predicate sees each match end once. Reuses and
+    /// records byte-scan sampling outcomes in `sampling` when it is not null. A caller that counts
+    /// one text in several calls, each starting at or after where the previous one stopped, passes
+    /// the same [CountByteScanSampling] to every call. Without one, a call with at least
     /// [#MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES] of text shares
     /// [CountByteScanSampling#forSingleCount()] among its own searches.
-    @SuppressWarnings("UnusedException")
     static long countMatches(Prog prog, Slice context, int start, Prog.MatchKind matchKind, IntPredicate continueCounting, CountByteScanSampling sampling)
     {
         requireNonNull(prog, "prog is null");
@@ -858,10 +863,24 @@ final class Dfa
         if (dfa == null || !dfa.ok()) {
             return COUNT_UNSUPPORTED;
         }
-        if (dfa.countSearchBailedWhenSlow()) {
-            return COUNT_UNSUPPORTED;
+        // After a streak of bailing DFA counts, the next DFA counts skip the DFA, then one tries it
+        // again.
+        if (dfa.takeCountSkip()) {
+            return COUNT_BAILED;
         }
+        long result = countMatches(prog, context, start, continueCounting, sampling, dfa);
+        if (result == COUNT_BAILED) {
+            dfa.recordCountBail();
+        }
+        else {
+            dfa.recordCountCompleted();
+        }
+        return result;
+    }
 
+    @SuppressWarnings("UnusedException")
+    private static long countMatches(Prog prog, Slice context, int start, IntPredicate continueCounting, CountByteScanSampling sampling, DfaInstance dfa)
+    {
         byte[] bytes = context.byteArray();
         int contextBegin = context.byteArrayOffset();
         int contextEnd = contextBegin + context.length();
@@ -936,9 +955,8 @@ final class Dfa
                     // the lock rather than forgiven. Giving the table back changes no tables, so
                     // the count searches again on the ones it just read.
                     if (dfa.countResetsTooOften(handedOffResetCount, true)) {
-                        dfa.recordCountSearchBailedWhenSlow();
                         dfa.cancelExclusiveSearch();
-                        return COUNT_UNSUPPORTED;
+                        return COUNT_BAILED;
                     }
                 }
                 else if (dfa.cacheVersion() != observedCacheVersion) {
@@ -969,8 +987,7 @@ final class Dfa
                     // Reload, so a long exclusive count does not keep superseded tables reachable.
                     tables = dfa.tablesAfterWrite(tables);
                     if (matchEnd == SEARCH_FAILED) {
-                        dfa.recordCountSearchBailedWhenSlow();
-                        return COUNT_UNSUPPORTED;
+                        return COUNT_BAILED;
                     }
                     if (matchEnd == SEARCH_NO_MATCH) {
                         return countStopResult(count, context.length());
@@ -997,8 +1014,7 @@ final class Dfa
                             handedOffResetCount = initialResetCount;
                             throw RETRY_SEARCH;
                         }
-                        dfa.recordCountSearchBailedWhenSlow();
-                        return COUNT_UNSUPPORTED;
+                        return COUNT_BAILED;
                     }
                     textBegin += (int) matchEnd;
                     count++;
@@ -1039,18 +1055,6 @@ final class Dfa
         return (int) result;
     }
 
-    static boolean countSearchBailedWhenSlow(Prog prog, Prog.MatchKind matchKind)
-    {
-        requireNonNull(prog, "prog is null");
-        requireNonNull(matchKind, "matchKind is null");
-        Prog.MatchKind effectiveMatchKind = prog.anchorEnd() ? Prog.MatchKind.LONGEST_MATCH : matchKind;
-        DfaInstance.Kind kind = effectiveMatchKind == Prog.MatchKind.FIRST_MATCH
-                ? DfaInstance.Kind.FIRST_MATCH
-                : DfaInstance.Kind.LONGEST_MATCH;
-        DfaInstance dfa = prog.cachedDfaIfPresent(kind);
-        return dfa != null && dfa.countSearchBailedWhenSlow();
-    }
-
     static GroupZeroForwardCursor createGroupZeroForwardCursor(Prog prog)
     {
         requireNonNull(prog, "prog is null");
@@ -1058,7 +1062,7 @@ final class Dfa
             return null;
         }
         DfaInstance dfa = prog.getCachedDfa(DfaInstance.Kind.FIRST_MATCH);
-        if (dfa == null || !dfa.ok() || dfa.countSearchBailedWhenSlow()) {
+        if (dfa == null || !dfa.ok()) {
             return null;
         }
         return new GroupZeroForwardCursor(prog, dfa, dfa.fixedDistanceByteCandidates());
@@ -5683,12 +5687,18 @@ final class Dfa
         static final long MAXIMUM_START_BYTE_TABLES_MEMORY = 16L + 256 + Math.max(
                 Math.max(16L + VectorByteSetScanner.NIBBLE_TABLES_LENGTH, StartLiteralFilter.MAXIMUM_RETAINED_SIZE),
                 StartClassFilter.INSTANCE_SIZE);
+        // A streak of this many bailing DFA counts opens a window in which the next
+        // COUNT_BAIL_SKIPPED_COUNTS DFA counts skip the DFA.
+        private static final int COUNT_BAIL_STREAK_LIMIT = 2;
+        private static final int COUNT_BAIL_SKIPPED_COUNTS = 16;
 
         private static final VarHandle TABLES;
+        private static final VarHandle COUNT_BAIL_SKIPS_REMAINING;
 
         static {
             try {
                 TABLES = MethodHandles.lookup().findVarHandle(DfaInstance.class, "tables", CacheTables.class);
+                COUNT_BAIL_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "countBailSkipsRemaining", int.class);
             }
             catch (ReflectiveOperationException e) {
                 throw new ExceptionInInitializerError(e);
@@ -5817,9 +5827,17 @@ final class Dfa
         // Cache: StateKey -> StateData
         private final StateCache cache = new StateCache();
 
+        // The consecutive DFA counts that bailed, saturating at COUNT_BAIL_STREAK_LIMIT, and the
+        // DFA counts left in the skip window. Every matcher and thread of the pattern shares them;
+        // "Count Fallback After Repeated Bails" in REGULATOR_DECISIONS.md gives the rule and why
+        // their races keep the window bounded.
+        private int countBailStreak;
+        // Accessed only through COUNT_BAIL_SKIPS_REMAINING, with opaque access or a compare-and-set.
+        @SuppressWarnings("UnusedVariable")
+        private int countBailSkipsRemaining;
+
         // Observability
         private volatile int resetCount;
-        private volatile boolean countSearchBailedWhenSlow;
         private int pairedRowSelectionCount;
         // Paired tables released to make room for a state, excluding clears at search end, rejection and reset.
         private int pairedRowReleaseCount;
@@ -6241,14 +6259,36 @@ final class Dfa
             return resetCount;
         }
 
-        boolean countSearchBailedWhenSlow()
+        // Takes one DFA count of the skip window, if one is left, and returns whether it did. A
+        // DFA count that loses the compare-and-set to another runs the DFA instead.
+        private boolean takeCountSkip()
         {
-            return countSearchBailedWhenSlow;
+            int skips = (int) COUNT_BAIL_SKIPS_REMAINING.getOpaque(this);
+            return skips > 0 && COUNT_BAIL_SKIPS_REMAINING.compareAndSet(this, skips, skips - 1);
         }
 
-        private void recordCountSearchBailedWhenSlow()
+        // The streak stays at the limit, so a DFA count that bails after the skipped counts opens
+        // the next window at once.
+        private void recordCountBail()
         {
-            countSearchBailedWhenSlow = true;
+            int streak = countBailStreak;
+            if (streak < COUNT_BAIL_STREAK_LIMIT) {
+                streak++;
+                countBailStreak = streak;
+            }
+            if (streak >= COUNT_BAIL_STREAK_LIMIT) {
+                COUNT_BAIL_SKIPS_REMAINING.setOpaque(this, COUNT_BAIL_SKIPPED_COUNTS);
+            }
+        }
+
+        // A DFA count that did not bail, including one the DFA could not run, ends the streak. It
+        // leaves an open window, which keeps its skips. The guard skips writing a shared field that
+        // is already zero.
+        private void recordCountCompleted()
+        {
+            if (countBailStreak != 0) {
+                countBailStreak = 0;
+            }
         }
 
         int smallByteSetScanCount()
@@ -8374,7 +8414,6 @@ final class Dfa
         {
             cacheMutationLock.lock();
             try {
-                countSearchBailedWhenSlow = false;
                 resetCache();
             }
             finally {

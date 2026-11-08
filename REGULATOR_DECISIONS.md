@@ -454,13 +454,15 @@ original pattern, including when quoting rewrites it before parsing.
   lazy DFA makes the same ASCII assumption but quits on every byte outside
   ASCII; this DFA quits only at those transitions, so text with non-ASCII bytes
   away from the assertions keeps it. A quit depends on the text, so it is never
-  cached and, unlike cache exhaustion, marks nothing on the program. Only the
-  matcher that saw it reacts: after four consecutive unanchored searches whose
-  DFA fails, its later unanchored searches of that input skip the DFA until it
-  is reset, because text that quits one search usually quits the next, and
-  each quit costs a DFA start before the fallback. A search whose DFA
-  completes ends the streak. The transition loops contain no Rust-language
-  branches; the predicates live where states are built.
+  cached, and apart from ending a count's bail streak, as
+  [Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
+  describes, it marks nothing on the program. Only the matcher that saw it
+  reacts: after four consecutive unanchored searches whose DFA fails, its later
+  unanchored searches of that input skip the DFA until it is reset, because
+  text that quits one search usually quits the next, and each quit costs a DFA
+  start before the fallback. A search whose DFA completes ends the streak. The
+  transition loops contain no Rust-language branches; the predicates live where
+  states are built.
 - OnePass evaluates these predicates too, as
   [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)
   describes.
@@ -822,7 +824,11 @@ through one volatile field:
 - a reader search loads the root once when it starts and reads only through it;
   it takes no lock and never waits for a writer; its only stores are racy
   performance hints that need no ordering, such as the counters and flags that
-  select paired rows or the pointer table
+  select paired rows or the pointer table. The count skip window is the
+  exception: a skip takes one unit of it with a compare-and-set, so that racing
+  counts cannot skip more counts than a window holds, as
+  [Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
+  describes
 - writers hold the DFA's cache mutation lock: an exclusive search fills empty
   slots of the current generation in place, and growth, paired rows, and the
   pointer table publish a new root that shares the arrays they leave unchanged
@@ -1371,12 +1377,18 @@ a collection has already found the superseded segments, so the same search
 could reset often enough to fall back with the table and keep going without it.
 Two rules give up for resetting too often: a search whose reset follows the
 previous one too closely, and a count that resets twice during a rejected byte
-scan, which then leaves later counts and group-zero finds to the other engines.
-While the DFA holds the table or has it withheld, either rule gives the table
-back instead and the search or count goes on. The next reset publishes tables
-without it, and the count's two resets are counted after that reset. So the
-table's charge never causes a fallback by itself: a DFA gives up for resetting
-too often only by counting resets that ran on object rows.
+scan. While the DFA holds the table or has it withheld, either rule gives the
+table back instead and the search or count goes on. The next reset publishes
+tables without it, and the count's two resets are counted after that reset. So
+the table's charge never causes a fallback by itself: a DFA gives up for
+resetting too often only by counting resets that ran on object rows. The first
+rule bounds each search, and a find that gives up falls back for that search
+only, as upstream RE2 does. The second counts resets over the count's attempt,
+which runs a search for each match, so a count that gives up has paid the
+resets its searches made before it gave up, and no fixed number of resets per
+public count is promised.
+[Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
+describes how a count that gives up falls back.
 
 Giving the table back records the release on the instance under the cache
 mutation lock and changes no published generation or table. A search reads the
@@ -1414,8 +1426,8 @@ fall back in one run and not in another. Results are identical either way; the
 residual changes only which engine runs at a threshold. The
 `([a-q][^u-z]{23}x)` sequence at a 16 MiB budget is the known example: whether
 the collector has run decides whether the count's next two-reset check finds
-more or less than the byte scan's 64 KiB minimum remaining, so later counts and
-finds run on the NFA and BitState in one run and on the DFA in the other.
+more or less than the byte scan's 64 KiB minimum remaining, so that count gives
+up and counts on the NFA and BitState in one run and keeps the DFA in the other.
 Removing the residual means making states per reset independent of collection
 timing, which changes the superseded cap that copy-on-reset's native memory
 bound rests on; that is left to a separate change.
@@ -1500,6 +1512,61 @@ mode, so it changes no comparison. An earlier run of the same table, before the
 wait was added, projected each row's 2.0 comparator ratio through its measured
 change: of 328 row, platform and mode pairs, none went from winning to losing,
 and 34, across 28 rows and all in safe mode, went from losing to winning.
+
+## Count Fallback After Repeated Bails
+
+A DFA count is one call of the DFA's counting routine, which counts text with a
+forward DFA search for each match. A public count can make several: the
+inner-literal search makes one for each dense run of candidates, and the
+fixed-width matcher makes one for the text after its scan bails. A DFA count
+gives up, or bails, when a search fails on cache exhaustion or the count resets
+too often, by the rules of
+[Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table).
+A public count whose DFA count gives up falls back for that call: it counts its
+text with a matcher whose finds skip the forward DFA, the inner-literal search,
+the end-anchored reverse DFA, the candidate start cursor, and the group-zero
+forward cursor, so its fallback adds no resets. The retained-class counter
+falls back to its compact counter instead. Either way, the answer is the
+fallback's, so a count that gives up or skips the DFA is exact.
+
+Upstream RE2 tries the DFA again on every search. Regulator's DFA counts do so
+until two DFA counts of a pattern in a row give up. The pattern's next 16 DFA
+counts, from any matcher or thread, then skip the DFA and fall back at once,
+and the DFA count after them tries it again: if it gives up, the next 16 skip
+again, and if it does not, the streak ends. One DFA count that gives up opens
+no window. Any DFA count that does not give up ends the streak, including one
+the DFA cannot finish, such as a count that quits on a byte outside ASCII. A
+count through the inner-literal search makes a DFA count for each dense run,
+and one that completes ends the streak, so rows whose earlier runs count on the
+DFA before a later one gives up pay a DFA attempt on each row. One row's count
+changes the engine of another row's only in this bounded form, and a find
+outside a count never skips the DFA for it. The streak is an engine policy for
+the count path, not a language rule: matches and counts stay exactly as RE2
+and every other language define them, and only the engine that produces a
+count changes.
+
+In `BenchmarkDfaCache` on r9g and r8i, the baseline skipped the DFA for every
+count after the first that gave up, as Regulator did before. On the rows where
+every count gives up (`countThrashingRow`, `countFixedWidthThrashingRow` and
+`countCandidateCursorThrashingRow`), the rejected alternative, trying the DFA
+on every count as upstream does on every search, took 1.12-1.24x the
+baseline's time on both platforms, because each call paid a full DFA attempt
+before its fallback. The streak took 1.004-1.020x on r9g and 0.982-1.023x on
+r8i, across runs of 5 and 30 measured iterations. The short rows after one
+count that gave up (`countShortRowAfterThrashingCount`) took 0.049x the
+baseline's time on r9g and 0.064x on r8i, because they count on the DFA again.
+
+The streak and the skip window are fields on the DFA instance, which every
+matcher and thread of the pattern shares, so DFA counts on several threads race
+on them. The skip window is read with opaque access and written only with
+opaque writes or a compare-and-set, so its writes fall in one order. A skip
+takes one unit of the latest window with a compare-and-set, and a DFA count
+that loses the compare-and-set runs the DFA, so at most 16 DFA counts skip
+after each window opens, and a window opens only after a DFA count that gave
+up. A DFA count on another thread that completes while a window is open ends
+the streak but leaves the window, so a short row cannot cut short the window a
+thrashing row opened. The streak is a plain `int` that stops counting at two,
+and a lost update to it can open a window one bail early or one bail late.
 
 ## Boolean Partial-Match Specializations
 
