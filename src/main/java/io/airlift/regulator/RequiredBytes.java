@@ -86,7 +86,7 @@ final class RequiredBytes
     // such as the `c` of `coding`, it mispredicted and cost `unnecessary-coding-comment` 14 to 15%
     // over testing both bytes on every word.
     private final boolean gatesLastByteOnFirst;
-    // LOW_BITS, read from a field so the word loop holds it in a register, as in
+    // LOW_BITS, read from a field so the word loops hold it in a register, as in
     // LiteralSearchKernel: on aarch64 C2 cannot encode -LOW_BITS as an immediate.
     private final long lowBits;
     // The exact literal's search of windows of SHORT_WINDOW_LIMIT bytes or more, for a pattern
@@ -593,23 +593,24 @@ final class RequiredBytes
         long first = broadcast(bytes[0]);
         long second = broadcast(bytes[1]);
         long third = broadcast(bytes[2]);
+        long low = lowBits;
         int lastWord = end - Long.BYTES;
         for (int position = offset; position < lastWord; position += Long.BYTES) {
-            if (holdsAny((long) LONG_HANDLE.get(data, position), first, second, third)) {
+            if (holdsAny((long) LONG_HANDLE.get(data, position), first, second, third, low)) {
                 return true;
             }
         }
-        return holdsAny((long) LONG_HANDLE.get(data, lastWord), first, second, third);
+        return holdsAny((long) LONG_HANDLE.get(data, lastWord), first, second, third, low);
     }
 
-    private static boolean holdsAny(long word, long first, long second, long third)
+    private static boolean holdsAny(long word, long first, long second, long third, long low)
     {
         long firstDifference = word ^ first;
         long secondDifference = word ^ second;
         long thirdDifference = word ^ third;
-        return ((((firstDifference - LOW_BITS) & ~firstDifference) |
-                ((secondDifference - LOW_BITS) & ~secondDifference) |
-                ((thirdDifference - LOW_BITS) & ~thirdDifference)) & HIGH_BITS) != 0;
+        return ((((firstDifference - low) & ~firstDifference) |
+                ((secondDifference - low) & ~secondDifference) |
+                ((thirdDifference - low) & ~thirdDifference)) & HIGH_BITS) != 0;
     }
 
     long estimatedRetainedSize()
