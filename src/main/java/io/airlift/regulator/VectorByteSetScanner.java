@@ -485,6 +485,177 @@ final class VectorByteSetScanner
         return InnerLiteralSearch.findClassPair(data, position, offset + length - position, bytes);
     }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Finds the first position where every byte of the filter's span
+    // lies in its offset's range, the span's last byte before offset + length, or -1. A pair
+    // and a triple each have a compare form and the form VectorSupport.SVE_128 selects, each in
+    // a body of its own so that every body holds one form and its loop.
+    static int findClassSequence(byte[] data, int offset, int length, StartClassFilter filter)
+    {
+        return switch (filter.span()) {
+            case 2 -> VectorSupport.SVE_128 ? findClassSequencePairSve(data, offset, length, filter) : findClassSequencePair(data, offset, length, filter);
+            case 3 -> VectorSupport.SVE_128 ? findClassSequenceTripleSve(data, offset, length, filter) : findClassSequenceTriple(data, offset, length, filter);
+            default -> throw new IllegalArgumentException("class filter span must be two or three");
+        };
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findClassSequence for a span of two, in the form of findClassPair:
+    // a byte lies in a range of low to high when its distance above low, as an unsigned byte, is
+    // at most high - low, so each offset takes a subtract and an unsigned compare, and the masks
+    // are ANDed. The loop is counted, the step that hits is compared again after it, the
+    // comparison is written out at both places, and the tail is the filter's scalar search, as
+    // findClassPair records. The SVE form is findClassSequencePairSve; keep the two in step.
+    static int findClassSequencePair(byte[] data, int offset, int length, StartClassFilter filter)
+    {
+        ByteVector firstLow = ByteVector.broadcast(SPECIES, (byte) filter.firstLow());
+        ByteVector firstWidth = ByteVector.broadcast(SPECIES, (byte) (filter.firstHigh() - filter.firstLow()));
+        ByteVector secondLow = ByteVector.broadcast(SPECIES, (byte) filter.secondLow());
+        ByteVector secondWidth = ByteVector.broadcast(SPECIES, (byte) (filter.secondHigh() - filter.secondLow()));
+        int lanes = SPECIES.length();
+        // The second byte of each step's last lane must lie before the end.
+        int steps = length > 0 ? (length - 1) / lanes : 0;
+        int step = 0;
+        for (; step < steps; step++) {
+            int stepStart = offset + step * lanes;
+            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
+            if (first.sub(firstLow).compare(VectorOperators.ULE, firstWidth).and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth)).anyTrue()) {
+                break;
+            }
+        }
+        int position = offset + step * lanes;
+        if (step < steps) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
+            VectorMask<Byte> matches = first.sub(firstLow).compare(VectorOperators.ULE, firstWidth).and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth));
+            return position + matches.firstTrue();
+        }
+
+        return filter.find(data, position, offset + length - position);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findClassSequencePair in the form VectorSupport.SVE_128 selects: an
+    // offset's distance above its low bound, raised to at least high - low by unsigned maximum
+    // and less high - low, is zero only where the byte lies in the range, so the offsets are
+    // ORed and one compare with zero gives the mask. The step that hits is compared again
+    // after the loop as in findClassSequencePair. Keep the two in step.
+    static int findClassSequencePairSve(byte[] data, int offset, int length, StartClassFilter filter)
+    {
+        ByteVector firstLow = ByteVector.broadcast(SPECIES, (byte) filter.firstLow());
+        ByteVector firstWidth = ByteVector.broadcast(SPECIES, (byte) (filter.firstHigh() - filter.firstLow()));
+        ByteVector secondLow = ByteVector.broadcast(SPECIES, (byte) filter.secondLow());
+        ByteVector secondWidth = ByteVector.broadcast(SPECIES, (byte) (filter.secondHigh() - filter.secondLow()));
+        int lanes = SPECIES.length();
+        // The second byte of each step's last lane must lie before the end.
+        int steps = length > 0 ? (length - 1) / lanes : 0;
+        int step = 0;
+        for (; step < steps; step++) {
+            int stepStart = offset + step * lanes;
+            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
+            if (first.sub(firstLow).lanewise(VectorOperators.UMAX, firstWidth).sub(firstWidth)
+                    .lanewise(VectorOperators.OR, second.sub(secondLow).lanewise(VectorOperators.UMAX, secondWidth).sub(secondWidth))
+                    .compare(VectorOperators.EQ, (byte) 0)
+                    .anyTrue()) {
+                break;
+            }
+        }
+        int position = offset + step * lanes;
+        if (step < steps) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
+            VectorMask<Byte> matches = first.sub(firstLow).compare(VectorOperators.ULE, firstWidth).and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth));
+            return position + matches.firstTrue();
+        }
+
+        return filter.find(data, position, offset + length - position);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findClassSequencePair with a third offset. The SVE form is
+    // findClassSequenceTripleSve; keep the two in step.
+    static int findClassSequenceTriple(byte[] data, int offset, int length, StartClassFilter filter)
+    {
+        ByteVector firstLow = ByteVector.broadcast(SPECIES, (byte) filter.firstLow());
+        ByteVector firstWidth = ByteVector.broadcast(SPECIES, (byte) (filter.firstHigh() - filter.firstLow()));
+        ByteVector secondLow = ByteVector.broadcast(SPECIES, (byte) filter.secondLow());
+        ByteVector secondWidth = ByteVector.broadcast(SPECIES, (byte) (filter.secondHigh() - filter.secondLow()));
+        ByteVector thirdLow = ByteVector.broadcast(SPECIES, (byte) filter.thirdLow());
+        ByteVector thirdWidth = ByteVector.broadcast(SPECIES, (byte) (filter.thirdHigh() - filter.thirdLow()));
+        int lanes = SPECIES.length();
+        // The third byte of each step's last lane must lie before the end.
+        int steps = length > 1 ? (length - 2) / lanes : 0;
+        int step = 0;
+        for (; step < steps; step++) {
+            int stepStart = offset + step * lanes;
+            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, stepStart + 2);
+            if (first.sub(firstLow).compare(VectorOperators.ULE, firstWidth)
+                    .and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth))
+                    .and(third.sub(thirdLow).compare(VectorOperators.ULE, thirdWidth))
+                    .anyTrue()) {
+                break;
+            }
+        }
+        int position = offset + step * lanes;
+        if (step < steps) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + 2);
+            VectorMask<Byte> matches = first.sub(firstLow).compare(VectorOperators.ULE, firstWidth)
+                    .and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth))
+                    .and(third.sub(thirdLow).compare(VectorOperators.ULE, thirdWidth));
+            return position + matches.firstTrue();
+        }
+
+        return filter.find(data, position, offset + length - position);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findClassSequencePairSve with a third offset. Keep it in step with
+    // findClassSequenceTriple.
+    static int findClassSequenceTripleSve(byte[] data, int offset, int length, StartClassFilter filter)
+    {
+        ByteVector firstLow = ByteVector.broadcast(SPECIES, (byte) filter.firstLow());
+        ByteVector firstWidth = ByteVector.broadcast(SPECIES, (byte) (filter.firstHigh() - filter.firstLow()));
+        ByteVector secondLow = ByteVector.broadcast(SPECIES, (byte) filter.secondLow());
+        ByteVector secondWidth = ByteVector.broadcast(SPECIES, (byte) (filter.secondHigh() - filter.secondLow()));
+        ByteVector thirdLow = ByteVector.broadcast(SPECIES, (byte) filter.thirdLow());
+        ByteVector thirdWidth = ByteVector.broadcast(SPECIES, (byte) (filter.thirdHigh() - filter.thirdLow()));
+        int lanes = SPECIES.length();
+        // The third byte of each step's last lane must lie before the end.
+        int steps = length > 1 ? (length - 2) / lanes : 0;
+        int step = 0;
+        for (; step < steps; step++) {
+            int stepStart = offset + step * lanes;
+            ByteVector first = ByteVector.fromArray(SPECIES, data, stepStart);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, stepStart + 1);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, stepStart + 2);
+            if (first.sub(firstLow).lanewise(VectorOperators.UMAX, firstWidth).sub(firstWidth)
+                    .lanewise(VectorOperators.OR, second.sub(secondLow).lanewise(VectorOperators.UMAX, secondWidth).sub(secondWidth))
+                    .lanewise(VectorOperators.OR, third.sub(thirdLow).lanewise(VectorOperators.UMAX, thirdWidth).sub(thirdWidth))
+                    .compare(VectorOperators.EQ, (byte) 0)
+                    .anyTrue()) {
+                break;
+            }
+        }
+        int position = offset + step * lanes;
+        if (step < steps) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + 1);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + 2);
+            VectorMask<Byte> matches = first.sub(firstLow).compare(VectorOperators.ULE, firstWidth)
+                    .and(second.sub(secondLow).compare(VectorOperators.ULE, secondWidth))
+                    .and(third.sub(thirdLow).compare(VectorOperators.ULE, thirdWidth));
+            return position + matches.firstTrue();
+        }
+
+        return filter.find(data, position, offset + length - position);
+    }
+
     static byte[] buildNibbleTables(byte[] candidates)
     {
         if (candidates == null) {

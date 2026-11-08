@@ -226,6 +226,15 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(469);
     }
 
+    /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the
+    /// start state, at the size it was measured at with the start class filter. Raise the limit
+    /// only after measuring a new scan.
+    @Test
+    public void testStartScanDispatchStaysAtMeasuredSize()
+    {
+        assertThat(codeLength(Dfa.class, "findByteSetCandidate")).as("Dfa.findByteSetCandidate bytecode bytes").isPositive().isLessThanOrEqualTo(214);
+    }
+
     private static int codeLength(Class<?> type, String methodName)
     {
         List<Integer> lengths = codeLengths(type, methodName);

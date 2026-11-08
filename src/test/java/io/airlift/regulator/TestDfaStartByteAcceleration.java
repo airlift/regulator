@@ -38,6 +38,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestDfaStartByteAcceleration
 {
+    // mariomka/ip, the IPv4 address row of the regex benchmarks, as rebar defines it.
+    private static final String IP_ADDRESS = "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])";
+
     @Test
     public void testLeadingByteClassSelectsStartByteAcceleration()
     {
@@ -110,12 +113,13 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testTwoAndThreeStartBytesUseSmallSetScanner()
     {
-        for (String pattern : List.of("[xy][0-9]{4}", "[xyz][0-9]{4}")) {
+        // A common class after the start bytes keeps the start class filter off.
+        for (String pattern : List.of("[xy][b-z]{4}", "[xyz][b-z]{4}")) {
             Prog program = compile(pattern);
             Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
             byte[] text = new byte[8 * 1024];
             Arrays.fill(text, (byte) 'a');
-            byte[] match = "x1234".getBytes(StandardCharsets.UTF_8);
+            byte[] match = "xbcde".getBytes(StandardCharsets.UTF_8);
             System.arraycopy(match, 0, text, text.length - match.length, match.length);
 
             assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
@@ -131,7 +135,8 @@ public class TestDfaStartByteAcceleration
         // The last two sets hold Ã, whose lead byte C3 differs in sign from ASCII bytes, so the
         // two- and three-byte vector scans must take the unsigned minimum of their XORs.
         for (String candidates : List.of("xy", "xyz", "x\u00C3", "xy\u00C3")) {
-            String pattern = "[" + candidates + "][0-9]{4}";
+            // A common class after the start bytes keeps the start class filter off.
+            String pattern = "[" + candidates + "][b-z]{4}";
             Dfa.DfaInstance dfa = firstMatchDfa(pattern);
             for (int iteration = 0; iteration < 1_000; iteration++) {
                 int offset = random.nextInt(8);
@@ -164,11 +169,12 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testNoncontiguousStartByteSetDoesNotUseRangeScanner()
     {
-        Prog program = compile("[aceg][0-9]{4}");
+        // A common class after the start bytes keeps the start class filter off.
+        Prog program = compile("[aceg][b-z]{4}");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         byte[] text = new byte[8 * 1024];
         Arrays.fill(text, (byte) '.');
-        byte[] match = "a1234".getBytes(StandardCharsets.UTF_8);
+        byte[] match = "abcde".getBytes(StandardCharsets.UTF_8);
         System.arraycopy(match, 0, text, text.length - match.length, match.length);
 
         assertThat(Dfa.search(program, Slices.wrappedBuffer(text), false, Prog.MatchKind.FIRST_MATCH, true))
@@ -583,7 +589,8 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testDenseSmallStartByteSetUsesWidthAppropriateScanner()
     {
-        Prog program = compile("[xy][0-9]{4}");
+        // A common class after the start bytes keeps the start class filter off.
+        Prog program = compile("[xy][b-z]{4}");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         byte[] text = new byte[32 * 1024];
         Arrays.fill(text, (byte) 'a');
@@ -684,10 +691,9 @@ public class TestDfaStartByteAcceleration
     @Test
     public void testInitializationMemoryCountsStartByteTables()
     {
-        // The exact memory a forward DFA needs exceeds its minimum by its start-byte tables, which
-        // stay within their bound even for the widest literal filter, so a budget that keeps the
-        // bound initializes the DFA without building them.
-        for (String expression : List.of("(abc|def)", "(abc|def|ghi|jkl|mno|pqr|stu|vwx)")) {
+        // A forward DFA initializes with exactly its minimum memory and its start-byte tables,
+        // which stay within their bound even for the widest literal filter or a class filter.
+        for (String expression : List.of("(abc|def)", "(abc|def|ghi|jkl|mno|pqr|stu|vwx)", IP_ADDRESS)) {
             Prog program = compile(expression);
             for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
                 String description = kind + " " + expression;
@@ -695,6 +701,17 @@ public class TestDfaStartByteAcceleration
                 assertThat(initializationMemory - Dfa.DfaInstance.minimumMemory(program, kind)).as(description).isLessThanOrEqualTo(Dfa.DfaInstance.MAXIMUM_START_BYTE_TABLES_MEMORY);
                 assertThat(new Dfa.DfaInstance(program, kind, initializationMemory).ok()).as(description).isTrue();
                 assertThat(new Dfa.DfaInstance(program, kind, initializationMemory - 1).ok()).as(description).isFalse();
+            }
+        }
+
+        // A class filter's tables are the start byte table and the filter. It replaces the nibble
+        // tables of a mixed start set such as [eost], which are not charged.
+        for (String expression : List.of(IP_ADDRESS, "[eost][0-9]{2,}")) {
+            Prog program = compile(expression);
+            for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
+                assertThat(Dfa.DfaInstance.initializationMemory(program, kind) - Dfa.DfaInstance.minimumMemory(program, kind))
+                        .as(kind + " " + expression)
+                        .isEqualTo(16 + 256 + (VectorSupport.isAvailable() ? StartClassFilter.INSTANCE_SIZE : 0));
             }
         }
     }
@@ -805,6 +822,80 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testClassSequenceVectorScannerMatchesScalarReference()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        Random random = new Random(99);
+        for (int span = 2; span <= 3; span++) {
+            for (int iteration = 0; iteration < 300; iteration++) {
+                // Ranges anywhere in the byte values, some crossing the sign boundary at 0x80, and
+                // text whose bytes fall in a range from densely to rarely.
+                int[] lows = new int[3];
+                int[] highs = new int[3];
+                for (int index = 0; index < 3; index++) {
+                    lows[index] = random.nextInt(256);
+                    highs[index] = Math.min(255, lows[index] + random.nextInt(48));
+                }
+                StartClassFilter filter = new StartClassFilter(span, lows[0], highs[0], lows[1], highs[1], lows[2], highs[2]);
+                int rarity = 1 + random.nextInt(200);
+                byte[] text = new byte[1 + random.nextInt(4_096)];
+                for (int index = 0; index < text.length; index++) {
+                    int range = random.nextInt(span);
+                    text[index] = (byte) (random.nextInt(rarity) == 0 ? lows[range] + random.nextInt(highs[range] - lows[range] + 1) : random.nextInt(256));
+                }
+                int offset = random.nextInt(Math.min(8, text.length));
+                int length = random.nextInt(text.length - offset + 1);
+                assertClassSequenceScansMatchScalarReference(filter, text, offset, length);
+            }
+
+            // A sequence ends a zero-filled window that ends the array, its last byte the last byte
+            // of the window: the only hit lands in the last lane of a full vector or at each offset
+            // of the scalar tail. One byte shorter, the window holds no sequence, and a scan that
+            // reads past it fails. The second filter's ranges cross the sign boundary, and the
+            // third's first and last ranges hold every byte value.
+            for (StartClassFilter filter : List.of(
+                    new StartClassFilter(span, '0', '9', '.', '9', '.', '9'),
+                    new StartClassFilter(span, 0x7E, 0x81, 0xF0, 0xFF, 0x41, 0x80),
+                    new StartClassFilter(span, 0, 255, '0', '9', 0, 255))) {
+                for (int end = span; end <= 200; end++) {
+                    byte[] text = new byte[end];
+                    text[end - span] = (byte) filter.firstHigh();
+                    text[end - span + 1] = (byte) filter.secondLow();
+                    if (span == 3) {
+                        text[end - 1] = (byte) filter.thirdHigh();
+                    }
+                    assertThat(filter.find(text, 0, end)).as("span %s end=%s", span, end).isEqualTo(end - span);
+                    assertClassSequenceScansMatchScalarReference(filter, text, 0, end);
+                    assertThat(filter.find(text, 0, end - 1)).as("span %s end=%s", span, end).isEqualTo(-1);
+                    assertClassSequenceScansMatchScalarReference(filter, text, 0, end - 1);
+                }
+            }
+        }
+    }
+
+    private static void assertClassSequenceScansMatchScalarReference(StartClassFilter filter, byte[] text, int offset, int length)
+    {
+        int expected = -1;
+        for (int position = offset; position < offset + length; position++) {
+            if (filter.accepts(text, position, offset + length)) {
+                expected = position;
+                break;
+            }
+        }
+        String description = "span %s offset=%s length=%s".formatted(filter.span(), offset, length);
+        assertThat(filter.find(text, offset, length)).as(description).isEqualTo(expected);
+        assertThat(VectorByteSetScanner.findClassSequence(text, offset, length, filter)).as(description).isEqualTo(expected);
+        if (filter.span() == 2) {
+            assertThat(VectorByteSetScanner.findClassSequencePair(text, offset, length, filter)).as(description).isEqualTo(expected);
+            assertThat(VectorByteSetScanner.findClassSequencePairSve(text, offset, length, filter)).as("SVE " + description).isEqualTo(expected);
+        }
+        else {
+            assertThat(VectorByteSetScanner.findClassSequenceTriple(text, offset, length, filter)).as(description).isEqualTo(expected);
+            assertThat(VectorByteSetScanner.findClassSequenceTripleSve(text, offset, length, filter)).as("SVE " + description).isEqualTo(expected);
+        }
+    }
+
+    @Test
     public void testStartLiteralFilterSearchMatchesNfa()
     {
         Random random = new Random(97);
@@ -872,6 +963,122 @@ public class TestDfaStartByteAcceleration
             }
             assertThat(dfa.startLiteralFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
         }
+    }
+
+    @Test
+    public void testStartClassFilterRequiresNarrowOffsetsBeforeEveryMatchEnd()
+    {
+        // A match of one digit leaves no second offset.
+        assertThat(firstMatchDfa("[0-9]+").startClassFilter()).isNull();
+        // A third offset that holds any letter narrows the pair too little to be checked.
+        StartClassFilter pair = firstMatchDfa("[0-9]{2}[a-z]+").startClassFilter();
+        assertThat(pair != null).isEqualTo(VectorSupport.isAvailable());
+        if (pair != null) {
+            assertThat(bounds(pair)).containsExactly('0', '9', '0', '9');
+        }
+        // The walk does not evaluate assertions, a nullable program has no start-byte scan to
+        // replace, an anchored one does not scan, and start bytes as rare as X and Q already stop
+        // seldom.
+        for (String pattern : List.of("\\d\\b\\d", "[0-9]*", "^\\d\\d\\d", "[XQ][0-9]{2}")) {
+            assertThat(firstMatchDfa(pattern).startClassFilter()).as(pattern).isNull();
+        }
+
+        // Literals of at least three bytes take the start literal filter first; their ranges
+        // would also admit a class filter, which is not built.
+        Dfa.DfaInstance literals = firstMatchDfa("a12|c34|e56|g78");
+        assertThat(literals.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(literals.startClassFilter()).isNull();
+
+        // A fixed-distance byte still runs first on the searches long enough for it.
+        Prog fixedDistance = compile("[a-z]:[0-9]");
+        Dfa.DfaInstance fixedDistanceDfa = fixedDistance.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(fixedDistanceDfa.startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(fixedDistanceDfa.canFixedDistanceByteAcceleration()).isTrue();
+        Slice text = Slices.utf8Slice("a".repeat(8 * 1024) + "x:7");
+        assertDfaMatchesNfa(fixedDistance, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
+        assertThat(fixedDistanceDfa.startClassFilterScanCount()).isZero();
+
+        // A fixed-width pattern keeps its matcher: the matcher yields to a start literal filter but
+        // not to a class filter, since the matcher's own scan for its rarest position replaces the
+        // DFA's start scan.
+        assertThat(firstMatchDfa("[0-9]{4}").startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(Re2.compile(Slices.utf8Slice("[0-9]{4}")).hasRetainedFixedWidthByteSpanMatcher()).isTrue();
+    }
+
+    @Test
+    public void testStartClassFilterSearchMatchesNfa()
+    {
+        Random random = new Random(100);
+        // Each case names the filter's bounds. Every match of mariomka/ip begins with two digits
+        // and then a dot or a third digit, the union of its octets' paths, in UTF-8 and in Latin-1;
+        // a match of two digits leaves no third offset, so its filter checks a pair; a three-byte
+        // start holds one dot; and in Latin-1 a range lies above ASCII. Each cut is a prefix of a
+        // match, which a region end shortens.
+        for (ClassFilterCase testCase : List.of(
+                new ClassFilterCase(IP_ADDRESS, Re2.Options.defaults(), new int[] {'0', '9', '0', '9', '.', '9'}, (byte) '.', "12.34.56.78"),
+                new ClassFilterCase("[0-9]{2,}", Re2.Options.defaults(), new int[] {'0', '9', '0', '9'}, (byte) '.', "12"),
+                new ClassFilterCase("[0-9]\\.[0-9]+", Re2.Options.defaults(), new int[] {'0', '9', '.', '.', '0', '9'}, (byte) '.', "1.2"),
+                new ClassFilterCase(IP_ADDRESS, Re2.Options.latin1(), new int[] {'0', '9', '0', '9', '.', '9'}, (byte) '.', "12.34.56.78"),
+                new ClassFilterCase("[0-9]\\xB7[0-9]", Re2.Options.latin1(), new int[] {'0', '9', 0xB7, 0xB7, '0', '9'}, (byte) 0xB7, "1·2"))) {
+            String description = testCase.pattern() + " " + testCase.options().encoding();
+            Re2 re2 = Re2.compileWithoutScanPlanForTesting(Slices.utf8Slice(testCase.pattern()), testCase.options());
+            Prog program = re2.forwardProgramForDiagnostics();
+            Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            StartClassFilter filter = dfa.startClassFilter();
+            assertThat(filter != null).as(description).isEqualTo(VectorSupport.isAvailable());
+            if (filter != null) {
+                assertThat(bounds(filter)).as(description).containsExactly(testCase.bounds());
+            }
+
+            // A lone digit stops a search under 1 KiB, which checks the start byte table, but not
+            // a longer one, which scans with the filter.
+            byte[] loneDigit = ("1" + " ".repeat(1_023)).getBytes(StandardCharsets.UTF_8);
+            assertThat(dfa.findStartByteCandidate(loneDigit, 0, 1_023)).as(description).isZero();
+            assertThat(dfa.findStartByteCandidate(loneDigit, 0, 1_024)).as(description).isEqualTo(VectorSupport.isAvailable() ? -1 : 0);
+
+            for (int trial = 0; trial < 20; trial++) {
+                byte[] body = numberText(random, 1_024 + random.nextInt(8 * 1_024), testCase.separator());
+                int backingOffset = random.nextInt(8);
+                byte[] backing = new byte[backingOffset + body.length + random.nextInt(8)];
+                System.arraycopy(body, 0, backing, backingOffset, body.length);
+                Slice text = Slices.wrappedBuffer(backing, backingOffset, body.length);
+
+                List<Boundary> expected = nfaBoundaries(program, text);
+                assertThat(Dfa.countMatches(program, text, Prog.MatchKind.FIRST_MATCH)).as("count for pattern %s", description).isEqualTo(expected.size());
+                assertThat(matcherBoundaries(re2.groupZeroMatcher(text, null))).as("matches for pattern %s", description).isEqualTo(expected);
+
+                int start = random.nextInt(128);
+                int end = text.length() - random.nextInt(128);
+                assertDfaMatchesNfa(program, text, start, end, Prog.MatchKind.FIRST_MATCH, description);
+                assertDfaMatchesNfa(program, text, start, end, Prog.MatchKind.LONGEST_MATCH, description);
+            }
+
+            // A region, or an array, that ends at each byte of the cut match holds no match there,
+            // and the filter reads nothing past its end.
+            byte[] cut = testCase.cut().getBytes(testCase.options().encoding() == Re2.Options.Encoding.LATIN1 ? StandardCharsets.ISO_8859_1 : StandardCharsets.UTF_8);
+            byte[] backing = new byte[2_048 + cut.length];
+            Arrays.fill(backing, 0, 2_048, (byte) ' ');
+            System.arraycopy(cut, 0, backing, 2_048, cut.length);
+            Slice context = Slices.wrappedBuffer(backing);
+            for (int end = 2_048; end <= backing.length; end++) {
+                assertDfaMatchesNfa(program, context, 0, end, Prog.MatchKind.FIRST_MATCH, description);
+                assertDfaMatchesNfa(program, context, 0, end, Prog.MatchKind.LONGEST_MATCH, description);
+                Slice region = Slices.wrappedBuffer(Arrays.copyOf(backing, end));
+                assertThat(Dfa.countMatches(program, region, Prog.MatchKind.FIRST_MATCH))
+                        .as("count for pattern %s end=%s", description, end)
+                        .isEqualTo(nfaBoundaries(program, region).size());
+            }
+            // The filter replaces the digits' range scan.
+            assertThat(dfa.startClassFilterScanCount() > 0).as(description).isEqualTo(VectorSupport.isAvailable());
+            assertThat(dfa.contiguousRangeScanCount()).as(description).isZero();
+        }
+    }
+
+    // The inclusive bounds of each range the filter checks, first to last.
+    private static int[] bounds(StartClassFilter filter)
+    {
+        int[] bounds = {filter.firstLow(), filter.firstHigh(), filter.secondLow(), filter.secondHigh(), filter.thirdLow(), filter.thirdHigh()};
+        return Arrays.copyOf(bounds, 2 * filter.span());
     }
 
     @Test
@@ -1332,6 +1539,37 @@ public class TestDfaStartByteAcceleration
         return text.toString().getBytes(StandardCharsets.UTF_8);
     }
 
+    // Words, integers, digits followed by a dot, and dotted runs of two to five numbers up to 300,
+    // separated by spaces: some runs are addresses, and many are only prefixes of one. Each dot
+    // is written as `separator`.
+    private static byte[] numberText(Random random, int length, byte separator)
+    {
+        byte[] text = new byte[length];
+        int position = 0;
+        while (position < length) {
+            String fragment = switch (random.nextInt(10)) {
+                case 0, 1, 2, 3 -> List.of("the", "and", "version", "of", "at", "room").get(random.nextInt(6));
+                case 4, 5, 6 -> Integer.toString(random.nextInt(random.nextBoolean() ? 10 : 10_000));
+                case 7, 8 -> {
+                    StringBuilder dotted = new StringBuilder(Integer.toString(random.nextInt(301)));
+                    for (int part = 2 + random.nextInt(4); part > 1; part--) {
+                        dotted.append('.').append(random.nextInt(301));
+                    }
+                    yield dotted.toString();
+                }
+                default -> random.nextInt(10) + ".";
+            };
+            for (int index = 0; index < fragment.length() && position < length; index++) {
+                char value = fragment.charAt(index);
+                text[position++] = value == '.' ? separator : (byte) value;
+            }
+            if (position < length) {
+                text[position++] = ' ';
+            }
+        }
+        return text;
+    }
+
     // Whether the byte is in the side of a class pair whose three slots start at `side`.
     private static boolean inClassPairSide(byte value, byte[] bytes, int side)
     {
@@ -1397,4 +1635,6 @@ public class TestDfaStartByteAcceleration
     private record MixedSetCase(String pattern, String match) {}
 
     private record Boundary(int start, int end) {}
+
+    private record ClassFilterCase(String pattern, Re2.Options options, int[] bounds, byte separator, String cut) {}
 }

@@ -52,7 +52,8 @@ public final class VectorPrefixScannerProbe
         check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorScans, "unexpected folded prefix strategy");
         check(foldCaseProgram.prefixAccel(foldCaseData, 0, foldCaseData.length) == foldCaseData.length - foldCaseMatch.length, "folded prefix scan failed");
 
-        ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[xy][0-9]{4}"), Regexp.LIKE_PERL);
+        // A common class after the start bytes keeps the start class filter off.
+        ParseResult parsed = RegexpParser.parse(Slices.utf8Slice("[xy][b-z]{4}"), Regexp.LIKE_PERL);
         Prog smallSetProgram = Compiler.compile(parsed.regexp(), false, 0);
         Dfa.DfaInstance dfa = smallSetProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         byte[] smallSetData = new byte[4_096];

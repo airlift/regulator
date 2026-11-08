@@ -1338,15 +1338,17 @@ public class TestDfaCountMatches
     @Test
     public void testStartByteScanSetNotSampledForFixedDistanceSearches()
     {
-        String expression = "[a-z]:[0-9]+";
+        String expression = "[a-z]{3}:[0-9]+";
         // The prefix, dense enough that no wider sample is taken, selects the scalar scan. Searches
         // with at least 4 KiB remaining use the fixed-distance scan for the colon, so they must
         // not sample start-byte density. A sample after a late prefix match would see only filler
         // and promote the range scanner for the final span, which is shorter than 4 KiB and
-        // reaches the start-byte scan without sampling.
-        Slice source = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "b:2" + ".".repeat(2_000));
+        // reaches the start-byte scan without sampling. Three letters keep the start class filter
+        // off, which the selection would keep without the sample.
+        Slice source = utf8Slice("zza:1.".repeat(64) + ".".repeat(8_000) + "bbb:2" + ".".repeat(2_000));
         Prog program = compile(expression);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.startClassFilter()).isNull();
 
         for (int iteration = 0; iteration < 3; iteration++) {
             assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
@@ -1449,14 +1451,16 @@ public class TestDfaCountMatches
         // search walks the DFA; sampling at each search would reject the scan inside the cluster.
         assertSingleCountFallbacks("([a-z]+)-([0-9]+)", "abc-1" + ".".repeat(200) + "abc-1".repeat(20) + ".".repeat(70_000), 21, 0);
         // The cluster's dense `:` bytes reject the fixed-distance scan, and the count holds that
-        // rejection. The searches whose start-byte samples also reject scanning walk the DFA, the
-        // 16 fallbacks; holding the earlier productive fixed-distance result instead would leave
-        // none.
+        // rejection. The searches whose start-scan samples also reject scanning walk the DFA: 15
+        // fallbacks with the start class filter, 16 with the start-byte scan alone. Holding the
+        // earlier productive fixed-distance result instead would leave none. The cluster repeats
+        // `1:1:`, which the start class filter passes at every digit, as densely as the start
+        // bytes; it would pass `a:1:` only at each letter.
         assertSingleCountFallbacks(
                 "\\w:[0-9]+",
-                "a:1" + ".".repeat(200) + "a:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000),
+                "a:1" + ".".repeat(200) + "1:1:".repeat(20) + ".".repeat(1_000) + "a:1" + ".".repeat(1_000) + "a:1" + ".".repeat(70_000),
                 23,
-                16);
+                VectorSupport.isAvailable() ? 15 : 16);
     }
 
     private static void assertSingleCountFallbacks(String expression, String text, long expectedCount, int expectedFallbackCount)

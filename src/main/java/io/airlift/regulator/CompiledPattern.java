@@ -1691,8 +1691,9 @@ abstract sealed class CompiledPattern
     // [а-я]{5} and [一-龥]{3}, whose lead bytes are dense in Russian and Chinese text, took
     // 2.9-3.1x and 1.32-1.34x the counter's time on the matcher. [0-9]{4}, whose digits English
     // text rates as it holds them, ran 9.4-10.9x faster on the matcher than on the counter, and
-    // 3.8-4.6x on short rows. A plain start-byte scan does not count: every pattern the matcher
-    // takes has one, and the matcher's rare candidate replaces it.
+    // 3.8-4.6x on short rows. Neither a plain start-byte scan nor a start class filter counts:
+    // every pattern the matcher takes has the scan, and the matcher's rare candidate replaces
+    // either.
     private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Regexp suffixRegexp, boolean longestMatch, Prog program)
     {
         // The DFA kind decides the start bytes only for a program that can match empty, and a

@@ -666,6 +666,7 @@ final class LiteralAlternationSpanMatcher
         return !Dfa.isByteCandidateScanProductive(
                 null,
                 startLiteralFilter,
+                null,
                 bytes,
                 position,
                 inputEnd,
