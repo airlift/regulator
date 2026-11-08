@@ -2910,7 +2910,10 @@ final class Dfa
             if (finalState == T_UNCOMPUTED) {
                 finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
-                    return SEARCH_FAILED;
+                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
+                    if (finalState == Integer.MIN_VALUE) {
+                        return SEARCH_FAILED;
+                    }
                 }
             }
             if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
@@ -3522,7 +3525,10 @@ final class Dfa
             if (finalState == T_UNCOMPUTED) {
                 finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
-                    return SEARCH_FAILED;
+                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
+                    if (finalState == Integer.MIN_VALUE) {
+                        return SEARCH_FAILED;
+                    }
                 }
             }
             if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
@@ -3782,7 +3788,10 @@ final class Dfa
             if (finalState == T_UNCOMPUTED) {
                 finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
-                    return SEARCH_FAILED;
+                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
+                    if (finalState == Integer.MIN_VALUE) {
+                        return SEARCH_FAILED;
+                    }
                 }
             }
             if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
@@ -4109,7 +4118,10 @@ final class Dfa
             if (finalState == T_UNCOMPUTED) {
                 finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
-                    return SEARCH_FAILED;
+                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
+                    if (finalState == Integer.MIN_VALUE) {
+                        return SEARCH_FAILED;
+                    }
                 }
             }
             if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
@@ -4345,7 +4357,10 @@ final class Dfa
             if (finalState == T_UNCOMPUTED) {
                 finalState = dfa.computeTransition(tables, stateOffset, lastByte);
                 if (finalState == Integer.MIN_VALUE) {
-                    return SEARCH_FAILED;
+                    finalState = computeEndOfTextTransitionAfterReset(dfa, tables, stateOffset, lastByte);
+                    if (finalState == Integer.MIN_VALUE) {
+                        return SEARCH_FAILED;
+                    }
                 }
             }
             if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
@@ -4492,6 +4507,22 @@ final class Dfa
             // Raw native addresses do not keep their automatic-arena owner reachable.
             Reference.reachabilityFence(absolutePointers);
         }
+    }
+
+    // Called when the end-of-text transition from the state at stateOffset does not fit the cache.
+    // As in upstream, the search resets the cache and computes the transition again, without the
+    // mid-text step's check for resetting too often, and fails only when the restored state or the
+    // transition does not fit the reset cache either. Returns the transition or Integer.MIN_VALUE.
+    private static int computeEndOfTextTransitionAfterReset(DfaInstance dfa, CacheTables tables, int stateOffset, int lastByte)
+    {
+        StateSaver savedState = new StateSaver(dfa, stateOffset);
+        RestoredStates restoredStates = dfa.resetAndRestore(savedState, savedState);
+        tables = dfa.tablesAfterWrite(tables);
+        int restoredOffset = restoredStates.stateOffset();
+        if (restoredOffset < 0) {
+            return Integer.MIN_VALUE;
+        }
+        return dfa.computeTransition(tables, restoredOffset, lastByte);
     }
 
     private static long finalizeResult(int textBegin, int textEnd, boolean endMatch, boolean matched, int lastMatchBoundaryAbs, boolean runForward)

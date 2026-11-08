@@ -332,6 +332,24 @@ public class TestRe2Set
     }
 
     @Test
+    public void testMatchesAnyResetsFullCacheAtEndOfText()
+    {
+        Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
+        builder.add(Slices.utf8Slice("a+"));
+        Re2Set set = builder.build();
+        // This search caches the DFA transition for 'a', but not the end-of-text step after it.
+        assertThat(set.matchesAny(Slices.utf8Slice("ab"))).isTrue();
+        Dfa.DfaInstance dfa = set.dfaForDiagnostics();
+        int resetCount = dfa.resetCount();
+
+        // The match ends at the last byte, so the DFA sees it only in its end-of-text step, whose
+        // new state does not fit the cache. The search resets the cache once and sees the match.
+        dfa.failStateAllocationsForTesting(1);
+        assertThat(set.matchesAny(Slices.utf8Slice("a"))).isTrue();
+        assertThat(dfa.resetCount()).isEqualTo(resetCount + 1);
+    }
+
+    @Test
     public void testMatchingPatternIdsSurvivesDefaultBudgetCacheResets()
     {
         Slice input = Slices.utf8Slice(deBruijnString(22) + "0");
