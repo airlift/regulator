@@ -265,6 +265,9 @@ report of it:
   the misreading is accidental, not Trino's intent.
 - An empty group repeated exactly 2 through 100 times, such as `(?:){2}`,
   fails with an internal error.
+- Some case-insensitive strings whose fold would end inside a character's
+  multi-character fold fail with an internal error, as `(?i)İsf` does on
+  `İsﬁ`.
 - A reluctant `{0}?` runs its body when what follows fails, so `a{0}?$` matches
   `a`, and a reluctant counted repeat of an empty capture ends the loop around
   it, so `(?:(){2}?.)*` matches `ab` one character at a time (Oniguruma
