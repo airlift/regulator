@@ -2416,9 +2416,9 @@ final class Dfa
 
     private static Object[] pairedStateReferences(Object[][] pairedStateRefArrays, int stateIndex)
     {
-        // The table is rebuilt only when an exclusive search ends, so states a count adds before then
-        // have no paired row.
-        return stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
+        // The table is built only when an exclusive search ends, so a state added since then has no
+        // paired row; nor does any state once adding a state released the table to make room.
+        return pairedStateRefArrays != null && stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
     }
 
     private static Object getStateReference(Object[] references, int index)
@@ -2910,36 +2910,29 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-        byte[] byteMap = dfa.bytemap;
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        Object[] stateRefs = pairedStateRefArrays[dfa.stateIndex(startOffset)];
-        int position = textBegin;
-
-        while (position + 1 < textEnd) {
-            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
-                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            Object nextRef = getStateReference(stateRefs, pairedClass);
-            if (nextRef == null) {
-                return searchForwardPairsAfterMiss(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateRefs,
-                        endMatch,
-                        wantEarliestMatch);
-            }
-            stateRefs = (Object[]) nextRef;
-            position += 2;
+        long pairedStop = stepPairedRows(
+                tables.pairedStateRefArrays[dfa.stateIndex(startOffset)],
+                bytes,
+                dfa.bytemap,
+                dfa.nextSize,
+                textBegin,
+                textEnd);
+        int position = (int) (pairedStop >>> 32);
+        int stateOffset = (int) pairedStop;
+        if (position + 1 < textEnd) {
+            return searchForwardPairsAfterMiss(
+                    dfa,
+                    tables,
+                    bytes,
+                    resultBegin,
+                    position,
+                    textEnd,
+                    ctxEnd,
+                    stateOffset,
+                    endMatch,
+                    wantEarliestMatch);
         }
 
-        // Paired rows are complete when published, so their row metadata needs no check.
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
@@ -2955,16 +2948,13 @@ final class Dfa
             int position,
             int textEnd,
             int ctxEnd,
-            Object[] stateRefs,
+            int stateOffset,
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
         if (dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
                 !endMatch &&
                 !wantEarliestMatch) {
-            int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             byte[] byteMap = dfa.bytemap;
             long pairedTransition = decodePairedTransition(
                     tables,
@@ -2991,12 +2981,33 @@ final class Dfa
             }
         }
 
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
         }
         return result;
+    }
+
+    // Steps from the paired row `stateRefs` two bytes at a time while each pair reaches a paired
+    // row, and returns the position it stopped at, before textEnd - 1 only at a pair without a
+    // paired row, packed with the offset of the state it stopped in as `position << 32 | offset`.
+    // The loop is its own small method so that it carries only these values: in a larger loop
+    // body, C2 on x86 sometimes kept the row reference in a vector register.
+    private static long stepPairedRows(Object[] stateRefs, byte[] bytes, byte[] byteMap, int nextSize, int position, int textEnd)
+    {
+        while (position + 1 < textEnd) {
+            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
+                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
+            Object nextRef = getStateReference(stateRefs, pairedClass);
+            if (nextRef == null) {
+                break;
+            }
+            stateRefs = (Object[]) nextRef;
+            position += 2;
+        }
+        // Paired rows are complete when published, so their row metadata needs no check.
+        int stateOffset = ((StateData) getStateReference(stateRefs, nextSize * nextSize)).offset();
+        return ((long) position << 32) | (stateOffset & 0xFFFF_FFFFL);
     }
 
     private static long searchForwardPairsAfterMatch(
@@ -3041,8 +3052,6 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
         long pairedTransition;
         Object[] stateRefs;
 
@@ -3074,18 +3083,16 @@ final class Dfa
             }
             pairedTransition = 0;
 
-            while (position + 1 < textEnd) {
-                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
-                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
-                int pairedClass = (firstClass * nextSize) + secondClass;
-                Object nextRef = getStateReference(stateRefs, pairedClass);
-                if (nextRef != null) {
-                    stateRefs = (Object[]) nextRef;
-                    position += 2;
-                    continue;
+            while (true) {
+                long pairedStop = stepPairedRows(stateRefs, bytes, dfa.bytemap, dfa.nextSize, position, textEnd);
+                position = (int) (pairedStop >>> 32);
+                stateOffset = (int) pairedStop;
+                if (position + 1 >= textEnd) {
+                    break;
                 }
 
-                stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
+                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
+                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
                 pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
                 int outcome = (int) pairedTransition;
                 switch (outcome) {
@@ -3145,7 +3152,6 @@ final class Dfa
                 position += consumedBytes;
                 continue;
             }
-            stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             return searchForwardContinuation(
                     dfa,
                     tables,
