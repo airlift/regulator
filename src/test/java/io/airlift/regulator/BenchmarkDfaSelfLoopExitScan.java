@@ -33,7 +33,9 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Dfa.SEARCH_NO_MATCH;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 
-/// Measures complete DFA searches through a stable self-loop with one to three exit bytes.
+/// Measures complete DFA searches through a stable self-loop with one to three exit bytes. After
+/// the first exit byte, the dense shapes loop on the bytes they stay on, which the stay-range scan
+/// skips.
 @State(Scope.Thread)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -114,9 +116,14 @@ public class BenchmarkDfaSelfLoopExitScan
         return dfa.selfLoopExitByteScanCount();
     }
 
+    int selfLoopStayRangeScanCount()
+    {
+        return dfa.selfLoopStayRangeScanCount();
+    }
+
     boolean hasExpectedExitByteSet()
     {
-        for (int exitByteSet : dfa.cacheTablesForTesting().selfLoopExitByteSets) {
+        for (long exitByteSet : dfa.cacheTablesForTesting().selfLoopExitByteSets) {
             if (exitByteSet >>> 24 == exitByteCount) {
                 return true;
             }
@@ -131,23 +138,21 @@ public class BenchmarkDfaSelfLoopExitScan
 
     public enum InputShape
     {
-        ABSENT(false, false, false, true),
-        LATE_MATCH(false, true, false, true),
-        SPARSE_FALSE_POSITIVE(false, false, true, true),
-        DENSE_FALSE_POSITIVE(true, false, false, false),
-        DENSE_MATCH(true, true, false, false);
+        ABSENT(false, false, false),
+        LATE_MATCH(false, true, false),
+        SPARSE_FALSE_POSITIVE(false, false, true),
+        DENSE_FALSE_POSITIVE(true, false, false),
+        DENSE_MATCH(true, true, false);
 
         private final boolean dense;
         private final boolean match;
         private final boolean sparseFalsePositive;
-        private final boolean vectorRoute;
 
-        InputShape(boolean dense, boolean match, boolean sparseFalsePositive, boolean vectorRoute)
+        InputShape(boolean dense, boolean match, boolean sparseFalsePositive)
         {
             this.dense = dense;
             this.match = match;
             this.sparseFalsePositive = sparseFalsePositive;
-            this.vectorRoute = vectorRoute;
         }
 
         boolean dense()
@@ -163,11 +168,6 @@ public class BenchmarkDfaSelfLoopExitScan
         boolean sparseFalsePositive()
         {
             return sparseFalsePositive;
-        }
-
-        boolean vectorRoute()
-        {
-            return vectorRoute;
         }
     }
 }

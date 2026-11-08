@@ -273,6 +273,16 @@ public class TestDfaPairedTransitions
                     .isEqualTo(multibyte.length() - 1);
         }
         assertThat(dfa.matchingSelfLoopExitByteScanCount() > exitByteScanCount).isEqualTo(VectorSupport.isAvailable());
+
+        // A matching loop that stays on capitals leaves on too many bytes for the exit form, so a
+        // vector scan for the first byte outside the range it stays on finishes the run.
+        Prog capitals = compileProg(".*.*=[A-Z]*");
+        Dfa.DfaInstance capitalsDfa = capitals.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Slice run = utf8Slice("key=" + "B".repeat(10_000) + "!");
+        assertThat(Dfa.search(capitals, run, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(10_004);
+        int stayRangeScanCount = capitalsDfa.selfLoopStayRangeScanCount();
+        assertThat(Dfa.search(capitals, run, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(10_004);
+        assertThat(capitalsDfa.selfLoopStayRangeScanCount() > stayRangeScanCount).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
@@ -280,20 +290,22 @@ public class TestDfaPairedTransitions
     {
         // The warm-ups build paired transitions and fill the cache tables to just below their next
         // growth. The long `x` run then passes the matching loop's stepped prefix, so the scan computes
-        // the loop's exit-byte set; the loop leaves on too many bytes for a vector scan, so the set is
-        // rejected and the run keeps stepping, but computing it added transitions that grew the
-        // tables. The paired search then continues through states allocated after that growth, so it
-        // must read the grown tables.
-        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|abx*![A-Z]+|abx*\\B)"));
-        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
+        // the loop's exit-byte set; the loop stays on `x` and four digits, five ranges, and leaves on
+        // the rest, too many bytes for a vector scan, so the set is rejected and the run keeps
+        // stepping, but computing it added transitions that grew the tables. The paired search then
+        // continues through states allocated after that growth, so it must read the grown tables.
+        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|ab[x0246]*![A-Z]+|ab[x0246]*\\B)"));
+        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb", "abaaaaaa", "abababab")) {
             pattern.matcher(utf8Slice(warm)).lookingAt();
         }
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        int transitionsLength = dfa.cacheTablesForTesting().transitions.length;
         int matchingSelfLoopScanCount = dfa.matchingSelfLoopScanCount();
         RegexpMatcher matcher = pattern.matcher(utf8Slice("ab" + "x".repeat(300) + "!AAA"));
         assertThat(matcher.lookingAt()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(306);
+        assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(transitionsLength);
         assertThat(dfa.matchingSelfLoopScanCount()).isGreaterThan(matchingSelfLoopScanCount);
     }
 
@@ -302,13 +314,14 @@ public class TestDfaPairedTransitions
     {
         // The warm-ups fill the cache tables to just below their next growth. The `y` sits past the
         // matching loop's stepped prefix, so the scan computes the loop's exit-byte set before the
-        // run reaches it; the set is rejected, and computing it grows the tables. `ay` gives `y` its
-        // own byte class, so the loop's `y` transition is first computed after that growth, and
-        // only the grown tables hold it. Stepping the rest of the run on them lets a single
-        // self-loop scan reach `!`. Without vectors the run steps without computing the set, stops
-        // at the uncomputed `y`, and a second scan finishes it.
-        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|ab[xy]*![A-Z]+|ab[xy]*\\B|ay)"));
-        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
+        // run reaches it; the loop stays on `x`, `y`, and four digits, five ranges, so the set is
+        // rejected, and computing it grows the tables. `ay` gives `y` its own byte class, so the
+        // loop's `y` transition is first computed after that growth, and only the grown tables hold
+        // it. Stepping the rest of the run on them lets a single self-loop scan reach `!`. Without
+        // vectors the run steps without computing the set, stops at the uncomputed `y`, and a
+        // second scan finishes it.
+        Re2 pattern = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|ab[xy0246]*![A-Z]+|ab[xy0246]*\\B|ay)"));
+        for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb", "abbaaaaa", "abababab")) {
             pattern.matcher(utf8Slice(warm)).lookingAt();
         }
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);

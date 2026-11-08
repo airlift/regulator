@@ -293,12 +293,13 @@ public class TestTaggedAlternationProgram
     @Test
     public void testCacheResetInsideOneSearch()
     {
-        // A small budget fills the many-match cache within one long match, so the search resets it,
-        // in the byte loop and at the end of the text, and must go on with the fresh tables,
-        // choosing the branches a default budget chooses.
+        // A small budget, 4.5 MiB, fills the many-match cache within one long match, so the search
+        // resets it, in the byte loop and at the end of the text, and must go on with the fresh
+        // tables, choosing the branches a default budget chooses. At 4 MiB the resets come often
+        // enough that the search gives the rest of the text to the NFA.
         Slice patternText = utf8Slice(largeAlternation("[ab]*a[ab]{12}c", "[ab]*b[ab]{12}d", "[ab]*a[ab]{11}", "[ab]+", "x*"));
         Re2 reference = Re2.compile(patternText);
-        Re2 small = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(4L << 20));
+        Re2 small = Re2.compile(patternText, Re2.Options.defaults().setMaxMemory(9L << 19));
         assertThat(small.usesTaggedAlternationForDiagnostics()).isTrue();
         Dfa.DfaInstance taggedDfa = small.taggedAlternationProgramForDiagnostics().cachedDfaIfPresent(MANY_MATCH);
 

@@ -144,7 +144,7 @@ Representative JMH classes include:
 | `BenchmarkRe2Practical` | Practical patterns and compile cost |
 | `BenchmarkRe2CompileFocused` | Parser, compiler, and cold-DFA costs |
 | `BenchmarkDfaCache` | Cache sharing, construction, and reset behavior |
-| `BenchmarkDfaSelfLoopExitScan` | Small exit-byte candidate scanning |
+| `BenchmarkDfaSelfLoopExitScan` | Small exit-set and stay-range self-loop scanning |
 | `BenchmarkBoundedCharacterClassCounter` | Specialized counting versus repeated matching |
 | `BenchmarkRe2PublicApi` | Boolean, caller-buffer, result, and matcher APIs |
 | `BenchmarkTrinoScanPlan` | [Trino scan-plan integration](SCAN_PLAN.md): public operations, mixed plans, suffix semantics, and fallback controls |

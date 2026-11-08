@@ -147,6 +147,62 @@ final class VectorByteSetScanner
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Finds the first byte outside every one of `rangeCount` ranges, one
+    // to four, that `ranges` packs in 16-bit slots, range i in bits 16i to 16i + 15. Each 16-bit
+    // slot holds the unsigned lower bound in its low byte and `highest - lowest` (at most 127) in
+    // its high byte. A byte is in a range when its distance above the lower bound, as an unsigned
+    // byte, is at most `highest - lowest`, one subtraction and one unsigned compare per range. The
+    // forward DFA's self-loop scans call it for loops described by the bytes that stay in them.
+    static int findOutsideRanges(byte[] data, int offset, int length, long ranges, int rangeCount)
+    {
+        ByteVector firstLowest = ByteVector.broadcast(SPECIES, (byte) ranges);
+        ByteVector firstWidth = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 8));
+        ByteVector secondLowest = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 16));
+        ByteVector secondWidth = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 24));
+        ByteVector thirdLowest = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 32));
+        ByteVector thirdWidth = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 40));
+        ByteVector fourthLowest = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 48));
+        ByteVector fourthWidth = ByteVector.broadcast(SPECIES, (byte) (ranges >>> 56));
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> stops = values.sub(firstLowest).compare(VectorOperators.UGT, firstWidth);
+            if (rangeCount > 1) {
+                stops = stops.and(values.sub(secondLowest).compare(VectorOperators.UGT, secondWidth));
+            }
+            if (rangeCount > 2) {
+                stops = stops.and(values.sub(thirdLowest).compare(VectorOperators.UGT, thirdWidth));
+            }
+            if (rangeCount > 3) {
+                stops = stops.and(values.sub(fourthLowest).compare(VectorOperators.UGT, fourthWidth));
+            }
+            if (stops.anyTrue()) {
+                return position + stops.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            if (isOutsideRanges(data[position], ranges, rangeCount)) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isOutsideRanges(byte value, long ranges, int rangeCount)
+    {
+        for (int range = 0; range < rangeCount; range++) {
+            int shift = range * Short.SIZE;
+            if (((value - (int) (ranges >>> shift)) & 0xFF) <= ((int) (ranges >>> (shift + 8)) & 0xFF)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Finds the first position where one of the filter's literals
     // matches at all three of its positions. For two groups, each vector step loads three
     // vectors, ORs each once with its position's mask, and checks both groups against those

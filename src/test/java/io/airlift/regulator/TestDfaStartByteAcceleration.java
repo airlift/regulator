@@ -244,6 +244,49 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testOutsideRangesVectorScannerMatchesScalarReference()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        Random random = new Random(95);
+        for (int iteration = 0; iteration < 1_000; iteration++) {
+            int rangeCount = 1 + random.nextInt(4);
+            int[] lowest = new int[rangeCount];
+            int[] width = new int[rangeCount];
+            long ranges = 0;
+            for (int range = 0; range < rangeCount; range++) {
+                lowest[range] = random.nextInt(256);
+                width[range] = random.nextInt(Math.min(127, 255 - lowest[range]) + 1);
+                ranges |= (long) (lowest[range] | (width[range] << 8)) << (range * 16);
+            }
+            // Most bytes stay inside a range, so runs cross several vectors before an exit.
+            int offset = random.nextInt(8);
+            int length = random.nextInt(4_097);
+            byte[] data = new byte[offset + length + random.nextInt(8)];
+            for (int position = 0; position < data.length; position++) {
+                int range = random.nextInt(rangeCount);
+                data[position] = (byte) (random.nextInt(64) == 0 ? random.nextInt(256) : lowest[range] + random.nextInt(width[range] + 1));
+            }
+
+            int expected = -1;
+            for (int position = offset; position < offset + length; position++) {
+                int value = data[position] & 0xFF;
+                boolean inside = false;
+                for (int range = 0; range < rangeCount; range++) {
+                    inside |= value >= lowest[range] && value <= lowest[range] + width[range];
+                }
+                if (!inside) {
+                    expected = position;
+                    break;
+                }
+            }
+
+            assertThat(VectorByteSetScanner.findOutsideRanges(data, offset, length, ranges, rangeCount))
+                    .as("offset=%s length=%s ranges=%s", offset, length, Long.toHexString(ranges))
+                    .isEqualTo(expected);
+        }
+    }
+
+    @Test
     public void testMixedSetVectorScannerMatchesScalarReference()
     {
         assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");

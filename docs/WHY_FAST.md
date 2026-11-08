@@ -187,19 +187,21 @@ Graviton, and a few percent less on Intel.
 **Self-loops.** Many searches spend long runs in a state that loops on itself,
 such as the `\C*` in RE2's `a\C*b` or UTF-8 `[^\n]*`. With the Vector API, a
 state that leaves only on one to three exit bytes, or on every non-ASCII byte
-plus up to three ASCII bytes, can
-[scan ahead to its next exit byte](reference/OPTIMIZATION_CATALOG.md#self-loop-exit-byte-scan)
+plus up to three ASCII bytes, or that stays on up to four byte ranges, such as
+`[A-Z]` or ASCII `\w`, can
+[scan ahead to the next byte that leaves it](reference/OPTIMIZATION_CATALOG.md#self-loop-exit-byte-scan)
 instead of stepping, as the Rust crate's DFA acceleration and Hyperscan's
-McClellan acceleration do. Counts do this for both kinds of state, some
+McClellan acceleration do. Counts do this for every kind of state, some
 forward searches do it for a matching loop after 32 stepped bytes, and a
-reverse search of at least 64 bytes skips back over a loop at its end.
+reverse search of at least 64 bytes skips back over a loop at its end; the
+reverse skip reads only the exit bytes, not the stay ranges.
 
 Other forward searches step through non-matching loops, except end-anchored
 and full-match searches with at least 64 KiB left: these
 [sample 64 transitions first](reference/OPTIMIZATION_CATALOG.md#sampled-self-loop-scan)
 and, when at least 90% stay on their state, switch to a loop that tests "the
 next row is this row", or to the vector scan when the state has one to three
-exit bytes. Counts of a repeated class such as `\w+` have a dedicated loop of
+exit bytes or stays on up to four byte ranges. Counts of a repeated class such as `\w+` have a dedicated loop of
 their own.
 
 **No lock per search.** A compiled pattern's DFA cache is shared by every

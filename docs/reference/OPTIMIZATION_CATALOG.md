@@ -875,10 +875,12 @@ entries cover its tables and loops beyond them.
 - **Where:** `Dfa.scanSelfLoopTransitions`,
   `Dfa.DfaInstance.selfLoopExitByteSet`
 - **Applies when:** Sampled non-matching byte-level loops such as `\C*` or
-  Latin-1 `[^\n]*`, Vector API
+  Latin-1 `[^\n]*`, or loops that stay on up to four byte ranges such as
+  `[A-Z]*`, Vector API
 - **What it does:** Once the sampled self-loop scan takes over, a non-matching
-  state that loops on every byte except 1 to 3 exit bytes vector-scans to its
-  next exit byte. Matching self-loops and reverse searches are covered in
+  state that loops on every byte except 1 to 3 exit bytes, or whose staying
+  bytes form one to four ranges, vector-scans to the next byte that leaves it.
+  Matching self-loops and reverse searches are covered in
   [Self-loop skips in matching and reverse searches](#self-loop-skips-in-matching-and-reverse-searches).
 
 ### Self-loop skips in matching and reverse searches
@@ -904,9 +906,11 @@ entries cover its tables and loops beyond them.
   one only when its program has a loop or can match empty. A matching
   self-loop run is stepped for 32 bytes; if it continues, a vector scan for
   the state's exit bytes, one to three bytes or 0x80–0xFF plus up to three
-  ASCII bytes, finishes it. A reverse search probes up to five cached
-  transitions back from its end and, at a non-matching self-loop, skips back
-  to the loop's last exit byte. The non-matching forward case is
+  ASCII bytes, or for the first byte outside its one to four stay ranges,
+  finishes it. A reverse search probes up to five cached transitions back from
+  its end and, at a non-matching self-loop, skips back to the loop's last exit
+  byte; the reverse skip reads only the exit form. The non-matching forward
+  case is
   [Self-loop exit-byte scan](#self-loop-exit-byte-scan).
 
 ### Empty match at the start
@@ -1343,27 +1347,37 @@ These entries cover what Regulator changed or added in them.
 
 - **Origin:** Adapted from regex-automata's DFA acceleration, which scans for
   a looping state's one to three exit bytes ([accel.rs][ra-accel]), and from
-  Hyperscan's McClellan acceleration ([mcclellan.c][hs-mcclellan]); Inspired
-  by a gap against Joni on counts ([#9]). Regulator: the high-bit exit test
-  and the count route ([#9], [design][d-count-self-loop]).
+  Hyperscan's McClellan acceleration ([mcclellan.c][hs-mcclellan]); First
+  described by Hyperscan's McClellan acceleration, which scans for a state's
+  escape class of up to 160 bytes with shufti or truffle
+  ([accel_dfa_build_strat.cpp][hs-accel-dfa],
+  [mcclellancompile.cpp][hs-mcclellan-compile]); Inspired by a gap against
+  Joni on counts ([#9]). Regulator: the high-bit exit test and the count route
+  ([#9], [design][d-count-self-loop]), and the staying bytes as up to four
+  ranges tested by range compares.
 - **Where:** `Dfa.searchForwardCountSelfLoopScan`,
   `Dfa.DfaInstance.countSelfLoopExitByteSet`,
-  `VectorByteSetScanner.findHighBitOr`
-- **Applies when:** `count` of shapes such as `.*(x|y).*`, at least 256 bytes,
-  Vector API
+  `Dfa.DfaInstance.selfLoopStayRanges`, `VectorByteSetScanner.findHighBitOr`,
+  `VectorByteSetScanner.findOutsideRanges`
+- **Applies when:** `count` of shapes such as `.*(x|y).*` or
+  `.*[^A-Z]|[A-Z]`, at least 64 bytes, Vector API
 - **What it does:** During a count, a looping state with up to three exit
-  bytes, optionally plus every byte 0x80–0xFF, jumps by vector scan to the
-  next exit byte. A high-bit test finds non-ASCII exits. The count stops
-  trying after 8 searches in a row where the scan does not apply.
+  bytes, optionally plus every byte 0x80–0xFF, or whose staying bytes form one
+  to four ranges of at most 128 bytes, jumps by vector scan to the next byte
+  that leaves it. A search advances a cutoff streak when it reaches no
+  eligible loop or scans only stay-form runs shorter than 16 bytes; any
+  exit-form scan or a stay run of at least 16 bytes clears it, and the count
+  stops trying after 8 such searches in a row.
 
 ### Count handoff to the faster loop
 
 - **Origin:** Regulator; no prior art found ([#84]).
 - **Where:** `Dfa.countHandoffKeepsPairedRows`
 - **Applies when:** `count` on long input
-- **What it does:** When the exit scan stops, the count returns to the pointer
-  loop, and to paired rows only when no pointer table can exist or paired rows
-  are requested or built.
+- **What it does:** When the exit scan stops, the count uses an existing
+  pointer table; only a productive search requests one, and an unproductive
+  search requests paired rows instead. A productive search takes paired rows
+  only when no pointer table can exist or paired rows are requested or built.
 
 ### Sticky vector scan in counts
 
@@ -2932,11 +2946,13 @@ registry entry holds the trigger.
 [grep-kwsearch]: https://github.com/Distrotech/grep/blob/d930f765041bb2ad936056ddfdad60042d44bd9d/src/kwsearch.c
 [hotspot-mdo]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/hotspot/share/oops/methodData.hpp#L53-L71
 [hs-accel]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel.c#L138-L141
+[hs-accel-dfa]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel_dfa_build_strat.cpp#L517-L534
 [hs-accelcompile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accelcompile.cpp
 [hs-boundary]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/ComponentBoundary.cpp#L134-L140
 [hs-buildstate]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/buildstate.cpp#L234-L282
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658
 [hs-mcclellan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellan.c
+[hs-mcclellan-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellancompile.cpp#L78-L82
 [hs-mcclellan-flags]: https://github.com/intel/hyperscan/blob/v4.0.0/src/nfa/mcclellan_internal.h#L39-L41
 [hs-noodle-caseless]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_engine_sse.c#L182-L200
 [hs-noodle-mask]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_build.cpp#L88-L117

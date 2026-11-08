@@ -35,14 +35,22 @@ public class TestBenchmarkDfaSelfLoopExitScan
                 benchmark.inputShape = inputShape;
                 benchmark.sourceLength = 128 * 1024;
                 benchmark.setup();
+                // Setup already searches, so only the counts' change shows the measured search's scans.
+                int exitByteScanCount = benchmark.selfLoopExitByteScanCount();
+                int stayRangeScanCount = benchmark.selfLoopStayRangeScanCount();
 
                 assertThat(benchmark.search())
                         .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
                         .isEqualTo(benchmark.expectedResult());
-                assertThat(benchmark.selfLoopExitByteScanCount())
+                assertThat(benchmark.selfLoopExitByteScanCount() > exitByteScanCount)
                         .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
-                        .matches(count -> (count > 0) == (inputShape.vectorRoute() && VectorSupport.isAvailable()));
-                if (inputShape.vectorRoute() && VectorSupport.isAvailable()) {
+                        .isEqualTo(VectorSupport.isAvailable());
+                // After the first exit byte, dense input reaches a state that loops on the original
+                // exit set; the stay-range scan finds the first byte outside it.
+                assertThat(benchmark.selfLoopStayRangeScanCount() > stayRangeScanCount)
+                        .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
+                        .isEqualTo(inputShape.dense() && VectorSupport.isAvailable());
+                if (!inputShape.dense() && VectorSupport.isAvailable()) {
                     assertThat(benchmark.hasExpectedExitByteSet())
                             .as("exitByteCount=%s inputShape=%s", exitByteCount, inputShape)
                             .isTrue();

@@ -30,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
@@ -475,10 +477,10 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanMinimumLength()
     {
-        // The route needs 256 bytes remaining, the same gate that requests paired transitions.
+        // The route needs 64 bytes remaining.
         for (String expression : new String[] {".*(x|y).*", ".*[xy].*"}) {
-            assertSelfLoopScanCount(expression, utf8Slice("a".repeat(254) + "x"), 1, 0);
-            assertSelfLoopScanCount(expression, utf8Slice("a".repeat(255) + "x"), 1, 1);
+            assertSelfLoopScanCount(expression, utf8Slice("a".repeat(62) + "x"), 1, 0);
+            assertSelfLoopScanCount(expression, utf8Slice("a".repeat(63) + "x"), 1, 1);
         }
     }
 
@@ -572,9 +574,110 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testSelfLoopExitScanRejectsManyExitBytes()
+    public void testSelfLoopStayRangeScan()
     {
-        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[0-9].*"));
+        // Each search of `.*[^A-Z]|[A-Z]` over a run of capitals records the `[A-Z]` match and then
+        // follows `.*[^A-Z]` to the end of the text, in a state that stays on A-Z and leaves on the
+        // other 230 bytes, too many for the exit form. Each search with at least 64 bytes left scans
+        // that run for the first byte outside the bytes it stays on: one range for capitals,
+        // lowercase letters, and digits, and four for word characters.
+        String[][] cases = {
+                {".*[^A-Z]|[A-Z]", "A"},
+                {".*[^a-z]|[a-z]", "a"},
+                {".*\\D|\\d", "1"},
+                {".*\\W|\\w", "aZ_9"},
+        };
+        for (String[] testCase : cases) {
+            for (int length : new int[] {100, 1_000}) {
+                Slice source = utf8Slice(testCase[1].repeat(length / testCase[1].length()));
+                Prog program = compile(testCase[0]);
+                assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(length);
+                assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).selfLoopStayRangeScanCount())
+                        .as("%s length=%s", testCase[0], length)
+                        .isEqualTo(VectorSupport.isAvailable() ? length - 63 : 0);
+            }
+        }
+
+        // Unused range slots are zero, which would read as a range holding only NUL, so a NUL after
+        // a run of capitals shows that the scan reads only the loop's ranges.
+        Slice nulSeparated = utf8Slice("A".repeat(100) + "\u0000" + "A".repeat(100));
+        assertThat(Dfa.countMatches(compile(".*[^A-Z]|[A-Z]"), nulSeparated, Prog.MatchKind.FIRST_MATCH)).isEqualTo(101);
+
+        // Latin-1 builds the loop from single-byte characters rather than UTF-8 sequences, and
+        // scans the same runs.
+        Prog latin1 = Re2.compile(utf8Slice(".*[^A-Z]|[A-Z]"), Re2.Options.latin1()).forwardProgramForDiagnostics();
+        assertThat(Dfa.countMatches(latin1, utf8Slice("A".repeat(1_000)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1_000);
+        assertThat(latin1.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).selfLoopStayRangeScanCount()).isEqualTo(VectorSupport.isAvailable() ? 1_000 - 63 : 0);
+
+        // In Latin-1, the `.*` of `.*[A-Z]|[^A-Z]` stays on every byte except a newline and the
+        // capitals, so the run from `[` through 0xFF, 165 bytes, takes two ranges, the first of
+        // the most bytes one range holds.
+        byte[] lowercaseAndHigh = new byte[1_000];
+        for (int index = 0; index < lowercaseAndHigh.length; index++) {
+            lowercaseAndHigh[index] = (byte) (index % 2 == 0 ? 'a' + index % 26 : 0x80 + index % 128);
+        }
+        Prog wide = Re2.compile(utf8Slice(".*[A-Z]|[^A-Z]"), Re2.Options.latin1()).forwardProgramForDiagnostics();
+        assertThat(Dfa.countMatches(wide, Slices.wrappedBuffer(lowercaseAndHigh), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1_000);
+        assertThat(wide.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).selfLoopStayRangeScanCount()).isEqualTo(VectorSupport.isAvailable() ? 1_000 - 63 : 0);
+    }
+
+    @Test
+    public void testSelfLoopStayRangeScanMatchesStepping()
+    {
+        // Runs of random lengths of the bytes each loop stays on end at separators, multibyte
+        // characters, and the region end, and the bytes outside the region extend the runs.
+        // java.util.regex steps every character, so it decides the counts and the matches.
+        String[] expressions = {".*[^A-Z]|[A-Z]", "[A-Z]+", "[a-z]+,", "\\d+;", "\\w+;", ".*\\W|\\w"};
+        String[] runs = {"A", "Q", "z", "a", "5", "_", "aZ_9"};
+        String[] separators = {",", ";", " ", "\n", "\u0000", "\u00e9", "\u4e2d", "\ud83d\udcb0"};
+        Random random = new Random(21);
+        int stayRangeScanCount = 0;
+        for (int iteration = 0; iteration < 30; iteration++) {
+            StringBuilder builder = new StringBuilder();
+            while (builder.length() < 1_000) {
+                builder.append(runs[random.nextInt(runs.length)].repeat(random.nextInt(100)));
+                builder.append(separators[random.nextInt(separators.length)]);
+            }
+            String run = runs[random.nextInt(runs.length)];
+            String text = builder + run.repeat(random.nextInt(100));
+            byte[] textBytes = text.getBytes(UTF_8);
+            int[] byteOffsets = utf8Offsets(text);
+            byte[] padding = run.repeat(80).getBytes(UTF_8);
+            byte[] backing = new byte[padding.length + textBytes.length + padding.length];
+            System.arraycopy(padding, 0, backing, 0, padding.length);
+            System.arraycopy(textBytes, 0, backing, padding.length, textBytes.length);
+            System.arraycopy(padding, 0, backing, padding.length + textBytes.length, padding.length);
+            Slice source = Slices.wrappedBuffer(backing, padding.length, textBytes.length);
+
+            for (String expression : expressions) {
+                List<Long> expectedMatches = new ArrayList<>();
+                Matcher oracle = Pattern.compile(expression, Pattern.UNIX_LINES).matcher(text);
+                while (oracle.find()) {
+                    expectedMatches.add(((long) byteOffsets[oracle.start()] << 32) | byteOffsets[oracle.end()]);
+                }
+
+                Prog program = compile(expression);
+                assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).as("%s iteration=%s", expression, iteration).isEqualTo(expectedMatches.size());
+                stayRangeScanCount += program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).selfLoopStayRangeScanCount();
+
+                Re2 pattern = Re2.compile(utf8Slice(expression));
+                assertThat(pattern.count(source)).as("%s iteration=%s", expression, iteration).isEqualTo(expectedMatches.size());
+                List<Long> matches = new ArrayList<>();
+                RegexpMatcher matcher = pattern.matcher(source);
+                while (matcher.find()) {
+                    matches.add(((long) matcher.start() << 32) | matcher.end());
+                }
+                assertThat(matches).as("%s iteration=%s", expression, iteration).isEqualTo(expectedMatches);
+            }
+        }
+        assertThat(stayRangeScanCount > 0).isEqualTo(VectorSupport.isAvailable());
+    }
+
+    @Test
+    public void testSelfLoopScanRejectsUnrepresentableByteSets()
+    {
+        // The loop leaves on five digits and stays on more than four ranges around them.
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[02468].*"));
         assertThat(pattern.count(utf8Slice("a".repeat(32_768)))).isZero();
         Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
@@ -590,25 +693,25 @@ public class TestDfaCountMatches
     @Test
     public void testSelfLoopExitScanStopsForIneligiblePattern()
     {
-        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[0-9].*"));
-        Slice input = utf8Slice(("a".repeat(50) + "1\n").repeat(20) + "a".repeat(300));
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[02468].*"));
+        Slice input = utf8Slice(("a".repeat(50) + "2\n").repeat(20) + "a".repeat(300));
         Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         // Without the vector scanners, the count never tries the route.
-        int notApplicableLimit = VectorSupport.isAvailable() ? 8 : 0;
+        int unproductiveLimit = VectorSupport.isAvailable() ? 8 : 0;
 
         assertThat(pattern.count(input)).isEqualTo(20);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(unproductiveLimit);
         for (int iteration = 0; iteration < 4; iteration++) {
             assertThat(pattern.count(input)).isEqualTo(20);
-            assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+            assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(unproductiveLimit);
         }
         assertThat(dfa.countSelfLoopScanCount()).isZero();
 
         dfa.resetCacheExternal();
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isZero();
         assertThat(pattern.count(input)).isEqualTo(20);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(unproductiveLimit);
     }
 
     @Test
@@ -623,7 +726,7 @@ public class TestDfaCountMatches
             int scanCount = dfa.countSelfLoopScanCount();
             assertThat(pattern.count(input.source())).isEqualTo(input.matchingLines());
             assertThat(dfa.countSelfLoopScanCount() > scanCount).isEqualTo(VectorSupport.isAvailable());
-            assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
+            assertThat(dfa.countSelfLoopUnproductiveCount()).isZero();
         }
     }
 
@@ -647,12 +750,12 @@ public class TestDfaCountMatches
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         // Without the vector scanners, the count never tries the route.
-        int notApplicableLimit = VectorSupport.isAvailable() ? 8 : 0;
+        int unproductiveLimit = VectorSupport.isAvailable() ? 8 : 0;
         int longLoopScanCount = VectorSupport.isAvailable() ? 1 : 0;
 
         // Every search over short lines dies after its match before reaching a loop.
         assertThat(Dfa.countMatches(program, utf8Slice("x\n".repeat(512)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(512);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(unproductiveLimit);
         assertThat(dfa.countSelfLoopScanCount()).isZero();
 
         // The cutoff reached by the previous count does not stop this one.
@@ -662,8 +765,58 @@ public class TestDfaCountMatches
         // Within one count, the route stops after eight searches, even before a long loop.
         assertThat(Dfa.countMatches(program, utf8Slice("x\n".repeat(512) + "a".repeat(32_768)), Prog.MatchKind.FIRST_MATCH))
                 .isEqualTo(512);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(notApplicableLimit);
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(unproductiveLimit);
         assertThat(dfa.countSelfLoopScanCount()).isEqualTo(longLoopScanCount);
+    }
+
+    @Test
+    public void testSelfLoopExitScanCutoffSpansCallsSharingSampling()
+    {
+        // Calls sharing one sampling count one text, as the inner literal count's fallbacks do,
+        // so the route stops after eight searches across them, and its unproductive hand-offs
+        // keep the paired rows the ordinary search uses.
+        Prog program = compile("\\w+://[^\\s]+");
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Slice source = utf8Slice(("see the page at a site, then go to http://example.com/x and read on. ".repeat(20) + "\n").repeat(100));
+        Dfa.CountByteScanSampling sampling = new Dfa.CountByteScanSampling();
+        long count = 0;
+        int position = 0;
+        while (position < source.length()) {
+            long counted = Dfa.countMatches(program, source, position, Prog.MatchKind.FIRST_MATCH, _ -> false, sampling);
+            assertThat(counted).isNotNegative();
+            assertThat(Dfa.countStopCount(counted)).isLessThanOrEqualTo(1);
+            assertThat(Dfa.countStopPosition(counted)).isGreaterThan(position);
+            count += Dfa.countStopCount(counted);
+            position = Dfa.countStopPosition(counted);
+        }
+        assertThat(count).isEqualTo(2_000);
+        if (VectorSupport.isAvailable()) {
+            // The route stops after eight unproductive searches, each of which stops scanning
+            // after four short scans.
+            assertThat(dfa.countSelfLoopScanCount()).isLessThanOrEqualTo(8 * VectorByteSetScanner.SHORT_SCAN_LIMIT);
+            assertThat(dfa.absolutePointerTransitionsAvailable()).isFalse();
+            assertThat(dfa.pairedTransitionMemory()).isPositive();
+        }
+
+        // The sampling carries the count's own cutoff value, so a count of another text between
+        // two calls, here one whose short searches reach the cutoff, does not stop the route for
+        // the resumed count, which scans the long run of its next match.
+        Prog holmes = compile("\\w+\\s+Holmes");
+        Dfa.DfaInstance holmesDfa = holmes.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Slice text = utf8Slice("word Holmes " + "a".repeat(70_000) + " Holmes");
+        Dfa.CountByteScanSampling resumed = new Dfa.CountByteScanSampling();
+        long first = Dfa.countMatches(holmes, text, 0, Prog.MatchKind.FIRST_MATCH, _ -> false, resumed);
+        assertThat(Dfa.countStopCount(first)).isEqualTo(1);
+        assertThat(Dfa.countMatches(holmes, utf8Slice("word Holmes ".repeat(20_000)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(20_000);
+        if (VectorSupport.isAvailable()) {
+            assertThat(holmesDfa.countSelfLoopUnproductiveCount()).isEqualTo(8);
+        }
+        int scanCount = holmesDfa.countSelfLoopScanCount();
+        long rest = Dfa.countMatches(holmes, text, Dfa.countStopPosition(first), Prog.MatchKind.FIRST_MATCH, _ -> true, resumed);
+        assertThat(Dfa.countStopCount(rest)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            assertThat(holmesDfa.countSelfLoopScanCount()).isGreaterThan(scanCount);
+        }
     }
 
     @Test
@@ -678,21 +831,92 @@ public class TestDfaCountMatches
                 .isEqualTo(1);
         if (VectorSupport.isAvailable()) {
             assertThat(dfa.countSelfLoopScanCount()).isEqualTo(1);
-            assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
+            assertThat(dfa.countSelfLoopUnproductiveCount()).isZero();
             assertThat(dfa.pairedTransitionMemory()).isZero();
         }
 
         // The walk now dies after the match without a mutation, and requesting paired transitions
-        // retries the same search exclusively.
-        assertThat(Dfa.countMatches(program, utf8Slice("x\n" + "\n".repeat(254)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        // retries the same search exclusively. The rest of the text is one more search that reaches
+        // no eligible loop within the step limit: lead bytes that newlines end, so that the start
+        // state stays for one byte at a time. Each search counts once.
+        byte[] input = new byte[256];
+        input[0] = 'x';
+        for (int index = 1; index < input.length; index++) {
+            input[index] = (byte) (index % 2 == 1 ? '\n' : 0xC3);
+        }
+        assertThat(Dfa.countMatches(program, Slices.wrappedBuffer(input), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
         if (VectorSupport.isAvailable()) {
-            assertThat(dfa.countSelfLoopNotApplicableCount()).isEqualTo(1);
+            assertThat(dfa.countSelfLoopUnproductiveCount()).isEqualTo(2);
             assertThat(dfa.pairedTransitionMemory()).isPositive();
+        }
+
+        // A search too short for paired rows that reaches no eligible loop falls back to the
+        // ordinary search, which retries it exclusively at a transition the warm-up did not
+        // compute, the second byte of the `é`. The search counts once.
+        Prog digits = compile(".*[02468].*");
+        Dfa.DfaInstance digitsDfa = digits.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(Dfa.countMatches(digits, utf8Slice("a".repeat(100)), Prog.MatchKind.FIRST_MATCH)).isZero();
+        long digitsCounted = Dfa.countMatches(digits, utf8Slice("a".repeat(80) + "\u00e9" + "2"), 0, Prog.MatchKind.FIRST_MATCH, _ -> false, null);
+        assertThat(Dfa.countStopCount(digitsCounted)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            assertThat(digitsDfa.countSelfLoopUnproductiveCount()).isEqualTo(1);
+        }
+
+        // An unproductive hand-off whose paired request retries the search counts it once. Each
+        // one-search count scans only the short stay runs of three-letter words and hands off to
+        // paired rows, where it matches within a few bytes. Sixteen such short paired searches
+        // reject the rows and clear the request, so the next hand-off requests them again, which
+        // retries that search exclusively.
+        Prog words = compile("\\w+;");
+        Dfa.DfaInstance wordsDfa = words.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Slice source = utf8Slice("abc d e f; ".repeat(10_000));
+        int position = 0;
+        for (int call = 0; call < 18; call++) {
+            long counted = Dfa.countMatches(words, source, position, Prog.MatchKind.FIRST_MATCH, _ -> false, null);
+            assertThat(Dfa.countStopCount(counted)).isEqualTo(1);
+            position = Dfa.countStopPosition(counted);
+            if (VectorSupport.isAvailable()) {
+                assertThat(wordsDfa.countSelfLoopUnproductiveCount()).as("call %s", call).isEqualTo(1);
+            }
+        }
+        if (VectorSupport.isAvailable()) {
+            assertThat(wordsDfa.pairedTransitionsDisabled()).isTrue();
+        }
+
+        // With a match pending, an unproductive hand-off also counts once and requests paired rows
+        // rather than the pointer table. The matching loop of `.*=\w+(?:;\w+)*` stays on word
+        // characters, and each semicolon ends its run after a few bytes.
+        Prog pending = compile(".*=\\w+(?:;\\w+)*");
+        Dfa.DfaInstance pendingDfa = pending.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(Dfa.countMatches(pending, utf8Slice("=" + "abcdefgh;".repeat(500)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            assertThat(pendingDfa.countSelfLoopUnproductiveCount()).isEqualTo(1);
+            assertThat(pendingDfa.absolutePointerTransitionsRequested()).isFalse();
+            assertThat(pendingDfa.absolutePointerTransitionsAvailable()).isFalse();
+            assertThat(pendingDfa.pairedTransitionMemory()).isPositive();
+        }
+
+        // A search with too few bytes left for paired rows hands off to the ordinary continuation
+        // after four short scans, which retries it exclusively at the `é` the earlier count did not
+        // compute. The search counts once.
+        assertThat(Dfa.countMatches(pending, utf8Slice("=" + "abcdefgh;".repeat(8) + "\u00e9"), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            assertThat(pendingDfa.countSelfLoopUnproductiveCount()).isEqualTo(1);
+        }
+
+        // With enough bytes left, the search hands the pending match off to the paired rows the
+        // earlier counts built, which retry it at the `ñ` none computed. It counts once too.
+        int handOffCount = pendingDfa.countSelfLoopMatchHandOffCount();
+        long pendingCounted = Dfa.countMatches(pending, utf8Slice("=" + "abcdefgh;".repeat(8) + "\u00f1" + "abcdefgh;".repeat(30)), 0, Prog.MatchKind.FIRST_MATCH, _ -> false, null);
+        assertThat(Dfa.countStopCount(pendingCounted)).isEqualTo(1);
+        if (VectorSupport.isAvailable()) {
+            assertThat(pendingDfa.countSelfLoopMatchHandOffCount()).isEqualTo(handOffCount + 1);
+            assertThat(pendingDfa.countSelfLoopUnproductiveCount()).isEqualTo(1);
         }
     }
 
     @Test
-    public void testSelfLoopExitScanResetsNotApplicableCount()
+    public void testSelfLoopExitScanResetsUnproductiveCount()
     {
         Prog program = compile(".*(x|y).*");
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
@@ -700,7 +924,7 @@ public class TestDfaCountMatches
 
         assertThat(Dfa.countMatches(program, input, Prog.MatchKind.FIRST_MATCH)).isEqualTo(5);
         assertThat(dfa.countSelfLoopScanCount()).isEqualTo(VectorSupport.isAvailable() ? 1 : 0);
-        assertThat(dfa.countSelfLoopNotApplicableCount()).isZero();
+        assertThat(dfa.countSelfLoopUnproductiveCount()).isZero();
     }
 
     @Test
@@ -808,10 +1032,13 @@ public class TestDfaCountMatches
         assertThat(Dfa.countMatches(afterMatch, utf8Slice("\u00e9," + "\u00e9".repeat(130)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
 
         // Here the paired search follows an ordinary transition into a state past the end of the table.
-        // The vector self-loop exit scan computes the transitions that fill the table, so without
-        // the vector scanners the second count checks only its result.
+        // The count's vector self-loop scan computes the transitions that fill the table, and a
+        // search over the same text then builds it, so without the vector scanners the second count
+        // checks only its result.
         Prog afterOrdinaryTransition = compile(".*(abcdef|a)");
-        assertThat(Dfa.countMatches(afterOrdinaryTransition, utf8Slice("a".repeat(300)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        Slice run = utf8Slice("a".repeat(300));
+        assertThat(Dfa.countMatches(afterOrdinaryTransition, run, Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        assertThat(Dfa.search(afterOrdinaryTransition, run, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(run.length());
         if (VectorSupport.isAvailable()) {
             assertThat(afterOrdinaryTransition.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).pairedTransitionMemory()).isPositive();
         }
@@ -1374,6 +1601,20 @@ public class TestDfaCountMatches
     }
 
     private record LineInput(Slice source, int matchingLines) {}
+
+    // The UTF-8 offset of each index of text that starts a character, and of its end.
+    private static int[] utf8Offsets(String text)
+    {
+        int[] offsets = new int[text.length() + 1];
+        int index = 0;
+        while (index < text.length()) {
+            int codePoint = text.codePointAt(index);
+            int next = index + Character.charCount(codePoint);
+            offsets[next] = offsets[index] + Character.toString(codePoint).getBytes(UTF_8).length;
+            index = next;
+        }
+        return offsets;
+    }
 
     private static byte[] stateExplosionInput(int length)
     {
