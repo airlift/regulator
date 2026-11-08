@@ -244,7 +244,7 @@ public class TestBoundedCharacterClassCounter
             Re2 re2 = Re2.compileParsed(pattern, parsed, flags, maxMemory);
             assertThat(re2.forwardProgramForDiagnostics().dfaMemory()).as(source).isEqualTo(control.dfaMemory() - re2.classMatchCounter().estimatedRetainedSize());
         }
-        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(32_976);
+        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(32_984);
     }
 
     @Test
@@ -285,7 +285,7 @@ public class TestBoundedCharacterClassCounter
         inputs.add(input);
 
         // Each language spells its own classes.
-        for (String pattern : List.of("\\pL", "\\p{Ll}", "\\p{Lu}", "(?i)\\p{Lu}", "\\p{Greek}", "[\\pL\\x{3FFFF}]", ALL_NON_ASCII_CLASS)) {
+        for (String pattern : List.of("\\pL", "\\PL", "\\p{Ll}", "\\p{Lu}", "(?i)\\p{Lu}", "\\p{Greek}", "[\\pL\\x{3FFFF}]", ALL_NON_ASCII_CLASS)) {
             assertCounterMatcherAgrees("RE2", Re2::compile, pattern, false, inputs);
         }
         for (String pattern : List.of("\\p{L}", "\\p{Lu}", "(?i)\\p{Lu}", "[\\p{L}\\x{3FFFF}]")) {
@@ -294,7 +294,7 @@ public class TestBoundedCharacterClassCounter
         for (String pattern : List.of("\\p{L}", "(?i)\\p{Lu}", "[\\p{L}\\x{3FFFF}]")) {
             assertCounterMatcherAgrees("Trino", source -> TrinoRegexp.compile(source).re2(), pattern, false, inputs);
         }
-        for (String pattern : List.of("\\pL", "\\p{Lu}", "(?i)\\p{Lu}", "\\d", "[\\pL\\x{3FFFF}]")) {
+        for (String pattern : List.of("\\pL", "\\p{Lu}", "(?i)\\p{Lu}", "\\d", "\\D", "[\\pL\\x{3FFFF}]")) {
             assertCounterMatcherAgrees("Rust", RustRegexp::compile, pattern, false, inputs);
         }
         // Compact patterns find through the same counter, and match through it in every language.
@@ -321,21 +321,37 @@ public class TestBoundedCharacterClassCounter
     {
         // The large-class matrix's generated inputs, then runs of eight and fourteen letters,
         // overlong three- and four-byte sequences with the negated classes' delimiters, and the
-        // first and last characters past U+40000.
+        // first and last characters past U+40000. Then the scalar values at each width's and the
+        // surrogates' edges, followed, between ASCII, by encoded surrogates, overlong sequences, a
+        // value past U+10FFFF, a lead byte past F4, a four-byte character cut short by a letter,
+        // and, at the end, one cut short by the end. Last, a three- and a four-byte character that
+        // the slice's end cuts short, although the bytes after it complete them.
         List<Slice> inputs = new ArrayList<>(randomFragmentInputs());
         inputs.addAll(longGapInputs());
         inputs.add(Slices.wrappedBuffer(new byte[] {'a', 'b', (byte) 0xC3, 'c', (byte) 0x80, '_', '9', (byte) 0xFF, 'd', (byte) 0xC3, (byte) 0xA9, 'e'}));
         inputs.add(utf8Slice("abcdefgh ABCDEFGHIJKLMN"));
         inputs.add(Slices.wrappedBuffer(new byte[] {(byte) 0xE0, (byte) 0x80, (byte) 0x80, 'a', ',', (byte) 0xF0, (byte) 0x80, (byte) 0x80, (byte) 0x80, 'b', '"', 'c', '\n', 'd', '\r', 'e'}));
         inputs.add(utf8Slice("a\uD8C0\uDC00b,\uDBFF\uDFFF"));
+        DynamicSliceOutput edges = new DynamicSliceOutput(64);
+        edges.writeBytes(utf8Slice("a\u007F\u0080\u07FF\u0800\uD7FF\uE000\uFFFD\uFFFF\uD800\uDC00\uDBFF\uDFFF"));
+        edges.writeBytes(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80, 'b', (byte) 0xE0, (byte) 0x9F, (byte) 0xBF, 'c', (byte) 0xF0, (byte) 0x8F, (byte) 0xBF, (byte) 0xBF});
+        edges.writeBytes(new byte[] {'d', (byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, 'e', (byte) 0xED, (byte) 0xBF, (byte) 0xBF, 'f', '"', 'g', '7', 'h', (byte) 0xF8, (byte) 0x90, (byte) 0x80, (byte) 0x80, 'i'});
+        edges.writeBytes(utf8Slice("\uD83D\uDE00"));
+        edges.writeBytes(new byte[] {'j', (byte) 0xF0, (byte) 0x9F, (byte) 0x98, 'k'});
+        edges.writeBytes(new byte[] {(byte) 0xF0, (byte) 0x9F, (byte) 0x98});
+        inputs.add(edges.slice());
+        inputs.add(Slices.wrappedBuffer(new byte[] {'a', 'b', (byte) 0xE2, (byte) 0x82, (byte) 0xAC}, 0, 4));
+        inputs.add(Slices.wrappedBuffer(new byte[] {'a', 'b', (byte) 0xF0, (byte) 0x9F, (byte) 0x98, (byte) 0x80}, 0, 5));
 
-        // A repeat of an ASCII or small class, or of a class holding every non-ASCII character,
-        // finds each run on the counter, cut at the maximum.
-        for (String pattern : List.of("\\w+", "[A-Za-z]{8,13}", "[0-9]{2,3}", "[a-z]{2,}", "\\d+", "[а-яё]+", "[^,]+", "(?s:.)+", ".{3,}", "[^\"]{2,5}", "[^\\x00-\\x7F]+")) {
+        // A repeat of an ASCII or small class, of a class holding every non-ASCII character, or of
+        // `[^\x{100}]`, whose tail starts at U+0101, finds each run on the counter, cut at the
+        // maximum.
+        for (String pattern : List.of("\\w+", "[A-Za-z]{8,13}", "[0-9]{2,3}", "[a-z]{2,}", "\\d+", "[а-яё]+", "[^,]+", "(?s:.)+", ".{3,}", "[^\"]{2,5}", "[^\\x00-\\x7F]+", "[^\\x{100}]+", "[^\\x{100}]{2,4}")) {
             assertCounterMatcherAgrees("RE2", Re2::compile, pattern, false, inputs);
         }
-        // Java and Trino spell an ASCII \w by default.
-        for (String pattern : List.of("\\w+", "[a-z]{2,4}", "\\d+", "[^,]+", "(?s).{2,}")) {
+        // Java and Trino spell an ASCII \w by default, and Java's dot leaves out the Unicode line
+        // terminators.
+        for (String pattern : List.of("\\w+", "[a-z]{2,4}", "\\d+", "[^,]+", ".+", "(?s).{2,}")) {
             assertCounterMatcherAgrees("Java", JavaRegexp::compile, pattern, false, inputs);
         }
         for (String pattern : List.of("\\w+", "[0-9]+", "[a-z]{3}", ".+", "[^,]{2,}")) {
@@ -348,27 +364,45 @@ public class TestBoundedCharacterClassCounter
         for (String pattern : List.of("\\w+", "[^,]+", "[\\x80-\\xFF]{1,2}", "(?s).+")) {
             assertCounterMatcherAgrees("Latin-1", source -> Re2.compile(source, Re2.Options.latin1()), pattern, false, inputs);
         }
-        for (String pattern : List.of("(?-u:\\w)+", "(?-u:[^,])+", "(?-u:[\\x80-\\xFF]){1,2}", "(?s-u:.)+")) {
+        // In Rust bytes mode, a Unicode class holds only scalar values, so an encoded surrogate
+        // ends its run.
+        for (String pattern : List.of("(?-u:\\w)+", "(?-u:[^,])+", "(?-u:[\\x80-\\xFF]){1,2}", "(?s-u:.)+", "(?s:.)+", "(?s:.){2,}", ".+", "[^\"]+", "\\S{2,5}")) {
             assertCounterMatcherAgrees("Rust bytes", source -> RustRegexp.compile(source, RustRegexp.Options.bytes()), pattern, false, inputs);
         }
+        // Rust's Unicode `\D` has enough ranges for the compact route.
+        assertCounterMatcherAgrees("Rust", RustRegexp::compile, "\\D+", true, inputs);
+        assertCounterMatcherAgrees("Rust bytes", source -> RustRegexp.compile(source, RustRegexp.Options.bytes()), "\\D+", true, inputs);
 
-        // Past the minimum, an unbounded repeat of a UTF-8 class of every character skips the rest
-        // of its run. A dot's repeats also reach count, including a Rust bytes dot, and Trino's
-        // class-span functions.
+        // Past the minimum, an unbounded repeat of a UTF-8 class of every character, or of every
+        // scalar value, skips the rest of its run. A dot's repeats also reach count, including a
+        // Rust bytes dot, and Trino's class-span functions.
         assertThat(Re2.compile(utf8Slice("(?s:.)+")).classMatchCounter().skipsEveryCharacterRunsForDiagnostics()).isTrue();
         assertThat(Re2.compile(utf8Slice("[^,]+")).classMatchCounter().skipsEveryCharacterRunsForDiagnostics()).isFalse();
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().skipsEveryCharacterRunsForDiagnostics()).isTrue();
+        // A control on the existing route: outside bytes mode, Rust's dot holds every non-ASCII
+        // character.
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+")).classMatchCounter().skipsEveryCharacterRunsForDiagnostics()).isTrue();
+        assertThat(RustRegexp.compile(utf8Slice(".+"), RustRegexp.Options.bytes()).classMatchCounter().skipsEveryCharacterRunsForDiagnostics()).isFalse();
         assertThat(RustRegexp.compile(utf8Slice("(?s-u:.)+"), RustRegexp.Options.bytes()).createBoundedCharacterClassCounter()).isNotNull();
         assertThat(TrinoRegexp.compile(utf8Slice("(?s).+")).re2().hasCharacterClassSpan()).isTrue();
+
+        // A matcher finds a run of every scalar value on the counter, without the DFA.
+        RustRegexp scalarValues = RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes());
+        Slice text = utf8Slice("the quiet tea éж€中");
+        RegexpMatcher scalarValueMatcher = scalarValues.matcher(text, 0);
+        assertThat(scalarValueMatcher.find()).isTrue();
+        assertThat(scalarValueMatcher.end()).isEqualTo(text.length());
+        assertThat(scalarValues.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
     }
 
     @Test
     public void testLastPlaneAndNullableClassesKeepEngine()
     {
         // Planes 4 through 13 hold no characters, so a class ending before U+40000 has a counter,
-        // and one that reaches the last planes, such as `\PL` or a class with plane-14 members, has
-        // none; its bitset would retain up to 136 KiB. A class holding every non-ASCII character,
-        // such as a negated ASCII class, is the exception: its bitset ends at U+07FF, the last
-        // two-byte character.
+        // and one with members in the last planes, such as `\p{Mn}`, has none; its bitset would
+        // retain up to 136 KiB. A class whose last range runs to U+10FFFF keeps that range as a
+        // tail, so its bitset ends at the range before the tail, which must end before U+40000, or
+        // at U+07FF, the last two-byte character, whichever is later, as for a negated ASCII class.
         List<Function<Slice, CompiledPattern>> compilers = List.of(
                 Re2::compile,
                 JavaRegexp::compile,
@@ -376,20 +410,23 @@ public class TestBoundedCharacterClassCounter
                 RustRegexp::compile);
         for (Function<Slice, CompiledPattern> compiler : compilers) {
             CompiledPattern belowLimit = compiler.apply(utf8Slice("[\\p{L}\\x{3FFFF}]"));
-            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_096);
+            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_104);
             CompiledPattern atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
             assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
             CompiledPattern allNonAscii = compiler.apply(utf8Slice("[^,]+"));
-            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(584);
+            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(592);
+            CompiledPattern beforeTailBelowLimit = compiler.apply(utf8Slice("[\\x{3FFFF}\\x{50000}-\\x{10FFFF}]+"));
+            assertThat(beforeTailBelowLimit.classMatchCounter()).as(beforeTailBelowLimit.pattern().toStringUtf8()).isNotNull();
+            CompiledPattern beforeTailAtLimit = compiler.apply(utf8Slice("[\\x{40000}\\x{50000}-\\x{10FFFF}]+"));
+            assertThat(beforeTailAtLimit.classMatchCounter()).as(beforeTailAtLimit.pattern().toStringUtf8()).isNull();
         }
+        // A Rust bytes-mode class of every scalar value retains a bitset that ends at U+D7FF, below
+        // the surrogates.
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_248);
         List<CompiledPattern> lastPlaneClasses = List.of(
-                Re2.compile(utf8Slice("\\PL")),
                 Re2.compile(utf8Slice("\\p{Mn}")),
                 JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)),
-                RustRegexp.compile(utf8Slice("\\w")),
-                RustRegexp.compile(utf8Slice("\\D")),
-                // Java's dot leaves out the Unicode line terminators.
-                JavaRegexp.compile(utf8Slice(".+")));
+                RustRegexp.compile(utf8Slice("\\w")));
         for (CompiledPattern compiledPattern : lastPlaneClasses) {
             assertThat(compiledPattern.classMatchCounter()).as(compiledPattern.pattern().toStringUtf8()).isNull();
         }
@@ -552,22 +589,24 @@ public class TestBoundedCharacterClassCounter
     public void testTwoByteTextMatchesGeneralMatcherAtEveryPosition()
     {
         // Cyrillic and ASCII text counts without decoding, a chunk at a time. Each nonempty insert,
-        // at every position, puts a longer character or a malformed sequence in some chunk, or
-        // splits a two-byte character: a three-byte and a four-byte character, a lone continuation
-        // byte, the overlong leads C0 and C1, and a lead byte, which at the end is truncated; the
-        // empty insert checks the text alone.
+        // at every position, puts another character or a malformed sequence in some chunk, or
+        // splits a two-byte character: U+0100, the one character `[^\x{100}]` lacks, a three-byte
+        // and a four-byte character, a lone continuation byte, the overlong leads C0 and C1, and a
+        // lead byte, which at the end is truncated; the empty insert checks the text alone.
         byte[] text = "Съешь же ещё этих мягких французских булок, да выпей чаю. ".getBytes(UTF_8);
         List<byte[]> inserts = List.of(
                 new byte[0],
+                "Ā".getBytes(UTF_8),
                 "€".getBytes(UTF_8),
                 "😀".getBytes(UTF_8),
                 new byte[] {(byte) 0x80},
                 new byte[] {(byte) 0xC0, (byte) 0x80},
                 new byte[] {(byte) 0xC1, (byte) 0xBF},
                 new byte[] {(byte) 0xD0});
-        // Classes whose bitset reaches past U+07FF, ends below it and is extended, or holds every
-        // non-ASCII character, with runs cut at the maximum or unbounded.
-        for (String pattern : List.of("\\p{L}{2,5}", "[а-яё]{2,4}", "[^x]{3,7}", "\\p{L}+", ALL_NON_ASCII_CLASS + "{1,3}")) {
+        // Classes whose bitset reaches past U+07FF, ends below it and is extended, holds every
+        // non-ASCII character, or has a tail starting at U+0101, with runs cut at the maximum or
+        // unbounded.
+        for (String pattern : List.of("\\p{L}{2,5}", "[а-яё]{2,4}", "[^x]{3,7}", "\\p{L}+", ALL_NON_ASCII_CLASS + "{1,3}", "[^\\x{100}]{2,4}")) {
             BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
             Re2 reference = Re2.compile(utf8Slice("(" + pattern + ")"));
             for (byte[] insert : inserts) {

@@ -32,6 +32,8 @@ final class Utf8
     ///
     /// For invalid sequences, returns `RUNE_ERROR` with width 1.
     /// Copied as `ScanKernelSupport.decode`; keep the copy in step.
+    /// `BoundedCharacterClassCounter.skipScalarValues` repeats its rules for well-formed UTF-8;
+    /// keep them in step.
     static long decode(byte[] bytes, int index, int end)
     {
         if (index >= end) {
