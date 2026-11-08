@@ -1,24 +1,29 @@
 # Optimization catalog
 
 This catalog lists the performance optimizations in Regulator's engines and
-compilers and credits where each came from. Optimizations preserve each
-language's matching contract; Trino regular-expression routes promise
-agreement only on valid UTF-8. Regulator is pure Java, with no JNI library or
-bundled native code. The only native memory it allocates is the DFA's optional
-pointer table, and only with native access; otherwise that table is a Java
-array, as [Runtime acceleration](REGULATOR_API.md#runtime-acceleration)
-describes. The [RE2 optimization registry](OPTIMIZATION_REGISTRY.md) gives the
-exact triggers of the RE2 mechanisms cited here by ID.
+compilers and credits where each came from. An entry is a mechanism that
+skips work, does work in bulk, or swaps in a cheaper method, and it cites a
+measured win; the gates and fallbacks that guard a mechanism are part of its
+entry. Optimizations preserve each language's matching contract; Trino
+regular-expression routes promise agreement only on valid UTF-8. Regulator is
+pure Java, with no JNI library or bundled native code. The only native memory
+it allocates is the DFA's optional pointer table, and only with native access;
+otherwise that table is a Java array, as
+[Runtime acceleration](REGULATOR_API.md#runtime-acceleration) describes. The
+[RE2 optimization registry](OPTIMIZATION_REGISTRY.md) gives the exact triggers
+of the RE2 mechanisms cited here by ID, and
+[Limits and defaults](REGULATOR_API.md#limits-and-defaults) gives the memory
+limits and defaults these optimizations work within.
 
 Most of these ideas were first built elsewhere: RE2, the Rust regex crate and
 its memchr and aho-corasick crates, Hyperscan, ClickHouse, .NET, Trino, and
 the string-matching literature. Regulator's work is making them work together
 in one engine, across four regex languages whose matching rules differ, within
 one memory budget, and on the JVM, where a technique that is fast in C or Rust
-often needs another form. The entries credited to Regulator include that JVM
-tuning and integration, along with other engineering choices. Crediting an
-entry to Regulator records that a search found no earlier source, not a claim
-of novelty.
+often needs another form. The parts of an Origin credited to Regulator
+include that JVM tuning and integration, along with other engineering
+choices. Crediting a part to Regulator records that a search found no earlier
+source, not a claim of novelty.
 
 Each entry's Origin line credits its sources with these labels:
 
@@ -65,173 +70,95 @@ we want to give credit where credit is due.
 Compile-time facts route each search to the cheapest engine that gives the same
 answer, or reject the input before any engine runs.
 
-### Minimum-length reject
+### Required-byte and minimum-length rejects
 
-- **Origin:** First described by PCRE ([changelog][pcre-changelog] 8.00;
-  [pcre2_match.c][pcre2-minlength]), Go regexp ([exec.go][go-exec-minlen]),
-  and the Rust regex crate ([regex.rs][ra-impossible]). Regulator: the 4 KiB
-  engine cutoff and the matcher check ([#138]).
-- **Where:** `CompiledPattern.matchOnOrdinaryEngine`,
-  `RegexpMatcher.findGeneral`
-- **Applies when:** The engine check on windows under 4 KiB, where longer ones
-  skip the metadata load; the matcher check on finds that take the general
-  route rather than a scan plan, span search, or anchored capture route
-- **What it does:** A window shorter than the pattern's minimum match length
-  fails before any engine setup.
-
-### Impossible first byte
-
-- **Origin:** First described by PCRE2
-  ([pcre2_match.c][pcre2-anchored-first]). Regulator: the check ahead of
-  OnePass and BitState setup ([#138]).
-- **Where:** `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`
-- **Applies when:** Start-anchored, non-nullable programs with no assertion
-  before the first byte
-- **What it does:** Compilation records which bytes can begin a match of a
-  start-anchored program. An anchored search rejects any other first byte with
-  one table load, before OnePass or BitState setup.
-
-### Short-window required bytes
-
-- **Origin:** First described by PCRE ([changelog][pcre-changelog] 4.0;
-  [pcre2_match.c][pcre2-req-cu]), for the word test by Muła (2016)
-  ([simd-strfind][mula-strfind]), and for joined literals by the Rust regex
-  crate ([literal.rs][rs-literal]); Inspired by the Rust regex crate
-  ([strategy.rs][ra-strategy]). Regulator: the 256-byte window, the
-  one-of-three-bytes form, and the conditional last-byte load ([#147], [#154],
-  [design][d-required-bytes]).
+- **Origin:** First described by PCRE ([changelog][pcre-changelog] 4.0 and
+  8.00; [pcre2_match.c][pcre2-req-cu], [minimum length][pcre2-minlength],
+  [anchored first code unit][pcre2-anchored-first]), Perl
+  ([re_intuit_start][perl-regexec]), Go regexp ([exec.go][go-exec-minlen]),
+  ClickHouse ([OptimizedRegularExpression.cpp][ch-optimized-regexp]), and the
+  Rust regex crate ([regex.rs][ra-impossible]), for the word test by Muła
+  (2016) ([simd-strfind][mula-strfind]), and for joined literals by the Rust
+  regex crate ([literal.rs][rs-literal]); Adapted from RE2 for the scan
+  plan's vector check (front-and-back scan, [prog.cc][re2-prog]), and from
+  PCRE2 for long windows ([required code unit][pcre2-match]); Inspired by the
+  Rust regex crate for the short-window checks ([strategy.rs][ra-strategy]),
+  and by Hyperscan for long windows ([double vermicelli][hs-vermicelli]).
+  Regulator: the 256-byte window, the one-of-three-bytes form, the conditional
+  last-byte load, the 4 KiB engine cutoff, the gated inner literal check, the
+  scan plan's one check after its first failed attempt, and a matcher's reuse
+  of the long-window literal it found ([#10], [#103], [#138], [#147], [#154],
+  [#188], [design][d-required-absence], [design][d-required-bytes],
+  [design][d-short-inner]).
 - **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
   `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
-  `CompiledPattern.shortWindowLacksRequiredBytes`
-- **Applies when:** Windows under 256 bytes, every regex language; not kept
-  for patterns with a [single-byte table](#single-byte-table); a pattern with
-  an inner literal search keeps no one-of form; dropped when its memory would
-  keep a forward DFA from initializing
+  `CompiledPattern.shortWindowLacksRequiredBytes`,
+  `CompiledPattern.checksRequiredLiteralOnLongWindows`,
+  `CompiledPattern.longWindowLacksRequiredLiteral`,
+  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
+  `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
+  `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`,
+  `InnerLiteralSearch.search`, `ScanPlan.findRequiredLiteralOperation`,
+  `ScanPlan.containsRequiredLiteral`, `VectorScanner.containsLiteral`
+- **Applies when:** Every regex language. Required bytes: windows under 256
+  bytes; not kept for one-byte patterns that take the
+  [256-entry table](#group-zero-matcher-routes); a pattern with an inner
+  literal search keeps no one-of form; they yield to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
+  Required literal on long windows: windows of 256 bytes or more in find,
+  count, and the one-shot range searches, for unanchored patterns whose
+  required bytes are an exact literal and that have no other literal search;
+  a pattern whose long-window search does not fit beside the forward DFAs
+  keeps the short-window check; a matcher reuses an occurrence until a find
+  passes it, and stops after eight scans in a row find it within 256 bytes of
+  their start. Minimum length: windows under 4 KiB, where longer ones skip the
+  metadata load, and matcher finds that take the general route. First byte:
+  start-anchored, non-nullable programs with no assertion before the first
+  byte. Inner literal: windows under the reverse-inner search's 64-byte
+  minimum. Scan plans: unanchored plans not led by a literal, with a later
+  case-sensitive literal that every match passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
-  every match holds one. A window that lacks it returns no match before any
+  every match holds one. A window that lacks them returns no match before any
   engine runs. The test reads 8-byte words; when the first byte is rare, it
-  loads the last byte's word only for a word that holds the first byte.
-
-### Long-window required literal
-
-- **Origin:** Adapted from PCRE2 ([required code unit][pcre2-match]);
-  Inspired by Hyperscan ([double vermicelli][hs-vermicelli]). Regulator
-  ([#188], [design][d-required-absence]).
-- **Where:** `CompiledPattern.checksRequiredLiteralOnLongWindows`,
-  `CompiledPattern.longWindowLacksRequiredLiteral`,
-  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`
-- **Applies when:** Windows of 256 bytes or more in find, count, and the
-  one-shot range searches, all four regex languages; unanchored patterns whose
-  required bytes are an exact literal and that have no other literal search
-- **What it does:** The search scans for the required literal before any
-  engine runs, with the vector pair scan from 1 KiB, and a window without it
-  has no match. A matcher reuses an occurrence it found until a find passes
-  it, and stops scanning after eight scans in a row find the literal within
-  256 bytes of their start.
-
-### Anchored find straight to its engine
-
-- **Origin:** Adapted from RE2 ([re2.cc][re2-anchored-capture]); Inspired by
-  the Rust regex crate ([#138]). Regulator: the matcher entry that skips the
-  general find and the ordinary-engine prologue ([#138]).
-- **Where:** `CompiledPattern.takesAnchoredSubmatchRoute`,
-  `RegexpMatcher.findAnchoredSubmatch`
-- **Applies when:** Start-anchored leftmost-first OnePass or BitState patterns
-  with a positive minimum length and no scan plan, required prefix, or literal
-  set
-- **What it does:** A matcher's first find on a start-anchored pattern with
-  captures checks the length and first byte, then calls OnePass or BitState
-  directly when the input fits that engine's text limit. It skips the general
-  find, region setup, and the ordinary-engine prologue.
-
-### Direct BitState capture
-
-- **Origin:** First described by Go regexp ([exec.go][go-exec-backtrack]), and
-  for anchored searches by RE2 ([re2.cc][re2-anchored-capture]). Regulator:
-  one BitState pass in place of both DFA passes and the capture pass on
-  unanchored matcher searches from 4 KiB ([design][d-direct-bitstate]).
-- **Where:** `CompiledPattern.canUseDirectBitStateCapture`
-- **Applies when:** Unanchored leftmost-first matcher searches with groups,
-  not one-pass, from 4 KiB up to the program's unanchored BitState text limit,
-  which keeps RE2's 256 Kibit bitmap, so only programs of at most 63
-  instruction lists qualify
-- **What it does:** When a matcher asks for groups, one bounded BitState pass
-  replaces the forward DFA, the reverse DFA, and the capture pass.
+  loads the last byte's word only for a word that holds the first byte. A
+  longer window is searched for an exact required literal instead, with the
+  vector pair scan from 1 KiB. The same early answer comes from three other
+  facts: a window shorter than the pattern's minimum match length fails
+  before any engine setup; a start-anchored search rejects a byte that cannot
+  begin a match with one table load, before OnePass or BitState setup; and a
+  window too short for the reverse-inner search is still checked for a
+  literal hit that passes the byte gates, so a short line without one runs no
+  DFA. A scan plan, after its first failed attempt, checks once that a
+  required literal occurs in the rest of the input, testing its first and
+  last bytes in 16-byte blocks, and ends the search if it does not. The
+  required-byte reject takes ruff's `noqa` rows to 0.41 to 0.68 of their
+  earlier time and lh3lh3's `uri-or-email` to 0.34 to 0.47
+  ([design][d-required-bytes]), and the long-window check takes the leipzig
+  `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
+  0.48–0.57 ms, 0.021 to 0.039 of its earlier time, in all four languages on
+  Graviton and Intel ([#188]).
 
 ### Match starts without a reverse DFA
 
 - **Origin:** First described by .NET for fixed-length matches
   ([SymbolicRegexMatcher.cs][dotnet-fixed-length]). Regulator: the nullable
-  and one-character UTF-8 rules ([#77], [design][d-forward-cursor]).
-- **Where:** `CompiledPattern.findGroupZeroBoundary`, `Utf8.previousRuneStart`
+  and one-character UTF-8 rules, and the forward DFA kept across a matcher's
+  finds ([#77], [design][d-forward-cursor]).
+- **Where:** `CompiledPattern.findGroupZeroBoundary`, `Utf8.previousRuneStart`,
+  `Dfa.createGroupZeroForwardCursor`, `Dfa.searchGroupZeroForward`
 - **Applies when:** Fixed-length patterns; nullable patterns without
-  assertions, such as `.*`; one-character patterns such as `\pL` in UTF-8
+  assertions, such as `.*`; one-character patterns such as `\pL` in UTF-8; the
+  kept forward DFA on repeated `find` without captures
 - **What it does:** When every match has the same byte length, the start is
   the end minus that length. A nullable pattern with no assertion starts where
   the search started, and a one-character match that ends in a valid UTF-8
-  character starts at that character's lead byte.
-
-### Literal boolean plans
-
-- **Origin:** First described by the Rust regex crate
-  ([strategy.rs][ra-strategy]), .NET
-  ([RegexCompiler.cs][dotnet-literal-find]), and Trino
-  ([LikeMatcher.java][trino-likematcher]). Regulator: unrestricted-gap
-  normalization and the final-line forms ([design][d-boolean]).
-- **Where:** `CompiledPattern.selectBooleanPlans`,
-  `ExpressionAnalysis.buildLiteralSequence`
-- **Applies when:** Patterns that normalize to one literal sequence
-- **What it does:** When analysis proves a pattern is one literal with
-  optional unrestricted gaps, full-input `find`, `lookingAt`, and `matches`
-  use literal contains, equality, prefix, and suffix tests, including
-  final-line forms.
-
-### Lowered final-line `$`
-
-- **Origin:** First described by Hyperscan
-  ([ComponentBoundary.cpp][hs-boundary], [buildstate.cpp][hs-buildstate]).
-  Regulator: the separate lowered program and the group-zero conditions
-  ([design][d-trino-assertions]).
-- **Where:** `BooleanRegexpLowering.lowerTerminalFinalLineEnds`,
-  `CompiledPattern.compileLoweredBooleanProgram`
-- **Applies when:** Trino final-line `$`, and Java `$` under `UNIX_LINES`
-  (`(?d)`); group-zero bounds only when the expression is nonempty and cannot
-  consume LF
-- **What it does:** A second program rewrites a terminal final-line `$` as an
-  optional LF and end of text, so boolean calls and group-zero bounds run on
-  the DFA instead of the program with the text-dependent assertion.
-
-### Tagged alternation program
-
-- **Origin:** Adapted from `RE2::Set` ([set.cc][re2-set]); First described by
-  the Rust regex crate, which documents pattern IDs in place of one group per
-  branch ([regex.rs][ra-pattern-ids]). Regulator: rewriting `(a)|(b)|…` this
-  way automatically, and setting the winning branch's group from group zero's
-  span.
-- **Where:** `TaggedAlternationProgram.compile`,
-  `TaggedAlternationProgram.materialize`
-- **Applies when:** Leftmost-first programs over 512 instructions that are not
-  one-pass, with one group per branch
-- **What it does:** For `(a)|(b)|…`, where each branch is one capture around a
-  capture-free body, the branches compile without captures into one program
-  whose matches name their branch, as `RE2::Set` does. A many-match DFA pass
-  over group zero's span, or a tagged NFA, finds the winning branch, and its
-  group is set to group zero's span.
-
-### Match-every-byte full match
-
-- **Origin:** First described by RE2 ([prog.cc][re2-altmatch],
-  [dfa.cc][re2-dfa]) and .NET ([RegexCompiler.cs][dotnet-any-star]).
-  Regulator: the decision at compile time, so a full match returns before any
-  engine runs ([design][d-match-every-byte], registry [O-RE2-016]).
-- **Where:** `Compiler.matchesAnyByteString`,
-  `CompiledPattern.matchOnOrdinaryEngine`
-- **Applies when:** A whole pattern of `\C*` in UTF-8 or dot-all `.*` in
-  Latin-1
-- **What it does:** A full match of a pattern that accepts every byte string
-  returns at once.
+  character starts at that character's lead byte. A matcher's group-zero finds
+  keep the forward DFA and its acceleration state from one match to the next
+  instead of setting them up for every match. Finds on Java and Trino letter
+  rows take 0.55 to 0.61 of their earlier time, and `.*` rows with native
+  access 0.27 to 0.62 ([#77]).
 
 ## Literal and prefix search
 
@@ -242,43 +169,43 @@ so the automata run only where a match can be.
 
 - **Origin:** Ported from RE2 [O-PROG-007]; Adapted from its AVX2 loop for the
   Vector API form; First described by Muła (2016) for the SWAR (SIMD within a
-  register) form ([simd-strfind][mula-strfind]).
-- **Where:** `Prog.prefixAccel`, `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`
+  register) form and the fused pair loop ([simd-strfind][mula-strfind]), and
+  by memchr for the pair loop and the short-row cutoff
+  ([packedpair][memchr-packedpair], [memchr.rs][memchr-generic],
+  [searcher.rs][memchr-short-haystack]); Inspired by memchr's rank table
+  ([default_rank.rs][memchr-rank]) and by a gap against the Rust regex crate
+  for the continuation-byte pair ([#141]). Regulator: the counted loop for
+  HotSpot's C2 JIT compiler with verification after it exits, the fixed UTF-8
+  pair rule, and the 64-byte cutoff on Trino exact-literal spans ([#14],
+  [#87], [#140], [#141], [design][d-prefix-vector]).
+- **Where:** `Prog.prefixAccel`, `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`,
+  `Prog.prefixAccelStrategy`, `VectorPrefixScanner.find`,
+  `VectorPrefixScanner.pairDifference`, `Prog.pairOffset`,
+  `CompiledPattern.findExactLiteralSpan`,
+  `CompiledPattern.exactLiteralSpanUsesPrefixScan`, `LiteralMatchKernel.find`
 - **Applies when:** Case-sensitive prefixes of two or more bytes in unanchored
-  searches, every regex language
+  searches, every regex language; the fused vector loop on windows of at least
+  1 KiB with the Vector API and the probe at byte 0, otherwise SWAR or the
+  first-byte scan; the continuation-byte pair for UTF-8 literals whose
+  non-ASCII first character ends before the literal's last byte; a Trino
+  exact-literal span with fewer than 64 bytes left uses `Slice.indexOf`
+  instead, unless the probe byte moved
 - **What it does:** A candidate must hold the prefix's first and last bytes
   before the whole prefix is compared. RE2 tests them 32 bytes at a time with
   AVX2; Regulator tests them with the Vector API on long windows, with 8-byte
   SWAR words for non-ASCII-led prefixes, and otherwise scans for one prefix
-  byte, the probe byte, and checks the other byte per candidate.
-
-### Fused vector pair scan
-
-- **Origin:** First described by Muła (2016) ([simd-strfind][mula-strfind])
-  and memchr ([packedpair][memchr-packedpair], [memchr.rs][memchr-generic]).
-  Regulator: the counted loop for HotSpot's C2 JIT compiler, with verification
-  after it exits, run out of line ([#87], [#140], [design][d-prefix-vector]);
-  base RE2 [O-PROG-007].
-- **Where:** `Prog.prefixAccelStrategy`, `VectorPrefixScanner.find`,
-  `VectorPrefixScanner.pairDifference`
-- **Applies when:** Windows of at least 1 KiB with the Vector API and a
-  case-sensitive prefix probed at byte 0; otherwise SWAR or the first-byte
-  scan
-- **What it does:** The vector loop only tests whether any lane holds both
-  bytes, so C2 compiles it as a counted loop. Candidates are rebuilt and
-  verified after the loop exits, and the scan runs out of line.
-
-### Continuation-byte pair
-
-- **Origin:** Inspired by memchr ([default_rank.rs][memchr-rank]) and by a gap
-  against the Rust regex crate ([#141]). Regulator: a fixed UTF-8 rule in
-  place of the rank table ([#141]).
-- **Where:** `Prog.pairOffset`
-- **Applies when:** UTF-8 literals whose non-ASCII first character ends before
-  the literal's last byte
-- **What it does:** For a literal that starts with a multibyte UTF-8
-  character, the pair scan probes that character's last byte instead of its
-  lead byte, which many characters in the same script share.
+  byte, the probe byte, and checks the other byte per candidate. The vector
+  loop only tests whether any lane holds both bytes, so C2 compiles it as a
+  counted loop, and candidates are rebuilt and verified after the loop exits;
+  the whole scan runs out of line from its callers. For a literal that starts
+  with a multibyte UTF-8 character, the pair probes that character's last byte
+  instead of its lead byte, which many characters in the same script share.
+  The counted form of the fused scan takes Graviton `aqj`, Sherlock, and
+  `the-upper` rows to 0.51 to 0.60 of their earlier time and Intel `aqj`,
+  `no-match-common`, and `line-boundary` rows to 0.78 to 0.80, and RE2's count
+  of `The` from 1.39 to 0.75 of native RE2's time ([#140]); the
+  continuation-byte pair takes Russian Sherlock rows to 0.28 on Intel and 0.84
+  on Graviton ([#141]).
 
 ### Folded prefix masks
 
@@ -293,7 +220,11 @@ so the automata run only where a match can be.
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned with first- and last-byte masks a SWAR word or vector at a time: the
   vector form ORs `0x20` into letter bytes, and the SWAR form matches both
-  case broadcasts. RE2 scans it with a ShiftDFA.
+  case broadcasts. RE2 scans it with a ShiftDFA. Rust, RE2, and Java
+  `name-sherlock-casei` and Rust `name-sherlock-holmes-casei` take 0.17 to
+  0.20 of their earlier time on Graviton and 0.09 to 0.13 on Intel, and
+  `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77 and 0.62 to
+  0.64 ([#85]).
 
 ### Rare-byte probe
 
@@ -311,7 +242,9 @@ so the automata run only where a match can be.
   later byte, and only when that byte's probability under the configured byte
   distribution, which defaults to uniform, is less than a quarter of byte 0's.
   Presets measured on English text and JSON, or caller counts, set the
-  distribution.
+  distribution. With the matching preset, literal counts take about 0.07 of
+  the default's time on English prose and 0.10 to 0.13 on GH Archive JSON
+  ([#13]).
 
 ### KMP handoff for dense false candidates
 
@@ -324,51 +257,14 @@ so the automata run only where a match can be.
   `LiteralSearchKernel.findKmp`, `Prog.finishWithKmp`
 - **Applies when:** The contains search, and case-sensitive prefix scans of
   two or more bytes; scan-plan leading literals keep their own scan
-- **What it does:** Failed candidates may compare at most 64 bytes more than
-  the search has advanced. The running total is kept as one position, so the
-  check is a single compare. Past that allowance, the scan continues with KMP,
-  so search time stays linear.
-
-### Shared border-free shift table
-
-- **Origin:** First described by Knuth, Morris & Pratt (1977)
-  ([paper][kmp-1977]). Regulator: one read-only table shared by every such
-  literal ([#81]).
-- **Where:** `LiteralSearchKernel.computePrefixShifts`,
-  `Prog.configurePrefixAccelBytes`
-- **Applies when:** Literals using the KMP handoff
-- **What it does:** A literal under 64 bytes whose first byte does not recur
-  has known KMP shifts, so all such literals share one read-only table. Other
-  literals build a table charged to the DFA budget.
-
-### Contains search in every language
-
-- **Origin:** First described by Muła (2016) for the kernel
-  ([simd-strfind][mula-strfind]). Regulator: one entry that routes every
-  language's contains search to it, with the KMP handoff ([#118]).
-- **Where:** `Prog.findLiteral`, `LiteralSearchKernel.findContains`
-- **Applies when:** Literals of two or more bytes, in every regex language,
-  whose table fits the DFA budget; outside Trino, literals of up to 64 bytes
-  also yield to the forward DFAs
-- **What it does:** Boolean contains plans and dot-star spans search a literal
-  of two or more bytes with the
-  [word-at-a-time scan](#call-free-pair-word-scan) that tests the literal's
-  first and last bytes without calls, with its KMP handoff, instead of
-  `Slice.indexOf`, whose repeated failed comparisons can cost the input length
-  times the literal length. Start and inner literal searches take the fused
-  vector pair scan from 1 KiB with the Vector API, and this scan below it.
-
-### Substring search on short rows
-
-- **Origin:** First described by memchr
-  ([searcher.rs][memchr-short-haystack]). Regulator: the 64-byte cutoff on
-  Trino exact-literal spans, kept off when the probe byte moved ([#14]).
-- **Where:** `CompiledPattern.findExactLiteralSpan`,
-  `CompiledPattern.exactLiteralSpanUsesPrefixScan`, `LiteralMatchKernel.find`
-- **Applies when:** Trino regular-expression exact-literal spans
-- **What it does:** A Trino exact-literal span with fewer than 64 bytes left
-  uses `Slice.indexOf` instead of the prefix scan, unless the probe byte
-  moved.
+- **What it does:** The bytes that failed candidates compare are charged
+  against the search's progress. The running total is kept as one position, so
+  the check is a single compare. Once failed candidates have compared more
+  than 64 bytes beyond what the search has advanced, the scan continues with
+  KMP, so search time stays linear. Rows dense with false candidates take 0.24
+  to 0.35 of their earlier time ([#18]), and a 1,001-byte literal over a 1 MiB
+  run of its first byte takes 2.1 million steps instead of 525 million
+  ([#99]).
 
 ### Transparent start literal
 
@@ -382,60 +278,51 @@ so the automata run only where a match can be.
 - **What it does:** When a pattern begins with line or word assertions and
   then a literal, the scan finds the literal and the engine checks the
   assertion from the byte before each hit. The NFA skips to the literal when
-  no thread is live, and a DFA cursor scans for it.
+  no thread is live, and a DFA cursor scans for it. On rebar's
+  `line-boundary-sherlock-holmes`, searches take 0.03 to 0.09 of their earlier
+  time, and Rust goes from 20 to 28 times the crate's time to 1.07 to 1.37
+  ([#96]).
 
 ### Reverse-inner literal search
 
 - **Origin:** Adapted from the Rust regex crate
-  ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy], [#90]).
+  ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy],
+  [teddy.rs][ra-teddy], [literal.rs][rs-literal], [#90]); First described by
+  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask])
+  and for class pairs ([shufti.c][hs-shufti-double]). Regulator: the exact
+  head with a folded tail, the vector kernels for long searches, and class
+  pairs with an English-rarity gate and their own no-earlier-match proof
+  ([#103], [#138], [#143], [#152], [design][d-class-pairs]).
 - **Where:** `InnerLiteralSearch.analyze`, `InnerLiteralSearch.search`,
-  `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`
-- **Applies when:** Find and count in every regex language
-- **What it does:** For a required literal in the top-level sequence, the
-  search finds the literal, runs the prefix backward to the leftmost start,
-  and confirms forward. It is used only when the prefix cannot hold an earlier
-  match. Guards against quadratic rescans, and a first hit that passes the
-  byte gates within 64 bytes of the start, hand back to the ordinary engine.
-
-### Inner literal forms
-
-- **Origin:** Adapted from the Rust regex crate
-  ([reverse_inner.rs][ra-reverse-inner], [teddy.rs][ra-teddy],
-  [literal.rs][rs-literal]); First described by Hyperscan for the masked
-  caseless check ([noodle_build.cpp][hs-noodle-mask]). Regulator: the exact
-  head with a folded tail, and the vector kernels for long searches ([#103],
-  [#138], [#143]).
-- **Where:** `InnerLiteralSearch.findLiteralSetMember`,
+  `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
+  `InnerLiteralSearch.findLiteralSetMember`,
   `InnerLiteralSearch.findFoldedLiteral`,
-  `InnerLiteralSearch.usesVectorSearch`
-- **Applies when:** Inner literal searches; the vector form from 1 KiB with
-  the Vector API
-- **What it does:** A required piece that is one of up to 8 ASCII literals of
-  3 to 64 bytes is searched with the start literal filter, and a literal with
-  case-insensitive ASCII letters after exact bytes, such as `# (?i:noqa)`, is
-  found by its exact leading bytes, with the rest checked by an OR mask. Long
-  searches for one exact ASCII literal use the vector byte-set scan for one
-  byte and the vector pair scan otherwise. A one-byte literal that is a
-  letter, digit, or whitespace starts no inner literal search.
-
-### Inner literal class pairs
-
-- **Origin:** First described by Hyperscan ([shufti.c][hs-shufti-double]);
-  Inspired by the Rust regex crate ([#152]). Regulator: the English-rarity
-  gate and the no-earlier-match proof ([#152], [design][d-class-pairs]).
-- **Where:** `InnerLiteralSearch.asciiClassPair`,
+  `InnerLiteralSearch.usesVectorSearch`, `InnerLiteralSearch.asciiClassPair`,
   `InnerLiteralSearch.hasNoEarlierMatchAcrossLastByte`,
   `InnerLiteralSearch.findClassPairMember`,
   `VectorByteSetScanner.findClassPair`
-- **Applies when:** Required pieces that are neither a literal nor a literal
-  set; the vector loop from 1 KiB with the Vector API
-- **What it does:** Where the required piece is two adjacent elements that
-  each consume one of at most three ASCII bytes, such as `[?!.]["']`, and
-  English text rarely holds the pair (estimated below once in 500 bytes), the
-  search scans for the pair's two-byte members with a counted loop. The pair
-  has its own proof that the prefix cannot hold an earlier match: the prefix's
-  first consuming element consumes one byte, and nothing after it can consume
-  a member's last byte.
+- **Applies when:** Find and count in every regex language, only when the
+  prefix cannot hold an earlier match, and not for a one-byte literal that is
+  a letter, digit, or whitespace; the vector forms from 1 KiB with the Vector
+  API; class pairs only for required pieces that are neither a literal nor a
+  literal set. Guards against quadratic rescans, and a first hit that passes
+  the byte gates within 64 bytes of the start, hand the search back to the
+  ordinary engine
+- **What it does:** For a required literal in the top-level sequence, the
+  search finds the literal, runs the prefix backward to the leftmost start,
+  and confirms forward. The required piece can take three other forms: one of
+  up to 8 ASCII literals of 3 to 64 bytes, searched with the start literal
+  filter; a literal with case-insensitive ASCII letters after exact bytes,
+  such as `# (?i:noqa)`, found by its exact leading bytes with the rest
+  checked by an OR mask; or two adjacent elements that each consume one of at
+  most three ASCII bytes, such as `[?!.]["']`, which English text rarely holds
+  as a pair (estimated below once in 500 bytes), scanned for its two-byte
+  members with a counted loop. Long searches for one exact ASCII literal use
+  the vector byte-set scan for one byte and the vector pair scan otherwise.
+  Leipzig `shing` and mariomka `email` counts take 0.06 to 0.10 of their
+  earlier time ([#90]), and class pairs take `quotes-bounded` to 0.54 of the
+  start-byte scan's time on Intel and 0.74 on Graviton
+  ([design][d-class-pairs]).
 
 ### Inner literal byte gates
 
@@ -455,376 +342,320 @@ so the automata run only where a match can be.
   outside that set or its following byte is outside the single ASCII class
   after the literal, as `\s` after `ing`. Skipped hits never trigger the
   near-start or reread fallbacks. Gated patterns run their own loop, which a
-  window without a hit never enters.
-
-### Short-window inner literal check
-
-- **Origin:** First described by PCRE ([pcre2_match.c][pcre2-req-cu]);
-  Inspired by the Rust regex crate ([strategy.rs][ra-strategy]). Regulator:
-  the gated hit check below the reverse-inner search's 64-byte minimum
-  ([#103], [design][d-short-inner]).
-- **Where:** `InnerLiteralSearch.search`
-- **Applies when:** Windows under 64 bytes
-- **What it does:** A window too short for the reverse-inner search is still
-  checked for a hit that passes the byte gates, so a short line without one
-  has no match and runs no DFA.
+  window without a hit never enters. The gates take leipzig `ing-whitespace`
+  to 0.77 to 0.78 of its earlier time and `before-after-holmes` to 0.71 to
+  0.76 ([design][d-byte-gates]).
 
 ## Start-byte and multi-literal filters
 
 A pattern without one leading literal often still admits only some first bytes.
 These filters skip to the next byte, or byte sequence, that can begin a match.
 
-### Start-byte scan
+### Start-byte and byte-set scans
 
 - **Origin:** Adapted from Trino's RE2J fork, whose DFA scans to the next byte
   that can leave its start state ([DFA.java][trino-re2j-dfa]), a byte-set form
-  of RE2's first-byte skip ([dfa.cc][re2-dfa-2019]); First described by the
-  Rust regex crate's DFA state acceleration ([accel.rs][ra-accel]) and PCRE's
-  start bitmap ([pcre2_match.c][pcre2-start-bits]). Regulator: the set derived
-  from the program and capped at 64 bytes.
+  of RE2's first-byte skip ([dfa.cc][re2-dfa-2019]), and from ClickHouse's
+  per-run stop scans ([CompileRegexp.cpp][ch-compile-regexp]
+  `emitConsumeRun`), and from Hyperscan's double shufti, which checks the
+  classes of two consecutive positions in one vector pass
+  ([shufti.c][hs-shufti-double]); First described by the Rust regex crate's
+  DFA state acceleration ([accel.rs][ra-accel]), PCRE's start bitmap
+  ([pcre2_match.c][pcre2-start-bits]), memchr's `memchr2` and `memchr3`
+  ([memchr.rs][memchr-generic]), Hyperscan's shufti nibble table
+  ([shufticompile.cpp][hs-shufti-compile], [shufti.c][hs-shufti]), offset
+  acceleration ([accel.c][hs-accel]) and stop-set sizing
+  ([accelcompile.cpp][hs-accelcompile]), Muła (2018) for the per-high-nibble
+  bitmap ([Universal.py][mula-universal]) and the two-compare range test
+  ([Range.py][mula-range]), .NET 7's fixed-distance sets
+  ([RegexFindOptimizations.cs][dotnet7-fixed-distance]) and `IndexOfAny`
+  loops ([RegexCompiler.cs][dotnet7-regex-compiler]), .NET 8
+  (`IndexOfAnyAsciiSearcher`), V8 irregexp's Boyer-Moore lookahead
+  ([jsregexp.cc][v8-bm-skip]) and subject sampling
+  ([regexp.cc][v8-subject-sample], [regexp-compiler.cc][v8-bm-interval];
+  earlier [jsregexp.cc][v8-bm-sample]), and musl for scalar bytes checked
+  ahead of a word scan ([memchr.c][musl-memchr]); Inspired by a gap against
+  the Rust regex crate on dense counts ([#144]). Regulator: the set derived
+  from the program and capped at 64 bytes, the bytes packed into one `int`,
+  the range test as unsigned Vector API compares, byte sets at offsets up to
+  16, the four-byte run limit, sampling the text being searched to turn a
+  scan off, the count's sticky vector choice, and the start class filter's
+  third offset, byte ranges rather than nibble tables, and admission by
+  English byte frequencies ([#9], [#10], [#43], [#148], [#201],
+  [design][d-small-byte-set], [design][d-once-per-count],
+  [design][d-start-class-filter]).
 - **Where:** `Prog.buildStartByteCandidates`,
   `Dfa.canUseStartByteAcceleration`, `Dfa.buildStartByteScanSet`,
-  `Dfa.searchForwardScanAcceleration`
-- **Applies when:** Unanchored forward searches whose start set is selective
+  `Dfa.searchForwardScanAcceleration`, `VectorByteSetScanner.find`,
+  `VectorByteSetScanner.findThree`, `VectorByteSetScanner.findRange`,
+  `VectorByteSetScanner.buildNibbleTables`,
+  `VectorByteSetScanner.findNibbleTable`, `Dfa.findByteSet`,
+  `Prog.buildFixedDistanceByteCandidates`,
+  `Dfa.canUseFixedDistanceByteAcceleration`, `ScanPlanRun.scan`,
+  `VectorScanner.findRunStop`, `ScanPlanRun.matchMinimum`,
+  `ScanPlanRun.findCandidate`, `VectorScanner.findRunCandidate`,
+  `Dfa.isByteCandidateScanProductive`,
+  `VectorByteSetScanner.shouldSampleCandidateDensity`,
+  `Dfa.selectEveryMatchCountByteScanSet`, `Dfa.countStartSampleCandidates`,
+  `StartClassFilter.build`, `Prog.buildStartOffsetByteSets`,
+  `VectorByteSetScanner.findClassSequence`, `Dfa.findByteSetCandidate`
+- **Applies when:** Unanchored forward searches whose start set is selective;
+  fixed-distance sets on unanchored forward DFA searches of at least 4 KiB;
+  every scan-plan run, and run-led unanchored plans; the DFA's vector forms
+  with the Vector API from 1 KiB, and scan-plan runs' vector scans at any
+  length; the nibble form also serves the Aho-Corasick root skip and the
+  class-run counter. Before a start-byte or fixed-distance scan from 64 KiB,
+  or a vector set scan from 4 KiB, the DFA samples four 16-byte windows spread
+  over the input, and dense samples skip the scan or demote it to a scalar
+  membership scan; sets of up to three bytes are sampled only on vectors wider
+  than 128 bits. A `count` samples once at its start, with a wider second
+  sample for borderline cases; a vector choice holds for the whole count, and
+  a scalar choice is resampled by later searches. A start literal or class
+  filter skips that sample, though long searches still sample its
+  productivity. The start class filter replaces the start set's own scan on
+  unanchored forward DFA searches of at least 1 KiB with the Vector API and no
+  start literal filter, where a productive fixed-distance scan goes first. Its
+  start set needs a vector scan of its own and English text holding it at
+  least once in 500 bytes, and its first two or three byte ranges, taken as
+  independent, an English estimate of at most a sixteenth as often as the
+  start bytes and under once in 500 bytes. The third offset is checked only
+  when it narrows the pair's estimate at least four times
 - **What it does:** The DFA scans to the next byte that can leave its
   unanchored start state, runs from there, and resumes the scan when it
-  returns to the start state. The byte set is built on first use. Where the
-  [start class filter](#start-class-filter) applies, it replaces this scan on
-  searches of at least 1 KiB.
-
-### Start class filter
-
-- **Origin:** Adapted from Hyperscan's double shufti acceleration, which checks
-  the classes of two consecutive positions in one vector pass
-  ([shufti.c][hs-shufti-double]). Regulator: a third offset, byte ranges
-  rather than nibble tables, and admission by English byte frequencies
-  ([design][d-start-class-filter]).
-- **Where:** `StartClassFilter.build`, `Prog.buildStartOffsetByteSets`,
-  `VectorByteSetScanner.findClassSequence`, `Dfa.findByteSetCandidate`
-- **Applies when:** Unanchored forward DFA searches of at least 1 KiB with the
-  Vector API and no start literal filter, whose start set has a vector scan of
-  its own and English text holds it at least once in 500 bytes, and whose first
-  two or three byte ranges English byte frequencies, taken as independent,
-  estimate at most a sixteenth as often as the start bytes and under once in
-  500 bytes
-- **What it does:** The start scan stops only where the bytes at a match's
-  first two or three offsets all lie in those offsets' byte ranges, checking a
-  vector of positions at a time; the DFA still decides each stop.
-
-### Small byte-set vector scan
-
-- **Origin:** First described by memchr's `memchr2` and `memchr3`
-  ([memchr.rs][memchr-generic]), which the Rust regex crate's DFA acceleration
-  uses for up to three exit bytes ([accel.rs][ra-accel]). Regulator: the bytes
-  packed into one `int` ([design][d-small-byte-set]).
-- **Where:** `VectorByteSetScanner.find`, `VectorByteSetScanner.findThree`
-- **Applies when:** DFA start and fixed-distance sets of up to three bytes,
-  Vector API, at least 1 KiB
-- **What it does:** Up to three bytes are packed into one `int` and scanned
-  with one to three compares per vector.
-
-### Range and nibble-table scans
-
-- **Origin:** First described by Hyperscan's shufti for the nibble table,
-  which gives each group of high nibbles one bucket bit
-  ([shufticompile.cpp][hs-shufti-compile], [shufti.c][hs-shufti]), by Muła
-  (2018) for the per-high-nibble bitmap ([Universal.py][mula-universal]) and
-  the two-compare range test ([Range.py][mula-range]), and by .NET 8
-  (`IndexOfAnyAsciiSearcher`). Regulator: the range test as unsigned Vector
-  API compares.
-- **Where:** `VectorByteSetScanner.findRange`,
-  `VectorByteSetScanner.buildNibbleTables`,
-  `VectorByteSetScanner.findNibbleTable`, `Dfa.findByteSet`
-- **Applies when:** DFA start sets; the nibble form also serves the
-  Aho-Corasick root skip and the class-run counter
-- **What it does:** A start set that is one contiguous range of 4 to 64 bytes
-  is scanned with an unsigned pair of compares. Other sets of 4 to 64 bytes
-  with at most 8 distinct high nibbles are found with two 16-entry nibble
-  lookups and an AND.
-
-### Scan productivity sampling
-
-- **Origin:** First described by V8 irregexp, which samples up to 128
-  characters from the middle of the subject when it compiles a regexp, to
-  decide whether and how far a skip loop pays ([regexp.cc][v8-subject-sample],
-  [regexp-compiler.cc][v8-bm-interval]; earlier [jsregexp.cc][v8-bm-sample]).
-  Regulator: sampling the text being searched, with four spread 16-byte
-  windows, to turn a scan off, and the wide-species demotion
-  ([design][d-small-byte-set]).
-- **Where:** `Dfa.isByteCandidateScanProductive`,
-  `VectorByteSetScanner.shouldSampleCandidateDensity`
-- **Applies when:** Start-byte and fixed-distance scans from 64 KiB; vector
-  set scans from 4 KiB, where sets of up to three bytes are sampled only on
-  vectors wider than 128 bits
-- **What it does:** Before a scan, the DFA samples four 16-byte windows spread
-  over the input. Dense samples skip a start-byte or fixed-distance scan, and
-  demote a vector set scan to a scalar membership scan.
-
-### Short-scan rule
-
-- **Origin:** First described by memchr, whose prefilter goes inert when its
-  skips average under 8 bytes ([searcher.rs][memchr-prefilter-state]).
-  Regulator: the streak of four short scans ([#9], [#120]).
-- **Where:** `VectorByteSetScanner.shortScanCount`
-- **Applies when:** DFA self-loop scans and the Aho-Corasick root skip
-- **What it does:** After four scans in a row that each skip fewer than 16
-  bytes, the loop stops scanning and steps byte by byte.
-
-### Fixed-distance byte candidates
-
-- **Origin:** First described by Hyperscan's offset acceleration
-  ([accel.c][hs-accel]), .NET 7's fixed-distance sets
-  ([RegexFindOptimizations.cs][dotnet7-fixed-distance]), and V8 irregexp's
-  Boyer-Moore lookahead ([jsregexp.cc][v8-bm-skip]). Regulator: byte sets at
-  offsets up to 16.
-- **Where:** `Prog.buildFixedDistanceByteCandidates`,
-  `Dfa.canUseFixedDistanceByteAcceleration`
-- **Applies when:** Unanchored forward DFA searches of at least 4 KiB
-- **What it does:** When every match has one of a small, selective byte set at
-  a fixed offset of up to 16 bytes from its start, the scan searches for that
-  set and steps back.
+  returns to the start state. The byte set is built on first use, and the scan
+  takes the cheapest form the set allows: up to three bytes packed into one
+  `int` and found with one to three compares per vector; one contiguous range
+  of 4 to 64 bytes found with an unsigned pair of compares; or other sets of
+  4 to 64 bytes with at most 8 distinct high nibbles, found with two 16-entry
+  nibble lookups and an AND. When every match has one of a small, selective
+  byte set at a fixed offset of up to 16 bytes from its start, the scan
+  searches for that set and steps back. The start class filter stops only
+  where the bytes at a match's first two or three offsets all lie in those
+  offsets' byte ranges, checking a vector of positions at a time; the DFA still
+  decides each stop. Each scan-plan run precomputes how to
+  find its stop: 16-byte vector compares when it has at most four member
+  bytes or at most four excluded bytes, otherwise a scalar membership table,
+  with `{n,}` runs checking their minimum in the same pass. Run-led plans
+  check 1 to 16 bytes with scalar code before any vector scan, so hits near
+  the cursor pay no vector setup. Keeping the vector start-byte scan for a
+  whole count takes sparse capture counts over 32 KiB to 0.49 of their
+  earlier time on Graviton and 0.16 on Intel ([#9]), and the start class
+  filter takes rebar mariomka/ip counts to 0.29 to 0.32 on Graviton and 0.22
+  to 0.23 on Intel ([#201]).
 
 ### Start literal filter
 
 - **Origin:** Adapted from Hyperscan's Teddy, by way of the aho-corasick crate
-  ([teddy][ac-teddy-readme]) and the Rust regex crate's three-byte rule
-  ([teddy.rs][ra-teddy]); First described by V8 irregexp for merging literals
-  that differ in a bit through a mask ([jsregexp.cc][v8-quick-check]).
+  ([teddy][ac-teddy-readme]), for the nibble bucket lookup and the one-load
+  shift-in ([teddy/generic.rs][ac-teddy]), and from the Rust regex crate's
+  three-byte rule ([teddy.rs][ra-teddy]); First described by V8 irregexp for
+  merging literals that differ in a bit through a mask
+  ([jsregexp.cc][v8-quick-check]), by Muła (2016) for comparing a needle's
+  bytes at two offsets and ANDing the masks ([simd-strfind][mula-strfind]),
+  as memchr's packed pair does ([packedpair][memchr-packedpair]), by the
+  aho-corasick crate's Teddy and Hyperscan's shufti for shifting 16-bit lanes
+  on x86 ([vector.rs][ac-vector], [shufti.c][hs-shufti]), and by memchr's
+  byte-frequency ranking ([default_rank.rs][memchr-rank]) and .NET 7's
+  frequency-ordered fixed-distance sets
+  ([RegexPrefixAnalyzer.cs][dotnet7-set-quality]) for choosing positions.
   Inspired by a gap against the Rust regex crate and RE2 ([#89]). Regulator:
-  three positions from the first six bytes ([#89], [design][d-start-filter]).
+  three positions from the first six bytes, two groups tested in one pass,
+  the Vector API nibble kernel, the density estimate and adoption gates, and
+  the x86-only short shift under C2 ([#89], [#98], [#110], [#142],
+  [design][d-start-filter]).
 - **Where:** `Prog.buildStartPositionByteSets`, `StartLiteralFilter.build`,
-  `StartLiteralFilter.canMerge`, `StartLiteralFilter.find`
+  `StartLiteralFilter.canMerge`, `StartLiteralFilter.find`,
+  `Dfa.buildStartLiteralFilter`,
+  `VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals`,
+  `VectorByteSetScanner.findTwoLiterals`,
+  `VectorByteSetScanner.findLiteralNibbles`,
+  `StartLiteralFilter.buildNibbleTables`,
+  `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`
 - **Applies when:** Vector API; in the DFA, vector scanning from 1 KiB and
   scalar filtering on shorter windows, except filters selected only for vector
-  scans; the literal alternation trie from 64 bytes
+  scans; the literal alternation trie from 64 bytes. The DFA adopts the filter
+  only when its estimated stop density is at most a quarter of the start-byte
+  scan's and the start set has at most 16 bytes; a start set with estimated
+  English frequency below 5% also needs more than three start bytes that are
+  not one range, or at most two groups and 64-byte vectors. The nibble kernel
+  needs 16 to 64 lanes
 - **What it does:** For at most eight groups of leading literals of three or
   more bytes, the filter tests three positions per group at once and stops
   only where all three fit some group, a superset of the literals' starts; the
   caller checks each stop. Literals that differ in one bit at a position, such
-  as ASCII or Cyrillic case pairs, share a group through an OR mask.
-
-### Filter positions and adoption
-
-- **Origin:** First described by memchr's byte-frequency ranking
-  ([default_rank.rs][memchr-rank]) and .NET 7's frequency-ordered
-  fixed-distance sets ([RegexPrefixAnalyzer.cs][dotnet7-set-quality]).
-  Regulator: the three-position density estimate and the adoption gates
-  ([#89], [#110], [#142]).
-- **Where:** `StartLiteralFilter.build`, `Dfa.buildStartLiteralFilter`,
-  `VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals`
-- **Applies when:** DFA start states
-- **What it does:** The filter takes the three positions with the lowest
-  estimated stop density, from English frequencies and fixed UTF-8 weights.
-  The DFA adopts it only when that density is at most a quarter of the
-  start-byte scan's and the start set has at most 16 bytes; a start set with
-  estimated English frequency below 5% also needs more than three start bytes
-  that are not one range, or at most two groups and 64-byte vectors.
-
-### Two-group filter kernel
-
-- **Origin:** First described by Muła (2016), who compares a needle's bytes
-  at two offsets and ANDs the masks ([simd-strfind][mula-strfind]), as
-  memchr's packed pair does ([packedpair][memchr-packedpair]). Regulator: two
-  literal groups tested in one pass ([#89]).
-- **Where:** `VectorByteSetScanner.findTwoLiterals`
-- **Applies when:** Filters with one or two groups
-- **What it does:** With two groups, each of the three positions is loaded
-  once and compared with both groups. Within a group the three comparisons are
-  ANDed, and a lane is a candidate when either group matches.
-
-### Nibble-group filter kernel
-
-- **Origin:** Adapted from Hyperscan's Teddy, by way of the aho-corasick
-  crate, for the nibble bucket lookup ([teddy][ac-teddy-readme]) and the
-  one-load shift-in ([teddy/generic.rs][ac-teddy]). Regulator: the Vector API
-  kernel ([#98], [#142]).
-- **Where:** `VectorByteSetScanner.findLiteralNibbles`,
-  `StartLiteralFilter.buildNibbleTables`
-- **Applies when:** Filters with three to eight groups, 16 to 64 lanes
-- **What it does:** With 3 to 8 groups, two nibble lookups per position give
-  every group's bit at once. Each step loads one vector at the third position
-  and shifts in the first two positions' bits from the previous step.
+  as ASCII or Cyrillic case pairs, share a group through an OR mask. The
+  filter takes the three positions with the lowest estimated stop density,
+  from English frequencies and fixed UTF-8 weights. With one or two groups,
+  each position is loaded once and compared with both groups, the three
+  comparisons of a group are ANDed, and a lane is a candidate when either
+  group matches. With 3 to 8 groups, two nibble lookups per position give
+  every group's bit at once; each step loads one vector at the third position
+  and shifts in the first two positions' bits from the previous step, on x86
+  with a 16-bit lane shift and a mask instead of a byte shift. Rust, RE2, and
+  Java `name-alt4-casei` and `name-alt5-casei` and Rust and RE2 `sherlock-ru`
+  take 0.13 to 0.24 of their earlier time on Graviton and 0.05 to 0.15 on
+  Intel ([#89]).
 
 ## Vector and word-at-a-time kernels
 
 The scans above share a few kernels. Vector forms need the incubating Vector
-API, and each has a SWAR or scalar form for JVMs without it.
+API, and each has a SWAR or scalar form for JVMs without it. Vector scans run
+only when the JVM's preferred species holds 16 to 64 byte lanes, since
+narrower vectors would wrap the 16-entry nibble tables and wider ones overflow
+the 64-bit masks ([#95], [#104]). The JVM picks that species, and byte-set,
+prefix, and filter scans widen with it, while run stops, required-literal
+checks, and folded-byte scans stay on a fixed 128-bit species.
 
-### Vector width gate
-
-- **Origin:** Regulator; no prior art found ([#95], [#104]).
-- **Where:** `VectorSupport.AVAILABLE`,
-  `VectorSupport.PreferredSpecies.hasSupportedLength`
-- **Applies when:** All vector scans
-- **What it does:** Vector scans run only when `jdk.incubator.vector` is
-  present and the preferred species holds 16 to 64 byte lanes. Narrower
-  vectors would wrap the 16-entry nibble tables, and wider ones overflow the
-  64-bit masks.
-
-### 128-bit run and literal scans
-
-- **Origin:** Regulator; no prior art found.
-- **Where:** `VectorScanner.findRunStop`, `VectorScanner.containsLiteral`
-- **Applies when:** All platforms; on wider hardware the byte-set, prefix, and
-  filter scans widen and these stay at 128 bits
-- **What it does:** Run stops, required-literal checks, and folded-byte scans
-  use a fixed 128-bit species. Byte-set, prefix, and filter scans use the
-  preferred species.
-
-### SVE candidate masks
+### One-compare candidate masks
 
 - **Origin:** First described by Muła (2016) for the XOR-and-OR test
   ([simd-strfind][mula-strfind]) and glibc's SVE2 memchr for the
   unsigned-minimum test ([memchr_sve2.S][glibc-sve2-memchr]). Regulator: these
-  forms on 128-bit SVE under C2 ([#132], [#135], [#152], [design][d-sve]).
+  forms on 128-bit SVE under C2, and the signed compare that also stops RE2
+  runs on non-ASCII bytes ([#43], [#132], [#134], [#135], [#152],
+  [design][d-sve]).
 - **Where:** `VectorSupport.sve128`, `VectorPrefixScanner.sveMatches`,
   `VectorScanner.findRunStopSve`, `VectorByteSetScanner.findTwoSve`,
   `VectorByteSetScanner.findTwoLiteralsSve`,
   `VectorByteSetScanner.findClassPairSve`,
   `VectorByteSetScanner.findClassSequencePairSve`,
-  `VectorByteSetScanner.findClassSequenceTripleSve`
+  `VectorByteSetScanner.findClassSequenceTripleSve`,
+  `VectorScanner.findRe2RunStop`,
+  `VectorScanner.findRe2SetStop`
 - **Applies when:** aarch64 with 128-bit SVE; NEON and x86 compare each probe
-  and combine with AND or OR
+  and combine with AND or OR. The RE2 run stop runs on every platform, for
+  runs that accept non-ASCII characters, such as `[^,]*`, in RE2, Java, and
+  Rust plans
 - **What it does:** Each candidate byte is XORed with its probe, the
   differences are joined with OR (all must match) or a lane-wise unsigned
   minimum (any may match), and the result is compared with zero once. This
-  replaces a compare per probe.
-
-### Nibble shift on shorts
-
-- **Origin:** First described by the aho-corasick crate's Teddy, which shifts
-  16-bit lanes and masks on x86 and shifts bytes on NEON
-  ([vector.rs][ac-vector]), and Hyperscan's shufti ([shufti.c][hs-shufti]).
-  Regulator: the x86-only choice under C2 ([#142]).
-- **Where:** `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`
-- **Applies when:** x86 only; aarch64 keeps the byte shift
-- **What it does:** On x86, the high nibble comes from a 16-bit lane shift and
-  a mask instead of a byte shift.
-
-### Needles broadcast once
-
-- **Origin:** First described by Muła (2016) ([simd-strfind][mula-strfind])
-  and memchr ([memchr.rs][memchr-generic]), which broadcast needles once
-  before the loop. Regulator: hoisting them by hand where C2 left them in the
-  loop ([#43]).
-- **Where:** `VectorScanner.findRunStop`
-- **Applies when:** Vector run-stop scans
-- **What it does:** Run-stop needles are broadcast once before the block loop
-  and reused in each iteration.
-
-### RE2 run stop in one compare
-
-- **Origin:** First described by glibc's SVE2 memchr for joining XOR
-  differences by unsigned minimum ([memchr_sve2.S][glibc-sve2-memchr]).
-  Regulator: the signed compare that also stops on non-ASCII bytes ([#43],
-  [#134], [#135]).
-- **Where:** `VectorScanner.findRe2RunStop`, `VectorScanner.findRe2SetStop`
-- **Applies when:** Runs that accept non-ASCII characters, such as `[^,]*`, in
-  RE2, Java, and Rust plans
-- **What it does:** Run-stop needles are ASCII, so the scan XORs the block
-  with the needle and does one signed compare below 1, which finds needle
-  bytes and every non-ASCII byte together. Several needles combine by
-  lane-wise unsigned minimum.
-
-### SWAR byte scan
-
-- **Origin:** First described by Mycroft (1987) for the zero-byte test
-  ([bithacks][bithacks-zero]) and by memchr's word-at-a-time fallback, which
-  XORs a broadcast byte and reads two words per step
-  ([memchr.rs][memchr-fallback]).
-- **Where:** `LiteralSearchKernel.findSingleByte`, `Prog.indexOfSWAR`
-- **Applies when:** One-byte literal searches in every language, and the
-  probe-byte scan of case-sensitive prefixes
-- **What it does:** The byte is broadcast into a word, XORed with the input,
-  and found with the zero-byte test, two 8-byte words per step.
-
-### Overlapping last word
-
-- **Origin:** Adapted from memchr's overlapping final vector
-  ([memchr.rs][memchr-generic]). Regulator: the same ending on 8-byte words
-  and in generated LIKE ([#155]).
-- **Where:** `LiteralSearchKernel.findSingleByteTail`,
-  `LiteralSearchKernel.skipToContainsCandidate`
-- **Applies when:** One-byte and contains scans
-- **What it does:** One-byte scans of 8 bytes or more, and contains scans of
-  at least 8 candidate starts, end with a word that ends at the range end and
-  overlaps bytes already searched, instead of a byte loop. Generated LIKE
-  emits the same ending.
+  replaces a compare per probe. RE2 run-stop needles are ASCII, so that scan
+  XORs the block with the needle and does one signed compare below 1, which
+  finds needle bytes and every non-ASCII byte together; several needles
+  combine by lane-wise unsigned minimum. On Graviton with JDK 25, the
+  two-byte candidate scans take Leipzig `∞|✓` to 0.45 of its earlier time and
+  RE2 `aqj` to 0.82 ([#132]), and the RE2 run stop takes `LONG_SET` to 0.39
+  and `LONG_PATH` to 0.67 to 0.68, and the two to 0.76 to 0.88 on Intel
+  ([#135]).
 
 ### Call-free pair word scan
 
 - **Origin:** First described by Muła (2016), whose SWAR search tests a
   needle's first and last bytes a word at a time
   ([simd-strfind][mula-strfind]), RE2's front-and-back prefix scan
-  ([O-PROG-007]), and memchr's packed pair ([packedpair][memchr-packedpair]);
-  Inspired by a gap against Trino's LIKE ([#28]). Regulator: the call-free
-  word loop with out-of-line verification ([#28], [#33], [#80], [#118]).
+  ([O-PROG-007]), memchr's packed pair ([packedpair][memchr-packedpair]),
+  Mycroft (1987) for the zero-byte test ([bithacks][bithacks-zero]), and
+  memchr's word-at-a-time fallback, which XORs a broadcast byte and reads two
+  words per step ([memchr.rs][memchr-fallback]); and, for answering a literal
+  pattern with literal tests, by the Rust regex crate
+  ([strategy.rs][ra-strategy]), .NET ([RegexCompiler.cs][dotnet-literal-find]),
+  and Trino ([LikeMatcher.java][trino-likematcher]). Adapted from memchr's
+  overlapping final vector ([memchr.rs][memchr-generic]) and from Trino for
+  ordered literals ([FjsMatcher.java][trino-fjs]). Inspired by a gap against
+  Trino's LIKE ([#28]). Regulator: the call-free word loop with out-of-line
+  verification, one contains entry for every language, the overlapping last
+  word on 8-byte words and in generated LIKE, and unrestricted-gap
+  normalization with final-line forms ([#28], [#33], [#80], [#118], [#155],
+  [design][d-boolean]).
 - **Where:** `LiteralSearchKernel.skipToContainsCandidate`,
-  `LiteralSearchKernel.verifyContainsCandidates`
-- **Applies when:** Contains and dot-star literals in every language; ordered
-  literals in Trino and LIKE, and in RE2 and Rust finds over byte gaps
+  `LiteralSearchKernel.verifyContainsCandidates`,
+  `LiteralSearchKernel.findContains`, `Prog.findLiteral`,
+  `LiteralSearchKernel.findSingleByte`, `Prog.indexOfSWAR`,
+  `LiteralSearchKernel.findSingleByteTail`, `OrderedLiteralMatcher.matches`,
+  `CompiledPattern.selectBooleanPlans`,
+  `ExpressionAnalysis.buildLiteralSequence`
+- **Applies when:** Contains and dot-star literals in every language whose
+  table fits the DFA budget; outside Trino, literals of up to 64 bytes also
+  yield to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes; start
+  and inner literal searches take the fused vector pair scan instead from 1
+  KiB with the Vector API. Ordered literals in Trino and LIKE, and in RE2 and
+  Rust finds over byte gaps; one-byte literal searches and the probe-byte scan
+  of case-sensitive prefixes; literal boolean plans for patterns that
+  normalize to one literal sequence
 - **What it does:** The literal's first and last bytes are tested a word at a
   time in a loop that makes no calls. Candidates are verified out of line with
-  8-byte word compares, two 4-byte reads, or single bytes.
+  8-byte word compares, two 4-byte reads, or single bytes. Every language's
+  contains search, boolean contains plans, dot-star spans, and LIKE `%lit%`
+  use this scan with its KMP handoff instead of `Slice.indexOf`, whose
+  repeated failed comparisons can cost the input length times the literal
+  length, and `%a%b%c%` uses the ordered-literal matcher on the same kernels.
+  A one-byte literal is broadcast into a word, XORed with the input, and found
+  with the zero-byte test, two 8-byte words per step. One-byte scans of 8
+  bytes or more, and contains scans of at least 8 candidate starts, end with a
+  word that ends at the range end and overlaps bytes already searched, instead
+  of a byte loop. When analysis proves a pattern is one literal with optional
+  unrestricted gaps, full-input `find`, `lookingAt`, and `matches` use literal
+  contains, equality, prefix, and suffix tests, including final-line forms.
+  Contains takes 0.40 of `Slice.indexOf`'s time on Intel and 0.43 on Graviton
+  ([#28]), and regexp dot-star contains 0.41 to 0.46 of its earlier time
+  ([#33]).
 
 ### Short literal in two words
 
 - **Origin:** First described by glibc's memcmp, which compares short lengths
-  with two overlapping loads ([memcmp.S][glibc-memcmp]). Regulator: the
-  unchecked reads ([#153]).
+  with two overlapping loads ([memcmp.S][glibc-memcmp]), .NET 5 (literals
+  compared as words against constants,
+  [RegexCompiler.cs][dotnet5-regex-compiler]), .NET 7 (`[Aa]` tested as
+  `(ch | 0x20) == 'a'`, [.NET 7][dotnet7-blog]), ClickHouse (folded bytes
+  compared with OR `0x20`, [CompileRegexp.cpp][ch-compile-regexp]), and memchr
+  (an overlapping last load, [memchr.rs][memchr-generic]). Regulator:
+  per-position fold masks, the words held in LIKE pattern fields, the
+  rare-plan split under C2's inline limit, and the unchecked reads ([#10],
+  [#24], [#81], [#153], [design][d-short-like]).
 - **Where:** `LiteralMatchKernel.shortLiteralWidth`,
-  `LiteralMatchKernel.matchesShortLiteralAt`
+  `LiteralMatchKernel.matchesShortLiteralAt`, `ScanPlan.Step.matches`,
+  `ScanPlan.Step.matchesAsciiFolded`, `ScanPlan.Builder.emit`,
+  `TrinoLikePattern.matches`, `TrinoLikePattern.matchesComplex`
 - **Applies when:** LIKE equality, prefix, and suffix tests, interpreted and
-  generated
+  generated; scan-plan literal operations, folded for ASCII case pairs whose
+  fold stays ASCII
 - **What it does:** A literal of 1 to 16 bytes is compared as its first and
   last word, of the width that `shortLiteralWidth` picks, which overlap when
-  needed. The reads skip `Slice` bounds checks.
-
-### SWAR constants on aarch64
-
-- **Origin:** Regulator; no prior art found ([#18], [#28],
-  [design][d-gen-like]).
-- **Where:** `LiteralSearchKernel.findContains`,
-  `TrinoLikeKernelGenerator.LikeEmitter.broadcastOperand`
-- **Applies when:** aarch64
-- **What it does:** The SWAR low-bits constant is read from a field, because
-  aarch64 C2 cannot encode it as an immediate. Generated LIKE reads its
-  broadcast constants from fields on aarch64 and keeps them as constants on
-  x86.
+  needed. The reads skip `Slice` bounds checks. Folded literals OR a `0x20`
+  mask into both sides, so an ASCII pair such as `[Kk]` becomes a folded
+  literal byte instead of a two-member run. A LIKE pattern holds its literal
+  as one or two `long` words in its fields, and rare plans live in a separate
+  method, so `matches` stays under C2's 325-byte hot-method inline limit. The
+  changes in [#81], which include putting the words in the pattern's fields,
+  take Trino LIKE `EXACT_MATCH` and `PREFIX_LARGE` to 0.91 and 0.75 of their
+  earlier time on Graviton, and the unchecked reads take the TPC-H `PROMO%`,
+  `%BRASS`, and `MEDIUM POLISHED%` predicates to 0.57 to 0.79 ([#153]).
 
 ## Lazy DFA
 
 The DFA is RE2's lazy DFA; its ported pieces are listed in
 [RE2 optimizations used as ported](#re2-optimizations-used-as-ported). These
-entries cover its tables and loops beyond them.
+entries cover its tables and loops beyond them. Its hot loops are counted
+loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
 
 ### Object rows with an integer sidecar
 
 - **Origin:** Adapted from RE2's pointer rows ([dfa.cc][re2-dfa]); First
   described by regex-automata, the Rust regex crate's engine library, whose
   lazy DFA stores transitions as premultiplied row offsets with tag bits
-  ([hybrid/dfa.rs][ra-hybrid], [hybrid/id.rs][ra-id]). Regulator: Java object
-  rows, with the tagged integer table kept for cold paths and integer loops.
+  ([hybrid/dfa.rs][ra-hybrid], [hybrid/id.rs][ra-id]), and by Granlund and
+  Montgomery (1994) for exact division by a shift and the odd part's inverse
+  ([section 9][gm-exact-division]). Regulator: Java object rows, with the
+  tagged integer table kept for cold paths and integer loops, and the
+  divide-free row index ([#149], [design][d-row-index]).
 - **Where:** `Dfa.DfaInstance.stateReferences`,
-  `Dfa.searchForwardContinuation`, `Dfa.DfaInstance.computeTransition`
+  `Dfa.searchForwardContinuation`, `Dfa.DfaInstance.computeTransition`,
+  `Dfa.DfaInstance.stateIndex`, `Dfa.DfaInstance.stateIndexMultiplier`
 - **Applies when:** Every DFA; a search steps on object rows when no pointer
   table or paired row serves it
 - **What it does:** Each state is an `Object[]` row whose slots point at next
   rows, so a step is one load and a `null` slot leaves for the cold path. A
   parallel `int[]` holds each transition as a state offset with tagged
-  sentinels and a match bit, for the cold path and the integer loops.
-
-### Divide-free row index
-
-- **Origin:** First described by Granlund and Montgomery (1994), exact
-  division by a shift and the odd part's inverse
-  ([section 9][gm-exact-division]). Regulator: applied to DFA row offsets
-  ([#149], [design][d-row-index]).
-- **Where:** `Dfa.DfaInstance.stateIndex`,
-  `Dfa.DfaInstance.stateIndexMultiplier`
-- **Applies when:** Cold paths, and each match transition on object rows
-- **What it does:** A row offset becomes a state index by a shift for the row
-  width's power-of-two factor and a multiply by the inverse of its odd part.
+  sentinels and a match bit, for the cold path and the integer loops. On cold
+  paths and each match transition on object rows, a row offset becomes a state
+  index by a shift for the row width's power-of-two factor and a multiply by
+  the inverse of its odd part, with no divide. Flat `int[]` tables indexed by
+  state and class ran about 20 to 30% slower than object rows
+  ([design][d-native]), and the divide-free index ran safe-mode
+  `everything-greedy` count-spans in 0.89 to 0.90 of the divide's time on
+  Graviton and 0.80 on Intel, measured before the heap pointer table took that
+  row ([#149]).
 
 ### Bounded paired table
 
@@ -843,7 +674,11 @@ entries cover its tables and loops beyond them.
   start state, when no prefix, long anchored prefix, fixed-distance, or
   start-byte scan route takes the search; not reverse or many-match programs;
   never alongside a pointer table, which waits while paired rows exist and
-  turns pairing off once allocated
+  turns pairing off once allocated. After 16 paired-loop matches in a row
+  that each end fewer than 16 bytes from the search start, the next search
+  that requests paired rows or a pointer table releases the rows; pairing
+  returns at the next cache reset unless the DFA holds a pointer table, has
+  one withheld, or has given one back
 - **What it does:** Composed two-byte transitions advance two bytes per load.
   A missing paired entry falls back to the one-byte transitions, and a
   first-match search decodes a pair that holds a match and keeps pairing with
@@ -851,172 +686,128 @@ entries cover its tables and loops beyond them.
   references, fits 64 KiB or the DFA's remaining budget if that is smaller;
   otherwise two rows are paired within 16 KiB, chosen from cached start rows
   and self-looping states, only when exactly two qualify or the budget has
-  room for only two. After 16 paired-loop matches in a row that each end fewer
-  than 16 bytes from the search start, the next search that requests paired
-  rows or a pointer table releases the rows. Pairing returns at the next cache
-  reset unless the DFA holds a pointer table, has one withheld, or has given
-  one back.
-
-### Specialized step loops
-
-- **Origin:** Adapted from RE2's specialized search loops and prefix
-  acceleration ([dfa.cc][re2-dfa]). Regulator: the long anchored-prefix loop
-  and counted loops that let C2 drop safepoint polls; base RE2 [O-DFA-004],
-  [O-DFA-005].
-- **Where:** `Dfa.searchForwardPrefixAccelSingleByte`,
-  `Dfa.searchForwardAnchoredLongPrefixInt`, `Dfa.searchAnchoredCandidate`
-- **Applies when:** One-byte required prefixes; long anchored prefixes; hot
-  loops
-- **What it does:** One loop scans for a one-byte prefix and steps the DFA
-  together, and anchored searches with a case-sensitive required prefix of 16
-  bytes or more have their own integer loop. Hot loops are counted loops, so
-  C2 can drop the safepoint poll on each step.
-
-### Sampled self-loop scan
-
-- **Origin:** First described by regex-automata, whose lazy DFA search
-  documents an unrolled loop over runs of self-transitions
-  ([hybrid/search.rs][ra-hybrid-search]); Inspired by regex-automata's DFA
-  acceleration ([accel.rs][ra-accel]) and Hyperscan's McClellan acceleration
-  ([mcclellan.c][hs-mcclellan]). Regulator: sampling 64 cached transitions
-  before switching to the identity-first loop.
-- **Where:** `Dfa.searchForwardSampledSelfLoops`,
-  `Dfa.shouldSampleSelfLoopTransitions`
-- **Applies when:** End-anchored or full-match searches of at least 64 KiB
-  outside the paired loop, as in `.*` runs
-- **What it does:** The search tries up to 64 cached transitions, stopping at
-  an uncached one. If it completes all 64 and at least 90% are self-loops, it
-  switches to the identity-first loop, which tests row identity before
-  decoding.
+  room for only two. With native access, Trino and Java Sherlock
+  `word-ending-n` run on paired rows in 0.82 of the pointer table's time on
+  Graviton and 0.96 to 1.01 on Intel ([#162]).
 
 ### Self-loop exit-byte scan
 
-- **Origin:** Adapted from regex-automata's DFA acceleration
-  ([accel.rs][ra-accel]) and Hyperscan's McClellan acceleration
-  ([mcclellan.c][hs-mcclellan]). Regulator: entering it from the sampled
-  self-loop scan ([#1]).
+- **Origin:** Adapted from regex-automata's DFA acceleration, which scans for
+  a looping state's one to three exit bytes, also from match states and in
+  reverse searches ([accel.rs][ra-accel], [search.rs][ra-dfa-search]), and
+  from Hyperscan's McClellan acceleration ([mcclellan.c][hs-mcclellan]). First
+  described by regex-automata for the unrolled loop over runs of
+  self-transitions ([hybrid/search.rs][ra-hybrid-search]); by Hyperscan for
+  the stay form, whose McClellan acceleration scans for a state's escape class
+  of up to 160 bytes with shufti or truffle
+  ([accel_dfa_build_strat.cpp][hs-accel-dfa],
+  [mcclellancompile.cpp][hs-mcclellan-compile]); by memchr, whose
+  prefilter goes inert when its skips average under 8 bytes
+  ([searcher.rs][memchr-prefilter-state]); and, for the candidate-start
+  cursor, by PCRE, which scans start bits before each DFA match attempt
+  ([pcre2_dfa_match.c][pcre2-dfa-match]), and regex-automata, whose bounded
+  searches give up for a fallback ([limited.rs][ra-limited]). Inspired by gaps
+  against Joni and the Rust regex crate on counts ([#9], [#144], [#152]),
+  against native RE2 ([#163]), and on matches ending in a long self-loop run
+  ([#176]). Regulator: sampling 64 cached transitions before the
+  identity-first loop, the high-bit exit test, the count route and its
+  handoff, matching self-loops that keep their row, the stepped prefix, the
+  reverse probe, the streak of four short scans, the staying bytes as up to
+  four ranges tested by range compares, and anchored candidate confirmation
+  under a linear work budget ([#1], [#9], [#84], [#120], [#144], [#152],
+  [#163], [#176], [#202], [design][d-count-self-loop],
+  [design][d-self-loop-skips], [design][d-candidate-cursor]).
 - **Where:** `Dfa.scanSelfLoopTransitions`,
-  `Dfa.DfaInstance.selfLoopExitByteSet`
-- **Applies when:** Sampled non-matching byte-level loops such as `\C*` or
-  Latin-1 `[^\n]*`, or loops that stay on up to four byte ranges such as
-  `[A-Z]*`, Vector API
-- **What it does:** Once the sampled self-loop scan takes over, a non-matching
-  state that loops on every byte except 1 to 3 exit bytes, or whose staying
-  bytes form one to four ranges, vector-scans to the next byte that leaves it.
-  Matching self-loops and reverse searches are covered in
-  [Self-loop skips in matching and reverse searches](#self-loop-skips-in-matching-and-reverse-searches).
-
-### Self-loop skips in matching and reverse searches
-
-- **Origin:** Adapted from regex-automata's DFA acceleration, which also scans
-  from match states and in reverse searches ([accel.rs][ra-accel],
-  [search.rs][ra-dfa-search]); Inspired by gaps against the Rust regex crate
-  on counts ([#144], [#152]) and on matches ending in a long self-loop run
-  ([#176]). Regulator: matching self-loops that keep their row ([#144],
-  [#152]), the stepped prefix, the reverse probe, and high-bit exit sets
-  ([#176], [design][d-self-loop-skips]).
-- **Where:** `Dfa.scanMatchingSelfLoopTransitions`,
+  `Dfa.DfaInstance.selfLoopExitByteSet`, `Dfa.DfaInstance.selfLoopStayRanges`,
+  `VectorByteSetScanner.findOutsideRanges`,
+  `Dfa.searchForwardSampledSelfLoops`, `Dfa.shouldSampleSelfLoopTransitions`,
+  `Dfa.scanMatchingSelfLoopTransitions`,
   `Dfa.scanMatchingSelfLoopTransitionsBackward`, `Dfa.skipReverseSelfLoop`,
   `Dfa.searchAnchoredWithStop`, `Prog.hasLoop`,
-  `VectorByteSetScanner.findLast`, `VectorByteSetScanner.findLastHighBitOr`
-- **Applies when:** Forward matching self-loops in the paired continuation,
-  candidate-start checks, and inner-literal confirmation; reverse searches of
-  at least 64 bytes from a non-matching start, with no byte limit and no
-  earliest-match request; the vector skips need the Vector API
-- **What it does:** Matching self-loops in the paired continuation,
-  candidate-start checks, inner-literal confirmation, and reverse searches are
-  read on the `int[]` table, keeping their row; a reverse search probes for
-  one only when its program has a loop or can match empty. A matching
-  self-loop run is stepped for 32 bytes; if it continues, a vector scan for
-  the state's exit bytes, one to three bytes or 0x80–0xFF plus up to three
-  ASCII bytes, or for the first byte outside its one to four stay ranges,
-  finishes it. A reverse search probes up to five cached transitions back from
-  its end and, at a non-matching self-loop, skips back to the loop's last exit
-  byte; the reverse skip reads only the exit form. The non-matching forward
-  case is
-  [Self-loop exit-byte scan](#self-loop-exit-byte-scan).
-
-### Empty match at the start
-
-- **Origin:** Regulator; no prior art found.
-- **Where:** `Dfa.canReturnEmptyAtStart`
-- **Applies when:** Nullable patterns
-- **What it does:** A nullable start state whose next byte cannot begin a
-  match returns the empty match at once.
-
-### Candidate-start cursor
-
-- **Origin:** First described by PCRE, which scans start bits before each DFA
-  match attempt ([pcre2_dfa_match.c][pcre2-dfa-match]), and regex-automata,
-  whose bounded searches give up for a fallback ([limited.rs][ra-limited]).
-  Inspired by a gap against native RE2 ([#163]). Regulator: anchored DFA
-  confirmation under a linear work budget ([#163],
-  [design][d-candidate-cursor]).
-- **Where:** `Dfa.createCandidateStartCursor`, `Dfa.searchAnchoredCandidate`,
+  `VectorByteSetScanner.findLast`, `VectorByteSetScanner.findLastHighBitOr`,
+  `Dfa.searchForwardCountSelfLoopScan`,
+  `Dfa.DfaInstance.countSelfLoopExitByteSet`,
+  `VectorByteSetScanner.findHighBitOr`, `Dfa.countHandoffKeepsPairedRows`,
+  `VectorByteSetScanner.shortScanCount`, `Dfa.createCandidateStartCursor`,
+  `Dfa.searchAnchoredCandidate`,
   `RegexpMatcher.createLongSearchCandidateStartCursor`
-- **Applies when:** Reusable first-match matchers on patterns without capture
-  groups, variable-length and without anchors or assertions; the
-  [transparent start literal](#transparent-start-literal) has its own cursor
-- **What it does:** The DFA steps to each start-byte or filter candidate and
-  confirms it with an anchored traversal that reads matching self-loop runs in
-  one scan. When the confirmations exceed a linear work budget, or one runs
-  past 128 transitions, the search falls back to the forward and reverse
-  searches. A matcher builds it when constructed; a literal alternation's
-  matcher builds it on its first long search.
+- **Applies when:** The exit-byte scans need the Vector API; the sampled
+  loop's identity test, matching-run stepping, and the candidate-start cursor
+  do not. Non-matching byte-level loops such as `\C*` or Latin-1 `[^\n]*`, or
+  loops that stay on up to four byte ranges such as `[A-Z]*`, in end-anchored
+  or full-match searches of at least 64 KiB outside the paired loop, once 64
+  sampled cached transitions are at least 90% self-loops; forward matching
+  self-loops in the paired continuation, candidate-start checks, and
+  inner-literal confirmation; reverse searches of at least 64 bytes from a
+  non-matching start, with no byte limit and no earliest-match request, where
+  a reverse search looks for a matching self-loop only when the program has a
+  loop or can match empty; `count` of shapes such as `.*(x|y).*` or
+  `.*[^A-Z]|[A-Z]` from 64 bytes, which stops trying the scan after 8 searches
+  in a row that reach no eligible loop or scan only stay runs under 16 bytes;
+  a stopped scan uses an existing pointer table, where only a productive
+  search requests one and an unproductive search requests paired rows
+  instead, and a productive search takes paired rows only when no pointer
+  table can exist or paired rows are requested or built; the candidate-start
+  cursor on reusable first-match matchers of capture-free, variable-length
+  patterns without anchors or assertions, which falls back to the forward and
+  reverse searches once its confirmations exceed a linear work budget or one
+  runs past 128 transitions. After four scans in a row that each skip fewer
+  than 16 bytes, a loop steps byte by byte instead
+- **What it does:** A non-matching state that loops on every byte except 1 to
+  3 exit bytes, or whose staying bytes form one to four ranges of at most 128
+  bytes, vector-scans to the next byte that leaves it, and the sampled loop
+  tests row identity before decoding. A matching self-loop run is read on the
+  `int[]` table, keeping its row, and is stepped for 32 bytes; if it
+  continues, a vector scan for the state's exit bytes, one to three bytes or
+  0x80–0xFF plus up to three ASCII bytes, or for the first byte outside its
+  stay ranges, finishes it. A reverse search probes up to five cached
+  transitions back from its end and, at a non-matching self-loop, skips back
+  to the loop's last exit byte, reading only the exit form. A count jumps the
+  same way, with a high-bit test for non-ASCII exits. The candidate-start
+  cursor builds on these runs: it steps to each start-byte or filter candidate
+  and confirms it with an anchored traversal that reads matching self-loop
+  runs in one scan. rebar's cloud-flare `simplified-long` (`.*.*=.*` over
+  10,000 bytes) runs in 0.030 of its earlier time on Graviton and 0.012 on
+  Intel ([#176]), Trino's `.*(x|y).*` count over 32 KiB in 0.14 and 0.03
+  ([#9]), and with the cursor, RE2 and Rust cloud-flare `original` in 0.13 to
+  0.16 and rsc `no-exponential` in 0.57 to 0.63 ([#163]). With stay ranges,
+  rebar's curated `14-quadratic` (10x), which iterates `.*[^A-Z]|[A-Z]` over
+  capitals, goes from 785 µs to 51.6 µs on Graviton and from 642 µs to
+  50.8 µs on Intel ([#202]).
 
-### Group-zero forward cursor
+### Assertions on the DFA with lazy quit
 
-- **Origin:** Regulator; no prior art found ([design][d-forward-cursor]).
-- **Where:** `Dfa.createGroupZeroForwardCursor`, `Dfa.searchGroupZeroForward`
-- **Applies when:** Repeated `find` without captures
-- **What it does:** The forward DFA and its acceleration state are kept across
-  a matcher's group-zero finds instead of being set up for every match.
-
-### Lazy quit on Unicode word boundaries
-
-- **Origin:** Adapted from regex-automata's heuristic Unicode word boundaries,
-  which quit on every non-ASCII byte ([hybrid/dfa.rs][ra-hybrid]). Regulator:
-  quitting only from states that need an assertion ([#64], [#76]).
-- **Where:** `Dfa.DfaInstance.computeTransition`, `Dfa.DfaInstance.quits`
-- **Applies when:** Rust Unicode `\b` and `\B`; Java and Trino word boundaries
-- **What it does:** In a program whose word boundaries decode characters (Rust
-  Unicode `\b` and `\B`, Java and Trino `\b` and `\B`), the DFA quits only
-  when a state that needs any assertion meets a non-ASCII byte before or after
-  it; elsewhere ASCII decides the boundary.
-
-### Quit streak
-
-- **Origin:** Regulator: four quits in a row turn off the DFA for the rest of
-  a matcher's input ([#64]).
-- **Where:** `CompiledPattern.matchOnOrdinaryEngine`,
-  `RegexpMatcher.findGeneral`
-- **Applies when:** Programs whose DFA can quit next to non-ASCII bytes
-- **What it does:** After 4 DFA quits in a row, a matcher skips the DFA for
-  the rest of its input.
-
-### Java and Trino word boundaries on the DFA
-
-- **Origin:** Ported from RE2's word-boundary state flags ([dfa.cc][re2-dfa]);
-  Adapted from regex-automata's quit on non-ASCII neighbors
-  ([hybrid/dfa.rs][ra-hybrid]). Regulator: Java and Trino word characters on
-  the DFA ([#76]).
-- **Where:** `Dfa.dfaEmptyFlags`, `Dfa.DfaInstance.startFlags`
-- **Applies when:** Java and Trino `\b` and `\B`
-- **What it does:** Java and Trino word boundaries run on the DFA instead of
-  forcing the NFA. State flags decide them next to ASCII bytes, and the lazy
-  quit hands non-ASCII neighbors to an engine that decodes characters.
-
-### Context start caches
-
-- **Origin:** Ported from RE2's per-context start cache ([dfa.cc][re2-dfa]);
-  First described by regex-automata for the after-CR start
-  ([start.rs][ra-start]). Regulator: the Trino-line and after-non-ASCII
-  contexts ([#6], [#64]); base RE2 [O-DFA-014].
-- **Where:** `Dfa.DfaInstance.analyzeStart`, `Dfa.DfaInstance.crlfStartFlags`
-- **Applies when:** Every language
-- **What it does:** Start states are cached per context: begin text, begin
-  line, Trino line, after a word byte, after CR, after a non-ASCII byte, and
-  after a non-word byte. Flags are built only on a cache miss.
+- **Origin:** Adapted from regex-automata's heuristic Unicode word
+  boundaries, which quit on every non-ASCII byte ([hybrid/dfa.rs][ra-hybrid]);
+  Ported from RE2's word-boundary state flags ([dfa.cc][re2-dfa]); First
+  described by Hyperscan for lowering a final-line `$`
+  ([ComponentBoundary.cpp][hs-boundary], [buildstate.cpp][hs-buildstate]).
+  Regulator: quitting only from states that need an assertion, Java and Trino
+  word characters on the DFA, the four-quit streak, and the separate lowered
+  program with its group-zero conditions ([#64], [#76],
+  [design][d-trino-assertions]).
+- **Where:** `Dfa.DfaInstance.computeTransition`, `Dfa.DfaInstance.quits`,
+  `Dfa.dfaEmptyFlags`, `Dfa.DfaInstance.startFlags`,
+  `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
+  `BooleanRegexpLowering.lowerTerminalFinalLineEnds`,
+  `CompiledPattern.compileLoweredBooleanProgram`
+- **Applies when:** Rust Unicode `\b` and `\B`; Java and Trino `\b` and `\B`;
+  Trino final-line `$`, and Java `$` under `UNIX_LINES` (`(?d)`), with
+  group-zero bounds only when the expression is nonempty and cannot consume
+  LF. After 4 DFA quits in a row, a matcher skips the DFA for the rest of its
+  input. A transition that must quit throws before taking the lock and is
+  never stored, so other readers never see a quit state
+- **What it does:** In a program whose word boundaries decode characters, the
+  DFA quits only when a state that needs any assertion meets a non-ASCII byte
+  before or after it. Elsewhere ASCII decides the boundary through RE2's state
+  flags, with the JDK's and Joni's word characters for Java and Trino, and the
+  quit hands non-ASCII neighbors to an engine that decodes characters. A
+  second program rewrites a terminal final-line `$` as an optional LF and end
+  of text, so boolean calls and group-zero bounds run on the DFA instead of
+  the program with the text-dependent assertion. Rust rows with Unicode `\b`
+  or CRLF anchors, once they run on the DFA and OnePass, are 4.7 to 125 times
+  faster ([#64]), and Java and Trino Sherlock `word-ending-n` run in 0.044 to
+  0.056 of their earlier time ([#76]).
 
 ## DFA pointer table
 
@@ -1028,105 +819,49 @@ authoritative.
 
 ### Absolute-pointer table
 
-- **Origin:** Adapted from RE2's pointer rows ([dfa.cc][re2-dfa]). Regulator:
-  absolute row addresses in native memory, short-search promotion, and the
-  one-time wait for pairing ([#162], [design][d-native]).
+- **Origin:** Adapted from RE2's pointer rows and its dead and full-match
+  sentinel pointers ([dfa.cc][re2-dfa]); First described by Hyperscan, whose
+  McClellan state IDs carry accept and acceleration flags
+  ([mcclellan_internal.h][hs-mcclellan-flags]), and by regex-automata, whose
+  lazy state IDs carry match, dead, and other tags ([hybrid/id.rs][ra-id])
+  and are premultiplied row offsets into one flat transition table
+  ([hybrid/dfa.rs][ra-hybrid]). Regulator: absolute row addresses in native
+  memory, tags in their low bits, a zero-based heap segment so one set of
+  loops serves both forms, short-search promotion, the one-time wait for
+  pairing, and giving the table back before NFA fallback ([#162], [#165],
+  [design][d-native]); base RE2 [O-DFA-001], [O-DFA-002], [O-DFA-013].
 - **Where:** `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
   `Dfa.DfaInstance.allocateAbsolutePointerTable`,
   `Dfa.searchForwardAbsolutePointers`,
-  `Dfa.DfaInstance.shouldUseAbsolutePointersForShortSearch`
-- **Applies when:** DFAs with a finite budget, except many-match sets, in
-  either memory mode; long forward searches when pairing is unavailable, fused
-  counts, and eligible short searches
-- **What it does:** Each slot holds the next row's 64-bit address in native
-  memory, or its byte offset in a heap `long[]`, so a step follows the next
-  row without decoding an object reference, and the heap form needs one more
-  addition; zero means uncomputed and defers to the object rows. Eligible
-  searches under 256 bytes use an existing table at once, and request one
-  after 16 such searches. The first allocation waits once while paired rows
-  are still possible and no transition is computed.
-
-### Tagged terminal pointers
-
-- **Origin:** First described by Hyperscan, whose McClellan state IDs carry
-  accept and acceleration flags ([mcclellan_internal.h][hs-mcclellan-flags]),
-  and by regex-automata, whose lazy state IDs carry match, dead, and other
-  tags ([hybrid/id.rs][ra-id]); Adapted from RE2's dead and full-match
-  sentinel pointers ([dfa.cc][re2-dfa]). Regulator: the tags in the low bits
-  of a row's address or offset ([design][d-native]); base RE2 [O-DFA-001],
-  [O-DFA-002].
-- **Where:** `Dfa.searchForwardAbsolutePointers`,
-  `Dfa.DfaInstance.setAbsolutePointerTransition`
-- **Applies when:** Either form
-- **What it does:** Match, dead, and full-match transitions live in the low 3
-  bits of the row's address or offset, so the loop tests a tag instead of
-  loading the state's data.
-
-### Reverse pointer loop
-
-- **Origin:** Adapted from RE2, whose reverse DFA walks the same pointer rows
-  as the forward one ([dfa.cc][re2-dfa]). Regulator: the pointer-table form
-  and its search conditions ([design][d-native]).
-- **Where:** `Dfa.searchBackwardAbsolutePointers`
-- **Applies when:** A pointer table of either form; unbounded longest-match
-  reverse searches from a non-matching start
-- **What it does:** The reverse DFA walks the pointer table too.
-
-### Geometric growth within the budget
-
-- **Origin:** Regulator: room left for each new row's Java state, and backfill
-  before publishing ([#151], [design][d-native]).
-- **Where:** `Dfa.DfaInstance.sizeAbsolutePointerTransitionGrowth`,
-  `Dfa.DfaInstance.backfillAbsolutePointerTransitions`
-- **Applies when:** Either form; a heap pointer table is charged its array's
-  real size
-- **What it does:** The table starts small and grows geometrically as states
-  are added. Each allocation leaves the budget room for the Java state behind
-  every new row, and new segments are backfilled before they are published.
-
-### Superseded-segment cap
-
-- **Origin:** Regulator; no prior art found ([#151], [design][d-native]).
-- **Where:** `Dfa.DfaInstance.supersedeAbsolutePointerTransitions`,
-  `Dfa.DfaInstance.supersededAbsolutePointerMemoryAllows`
-- **Applies when:** Native tables that reset or grow; a superseded heap
-  pointer table is not counted or capped
-- **What it does:** A reset or growth allocates a new segment only while
-  counted superseded segments, with the one it replaces, total at most twice
-  the new one; otherwise the DFA runs on object rows until collection frees
-  enough of them.
-
-### Heap pointer table
-
-- **Origin:** First described by regex-automata, whose premultiplied state IDs
-  are row offsets into one flat transition table ([hybrid/dfa.rs][ra-hybrid]);
-  Adapted from RE2's pointer rows ([dfa.cc][re2-dfa]). Regulator: a zero-based
-  heap segment, so one set of tagged loops serves heap and native tables
-  ([#162], [design][d-native]).
-- **Where:** `Dfa.DfaInstance.allocateAbsolutePointerTable`,
-  `Dfa.DfaInstance.absolutePointerTableBytes`
-- **Applies when:** No `--enable-native-access`; the form is fixed per JVM
-- **What it does:** Without native access the same tagged table is a `long[]`
-  read through its heap segment, whose base address is zero, so one set of
-  loops and tags serves both forms; offset zero is a reserved row. It is
-  charged at the array's real size, a superseded table is ordinary garbage,
-  and a failed allocation falls back to object rows.
-
-### Table given back before NFA fallback
-
-- **Origin:** Regulator; no prior art found ([#165], [design][d-native]); base
-  RE2 [O-DFA-013].
-- **Where:** `Dfa.DfaInstance.releaseAbsolutePointerTransitionsForSlowReset`,
+  `Dfa.DfaInstance.shouldUseAbsolutePointersForShortSearch`,
+  `Dfa.DfaInstance.setAbsolutePointerTransition`,
+  `Dfa.searchBackwardAbsolutePointers`,
+  `Dfa.DfaInstance.absolutePointerTableBytes`,
+  `Dfa.DfaInstance.releaseAbsolutePointerTransitionsForSlowReset`,
   `Dfa.DfaInstance.countResetsTooOften`,
   `Dfa.DfaInstance.countHandsResetsToLock`
-- **Applies when:** DFAs holding a pointer table, or whose table was withheld
-  by the superseded-segment cap or an allocation failure
-- **What it does:** A search or count about to give up for resetting too often
-  gives the pointer table back instead, because its per-state charge fits
-  fewer states per reset. The next reset drops it, the search continues on
-  object rows, and the DFA gives up only if those resets come as often. A
-  count without the lock hands the judgment to a locked count. The table stays
-  given back for the life of the pattern's DFA.
+- **Applies when:** DFAs with a finite budget, except many-match sets, in
+  either memory mode, the heap form when the JVM runs without native access;
+  long forward searches when pairing is unavailable, fused counts, and
+  eligible short searches; the reverse loop on unbounded longest-match
+  reverse searches from a non-matching start. A search or count about to give
+  up to the NFA for resetting too often gives the table back instead, since
+  its per-state charge fits fewer states per reset, and continues on object
+  rows; the table stays given back for the life of the pattern's DFA
+- **What it does:** Each slot holds the next row's 64-bit address in native
+  memory, or its byte offset in a heap `long[]` read through a segment whose
+  base address is zero, so a step follows the next row without decoding an
+  object reference, and the heap form needs one more addition; zero means
+  uncomputed and defers to the object rows. Match, dead, and full-match
+  transitions live in the low 3 bits of the row's address or offset, so the
+  loop tests a tag instead of loading the state's data, and the reverse DFA
+  walks the same table. Eligible searches under 256 bytes use an existing
+  table at once, and request one after 16 such searches. The first allocation
+  waits once while paired rows are still possible and no transition is
+  computed. The native table ran DFA rows in 0.71 to 0.78 of object rows'
+  time ([design][d-native]); without native access, the heap form runs
+  `everything-greedy` in 0.32 to 0.33 of object rows' time, `any-one` in 0.65
+  to 0.75, and `03-date` in 0.74 to 0.78 ([#162]).
 
 ## Shared DFA concurrency
 
@@ -1151,319 +886,120 @@ those threads search.
   so a racy reader always sees one table generation; a missing entry retries
   the search under the cache lock. Paired rows and the first pointer table are
   built when a locked search ends; pointer-table growth and reset tables are
-  allocated under the lock when the cache grows or resets.
-
-### Racy performance hints
-
-- **Origin:** First described by the JDK's HotSpot profile counters, whose
-  data races degrade optimization but never correctness
-  ([methodData.hpp][hotspot-mdo]). Regulator: the paired-row, pointer-table,
-  and sampling counters ([design][d-concurrency]).
-- **Where:** `Dfa.DfaInstance.recordPairedSearch`,
-  `Dfa.DfaInstance.shouldUseAbsolutePointersForShortSearch`
-- **Applies when:** Every DFA
-- **What it does:** The counters that select paired rows, the pointer table,
-  and sampling outcomes are plain fields. Concurrent updates may change when a
-  heuristic takes effect, but never change results.
-
-### Quit transitions never cached
-
-- **Origin:** Regulator; no prior art found ([#64]).
-- **Where:** `Dfa.DfaInstance.computeTransition`
-- **Applies when:** Programs whose DFA can quit next to non-ASCII bytes
-- **What it does:** A transition that must quit throws before taking the lock
-  and is never stored, so other readers never see a quit state.
-
-### Inner literal pair in one call
-
-- **Origin:** Regulator; no prior art found ([#149]).
-- **Where:** `Dfa.searchReverseThenAnchoredWithStop`
-- **Applies when:** Patterns with an inner literal search
-- **What it does:** The reverse-prefix and forward-confirm searches of an
-  inner literal hit run in one call, each reading one captured table root
-  without the lock. If either needs a cache write, the two run separately.
+  allocated under the lock when the cache grows or resets. Without the
+  per-search reader registration this replaced, `03-date` count-spans run in
+  0.83 to 0.90 of their earlier time, and 56 DFA rows at a geomean of 0.94 to
+  0.95 ([#151]).
 
 ## OnePass, BitState, and NFA
 
 Capture searches use RE2's OnePass, BitState, and NFA engines in RE2's order.
-These entries cover what Regulator changed or added in them.
+These entries cover what Regulator changed or added in OnePass. BitState's
+bitmap, text limit, and eligibility, and the NFA's bounded capture passes, are
+in [Limits and defaults](REGULATOR_API.md#limits-and-defaults), and the
+capture work skipped for boolean and group-zero calls is in
+[Boolean-call shortcuts](#boolean-call-shortcuts).
 
 ### OnePass next-state offsets
 
 - **Origin:** Adapted from the Rust regex crate, whose DFAs premultiply state
-  IDs into row offsets ([dense.rs][ra-dense]). Regulator: the row offset
-  beside RE2's action in one `long` ([#138], [design][d-onepass-offsets]);
-  base RE2 [O-1PASS-001].
-- **Where:** `Prog.computeOnePass`, `OnePass.searchBoolean`
-- **Applies when:** Every one-pass program
+  IDs into row offsets ([dense.rs][ra-dense]); Ported from RE2 [O-1PASS-010],
+  whose full-match OnePass search checks for a match only after the text
+  ([onepass.cc][re2-onepass] `kFullMatch`); Inspired by a gap against the Rust
+  regex crate on full-match capture rows ([#150]). Regulator: the row offset
+  beside RE2's action in one `long`, and the call-free full-match loop that
+  leaves for assertions ([#138], [#150], [design][d-onepass-offsets]); base
+  RE2 [O-1PASS-001].
+- **Where:** `Prog.computeOnePass`, `OnePass.searchBoolean`,
+  `OnePass.searchExtendedCaptures`
+- **Applies when:** Every one-pass program; the call-free loop on full matches
+  with extended captures
 - **What it does:** Each action is stored as a `long`: the low half is RE2's
   action and the high half the next state's row offset. One load per byte
   gives both, so a step needs no multiply. Eligibility still uses RE2's memory
-  limit, computed with four-byte actions.
+  limit, computed with four-byte actions. Full-match extended-capture searches
+  load only the action and capture mask per byte; actions that need
+  assertions leave the inner loop, and match tables are read once after the
+  text is consumed. Rust and RE2 Unicode character data line parsing runs in
+  0.86 to 0.87 of its earlier time on Graviton and 0.94 on Intel ([#150]).
 
-### Extended OnePass captures
+### OnePass past RE2's limits
 
 - **Origin:** First described by the Rust regex crate, whose one-pass engine
   went past RE2's capture limit first, to 16, and whose transitions carry a
-  slot bitmask applied bit by bit ([onepass.rs][ra-onepass] `Slots`).
-  Regulator: parallel 64-bit masks beside RE2's packed action, for up to 31
-  groups ([design][d-onepass-ext]).
+  slot bitmask applied bit by bit ([onepass.rs][ra-onepass] `Slots`) and the
+  CRLF anchors and word boundaries they need, checked against the text
+  ([onepass.rs][ra-onepass] `Epsilons`). Regulator: parallel 64-bit masks
+  beside RE2's packed action, for up to 31 groups
+  ([design][d-onepass-ext]); one marker bit with parallel assertion masks,
+  Java and Trino word boundaries ([#64], [design][d-onepass-assert]), and
+  Java's `$` and `\Z` and Trino's `$` ([#128]).
 - **Where:** `OnePass.searchExtendedCaptures`,
-  `Prog.supportsOnePassCaptureSlots`
-- **Applies when:** One-pass programs with 5 to 31 explicit groups
+  `Prog.supportsOnePassCaptureSlots`, `OnePass.satisfyAction`,
+  `Prog.computeOnePass`
+- **Applies when:** One-pass programs with 5 to 31 explicit groups, or whose
+  text-dependent assertions are among those below. A program that is
+  one-pass only through the Java and Trino end anchors takes its tables'
+  memory after every plan and route and yields to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes;
+  otherwise it runs on BitState or the NFA
 - **What it does:** Parallel 64-bit capture masks let one-pass programs with
   more groups than RE2's packed word allows stay on OnePass; a separate loop
-  visits only the set bits. The small-capture loop is unchanged.
-
-### Call-free full-match loop
-
-- **Origin:** Ported from RE2 [O-1PASS-010], whose full-match OnePass search
-  checks for a match only after the text ([onepass.cc][re2-onepass]
-  `kFullMatch`); Inspired by a gap against the Rust regex crate on full-match
-  capture rows ([#150]). Regulator: the call-free inner loop that leaves for
-  assertions ([#138], [#150]).
-- **Where:** `OnePass.searchExtendedCaptures`
-- **Applies when:** Full matches with extended captures
-- **What it does:** Full-match extended-capture searches load only the action
-  and capture mask per byte. Actions that need assertions leave the inner
-  loop, and match tables are read once after the text is consumed.
-
-### Text-dependent assertions in OnePass
-
-- **Origin:** First described by the Rust regex crate, whose one-pass
-  transitions carry the CRLF anchors and word boundaries they need and check
-  them against the text ([onepass.rs][ra-onepass] `Epsilons`). Regulator: one
-  marker bit with parallel assertion masks, Java and Trino word boundaries
-  ([#64], [design][d-onepass-assert]), and Java's `$` and `\Z` and Trino's `$`
+  visits only the set bits, and the small-capture loop is unchanged.
+  Conditions that need a Rust CRLF-mode `^` or `$`, a Rust word assertion, a
+  Java or Trino word boundary, or a Java `$` or `\Z` or Trino `$` that also
+  matches before a final line terminator carry one marker bit, and the full
+  assertion mask comes from parallel arrays, so those programs stay on
+  OnePass too. Java and Trino Unicode character data line searches run in
+  0.61 to 0.76 of their earlier time on Graviton and 0.31 to 0.36 on Intel
   ([#128]).
-- **Where:** `OnePass.satisfyAction`, `Prog.computeOnePass`
-- **Applies when:** One-pass programs whose text-dependent assertions are
-  among those below
-- **What it does:** Conditions that need a Rust CRLF-mode `^` or `$`, a Rust
-  word assertion, a Java or Trino word boundary, or a Java `$` or `\Z` or
-  Trino `$` that also matches before a final line terminator carry one marker
-  bit, and the full assertion mask comes from parallel arrays. Those programs
-  stay on OnePass. A program that is one-pass only through those end anchors
-  takes its tables' memory after every plan and route, and only where every
-  forward DFA that could initialize still can; otherwise it runs on BitState
-  or the NFA.
-
-### OnePass boolean and group-zero loops
-
-- **Origin:** Ported from RE2 [O-1PASS-014], [O-1PASS-020], whose OnePass
-  search copies only the captures the caller asks for
-  ([onepass.cc][re2-onepass] `nmatch`); Inspired by .NET, whose runner modes
-  separate existence, bounds, and full-capture work
-  ([RegexRunnerMode.cs][dotnet-runner-mode]). Regulator: a separate loop for
-  each request, and captures written straight into the caller's array.
-- **Where:** `OnePass.searchBoolean`, `OnePass.searchGroupZero`,
-  `OnePass.captureFinalization`
-- **Applies when:** OnePass searches that request no captures, or only group
-  zero
-- **What it does:** Separate loops serve capture-free searches and group-zero
-  requests, which track only the match end. Captures are written straight into
-  the caller's array when finalization allows.
-
-### Larger BitState bitmap
-
-- **Origin:** First described by the Rust regex crate, whose bounded
-  backtracker defaults to a 256 KiB visited set and derives its text limit
-  from it ([backtrack.rs][ra-backtrack] `get_visited_capacity`). Regulator:
-  the large bitmap only for anchored searches, and a text limit that fits the
-  whole workspace in the memory budget ([#146], [#173],
-  [design][d-direct-bitstate]); base RE2 [O-BIT-003].
-- **Where:** `Prog.limitBitStateMemory`, `Prog.anchoredBitStateTextMaxSize`,
-  `BitState.maxTextLength`
-- **Applies when:** Anchored BitState searches
-- **What it does:** An anchored search's visited bitmap may reach 256 KiB
-  instead of RE2's 256 Kibit, so longer spans, such as the capture pass over a
-  span the DFA found, run one BitState pass. Unanchored searches keep RE2's
-  bitmap: each clears it over its whole window, and a find-all repeats them
-  from each match. Compilation then lowers the text limit until the bitmap,
-  slots, job stack, and objects fit the forward program's share of the memory
-  budget.
-
-### BitState for large programs
-
-- **Origin:** Adapted from the Rust regex crate ([backtrack.rs][ra-backtrack],
-  [#87]); base RE2 [O-BIT-002], [O-PROG-008].
-- **Where:** `Prog.flatten`, `Prog.canBitState`
-- **Applies when:** Large programs, such as Unicode classes with captures, on
-  short spans
-- **What it does:** Every program with at most 32,767 output lists gets
-  output-list IDs, not only programs of at most 512 instructions, so the
-  BitState memory limit, not program size, decides the span.
-
-### BitState step layout
-
-- **Origin:** Regulator; no prior art found ([#150], [#159]); base RE2
-  [O-BIT-015].
-- **Where:** `BitState.BitStateImpl.trySearch`, `BitState.initialJobCapacity`,
-  `BitState.nextJobCapacity`, `BitState.BitStateImpl.growStack`
-- **Applies when:** All BitState searches
-- **What it does:** Flattening stores each instruction's output-list ID, so a
-  step reads its next list beside its instruction word without decoding the
-  output. The job stack starts at the most jobs the search can hold, at least
-  16, when that fits the memory model's first stack of 16 to 64 entries, and
-  then never grows. Otherwise it starts at 16 entries and grows as needed, by
-  doubling and then straight to that maximum, never past it. A matcher's
-  workspace keeps the grown stack for later searches.
-
-### No-submatch NFA
-
-- **Origin:** Ported from RE2, whose NFA tracks only group zero when no groups
-  are requested ([nfa.cc][re2-nfa]); First described by Thompson (1968), whose
-  simulation keeps bare current and next state lists
-  ([CACM 1968][thompson-1968]), as Cox (2007) explains
-  ([article][cox-regexp1]), and by the Rust regex crate, whose PikeVM copies
-  only the requested slots from flat per-state slot tables
-  ([pikevm.rs][ra-pikevm] `SlotTable`). Regulator: one encoded start per queue
-  entry, with instructions read from flat per-program arrays.
-- **Where:** `Nfa.searchGroupZero`, `Nfa.NoSubmatchNfaImpl`
-- **Applies when:** Group-zero and boolean NFA searches
-- **What it does:** The group-zero and boolean NFA keeps only an encoded start
-  position per queue entry and reads instructions from flat per-program
-  arrays, with no capture arrays or thread objects.
-
-### Capture search in bounded passes
-
-- **Origin:** Regulator; no prior art found ([#146], [design][d-memory]).
-- **Where:** `Prog.flatten`, `Nfa.planCaptureSearches`,
-  `Nfa.searchInBoundedPasses`
-- **Applies when:** NFA capture searches whose workspace exceeds the forward
-  program's share of the memory budget
-- **What it does:** BitState and the NFA track only the slots through the
-  highest capture the simplifier keeps. An NFA capture search that does not
-  fit the forward program's share of the memory budget runs several passes,
-  each tracking group zero plus a window of slots, which together report what
-  one pass would.
-
-### Capture instruction words
-
-- **Origin:** Adapted from RE2, which packs each instruction's opcode and
-  output into one 32-bit word beside its arguments ([prog.h][re2-prog-h]
-  `Inst`). Regulator: the whole instruction packed into one `long` at compile
-  time ([#156]).
-- **Where:** `Prog.buildCaptureInstructionWords`
-- **Applies when:** Every flattened program
-- **What it does:** Each instruction is packed into one `long` (opcode,
-  output, capture or hint) for BitState and the capture NFA, built at compile
-  time.
 
 ## Counting
 
-`count` needs only match ends, so it has its own loops and counters.
-
-### Fused count
-
-- **Origin:** First described by .NET, whose `Regex.Count` finds every match
-  in one internal scan that needs only bounds
-  ([Regex.Count.cs][dotnet-count]). Regulator: one DFA session per count,
-  with the count and stop position packed in one `long`.
-- **Where:** `Dfa.countMatches`, `Dfa.searchForwardForCount`
-- **Applies when:** `count` on the DFA route
-- **What it does:** A count finds all its matches inside one DFA session
-  instead of one public call per match. The count and stop position are packed
-  into one `long`.
-
-### Count self-loop exit scan
-
-- **Origin:** Adapted from regex-automata's DFA acceleration, which scans for
-  a looping state's one to three exit bytes ([accel.rs][ra-accel]), and from
-  Hyperscan's McClellan acceleration ([mcclellan.c][hs-mcclellan]); First
-  described by Hyperscan's McClellan acceleration, which scans for a state's
-  escape class of up to 160 bytes with shufti or truffle
-  ([accel_dfa_build_strat.cpp][hs-accel-dfa],
-  [mcclellancompile.cpp][hs-mcclellan-compile]); Inspired by a gap against
-  Joni on counts ([#9]). Regulator: the high-bit exit test and the count route
-  ([#9], [design][d-count-self-loop]), and the staying bytes as up to four
-  ranges tested by range compares.
-- **Where:** `Dfa.searchForwardCountSelfLoopScan`,
-  `Dfa.DfaInstance.countSelfLoopExitByteSet`,
-  `Dfa.DfaInstance.selfLoopStayRanges`, `VectorByteSetScanner.findHighBitOr`,
-  `VectorByteSetScanner.findOutsideRanges`
-- **Applies when:** `count` of shapes such as `.*(x|y).*` or
-  `.*[^A-Z]|[A-Z]`, at least 64 bytes, Vector API
-- **What it does:** During a count, a looping state with up to three exit
-  bytes, optionally plus every byte 0x80–0xFF, or whose staying bytes form one
-  to four ranges of at most 128 bytes, jumps by vector scan to the next byte
-  that leaves it. A search advances a cutoff streak when it reaches no
-  eligible loop or scans only stay-form runs shorter than 16 bytes; any
-  exit-form scan or a stay run of at least 16 bytes clears it, and the count
-  stops trying after 8 such searches in a row.
-
-### Count handoff to the faster loop
-
-- **Origin:** Regulator; no prior art found ([#84]).
-- **Where:** `Dfa.countHandoffKeepsPairedRows`
-- **Applies when:** `count` on long input
-- **What it does:** When the exit scan stops, the count uses an existing
-  pointer table; only a productive search requests one, and an unproductive
-  search requests paired rows instead. A productive search takes paired rows
-  only when no pointer table can exist or paired rows are requested or built.
-
-### Sticky vector scan in counts
-
-- **Origin:** Inspired by a gap against the Rust regex crate on dense counts
-  ([#144]). Regulator: sampling at count start, with a vector choice that
-  holds ([#9], [#148], [design][d-once-per-count]).
-- **Where:** `Dfa.selectEveryMatchCountByteScanSet`,
-  `Dfa.countStartSampleCandidates`
-- **Applies when:** `count` with a start-byte scan
-- **What it does:** A count samples its start-byte scan at its start, with a
-  wider second sample for borderline cases. A vector choice holds for the
-  whole count; a scalar choice is resampled by later searches until one
-  selects the vector scan. A start literal or class filter is kept without
-  these samples, though long searches still sample its productivity.
-
-### Per-count NFA fallback
-
-- **Origin:** Adapted from RE2 [O-DFA-013], which gives up on the DFA one
-  search at a time; the skip after a streak of bails is Regulator's, no
-  earlier source found ([design][d-count-fallback]).
-- **Where:** `Dfa.countMatches`, `Dfa.DfaInstance.takeCountSkip`,
-  `Dfa.DfaInstance.recordCountBail`, `CompiledPattern.count`,
-  `TrinoRegexp.count`, `RegexpMatcher.findGeneral`
-- **Applies when:** `count`
-- **What it does:** When a count's DFA search gives up as too slow, that count
-  counts its text with a matcher whose finds skip the forward DFA, the
-  candidate start cursor and the group-zero forward cursor, so its fallback
-  adds no cache resets. After two DFA counts in a row give up, the pattern's
-  next 16 DFA counts, on any matcher or thread, skip the DFA and fall back at
-  once; then one tries the DFA again. A DFA count that does not give up ends
-  the streak, and a find outside a count never skips the DFA for it.
-
-### Retained-class count DFA
-
-- **Origin:** Regulator; no prior art found.
-- **Where:** `RetainedCharacterClassCountDfa.supports`,
-  `RetainedCharacterClassCountDfa.count`
-- **Applies when:** UTF-8 patterns with a DFA budget of at least 128 KiB, and
-  small case-sensitive greedy classes
-- **What it does:** A count of one class under `+` or another repeat with a
-  positive minimum runs on a DFA when class members are sparse. Input of 1 MiB
-  or more is sampled first; shorter input, or input whose sample holds many
-  members, uses the class-run counter below.
+`count` needs only match ends, so it has its own loops and counters. A count
+finds all its matches inside one DFA session instead of one public call per
+match, as .NET's `Regex.Count` finds every match in one internal scan
+([Regex.Count.cs][dotnet-count]).
 
 ### Class-run counter
 
 - **Origin:** First described by the JDK, whose greedy class repeat scans a
   run of members directly ([Pattern.java][jdk-pattern] `CharPropertyGreedy`),
-  and by Lamport (1975) for SWAR byte tests ([CACM 1975][lamport-swar]);
-  Inspired by a gap against the Rust regex crate on class counts for the byte
-  reads and branch-free updates ([#87], [#144]). Regulator: splitting each run
-  by the repeat's bounds ([#1], [design][d-class-count]), with a branch-free
-  run update ([#144]).
+  by Lamport (1975) for SWAR byte tests ([CACM 1975][lamport-swar]), and, for
+  skipping to a member's start, by Hyperscan, whose shufti scan finds a sparse
+  byte set with two nibble lookups ([shufti.c][hs-shufti]), and .NET, which
+  finds the characters that can start a match with `IndexOfAny`
+  ([.NET 5 regex][dotnet5-blog]); Inspired by gaps against the Rust regex
+  crate on class counts for the byte reads and branch-free updates ([#87],
+  [#144]) and on Unicode class extraction ([#91]). Regulator: splitting each
+  run by the repeat's bounds ([#1], [design][d-class-count]), a branch-free
+  run update ([#144]), and the member-start table, which also reads byte and
+  ASCII runs ([#91], [#112]).
 - **Where:** `BoundedCharacterClassCounter.analyzeRepeat`,
   `BoundedCharacterClassCounter.create`,
   `BoundedCharacterClassCounter.countBytes`,
-  `BoundedCharacterClassCounter.countUtf8`
-- **Applies when:** Non-nullable, unanchored greedy repeats of one class
+  `BoundedCharacterClassCounter.countUtf8`,
+  `BoundedCharacterClassCounter.findSpan`,
+  `BoundedCharacterClassCounter.findMemberStart`,
+  `BoundedCharacterClassCounter.byteRunEnd`,
+  `RetainedCharacterClassCountDfa.supports`,
+  `RetainedCharacterClassCountDfa.count`
+- **Applies when:** Non-nullable, unanchored greedy repeats of one class; span
+  searches serve matcher finds and anchored matching, not counts. In UTF-8,
+  with a DFA budget of at least 128 KiB, a count of a small case-sensitive
+  greedy class with a positive minimum runs on a DFA instead when class
+  members are sparse; input of 1 MiB or more is sampled first, and shorter
+  input, or input whose sample holds many members, uses the counter
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text
   decodes with a branch. UTF-8 text of ASCII and two-byte characters is
-  checked 32 bytes at a time with SWAR masks.
+  checked 32 bytes at a time with SWAR masks. Span searches skip bytes that
+  cannot begin a member, with a table or, for a sparse class, a vector nibble
+  scan; for byte and ASCII classes, the table also reads the whole run.
+  Letter-run counts take 0.55 to 0.62 of their earlier time on Graviton and
+  0.47 to 0.49 on Intel ([#144]), and finding every `\pL` or `\p{Ll}` letter
+  0.16 to 0.29 ([#91]).
 
 ## Scan plans
 
@@ -1474,268 +1010,140 @@ byte operations instead of an automaton.
 ### Bounded scan plan
 
 - **Origin:** Adapted from ClickHouse ([RegexpProgram.cpp][ch-regexp-program],
-  [#108004][ch-108004]), keeping its optional fork and its limits
-  ([coverage][scan-plan-coverage]); First described by .NET 5 (a restricted
-  non-backtracking subset with a depth bound,
-  [RegexCompiler.cs][dotnet5-regex-compiler]). Regulator: a Java interpreter
-  instead of LLVM code, dedicated delimited-capture and tail operations, and
-  its own operation, literal, and group limits ([#10], [#31], [#41]).
-- **Where:** `ScanPlan.Builder.emit`, `ScanPlan.Builder.flatten`
+  [#108004][ch-108004]), keeping its optional fork, its limits
+  ([coverage][scan-plan-coverage]), and its check that a run's members are
+  disjoint from what follows (`analyzeFirst`); Adapted from RE2 for the
+  `x{n,m}` expansion ([simplify.cc][re2-simplify]) and from the JDK for Java's
+  `$` ([Pattern.java][jdk-pattern] `Pattern.Dollar`). First described by
+  .NET 5 (a restricted non-backtracking subset with a depth bound,
+  [RegexCompiler.cs][dotnet5-regex-compiler]; auto-atomic loops and
+  `UpdateBumpalong`, [RegexNode.cs][dotnet5-regex-node]; a `FindFirstChar`
+  scan before each attempt, [.NET 5][dotnet5-blog]), PCRE2
+  (auto-possessification, [pcre2_auto_possess.c][pcre2-auto-possess]),
+  McKeeman (1965) for peephole rewrites
+  ([peephole optimization][mckeeman-1965]), RE2 (prefix acceleration,
+  [prog.h][re2-prog-h]; starting past bytes a cheaper check already matched,
+  [re2.cc][re2-re2]; a DFA that gives up to the NFA, [dfa.cc][re2-dfa]), and
+  memchr (a prefilter that turns itself off when its skips are short,
+  [searcher.rs][memchr-prefilter-state]). Inspired by ClickHouse
+  ([CompileRegexp.cpp][ch-compile-regexp]), which backtracks over the same
+  four optionals with no stack by duplicating the continuation in code, skips
+  past a failed leading run, and jumps an all-byte run straight to the input
+  end. Regulator: a Java interpreter instead of LLVM code, dedicated
+  delimited-capture and tail operations, its own operation, literal, and
+  group limits, retry state packed into primitive locals, the resume into a
+  superset run, the work-budget and failure-density handoff, and extract
+  without a matcher ([#10], [#17], [#31], [#41], [#158]).
+- **Where:** `ScanPlan.Builder.emit`, `ScanPlan.Builder.flatten`,
+  `ScanPlan.matchEndAnchored`, `ScanPlan.matchUnanchoredAt`,
+  `ScanPlan.Builder.verifyContinuations`, `ScanPlan.Builder.compact`,
+  `ScanPlan.Builder.emitFixedLiteralRepeat`, `ScanPlan.search`,
+  `ScanPlan.searchWholeLiteralCandidates`, `ScanPlan.findLiteralAtProbe`,
+  `ScanPlan.findFailureResumeOperation`, `ScanPlan.resumeAfterFailedAttempt`,
+  `ScanPlan.searchBeforeHandoff`, `ScanPlan.handOff`,
+  `ScanPlan.endsBeforeJavaFinalTerminator`,
+  `ScanPlan.Builder.stopsWhereJavaFinalEndAllows`, `TrinoRegexp.extract`
 - **Applies when:** Nonempty leftmost-first patterns in every regex language
   that fit the operation set and limits; an unanchored plan also needs a
-  capture group
+  capture group. A variable-length run is accepted only when its members are
+  disjoint from the bytes that can follow it, so a greedy run never gives
+  bytes back, and a Java plan keeps a final `$` only when a run that can reach
+  it admits none of Java's line terminators, or all of them and is unbounded.
+  An unanchored search hands the rest of the input to the ordinary engine
+  once its failed attempts have examined more than 2048 bytes plus 4 times the
+  distance it has advanced, or, on boolean finds of ASCII plans not led by a
+  literal with at least 256 bytes left, once the failures average fewer than
+  32 bytes apart, so plan searches stay linear
 - **What it does:** A pattern is lowered to literal, folded literal, optional,
   fork, run, save, delimited capture, and tail operations, run by a dedicated
   interpreter or a generated class. Plans are capped at 32 operations plus an
   end operation, 4 optionals or forks, 256-byte literals, 16 groups, nesting
-  depth 16, and repeat counts of 1000, so attempts stay bounded and retry
-  state fits in primitive locals.
-
-### Packed retry stack
-
-- **Origin:** Inspired by ClickHouse ([CompileRegexp.cpp][ch-compile-regexp]),
-  which backtracks over the same four optionals with no stack by duplicating
-  the continuation in code. Regulator: retry positions and operation indexes
-  packed into `long` and `int` locals ([#10]).
-- **Where:** `ScanPlan.matchEndAnchored`, `ScanPlan.matchUnanchoredAt`
-- **Applies when:** Plans with optionals or forks
-- **What it does:** Retry positions are packed as 32-bit values into two
-  `long` locals, and 6-bit operation indexes into an `int`, with no heap
-  stack.
-
-### Continuation disjointness
-
-- **Origin:** Ported from ClickHouse ([RegexpProgram.cpp][ch-regexp-program]
-  `analyzeFirst`, [#10]); First described by PCRE2 (auto-possessification,
-  [pcre2_auto_possess.c][pcre2-auto-possess]) and .NET 5 (auto-atomic loops,
-  [RegexNode.cs][dotnet5-regex-node]).
-- **Where:** `ScanPlan.Builder.verifyContinuations`
-- **Applies when:** Every variable-length run
-- **What it does:** A variable-length run is accepted only when its members
-  are disjoint from the bytes that can follow it, so a greedy run never gives
-  bytes back.
+  depth 16, and repeat counts of 1000, so attempts stay bounded; retry
+  positions are packed as 32-bit values into two `long` locals and 6-bit
+  operation indexes into an `int`, with no heap stack. On start-anchored,
+  fork-free plans with at most three captures, run, delimiter, and capture
+  fold into one delimited-capture operation, and on such Trino plans that are
+  also end-anchored, `.*` and `[^\n]*` tails fold into tail operations; and a
+  small bounded repeat of a literal of two or more bytes, `lit{n,m}`, expands
+  into one literal of `n` copies and `m-n` optional literals instead of a
+  counted loop. An unanchored plan scans for the next candidate start, and a
+  plan led by a case-sensitive literal checks the whole literal at each
+  probe-byte hit before attempting. When a plan starts with a one-character
+  run followed by an unbounded run with no minimum whose class contains the
+  first, as in `[a-z][a-z0-9]*`, a failed attempt resumes at that run's end.
+  In the case-sensitive interpreter, a plan led by an uncaptured one-character
+  run starts each attempt at an ASCII candidate after that character, since
+  the candidate scan already matched it; the case-insensitive executor and
+  generated classes start at the first operation. A start-anchored plan
+  answers `regexp_extract` of a capturing group without allocating a matcher,
+  and generated classes do so for every plan. Trino's targeted scan workloads
+  take about 0.3 of their earlier time ([#10]), and Java and Rust URL captures
+  and extraction about 0.22 of the ordinary engine's time ([#41]).
 
 ### Boolean-call shortcuts
 
-- **Origin:** First described by RE2 (boolean calls stop at the earliest
-  match, [dfa.cc][re2-dfa]) and the Rust regex crate (`is_match` runs with no
-  capture slots, [strategy.rs][ra-strategy]); Inspired by a gap against RE2
-  ([#158]). Regulator: the save-free plan copy, the boolean-tail exit, and the
-  48-byte DFA route ([#10], [#31]).
+- **Origin:** Ported from RE2, whose OnePass search copies only the captures
+  the caller asks for ([onepass.cc][re2-onepass] `nmatch`, [O-1PASS-014],
+  [O-1PASS-020]) and whose NFA tracks only group zero when no groups are
+  requested ([nfa.cc][re2-nfa]); First described by RE2 (boolean calls stop at
+  the earliest match, [dfa.cc][re2-dfa]) and the Rust regex crate (`is_match`
+  runs with no capture slots, [strategy.rs][ra-strategy]), by Thompson
+  (1968), whose simulation keeps bare current and next state lists
+  ([CACM 1968][thompson-1968]), as Cox (2007) explains
+  ([article][cox-regexp1]), and by the Rust regex crate's PikeVM, which copies
+  only the requested slots from flat per-state slot tables
+  ([pikevm.rs][ra-pikevm] `SlotTable`); Inspired by .NET, whose runner modes
+  separate existence, bounds, and full-capture work
+  ([RegexRunnerMode.cs][dotnet-runner-mode]), and by a gap against RE2
+  ([#158]). Regulator: the save-free plan copy, the boolean-tail exit, the
+  48-byte DFA route ([#10], [#31]), a OnePass loop for each request, and one
+  encoded start per NFA queue entry.
 - **Where:** `ScanPlan.findBooleanTails`, `ScanPlan.withoutSaves`,
-  `ScanPlan.allowsOrdinaryShortBooleanMatch`
-- **Applies when:** Boolean calls
+  `ScanPlan.allowsOrdinaryShortBooleanMatch`, `OnePass.searchBoolean`,
+  `OnePass.searchGroupZero`, `OnePass.captureFinalization`,
+  `Nfa.searchGroupZero`, `Nfa.NoSubmatchNfaImpl`
+- **Applies when:** Boolean calls on scan plans; OnePass searches that request
+  no captures, or only group zero; group-zero and boolean NFA searches. The
+  48-byte DFA route needs the plan's find to take the general route and the
+  DFA to evaluate its assertions; Trino plans also need to consume only ASCII
 - **What it does:** An unanchored plan, or a start-anchored one with forks,
   answers a boolean call with a copy of the plan without saves; a plan with no
   end anchor returns once a run reaches its minimum when everything after it
   can match empty. A start-anchored plan with forks and no such tail answers
   inputs of at most 48 bytes on the ordinary DFA instead of replaying forks.
-  That applies when its find takes the general route and the DFA can evaluate
-  its assertions; Trino plans also need to consume only ASCII.
-
-### Peephole rewrites
-
-- **Origin:** First described by McKeeman (1965)
-  ([peephole optimization][mckeeman-1965]); Adapted from RE2 for the `x{n,m}`
-  expansion ([simplify.cc][re2-simplify]); Inspired by ClickHouse
-  ([CompileRegexp.cpp][ch-compile-regexp]), whose all-byte run jumps straight
-  to the input end. Regulator: the delimited-capture and tail folds ([#10]).
-- **Where:** `ScanPlan.Builder.compact`,
-  `ScanPlan.Builder.emitFixedLiteralRepeat`
-- **Applies when:** Run and capture folding on start-anchored, fork-free plans
-  with at most three captures, tail folding only on Trino plans anchored at
-  both ends; expansion on small bounded repeats of a literal of two or more
-  bytes
-- **What it does:** Run, delimiter, and capture fold into one
-  delimited-capture operation, `.*` and `[^\n]*` tails fold into tail
-  operations, and `lit{n,m}` expands into one literal of `n` copies and `m-n`
-  optional literals instead of a counted loop.
-
-### Separate executors
-
-- **Origin:** First described by RE2 (search loops specialized per flag
-  combination, [dfa.cc][re2-dfa]) and the JDK (separate case-folded `Slice`
-  node classes, [Pattern.java][jdk-pattern]). Regulator: one method per
-  attempt kind and fold, split to keep C2 profiles apart ([#10]).
-- **Where:** `ScanPlan.matchEndAnchored`, `ScanPlan.matchPartial`,
-  `ScanPlan.matchUnanchoredAt`, `ScanPlan.matchAsciiFoldedPartial`
-- **Applies when:** All plan calls
-- **What it does:** End-anchored, partial, and unanchored attempts each have
-  their own method and an ASCII-folded twin, so the folding test is not
-  repeated per operation.
-
-### Candidate search
-
-- **Origin:** Adapted from memchr (rare-byte rank,
-  [default_rank.rs][memchr-rank]) for the probe byte ([#13]); First described
-  by RE2 (prefix acceleration, [prog.h][re2-prog-h]) and .NET (a
-  `FindFirstChar` scan before each attempt, [.NET 5][dotnet5-blog]).
-  Regulator: the plan's candidate loop ([#10]).
-- **Where:** `ScanPlan.search`, `ScanPlan.searchWholeLiteralCandidates`,
-  `ScanPlan.findLiteralAtProbe`
-- **Applies when:** Unanchored plans
-- **What it does:** An unanchored plan scans for the next candidate start, and
-  a plan led by a case-sensitive literal of two or more bytes scans for that
-  literal's probe byte and checks the whole literal at each hit before
-  attempting.
-
-### Failure resume
-
-- **Origin:** First described by .NET 5 (`UpdateBumpalong`,
-  [RegexNode.cs][dotnet5-regex-node]) and ClickHouse (leading-run skip,
-  [CompileRegexp.cpp][ch-compile-regexp]) for resuming after a failed run's
-  end, and by RE2 ([re2.cc][re2-re2]) for starting past bytes a cheaper check
-  already matched. Regulator: the resume through a one-character run into a
-  superset run ([#10], [#158]).
-- **Where:** `ScanPlan.findFailureResumeOperation`,
-  `ScanPlan.resumeAfterFailedAttempt`
-- **Applies when:** Unanchored plans led by a one-character run
-- **What it does:** When a plan starts with a one-character run followed by an
-  unbounded run with no minimum whose class contains the first, as in
-  `[a-z][a-z0-9]*`, a failed attempt resumes at that run's end. A plan led by
-  a one-character run starts each attempt at an ASCII candidate after that
-  character, since the scan already matched it.
-
-### Handoff to the ordinary engine
-
-- **Origin:** First described by RE2 (the DFA gives up to the NFA when it
-  makes too little progress, [dfa.cc][re2-dfa]) and memchr (a prefilter that
-  turns itself off when its skips are short,
-  [searcher.rs][memchr-prefilter-state]). Regulator: the work budget against
-  distance advanced and the failure-density rule ([#10]).
-- **Where:** `ScanPlan.searchBeforeHandoff`, `ScanPlan.handOff`
-- **Applies when:** Unanchored plan searches; the density rule only on boolean
-  finds of ASCII plans not led by a literal, with at least 256 bytes left
-- **What it does:** A search hands off once its failed attempts have examined
-  more than 2048 bytes plus 4 times the distance it has advanced, or when the
-  failures, checked every eighth failure, average fewer than 32 bytes apart.
-  The rest of the input goes to the ordinary engine, so plan searches stay
-  linear.
-
-### Required-literal early reject
-
-- **Origin:** First described by Perl ([re_intuit_start][perl-regexec]), PCRE2
-  (required code unit, [pcre2_match.c][pcre2-match]), and ClickHouse (required
-  substring, [OptimizedRegularExpression.cpp][ch-optimized-regexp]); Adapted
-  from RE2 for the vector form (front-and-back scan, [prog.cc][re2-prog]);
-  First described by Muła (2016) ([simd-strfind][mula-strfind]). Regulator:
-  one check after the first failed attempt ([#10]).
-- **Where:** `ScanPlan.findRequiredLiteralOperation`,
-  `ScanPlan.containsRequiredLiteral`, `VectorScanner.containsLiteral`
-- **Applies when:** Unanchored plans not led by a literal, with a later
-  case-sensitive literal that every match passes
-- **What it does:** After the first failed attempt, the plan checks once that
-  a required literal occurs in the rest of the input; if not, the search ends.
-  The vector form tests the literal's first and last bytes in 16-byte blocks.
-
-### Overlapping-load literal compare
-
-- **Origin:** First described by .NET 5 (literals compared as words against
-  constants, [RegexCompiler.cs][dotnet5-regex-compiler]), .NET 7 (`[Aa]`
-  tested as `(ch | 0x20) == 'a'`, [.NET 7][dotnet7-blog]), ClickHouse (folded
-  bytes compared with OR `0x20`, [CompileRegexp.cpp][ch-compile-regexp]), and
-  memchr (an overlapping last load, [memchr.rs][memchr-generic]). Regulator:
-  one or two overlapping loads with per-position fold masks ([#10], [#24]).
-- **Where:** `ScanPlan.Step.matches`, `ScanPlan.Step.matchesAsciiFolded`,
-  `ScanPlan.Builder.emit`
-- **Applies when:** Literal operations; ASCII case pairs whose fold stays
-  ASCII
-- **What it does:** Literals of up to 16 bytes compare with one or two
-  overlapping loads of 1, 2, 4, or 8 bytes, and folded literals OR a `0x20`
-  mask into both sides. An ASCII pair such as `[Kk]` becomes a folded literal
-  byte instead of a two-member run.
-
-### Per-run stop selection
-
-- **Origin:** Adapted from ClickHouse ([CompileRegexp.cpp][ch-compile-regexp]
-  `emitConsumeRun`), which scans small sets or their complements with 16-byte
-  vectors and others with a table; First described by .NET 7 (`IndexOfAny` and
-  `IndexOfAnyExcept` loops, [RegexCompiler.cs][dotnet7-regex-compiler]) and
-  Hyperscan (acceleration chosen by stop-set size,
-  [accelcompile.cpp][hs-accelcompile]). Regulator: the four-byte limit ([#10],
-  [#43]).
-- **Where:** `ScanPlanRun.scan`, `VectorScanner.findRunStop`,
-  `ScanPlanRun.matchMinimum`
-- **Applies when:** Every run
-- **What it does:** Each run precomputes how to find its stop: 16-byte vector
-  compares when it has at most four member bytes or at most four excluded
-  bytes, otherwise a scalar membership table. `{n,}` runs check their minimum
-  in the same pass.
-
-### Run candidate scan
-
-- **Origin:** First described by Hyperscan (shufti nibble tables,
-  [shufti.c][hs-shufti]) and memchr (small-set scans,
-  [memchr.rs][memchr-generic]) for the vector scans, and by musl
-  ([memchr.c][musl-memchr]) for scalar bytes checked ahead of a word scan.
-  Regulator: a fixed scalar check of up to 16 bytes before vector setup
-  ([#10]).
-- **Where:** `ScanPlanRun.findCandidate`, `VectorScanner.findRunCandidate`
-- **Applies when:** Run-led unanchored plans
-- **What it does:** Run-led candidates first check 1 to 16 bytes with scalar
-  code, then use a small-set, range, nibble-table, or needle vector scan, or
-  else a scalar membership table, so hits near the cursor pay no vector setup.
+  OnePass has separate loops for capture-free searches and group-zero
+  requests, which track only the match end, and writes captures straight into
+  the caller's array when finalization allows. The group-zero and boolean NFA
+  keeps only an encoded start position per queue entry and reads instructions
+  from flat per-program arrays, with no capture arrays or thread objects. The
+  save-free plan alone runs `quotedField` boolean contains in 0.90 to 0.93 of
+  its earlier time ([#158]).
 
 ### RE2-rule runs
 
-- **Origin:** Adapted from RE2 (UTF-8 byte ranges, [compile.cc][re2-compile]).
-  Regulator: run and set-run readers that keep such classes on the plan
-  ([#31], [#41], [#50]).
+- **Origin:** Adapted from RE2 for UTF-8 byte ranges and for interning trie
+  nodes through its rune cache ([compile.cc][re2-compile]); First described by
+  Daciuk et al. (2000) ([minimal acyclic automata][daciuk-2000]) and the Rust
+  regex crate ([Utf8Compiler][ra-utf8-compiler]) for sharing identical nodes.
+  Regulator: run and set-run readers that keep such classes on the plan, and
+  the trie's bounded in-place build in primitive tables ([#31], [#41], [#50],
+  [#52], [#107]).
 - **Where:** `ScanPlan.Builder.useRe2Runs`, `ScanPlanRun.re2Match`,
-  `ScanPlanRun.re2SetMatch`
+  `ScanPlanRun.re2SetMatch`, `Utf8MemberTable.of`
 - **Applies when:** RE2, Java, and Rust plans with non-ASCII classes
 - **What it does:** In RE2, Java, and Rust plans, non-ASCII classes become
   runs or set runs, so they stay on the plan. A run reads UTF-8 by RE2's
   compiled byte ranges, accepting the overlong and surrogate forms RE2 admits,
   and ends at a rejected byte. A set run tests membership in a UTF-8 member
-  trie.
-
-### UTF-8 member trie
-
-- **Origin:** First described by Daciuk et al. (2000)
-  ([minimal acyclic automata][daciuk-2000]) and the Rust regex crate
-  ([Utf8Compiler][ra-utf8-compiler]) for sharing identical nodes; Adapted from
-  RE2 for interning them (rune cache, [compile.cc][re2-compile]). Regulator:
-  the bounded in-place build and primitive tables ([#52], [#107]).
-- **Where:** `Utf8MemberTable.of`
-- **Applies when:** RE2-rule set runs
-- **What it does:** Set-run membership uses a trie with shared identical
-  nodes, interned in primitive open-addressing tables and built with bounded
-  memory.
-
-### Java final-terminator `$`
-
-- **Origin:** Adapted from the JDK (`Pattern.Dollar`,
-  [Pattern.java][jdk-pattern]). Regulator: the check on UTF-8 bytes and the
-  all-or-none run rule ([#41]).
-- **Where:** `ScanPlan.endsBeforeJavaFinalTerminator`,
-  `ScanPlan.Builder.stopsWhereJavaFinalEndAllows`
-- **Applies when:** Java plans ending in `$`
-- **What it does:** One helper checks Java's `$` before a final line
-  terminator, and the builder accepts a variable run that can reach `$`
-  without more input only if it admits none of Java's line terminators, or all
-  of them and is unbounded, so Java plans keep `$`.
+  trie whose identical nodes are shared, interned in primitive open-addressing
+  tables and built with bounded memory. Newly planned patterns with partial
+  non-ASCII sets run at a geometric mean of 0.16 of the ordinary engine's time
+  on Graviton and 0.14 on Intel ([#50]).
 
 ## Specialized matchers
 
 Some pattern shapes skip the automata entirely. Each matcher reports what the
 ordinary engine would.
-
-### Single-byte table
-
-- **Origin:** First described by the Rust regex crate, whose meta engine
-  answers an exact set of one-byte literals with a 256-entry table and no
-  regex engine ([strategy.rs][ra-strategy] `Pre::from_prefixes`,
-  [byteset.rs][ra-byteset]), and by the JDK's 256-entry class table
-  ([Pattern.java][jdk8-pattern] `BitClass`). Regulator: the table cursor for
-  one-byte repeats such as `x*`.
-- **Where:** `SingleByteMatcher.analyze`, `SingleByteMatcher.count`,
-  `SingleByteRepeatMatcher.analyze`
-- **Applies when:** One-byte patterns in every regex language; greedy
-  zero-or-more one-byte repeats in Trino count and cursor-based operations
-- **What it does:** A pattern that matches exactly one byte from a set counts
-  and finds with a 256-entry table, and one-byte repeats such as `x*` iterate
-  with the table and a cursor.
 
 ### Dot-star literal span
 
@@ -1750,14 +1158,16 @@ ordinary engine would.
 - **Applies when:** Unanchored, capture-free patterns of one case-sensitive
   literal between greedy `.*` gaps whose dots match any character but a line
   feed: Trino span operations, and counts and group-zero matcher finds in RE2,
-  Java with `(?d)`, and Rust; the matcher yields when its memory reservation
-  would prevent a forward DFA from initializing
+  Java with `(?d)`, and Rust; the matcher yields to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes
 - **What it does:** `.*lit.*` finds the literal's first occurrence with the
   pattern's contains search, then widens over the characters the dots match on
   each side. A count scans only the trailing dots and resumes at their end.
   ASCII bytes step inline, and after 16 ASCII bytes a run with at least 64
   bytes left switches to the vector scan the DFA count uses to leave a `[^\n]`
-  loop.
+  loop. Everyday `.*lit.*` counts in RE2 and Rust run in 0.26 to 0.32 of
+  their earlier time, and rebar's cloud-flare `simplified` rows in 0.007 to
+  0.12 ([#126]).
 
 ### Ordered literals
 
@@ -1771,89 +1181,92 @@ ordinary engine would.
 - **Applies when:** Unanchored chains of case-sensitive literals: Trino
   `contains` with dot-all gaps; full-input boolean finds in RE2 and Rust whose
   gaps match every byte sequence (RE2 `\C*` or Latin-1 `(?s:.*)`, Rust
-  bytes-API `(?s-u).*`); and LIKE `%a%b%c%`
+  bytes-API `(?s-u).*`), which yield to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes; and
+  LIKE `%a%b%c%`
 - **What it does:** `(?s)a.*b.*c` finds each literal in turn at its first
-  occurrence with `LiteralSearchKernel`. In RE2 and Rust the matcher yields
-  when its memory reservation would prevent a forward DFA from initializing. A
-  UTF-8 `(?s:.)` gap keeps the general engine, which rejects malformed UTF-8
-  there.
+  occurrence with `LiteralSearchKernel`. A UTF-8 `(?s:.)` gap keeps the
+  general engine, which rejects malformed UTF-8 there. On synthetic rows, RE2
+  Latin-1 and Rust bytes-API ordered-literal finds take 0.03 to 0.04 of their
+  earlier time on 1 KB rows and 0.31 to 0.42 on short rows ([#127]).
 
 ### Fixed-width byte span
+
+- **Origin:** First described by .NET 7's fixed-distance sets, which search
+  for one set with `IndexOfAny` and check the others around each hit
+  ([set choice][dotnet-fixed-distance-sets],
+  [search][dotnet-fixed-distance-search]), by Hyperscan's lookaround checks at
+  fixed offsets from a literal ([rose_build_lookaround.cpp][hs-lookaround]),
+  and, for a literal searched first with the repeat before it validated
+  backward, by nim-regex (2020) ([literals optimization][nim-litopt]) and
+  .NET's literal-after-loop search
+  ([RegexFindOptimizations.cs][dotnet-find], [.NET 7][dotnet7-blog]);
+  Inspired by a gap against the Rust regex crate on everyday span rows
+  ([#87]). Regulator: the shared fixed-width matcher and its short-row form
+  ([#87], [#125], [design][d-boolean]), and the `AB{n}x` matcher with an exact
+  count and an ASCII prefix.
+- **Where:** `FixedWidthByteSpanMatcher.analyze`,
+  `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
+  `CompiledPattern.shortFixedWidthByteMatcher`,
+  `DisjointSuffixRepeatMatcher.analyze`, `DisjointSuffixRepeatMatcher.search`
+- **Applies when:** Capture-free patterns, other than exact literals, of a
+  fixed count of 2 to 256 characters, in every language, whose scanned
+  position is an ASCII singleton (below) or passes the
+  [rare class scan](#fixed-width-rare-class-scan). When find also has an inner
+  literal search of two or more bytes, every language keeps that search, and a
+  second matcher answers only counts under 64 bytes and matcher finds with
+  under 64 bytes left. A pattern that yields to the engine keeps neither. The
+  `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
+- **What it does:** The matcher scans for one position, then checks the others
+  around each hit: a byte mask for ASCII, Latin-1, and Rust byte classes, one
+  decoded character for a UTF-8 class above ASCII. ASCII patterns of up to 64
+  bytes with a position that admits exactly one byte scan with `indexOf` for
+  the byte the first such position accepts. In `AB{n}x`, where `A` is a class
+  of ASCII characters, `B` a character class without `x`, `x` one ASCII
+  character, and `n` an exact count from 1 to 1000, the matcher finds `x` with
+  `indexOf` and validates the repeat backward, stopping at the previous `x`,
+  so no run is validated twice. RE2 ISO date and phone number contains run in
+  0.42 to 0.47 of the general engine's time ([#87]).
+
+### Fixed-width rare class scan
 
 - **Origin:** First described by Oniguruma's map search, which Joni ports: it
   picks a byte set at a known distance from the match start by a static
   per-byte weight and scans for it before the matcher runs
-  ([regcomp.c][onig-map-select], [regexec.c][onig-map-search]); by .NET 7's
-  fixed-distance sets, which search for one set with `IndexOfAny` and check
-  the others around each hit ([set choice][dotnet-fixed-distance-sets],
-  [search][dotnet-fixed-distance-search]); and by Hyperscan's lookaround
-  checks at fixed offsets from a literal
-  ([rose_build_lookaround.cpp][hs-lookaround]); Inspired by a gap against the
-  Rust regex crate on everyday span rows ([#87]). Regulator: the shared
-  fixed-width matcher, its short-row form, and its classes above ASCII ([#87],
-  [#125], [#194], [design][d-boolean]).
-- **Where:** `FixedWidthByteSpanMatcher.analyze`,
-  `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
-  `CompiledPattern.shortFixedWidthByteMatcher`
-- **Applies when:** Capture-free patterns, other than exact literals, of a
-  fixed count of 2 to 256 characters, in every language. The pattern is either
-  ASCII of up to 64 bytes with a position that admits exactly one byte, or has
-  a position that passes the [rare class scan](#fixed-width-rare-class-scan).
-  When find also has an inner literal search of two or more bytes, every
-  language keeps that search, and a second matcher answers only counts under 64
-  bytes and matcher finds with under 64 bytes left. A pattern that yields to the
-  engine keeps neither matcher.
-- **What it does:** The matcher scans for one position, then checks the others
-  around each hit: a byte mask for ASCII, Latin-1, and Rust byte classes, one
-  decoded character for a UTF-8 class above ASCII. ASCII patterns of up to 64
-  bytes with a position that admits exactly one byte find the first such
-  position with `indexOf`.
-
-### Fixed-width rare class scan
-
-- **Origin:** First described by Oniguruma, which picks a byte map at a
-  distance from the match start by static byte weights and scans for it
-  ([regcomp.c][onig-map-select], [regexec.c][onig-map-search]), and by .NET,
+  ([regcomp.c][onig-map-select], [regexec.c][onig-map-search]); by .NET 7,
   which ranks a pattern's fixed-distance character sets by character frequency
-  and searches for the rarest with a vector search
+  and searches for the rarest
   ([RegexFindOptimizations.cs][dotnet7-fixed-distance],
-  [RegexPrefixAnalyzer.cs][dotnet7-set-quality]). Regulator: the yield to the
-  engine's own scans ([#194], [design][d-fixed-width-rare]).
+  [RegexPrefixAnalyzer.cs][dotnet7-set-quality]); and by memchr and
+  aho-corasick for the handoff on dense candidates, whose per-search prefilter
+  state turns the prefilter off once its skips are many and short
+  ([searcher.rs][memchr-prefilter-state], [prefilter.rs][ac-prefilter]).
+  Regulator: the yield to the engine's own scans and the handoff thresholds
+  ([#194], [design][d-fixed-width-rare]).
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.scansRareCandidate`,
+  `FixedWidthByteSpanMatcher.countOrBail`,
+  `FixedWidthByteSpanMatcher.findSpanOrBail`,
   `CompiledPattern.yieldsToEngineRoute`
-- **Applies when:** Fixed-width patterns other than ASCII singleton patterns
-  of up to 64 bytes, whose rarest position English text holds under once in
-  100 bytes, in every language. The pattern keeps the engine when its program
-  skips to a literal prefix, a forward DFA would search a start literal filter,
-  or the class-run counter takes a pattern whose candidate has bytes above
-  ASCII.
-- **What it does:** The matcher scans for the first bytes of the position
-  English text holds least, rating bytes above ASCII at the rarest ASCII
-  byte's rate and preferring an ASCII position. A position with one first
-  byte is found with `indexOf`. One with several takes the byte-set vector
-  scans, the [small byte-set vector scan](#small-byte-set-vector-scan) or the
-  [range and nibble-table scans](#range-and-nibble-table-scans), with the DFA's
-  [scan productivity sampling](#scan-productivity-sampling). A byte table
-  answers searches under 64 bytes, searches the sampling demotes, and every
-  search without the Vector API.
-
-### Fixed-width dense-candidate bail
-
-- **Origin:** First described by memchr and aho-corasick, whose per-search
-  prefilter state turns the prefilter off once its skips are many and short
-  ([searcher.rs][memchr-prefilter-state], [prefilter.rs][ac-prefilter]).
-  Regulator: the thresholds and the hand-off to the engine ([#194],
-  [design][d-fixed-width-rare]).
-- **Where:** `FixedWidthByteSpanMatcher.findSpanOrBail`,
-  `FixedWidthByteSpanMatcher.countOrBail`, `CompiledPattern.findOnFixedWidth`,
-  `CompiledPattern.countOnFixedWidth`
-- **Applies when:** Rare class scans whose candidate holds bytes above ASCII,
-  in every language
-- **What it does:** A find or a whole count that has failed on at least 64
-  candidates at more than one per 32 bytes hands the rest of that search to
-  the engine. A count keeps its matches and counts on from the last match end;
-  a find restarts from its start. The next search scans again.
+- **Applies when:** Fixed-width patterns in every language that have a
+  position whose first bytes' estimated English-text frequencies sum to under
+  1 in 100, other than ASCII singleton patterns of up to 64 bytes. The pattern
+  keeps the engine when its program skips to a literal prefix, a forward DFA
+  would search a start literal filter, or the class-run counter takes a
+  pattern whose candidate has bytes above ASCII. A candidate above ASCII hands
+  the rest of one find or whole count to the engine once it has failed on at
+  least 64 candidates at more than one per 32 bytes; the next search scans
+  again
+- **What it does:** The matcher sums the estimated English-text frequencies
+  of each position's first bytes, rating bytes above ASCII at the rarest ASCII
+  byte's rate, and scans for the first bytes of the position with the lowest
+  sum, preferring an ASCII position. A position with one first byte is found
+  with `indexOf`; one with several takes the
+  [vector byte-set scan](#start-byte-and-byte-set-scans) with the DFA's
+  sampling of scan productivity, or a byte table without the Vector API.
+  Counts of `[0-9]{4}` run 19 to 34 times faster, and a class repeat that once
+  overran the DFA, such as `[a-q][^u-z]{80}[x\xE0-\xFF]`, 740 to 1,390 times
+  faster ([#194]).
 
 ### Literal alternation trie
 
@@ -1868,45 +1281,42 @@ ordinary engine would.
   `LiteralAlternationSpanMatcher.findSpan`,
   `LiteralAlternationSpanMatcher.holdsFilterRoute`
 - **Applies when:** Capture-free, case-sensitive literal alternations with
-  leftmost-first matching, in every regex language
+  leftmost-first matching, in every regex language; a boolean find that is
+  dense from its start defers to the DFA
 - **What it does:** Up to 64 alternatives of up to 64 bytes go in a byte trie
   with a root table. When the span matcher runs with a filter and at least 64
   bytes left, the start literal filter skips non-starts; a filter route whose
   stops stayed sparse keeps the filter for the next search instead of sampling
   again. With at least 64 KiB left in the search, a dense stretch switches to
-  the root-table loop, and a boolean find that is dense from its start defers
-  to the DFA.
+  the root-table loop. Rust Sherlock and Tom Sawyer name alternations run in
+  0.18 to 0.70 of the DFA's time ([#87]).
 
 ### Aho-Corasick for large literal sets
 
 - **Origin:** Ported from the aho-corasick crate
   ([noncontiguous.rs][ac-noncontiguous], [automaton.rs][ac-automaton]
-  `try_find_fwd`, [#82], [design][d-large-alternations]); First described by
-  Knuth (1973) (ordered-table search with a sentinel, [TAOCP][knuth-taocp]
-  vol. 3, §6.1) for the edge scan. Regulator: using a state's last edge as
-  the sentinel ([#160]).
+  `try_find_fwd`, [#82], [design][d-large-alternations]), including its
+  prefilter run whenever the search returns to the start state; First
+  described by Knuth (1973) (ordered-table search with a sentinel,
+  [TAOCP][knuth-taocp] vol. 3, §6.1) for the edge scan. Regulator: using a
+  state's last edge as the sentinel ([#160]), and the root skip's second-miss
+  trigger and byte-set scan for larger root sets ([#120]).
 - **Where:** `LiteralSetSpanMatcher.findSpan`,
-  `LiteralSetSpanMatcher.walkTrie`, `LiteralSetSpanMatcher.findChild`
+  `LiteralSetSpanMatcher.walkTrie`, `LiteralSetSpanMatcher.findChild`,
+  `LiteralSetSpanMatcher.walkTrieSkippingRootBytes`
 - **Applies when:** Unanchored leftmost-first find in every regex language;
-  every Trino operation
+  every Trino operation; the root skip with a vector-scannable root set and
+  64 bytes or more left, which steps byte by byte after four short scans in a
+  row
 - **What it does:** A capture-free alternation of more than 64 literals
   searches a leftmost-first Aho-Corasick automaton ported from the
   aho-corasick crate's noncontiguous NFA. A trie step rejects a byte above
   the state's last edge first, so its scan over the sorted edges needs no
-  bound test.
-
-### Aho-Corasick root skip
-
-- **Origin:** First described by the aho-corasick crate, which runs its
-  prefilter whenever the search returns to the start state
-  ([automaton.rs][ac-automaton] `try_find_fwd`). Regulator: the second-miss
-  trigger and the byte-set scan for larger root sets ([#120]).
-- **Where:** `LiteralSetSpanMatcher.walkTrieSkippingRootBytes`
-- **Applies when:** Large literal sets with a vector-scannable root set, 64
-  bytes or more left
-- **What it does:** At the trie root, the matcher skips to the next root byte
-  with a byte-set scan, from the second root miss in a row and under the
-  short-scan rule.
+  bound test. At the trie root, from the second root miss in a row, the
+  matcher skips to the next root byte with a byte-set scan. rebar's
+  43,029-word `english-10` dictionary search runs 300 to 590 times faster than
+  the NFA it fell back to, now 1.3 to 1.4 times the regex crate's time
+  ([#82]).
 
 ### Word-run plan
 
@@ -1921,89 +1331,38 @@ ordinary engine would.
   between two word boundaries
 - **What it does:** `\b\w+\b` and bounded `\b\w{m,n}\b` scan maximal ASCII
   word runs and check only the two end boundaries. With a minimum greater than
-  one, the scan probes ahead to step over short words.
-
-### Disjoint-suffix repeat
-
-- **Origin:** First described by nim-regex (2020), which finds a literal that
-  the preceding part cannot match and runs that part backward
-  ([literals optimization][nim-litopt]), and by .NET's literal-after-loop
-  search ([RegexFindOptimizations.cs][dotnet-find], [.NET 7][dotnet7-blog]).
-  Regulator: the `AB{n}x` matcher with an exact count and an ASCII prefix.
-- **Where:** `DisjointSuffixRepeatMatcher.analyze`,
-  `DisjointSuffixRepeatMatcher.search`
-- **Applies when:** Capture-free, case-sensitive patterns of that shape, in
-  every regex language
-- **What it does:** In `AB{n}x`, `A` is a class of ASCII characters, `B` a
-  character class without `x`, `x` one ASCII character, and `n` an exact count
-  from 1 to 1000. The matcher finds `x` with `indexOf` and validates the
-  repeat backward, stopping at the previous `x`, so no run is validated twice.
-
-### Whole-input capture plan
-
-- **Origin:** First described by .NET, whose generated code turns a dot-all
-  `.*` into a jump to the input's end
-  ([RegexGenerator.Emitter.cs][dotnet7-emitter]); Inspired by a gap against
-  the Rust regex crate on byte-mode workloads ([#87]). Regulator: setting
-  every capture from the input bounds after UTF-8 validation ([#1]), and the
-  any-byte and Latin-1 forms that skip validation ([#87]).
-- **Where:** `WholeInputCapturePlan.analyze`, `WholeInputCapturePlan.matches`
-- **Applies when:** Anchored whole-input greedy dot-all or any-byte `.*` with
-  captures
-- **What it does:** For `(?s)^(.*)$`-like patterns, the matcher validates
-  UTF-8, or skips validation for any-byte and Latin-1 dots, and sets each
-  capture's start and end to 0 or the input length.
-
-### Member-start skip
-
-- **Origin:** First described by Hyperscan, whose shufti scan finds a sparse
-  byte set with two nibble lookups ([shufti.c][hs-shufti]), and by .NET, which
-  finds the characters that can start a match with `IndexOfAny`
-  ([.NET 5 regex][dotnet5-blog]); Inspired by a gap against the Rust regex
-  crate on Unicode class extraction ([#91]). Regulator: the member-start
-  table, which also reads byte and ASCII runs ([#91], [#112]).
-- **Where:** `BoundedCharacterClassCounter.findSpan`,
-  `BoundedCharacterClassCounter.findMemberStart`,
-  `BoundedCharacterClassCounter.byteRunEnd`
-- **Applies when:** Class-run span searches
-- **What it does:** Class-run span searches, used by matcher finds and
-  anchored matching but not counts, skip bytes that cannot begin a member,
-  with a table or, for a sparse class, a vector nibble scan. For byte and
-  ASCII classes, the table also reads the whole run.
+  one, the scan probes ahead to step over short words. RE2 and Unicode-off
+  Rust iterate `\b\w+\b` over English in 0.37 to 0.49 of the DFA's time, and
+  Java and Trino `long-english` and `boundary-long-english` take 0.017 to 0.17
+  ([#139]).
 
 ## Generated bytecode
 
 With `Options.setGenerateBytecode(true)`, off by default, an eligible pattern
 compiles into its own hidden class. Results never change; a pattern whose
-class cannot be generated stays interpreted. Its first entries, sealed classes
-and shapes and bound method handles, apply to every pattern, interpreted or
-generated.
+class cannot be generated stays interpreted. Its first entry, sealed classes
+and shapes, applies to every pattern, interpreted or generated.
 
 ### Sealed language classes and shapes
 
 - **Origin:** First described by the Rust regex crate (one strategy chosen
   when the regex is built, [strategy.rs][ra-strategy]). Regulator: sealed
   language classes with one shape subclass per route, for C2 call-site
-  profiles ([#106], [#108], [design][d-boolean]).
-- **Where:** `CompiledPattern.selectRoutes`
+  profiles, and the Trino route set with direct matcher calls ([#106],
+  [#108], [design][d-boolean], [design][d-trino-adapter]).
+- **Where:** `CompiledPattern.selectRoutes`, `TrinoRegexp.compile`
 - **Applies when:** All regex languages, interpreted or generated
 - **What it does:** `Re2`, `JavaRegexp`, `RustRegexp`, and `TrinoRegexp` are
   sealed. Compilation picks one shape subclass, such as exact literal, class
   run, or scan plan, whose entries each call the route chosen for that
   operation; a route may still pick among its own kernels, but a call site
-  sees no strategy switch.
-
-### Bound method handles
-
-- **Origin:** First described by Trino (constant method handles bound into
-  generated classes, [CallSiteBinder.java][trino-callsitebinder]). Regulator:
-  entries such as `find` bound to one pattern ([#106],
-  [API guide][api-binding]).
-- **Where:** `CompiledPattern.find`
-- **Applies when:** Any pattern, generated or not
-- **What it does:** A caller can bind an entry such as `find` to a pattern;
-  when the handle is a constant, the JIT sees the exact class and can inline
-  its entry.
+  sees no strategy switch. Trino compilation tries literal alternation and
+  literal set, then picks begin-line, ordered literal, dot-star literal, exact
+  literal, fixed-width byte, character class, or a generated class, falling
+  back to the compiled pattern, and these classes call their matchers
+  directly instead of through the compiled pattern's dispatch. With other
+  patterns run first, short rows take 0.92 of the time of the shared route
+  chain, and exact-literal `matches` 0.18 to 0.50 ([#108]).
 
 ### Generated class is the pattern
 
@@ -2012,83 +1371,72 @@ generated.
   ([RJavaClassMachine.java][jitrex-machine]), and .NET (a `Regex` subclass per
   expression from .NET Framework's `CompileToAssembly`
   ([docs][dotnet-compile-to-assembly]) and .NET 7's source generator
-  ([.NET 7][dotnet7-blog])); Inspired by ClickHouse's regexp JIT
+  ([.NET 7][dotnet7-blog])); by Trino for constant method handles bound into
+  generated classes ([CallSiteBinder.java][trino-callsitebinder]); and by the
+  JDK for splitting a method to stay under the inline limit
+  ([ArrayList.java][jdk-arraylist] `add`). Inspired by ClickHouse's regexp JIT
   ([#108004][ch-108004]). Regulator: a hidden class that extends the
-  language's pattern class ([#17], [#31], [#106], [#131]).
+  language's pattern class, with route-fixed entries within C2's inline
+  limit, and entries such as `find` bound to one pattern ([#17], [#31],
+  [#106], [#131], [API guide][api-binding]).
 - **Where:** `ScanKernelGenerator.generateCompiledScanPattern`,
   `ScanKernelGenerator.generateCompiledTrinoPattern`,
-  `TrinoLikeKernelGenerator.generate`
-- **Applies when:** Scan-plan and LIKE patterns
+  `TrinoLikeKernelGenerator.generate`,
+  `ScanKernelGenerator.ScanEmitter.definePattern`,
+  `ScanKernelGenerator.ScanEmitter.defineTrino`, `CompiledPattern.find`
+- **Applies when:** Scan-plan and LIKE patterns; each routed public operation
+  is declared on the generated class with its route fixed, within C2's
+  325-byte hot-method inline limit; binding works on any pattern, generated or
+  not
 - **What it does:** The plan compiles into one hidden class through the
   `io.airlift:classfile` library. The class extends the language's pattern
-  class, so a call site sees the generated class directly.
+  class, so a call site sees the generated class directly. A caller can also
+  bind an entry such as `find` to a pattern; when the handle is a constant,
+  the JIT sees the exact class and can inline its entry. With 13 other
+  patterns run first, generated RE2, Java, and Rust patterns take 0.81 to
+  0.83 of their earlier time on short rows ([#106]), and generated Trino scan
+  plans 0.88 to 0.94 on `PLAN_0` dispatch rows ([#131]).
 
 ### Straight-line attempt code
 
 - **Origin:** Adapted from ClickHouse (code per operation with literals and
-  sets baked in as constants, [CompileRegexp.cpp][ch-compile-regexp]); First
-  described by .NET (a backtracking `switch` and word literal compares in
-  generated IL, [RegexCompiler.cs][dotnet5-regex-compiler]) and Jitrex
-  (`tableswitch` retries, [RJavaClassMachine.java][jitrex-machine]).
-  Regulator: class-data constants the JIT folds ([#17]).
+  sets baked in as constants, [CompileRegexp.cpp][ch-compile-regexp]) and, for
+  LIKE wildcards, from Baeza-Yates and Gonnet (1992)
+  ([Shift-And][bg-shift-and]); First described by .NET (a backtracking
+  `switch` and word literal compares in generated IL,
+  [RegexCompiler.cs][dotnet5-regex-compiler]; a generated `FindFirstChar` per
+  pattern, [.NET 5][dotnet5-blog]), ClickHouse (a generated start loop),
+  Jitrex (`tableswitch` retries, [RJavaClassMachine.java][jitrex-machine]),
+  Trino (a private copy of a shared class for each generated user,
+  [IsolatedClass.java][trino-isolated-class]) and Truffle (call-target
+  splitting for clean profiles, [Splitting.md][truffle-splitting]) for the
+  helper copies, and Spark SQL (huge-method fallback,
+  [WholeStageCodegenExec.scala][spark-codegen-limit]). Regulator: class-data
+  constants the JIT folds, the search's work budget, density limits, and probe
+  byte compiled in, and the code-point mask switch ([#17]).
 - **Where:** `ScanKernelGenerator.KernelEmitter.emitOperation`,
-  `TrinoLikeKernelGenerator.literalDiffers`
-- **Applies when:** Generated plans and LIKE
+  `TrinoLikeKernelGenerator.literalDiffers`,
+  `ScanKernelGenerator.ScanEmitter.emitCandidateLoop`,
+  `TrinoLikeKernelGenerator.LikeEmitter.defineWildcard`,
+  `TrinoLikeKernelGenerator.certainlyExceedsLimit`,
+  `TrinoLikeKernelGenerator.LikeEmitter.defineFindTail`
+- **Applies when:** Generated plans and LIKE. Generated code calls its own
+  copies of the scan, vector, and LIKE helpers, so generated and interpreted
+  paths keep separate C2 profiles. LIKE generation is refused when a lower
+  bound on method size, or a finished method, exceeds HotSpot's 8000-byte
+  huge-method limit
 - **What it does:** Each plan operation becomes code under its own label, with
   runs, literals, and steps bound as class-data constants the JIT folds, and
   retries resume through a `lookupswitch`. Literals of up to 16 bytes compare
-  against `int` or `long` constants with one or two loads.
-
-### Generated candidate search
-
-- **Origin:** First described by .NET (a generated `FindFirstChar` per
-  pattern, [.NET 5][dotnet5-blog]) and ClickHouse (a generated start loop,
-  [CompileRegexp.cpp][ch-compile-regexp]). Regulator: the work budget, density
-  limits, and probe byte compiled in as constants ([#17]).
-- **Where:** `ScanKernelGenerator.ScanEmitter.emitCandidateLoop`
-- **Applies when:** Unanchored generated plans
-- **What it does:** Unanchored plans get generated search code with the work
-  budget, density limits, and probe byte as constants, matching the
-  interpreter's candidates and handoffs.
-
-### Separate helper copies
-
-- **Origin:** First described by Trino (a private copy of a shared class for
-  each generated user, [IsolatedClass.java][trino-isolated-class]) and Truffle
-  (call-target splitting for clean profiles,
-  [Splitting.md][truffle-splitting]). Regulator: hand-kept source copies of
-  the scan, vector, and LIKE helpers ([#17], [#43]).
-- **Where:** `ScanKernelSupport.runMatch`,
-  `VectorScanKernelSupport.findRunStop`, `TrinoLikeKernelSupport.findKmp`
-- **Applies when:** Generated plans and LIKE
-- **What it does:** Generated code calls copies of the scan, vector, and LIKE
-  helpers, so generated and interpreted paths keep separate C2 profiles.
-
-### Inline-sized entries
-
-- **Origin:** First described by the JDK (`ArrayList.add` split to stay under
-  the inline limit, [ArrayList.java][jdk-arraylist]). Regulator: route-fixed
-  entries on the generated class within C2's 325-byte hot-method inline limit
-  ([#106], [#131]).
-- **Where:** `ScanKernelGenerator.ScanEmitter.definePattern`,
-  `ScanKernelGenerator.ScanEmitter.defineTrino`
-- **Applies when:** Generated patterns
-- **What it does:** Each routed public operation is declared on the generated
-  class with its route fixed, within C2's 325-byte hot-method inline limit.
-
-### Generation at compile time
-
-- **Origin:** First described by .NET (`RegexOptions.Compiled` generates code
-  in the `Regex` constructor, [.NET 5][dotnet5-blog]) and Jitrex (generation
-  inside `Pattern.compile`, [Pattern.java][jitrex-pattern]). Regulator:
-  hoisting pattern-independent metadata out of generation, and verifying a
-  class only after the JVM rejects it ([#105], [#109], [design][d-gen-re2]).
-- **Where:** `CompiledPattern.generateScanPattern`,
-  `ScanKernelGenerator.compile`
-- **Applies when:** Generated patterns
-- **What it does:** Classes are generated inside `compile`, never on first
-  use. Pattern-independent metadata is hoisted out of generation, and the
-  classfile library verifies a class only when the JVM rejects it.
+  against `int` or `long` constants with one or two loads. Unanchored plans
+  get generated search code with the work budget, density limits, and probe
+  byte as constants, matching the interpreter's candidates and handoffs. LIKE
+  wildcard patterns compile to a bit-parallel Shift-And automaton over code
+  points, one bit per pattern position, with a `switch` over the pattern's
+  code points for masks. Generated RE2, Java, and Rust plans take 0.51 to 0.60
+  of the interpreted plan's time and 0.11 to 0.13 of the ordinary engine's
+  ([design][d-gen-re2]), and generated LIKE runs the TPC-H LIKE predicates 1.4
+  times faster than the interpreted plan ([#17]).
 
 ## Trino SQL LIKE
 
@@ -2097,683 +1445,200 @@ kernels with the regex engines.
 
 ### Plan per pattern shape
 
-- **Origin:** First described by Spark SQL ([LikeSimplification][spark-like]);
-  Inspired by Trino ([LikeMatcher.java][trino-likematcher]). Regulator: the
-  literal-gap and wildcard plans and one `matches` switch ([#1]).
-- **Where:** `TrinoLikePattern.compile`, `TrinoLikePattern.matches`
-- **Applies when:** Every LIKE pattern
-- **What it does:** Compilation picks one plan: empty, equals, starts-with,
-  ends-with, contains, ordered literals, literal gaps, or wildcard. `matches`
-  runs one specialized routine for it.
-
-### Length bounds and anchored ends
-
-- **Origin:** Adapted from Trino ([LikeMatcher.java][trino-likematcher]).
-- **Where:** `TrinoLikePattern.compile`, `TrinoLikePattern.matches`
-- **Applies when:** All plans
-- **What it does:** Compilation records the minimum and maximum byte length,
-  so `matches` rejects a value outside them before any scan. Leading and
-  trailing literals are compared in place at the value's ends, and only the
-  middle goes to the plan.
-
-### Simple ASCII compile
-
-- **Origin:** First described by Spark SQL ([LikeSimplification][spark-like]).
-  Regulator: the separate ASCII compile path and single literal copy ([#8],
-  [#81]).
-- **Where:** `TrinoLikePattern.tryCompileSimpleAscii`
-- **Applies when:** `lit`, `lit%`, `%lit`, `%lit%`
-- **What it does:** An ASCII pattern with one literal shape and no escape
-  character copies the literal once and skips the general parser.
-
-### Short literals in pattern fields
-
-- **Origin:** First described by glibc (overlapping loads,
-  [memcmp.S][glibc-memcmp]) and .NET (word-sized literal compares,
-  [RegexCompiler.cs][dotnet5-regex-compiler]). Regulator: the words in the
-  pattern's fields and the rare-plan split under C2's inline limit ([#81],
-  [design][d-short-like]).
-- **Where:** `TrinoLikePattern.matches`, `TrinoLikePattern.matchesComplex`,
-  `LiteralMatchKernel.matchesShortLiteralAt`
-- **Applies when:** Equals, starts-with, and ends-with plans
-- **What it does:** A literal of 1 to 16 bytes is held as one or two `long`
-  words and compared with one or two loads and no loop, by the
-  [short-literal kernel](#short-literal-in-two-words). Rare plans live in a
-  separate method, so `matches` stays under C2's 325-byte hot-method inline
-  limit.
-
-### Contains and ordered plans on shared kernels
-
-- **Origin:** Adapted from Trino ([FjsMatcher.java][trino-fjs]) for ordered
-  literals; First described by memchr ([packedpair][memchr-packedpair]) for
-  the pair scan; Inspired by a gap against Trino on contains searches ([#28]).
-  Regulator: routing both plans to the shared literal kernels ([#28]).
-- **Where:** `LiteralSearchKernel.findContains`,
-  `OrderedLiteralMatcher.matches`
-- **Applies when:** Contains and ordered plans
-- **What it does:** `%lit%` of two or more bytes uses the call-free pair scan,
-  a one-byte literal uses a byte search, and `%a%b%c%` uses the
-  ordered-literal matcher.
-
-### Literal gaps
-
-- **Origin:** First described by PostgreSQL ([like_match.c][postgres-like])
-  for finding the first literal, stepping each `_` by one character, and
-  checking the rest in place; First described by memchr
-  ([packedpair][memchr-packedpair]) for the pair scan. Regulator: the
-  precompiled gap plan ([#1]) and its malformed-input step ([#17],
-  [design][d-like]).
-- **Where:** `LiteralGapMatcher.analyze`, `LiteralGapMatcher.matches`
-- **Applies when:** `%lit_lit…%` middles, after anchored end literals, of two
-  or more literals with a first literal of at least two bytes
-- **What it does:** `%lit_lit%` finds the first literal with the pair scan,
-  steps over each `_` by one UTF-8 character, and checks later literals in
-  place.
-
-### Wildcard-run normalization
-
-- **Origin:** Adapted from Trino ([LikeMatcher.java][trino-likematcher]).
-- **Where:** `TrinoLikeParser.parse`
-- **Applies when:** Patterns through the general parser
-- **What it does:** Each run of `%` and `_` becomes at most one counted `_`
-  step and one `%` step, so matchers see one gap per run.
-
-### Literal runs copied once
-
-- **Origin:** First described by .NET ([RegexParser.cs][dotnet-parser]).
-  Regulator: the byte-run form in the LIKE parser ([#8]).
-- **Where:** `TrinoLikeParser.parse`
-- **Applies when:** Literals before a pattern's first escape
-- **What it does:** Contiguous literal bytes are collected and copied once
-  into a pattern slice.
-
-### Position-set wildcard NFA
-
-- **Origin:** Adapted from Trino ([NfaMatcher.java][trino-nfamatcher]).
-- **Where:** `TrinoLikeWildcardMatcher.matches`
-- **Applies when:** Wildcard patterns outside the literal-gap shape, except
+- **Origin:** First described by Spark SQL ([LikeSimplification][spark-like]),
+  and for literal gaps by PostgreSQL, which finds the first literal, steps
+  each `_` by one character, and checks the rest in place
+  ([like_match.c][postgres-like]); Adapted from Trino for the length bounds,
+  anchored ends ([LikeMatcher.java][trino-likematcher]), and position-set
+  wildcard NFA ([NfaMatcher.java][trino-nfamatcher]). Regulator: the
+  literal-gap and wildcard plans, one `matches` switch ([#1]), and the gap
+  plan's malformed-input step ([#17], [design][d-like]).
+- **Where:** `TrinoLikePattern.compile`, `TrinoLikePattern.matches`,
+  `LiteralGapMatcher.analyze`, `LiteralGapMatcher.matches`,
+  `TrinoLikeWildcardMatcher.matches`
+- **Applies when:** Every LIKE pattern; literal gaps for `%lit_lit…%` middles,
+  after anchored end literals, of two or more literals with a first literal of
+  at least two bytes; the wildcard NFA for other `_` and `%` patterns, except
   those whose middle is one `_` run
-- **What it does:** General `_` and `%` patterns run an NFA over code points
-  that tracks a set of pattern positions.
-
-### Per-thread wildcard workspace
-
-- **Origin:** First described by Cox (2007) (list generation number,
-  [article][cox-regexp1]) for the generation counter; First described by the
-  Unicode Standard ([maximal subparts][unicode-maximal-subparts]) for the
-  malformed split. Regulator: the per-thread workspace ([design][d-like],
-  [design][d-malformed-like]).
-- **Where:** `TrinoLikeWildcardMatcher.matches`
-- **Applies when:** Wildcard matcher
-- **What it does:** One growable workspace per thread holds the state sets,
-  and a generation counter replaces clearing the seen set for each character.
-  ASCII bytes skip UTF-8 decoding, and each malformed sequence, split as
-  Unicode's U+FFFD substitution splits it, reads as one character that equals
-  no literal.
-
-### Straight-line `_` steps
-
-- **Origin:** First described by .NET (fixed-repeat unrolling,
-  [RegexCompiler.cs][dotnet5-regex-compiler]). Regulator: UTF-8 `_` runs of 1
-  to 4, sized to C2's counted-loop cost ([#17]).
-- **Where:** `TrinoLikeWildcardMatcher.matches`,
-  `TrinoLikeKernelGenerator.stepCharacter`
-- **Applies when:** Wildcard patterns whose middle is one `_` run of 1 to 4
-  characters; generated `_` gaps of up to 4 characters
-- **What it does:** When a pattern's middle is a single `_` run of 1 to 4
-  characters, the interpreter steps it with straight-line code, avoiding C2's
-  counted-loop setup. Generated classes unroll `_` gaps of up to 4 characters
-  the same way.
-
-### Generated Shift-And automaton
-
-- **Origin:** Adapted from Baeza-Yates and Gonnet (1992)
-  ([Shift-And][bg-shift-and]). Regulator: the generated class with a
-  code-point mask switch ([#17]).
-- **Where:** `TrinoLikeKernelGenerator.LikeEmitter.defineWildcard`
-- **Applies when:** Generated LIKE wildcard patterns
-- **What it does:** Wildcard patterns compile to a bit-parallel Shift-And
-  automaton over code points, one bit per pattern position, with a `switch`
-  over the pattern's code points for masks.
-
-### Generated method size guards
-
-- **Origin:** First described by Spark SQL (huge-method fallback,
-  [WholeStageCodegenExec.scala][spark-codegen-limit]). Regulator: refusing
-  from a lower bound before building, and the one-byte search finish split out
-  under C2's inline limit ([#17]).
-- **Where:** `TrinoLikeKernelGenerator.certainlyExceedsLimit`,
-  `TrinoLikeKernelGenerator.LikeEmitter.defineFindTail`
-- **Applies when:** Generated LIKE
-- **What it does:** Generation is refused when a lower bound on method size,
-  or a finished method, exceeds HotSpot's 8000-byte huge-method limit, and the
-  finish of a one-byte literal search is emitted as its own method to stay
-  within C2's 325-byte hot-method inline limit.
+- **What it does:** Compilation picks one plan: empty, equals, starts-with,
+  ends-with, contains, ordered literals, literal gaps, or wildcard. It also
+  records the minimum and maximum byte length, so `matches` rejects a value
+  outside them before any scan, then runs one specialized routine for the
+  plan. Leading and trailing literals are compared in place at the value's
+  ends, and only the middle goes to the plan. `%lit_lit%` finds the first
+  literal with the pair scan, steps over each `_` by one UTF-8 character, and
+  checks later literals in place. A middle that is one `_` run steps over its
+  characters directly, and other wildcard patterns run an NFA over code points
+  that tracks a set of pattern positions. Interpreted LIKE runs the seven
+  TPC-H LIKE predicates 1.45 times faster than Trino's LIKE ([#17]).
 
 ## Trino regular-expression operations
 
 Trino's SQL functions get routes and output planning on top of the shared
 engines.
 
-### Direct calls to specialized matchers
-
-- **Origin:** First described by the Rust regex crate
-  ([strategy.rs][ra-strategy]). Regulator: the Trino route set and direct
-  matcher calls ([design][d-trino-adapter], [design][d-boolean]).
-- **Where:** `TrinoRegexp.compile`
-- **Applies when:** Every Trino pattern
-- **What it does:** Compilation tries literal alternation and literal set,
-  then builds the compiled pattern and picks begin-line, ordered literal,
-  dot-star literal, exact literal, fixed-width byte, character class, or a
-  generated class, falling back to the compiled pattern. The specialized
-  classes call their matchers directly instead of through the compiled
-  pattern's dispatch.
-
-### Begin-line count
-
-- **Origin:** First described by memchr ([memchr.rs][memchr-count] `count`)
-  for counting one byte. Regulator: answering a count of lone multiline `^`
-  with that LF count ([#6], [design][d-trino-assertions]).
-- **Where:** `TrinoRegexp.BeginLineTrinoRegexp.count`
-- **Applies when:** Patterns that parse to multiline `^` alone
-- **What it does:** `regexp_count` of a pattern that is only multiline `^`
-  counts one plus the LF bytes before the final byte, without matching.
-
-### Count specializations
-
-- **Origin:** First described by .NET (bounds-only `Count`,
-  [Regex.Count.cs][dotnet-count]) and RE2 (span-only `Match`,
-  [re2.cc][re2-re2]). Regulator: the single-byte table, one-byte repeat, and
-  compiled-pattern count routes ahead of the group-zero matcher.
-- **Where:** `TrinoRegexp.count`
-- **Applies when:** `regexp_count`
-- **What it does:** `regexp_count` tries the single-byte table, the one-byte
-  repeat, the compiled pattern's count (see [Counting][counting-section]), and
-  then a group-zero matcher, with no capture work.
-
 ### Span-only operations
 
 - **Origin:** Ported from Trino
   ([JoniRegexpFunctions.java][trino-joni-functions]) for input views and the
   late code-point conversion; First described by RE2 (span-only `Match`,
-  [re2.cc][re2-re2]) for skipping capture work.
+  [re2.cc][re2-re2]) for skipping capture work, by .NET (bounds-only `Count`,
+  [Regex.Count.cs][dotnet-count]), and by memchr ([memchr.rs][memchr-count]
+  `count`) for counting one byte. Regulator: the count routes ahead of the
+  group-zero matcher, and answering a count of lone multiline `^` with that
+  LF count ([#6], [design][d-trino-assertions]).
 - **Where:** `TrinoRegexp.newGroupZeroMatcher`, `TrinoRegexp.extractAll`,
-  `TrinoRegexp.split`, `TrinoRegexp.position`
-- **Applies when:** Count, position, split, and extract-all without a group
+  `TrinoRegexp.split`, `TrinoRegexp.position`, `TrinoRegexp.count`,
+  `TrinoRegexp.BeginLineTrinoRegexp.count`
+- **Applies when:** Count, position, split, and extract-all without a group;
+  the LF count for patterns that parse to multiline `^` alone
 - **What it does:** Operations that need only the match span use a matcher
   with no capture groups. `regexp_extract_all` and `regexp_split` return views
   of the input, and `regexp_position` converts byte offsets to code points
-  once at the end.
-
-### Extract without a matcher
-
-- **Origin:** Regulator; no prior art found ([#17]).
-- **Where:** `TrinoRegexp.extract`
-- **Applies when:** Capturing groups of start-anchored scan-plan patterns;
-  generated scan plans
-- **What it does:** A start-anchored scan plan answers `regexp_extract` of a
-  capturing group without allocating a matcher, and generated classes do so
-  for every scan plan.
-
-### Cached replacement templates
-
-- **Origin:** First described by .NET (cached replacement,
-  [RegexReplacement.cs][dotnet-replacement]) and RE2 ([re2.cc][re2-re2]
-  `MaxSubmatch`). Regulator: the 256-byte cache bound, the named-reference
-  rule, and an allocation-free pre-scan ([#10]).
-- **Where:** `TrinoReplacementPlan.parseTemplate`,
-  `TrinoReplacementPlan.maximumReferencedGroup`
-- **Applies when:** `regexp_replace` with a replacement template
-- **What it does:** The template is parsed on the first match and cached on
-  the pattern when it is at most 256 bytes. An allocation-free pre-scan finds
-  the highest numbered group it references, or every group when it has a named
-  reference, and the matcher tracks groups only through that number.
-
-### Buffered and direct replacement output
-
-- **Origin:** First described by .NET (simple-text replace,
-  [RegexReplacement.cs][dotnet-replacement]) and the Rust regex crate
-  ([no_expansion][rust-replacen]). Regulator: the bounded record buffer
-  flushed in chunks and the static-helper replacer shaped for C2 ([#10]).
-- **Where:** `TrinoReplacementPlan.addMatch`,
-  `TrinoReplacementPlan.flushMatches`,
-  `TrinoReplacementPlan.groupFreeReplacer`
-- **Applies when:** `regexp_replace` with a replacement template
-- **What it does:** Matches whose replacement references capturing groups go
-  into a bounded buffer flushed in chunks into output that grows
-  geometrically. A replacement without group references is written straight to
-  the output by a per-match call small enough for C2 to inline; routes that
-  find their own match bounds use a small replacer whose helpers are static,
-  so C2 keeps its fields in registers across the match loop.
+  once at the end. `regexp_count` tries a one-byte pattern's table, the
+  one-byte repeat, the compiled pattern's count (see
+  [Counting][counting-section]), and then a group-zero matcher, with no
+  capture work; a pattern that is only multiline `^` counts one plus the LF
+  bytes before the final byte, without matching. Dense `regexp_count` of a
+  lone multiline `^` runs 6.7 to 11.5 times faster and allocates nothing
+  ([#6]).
 
 ## Matcher API
 
 `RegexpMatcher` reuses its search scratch across finds, and regions and results
-avoid copying input bytes.
-
-### Matcher-owned workspaces
-
-- **Origin:** First described by the Rust regex crate
-  ([regex.rs][ra-meta-regex] `Cache`) and Go regexp (pools,
-  [backtrack.go][go-backtrack]). Regulator: the matcher owning its scratch,
-  created on first use ([design][d-workspaces]).
-- **Where:** `OnePass.Workspace`, `BitState.Workspace`, `Nfa.Workspace`
-- **Applies when:** `RegexpMatcher` searches
-- **What it does:** A matcher creates its OnePass, BitState, and NFA scratch
-  on first use and reuses it across finds. The stateless `*Into` APIs allocate
-  per call instead.
-
-### Allocation-free regions
-
-- **Origin:** First described by the JDK ([Matcher.region][jdk-matcher]) and
-  the Rust regex crate ([Captures][rust-captures]). Regulator: the `Slice`
-  region reset ([design][d-regions]).
-- **Where:** `RegexpMatcher.reset`, `RegexpMatcher.toMatchResult`
-- **Applies when:** Region resets and results
-- **What it does:** `reset` with a region sets bounds without creating a
-  `Slice` view, and `MatchResult` keeps the caller's `Slice` with absolute
-  offsets.
+avoid copying input bytes, as
+[Matching APIs](REGULATOR_API.md#matching-apis) describes.
 
 ### Group-zero matcher routes
 
 - **Origin:** First described by the Rust regex crate
-  ([strategy.rs][ra-strategy]) for answering a literal alternation without a
-  regex engine; Inspired by a gap against the Rust regex crate ([#91]) for the
-  class-counter route. Regulator: the single-byte table route and the 64-byte
-  handoffs ([#122], [#123]).
+  ([strategy.rs][ra-strategy]) for answering a literal alternation, and an
+  exact set of one-byte literals with a 256-entry table
+  ([strategy.rs][ra-strategy] `Pre::from_prefixes`, [byteset.rs][ra-byteset]),
+  without a regex engine, and by the JDK's 256-entry class table
+  ([Pattern.java][jdk8-pattern] `BitClass`) for the one-byte table; Inspired
+  by a gap against the Rust regex crate ([#91]) for the class-counter route.
+  Regulator: the one-byte table route and the 64-byte handoffs ([#122],
+  [#123]).
 - **Where:** `RegexpMatcher.find`, `RegexpMatcher.findSpanSearch`,
   `RegexpMatcher.findGeneral`
 - **Applies when:** Matchers that retain no capturing groups
-- **What it does:** A matcher that retains no capturing groups finds with the
-  single-byte table while fewer than 64 bytes remain, with the span matchers,
-  or with the class counter, before the program's search. A literal
-  alternation and the short-row form of the fixed-width byte span hand regions
-  of 64 bytes or more to the program's search.
-
-### Skip the group clear
-
-- **Origin:** First described by RE2 ([re2.cc][re2-re2]) and the Rust regex
-  crate's PikeVM ([backtrack.rs][ra-backtrack]). Regulator: the rare
-  pre-engine matchers behind one out-of-line flag ([#138]).
-- **Where:** `CompiledPattern.matchRegionInto`,
-  `CompiledPattern.matchOnPreEngineMatcher`
-- **Applies when:** Matcher finds on patterns without a specialized
-  compiled-pattern class
-- **What it does:** The ordinary engine writes every slot itself, so a matcher
-  does not clear its groups first. The rare disjoint-suffix,
-  whole-input-capture, and word-run matchers clear their own group slots and
-  sit out of line behind one flag, so the ordinary engine tests one field for
-  all three.
-
-### Caller buffers trimmed to the pattern
-
-- **Origin:** First described by RE2 (submatch clamp, [re2.cc][re2-re2]) and
-  the Rust regex crate ([onepass.rs][ra-onepass]). Regulator: the temporary
-  slot array that keeps the OnePass route ([#146]).
-- **Where:** `CompiledPattern.matchRegionInto`
-- **Applies when:** Buffers longer than the pattern's slots, when the program
-  has at most 64 capture slots
-- **What it does:** A caller buffer longer than the pattern's slots is
-  searched through a temporary array of the program's capture slots, so
-  OnePass, which picks its route by buffer length, still runs.
+- **What it does:** A matcher that retains no capturing groups finds with a
+  one-byte pattern's 256-entry table while fewer than 64 bytes remain, with
+  the span matchers, or with the class counter, before the program's search.
+  A literal alternation and the short-row form of the fixed-width byte span
+  hand regions of 64 bytes or more to the program's search. Matcher iteration
+  of one-byte patterns on short rows runs in 0.33 to 0.37 of its earlier time
+  ([#122]), and of fixed-width patterns in 0.31 to 0.69 ([#123]).
 
 ## Compile time and memory
 
-These entries cover compile speed and the regex planning budget, which charges
-the retained program and optional plans before matching starts.
+The entry below covers compile speed. The regex planning budget, which charges
+the retained program and optional plans before matching starts, is described
+in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
 
-### 96 MiB default budget
-
-- **Origin:** Regulator; no prior art found ([design][d-memory]); base RE2
-  [O-RE2-001].
-- **Where:** `Re2.Options.defaults`
-- **Applies when:** Default options
-- **What it does:** The default planning budget is 96 MiB instead of RE2's 8
-  MiB, so large DFA graphs reset less often.
-
-### Retained-memory compile charge
-
-- **Origin:** Adapted from RE2 ([compile.cc][re2-compile], [dfa.cc][re2-dfa])
-  for the instruction cap, the deduction from the DFA budget, and a DFA that
-  stays failed once it fails to initialize; First described by the Rust regex
-  crate (NFA size limit, [builder.rs][ra-builder]) for charging memory as the
-  program is built. Regulator: the per-instruction flatten charge ([#133]).
-- **Where:** `Compiler.CompilerState.finish`, `Prog.flatten`,
-  `Prog.getCachedDfa`
-- **Applies when:** Every compile
-- **What it does:** Compilation caps instructions as RE2 does and also charges
-  each instruction as flattening emits it; a flatten that exceeds the
-  program's share fails the compile. RE2 does not check the budget while
-  flattening; it deducts the retained program from the DFA budget afterwards.
-  A program also remembers a budget at which its DFA failed to initialize, so
-  later searches do not rebuild it.
-
-### Optional plans yield to forward DFAs
-
-- **Origin:** Adapted from RE2 ([dfa.cc][re2-dfa]) for charging fixed overhead
-  before any state. Regulator: optional plans that yield to the forward DFAs
-  ([design][d-memory]).
-- **Where:** `CompiledPattern.tryReserveBesideForwardDfas`,
-  `Prog.leavesDfaMinimum`, `Dfa.DfaInstance.initializationMemory`
-- **Applies when:** Optional plans beside the forward DFAs, and every DFA
-- **What it does:** Literal searches of up to 64 bytes outside Trino, the
-  dot-star literal span matcher, the byte-gap ordered-literal matcher, the
-  OnePass tables of a program that is one-pass only through Java's or Trino's
-  final-line end anchors, and required bytes give way when they would stop the
-  first-match or longest-match DFA from initializing. The Aho-Corasick root
-  skip is dropped unless both DFAs can initialize, and the transparent start
-  literal needs both to keep their minimum memory. Other literal searches,
-  scan plans, and other matchers reserve whenever they fit. Each DFA charges
-  its work queues, stack, and start-byte tables before creating any state.
-
-### OnePass tables sized from targets
-
-- **Origin:** Ported from RE2 ([onepass.cc][re2-onepass]) for growing node
-  storage on demand. Regulator: the cap at one more than the distinct
-  byte-range targets ([#8], [#107]); base RE2 [O-1PASS-003].
-- **Where:** `Prog.onePassInitialNodeCapacity`, `Prog.computeOnePass`
-- **Applies when:** Every OnePass build; matters for large Unicode classes
-- **What it does:** OnePass node storage grows on demand, as in RE2, and is
-  capped at one more than the distinct byte-range targets, so the tables end
-  exactly sized.
-
-### Memoized program optimization
-
-- **Origin:** First described by the Rust regex crate (empty-chain remap,
-  [builder.rs][ra-builder]). Regulator: memoizing RE2's NOP and AltMatch chain
-  walks ([#40]); base RE2 [O-PROG-001], [O-PROG-002].
-- **Where:** `Prog.optimize`, `Prog.isNopChain`, `Prog.isMatch`
-- **Applies when:** Every program
-- **What it does:** NOP elimination and AltMatch insertion cache each chain's
-  answer, so shared chains are walked once.
-
-### Byte-map builder limits
-
-- **Origin:** Regulator; no prior art found ([#8], [#107]); base RE2
-  [O-PROG-003].
-- **Where:** `Prog.computeByteMap`
-- **Applies when:** Programs with many byte-range groups, such as large
-  Unicode classes
-- **What it does:** After 32 merges, groups of up to three ranges already
-  merged are skipped, and IDs of active byte classes are renumbered once the
-  next ID exceeds 256.
-
-### Hints per range run
-
-- **Origin:** Regulator; no prior art found ([#8]); base RE2 [O-PROG-005].
-- **Where:** `Prog.computeHints`, `Prog.computeRunHints`
-- **Applies when:** Every flatten
-- **What it does:** A run of one byte range gets its hint directly; only
-  longer runs track byte classes.
-
-### Dominator pass elision
-
-- **Origin:** Regulator; no prior art found ([#119]).
-- **Where:** `Compiler.shouldSkipDominatorPass`, `Prog.markDominator`
-- **Applies when:** Programs of at least 1024 instructions
-- **What it does:** A bounded structural check skips the dominator pass when
-  it would change nothing, as for non-nullable alternations of literals and
-  classes. When the pass runs, its predecessor scan stops at an instruction
-  that is already a root.
-
-### Array-backed compiler
-
-- **Origin:** Adapted from RE2 ([compile.cc][re2-compile],
-  [walker-inl.h][re2-walker]) for the instruction array and the explicit-stack
-  walk; First described by Briggs and Torczon (1993)
-  ([sparse sets][briggs-torczon]) for the constant-time clear. Regulator: one
-  clone table shared by every Trino greedy nullable loop ([#8], [#42]).
-- **Where:** `Compiler.CompilerState.compileTree`
-- **Applies when:** Every compile
-- **What it does:** Instructions live in a growable array, and the compiler
-  walks the tree post-order on array stacks instead of a generic walker. One
-  clone table, cleared in constant time, serves every Trino greedy nullable
-  loop in a compile.
-
-### Seeded compile-time hashing
-
-- **Origin:** First described by Crosby and Wallach (2003)
-  ([algorithmic complexity attacks][crosby-wallach]); Ported from MurmurHash3
-  ([fmix64][murmur3-fmix64]) for the mix. Regulator: seeding the compile-time
-  tables ([#116]).
-- **Where:** `SeededHash.hash`
-- **Applies when:** Every compile
-- **What it does:** Compile-time hash tables mix in a per-process random seed,
-  so crafted patterns cannot force collisions in every process.
-
-### Linear parsing and simplification
+### Quadratic compile paths removed
 
 - **Origin:** Adapted from RE2 ([parse.cc][re2-parse],
   [simplify.cc][re2-simplify]) for collecting literal runs as they are parsed
-  and factoring on an explicit stack. Regulator: factoring through views and
-  remembering a failed POSIX `:]` search ([#8], [#39]).
+  and factoring on an explicit stack; First described by Briggs and Torczon
+  (1993) ([sparse sets][briggs-torczon]) for the constant-time clear, by Go
+  ([syntax/parse.go][go-syntax-parse]) for the ascending append and sort-once
+  merge of class ranges, and by the Rust regex crate for binary-search
+  insertion and one-pass set operations ([IntervalSet][rs-interval]) and for
+  its empty-chain remap ([builder.rs][ra-builder]). Regulator: factoring
+  through views, remembering a failed POSIX `:]` search, nested sets passed up
+  with a negation flag, the larger set edited by the smaller one's ranges, one
+  clone table shared by every Trino greedy nullable loop, memoized NOP and
+  AltMatch chain walks, the dominator-pass check, and literal analysis
+  expanded once at the root ([#8], [#34], [#39], [#40], [#42], [#119]); base
+  RE2 [O-PROG-001], [O-PROG-002].
 - **Where:** `Simplifier.simplifyAlternateForParse`,
   `Simplifier.factorAlternationForParse`,
-  `RegexpParser.Parser.tryParsePosixCharClass`
-- **Applies when:** Long literal runs, deep alternations, many `[:`
+  `RegexpParser.Parser.tryParsePosixCharClass`,
+  `CharClassBuilder.addCharClass`, `CharClassBuilder.addPending`,
+  `RuneRangeSet.union`, `RuneRangeSet.intersection`, `Prog.optimize`,
+  `Prog.isNopChain`, `Prog.isMatch`, `Compiler.shouldSkipDominatorPass`,
+  `Prog.markDominator`, `ExpressionAnalysis.buildLiteralSequence`
+- **Applies when:** Long literal runs, deep alternations, many `[:`; every
+  class, nested Java and Trino classes, and Rust set operations; every
+  program; counted repetitions and nested concatenations; the dominator check
+  on programs of at least 1024 instructions
 - **What it does:** Concatenations buffer literal code points in an `int`
   array, factoring works through views and an explicit stack, and a failed
-  POSIX `:]` search is remembered.
-
-### Character-class building
-
-- **Origin:** First described by Go ([syntax/parse.go][go-syntax-parse]) for
-  the ascending append and sort-once merge, and by the Rust regex crate
-  ([IntervalSet][rs-interval]) for binary-search insertion and one-pass set
-  operations. Regulator: nested sets passed up with a negation flag, and the
-  larger set edited by the smaller one's ranges ([#8], [#39]).
-- **Where:** `CharClassBuilder.addCharClass`, `CharClassBuilder.addPending`,
-  `RuneRangeSet.union`, `RuneRangeSet.intersection`
-- **Applies when:** Every class; nested Java and Trino classes and Rust set
-  operations
-- **What it does:** Ascending ranges append; others insert by binary search or
-  wait in a batch that is sorted once and merged in one pass. Nested bracket
-  sets pass up with a negation flag, and when one set is much larger, it is
-  edited by the smaller one's ranges.
-
-### Linear literal analysis
-
-- **Origin:** Regulator; no prior art found ([#34]).
-- **Where:** `ExpressionAnalysis.buildLiteralSequence`
-- **Applies when:** Counted repetitions, nested concatenations
-- **What it does:** Adjacent literals accumulate in one buffer, and
-  concatenations refer to their children's elements, expanded once at the
-  root.
-
-### Match length computed once
-
-- **Origin:** First described by the Rust regex crate ([hir/mod.rs][rs-hir]
-  `Properties`). Regulator: packing the facts into one `int` and analyzing the
-  suffix after a required prefix ([#8]).
-- **Where:** `MatchLength.analyze`, `CompiledPattern.build`
-- **Applies when:** Every compile
-- **What it does:** Length facts are packed into one `int` computed from the
-  normalized tree, and compilation reuses it; the suffix after a required
-  prefix is analyzed separately.
-
-### Two-stage Unicode tables
-
-- **Origin:** First described by the Unicode Standard
-  ([two-stage tables][unicode-two-stage]) and PCRE2 ([pcre2_ucd.c][pcre2-ucd])
-  for two-stage tables with a shared block, and by the Rust regex crate
-  ([perl_word][ra-look]) for one word table behind every Unicode `\b`.
-  Regulator: the case-fold and flag tables and the 128-entry ASCII fold table
-  ([#16]).
-- **Where:** `CodePointTable.get`, `CodePointFlags.get`,
-  `UnicodeGroups.WordFlags`
-- **Applies when:** Case-insensitive patterns, properties, Unicode `\b` and
-  `\w`
-- **What it does:** Case folds and code-point flags live in 256-code-point
-  blocks with a shared empty block, and ASCII folds use a 128-entry table. One
-  word-character table serves every Unicode word-boundary pattern.
-
-### Lazy and indexed Unicode data
-
-- **Origin:** First described by Joni
-  ([jcodings UnicodeEncoding][jcodings-unicode]) for decoding each Unicode
-  table on first use, and by RE2 ([parse.cc][re2-parse]) and the Rust regex
-  crate ([unicode.rs][rs-unicode]) for fold lookups in sorted arrays.
-  Regulator: the first-rune index into full case-fold tokens ([#8], [#23]).
-- **Where:** `UnicodeDatabase.SimpleCaseFolding`,
-  `UnicodeFullCaseFold.Data.firstTokenIndex`
-- **Applies when:** The first pattern that needs a section; Trino `(?i)`
-- **What it does:** Each Unicode database section is decoded once, on first
-  use. Full case-fold tokens are looked up in sorted primitive arrays,
-  starting only at tokens that begin with the folded rune.
+  POSIX `:]` search is remembered. Ascending class ranges append; others
+  insert by binary search or wait in a batch that is sorted once and merged in
+  one pass. Nested bracket sets pass up with a negation flag, and a much
+  larger set is edited by the smaller one's ranges. One clone table, cleared
+  in constant time, serves every Trino greedy nullable loop in a compile. NOP
+  elimination and AltMatch insertion cache each chain's answer, so shared
+  chains are walked once, and a bounded structural check skips the dominator
+  pass when it would change nothing, as for non-nullable alternations of
+  literals and classes. Literal analysis accumulates adjacent literals in one
+  buffer, and concatenations refer to their children's elements, expanded
+  once at the root. Nested alternation chains compile in 0.26 to 0.47 of
+  their earlier time and Trino `(?i)` keyword chains in 0.10 to 0.75 ([#39]).
 
 ## RE2 optimizations used as ported
 
-These mechanisms come from RE2 and keep its behavior except where an entry
-says otherwise. Ported mechanisms that Regulator reshaped have full entries in
-the sections above; each entry here gives its Origin and Where, and its
-registry entry holds the trigger.
+Regulator's engines are RE2's. Its lazy DFA builds states from work queues
+into a state cache over byte classes, with dead and full-match sentinel states
+and an earliest-match exit, and falls back to the NFA when cache resets thrash.
+It caches start states per context as RE2 does ([O-DFA-014]), with
+Trino-line, after-CR (as regex-automata has it, [start.rs][ra-start]), and
+after-non-ASCII start contexts added ([#6], [#64]). With RE2's and .NET's
+match-every-byte shortcut ([prog.cc][re2-altmatch], [dfa.cc][re2-dfa],
+[RegexCompiler.cs][dotnet-any-star], [O-RE2-016]), a full match of a pattern
+that accepts every byte string, such as `\C*` in UTF-8, returns at once,
+decided at compile time ([design][d-match-every-byte]). A count gives up on
+the DFA its own way: a count whose DFA search gives up as too slow counts its
+text with finds that skip the forward DFA and its cursors, and after two such
+counts in a row the pattern's next 16 counts skip the DFA at once before one
+tries it again ([design][d-count-fallback]). A search runs
+forward to a match end and back to its start on a lazily compiled reverse
+program, and an end-anchored pattern without a start anchor searches only
+backward. The DFA and NFA skip ahead to a literal prefix. Captures run on
+OnePass, BitState, and the NFA in RE2's order. `Re2Set` runs its patterns as
+one many-match DFA, and `FilteredRe2` filters by prefilter atoms. Regulator
+also compiles a leftmost-first program over 512 instructions that is not
+one-pass and has the form `(a)|(b)|…`, one capture around each capture-free
+branch, the way `RE2::Set` does ([set.cc][re2-set]), with no request from the
+caller: its matches name their branch, as the Rust regex crate's pattern IDs
+do ([regex.rs][ra-pattern-ids]), and the winning branch's group is set from
+group zero's span. The compiler keeps RE2's reductions, simplification, and
+instruction flattening. The [registry](OPTIMIZATION_REGISTRY.md) gives each
+mechanism's trigger, and the table below gives where it lives; where
+Regulator changed a mechanism, its row says what changed or names where the
+change is described.
 
-### Dead-state and full-match sentinels
-
-- **Origin:** Ported from RE2 [O-DFA-001], [O-DFA-002], [O-DFA-016],
-  [O-RE2-012].
-- **Where:** `Dfa.searchForwardContinuation`
-
-### State cache and work-queue construction
-
-- **Origin:** Ported from RE2 [O-DFA-003], [O-DFA-009], [O-DFA-010],
-  [O-DFA-011], [O-DFA-012], [O-DFA-015].
-- **Where:** `Dfa.DfaInstance.workQueueToCachedState`,
-  `Dfa.DfaInstance.addToQueue`
-
-### Separate forward and backward search loops with an earliest-match exit
-
-- **Origin:** Adapted from RE2 [O-DFA-007], [O-RE2-014], which specializes
-  one search loop by template ([O-DFA-004], [O-RE2-013]); Java has no
-  templates, so each direction is its own method.
-- **Where:** `Dfa.searchForwardContinuation`, `Dfa.searchBackward`
-
-### Prefix acceleration in the DFA and NFA
-
-- **Origin:** Ported from RE2 [O-DFA-005], [O-RE2-004], [O-NFA-008].
-- **Where:** `Prog.prefixAccel`, `Prog.prefixAccelSingleByteNoFoldCase`,
-  `Prog.skipToStartCandidate`
-
-### Byte classes
-
-- **Origin:** Ported from RE2 [O-DFA-006], [O-PROG-003], [O-RE2-015]; builder
-  limits added, see [Byte-map builder limits][byte-map-limits-entry].
-- **Where:** `Prog.computeByteMap`
-
-### Lock-free transition reads
-
-- **Origin:** Ported from RE2 [O-DFA-008]; publication changed, see
-  [Shared DFA concurrency][concurrency-section].
-- **Where:** `Dfa.DfaInstance.computeTransition`
-
-### NFA fallback when the cache thrashes
-
-- **Origin:** Ported from RE2 [O-DFA-013], [O-RE2-011]; the pointer-table
-  give-back is Regulator's, see
-  [Table given back before NFA fallback][give-back-entry].
-- **Where:** `Dfa.searchForwardContinuation`
-
-### Per-kind DFA budgets and a minimum state count
-
-- **Origin:** Ported from RE2 [O-DFA-017].
-- **Where:** `Dfa.DfaInstance.minimumMemory`
-
-### State kept across a cache reset
-
-- **Origin:** Ported from RE2 [O-DFA-018].
-- **Where:** `Dfa.DfaInstance.resetAndRestore`
-
-### Many-match DFA
-
-- **Origin:** Ported from RE2 [O-DFA-019].
-- **Where:** `Dfa.searchMany`
-
-### Reverse program compiled lazily with swapped assertions
-
-- **Origin:** Ported from RE2 [O-COMP-017].
-- **Where:** `CompiledPattern.reverseProg`
-
-### Forward and reverse memory split
-
-- **Origin:** Ported from RE2 [O-RE2-002].
-- **Where:** `CompiledPattern.build`, `CompiledPattern.reverseProgramMemory`
-
-### Required literal prefix split
-
-- **Origin:** Ported from RE2 [O-RE2-003].
-- **Where:** `CompiledPattern.build`, `CompiledPattern.matchesRequiredPrefix`
-
-### Capture engine cascade and DFA result checks
-
-- **Origin:** Ported from RE2 [O-RE2-005], [O-RE2-006], [O-RE2-007],
-  [O-RE2-010].
-- **Where:** `CompiledPattern.runSubmatchEngine`,
-  `CompiledPattern.matchOnOrdinaryEngine`
-
-### Explicit anchors and reverse-only end-anchored search
-
-- **Origin:** Ported from RE2 [O-RE2-008], [O-RE2-009].
-- **Where:** `CompiledPattern.matchOnOrdinaryEngine`
-
-### Instruction flattening
-
-- **Origin:** Ported from RE2 [O-PROG-004].
-- **Where:** `Prog.flatten`
-
-### RE2 compiler reductions
-
-- **Origin:** Ported from RE2 [O-COMP-001] through [O-COMP-005] and
-  [O-COMP-006-016] (the rune cache, ASCII folding, the U+0080–U+10FFFF
-  any-character case, NOP elision, anchor removal, UTF-8 suffix sharing,
-  nullable stars, and the unanchored `.*?` prefix).
-- **Where:** `Compiler.compileInternal`,
-  `Compiler.CompilerState.addRuneRangeUtf8`
-
-### OnePass analysis and eligibility
-
-- **Origin:** Ported from RE2 [O-1PASS-002] through [O-1PASS-020],
-  [O-PROG-009]; eligibility extended, see
-  [Extended OnePass captures][onepass-captures-entry] and
-  [Text-dependent assertions in OnePass][onepass-assertions-entry]; node
-  storage capped, see
-  [OnePass tables sized from targets][onepass-sizing-entry].
-- **Where:** `Prog.computeOnePass`, `OnePass.search`
-
-### BitState memoization and job stack
-
-- **Origin:** Ported from RE2 [O-BIT-001], [O-BIT-004] through [O-BIT-015]
-  (bitmap memoization, a run-length job stack, the prefix skip, and capture
-  undo); step layout and job-stack growth changed, see
-  [BitState step layout][bitstate-layout-entry].
-- **Where:** `BitState.BitStateImpl.shouldVisit`,
-  `BitState.BitStateImpl.push`, `BitState.BitStateImpl.trySearch`
-
-### NFA thread arena, sparse queues, and shortcuts
-
-- **Origin:** Ported from RE2 [O-NFA-001] through [O-NFA-011].
-- **Where:** `Nfa.NfaImpl`, `SparseSet.clear`, `SparseIntArray.clear`
-
-### Unchanged nodes kept during simplification
-
-- **Origin:** Ported from RE2 [O-COMP-018].
-- **Where:** `Simplifier.simplifyRecursive`
-
-### Next set bit in a 256-bit set
-
-- **Origin:** Ported from RE2 [O-PROG-010].
-- **Where:** `Bitmap256.findNextSetBit`
-
-### Pattern sets as one many-match program
-
-- **Origin:** Ported from RE2 [O-RE2-017] (patterns compiled without captures,
-  one marker per pattern, and one many-match pass per call).
-- **Where:** `Re2Set.Builder`, `Re2Set.matchingPatternIds`,
-  `Re2Set.matchesAny`
-
-### Prefilter atoms, prefilter tree, and filtered matching
-
-- **Origin:** Ported from RE2 [O-RE2-018].
-- **Where:** `Prefilter.fromRegexp`, `FilteredRe2`
+| Mechanism | Registry IDs | Where |
+| --- | --- | --- |
+| Dead-state and full-match sentinels | [O-DFA-001], [O-DFA-002], [O-DFA-016], [O-RE2-012] | `Dfa.searchForwardContinuation` |
+| State cache and work-queue construction | [O-DFA-003], [O-DFA-009], [O-DFA-010], [O-DFA-011], [O-DFA-012], [O-DFA-015] | `Dfa.DfaInstance.workQueueToCachedState`, `Dfa.DfaInstance.addToQueue` |
+| Separate forward and backward search loops with an earliest-match exit; Java has no templates, so each direction is its own method where RE2 specializes one loop | [O-DFA-007], [O-RE2-014], [O-DFA-004], [O-RE2-013] | `Dfa.searchForwardContinuation`, `Dfa.searchBackward` |
+| Prefix acceleration in the DFA and NFA | [O-DFA-005], [O-RE2-004], [O-NFA-008] | `Prog.prefixAccel`, `Prog.prefixAccelSingleByteNoFoldCase`, `Prog.skipToStartCandidate` |
+| Byte classes; Regulator's builder skips small merged groups after 32 merges and renumbers active classes past 256 | [O-DFA-006], [O-PROG-003], [O-RE2-015] | `Prog.computeByteMap` |
+| Lock-free transition reads; publication changed in [Copy-on-reset readers](#copy-on-reset-readers) | [O-DFA-008] | `Dfa.DfaInstance.computeTransition` |
+| NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table) | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
+| Per-kind DFA budgets and a minimum state count | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory` |
+| State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
+| Many-match DFA | [O-DFA-019] | `Dfa.searchMany` |
+| Reverse program compiled lazily with swapped assertions | [O-COMP-017] | `CompiledPattern.reverseProg` |
+| Options defaults: UTF-8 and leftmost-first; the default budget is 96 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
+| Forward and reverse memory split | [O-RE2-002] | `CompiledPattern.build`, `CompiledPattern.reverseProgramMemory` |
+| Required literal prefix split | [O-RE2-003] | `CompiledPattern.build`, `CompiledPattern.matchesRequiredPrefix` |
+| Capture engine cascade and DFA result checks | [O-RE2-005], [O-RE2-006], [O-RE2-007], [O-RE2-010] | `CompiledPattern.runSubmatchEngine`, `CompiledPattern.matchOnOrdinaryEngine` |
+| Explicit anchors and reverse-only end-anchored search | [O-RE2-008], [O-RE2-009] | `CompiledPattern.matchOnOrdinaryEngine` |
+| Instruction flattening | [O-PROG-004] | `Prog.flatten` |
+| Skip hints for byte-range instructions; Regulator gives a run of one byte range its hint directly | [O-PROG-005] | `Prog.computeHints`, `Prog.computeRunHints` |
+| RE2 compiler reductions: the rune cache, ASCII folding, the U+0080–U+10FFFF any-character case, NOP elision, anchor removal, UTF-8 suffix sharing, nullable stars, and the unanchored `.*?` prefix | [O-COMP-001] through [O-COMP-005], [O-COMP-006-016] | `Compiler.compileInternal`, `Compiler.CompilerState.addRuneRangeUtf8` |
+| Unchanged nodes kept during simplification | [O-COMP-018] | `Simplifier.simplifyRecursive` |
+| OnePass analysis and eligibility; eligibility extended in [OnePass past RE2's limits](#onepass-past-re2s-limits), and node storage capped at one more than the distinct byte-range targets | [O-1PASS-002] through [O-1PASS-020], [O-PROG-009] | `Prog.computeOnePass`, `Prog.onePassInitialNodeCapacity`, `OnePass.search` |
+| BitState eligibility, memoization, and job stack: bitmap memoization, a run-length job stack, the prefix skip, and capture undo; Regulator changes the bitmap size, the text limit, and large-program eligibility (up to 32,767 output lists), as [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes, and starts the job stack at a short search's whole need | [O-PROG-008], [O-BIT-001], [O-BIT-002], [O-BIT-003], [O-BIT-004] through [O-BIT-015] | `Prog.canBitState`, `BitState.BitStateImpl.shouldVisit`, `BitState.BitStateImpl.push`, `BitState.BitStateImpl.trySearch`, `BitState.initialJobCapacity` |
+| NFA thread arena, sparse queues, and shortcuts | [O-NFA-001] through [O-NFA-011] | `Nfa.NfaImpl`, `SparseSet.clear`, `SparseIntArray.clear` |
+| Next set bit in a 256-bit set | [O-PROG-010] | `Bitmap256.findNextSetBit` |
+| Pattern sets as one many-match program | [O-RE2-017] | `Re2Set.Builder`, `Re2Set.matchingPatternIds`, `Re2Set.matchesAny` |
+| Prefilter atoms, prefilter tree, and filtered matching | [O-RE2-018] | `Prefilter.fromRegexp`, `FilteredRe2` |
 
 [#1]: https://github.com/airlift/regulator/pull/1
 [#6]: https://github.com/airlift/regulator/pull/6
@@ -2782,10 +1647,8 @@ registry entry holds the trigger.
 [#10]: https://github.com/airlift/regulator/pull/10
 [#13]: https://github.com/airlift/regulator/pull/13
 [#14]: https://github.com/airlift/regulator/pull/14
-[#16]: https://github.com/airlift/regulator/pull/16
 [#17]: https://github.com/airlift/regulator/pull/17
 [#18]: https://github.com/airlift/regulator/pull/18
-[#23]: https://github.com/airlift/regulator/pull/23
 [#24]: https://github.com/airlift/regulator/pull/24
 [#28]: https://github.com/airlift/regulator/pull/28
 [#31]: https://github.com/airlift/regulator/pull/31
@@ -2816,14 +1679,11 @@ registry entry holds the trigger.
 [#99]: https://github.com/airlift/regulator/pull/99
 [#103]: https://github.com/airlift/regulator/pull/103
 [#104]: https://github.com/airlift/regulator/pull/104
-[#105]: https://github.com/airlift/regulator/pull/105
 [#106]: https://github.com/airlift/regulator/pull/106
 [#107]: https://github.com/airlift/regulator/pull/107
 [#108]: https://github.com/airlift/regulator/pull/108
-[#109]: https://github.com/airlift/regulator/pull/109
 [#110]: https://github.com/airlift/regulator/pull/110
 [#112]: https://github.com/airlift/regulator/pull/112
-[#116]: https://github.com/airlift/regulator/pull/116
 [#118]: https://github.com/airlift/regulator/pull/118
 [#119]: https://github.com/airlift/regulator/pull/119
 [#120]: https://github.com/airlift/regulator/pull/120
@@ -2835,7 +1695,6 @@ registry entry holds the trigger.
 [#128]: https://github.com/airlift/regulator/pull/128
 [#131]: https://github.com/airlift/regulator/pull/131
 [#132]: https://github.com/airlift/regulator/pull/132
-[#133]: https://github.com/airlift/regulator/pull/133
 [#134]: https://github.com/airlift/regulator/pull/134
 [#135]: https://github.com/airlift/regulator/pull/135
 [#138]: https://github.com/airlift/regulator/pull/138
@@ -2845,7 +1704,6 @@ registry entry holds the trigger.
 [#142]: https://github.com/airlift/regulator/pull/142
 [#143]: https://github.com/airlift/regulator/pull/143
 [#144]: https://github.com/airlift/regulator/pull/144
-[#146]: https://github.com/airlift/regulator/pull/146
 [#147]: https://github.com/airlift/regulator/pull/147
 [#148]: https://github.com/airlift/regulator/pull/148
 [#149]: https://github.com/airlift/regulator/pull/149
@@ -2855,17 +1713,16 @@ registry entry holds the trigger.
 [#153]: https://github.com/airlift/regulator/pull/153
 [#154]: https://github.com/airlift/regulator/pull/154
 [#155]: https://github.com/airlift/regulator/pull/155
-[#156]: https://github.com/airlift/regulator/pull/156
 [#158]: https://github.com/airlift/regulator/pull/158
-[#159]: https://github.com/airlift/regulator/pull/159
 [#160]: https://github.com/airlift/regulator/pull/160
 [#162]: https://github.com/airlift/regulator/pull/162
 [#163]: https://github.com/airlift/regulator/pull/163
 [#165]: https://github.com/airlift/regulator/pull/165
-[#173]: https://github.com/airlift/regulator/pull/173
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
 [#194]: https://github.com/airlift/regulator/pull/194
+[#201]: https://github.com/airlift/regulator/pull/201
+[#202]: https://github.com/airlift/regulator/pull/202
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2874,17 +1731,13 @@ registry entry holds the trigger.
 [d-concurrency]: ../../REGULATOR_DECISIONS.md#shared-dfa-concurrency
 [d-count-fallback]: ../../REGULATOR_DECISIONS.md#count-fallback-after-repeated-bails
 [d-count-self-loop]: ../../REGULATOR_DECISIONS.md#count-self-loop-exit-byte-scan
-[d-direct-bitstate]: ../../REGULATOR_DECISIONS.md#bounded-direct-bitstate-capture
 [d-fixed-width-rare]: ../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates
 [d-folded-prefix]: ../../REGULATOR_DECISIONS.md#folded-prefix-candidate-scan
 [d-forward-cursor]: ../../REGULATOR_DECISIONS.md#reusable-group-zero-forward-cursor
-[d-gen-like]: ../../REGULATOR_DECISIONS.md#generated-trino-like-kernels
 [d-gen-re2]: ../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels
 [d-large-alternations]: ../../REGULATOR_DECISIONS.md#large-literal-alternations
 [d-like]: ../../REGULATOR_DECISIONS.md#trino-like-frontend
-[d-malformed-like]: ../../REGULATOR_DECISIONS.md#malformed-like-input
 [d-match-every-byte]: ../../REGULATOR_DECISIONS.md#match-every-byte-shortcut
-[d-memory]: ../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching
 [d-native]: ../../REGULATOR_DECISIONS.md#bounded-dfa-pointer-transition-table
 [d-once-per-count]: ../../REGULATOR_DECISIONS.md#once-per-count-start-byte-scan-selection
 [d-onepass-assert]: ../../REGULATOR_DECISIONS.md#text-dependent-assertions-in-onepass
@@ -2892,7 +1745,6 @@ registry entry holds the trigger.
 [d-onepass-offsets]: ../../REGULATOR_DECISIONS.md#onepass-next-state-offsets
 [d-paired]: ../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
-[d-regions]: ../../REGULATOR_DECISIONS.md#allocation-free-matcher-regions
 [d-required-absence]: ../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
 [d-row-index]: ../../REGULATOR_DECISIONS.md#dfa-row-index-without-a-divide
@@ -2907,16 +1759,8 @@ registry entry holds the trigger.
 [d-trino-assertions]: ../../REGULATOR_DECISIONS.md#trino-text-dependent-assertions-and-full-case-folding
 [d-trino-literal]: ../../REGULATOR_DECISIONS.md#trino-regexp-literal-searches
 [d-word-run]: ../../REGULATOR_DECISIONS.md#word-run-plan
-[d-workspaces]: ../../REGULATOR_DECISIONS.md#matcher-owned-capture-workspaces
 [api-binding]: REGULATOR_API.md#binding-a-compiled-pattern
-[bitstate-layout-entry]: #bitstate-step-layout
-[byte-map-limits-entry]: #byte-map-builder-limits
-[concurrency-section]: #shared-dfa-concurrency
 [counting-section]: #counting
-[give-back-entry]: #table-given-back-before-nfa-fallback
-[onepass-assertions-entry]: #text-dependent-assertions-in-onepass
-[onepass-captures-entry]: #extended-onepass-captures
-[onepass-sizing-entry]: #onepass-tables-sized-from-targets
 [scan-plan-coverage]: ../benchmarks/SCAN_PLAN.md#coverage
 [O-DFA-001]: OPTIMIZATION_REGISTRY.md#o-dfa-001-deadstate-sentinel-critical
 [O-DFA-002]: OPTIMIZATION_REGISTRY.md#o-dfa-002-fullmatchstate-sentinel-critical
@@ -2954,7 +1798,6 @@ registry entry holds the trigger.
 [O-COMP-018]: OPTIMIZATION_REGISTRY.md#o-comp-018-unchanged-nodes-kept-during-simplification-minor
 [O-1PASS-001]: OPTIMIZATION_REGISTRY.md#o-1pass-001-bit-packed-action-encoding-critical
 [O-1PASS-002]: OPTIMIZATION_REGISTRY.md#o-1pass-002-memory-budget-check-minor
-[O-1PASS-003]: OPTIMIZATION_REGISTRY.md#o-1pass-003-through-o-1pass-020-additional-onepass-optimizations
 [O-1PASS-010]: OPTIMIZATION_REGISTRY.md#o-1pass-003-through-o-1pass-020-additional-onepass-optimizations
 [O-1PASS-014]: OPTIMIZATION_REGISTRY.md#o-1pass-003-through-o-1pass-020-additional-onepass-optimizations
 [O-1PASS-020]: OPTIMIZATION_REGISTRY.md#o-1pass-003-through-o-1pass-020-additional-onepass-optimizations
@@ -3000,7 +1843,6 @@ registry entry holds the trigger.
 [ch-regexp-program]: https://github.com/ClickHouse/ClickHouse/blob/v26.8.2.7-lts/src/Common/RegexpJIT/RegexpProgram.cpp
 [cox-regexp1]: https://swtch.com/~rsc/regexp/regexp1.html
 [cpython-fastsearch]: https://github.com/python/cpython/blob/v3.10.0/Objects/stringlib/fastsearch.h#L582-L635
-[crosby-wallach]: https://www.usenix.org/legacy/events/sec03/tech/full_papers/crosby/crosby_html/index.html
 [daciuk-2000]: https://aclanthology.org/J00-1002/
 [dotnet-any-star]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs#L4328-L4340
 [dotnet-compile-to-assembly]: https://learn.microsoft.com/en-us/dotnet/api/system.text.regularexpressions.regex.compiletoassembly?view=netframework-4.8#remarks
@@ -3011,14 +1853,11 @@ registry entry holds the trigger.
 [dotnet-fixed-length]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/Symbolic/SymbolicRegexMatcher.cs#L376-L387
 [dotnet-literal-find]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs#L5017-L5048
 [dotnet-node]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexNode.cs
-[dotnet-parser]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexParser.cs
-[dotnet-replacement]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexReplacement.cs
 [dotnet-runner-mode]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexRunnerMode.cs
 [dotnet5-blog]: https://devblogs.microsoft.com/dotnet/regex-performance-improvements-in-net-5/
 [dotnet5-regex-compiler]: https://github.com/dotnet/runtime/blob/v5.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs
 [dotnet5-regex-node]: https://github.com/dotnet/runtime/blob/v5.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexNode.cs
 [dotnet7-blog]: https://devblogs.microsoft.com/dotnet/regular-expression-improvements-in-dotnet-7/
-[dotnet7-emitter]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/gen/RegexGenerator.Emitter.cs
 [dotnet7-fixed-distance]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L572-L591
 [dotnet7-regex-compiler]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs
 [dotnet7-set-quality]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexPrefixAnalyzer.cs#L430-L460
@@ -3026,13 +1865,10 @@ registry entry holds the trigger.
 [glibc-memcmp]: https://github.com/bminor/glibc/blob/glibc-2.38/sysdeps/aarch64/memcmp.S#L109-L127
 [glibc-sve2-memchr]: https://github.com/bminor/glibc/blob/3edeb81021feff11a3d0e934d68446f6a67dd1a3/sysdeps/aarch64/multiarch/memchr_sve2.S#L99-L107
 [gm-exact-division]: https://doi.org/10.1145/178243.178249
-[go-backtrack]: https://github.com/golang/go/blob/go1.22.0/src/regexp/backtrack.go
-[go-exec-backtrack]: https://github.com/golang/go/blob/go1.20.14/src/regexp/exec.go#L534-L536
 [go-exec-minlen]: https://github.com/golang/go/blob/go1.20.14/src/regexp/exec.go#L527-L529
 [go-strings-index]: https://github.com/golang/go/blob/go1.20.14/src/strings/strings.go#L1178-L1256
 [go-syntax-parse]: https://github.com/golang/go/blob/go1.23.0/src/regexp/syntax/parse.go
 [grep-kwsearch]: https://github.com/Distrotech/grep/blob/d930f765041bb2ad936056ddfdad60042d44bd9d/src/kwsearch.c
-[hotspot-mdo]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/hotspot/share/oops/methodData.hpp#L53-L71
 [hs-accel]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel.c#L138-L141
 [hs-accel-dfa]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accel_dfa_build_strat.cpp#L517-L534
 [hs-accelcompile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accelcompile.cpp
@@ -3047,15 +1883,13 @@ registry entry holds the trigger.
 [hs-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L110-L118
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
+[hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
 [hs-vermicelli]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/vermicelli.h#L463-L516
-[jcodings-unicode]: https://github.com/jruby/jcodings/blob/jcodings-1.0.58/src/org/jcodings/unicode/UnicodeEncoding.java
 [jdk-arraylist]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/ArrayList.java
 [jdk-cowal]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/java.base/share/classes/java/util/concurrent/CopyOnWriteArrayList.java
-[jdk-matcher]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/regex/Matcher.java
 [jdk-pattern]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/regex/Pattern.java
 [jdk8-pattern]: https://github.com/openjdk/jdk8u/blob/jdk8u442-b06/jdk/src/share/classes/java/util/regex/Pattern.java
 [jitrex-machine]: https://github.com/humio/jitrex/blob/0.1.15/src/main/java/com/humio/jitrex/jvm/RJavaClassMachine.java
-[jitrex-pattern]: https://github.com/humio/jitrex/blob/0.1.15/src/main/java/com/humio/jitrex/Pattern.java
 [kawa-regexps]: https://www.gnu.org/software/kawa/gnu.bytecode/compiling-regexps.html
 [kmp-1977]: https://doi.org/10.1137/0206024
 [knuth-taocp]: https://www-cs-faculty.stanford.edu/~knuth/taocp.html
@@ -3072,7 +1906,6 @@ registry entry holds the trigger.
 [mula-range]: https://github.com/WojciechMula/simd-byte-lookup/blob/870eccb54b6ad8888619cceecc3d5ea6a12d213b/lib/Range.py#L20-L33
 [mula-strfind]: http://0x80.pl/notesen/2016-11-28-simd-strfind.html
 [mula-universal]: https://github.com/WojciechMula/simd-byte-lookup/blob/870eccb54b6ad8888619cceecc3d5ea6a12d213b/lib/Universal.py#L13-L36
-[murmur3-fmix64]: https://github.com/aappleby/smhasher/blob/61a0530f28277f2e850bfc39600ce61d02b518de/src/MurmurHash3.cpp#L81-L90
 [musl-memchr]: https://git.musl-libc.org/cgit/musl/tree/src/string/memchr.c?h=v1.2.5
 [nim-litopt]: https://nitely.github.io/2020/11/30/regex-literals-optimization.html
 [onig-map-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5440-L5469
@@ -3085,12 +1918,10 @@ registry entry holds the trigger.
 [pcre2-minlength]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.00/src/pcre2_match.c#L6794-L6804
 [pcre2-req-cu]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.00/src/pcre2_match.c#L6806-L6862
 [pcre2-start-bits]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.42/src/pcre2_match.c#L7136-L7146
-[pcre2-ucd]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.44/src/pcre2_ucd.c
 [perl-regexec]: https://github.com/Perl/perl5/blob/v5.40.0/regexec.c
 [perl-trie]: https://github.com/Perl/perl5/blob/v5.40.0/regcomp_trie.c#L274-L320
 [postgres-like]: https://github.com/postgres/postgres/blob/REL_17_0/src/backend/utils/adt/like_match.c
 [ra-accel]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/accel.rs
-[ra-backtrack]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/backtrack.rs
 [ra-builder]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/builder.rs
 [ra-byteset]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/util/prefilter/byteset.rs
 [ra-dense]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/dense.rs
@@ -3101,8 +1932,6 @@ registry entry holds the trigger.
 [ra-impossible]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs#L2047-L2055
 [ra-limited]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/limited.rs
 [ra-literal-trie]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/literal_trie.rs
-[ra-look]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/util/look.rs
-[ra-meta-regex]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs
 [ra-onepass]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/onepass.rs
 [ra-pattern-ids]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs#L360-L365
 [ra-pikevm]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/pikevm.rs
@@ -3113,7 +1942,6 @@ registry entry holds the trigger.
 [ra-utf8-compiler]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/compiler.rs
 [rcu-history]: https://github.com/torvalds/linux/blob/v6.6/Documentation/RCU/RTFP.txt#L91-L95
 [re2-altmatch]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/prog.cc#L259-L291
-[re2-anchored-capture]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/re2.cc#L825-L847
 [re2-compile]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/compile.cc
 [re2-dfa]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/dfa.cc
 [re2-dfa-2019]: https://github.com/google/re2/blob/2019-12-01/re2/dfa.cc#L1287-L1293
@@ -3125,13 +1953,8 @@ registry entry holds the trigger.
 [re2-re2]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/re2.cc
 [re2-set]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/set.cc
 [re2-simplify]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/simplify.cc
-[re2-walker]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/walker-inl.h
-[rs-hir]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/mod.rs
 [rs-interval]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/interval.rs
 [rs-literal]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/hir/literal.rs
-[rs-unicode]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-syntax/src/unicode.rs
-[rust-captures]: https://github.com/rust-lang/regex/blob/1.13.1/src/regex/bytes.rs
-[rust-replacen]: https://github.com/rust-lang/regex/blob/1.13.1/src/regex/string.rs
 [spark-codegen-limit]: https://github.com/apache/spark/blob/v2.3.0/sql/core/src/main/scala/org/apache/spark/sql/execution/WholeStageCodegenExec.scala#L587-L599
 [spark-like]: https://github.com/apache/spark/blob/v1.1.0/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/Optimizer.scala#L117-L140
 [thompson-1968]: https://doi.org/10.1145/363347.363387
@@ -3143,8 +1966,6 @@ registry entry holds the trigger.
 [trino-nfamatcher]: https://github.com/trinodb/trino/blob/34324a2e67e278716ab07841e35d0dfeb8df89c6/core/trino-main/src/main/java/io/trino/likematcher/NfaMatcher.java
 [trino-re2j-dfa]: https://github.com/trinodb/re2j/blob/6d2a746b1db0a6fed7875218f2a8ab668f0fc2d6/java/io/trino/re2j/DFA.java#L443-L496
 [truffle-splitting]: https://github.com/oracle/graal/blob/vm-23.0.0/truffle/docs/splitting/Splitting.md
-[unicode-maximal-subparts]: https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-3/#G66453
-[unicode-two-stage]: https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-5/#G7642
 [v8-bm-interval]: https://github.com/v8/v8/blob/63481c19453c72221531058be6d2e94adf3ebc66/src/regexp/regexp-compiler.cc#L3841-L3917
 [v8-bm-sample]: https://github.com/v8/v8/blob/4.2.70.1/src/jsregexp.cc#L3645-L3697
 [v8-bm-skip]: https://github.com/v8/v8/blob/4.2.70.1/src/jsregexp.cc#L3733-L3798

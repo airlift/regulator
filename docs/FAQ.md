@@ -69,8 +69,8 @@ scans, vector and word-at-a-time kernels, a DFA table and loops tuned for the
 JVM, extended OnePass and BitState capture engines, and specialized plans for
 common shapes such as URL or key-value extraction.
 [Why Regulator is fast](WHY_FAST.md) walks through them; the
-[optimization catalog](reference/OPTIMIZATION_CATALOG.md) lists each one and
-credits its sources.
+[optimization catalog](reference/OPTIMIZATION_CATALOG.md) lists the main ones
+and credits their sources.
 
 ## Where do the optimizations come from?
 
@@ -79,10 +79,10 @@ optimizations were first built in RE2, the Rust `regex` crate and its `memchr`
 and `aho-corasick` crates, Hyperscan, ClickHouse, .NET, Trino, and the
 string-matching literature. Regulator's own work is mostly making them work
 together across four regex languages and fast on the JVM. The
-[optimization catalog](reference/OPTIMIZATION_CATALOG.md) credits each one's
-sources and says whether it was ported, adapted, first described elsewhere, or
-inspired by another engine; an entry credited to Regulator means a search
-found no earlier source. The
+[optimization catalog](reference/OPTIMIZATION_CATALOG.md) credits the sources
+of each optimization it lists and says whether it was ported, adapted, first
+described elsewhere, or inspired by another engine; a part of an entry
+credited to Regulator means a search found no earlier source. The
 [RE2 optimization registry](reference/OPTIMIZATION_REGISTRY.md) details the
 C++ RE2 optimizations. The license notices for ported code are in
 [LICENSE-re2.txt](../LICENSE-re2.txt) and
@@ -106,9 +106,15 @@ Yes, per search. Every search, including specialized routes, runs in time
 linear in its input with bounded memory, so it avoids the catastrophic cases
 of backtracking engines. Operations over every match, such as `count`,
 repeated `find` calls, and replacement, can total quadratic time, as in RE2
-and the Rust crate. The price is that features which need backtracking are not
-supported. See the
+and the Rust crate. The price is that features which need backtracking are
+not supported. See the
 [execution contract](reference/languages/UNSUPPORTED_FEATURES.md#current-execution-contract).
+
+Compile-time hash tables mix
+[MurmurHash3's fmix64](https://github.com/aappleby/smhasher/blob/61a0530f28277f2e850bfc39600ce61d02b518de/src/MurmurHash3.cpp#L81-L90)
+with a per-process random seed, the defense
+[Crosby and Wallach (2003)](https://www.usenix.org/legacy/events/sec03/tech/full_papers/crosby/crosby_html/index.html)
+describe, so a crafted pattern cannot force hash collisions in every process.
 
 ## How much memory does a pattern use?
 

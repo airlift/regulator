@@ -143,6 +143,43 @@ table moves to native memory when native access is enabled. Native access is
 optional; when it is unavailable, the DFA keeps the same pointer table on the
 Java heap without a warning or initialization failure.
 
+### Limits and defaults
+
+Within the budget, compilation and matching keep these limits:
+
+- Compilation caps instructions as RE2 does, and also charges each instruction
+  as flattening emits it. A forward program that outgrows its share of the
+  budget fails to compile; a reverse program that does not fit is dropped, and
+  the pattern searches without one. A DFA that fails to initialize is
+  remembered, so later searches do not try to build it again.
+- Optional plans give way to the forward DFAs. Literal searches of up to 64
+  bytes outside Trino, the dot-star literal and byte-gap ordered-literal
+  matchers, the root skip of a large literal set, OnePass tables needed only
+  for Java's or Trino's final-line end anchors, and required-byte checks are
+  not kept when their memory would stop the first-match or longest-match DFA
+  from initializing. The literal searched behind a leading assertion is kept
+  only when the first-match and longest-match DFAs both keep their minimum
+  memory beside it, a minimum that leaves out a forward DFA's start-byte
+  tables. Other plans keep their memory whenever it fits.
+- Every program with at most 32,767 output lists can use BitState, where RE2
+  allows only programs of at most 512 instructions, so the text limit, not
+  program size, decides which spans BitState captures. An anchored BitState
+  search may use a visited bitmap of up to 256 KiB, where RE2 stops at
+  256 Kibit, so a longer span is captured in one pass; unanchored searches
+  keep RE2's bitmap. Compilation lowers BitState's text limit until its
+  bitmap, slots, job stack, and objects fit the forward program's share.
+- An NFA capture search whose workspace does not fit the forward program's
+  share runs several passes, each tracking group zero and a window of capture
+  slots, which together report what one pass would.
+- With native access, each DFA counts a pointer-table segment that a reset or
+  growth replaces until the collector finds it unreachable, and allocates a
+  new segment only while its counted segments total at most twice that size.
+  A DFA's counted native memory thus stays within three times its newest
+  segment, and the native memory it holds exceeds that only by segments the
+  JDK's cleaner has not yet freed. A replacement that would push the counted superseded
+  segments past twice the new segment's size leaves searches on Java object
+  rows until the count falls.
+
 ### Byte frequencies
 
 Unanchored searches that scan for one probe byte of a case-sensitive literal,
@@ -206,8 +243,9 @@ Re2 pattern = Re2.compile(
 `RustRegexp.Options.setGenerateBytecode(true)` are options, off by default,
 that compile an eligible pattern's case-sensitive scan plan into its
 own hidden class. Results are unchanged; `usesGeneratedBytecode()` reports
-whether the pattern has such a class. A pattern that is not eligible, or whose
-class cannot be generated, compiles as it does without the option.
+whether the pattern has such a class. A pattern's class is generated inside
+`compile`, never on first use. A pattern that is not eligible, or whose class
+cannot be generated, compiles as it does without the option.
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, `RustRegexp`, and `TrinoLikePattern` are
 sealed classes that callers cannot extend, and `compile` may return a subclass

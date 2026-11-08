@@ -2,7 +2,7 @@
 
 This registry lists C++ RE2 optimizations and their exact trigger conditions
 for upstream fidelity audits. O-RE2-016 is Regulator's compile-time form of an
-RE2 run-time shortcut; its entry gives the C++ counterpart. Regulator's own
+RE2 run-time shortcut; its entry gives the C++ counterpart. Regulator's main
 optimizations, and where each RE2 mechanism lives in Regulator, are in the
 [optimization catalog](OPTIMIZATION_CATALOG.md).
 
@@ -1061,8 +1061,8 @@ When auditing Java implementation, verify each optimization:
 2. **Effect is identical** (same code path taken)
 3. **Protected benchmarks preserve the expected algorithm and scaling**
 
-Where Regulator deliberately differs, check the difference against its catalog
-entry and design decision instead.
+For a deliberate difference, check the catalog entry or table row and its
+design decision instead of these criteria.
 
 Use the correctness and performance gates in
 [`MAINTAINING_REGULATOR.md`](../MAINTAINING_REGULATOR.md) for changes to these
