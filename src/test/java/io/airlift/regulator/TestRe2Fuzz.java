@@ -379,6 +379,12 @@ public class TestRe2Fuzz
                 // bounds that extra compile work.
                 return new Generated(TestingPatternGenerator.scanPlanShape(random), options & ~(LATIN1 | LONGEST | LITERAL | CASE_INSENSITIVE));
             }
+            if (random.nextInt(8) == 0) {
+                // Random trees rarely reach the inner literal search's class-run proof, so one in
+                // eight of the rest has its shape, in options that keep the search: leftmost-first,
+                // with the literal exact. Latin-1 admits runs a UTF-8 dot does not.
+                return new Generated(TestingPatternGenerator.innerLiteralShape(random), options & ~(LONGEST | LITERAL | CASE_INSENSITIVE));
+            }
             Node tree = TestingPatternGenerator.generate(random, (options & LATIN1) != 0 ? LATIN1_VOCABULARY : VOCABULARY);
             if (random.nextInt(6) == 0) {
                 tree = TestingPatternGenerator.withLargeCounts(random, tree);

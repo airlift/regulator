@@ -844,14 +844,18 @@ abstract sealed class CompiledPattern
         // the least memory of a longest-match DFA over it, and an eighth more, since reversed
         // UTF-8 sequences can take a few more instructions. The reverse prefix program takes half
         // the reverse budget, or less if the search would otherwise not fit beside that estimate,
-        // and the search is left out unless its reverse prefix DFA can initialize.
+        // and the search is left out unless its reverse prefix DFA can initialize. A pattern of the
+        // dot-star literal matcher's shape below, such as `.*literal.*` in RE2, Trino, and Rust's
+        // string API, is left to that matcher: only the class-run proof admits its prefix of dots,
+        // so the search is left out, as it was before that proof.
         if (requiredPrefix == null && loweredBooleanProgram == null && !longestMatch && exactLiteral == null &&
                 booleanPlans.scanPlan() == null && booleanPlans.wordRunMatcher() == null && booleanPlans.disjointSuffixRepeatMatcher() == null) {
             long forwardEstimate = Compiler.estimatedProgramMemory(semanticProgram) + Dfa.DfaInstance.minimumMemory(semanticProgram, Dfa.DfaInstance.Kind.LONGEST_MATCH);
             long fullReverseMemory = forwardEstimate + forwardEstimate / 8;
             long searchMemory = reverseMemory - fullReverseMemory;
             long prefixMemory = Math.max(1, reverseMemory / 2);
-            InnerLiteralSearch innerLiteralSearch = InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
+            boolean dotStarLiteralShape = DotStarLiteralSpanMatcher.analyze(expressionAnalysis, booleanPlans.literal(), null, (flags & Regexp.LATIN1) != 0) != null;
+            InnerLiteralSearch innerLiteralSearch = dotStarLiteralShape ? null : InnerLiteralSearch.analyze(normalizedSuffixRegexp, semanticProgram, prefixMemory, searchMemory, compilerDialect, caseFolding);
             if (innerLiteralSearch != null) {
                 booleanPlans = booleanPlans.withInnerLiteralSearch(innerLiteralSearch);
             }
@@ -1127,7 +1131,7 @@ abstract sealed class CompiledPattern
         // check ahead of the table would scan such a window twice. An exact literal of a pattern
         // with no other literal route takes its long-window search into the same charge; where
         // that larger charge does not fit, it keeps the short-window check alone if that charge
-        // fits.
+        // fits. An inner literal search is such a route unless only the class-run proof admits it.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
@@ -1223,20 +1227,24 @@ abstract sealed class CompiledPattern
     /// window, so a window without the literal holds none, in every language and search mode.
     /// The check is left to a pattern whose engine reads the whole of a window that holds no
     /// match, and which no other route already searches for a literal at least as fast. So the
-    /// pattern has no required prefix, exact literal, literal kernel or search, inner literal
-    /// search, scan plan, class counter, literal set or alternation, span, byte-run, word-run, or
-    /// disjoint suffix-repeat matcher, or whole-input capture plan. Neither its forward nor its
-    /// lowered program is anchored at either end, where the engine can stop early, or has a
-    /// prefix scan, a transparent start literal, or a start literal filter that its first-match
-    /// DFA can run. A program whose folded run stands in for no prefix is judged as without the
-    /// run: the run is no prefix scan, and the start literal filter is the one its start bytes
-    /// would carry; see [Prog#prefixRunAddsPrefixScan]. Whether the first-match DFA initializes
-    /// is still judged on the program the search runs, whose start-byte tables the run replaces,
-    /// so in the few hundred bytes of budget between the two programs' initialization charges the
-    /// decision can differ from the program without the run. Such a program has no transparent
-    /// start literal either way, since that needs an assertion before the first byte, where
-    /// [Regexp#foldedRunsForAccel] stops. A pattern with a single-byte table is not checked here:
-    /// the caller keeps no required bytes for it at all.
+    /// pattern has no required prefix, exact literal, literal kernel or search, scan plan, class
+    /// counter, literal set or alternation, span, byte-run, word-run, or disjoint suffix-repeat
+    /// matcher, or whole-input capture plan, and no inner literal search but one that
+    /// [only the class-run proof adds][InnerLiteralSearch#addedByClassRunProof]. The pattern
+    /// decides as it would without such a search, so that proof neither adds the check to a
+    /// pattern nor takes it away.
+    /// Neither its forward nor its lowered program is anchored at either end, where the engine
+    /// can stop early, or has a prefix scan, a transparent start literal, or a start literal
+    /// filter that its first-match DFA can run. A program whose folded run stands in for no
+    /// prefix is judged as without the run: the run is no prefix scan, and the start literal
+    /// filter is the one its start bytes would carry; see [Prog#prefixRunAddsPrefixScan].
+    /// Whether the first-match DFA initializes is still judged on the program the search runs,
+    /// whose start-byte tables the run replaces, so in the few hundred bytes of budget between
+    /// the two programs' initialization charges the decision can differ from the program
+    /// without the run. Such a program has no transparent start literal either way, since that
+    /// needs an assertion before the first byte, where [Regexp#foldedRunsForAccel] stops. A
+    /// pattern with a single-byte table is not checked here: the caller keeps no required bytes
+    /// for it at all.
     private static boolean checksRequiredLiteralOnLongWindows(
             BooleanPlans booleanPlans,
             byte[] requiredPrefix,
@@ -1247,12 +1255,13 @@ abstract sealed class CompiledPattern
     {
         BooleanPlanKind find = booleanPlans.find();
         Prog loweredProgram = booleanPlans.loweredProgram();
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
         return requiredPrefix == null && exactLiteralLength <= 0 &&
                 (find == BooleanPlanKind.GENERAL || find == BooleanPlanKind.LOWERED_PROGRAM) &&
                 compactBoundedCharacterClass == null && matcherClass == null &&
                 booleanPlans.scanPlan() == null &&
                 booleanPlans.literalSearch() == null &&
-                booleanPlans.innerLiteralSearch() == null &&
+                (innerLiteralSearch == null || innerLiteralSearch.addedByClassRunProof()) &&
                 booleanPlans.literalSet() == null &&
                 booleanPlans.literalAlternationMatcher() == null &&
                 booleanPlans.fixedWidthByteMatcher() == null &&
@@ -3788,6 +3797,15 @@ abstract sealed class CompiledPattern
                 mutableGroupOffsets != null &&
                 hasBitStateWorkspace(workspaces) &&
                 canUseDirectBitStateCapture(prog, searchLength, captureCount)) {
+            // This route skips the inner literal search, whose minimum window is shorter than any
+            // window here, so it scans for the search's literal instead: a pattern with a search
+            // may have no long-window check. One that keeps the check, since only the class-run
+            // proof gives it the search, may read the bytes before the literal twice, which the
+            // BitState search after it outweighs.
+            InnerLiteralSearch innerLiteralSearch = prog == partialProg ? booleanPlans.innerLiteralSearch() : null;
+            if (innerLiteralSearch != null && innerLiteralSearch.windowLacksLiteral(text, start, end)) {
+                return false;
+            }
             Slice logicalContext = logicalContext(text, contextStart, contextEnd);
             boolean matched = BitState.search(
                     prog,
@@ -3842,6 +3860,14 @@ abstract sealed class CompiledPattern
                     ? innerLiteralSearch.search(text, contextStart, contextEnd, start, end)
                     : InnerLiteralSearch.FALLBACK;
             if (innerLiteralSpan == Dfa.SEARCH_NO_MATCH) {
+                return false;
+            }
+            // A search that skips the DFA skips the inner literal search too, so it scans for the
+            // search's literal instead: a pattern with a search may have no long-window check.
+            // One that keeps the check, since only the class-run proof gives it the search, may
+            // read the bytes before the literal twice, which the submatch engines after it
+            // outweigh.
+            if (dfaSearchSkippedOrFailed && innerLiteralSearch != null && innerLiteralSearch.windowLacksLiteral(text, start, end)) {
                 return false;
             }
             if (innerLiteralSpan >= 0) {
