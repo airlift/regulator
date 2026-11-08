@@ -244,10 +244,9 @@ public class TestUpstreamDfa
         assertThat(result3 >= 0).as("unanchored should find match").isTrue();
     }
 
-    /// Test DFA with earliestMatch mode.
-    /// The earliestMatch flag causes the DFA to return as soon as any match is detected.
-    /// Note: match detection is delayed by one byte in the DFA implementation (per upstream re2/dfa.cc),
-    /// so the exact boundary position may not be the absolute minimum possible.
+    /// Test DFA with earliestMatch mode, which returns as soon as the DFA sees a match. The DFA
+    /// sees a match one byte late, on the byte after it ends, and upstream re2/dfa.cc returns the
+    /// match's end from there without taking the end-of-text step.
     @Test
     public void testEarliestMatchSearch()
     {
@@ -264,12 +263,27 @@ public class TestUpstreamDfa
         assertThat(result1 >= 0).isTrue();
         assertThat((int) result1).isEqualTo(4);
 
-        // With earliestMatch, returns as soon as a match is detected.
-        // Due to the one-byte delay in match detection, this may not be the absolute minimum.
-        long result2 = Dfa.search(prog, text, true, Prog.MatchKind.FIRST_MATCH, false);
-        assertThat(result2 >= 0).isTrue();
-        // Just verify it returns something less than the full match
-        assertThat((int) result2).isLessThan(4);
+        // With earliestMatch, the search stops at the first 'a', seen when reading the second.
+        for (boolean anchored : new boolean[] {true, false}) {
+            assertThat(Dfa.search(prog, text, anchored, Prog.MatchKind.FIRST_MATCH, false)).isEqualTo(1);
+        }
+
+        // Searching backward from the end, the search stops at the last 'a', seen when reading the
+        // one before it. The second search of each pair runs on the transitions the first cached.
+        Prog reverse = Compiler.compile(parsed.regexp(), true, 0);
+        for (boolean anchored : new boolean[] {true, false}) {
+            for (int repetition = 0; repetition < 2; repetition++) {
+                assertThat(Dfa.search(reverse, text, 0, text.length(), anchored, Prog.MatchKind.LONGEST_MATCH, false)).isEqualTo(3);
+            }
+        }
+
+        // The search stops at the end of `a`, seen when reading 'b'. Stepping on to the end of the
+        // text would report `ab$`, which does not match before 'c'.
+        Prog alternation = compile("a|ab$");
+        Slice alternationText = Slices.utf8Slice("abc");
+        for (boolean anchored : new boolean[] {true, false}) {
+            assertThat(Dfa.search(alternation, alternationText, anchored, Prog.MatchKind.FIRST_MATCH, false)).isEqualTo(1);
+        }
     }
 
     /// Test DFA with text/context separation.

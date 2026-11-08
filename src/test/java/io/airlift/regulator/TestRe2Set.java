@@ -313,6 +313,25 @@ public class TestRe2Set
     }
 
     @Test
+    public void testMatchesAnyStopsAtFirstMatchInFullCache()
+    {
+        Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults(), Re2Set.MatchMode.FIND);
+        builder.add(Slices.utf8Slice("a+"));
+        Re2Set set = builder.build();
+        // Collecting every match reads the whole text, so it caches the DFA transitions for `aa`
+        // without stopping where the second 'a' shows the first match.
+        assertThat(set.matchingPatternIds(Slices.utf8Slice("aab"))).containsExactly(0);
+        Dfa.DfaInstance dfa = set.dfaForDiagnostics();
+        int resetCount = dfa.resetCount();
+
+        // The DFA sees the match when it reads the second 'a' and returns there, so it needs no new
+        // state, and a cache with no room for one is not reset.
+        dfa.failStateAllocationsForTesting(1);
+        assertThat(set.matchesAny(Slices.utf8Slice("aa"))).isTrue();
+        assertThat(dfa.resetCount()).isEqualTo(resetCount);
+    }
+
+    @Test
     public void testMatchingPatternIdsSurvivesDefaultBudgetCacheResets()
     {
         Slice input = Slices.utf8Slice(deBruijnString(22) + "0");

@@ -583,6 +583,8 @@ final class Dfa
             matchKind = Prog.MatchKind.LONGEST_MATCH;
         }
 
+        // As in upstream, an earliest-match search that sees its match mid-text returns the match
+        // there, without taking the end-of-text step.
         boolean wantEarliestMatch = !wantMatchBoundary && !endMatch;
         if (wantEarliestMatch && matchKind != Prog.MatchKind.MANY_MATCH) {
             matchKind = Prog.MatchKind.LONGEST_MATCH;
@@ -2820,8 +2822,7 @@ final class Dfa
                         lastMatchBoundary = position;
                         stateOffset &= ~T_MATCH_BIT;
                         if (wantEarliestMatch && !endMatch) {
-                            position++;
-                            break scan;
+                            return finalizeResult(resultBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                         }
                     }
                     position++;
@@ -2867,7 +2868,7 @@ final class Dfa
                     lastMatchBoundary = position - 1;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        break;
+                        return finalizeResult(resultBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
                 stateRefs = dfa.stateReferences(tables, stateOffset);
@@ -2887,8 +2888,7 @@ final class Dfa
             lastMatchBoundary = position;
             stateOffset = nextState & ~T_MATCH_BIT;
             if (wantEarliestMatch && !endMatch) {
-                position++;
-                break scan;
+                return finalizeResult(resultBegin, textEnd, endMatch, true, lastMatchBoundary, true);
             }
             position++;
             stateRefs = dfa.stateReferences(tables, stateOffset);
@@ -3417,8 +3417,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position++;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
                 if (stateOffset == startOffset) {
@@ -3459,8 +3458,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position++;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
                 position++;
@@ -3504,7 +3502,7 @@ final class Dfa
                 lastMatchBoundary = position - 1;
                 stateOffset &= ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    break;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                 }
             }
         }
@@ -3675,8 +3673,7 @@ final class Dfa
                 lastMatchBoundary = position;
                 stateOffset = nextState & ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    position++;
-                    break scan;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                 }
                 position++;
                 stateRefs = dfa.stateReferences(tables, stateOffset);
@@ -3714,8 +3711,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position++;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
                 position++;
@@ -3762,7 +3758,7 @@ final class Dfa
                 lastMatchBoundary = position - 1;
                 stateOffset &= ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    break;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                 }
             }
             stateRefs = dfa.stateReferences(tables, stateOffset);
@@ -4012,8 +4008,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position++;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
             }
@@ -4050,8 +4045,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position++;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                     }
                 }
                 position++;
@@ -4095,7 +4089,7 @@ final class Dfa
                 lastMatchBoundary = position - 1;
                 stateOffset &= ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    break;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, true);
                 }
             }
         }
@@ -4209,8 +4203,7 @@ final class Dfa
                 lastMatchBoundary = position;
                 stateOffset = nextState & ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    position--;
-                    break scan;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, false);
                 }
                 position--;
                 // Object rows hold no match transitions, so each byte of a matching self-loop,
@@ -4277,8 +4270,7 @@ final class Dfa
                     lastMatchBoundary = position;
                     stateOffset &= ~T_MATCH_BIT;
                     if (wantEarliestMatch && !endMatch) {
-                        position--;
-                        break scan;
+                        return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, false);
                     }
                 }
                 position--;
@@ -4327,7 +4319,7 @@ final class Dfa
                 lastMatchBoundary = position + 1;
                 stateOffset &= ~T_MATCH_BIT;
                 if (wantEarliestMatch && !endMatch) {
-                    break;
+                    return finalizeResult(textBegin, textEnd, endMatch, true, lastMatchBoundary, false);
                 }
             }
             stateRefs = dfa.stateReferences(tables, stateOffset);
