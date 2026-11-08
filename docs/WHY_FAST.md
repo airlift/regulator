@@ -16,15 +16,15 @@ on top:
 Few of these mechanisms began in Regulator. Most were first built in RE2, the
 Rust `regex` crate and its companion crates, Hyperscan, ClickHouse, .NET,
 Trino, and the string-matching literature, and the
-[optimization catalog](reference/OPTIMIZATION_CATALOG.md) credits each one; if
-a credit there is wrong, please
+[optimization catalog](reference/OPTIMIZATION_CATALOG.md) credits the main
+ones; if a credit there is wrong, please
 [send a pull request](https://github.com/airlift/regulator/edit/main/docs/reference/OPTIMIZATION_CATALOG.md)
 that corrects it. The hard part is making them work together across four regex
 languages without changing any language's results, and making them fast on the
 JVM, where a technique that wins in C or Rust often has to take another form.
 
 This page explains those mechanisms for a curious engineer. The catalog lists
-the optimizations with their locations and origins, and the
+the main optimizations with their locations and origins, and the
 [benchmark report](https://airlift.github.io/regulator/benchmarks/) has the
 measurements.
 
@@ -92,7 +92,7 @@ progressively more. Regulator answers each with the least it can.
   starts at that character's lead byte.
 - Captures run on RE2's OnePass engine when the pattern is unambiguous. RE2's
   OnePass handles at most four explicit groups.
-  [Regulator's handles up to 31](reference/OPTIMIZATION_CATALOG.md#extended-onepass-captures);
+  [Regulator's handles up to 31](reference/OPTIMIZATION_CATALOG.md#onepass-past-re2s-limits);
   the Rust crate's one-pass engine went past RE2's limit first, to 16. Beyond
   RE2's line and word assertions, Regulator's OnePass checks Rust's CRLF
   anchors and word boundaries, which the crate's engine also checks, Java's
@@ -101,12 +101,17 @@ progressively more. Regulator answers each with the least it can.
   into each transition's action; Regulator's entry also holds that state's row
   offset, premultiplied as the crate's other DFAs store their state IDs, so a
   step finds the next row without a multiply.
-- Ambiguous captures through a matcher run
-  [one bounded backtracking pass](reference/OPTIMIZATION_CATALOG.md#direct-bitstate-capture)
-  instead of a forward DFA, a reverse DFA, and a capture pass, on input from
-  4 KiB up to the backtracker's unanchored limit. That limit keeps upstream's
-  256 Kibit visited bitmap, so only small programs, of at most 63 lists,
-  qualify. The bitmap keeps the pass linear.
+- Ambiguous captures in an unanchored leftmost-first matcher search, on input
+  from 4 KiB up to the backtracker's unanchored limit, run one bounded
+  backtracking pass instead of a forward DFA, a reverse DFA, and a capture
+  pass, as
+  [Go's regexp](https://github.com/golang/go/blob/go1.20.14/src/regexp/exec.go#L534-L536)
+  does, and as
+  [RE2](https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/re2.cc#L825-L847)
+  does for anchored searches. That limit keeps upstream's
+  [256 Kibit visited bitmap](reference/REGULATOR_API.md#limits-and-defaults),
+  so only small programs, of at most 63 lists, qualify. The bitmap keeps the
+  pass linear.
 
 ## Use a specialized plan for a common shape
 
@@ -198,11 +203,11 @@ reverse skip reads only the exit bytes, not the stay ranges.
 
 Other forward searches step through non-matching loops, except end-anchored
 and full-match searches with at least 64 KiB left: these
-[sample 64 transitions first](reference/OPTIMIZATION_CATALOG.md#sampled-self-loop-scan)
+[sample 64 transitions first](reference/OPTIMIZATION_CATALOG.md#self-loop-exit-byte-scan)
 and, when at least 90% stay on their state, switch to a loop that tests "the
 next row is this row", or to the vector scan when the state has one to three
-exit bytes or stays on up to four byte ranges. Counts of a repeated class such as `\w+` have a dedicated loop of
-their own.
+exit bytes or stays on up to four byte ranges. Counts of a repeated class such
+as `\w+` have a dedicated loop of their own.
 
 **No lock per search.** A compiled pattern's DFA cache is shared by every
 thread that uses it. RE2 takes a reader lock on the cache for each search.
@@ -239,12 +244,16 @@ form. See
 **The JIT targets the CPU it runs on.** Vector API scans compile to the
 running CPU's vector instructions, and the few loops whose best form differs
 by platform, such as candidate tests on Graviton's SVE and on Intel, have
-[separate implementations](reference/OPTIMIZATION_CATALOG.md#sve-candidate-masks).
+[separate implementations](reference/OPTIMIZATION_CATALOG.md#one-compare-candidate-masks).
 
 **Matching allocates little.** Inputs and captures are views of the caller's
 bytes (Airlift `Slice` objects), and a matcher reuses its capture buffer and
-[workspaces](reference/OPTIMIZATION_CATALOG.md#matcher-owned-workspaces) from
-one match to the next.
+[workspaces](reference/REGULATOR_API.md#matching-apis) from
+one match to the next, as the Rust crate's
+[`Cache`](https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs)
+and Go's
+[pools](https://github.com/golang/go/blob/go1.22.0/src/regexp/backtrack.go)
+do.
 
 ## Where Regulator does not win
 
