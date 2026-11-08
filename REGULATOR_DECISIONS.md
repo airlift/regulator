@@ -3284,6 +3284,21 @@ sentinels where C++ uses distinguished pointers, and unsigned-byte masking with
 contract. These representation changes are acceptable only when tests establish
 the same externally observable behavior as pinned upstream RE2.
 
+## UTF-8 Encoding By Code Point
+
+Every UTF-8 encoder chooses its one- to four-byte form by comparing the code
+point with U+007F, U+07FF, and U+FFFF, never by testing a length computed first.
+This works around JDK-8376400, a HotSpot C2 miscompilation, and is needed on
+every JDK that lacks its fix. The fix is in jdk-27+21 and was backported in
+25.0.5 (jdk25u 5803dd3e80f4); no JDK 26 update through 26.0.2.1 has it, and the
+JDK's regression test fails as far back as JDK 17.
+
+Once the encoder is inlined into a compiled caller, C2 can push the length tests
+through the constants the length computation returns and fold them into a
+narrower range test, and a trap taken there resumes in the interpreter with the
+wrong length. A pattern compiled at that moment encoded U+1F600 as the two bytes
+`d8 80`, so `^(😀)$` did not match 😀.
+
 ## Trino Text-Dependent Assertions And Full Case Folding
 
 `TrinoRegexp` implements Joni's final-LF `$`, multiline `^`, Unicode `\b` and

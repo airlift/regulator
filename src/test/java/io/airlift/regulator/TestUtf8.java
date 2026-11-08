@@ -13,10 +13,15 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestUtf8
 {
@@ -62,5 +67,54 @@ public class TestUtf8
         assertThat(cursor.readCodePoint()).isEqualTo(0xA2);
         assertThat(cursor.readCodePoint()).isEqualTo(0x42);
         assertThat(cursor.readCodePoint()).isEqualTo(-1);
+    }
+
+    @Test
+    public void testEncode()
+    {
+        // Both encoders write the JDK's UTF-8 for every code point except surrogates
+        for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
+            if (codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) {
+                continue;
+            }
+
+            assertEncodes(codePoint, Character.toString(codePoint).getBytes(UTF_8));
+        }
+
+        // A surrogate takes the three-byte form
+        assertEncodes(0xD800, new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80});
+
+        // Values outside the code point range are rejected before anything is written
+        for (int codePoint : new int[] {-1, 0x110000}) {
+            byte[] output = new byte[8];
+            Arrays.fill(output, (byte) 0x55);
+            byte[] expectedOutput = output.clone();
+            assertThatThrownBy(() -> Utf8.encode(output, 2, codePoint))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("invalid rune: " + codePoint);
+            assertThat(output).isEqualTo(expectedOutput);
+
+            DynamicSliceOutput sliceOutput = new DynamicSliceOutput(8);
+            assertThatThrownBy(() -> Utf8.encode(sliceOutput, codePoint))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("invalid rune: " + codePoint);
+            assertThat(sliceOutput.size()).isZero();
+        }
+    }
+
+    private static void assertEncodes(int codePoint, byte[] expected)
+    {
+        // The array form writes at the offset, returns the end, and leaves the guard bytes alone
+        int offset = 2;
+        byte[] output = new byte[offset + expected.length + 2];
+        Arrays.fill(output, (byte) 0x55);
+        byte[] expectedOutput = output.clone();
+        System.arraycopy(expected, 0, expectedOutput, offset, expected.length);
+        assertThat(Utf8.encode(output, offset, codePoint)).isEqualTo(offset + expected.length);
+        assertThat(output).as("U+%04X", codePoint).isEqualTo(expectedOutput);
+
+        DynamicSliceOutput sliceOutput = new DynamicSliceOutput(4);
+        Utf8.encode(sliceOutput, codePoint);
+        assertThat(sliceOutput.slice().getBytes()).as("U+%04X", codePoint).isEqualTo(expected);
     }
 }
