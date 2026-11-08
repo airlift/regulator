@@ -151,9 +151,9 @@ since then, such as the script `Seal` and the names of new characters in
 from `Pattern`. Unicode 17.0 changed two for older characters: U+0295 is `Lo`
 rather than lowercase, and 689 code points that are not emoji, such as U+2605
 BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's `Pattern`
-lacks case-insensitive matches that JDK 26 added: it does not match `ß`
-against `ẞ`, and its ranges lack the closing characters described below, so
-`(?iu)[ς-ς]` matches `σ` only on JDK 26.
+lacks case-insensitive matches that JDK 26 added: it does not match `(?iu)ß`
+or `(?iu)[ß]` against `ẞ`, and its ranges lack the closing characters
+described below, so `(?iu)[ς-ς]` matches `σ` only on JDK 26.
 
 Property names are resolved by `Pattern`'s rules. A name may take one of the
 prefixes `In`, `Is`, `gc=`, `general_category=`, `sc=`, `script=`, `blk=`, or
