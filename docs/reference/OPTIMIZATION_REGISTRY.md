@@ -1,7 +1,10 @@
 # RE2 optimization registry
 
 This registry lists C++ RE2 optimizations and their exact trigger conditions
-for upstream fidelity audits.
+for upstream fidelity audits. O-RE2-016 is Regulator's compile-time form of an
+RE2 run-time shortcut; its entry gives the C++ counterpart. Regulator's own
+optimizations, and where each RE2 mechanism lives in Regulator, are in the
+[optimization catalog](OPTIMIZATION_CATALOG.md).
 
 **Upstream commit**: `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
 
@@ -311,6 +314,57 @@ if (dfa_should_bail_when_slow && resetp != NULL &&
 
 ---
 
+### O-DFA-017: Per-Kind DFA Budgets and Minimum State Count (IMPORTANT)
+
+**Location**: `dfa.cc:420-467`, `1801-1828`
+**Function**: `DFA::DFA()`, `Prog::GetDFA()`
+
+**Budget split** (`GetDFA`): a forward first-match or longest-match DFA gets
+`dfa_mem_ / 2`; a many-match DFA, and the longest-match DFA of a reversed
+program, get all of `dfa_mem_`.
+
+**Trigger condition** (`DFA::DFA`, lines 456-462):
+```cpp
+int nnext = prog_->bytemap_range() + 1;  // + 1 for kByteEndText slot
+int64_t one_state = sizeof(State) + nnext*sizeof(std::atomic<State*>) +
+                    (prog_->list_count()+nmark)*sizeof(int);
+if (state_budget_ < 20*one_state) {
+  init_failed_ = true;
+  return;
+}
+```
+
+**Effect**: After the DFA, work queues, and stack are charged to the budget,
+construction fails unless the rest holds 20 states.
+
+---
+
+### O-DFA-018: State Kept Across Cache Reset (MINOR)
+
+**Location**: `dfa.cc:1202-1276`, `1445-1459`
+**Function**: `DFA::StateSaver`, `InlinedSearchLoop`
+
+**Effect**: Before `ResetCache`, a `StateSaver` copies a state's instruction
+list and flags out of the cache (special states are kept as pointers);
+`Restore()` re-creates it in the emptied cache, so the search continues from
+its current and start states instead of starting over.
+
+---
+
+### O-DFA-019: Many-Match DFA (IMPORTANT)
+
+**Location**: `dfa.cc:643`, `719-734`, `1103-1106`, `1439-1441`, `1490-1497`
+**Function**: `WorkqToCachedState`, `RunStateOnByte`, `InlinedSearchLoop`
+
+**Trigger condition**: `kind_ == Prog::kManyMatch`
+
+**Effect**: A matching state stores the match IDs of every pattern that matched
+after a `MatchSep` marker, and the search loop inserts them into the caller's
+set. Many-match never returns `FullMatchState` and never bails to the NFA when
+the cache thrashes, since `RE2::Set` has no fallback.
+
+---
+
 ## Program Optimizations
 
 ### O-PROG-001: NOP Elimination (MINOR)
@@ -438,6 +492,18 @@ bool CanBitState() { return list_heads_.data() != NULL; }
 
 ---
 
+### O-PROG-010: Next Set Bit in a 256-Bit Set (MINOR)
+
+**Location**: `bitmap256.cc:13-41`, `bitmap256.h:52-81`
+**Function**: `Bitmap256::FindNextSetBit()`, `Bitmap256::FindLSBSet()`
+
+**Effect**: Finds the next set bit at or after `c` by masking the bits below `c`
+in its 64-bit word and counting trailing zeros, then testing the following
+words in turn. Byte-class construction (`ByteMapBuilder::Merge`, `Build`) and
+`ComputeHints` use it to step between split points.
+
+---
+
 ## Compiler Optimizations
 
 ### O-COMP-001: RuneCache - Suffix Fragment Caching (MINOR)
@@ -504,6 +570,57 @@ if (lo == 0x80 && hi == 0x10ffff) {
 - **O-COMP-014**: Flattening
 - **O-COMP-015**: DotStar for Unanchored Search
 - **O-COMP-016**: ANCHOR_BOTH End-of-Text
+
+---
+
+### O-COMP-017: Lazy Reverse Program with Swapped Assertions (IMPORTANT)
+
+**Location**: `compile.cc:296-300`, `963-973`, `1115-1161`, `re2.cc:287-303`
+**Function**: `Compiler::Cat()`, `Compiler::PostVisit()`, `Compiler::Compile()`, `RE2::ReverseProg()`
+
+**Trigger condition** (`PostVisit`, lines 963-973):
+```cpp
+case kRegexpBeginLine:
+  return EmptyWidth(reversed_ ? kEmptyEndLine : kEmptyBeginLine);
+case kRegexpEndLine:
+  return EmptyWidth(reversed_ ? kEmptyBeginLine : kEmptyEndLine);
+case kRegexpBeginText:
+  return EmptyWidth(reversed_ ? kEmptyEndText : kEmptyBeginText);
+case kRegexpEndText:
+  return EmptyWidth(reversed_ ? kEmptyBeginText : kEmptyEndText);
+```
+
+**Effect**: A reversed compile reverses every concatenation, swaps begin and
+end assertions, and swaps the recorded start and end anchors. `RE2` compiles
+the reverse program only on the first `ReverseProg()` call, once, with
+`max_mem() / 3`; a failed compile returns `NULL`, and matching falls back to
+BitState when eligible, otherwise to the NFA.
+
+---
+
+### O-COMP-018: Unchanged Nodes Kept During Simplification (MINOR)
+
+**Location**: `simplify.cc:202-219`, `242`, `270`, `459-465`, `493`
+**Function**: `ChildArgsChanged()`, `CoalesceWalker::PostVisit()`, `SimplifyWalker::PreVisit()`, `SimplifyWalker::PostVisit()`
+
+**Trigger condition**:
+```cpp
+static bool ChildArgsChanged(Regexp* re, Regexp** child_args) {
+  for (int i = 0; i < re->nsub(); i++) {
+    Regexp* sub = re->sub()[i];
+    Regexp* newsub = child_args[i];
+    if (newsub != sub)
+      return true;
+  }
+  ...
+  return false;
+}
+```
+
+**Effect**: At each `ChildArgsChanged` call site, when no child changed, the
+walker releases the child results and returns the original node with
+`Incref()` instead of allocating a copy. `SimplifyWalker::PreVisit` returns a
+node already marked simple without visiting its children.
 
 ---
 
@@ -665,7 +782,7 @@ if (can_bit_state && text.size() <= bit_state_text_max_size && ncap > 1) {
 
 ---
 
-### O-RE2-016: Match-Every-Byte Detection (IMPORTANT, Java-only)
+### O-RE2-016: Match-Every-Byte Detection (IMPORTANT)
 
 **Location**: `Compiler.java`, `CompiledPattern.java`
 **Function**: `matchesAnyByteString()`, `matchOnOrdinaryEngine()`
@@ -677,10 +794,9 @@ private static boolean matchesAnyByteString(Regexp regexp)
     if (regexp.op() != RegexpOp.STAR) {
         return false;
     }
-    Regexp operand = regexp.sub(0);
+    Regexp operand = regexp.child(0);
     return operand.op() == RegexpOp.ANY_BYTE ||
-            (operand.op() == RegexpOp.ANY_CHAR &&
-                    (operand.parseFlags() & Regexp.LATIN1) != 0);
+            (operand.op() == RegexpOp.ANY_CHAR && (operand.parseFlags() & Regexp.LATIN1) != 0);
 }
 ```
 
@@ -688,8 +804,8 @@ private static boolean matchesAnyByteString(Regexp regexp)
 ```java
 if (anchorMode == Anchor.ANCHOR_BOTH && prog.matchesAnyByteString() && captureCount <= 1) {
     if (mutableGroupOffsets != null && mutableGroupOffsets.length >= 2) {
-        mutableGroupOffsets[0] = start;
-        mutableGroupOffsets[1] = end;
+        mutableGroupOffsets[0] = start - contextStart - strippedPrefixLength;
+        mutableGroupOffsets[1] = end - contextStart;
     }
     return true;
 }
@@ -698,6 +814,64 @@ if (anchorMode == Anchor.ANCHOR_BOTH && prog.matchesAnyByteString() && captureCo
 **Effect**: Returns immediately for full matches when the expression accepts
 every byte sequence. This includes `\C*` in UTF-8 mode and dot-all `.*` in
 Latin-1 mode. UTF-8 dot-all `.*` is excluded because it rejects malformed UTF-8.
+
+**C++ counterpart**: RE2 reaches the same answer at run time. `Prog::Optimize`
+marks a `[00-FF]*` loop before `Match` as `kInstAltMatch`
+([O-PROG-002](#o-prog-002-altmatch-insertion-critical)). The DFA turns a state
+holding it into `FullMatchState` once the state's match flag is set, which
+happens after the first byte, or the end-of-text step on empty input, and
+returns at once
+([O-DFA-002](#o-dfa-002-fullmatchstate-sentinel-critical); `dfa.cc:638-650`,
+`1469-1476`). BitState and the NFA jump to the end of the text
+([O-NFA-006](#o-nfa-006-altmatch-greedy-shortcut-critical); `bitstate.cc:184`,
+`nfa.cc:362`), and OnePass ignores it (`onepass.cc:450`). Regulator decides at
+compile time instead, so a full match returns before any engine setup and
+reads no input.
+
+---
+
+### O-RE2-017: RE2::Set Many-Match Program (IMPORTANT)
+
+**Location**: `set.cc:24-30`, `64-101`, `103-131`, `137-183`, `compile.cc:859-866`, `1219-1259`
+**Function**: `RE2::Set::Set()`, `RE2::Set::Add()`, `RE2::Set::Compile()`, `RE2::Set::Match()`, `Compiler::CompileSet()`
+
+**Match call** (`set.cc:154-155`):
+```cpp
+bool ret = prog_->SearchDFA(text, text, Prog::kAnchored, Prog::kManyMatch,
+                            NULL, &dfa_failed, matches.get());
+```
+
+**Effect**: The set forces `never_capture`, appends a `HaveMatch(n)` marker to
+each pattern (compiled as `Match(n)`, after `\z` for `ANCHOR_BOTH`), and
+compiles the sorted patterns as one alternation, with a `.*` prefix when
+unanchored. `CompileSet` runs one probe search and fails if the DFA is out of
+memory, since there is no NFA fallback. Each `Match` is one many-match DFA
+pass ([O-DFA-019](#o-dfa-019-many-match-dfa-important)); with no result vector
+it stops at the earliest match.
+
+---
+
+### O-RE2-018: Prefilter Tree and Filtered Matching (IMPORTANT)
+
+**Location**: `prefilter.cc:581-602`, `646-662`, `699-708`, `prefilter_tree.cc:39-70`, `80-115`, `117-266`, `268-330`, `filtered_re2.cc:70-89`, `98-122`
+**Function**: `Prefilter::FromRE2()`, `PrefilterTree::Add()`, `PrefilterTree::Compile()`, `PrefilterTree::RegexpsGivenStrings()`, `PrefilterTree::PropagateMatch()`, `FilteredRE2::FirstMatch()`, `FilteredRE2::AllMatches()`
+
+**Filtered match** (`filtered_re2.cc:104-109`):
+```cpp
+std::vector<int> regexps;
+prefilter_tree_->RegexpsGivenStrings(atoms, &regexps);
+for (size_t i = 0; i < regexps.size(); i++)
+  if (RE2::PartialMatch(text, *re2_vec_[regexps[i]]))
+    return regexps[i];
+return -1;
+```
+
+**Effect**: Each pattern becomes an AND/OR tree of literal atoms. The tree
+drops atoms shorter than `min_atom_len`, shares identical nodes, and returns
+the atoms for the caller to find in the text. From the matched atoms, an OR
+node triggers on one child and an AND node on every child left after edge
+pruning; only patterns whose root triggers, plus patterns with no prefilter,
+run `RE2::PartialMatch`.
 
 ---
 
@@ -875,7 +1049,7 @@ These optimizations have the highest impact and are most likely to cause perform
 | **O-BIT-001** | Bitmap Memoization | bitstate.cc | Linear time guarantee |
 | **O-RE2-003** | Prefix Extraction | re2.cc | Enables prefix accel |
 | **O-RE2-005** | OnePass Selection | re2.cc | Avoids general NFA execution |
-| **O-RE2-016** | Match-every-byte detection (Java-only) | Compiler.java | Constant-time full match for byte-universal patterns |
+| **O-RE2-016** | Match-every-byte detection | Compiler.java | Constant-time full match for byte-universal patterns |
 
 ---
 
@@ -886,6 +1060,9 @@ When auditing Java implementation, verify each optimization:
 1. **Trigger condition matches exactly** (not just "similar")
 2. **Effect is identical** (same code path taken)
 3. **Protected benchmarks preserve the expected algorithm and scaling**
+
+Where Regulator deliberately differs, check the difference against its catalog
+entry and design decision instead.
 
 Use the correctness and performance gates in
 [`MAINTAINING_REGULATOR.md`](../MAINTAINING_REGULATOR.md) for changes to these

@@ -261,6 +261,10 @@ paths without changing results:
 --enable-native-access=ALL-UNNAMED
 ```
 
+Enable both; the
+[FAQ](../FAQ.md#should-i-enable-the-vector-api-or-native-access) explains
+the benefit of each.
+
 Resolving `jdk.incubator.vector` enables vectorized candidate scanning for
 eligible long searches when the JVM's preferred byte vector holds 16 to 64
 bytes. Without the module, or on a JVM whose vectors fall outside the supported

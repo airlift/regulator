@@ -163,14 +163,19 @@ decoding compressed references, also known as compressed oops. In native memory
 an entry is the next row's address; in a Java array it is the next row's offset,
 which costs an addition per transition. The effect of native access depends on
 the pattern, input, and matching engine; LIKE-only routes do not use the DFA.
-Start with the pure-Java default and compare both modes on your workload when
-regex execution is a substantial part of its cost. The
-[benchmark report](https://airlift.github.io/regulator/benchmarks/) includes
-separate native-access and pure-Java results.
+
+Enable both flags. The
+[benchmark report](https://airlift.github.io/regulator/benchmarks/) runs every
+row with the Vector API and includes separate native-access and pure-Java
+results. The published report predates the Java-array table; the
+[FAQ](docs/FAQ.md#should-i-enable-the-vector-api-or-native-access) explains the
+current benefit of each flag.
 
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [FAQ](docs/FAQ.md)
+- [Why Regulator is fast](docs/WHY_FAST.md)
 - [API guide](docs/reference/REGULATOR_API.md)
 - [Pattern languages](docs/integrations/REGEXP_LANGUAGES.md)
 - [RE2 language](docs/reference/languages/RE2.md)
