@@ -31,6 +31,7 @@ public sealed class JavaRegexp
                 JavaRegexp.FixedWidthJavaRegexp,
                 JavaRegexp.LiteralAlternationJavaRegexp,
                 JavaRegexp.LiteralKernelJavaRegexp,
+                JavaRegexp.LiteralSetJavaRegexp,
                 JavaRegexp.ScanPlanJavaRegexp
 {
     /// Mutable Java-language compilation options. Compilation snapshots every option, so later
@@ -200,7 +201,7 @@ public sealed class JavaRegexp
             case ENGINE -> new JavaRegexp(analysis);
             case EXACT_LITERAL -> new ExactLiteralJavaRegexp(analysis);
             case LITERAL_KERNEL -> new LiteralKernelJavaRegexp(analysis);
-            case LITERAL_ALTERNATION -> new LiteralAlternationJavaRegexp(analysis);
+            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationJavaRegexp(analysis) : new LiteralSetJavaRegexp(analysis);
             case FIXED_WIDTH -> new FixedWidthJavaRegexp(analysis);
             case CLASS_RUN -> new ClassRunJavaRegexp(analysis);
             case BYTE_TABLE -> new ByteTableJavaRegexp(analysis);
@@ -382,6 +383,45 @@ public sealed class JavaRegexp
         boolean countsOnLiteralSetForDiagnostics()
         {
             return literalSetCount;
+        }
+    }
+
+    /// A pattern of the [literal-alternation shape][Shape#LITERAL_ALTERNATION] whose program did
+    /// not fit the budget, so it compiled none: every operation runs the literal set.
+    static final class LiteralSetJavaRegexp
+            extends JavaRegexp
+    {
+        // The literals that a full match reads beside the literal set.
+        private final LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals;
+
+        private LiteralSetJavaRegexp(Analysis analysis)
+        {
+            super(analysis);
+            this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralAlternation(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnLiteralAlternation(text, true);
+        }
+
+        @Override
+        boolean countsOnLiteralSetForDiagnostics()
+        {
+            return true;
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnLiteralSet(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, extendingLiterals);
         }
     }
 

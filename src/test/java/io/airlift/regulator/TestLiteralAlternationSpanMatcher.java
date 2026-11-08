@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,11 +29,14 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
+import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestBudget;
+import static io.airlift.regulator.TestingPatternShapes.holdsAt;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOfByteArray;
@@ -185,8 +189,9 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(optionalLiteralSet(dictionary + "|b[xy](?:|)|(?:|)c[xy]")).isNotNull();
 
         // Where a choice ends the pattern, the extraction skips each literal that equals or
-        // extends an earlier one, which can never match. Before more text a later alternative
-        // can still match, so each row keeps the route it takes with every literal.
+        // extends an earlier one, which a leftmost-first search never reports. Before more text a
+        // later alternative can still match, so each row keeps the route it takes with every
+        // literal.
         for (List<String> row : List.of(
                 List.of("(?:|a)b", "ab", "0-2", "engine"),
                 List.of("x(?:|a)b", "xab", "0-3", "engine"),
@@ -312,7 +317,8 @@ public class TestLiteralAlternationSpanMatcher
         // under the default budget. A budget least for the root's skip shows that the skip, a
         // contiguous range or nibble tables, compiles with the same answers whether it fits or not;
         // without the Vector API no budget builds it. The count is answered without a matcher at
-        // every budget, below the first-match DFA's least budget by the set.
+        // every budget, below the first-match DFA's least budget by the set. The program fits at
+        // every one of these budgets, so the pattern keeps it.
         Slice wordsInput = utf8Slice("zz ax0 then ax64, ax8x and ax6?");
         for (String leadingBytes : List.of("abcdefgh", "acegikmo")) {
             String expression = leadingByteWords(leadingBytes, 65);
@@ -329,6 +335,7 @@ public class TestLiteralAlternationSpanMatcher
                 String label = expression.substring(0, 20) + " at " + budget;
                 assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(label).isNotNull();
                 assertThat(shape(pattern)).as(label).isEqualTo(budget >= findEdge ? CompiledPattern.Shape.ENGINE : CompiledPattern.Shape.LITERAL_ALTERNATION);
+                assertThat(pattern.forwardProgramForDiagnostics().start()).as(label).isNotZero();
                 assertThat(pattern.countsOnLiteralSetForDiagnostics()).as(label).isEqualTo(budget < countEdge);
                 assertThat(pattern.literalSetSpanMatcherForDiagnostics().rootByteScanSetForDiagnostics()).as(label).isEqualTo(budget >= skipEdge ? scanSet : 0);
                 assertThat(pattern.find(wordsInput)).as(label).isTrue();
@@ -338,6 +345,183 @@ public class TestLiteralAlternationSpanMatcher
                 assertThat(findSpans(pattern.matcher(wordsInput, 0))).as(label).containsExactly("3-6", "12-16", "18-21");
             }
         }
+    }
+
+    @Test
+    public void testLiteralSetWithoutProgram()
+    {
+        // Leftmost-first priority (ab before a), a literal extending an earlier one, which the
+        // automaton omits but a full match still reaches (sam then samwise in one order, and word1
+        // then word10), the reverse order (bilbo then bil, and samwise then sam in the other), a
+        // duplicate, and non-ASCII literals.
+        for (String sam : List.of("sam|samwise", "samwise|sam")) {
+            String utf8Expression = "ab|a|" + sam + "|bilbo|bil|dup|dup|café|終わり|💰|" + words(65);
+            String latin1Expression = "ab|a|" + sam + "|bilbo|bil|dup|dup|caf\\xE9|\\xFF|\\xA4|" + words(65);
+            Slice utf8Input = utf8Slice("samwise, samx, bilbo and bil ate abc at a café: 終わり 💰 word10 word1x dup dupe sa");
+            Slice malformedInput = wrappedBuffer(ByteArrays.concat(utf8Input, wrappedBuffer(new byte[] {(byte) 0xFF, 's', 'a', 'm', (byte) 0x80, 'a', 'b'})));
+            Slice latin1Input = wrappedBuffer("samwise, samx, bilbo and bil ate abc at a café: ÿ ¤ word10 word1x dup dupe sa".getBytes(ISO_8859_1));
+            List<String> utf8Probes = List.of("", "a", "ab", "abc", "sam", "samwise", "samwis", "samwisex", "samx", "bil", "bilbo", "bilb", "dup", "café", "caf", "終わり", "💰", "word1", "word10", "word100", "word64", "word65", "xsam");
+
+            for (Map.Entry<String, LongFunction<CompiledPattern>> entry : literalSetCompilers(utf8Expression, latin1Expression).entrySet()) {
+                boolean latin1 = entry.getKey().equals("RE2 Latin-1");
+                List<Slice> inputs = new ArrayList<>(latin1 ? List.of(latin1Input) : List.of(utf8Input, malformedInput));
+                utf8Probes.stream()
+                        .map(probe -> latin1 ? wrappedBuffer(probe.replace("終わり", "ÿ").replace("💰", "¤").getBytes(ISO_8859_1)) : utf8Slice(probe))
+                        .forEach(inputs::add);
+                // The program fits the default budget, so the pattern keeps it and its DFAs; the
+                // set routes beside the program answer as the general engine.
+                String label = entry.getKey() + " " + sam;
+                CompiledPattern withProgram = entry.getValue().apply(Re2.Options.defaults().maxMemory());
+                assertThat(shape(withProgram)).as(label).isEqualTo(CompiledPattern.Shape.ENGINE);
+                assertThat(withProgram.forwardProgramForDiagnostics().start()).as(label).isNotZero();
+                assertSamPriority(withProgram, sam, label);
+                // Only below the least budget of the program does the pattern compile without
+                // one, down to the least budget of the set and the literals it omits.
+                long programEdge = leastValue(1, budget -> holdsAt(entry.getValue(), budget, pattern -> pattern.forwardProgramForDiagnostics().start() != 0));
+                long setEdge = leastValue(1, budget -> holdsAt(entry.getValue(), budget, _ -> true));
+                assertThat(setEdge).as(label).isLessThan(programEdge);
+                assertThatThrownBy(() -> entry.getValue().apply(setEdge - 1)).as(label).isInstanceOf(RegexpCompileMemoryLimitException.class);
+                for (long budget : List.of(setEdge, programEdge - 1, programEdge)) {
+                    String budgetLabel = label + " at " + budget;
+                    boolean withoutProgram = budget < programEdge;
+                    CompiledPattern pattern = entry.getValue().apply(budget);
+                    assertThat(pattern.forwardProgramForDiagnostics().start() == 0).as(budgetLabel).isEqualTo(withoutProgram);
+                    if (withoutProgram) {
+                        assertThat(shape(pattern)).as(budgetLabel).isEqualTo(CompiledPattern.Shape.LITERAL_ALTERNATION);
+                        assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(budgetLabel).isNotNull();
+                        assertThat(pattern.hasReverseProgramInputForDiagnostics()).as(budgetLabel).isFalse();
+                        assertThat(pattern.countsOnLiteralSetForDiagnostics()).as(budgetLabel).isTrue();
+                    }
+                    assertSamPriority(pattern, sam, budgetLabel);
+                    for (Slice input : inputs) {
+                        assertAgreesWithProgram(pattern, withProgram, input, budgetLabel);
+                        // A view between sentinel bytes, so the routes must read from its offset
+                        // and stop at its end.
+                        Slice view = wrappedBuffer(ByteArrays.concat(utf8Slice("!"), input, utf8Slice("wise"))).slice(1, input.length());
+                        assertAgreesWithProgram(pattern, withProgram, view, budgetLabel + " view");
+                    }
+                    if (withoutProgram) {
+                        assertNoProgramSearch(pattern, budgetLabel);
+                    }
+                }
+            }
+        }
+
+        // A capture buffer wider than group zero leaves its other groups unset at each anchor.
+        String expression = "bilbo|bil|" + words(65);
+        Re2 dictionary = compileAtSmallestBudget(budget -> compileWithMaxMemory(expression, budget), _ -> true);
+        assertThat(dictionary.forwardProgramForDiagnostics().start()).isZero();
+        Slice text = utf8Slice("xx bilbo");
+        int[] groups = new int[4];
+        Arrays.fill(groups, 7);
+        assertThat(dictionary.findInto(text, 1, 8, groups)).isTrue();
+        assertThat(groups).containsExactly(3, 8, -1, -1);
+        Arrays.fill(groups, 7);
+        assertThat(dictionary.lookingAtInto(text, 3, 8, groups)).isTrue();
+        assertThat(groups).containsExactly(3, 8, -1, -1);
+        Arrays.fill(groups, 7);
+        assertThat(dictionary.matchesInto(text, 3, 8, groups)).isTrue();
+        assertThat(groups).containsExactly(3, 8, -1, -1);
+    }
+
+    @Test
+    public void testLiteralSetWithoutProgramBudget()
+    {
+        // A dictionary of thousands of words is far smaller as a set than as a program. Below the
+        // program's least budget, which the longest-match compile shows, it compiles as the set,
+        // within a few times the set's own size; at the set's own size it is rejected.
+        String expression = IntStream.range(0, 4096).mapToObj(index -> Integer.toString(index * 7919, 36)).collect(Collectors.joining("|"));
+        long setSize = literalSet(expression).withoutRootSkipping().estimatedRetainedSize();
+        long budget = 4 * setSize;
+        assertThatThrownBy(() -> Re2.compile(utf8Slice(expression), Re2.Options.defaults().setMaxMemory(budget).setLongestMatch(true)))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        for (Map.Entry<String, LongFunction<CompiledPattern>> entry : literalSetCompilers(expression, expression).entrySet()) {
+            String label = entry.getKey();
+            CompiledPattern pattern = entry.getValue().apply(budget);
+            assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.LITERAL_ALTERNATION);
+            assertThat(pattern.forwardProgramForDiagnostics().start()).as(label).isZero();
+            assertThatThrownBy(() -> entry.getValue().apply(setSize)).as(label).isInstanceOf(RegexpCompileMemoryLimitException.class);
+        }
+
+        // Where most literals extend an earlier one, the full-match list is about half the set's
+        // literals, and it is charged beside the set: at the least budget at which the pattern
+        // compiles, the set, the list, and the placeholder program fit the forward share.
+        Random random = new Random(20261108);
+        List<String> literals = new ArrayList<>();
+        for (int index = 0; index < 300; index++) {
+            String word = random.ints(24, 'a', 'z' + 1).mapToObj(Character::toString).collect(Collectors.joining());
+            literals.add(word);
+            literals.add(word + "X");
+        }
+        String extendingExpression = String.join("|", literals);
+        ParseResult parsed = RegexpParser.parse(utf8Slice(extendingExpression), Re2.Options.defaults().parseFlags());
+        long listSize = LiteralSetSpanMatcher.ExtendingLiterals.analyze(parsed.regexp(), Re2.Options.defaults().maxMemory()).estimatedRetainedSize();
+        long smallestBudget = leastValue(1, maxMemory -> holdsAt(memory -> compileWithMaxMemory(extendingExpression, memory), maxMemory, _ -> true));
+        Re2 smallest = compileWithMaxMemory(extendingExpression, smallestBudget);
+        assertThat(smallest.forwardProgramForDiagnostics().start()).isZero();
+        long charged = smallest.literalSetSpanMatcherForDiagnostics().estimatedRetainedSize() + listSize + Compiler.estimatedProgramMemory(smallest.forwardProgramForDiagnostics());
+        assertThat(charged).isLessThanOrEqualTo(smallestBudget - smallestBudget / 3);
+    }
+
+    // The languages and modes that compile a large literal set without a program, each from the
+    // expression and a budget: `latin1Expression` for RE2's Latin-1 mode, and `utf8Expression`
+    // for every other.
+    private static Map<String, LongFunction<CompiledPattern>> literalSetCompilers(String utf8Expression, String latin1Expression)
+    {
+        Map<String, LongFunction<CompiledPattern>> compilers = new LinkedHashMap<>();
+        compilers.put("RE2", budget -> Re2.compile(utf8Slice(utf8Expression), Re2.Options.defaults().setMaxMemory(budget)));
+        compilers.put("Java", budget -> JavaRegexp.compile(utf8Slice(utf8Expression), JavaRegexp.Options.defaults().setMaxMemory(budget)));
+        compilers.put("Rust", budget -> RustRegexp.compile(utf8Slice(utf8Expression), RustRegexp.Options.defaults().setMaxMemory(budget)));
+        compilers.put("Rust bytes", budget -> RustRegexp.compile(utf8Slice(utf8Expression), RustRegexp.Options.defaults().setUnicode(false).setBytes(true).setMaxMemory(budget)));
+        compilers.put("RE2 Latin-1", budget -> Re2.compile(utf8Slice(latin1Expression), Re2.Options.latin1().setMaxMemory(budget)));
+        return compilers;
+    }
+
+    // The leftmost-first answers of `sam`, either `sam|samwise` or `samwise|sam`, in the general
+    // engine: a search and a prefix take the first alternative that matches, while a full match
+    // takes either.
+    private static void assertSamPriority(CompiledPattern pattern, String sam, String label)
+    {
+        String samwise = sam.startsWith("samwise") ? "0-7" : "0-3";
+        assertThat(span(pattern.findResult(utf8Slice("samwise")))).as(label).isEqualTo(samwise);
+        assertThat(span(pattern.lookingAtResult(utf8Slice("samwise")))).as(label).isEqualTo(samwise);
+        assertThat(pattern.matches(utf8Slice("samwise"))).as(label).isTrue();
+        assertThat(span(pattern.findResult(utf8Slice("samx")))).as(label).isEqualTo("0-3");
+        assertThat(span(pattern.lookingAtResult(utf8Slice("samx")))).as(label).isEqualTo("0-3");
+        assertThat(pattern.matches(utf8Slice("samx"))).as(label).isFalse();
+        assertThat(span(pattern.matchesResult(utf8Slice("xsamwise"), 1, 8))).as(label).isEqualTo("1-8");
+        assertThat(pattern.countMatches(utf8Slice("samwise samx"))).as(label).isEqualTo(2);
+    }
+
+    // Every operation of `pattern` agrees with `withProgram`, the same expression compiled where
+    // its program answers: boolean, position, and region calls at each anchor, count, and a
+    // matcher's finds, matches, and lookingAt over regions.
+    private static void assertAgreesWithProgram(CompiledPattern pattern, CompiledPattern withProgram, Slice input, String label)
+    {
+        String text = label + " input " + input.toStringUtf8();
+        assertThat(pattern.find(input)).as(text).isEqualTo(withProgram.find(input));
+        assertThat(pattern.lookingAt(input)).as(text).isEqualTo(withProgram.lookingAt(input));
+        assertThat(pattern.matches(input)).as(text).isEqualTo(withProgram.matches(input));
+        assertThat(pattern.countMatches(input)).as(text).isEqualTo(withProgram.countMatches(input));
+        assertThat(findSpans(pattern.matcher(input, 0))).as(text).isEqualTo(findSpans(withProgram.genericGroupZeroMatcherForDiagnostics(input)));
+        for (int start = 0; start <= input.length(); start++) {
+            for (int end = start; end <= input.length(); end++) {
+                String region = text + " region " + start + "-" + end;
+                assertThat(span(pattern.findResult(input, start, end))).as(region).isEqualTo(span(withProgram.findResult(input, start, end)));
+                assertThat(span(pattern.lookingAtResult(input, start, end))).as(region).isEqualTo(span(withProgram.lookingAtResult(input, start, end)));
+                assertThat(span(pattern.matchesResult(input, start, end))).as(region).isEqualTo(span(withProgram.matchesResult(input, start, end)));
+                RegexpMatcher matcher = pattern.matcher(input, 0).reset(input, start, end);
+                RegexpMatcher expected = withProgram.genericGroupZeroMatcherForDiagnostics(input).reset(input, start, end);
+                assertThat(findSpans(matcher)).as(region).isEqualTo(findSpans(expected));
+                assertThat(matcher.reset(input, start, end).lookingAt() ? matcher.start() + "-" + matcher.end() : "none").as(region).isEqualTo(expected.reset(input, start, end).lookingAt() ? expected.start() + "-" + expected.end() : "none");
+                assertThat(matcher.reset(input, start, end).matches()).as(region).isEqualTo(expected.reset(input, start, end).matches());
+            }
+        }
+    }
+
+    private static String span(MatchResult result)
+    {
+        return result == null ? "none" : result.start() + "-" + result.end();
     }
 
     @Test

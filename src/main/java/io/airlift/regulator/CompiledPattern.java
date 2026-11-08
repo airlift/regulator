@@ -157,7 +157,8 @@ abstract sealed class CompiledPattern
         LITERAL_KERNEL,
         // An alternation of literals: short literals found by the literal-alternation span matcher,
         // or more than LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES found by the literal set
-        // where the forward DFA that full-Slice find runs cannot initialize.
+        // where the forward DFA that full-Slice find runs cannot initialize, or by the literal set
+        // alone, which answers every operation, where the program did not fit the budget.
         LITERAL_ALTERNATION,
         // A fixed-width pattern, found by the fixed-width byte span matcher.
         FIXED_WIDTH,
@@ -193,6 +194,10 @@ abstract sealed class CompiledPattern
     ///         literal set rather than the DFA count
     /// @param fixedWidthWithoutProgram whether a Trino [Shape#FIXED_WIDTH] pattern compiled no
     ///         program, so that every call of its placeholder forward program runs the matcher
+    /// @param literalSetExtendingLiterals the extending literals a [Shape#LITERAL_ALTERNATION]
+    ///         pattern's full match reads beside the literal set where the pattern compiled no
+    ///         program, since its program did not fit the budget, so that every call of its
+    ///         placeholder forward program runs the set; otherwise `null`
     record Analysis(
             int flags,
             long maxMemory,
@@ -220,6 +225,7 @@ abstract sealed class CompiledPattern
             boolean literalKernelFind,
             boolean literalSetCount,
             boolean fixedWidthWithoutProgram,
+            LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals,
             RequiredBytes requiredBytes)
     {
         Analysis
@@ -542,7 +548,8 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 null,
-                true);
+                true,
+                null);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -556,7 +563,106 @@ abstract sealed class CompiledPattern
                 regexp.requiredPrefix(parsed.caseFolding()) == null;
     }
 
+    /// Analyzes a parsed pattern of any language. Where the program of a leftmost-first RE2, Java,
+    /// or Rust pattern does not fit the budget, a pattern that is a large capture-free literal set,
+    /// such as a dictionary of words, compiles without one wherever the set fits, and every
+    /// operation runs on the set, as Trino's large literal sets do (see
+    /// [#analyzeLiteralSetWithoutProgram]). A program that fits is always kept, since its DFAs
+    /// count and search faster than the set's automaton. Trino is excluded: it takes its set
+    /// before it compiles anything.
     static Analysis build(
+            Slice pattern,
+            ParseResult parsed,
+            int flags,
+            long maxMemory,
+            ByteFrequencies byteFrequencies,
+            boolean longestMatch,
+            Compiler.Dialect compilerDialect,
+            ScanPlan.Language scanPlanLanguage,
+            ScanPlanMode scanPlanMode)
+    {
+        try {
+            return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, compilerDialect, scanPlanLanguage, scanPlanMode);
+        }
+        catch (RegexpCompileMemoryLimitException e) {
+            if (longestMatch || compilerDialect == Compiler.Dialect.TRINO || parsed.capturingGroupCount() != 0) {
+                throw e;
+            }
+            // The rejected compile kept nothing: its programs and plans were its own, and the
+            // parse it read is immutable.
+            Analysis analysis = analyzeLiteralSetWithoutProgram(pattern, parsed, flags, maxMemory, compilerDialect);
+            if (analysis == null) {
+                throw e;
+            }
+            return analysis;
+        }
+    }
+
+    /// Returns the analysis of a large capture-free literal set that answers every operation from
+    /// its literal set and compiles no program, for a pattern whose program does not fit the
+    /// budget, or `null` where the expression is no such set, the set does not fit the forward
+    /// budget, or its plans route find elsewhere. A full match also reads the set's extending
+    /// literals, which hold the literals the automaton omits; they are charged first, so the
+    /// root's skip is built only where it fits beside them. The pattern keeps no reverse
+    /// expression and no required bytes, and its placeholder program has no DFA memory, so no DFA
+    /// or cursor of it ever runs; every call of it runs the set (see
+    /// [#matchInternalOnLiteralSet]).
+    private static Analysis analyzeLiteralSetWithoutProgram(Slice pattern, ParseResult parsed, int flags, long maxMemory, Compiler.Dialect compilerDialect)
+    {
+        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        Regexp entireRegexp = parsed.regexp();
+        CaseFolding caseFolding = parsed.caseFolding();
+        Prog placeholderProgram;
+        try {
+            placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, compilerDialect, caseFolding);
+        }
+        catch (RegexpCompileMemoryLimitException ignored) {
+            // A budget too small for an empty program holds no set either.
+            return null;
+        }
+        long availableMemory = placeholderProgram.dfaMemory();
+        LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals = LiteralSetSpanMatcher.ExtendingLiterals.analyze(entireRegexp, availableMemory);
+        if (extendingLiterals == null) {
+            return null;
+        }
+        long setMemory = availableMemory - extendingLiterals.estimatedRetainedSize();
+        LiteralSetSpanMatcher literalSet = setMemory > 0 ? LiteralSetSpanMatcher.analyze(entireRegexp, 0, setMemory) : null;
+        if (literalSet == null || literalSet.estimatedRetainedSize() > setMemory) {
+            return null;
+        }
+        placeholderProgram.setDfaMemory(0);
+        // As on the compact route, the expression is analyzed as parsed: a literal set holds no
+        // repeat or other construct for the simplifier to rewrite.
+        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp, caseFolding);
+        BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram).withLiteralSet(literalSet);
+        Analysis analysis = selectRoutes(
+                flags,
+                maxMemory,
+                compilerDialect,
+                false,
+                pattern,
+                expressionAnalysis,
+                entireRegexp,
+                null,
+                null,
+                false,
+                expressionAnalysis.length().encoded(),
+                -1,
+                placeholderProgram,
+                booleanPlans,
+                0,
+                parsed.capturingGroupNames(),
+                null,
+                null,
+                null,
+                false,
+                extendingLiterals);
+        // Every operation runs on the set only where the set is the shape's route for find and
+        // count; a pattern whose plans route find elsewhere needs its program.
+        return analysis.shape() == Shape.LITERAL_ALTERNATION && analysis.literalSetCount() ? analysis : null;
+    }
+
+    private static Analysis buildWithProgram(
             Slice pattern,
             ParseResult parsed,
             int flags,
@@ -620,7 +726,8 @@ abstract sealed class CompiledPattern
                     compactBoundedCharacterClass,
                     null,
                     null,
-                    false);
+                    false,
+                    null);
         }
 
         // For "^literal...", compile only the suffix and check the required prefix before matching.
@@ -910,7 +1017,8 @@ abstract sealed class CompiledPattern
                 null,
                 requiredBytes,
                 finalLineEndOnePass,
-                false);
+                false,
+                null);
     }
 
     /// Returns the bytes of `prefix`, sharing the literal sequence's first literal when it holds
@@ -951,7 +1059,8 @@ abstract sealed class CompiledPattern
             BoundedCharacterClassCounter compactBoundedCharacterClass,
             RequiredBytes requiredBytes,
             Prog.OnePassTables finalLineEndOnePass,
-            boolean fixedWidthWithoutProgram)
+            boolean fixedWidthWithoutProgram,
+            LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals)
     {
         // The shape full-Slice find takes, in the order each route was added. A pattern whose find
         // runs the ordinary engine on the forward program alone is general, and only a general
@@ -1105,6 +1214,7 @@ abstract sealed class CompiledPattern
                 literalKernelFind,
                 literalSetCount,
                 fixedWidthWithoutProgram,
+                literalSetExtendingLiterals,
                 reservedRequiredBytes);
     }
 
@@ -3402,8 +3512,9 @@ abstract sealed class CompiledPattern
     }
 
     /// The engine hook through which every call of a program over a region runs: the ordinary
-    /// engine. The class-run and scan-plan shapes override it, as does Trino's fixed-width shape,
-    /// which runs the matcher where the pattern compiled no program.
+    /// engine. The class-run and scan-plan shapes override it, as do Trino's fixed-width shape,
+    /// which runs the matcher where the pattern compiled no program, and the literal-alternation
+    /// class of a pattern that compiled no program, which runs the literal set.
     boolean matchInternal(
             Prog prog,
             Slice text,
@@ -3441,6 +3552,52 @@ abstract sealed class CompiledPattern
             return matchFixedWidthByteSpan(text, contextStart, start, end, anchor, groupOffsets);
         }
         return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+    }
+
+    /// The [#matchInternal] route of a literal-alternation pattern that compiled no program: every
+    /// call of its placeholder forward program runs the literal set and `extendingLiterals`, which
+    /// hold the literals the set omits. They report group zero only, as a pattern without
+    /// captures needs. Every other call runs the ordinary engine.
+    final boolean matchInternalOnLiteralSet(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces, LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals)
+    {
+        if (prog == partialProg) {
+            return matchLiteralSet(text, contextStart, start, end, anchor, groupOffsets, extendingLiterals);
+        }
+        return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+    }
+
+    /// Matches `[start, end)` of `text` on the literal set, with groups relative to
+    /// `contextStart`. The literals have no assertion, so nothing outside the region reaches the
+    /// result. An unanchored call is the set's leftmost-first search, a start-anchored call the
+    /// walk from the root that keeps the highest-priority literal starting at `start`, and a full
+    /// match takes any literal spanning the region, which the trie holds or which extends another.
+    private boolean matchLiteralSet(Slice text, int contextStart, int start, int end, Anchor anchor, int[] groups, LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals)
+    {
+        LiteralSetSpanMatcher literalSet = booleanPlans.literalSet();
+        int matchStart = start;
+        int matchEnd = end;
+        if (anchor == Anchor.UNANCHORED) {
+            long span = literalSet.findSpan(text, start, end);
+            if (span < 0) {
+                return false;
+            }
+            matchStart = (int) (span >>> 32);
+            matchEnd = (int) span;
+        }
+        else if (anchor == Anchor.ANCHOR_START) {
+            matchEnd = literalSet.findPrefixEnd(text, start, end);
+            if (matchEnd < 0) {
+                return false;
+            }
+        }
+        else if (literalSet.findPrefixEnd(text, start, end) != end && !extendingLiterals.contains(text, start, end)) {
+            return false;
+        }
+        if (groups != null) {
+            groups[0] = matchStart - contextStart;
+            groups[1] = matchEnd - contextStart;
+        }
+        return true;
     }
 
     /// Matches `[start, end)` of `text` on the fixed-width matcher, with groups relative to

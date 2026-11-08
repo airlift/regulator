@@ -32,6 +32,7 @@ public sealed class Re2
                 Re2.FixedWidthRe2,
                 Re2.LiteralAlternationRe2,
                 Re2.LiteralKernelRe2,
+                Re2.LiteralSetRe2,
                 Re2.ScanPlanRe2
 {
     /// The result of replacing every non-overlapping match.
@@ -290,7 +291,7 @@ public sealed class Re2
             case ENGINE -> new Re2(analysis);
             case EXACT_LITERAL -> new ExactLiteralRe2(analysis);
             case LITERAL_KERNEL -> new LiteralKernelRe2(analysis);
-            case LITERAL_ALTERNATION -> new LiteralAlternationRe2(analysis);
+            case LITERAL_ALTERNATION -> analysis.literalSetExtendingLiterals() == null ? new LiteralAlternationRe2(analysis) : new LiteralSetRe2(analysis);
             case FIXED_WIDTH -> new FixedWidthRe2(analysis);
             case CLASS_RUN -> new ClassRunRe2(analysis);
             case BYTE_TABLE -> new ByteTableRe2(analysis);
@@ -746,6 +747,45 @@ public sealed class Re2
         boolean countsOnLiteralSetForDiagnostics()
         {
             return literalSetCount;
+        }
+    }
+
+    /// A pattern of the [literal-alternation shape][Shape#LITERAL_ALTERNATION] whose program did
+    /// not fit the budget, so it compiled none: every operation runs the literal set.
+    static final class LiteralSetRe2
+            extends Re2
+    {
+        // The literals that a full match reads beside the literal set.
+        private final LiteralSetSpanMatcher.ExtendingLiterals extendingLiterals;
+
+        private LiteralSetRe2(Analysis analysis)
+        {
+            super(analysis);
+            this.extendingLiterals = requireNonNull(analysis.literalSetExtendingLiterals(), "literalSetExtendingLiterals is null");
+        }
+
+        @Override
+        public boolean find(Slice input)
+        {
+            return findOnLiteralAlternation(input);
+        }
+
+        @Override
+        long countMatches(Slice text)
+        {
+            return countOnLiteralAlternation(text, true);
+        }
+
+        @Override
+        boolean countsOnLiteralSetForDiagnostics()
+        {
+            return true;
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnLiteralSet(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, extendingLiterals);
         }
     }
 

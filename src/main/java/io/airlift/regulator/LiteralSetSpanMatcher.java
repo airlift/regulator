@@ -17,6 +17,7 @@ import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
+import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import java.util.List;
 
@@ -30,8 +31,8 @@ import static java.util.Objects.requireNonNull;
 /// `try_find_fwd`), which the `regex` crate uses for such patterns, so each input byte follows
 /// one transition plus the failure links it amortizes.
 ///
-/// The trie omits a literal whose path passes through an earlier literal's match state, since
-/// leftmost-first priority means it can never match. A state with its own match therefore keeps
+/// The trie omits a literal whose path passes through an earlier literal's match state, which
+/// a leftmost-first search never reports. A state with its own match therefore keeps
 /// only the edges of earlier literals that extend it, such as `samwise` in `samwise|sam`. Its
 /// failure link is [#DEAD], so a failure path that reaches it ends there. Every other state's
 /// failure link is the longest proper suffix of its path that is also a trie path, and a state
@@ -134,9 +135,11 @@ sealed class LiteralSetSpanMatcher
     }
 
     /// Phase 1 of the automaton's build: the leftmost-first trie of non-empty literals, added in
-    /// priority order. Each state records the byte of its incoming edge and its children as a list
-    /// sorted by byte, so the breadth-first pass emits sorted edges. A literal that passes through
-    /// an earlier literal's match state adds nothing, since the earlier one always matches first.
+    /// priority order, or, spelled by [LiteralAlternationSpanMatcher#spellEveryLiteral], of every
+    /// literal; such a trie is only walked. Each state records the byte of its incoming edge and
+    /// its children as a list sorted by byte, so the breadth-first pass emits sorted edges. A
+    /// literal that passes through an earlier literal's match state adds nothing to the
+    /// leftmost-first trie, since the earlier one always matches first.
     static final class Trie
     {
         /// The state every literal starts from.
@@ -221,6 +224,69 @@ sealed class LiteralSetSpanMatcher
         void setMatchLength(int state, int length)
         {
             matchLength[state] = length;
+        }
+
+        /// Returns the literals this trie marks that extend another literal it marks, in unsigned
+        /// byte order, or `null` where they would retain more than `maximumRetainedBytes`. Only a
+        /// trie [LiteralAlternationSpanMatcher#spellEveryLiteral] spelled marks such literals. An
+        /// extending literal that came before the literal it extends is kept too, though the search
+        /// trie holds it; a full match reads the trie first.
+        private ExtendingLiterals extendingLiterals(long maximumRetainedBytes)
+        {
+            ByteArrayOutputStream literalBytes = new ByteArrayOutputStream();
+            int[] literalEnds = new int[16];
+            int literalCount = 0;
+            // The path from the root to the state visited, its byte and state at each depth, and
+            // whether it marks a literal above each depth.
+            byte[] path = new byte[16];
+            int[] stateByDepth = new int[16];
+            boolean[] markedAbove = new boolean[16];
+            for (int value = 0; value < 256; value++) {
+                int state = rootChildByByte[value];
+                if (state == ROOT) {
+                    continue;
+                }
+                // A depth-first walk of the subtree under the root's child, in byte order, which
+                // reaches a literal before the literals extending it.
+                int depth = 0;
+                while (true) {
+                    if (depth + 1 == path.length) {
+                        int length = 2 * path.length;
+                        path = Arrays.copyOf(path, length);
+                        stateByDepth = Arrays.copyOf(stateByDepth, length);
+                        markedAbove = Arrays.copyOf(markedAbove, length);
+                    }
+                    path[depth] = incomingByte[state];
+                    stateByDepth[depth] = state;
+                    boolean marked = matchLength[state] != 0;
+                    if (marked && markedAbove[depth]) {
+                        literalBytes.write(path, 0, depth + 1);
+                        if (literalCount == literalEnds.length) {
+                            literalEnds = Arrays.copyOf(literalEnds, 2 * literalCount);
+                        }
+                        literalEnds[literalCount++] = literalBytes.size();
+                        if (ExtendingLiterals.retainedSize(literalBytes.size(), literalCount) > maximumRetainedBytes) {
+                            return null;
+                        }
+                    }
+                    if (firstChild[state] != ROOT) {
+                        markedAbove[depth + 1] = markedAbove[depth] || marked;
+                        depth++;
+                        state = firstChild[state];
+                        continue;
+                    }
+                    // Back up to the deepest state with a next sibling; the root's children are
+                    // not linked as siblings, so the walk ends at the root's child.
+                    while (depth > 0 && nextSibling[stateByDepth[depth]] == ROOT) {
+                        depth--;
+                    }
+                    if (depth == 0) {
+                        break;
+                    }
+                    state = nextSibling[stateByDepth[depth]];
+                }
+            }
+            return new ExtendingLiterals(literalBytes.toByteArray(), Arrays.copyOf(literalEnds, literalCount));
         }
 
         /// Builds the automaton of the literals added. `maximumRetainedBytes` decides only whether
@@ -407,6 +473,34 @@ sealed class LiteralSetSpanMatcher
         return findSpan(input, start, end, null);
     }
 
+    /// Returns the end of the leftmost-first match that starts at `start` in `[start, end)` of
+    /// `input`, or `-1`; the caller checks that `0 <= start <= end <= input.length()`. The walk
+    /// follows the trie's edges from the root and keeps the deepest state with its own match on
+    /// the path, one whose match length is its depth. The states below a state with its own match
+    /// belong only to earlier literals, which extend it, so the deeper match has priority, and a
+    /// literal the trie omits loses to the earlier literal it extends, which also starts here. So
+    /// the result is `end` exactly when all of `[start, end)` is a literal the trie holds; a
+    /// literal the trie omits, one extending an earlier literal, is not found here, see
+    /// [ExtendingLiterals].
+    final int findPrefixEnd(Slice input, int start, int end)
+    {
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int matchEnd = -1;
+        int state = ROOT;
+        for (int position = start; position < end; position++) {
+            byte value = bytes[inputOffset + position];
+            state = state == ROOT ? rootStateByByte[value & 0xFF] : findChild(state, value);
+            if (state == ROOT) {
+                break;
+            }
+            if (matchLengthByState[state] == position + 1 - start) {
+                matchEnd = position + 1;
+            }
+        }
+        return matchEnd;
+    }
+
     /// Returns [#findSpan(Slice,int,int)], adding the root skips it makes to `diagnostics`.
     final long findSpanForDiagnostics(Slice input, int start, int end, SkipDiagnostics diagnostics)
     {
@@ -545,6 +639,73 @@ sealed class LiteralSetSpanMatcher
             edge++;
         }
         return (edgeByte[edge] & 0xFF) == unsignedValue ? edge + 1 : ROOT;
+    }
+
+    /// The literals of a large set that extend another of its literals, such as `samwise` in
+    /// `sam|samwise` or `samwise|sam`, which a full match needs beside the automaton: the trie
+    /// omits every such literal that follows the one it extends, since a search never reports it.
+    /// Every other literal is a trie state with its own match, see
+    /// [LiteralSetSpanMatcher#findPrefixEnd], so a string is one of the set's literals exactly
+    /// when the trie holds it or it is one of these. They are kept in unsigned byte order, packed
+    /// into one array, for a binary search.
+    static final class ExtendingLiterals
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(ExtendingLiterals.class);
+
+        private final byte[] literalBytes;
+        // The end of each literal in literalBytes, where the next one starts.
+        private final int[] literalEnds;
+
+        private ExtendingLiterals(byte[] literalBytes, int[] literalEnds)
+        {
+            this.literalBytes = literalBytes;
+            this.literalEnds = literalEnds;
+        }
+
+        /// Returns the extending literals of the large set [LiteralSetSpanMatcher#analyze] would
+        /// build from `expression`, or `null` where the expression is unsupported or they, or the
+        /// trie spelling them, would retain more than `maximumRetainedBytes`.
+        static ExtendingLiterals analyze(Regexp expression, long maximumRetainedBytes)
+        {
+            requireNonNull(expression, "expression is null");
+            Trie trie = LiteralAlternationSpanMatcher.spellEveryLiteral(expression, maximumRetainedBytes);
+            return trie == null ? null : trie.extendingLiterals(maximumRetainedBytes);
+        }
+
+        private static long retainedSize(int byteCount, int literalCount)
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOfByteArray(byteCount) + SizeOf.sizeOfIntArray(literalCount);
+        }
+
+        long estimatedRetainedSize()
+        {
+            return retainedSize(literalBytes.length, literalEnds.length);
+        }
+
+        /// Returns whether all of `[start, end)` of `input` is one of these literals.
+        boolean contains(Slice input, int start, int end)
+        {
+            byte[] bytes = input.byteArray();
+            int inputStart = input.byteArrayOffset() + start;
+            int inputEnd = input.byteArrayOffset() + end;
+            int low = 0;
+            int high = literalEnds.length - 1;
+            while (low <= high) {
+                int middle = (low + high) >>> 1;
+                int literalStart = middle == 0 ? 0 : literalEnds[middle - 1];
+                int comparison = Arrays.compareUnsigned(literalBytes, literalStart, literalEnds[middle], bytes, inputStart, inputEnd);
+                if (comparison == 0) {
+                    return true;
+                }
+                if (comparison < 0) {
+                    low = middle + 1;
+                }
+                else {
+                    high = middle - 1;
+                }
+            }
+            return false;
+        }
     }
 
     /// Counts what a diagnostics search of a literal set reads.
