@@ -1192,11 +1192,13 @@ the vector scan, the count keeps it for every match. When it selects the scalar
 scan, a later search that reaches the start-byte scan samples again from its
 start while at least 4 KiB remain, and the count keeps the vector scan from the
 first sample that selects it; on a text of at least 64 KiB, a later scalar
-choice holds for the next 64 KiB past its sample. Searches served by the
-fixed-distance scan do not sample, so dense input such as `[a-z]:[0-9]+` over
-repeated `a:1.` does not pay a start-byte density sample per match. Below 4 KiB
-the check reports the span as productive without sampling, so resampling there
-would promote the vector scan for uniformly dense input. The per-search
+choice holds for the next 64 KiB past its sample. A start literal filter or
+start class filter is kept without this sample, though the per-search
+productivity check still samples its stops. Searches served by the
+fixed-distance scan do not sample, so dense input such as `[a-z]{3}:[0-9]+`
+over repeated `zza:1.` does not pay a start-byte density sample per match.
+Below 4 KiB the check reports the span as productive without sampling, so
+resampling there would promote the vector scan for uniformly dense input. The per-search
 productivity check that can reject candidate scanning altogether runs for each
 match, except in the shared counts and the counts of at least 64 KiB described
 below, which hold some of its results. Retries after a cache reset keep the
@@ -2495,6 +2497,13 @@ RE2 run stops differ: their one compare also replaces the compare for non-ASCII
 bytes, and that form wins on every platform, as
 [RE2 Scan Plans](#re2-scan-plans) records.
 
+The [start class filter](#start-class-filter)'s pair and triple scans take the
+same key. They need each offset's byte in its range rather than equal to a
+probe: the SVE form raises each offset's distance above its low bound to at
+least the bounds' difference by unsigned maximum, subtracts that difference,
+ORs the offsets, and compares once with zero, where the other form compares
+each offset's distance unsigned and ANDs the masks.
+
 In each scan both forms find the same candidates. The x86 CI builds run the
 compare forms, and the arm64 CI build runs the suite with the XOR forms and
 fails if they are not selected.
@@ -2598,7 +2607,8 @@ or three bytes use a packed, allocation-free Vector scanner for searches of at
 least 1 KiB when `jdk.incubator.vector` is resolved and the preferred byte
 vector holds 16 to 64 bytes. Other candidate counts, short searches, and JVMs
 without vector scanning retain the branch-free scalar membership-table scanner.
-A start set that gets a start literal filter scans with the filter instead.
+A start set that gets a [start literal filter](#start-literal-filter) or a
+[start class filter](#start-class-filter) scans with the filter instead.
 
 Preferred species wider than 128 bits sample four 16-byte windows before using
 Vector scanning on inputs of at least 4 KiB. Four sampled candidates demote
@@ -2669,9 +2679,10 @@ on r9g. Platforms other than x86 and aarch64 were not measured.
 
 The filter is built only when the Vector API is available, and only for start
 sets of at most 16 bytes. Sets less than 5% probable in English text keep their
-single-byte scanners, with two exceptions. The exceptions take the filter only
-on vector searches of at least 1 KiB; shorter searches stop on the start bytes
-through the byte table rather than check three bytes at every position.
+single-byte scanners, though a [start class filter](#start-class-filter) may
+replace them, with two exceptions. The exceptions take the filter only on vector
+searches of at least 1 KiB; shorter searches stop on the start bytes through the
+byte table rather than check three bytes at every position.
 
 A rare set of more than three bytes that is not one range would take the mixed
 nibble-table scan. The filter's three-position scan costs about as much per
@@ -2682,9 +2693,10 @@ mixed scan's time on r8i and 0.45x to 0.53x on r9g in RE2, Java, and Rust. Much
 rarer mixed sets were not measured.
 
 Rare small sets and ranges keep their single-byte scanners, which cost less per
-vector, except with 64-byte vectors, as with AVX-512, where a set whose filter
-holds two literals takes it. In the same A/Bs, on r8i, that took 0.56x to 0.60x
-the time for `imported/leipzig/huck-saw` (`Huck[a-zA-Z]+|Saw[a-zA-Z]+`), 0.85x
+vector, unless a start class filter replaces them, except with 64-byte vectors,
+as with AVX-512, where a set whose filter holds two literals takes it. In the
+same A/Bs, on r8i, that took 0.56x to 0.60x the time for
+`imported/leipzig/huck-saw` (`Huck[a-zA-Z]+|Saw[a-zA-Z]+`), 0.85x
 to 0.96x for `name-alt2` (1.00x in Trino), and 0.87x to 0.94x for `name-alt4`.
 On r9g's 16-byte vectors, with the SVE XOR two-literal scan, taking the filter
 took 0.84x to 0.91x the time for `huck-saw` but 1.17x to 1.19x for `name-alt2`
@@ -2759,6 +2771,69 @@ performance-only deviation. The filter accepts every position where a match
 can start, the DFA, the trie, or the literal compare at a stop still decides
 each one, and randomized tests compare the results with the NFA or the general
 engine.
+
+## Start Class Filter
+
+A forward DFA whose matches begin with a few narrow classes, rather than
+literals, can check the byte ranges of its first two or three offsets together.
+The IPv4 address pattern of mariomka/ip begins every match with two digits and
+then a dot or a third digit. On English text with numbers, the digit scan
+handed control to the DFA at nearly every number, which failed after about 2.4
+steps on average.
+
+The filter is sound by construction. The walk from the program's start, the one
+the fixed-distance byte candidates use, takes at each offset the union of the
+bytes every path reads there, and it keeps only the offsets before the shortest
+match ends, so every match holds a byte of each offset's set. Each set is
+stored as the smallest unsigned range that covers it, which can only accept
+more. A match therefore starts only where every byte of the span lies in its
+range and before the search's end. The walk gives up at any assertion, and no
+filter is built for a reversed, start-anchored, prefix-accelerated, or
+nullable program, or where the shortest match is a single byte.
+
+The filter is built only when the Vector API is available, there is no start
+literal filter, and the start set has a vector scan of its own: a contiguous
+range, two or three bytes, or a mixed set's nibble tables. The estimates use
+English frequencies, as if each byte were independent of its neighbors,
+whatever frequencies the pattern was compiled with: the start set must be at
+least 0.2% probable, and the product of the offsets' range probabilities must be
+at most a sixteenth of the start set's and below 0.2%, the cap on an [inner
+literal class pair](#inner-literal-class-pairs). The third offset is checked
+only when it narrows the pair's estimate at least four times; otherwise the
+filter checks a pair. For the ip pattern the start set is about 0.9% probable
+and the three ranges about 0.00015%.
+
+Vector code checks a vector of positions at a time on searches of at least
+1 KiB, loading at each offset. A byte lies in a range when its distance above
+the low bound, as an unsigned byte, is at most the range's width. The compare
+form compares each offset's distance with its width and ANDs the masks; the
+SVE form of [Candidate Masks on SVE](#candidate-masks-on-sve) raises each
+distance to at least the width by unsigned maximum, subtracts the width, ORs the
+offsets, and compares once with zero. Each loop is counted, as the class-pair
+scan's is, and its tail checks one position at a time without reading past the
+search. Shorter searches check each byte against the start byte table, as a
+start literal filter taken for rare start bytes does. On long inputs the
+start-scan productivity check samples the filter's own stops.
+
+A start literal filter takes precedence outright, and fixed-distance byte
+candidates still run first on the searches long enough for them; the class
+filter replaces only the start set's own scan. A fixed-width pattern does not
+yield to it: unlike the start literal filter, it is not among the engine routes
+the [fixed-width matcher](#fixed-width-rare-class-candidates) yields to,
+since the matcher's rare candidate already replaces the plain start scan.
+
+On rebar mariomka/ip the filter counts 3.2-3.5 times faster than the start set's
+own scan on r9g and 4.3-4.6 times on r8i. Checking only a pair gives 3.0-3.4 and
+2.8-3.0 times; the third offset also wins on dotted quads and on
+lh3lh3-reb/date counts, most on r8i, so the filter checks three offsets
+wherever the third narrows it enough. Searches under 1 KiB, such as rebar's
+per-line date model, are unchanged, and so is `ERROR|WARN|FATAL`: the
+literal-alternation matcher answers it with its own start literal filter, so its
+DFA's class filter is not on the route.
+
+This is a performance-only deviation. The filter accepts every position where a
+match can start, the DFA still decides each one, and randomized tests compare
+the vector scans with the scalar check and the results with the NFA.
 
 ## Bounded Character-Class Counting
 
@@ -3164,10 +3239,10 @@ the root's row over every byte lost on 1024-byte rows. The scan uses the forward
 DFA's kernel selection, two or three bytes or a contiguous range of 4 to 64, and
 otherwise its nibble tables, which take 4 to 64 bytes with at most 8 high
 nibbles. It is not the DFA's start-byte skip, which prefers its start literal
-filter for up to 16 common start bytes, covers a single start byte with its
-prefix scan, and vector-scans only with at least 1024 bytes left. The skip is
-exact, since a byte that leads no literal leaves the automaton at the root and
-records nothing. It starts only at a second root miss in a row, and, as in the
+filter for up to 16 common start bytes or its start class filter for a few
+narrow classes, covers a single start byte with its prefix scan, and
+vector-scans only with at least 1024 bytes left. The skip is exact, since a byte
+that leads no literal leaves the automaton at the root and records nothing. It starts only at a second root miss in a row, and, as in the
 DFA's count self-loop scan, stops for the rest of the search once 4 skips in a
 row each moved fewer than 16 bytes, as on prose, where a skip crosses only the
 punctuation and space between words. The skip, with its tables where it needs

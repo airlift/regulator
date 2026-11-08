@@ -103,10 +103,11 @@ final class Dfa
     // The scan set of a start byte set that only the nibble tables of [#findByteSet] take.
     static final int MIXED_BYTE_SET_MARKER = Integer.MIN_VALUE;
     private static final int START_LITERAL_FILTER_MARKER = Integer.MIN_VALUE + 1;
+    private static final int START_CLASS_FILTER_MARKER = Integer.MIN_VALUE + 2;
     // Start byte sets at least this probable in English text stop often enough that checking
     // three bytes of each literal pays. Rarer sets keep their single-byte scanners, which cost
-    // less per byte, except where buildStartLiteralFilter says. UTF-8 lead bytes rate as common
-    // as the most common ASCII byte.
+    // less per byte, except where buildStartLiteralFilter says or a start class filter replaces
+    // them. UTF-8 lead bytes rate as common as the most common ASCII byte.
     private static final double MINIMUM_START_LITERAL_FILTER_START_PROBABILITY = 0.05;
     // Room for the folded first letters of eight literals.
     private static final int MAXIMUM_START_LITERAL_FILTER_START_BYTES = 16;
@@ -875,12 +876,14 @@ final class Dfa
         // selected; searches served by another scan do not sample. Resampling requires at least
         // 4 KiB remaining; below that the check reports the span as productive without sampling,
         // which would promote the vector scan for dense input. Prefix acceleration returns before
-        // the start-byte scan, so the selection is made only when it can be read. A start literal
-        // filter is kept without sampling. A count of every match, the three-argument form's
-        // `COUNT_EVERY_MATCH`, settles a borderline first sample with a wider one; any other
-        // predicate keeps the 64-byte decision. A count that carries sampling across calls keeps an
-        // earlier call's selection where it still holds. On a long text, the count's own
-        // sampling, below, holds a later search's scalar choice for the recheck distance.
+        // the start-byte scan, so the selection is made only when it can be read. This selection
+        // keeps a start literal filter or a start class filter without the small-set sample; the
+        // productivity sampling of long searches still samples the filter's own stops. A count of
+        // every match, the three-argument form's `COUNT_EVERY_MATCH`, settles a borderline first
+        // sample with a wider one; any other predicate keeps the 64-byte decision. A count that
+        // carries sampling across calls keeps an earlier call's selection where it still holds. On
+        // a long text, the count's own sampling, below, holds a later search's scalar choice for
+        // the recheck distance.
         int startByteScanSet = 0;
         boolean resampleStartByteScanSet = false;
         if (dfa.canStartByteAcceleration() && !prog.canPrefixAccel()) {
@@ -2031,7 +2034,7 @@ final class Dfa
     {
         // On long inputs the start-scan productivity check samples the filter's own candidates,
         // and a single-byte scan would stop at every start byte the filter skips.
-        if (byteScanSet == START_LITERAL_FILTER_MARKER) {
+        if (byteScanSet == START_LITERAL_FILTER_MARKER || byteScanSet == START_CLASS_FILTER_MARKER) {
             return byteScanSet;
         }
         if (byteScanSet != 0 &&
@@ -2039,6 +2042,7 @@ final class Dfa
                 ((byteScanSet >>> 24) > 3 || VectorByteSetScanner.shouldSampleCandidateDensity()) &&
                 !isByteCandidateScanProductive(
                         candidates,
+                        null,
                         null,
                         bytes,
                         position,
@@ -2062,6 +2066,7 @@ final class Dfa
                 byteScanSet == 0 ||
                 !isByteCandidateScanProductive(
                         candidates,
+                        null,
                         null,
                         bytes,
                         position,
@@ -2091,22 +2096,16 @@ final class Dfa
 
     private static boolean isByteCandidateScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
     {
-        return isByteCandidateScanProductive(
-                candidates,
-                null,
-                bytes,
-                position,
-                textEnd,
-                MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES,
-                BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
+        return isByteCandidateScanProductive(candidates, null, null, bytes, position, textEnd, MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES, BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
     }
 
-    // With a start literal filter, a sampled position counts when the filter accepts it, not
-    // when its byte is in the candidate set. The literal-alternation matcher samples its own
-    // filter's stops with this check.
+    // With a start literal filter or a start class filter, a sampled position counts when the
+    // filter accepts it, not when its byte is in the candidate set. The literal-alternation
+    // matcher samples its own filter's stops with this check.
     static boolean isByteCandidateScanProductive(
             byte[] candidates,
             StartLiteralFilter literalFilter,
+            StartClassFilter classFilter,
             byte[] bytes,
             int position,
             int textEnd,
@@ -2125,9 +2124,16 @@ final class Dfa
             int windowStart = position + (int) (((long) windowRange * window) / (BYTE_SCAN_SAMPLE_WINDOWS - 1));
             int windowEnd = windowStart + windowSize;
             for (int samplePosition = windowStart; samplePosition < windowEnd; samplePosition++) {
-                boolean candidate = literalFilter == null
-                        ? candidates[bytes[samplePosition] & 0xFF] != 0
-                        : literalFilter.accepts(bytes, samplePosition, textEnd);
+                boolean candidate;
+                if (literalFilter != null) {
+                    candidate = literalFilter.accepts(bytes, samplePosition, textEnd);
+                }
+                else if (classFilter != null) {
+                    candidate = classFilter.accepts(bytes, samplePosition, textEnd);
+                }
+                else {
+                    candidate = candidates[bytes[samplePosition] & 0xFF] != 0;
+                }
                 if (candidate && ++candidateCount >= candidateLimit) {
                     return false;
                 }
@@ -3569,9 +3575,10 @@ final class Dfa
         Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
         Object[] startRefs = stateRefs;
 
-        // Generic scan acceleration for sparse start bytes, start literal filters and literal
-        // prefixes other than the single-byte fast path. Keep scanner control local so later searches can still
-        // use the unchanged compact transition rows when sampling rejects acceleration.
+        // Generic scan acceleration for sparse start bytes, start literal filters, start class
+        // filters, and literal prefixes other than the single-byte fast path. Keep scanner control
+        // local so later searches can still use the unchanged compact transition rows when sampling
+        // rejects acceleration.
 
         if (startIsMatch) {
             matched = true;
@@ -3804,7 +3811,7 @@ final class Dfa
 
     private static int findByteSetCandidate(DfaInstance dfa, byte[] candidates, int byteScanSet, byte[] data, int offset, int length)
     {
-        // A filter is built only when the Vector API is available.
+        // Either filter is built only when the Vector API is available.
         if (byteScanSet == START_LITERAL_FILTER_MARKER) {
             if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
                 dfa.startLiteralFilterScanCount++;
@@ -3817,6 +3824,15 @@ final class Dfa
             }
             dfa.startLiteralFilterScanCount++;
             return dfa.startLiteralFilter.find(data, offset, length);
+        }
+        // As for a literal filter taken for rare start bytes, shorter searches check each input
+        // byte against the start byte table.
+        if (byteScanSet == START_CLASS_FILTER_MARKER) {
+            if (length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
+                dfa.startClassFilterScanCount++;
+                return VectorByteSetScanner.findClassSequence(data, offset, length, dfa.startClassFilter);
+            }
+            return findByteCandidate(candidates, data, offset, length);
         }
         if (VectorSupport.isAvailable() && length >= MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) {
             if (byteScanSet == MIXED_BYTE_SET_MARKER) {
@@ -3932,19 +3948,18 @@ final class Dfa
     // than three start bytes that is not one range would take the mixed nibble-table scan, and
     // the filter's three-position scan, at similar vector cost, stops far less often. Other rare
     // sets keep their cheaper small-set and range scanners, except for a filter of two literals
-    // where VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals says its scan is faster.
-    private static StartLiteralFilterChoice buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates, int startByteScanSet)
+    // where VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals says its scan is faster;
+    // a start class filter may still replace those scanners. `startByteProbability` is the
+    // English probability of the start bytes.
+    private static StartLiteralFilterChoice buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates, int startByteScanSet, double startByteProbability)
     {
         if (startByteCandidates == null) {
             return null;
         }
-        ByteFrequencies byteFrequencies = ByteFrequencies.englishText();
         int startByteCount = 0;
-        double startByteProbability = 0;
-        for (int value = 0; value < startByteCandidates.length; value++) {
-            if (startByteCandidates[value] != 0) {
+        for (byte candidate : startByteCandidates) {
+            if (candidate != 0) {
                 startByteCount++;
-                startByteProbability += byteFrequencies.probability((byte) value);
             }
         }
         boolean rareStartBytes = startByteProbability < MINIMUM_START_LITERAL_FILTER_START_PROBABILITY;
@@ -3958,7 +3973,7 @@ final class Dfa
         if (paths == null) {
             return null;
         }
-        StartLiteralFilter filter = StartLiteralFilter.build(paths, byteFrequencies);
+        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText());
         if (filter == null || filter.density() * START_LITERAL_FILTER_NARROWING_FACTOR > startByteProbability) {
             return null;
         }
@@ -3970,6 +3985,42 @@ final class Dfa
 
     // A filter taken for rare start bytes serves only vector searches.
     private record StartLiteralFilterChoice(StartLiteralFilter filter, boolean vectorOnly) {}
+
+    // Returns the English probability of the bytes `startByteCandidates` holds, or zero when it is
+    // null. Both start filters compare their estimates with it, whatever byte frequencies the
+    // pattern was compiled with.
+    private static double englishProbability(byte[] startByteCandidates)
+    {
+        if (startByteCandidates == null) {
+            return 0;
+        }
+        ByteFrequencies byteFrequencies = ByteFrequencies.englishText();
+        double probability = 0;
+        for (int value = 0; value < startByteCandidates.length; value++) {
+            if (startByteCandidates[value] != 0) {
+                probability += byteFrequencies.probability((byte) value);
+            }
+        }
+        return probability;
+    }
+
+    // Patterns that begin with a few narrow classes, such as the IPv4 address of mariomka/ip,
+    // whose matches begin with two digits and then a dot or a digit, stop the start scan at every
+    // start byte in text with numbers, and the DFA fails again within a few bytes; the ranges of
+    // two or three offsets together stop far less often. StartClassFilter.build decides from the
+    // byte sets at those offsets whether a filter replaces start bytes of `startByteProbability`.
+    // Start bytes rarer than StartClassFilter.MINIMUM_START_PROBABILITY skip the program walk.
+    private static StartClassFilter buildStartClassFilter(Prog prog, int[] stack, double startByteProbability)
+    {
+        if (startByteProbability < StartClassFilter.MINIMUM_START_PROBABILITY) {
+            return null;
+        }
+        byte[][] byteSets = prog.buildStartOffsetByteSets(stack, StartClassFilter.MAXIMUM_SPAN);
+        if (byteSets == null) {
+            return null;
+        }
+        return StartClassFilter.build(byteSets, ByteFrequencies.englishText(), startByteProbability);
+    }
 
     private static long searchForwardAnchoredLongPrefixInt(
             DfaInstance dfa,
@@ -5627,8 +5678,11 @@ final class Dfa
         // largest possible states.
         private static final int MINIMUM_INITIAL_STATES = 20;
         // The most a forward DFA charges for its start-byte tables: the candidates, one entry per
-        // byte value, and the nibble tables or the literal filter, which exclude each other.
-        static final long MAXIMUM_START_BYTE_TABLES_MEMORY = 16L + 256 + Math.max(16L + VectorByteSetScanner.NIBBLE_TABLES_LENGTH, StartLiteralFilter.MAXIMUM_RETAINED_SIZE);
+        // byte value, and the nibble tables, the literal filter, or the class filter, which
+        // exclude each other.
+        static final long MAXIMUM_START_BYTE_TABLES_MEMORY = 16L + 256 + Math.max(
+                Math.max(16L + VectorByteSetScanner.NIBBLE_TABLES_LENGTH, StartLiteralFilter.MAXIMUM_RETAINED_SIZE),
+                StartClassFilter.INSTANCE_SIZE);
 
         private static final VarHandle TABLES;
 
@@ -5665,6 +5719,7 @@ final class Dfa
         private final byte[] startByteNibbleTables;
         private final StartLiteralFilter startLiteralFilter;
         private final boolean startLiteralFilterVectorOnly;
+        private final StartClassFilter startClassFilter;
         private final boolean nullableStartByteCandidates;
         private final int trinoLineFlag;
         // Rust CRLF anchors read a CR LF pair in the direction of the search: its first byte is CR
@@ -5773,6 +5828,7 @@ final class Dfa
         private int contiguousRangeScanCount;
         private int mixedByteSetScanCount;
         private int startLiteralFilterScanCount;
+        private int startClassFilterScanCount;
         private int selfLoopExitByteScanCount;
         private int countSelfLoopScanCount;
         private int countSelfLoopMatchHandOffCount;
@@ -5817,6 +5873,7 @@ final class Dfa
             this.nullableStartByteCandidates = startByteTables.nullableCandidates();
             this.startLiteralFilter = startByteTables.literalFilter();
             this.startLiteralFilterVectorOnly = startByteTables.literalFilterVectorOnly();
+            this.startClassFilter = startByteTables.classFilter();
             this.startByteNibbleTables = startByteTables.nibbleTables();
             this.startByteScanSet = startByteTables.scanSet();
 
@@ -5924,11 +5981,12 @@ final class Dfa
         }
 
         /// Returns whether a DFA of `kind` over `prog` searches for its start literal filter in
-        /// place of its start bytes, which this builds the start-byte tables to answer.
+        /// place of its start bytes, which this selects as the start-byte tables do, building none
+        /// of the tables that follow the selection.
         static boolean searchesStartLiteralFilter(Prog prog, Kind kind)
         {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
-            return StartByteTables.build(prog, kind, new int[stackLength(prog, nmark)]).literalFilter() != null;
+            return StartLiteralFilterSelection.select(prog, kind, new int[stackLength(prog, nmark)]).literalFilterChoice() != null;
         }
 
         // The work queues, the stack, and fixed fields, without the start-byte tables.
@@ -5950,32 +6008,46 @@ final class Dfa
         }
 
         // The start-byte tables a forward program's DFA builds and charges to its budget: the
-        // bytes that can begin a match and, with the Vector API, the start literal filter or the
-        // nibble tables a search scans for them with. The scan set selects that search, and a
-        // filter taken for rare start bytes serves only vector searches.
-        private record StartByteTables(byte[] candidates, boolean nullableCandidates, int scanSet, StartLiteralFilter literalFilter, boolean literalFilterVectorOnly, byte[] nibbleTables)
+        // bytes that can begin a match and, with the Vector API, the start literal filter, the
+        // start class filter, or the nibble tables a search scans for them with. The scan set
+        // selects that search, and a filter taken for rare start bytes serves only vector
+        // searches. The literal filter comes first, and the class filter replaces only a start
+        // set's own vector scan: a contiguous range, two or three bytes, or the nibble tables of a
+        // mixed set.
+        private record StartByteTables(
+                byte[] candidates,
+                boolean nullableCandidates,
+                int scanSet,
+                StartLiteralFilter literalFilter,
+                boolean literalFilterVectorOnly,
+                StartClassFilter classFilter,
+                byte[] nibbleTables)
         {
             static StartByteTables build(Prog prog, Kind kind, int[] stack)
             {
-                byte[] candidates = prog.buildStartByteCandidates(stack, kind == Kind.FIRST_MATCH);
-                boolean nullableCandidates = candidates != null && prog.canMatchEmpty();
-                int byteScanSet = buildStartByteScanSet(candidates);
-                StartLiteralFilterChoice literalFilterChoice = !nullableCandidates && VectorSupport.isAvailable()
-                        ? buildStartLiteralFilter(prog, stack, candidates, byteScanSet)
-                        : null;
+                StartLiteralFilterSelection selection = StartLiteralFilterSelection.select(prog, kind, stack);
+                byte[] candidates = selection.candidates();
+                int byteScanSet = selection.byteScanSet();
+                boolean vectorScans = selection.vectorScans();
+                StartLiteralFilterChoice literalFilterChoice = selection.literalFilterChoice();
                 StartLiteralFilter literalFilter = literalFilterChoice == null ? null : literalFilterChoice.filter();
                 boolean literalFilterVectorOnly = literalFilterChoice != null && literalFilterChoice.vectorOnly();
-                byte[] nibbleTables = literalFilter == null && byteScanSet == 0 && !nullableCandidates && VectorSupport.isAvailable()
-                        ? VectorByteSetScanner.buildNibbleTables(candidates)
+                byte[] nibbleTables = literalFilter == null && byteScanSet == 0 && vectorScans ? VectorByteSetScanner.buildNibbleTables(candidates) : null;
+                StartClassFilter classFilter = literalFilter == null && (byteScanSet != 0 || nibbleTables != null) && vectorScans
+                        ? buildStartClassFilter(prog, stack, selection.startByteProbability())
                         : null;
                 int scanSet;
                 if (literalFilter != null) {
                     scanSet = START_LITERAL_FILTER_MARKER;
                 }
+                else if (classFilter != null) {
+                    scanSet = START_CLASS_FILTER_MARKER;
+                    nibbleTables = null;
+                }
                 else {
                     scanSet = nibbleTables == null ? byteScanSet : MIXED_BYTE_SET_MARKER;
                 }
-                return new StartByteTables(candidates, nullableCandidates, scanSet, literalFilter, literalFilterVectorOnly, nibbleTables);
+                return new StartByteTables(candidates, selection.nullableCandidates(), scanSet, literalFilter, literalFilterVectorOnly, classFilter, nibbleTables);
             }
 
             long estimatedRetainedSize()
@@ -5990,7 +6062,33 @@ final class Dfa
                 if (literalFilter != null) {
                     size += literalFilter.estimatedRetainedSize();
                 }
+                if (classFilter != null) {
+                    size += StartClassFilter.INSTANCE_SIZE;
+                }
                 return size;
+            }
+        }
+
+        // The first step of the start-byte tables, which searchesStartLiteralFilter stops after:
+        // the bytes that can begin a match, their scan set and English probability, whether a
+        // search may take a vector scan or a filter for them, and the start literal filter.
+        private record StartLiteralFilterSelection(
+                byte[] candidates,
+                boolean nullableCandidates,
+                int byteScanSet,
+                double startByteProbability,
+                boolean vectorScans,
+                StartLiteralFilterChoice literalFilterChoice)
+        {
+            static StartLiteralFilterSelection select(Prog prog, Kind kind, int[] stack)
+            {
+                byte[] candidates = prog.buildStartByteCandidates(stack, kind == Kind.FIRST_MATCH);
+                boolean nullableCandidates = candidates != null && prog.canMatchEmpty();
+                int byteScanSet = buildStartByteScanSet(candidates);
+                double startByteProbability = englishProbability(candidates);
+                boolean vectorScans = !nullableCandidates && VectorSupport.isAvailable();
+                StartLiteralFilterChoice literalFilterChoice = vectorScans ? buildStartLiteralFilter(prog, stack, candidates, byteScanSet, startByteProbability) : null;
+                return new StartLiteralFilterSelection(candidates, nullableCandidates, byteScanSet, startByteProbability, vectorScans, literalFilterChoice);
             }
         }
 
@@ -6026,6 +6124,7 @@ final class Dfa
             return isByteCandidateScanProductive(
                     startByteCandidates,
                     startLiteralFilter,
+                    startClassFilter,
                     bytes,
                     position,
                     textEnd,
@@ -6175,6 +6274,16 @@ final class Dfa
         StartLiteralFilter startLiteralFilter()
         {
             return startLiteralFilter;
+        }
+
+        int startClassFilterScanCount()
+        {
+            return startClassFilterScanCount;
+        }
+
+        StartClassFilter startClassFilter()
+        {
+            return startClassFilter;
         }
 
         int fixedDistanceShortSkipFallbackCount()

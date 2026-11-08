@@ -304,9 +304,9 @@ so the automata run only where a match can be.
   `ByteFrequencies.fromCounts`, `Prog.prefixAccelProbe`
 - **Applies when:** Case-sensitive multi-byte prefixes with an ASCII first
   byte, and multi-byte scan-plan leading literals, opt-in through
-  `Options.setByteFrequencies`; the start literal filter, an inner literal
-  search's set filter and class-pair choice, and required bytes always use
-  English
+  `Options.setByteFrequencies`; the start literal and class filters, an inner
+  literal search's set filter and class-pair choice, and required bytes always
+  use English
 - **What it does:** The probe moves off byte 0 only to the literal's rarest
   later byte, and only when that byte's probability under the configured byte
   distribution, which defaults to uniform, is less than a quarter of byte 0's.
@@ -488,7 +488,28 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
 - **Applies when:** Unanchored forward searches whose start set is selective
 - **What it does:** The DFA scans to the next byte that can leave its
   unanchored start state, runs from there, and resumes the scan when it
-  returns to the start state. The byte set is built on first use.
+  returns to the start state. The byte set is built on first use. Where the
+  [start class filter](#start-class-filter) applies, it replaces this scan on
+  searches of at least 1 KiB.
+
+### Start class filter
+
+- **Origin:** Adapted from Hyperscan's double shufti acceleration, which checks
+  the classes of two consecutive positions in one vector pass
+  ([shufti.c][hs-shufti-double]). Regulator: a third offset, byte ranges
+  rather than nibble tables, and admission by English byte frequencies
+  ([design][d-start-class-filter]).
+- **Where:** `StartClassFilter.build`, `Prog.buildStartOffsetByteSets`,
+  `VectorByteSetScanner.findClassSequence`, `Dfa.findByteSetCandidate`
+- **Applies when:** Unanchored forward DFA searches of at least 1 KiB with the
+  Vector API and no start literal filter, whose start set has a vector scan of
+  its own and English text holds it at least once in 500 bytes, and whose first
+  two or three byte ranges English byte frequencies, taken as independent,
+  estimate at most a sixteenth as often as the start bytes and under once in
+  500 bytes
+- **What it does:** The start scan stops only where the bytes at a match's
+  first two or three offsets all lie in those offsets' byte ranges, checking a
+  vector of positions at a time; the DFA still decides each stop.
 
 ### Small byte-set vector scan
 
@@ -659,7 +680,9 @@ API, and each has a SWAR or scalar form for JVMs without it.
 - **Where:** `VectorSupport.sve128`, `VectorPrefixScanner.sveMatches`,
   `VectorScanner.findRunStopSve`, `VectorByteSetScanner.findTwoSve`,
   `VectorByteSetScanner.findTwoLiteralsSve`,
-  `VectorByteSetScanner.findClassPairSve`
+  `VectorByteSetScanner.findClassPairSve`,
+  `VectorByteSetScanner.findClassSequencePairSve`,
+  `VectorByteSetScanner.findClassSequenceTripleSve`
 - **Applies when:** aarch64 with 128-bit SVE; NEON and x86 compare each probe
   and combine with AND or OR
 - **What it does:** Each candidate byte is XORed with its probe, the
@@ -1390,7 +1413,8 @@ These entries cover what Regulator changed or added in them.
 - **What it does:** A count samples its start-byte scan at its start, with a
   wider second sample for borderline cases. A vector choice holds for the
   whole count; a scalar choice is resampled by later searches until one
-  selects the vector scan.
+  selects the vector scan. A start literal or class filter is kept without
+  these samples, though long searches still sample its productivity.
 
 ### Sticky NFA fallback
 
@@ -2867,6 +2891,7 @@ registry entry holds the trigger.
 [d-short-inner]: ../../REGULATOR_DECISIONS.md#short-window-inner-literal-check
 [d-short-like]: ../../REGULATOR_DECISIONS.md#short-like-literal-comparisons
 [d-small-byte-set]: ../../REGULATOR_DECISIONS.md#small-candidate-byte-vector-scan
+[d-start-class-filter]: ../../REGULATOR_DECISIONS.md#start-class-filter
 [d-start-filter]: ../../REGULATOR_DECISIONS.md#start-literal-filter
 [d-sve]: ../../REGULATOR_DECISIONS.md#candidate-masks-on-sve
 [d-trino-adapter]: ../../REGULATOR_DECISIONS.md#trino-compatibility-adapter

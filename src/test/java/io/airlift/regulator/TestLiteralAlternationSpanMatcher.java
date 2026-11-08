@@ -815,7 +815,10 @@ public class TestLiteralAlternationSpanMatcher
         // between them would carry one input's verdict into the other's search; each matcher's
         // spans are the general engine's. Then the first matcher, reset onto a shorter input,
         // turns its cursor back on.
-        byte[] nearMisses = nearMisses(4 * RECHECK_BYTES);
+        // These near misses pass the start class filter each language's DFA builds for the
+        // pattern, whose third offset reads R to T, so its productivity check still rejects the
+        // scan; ERxO, WAxN, and FAxA would not pass it.
+        byte[] nearMisses = nearMissText("ERRO WASN FASA ", 4 * RECHECK_BYTES).getBytes(UTF_8);
         for (int position = 5_000; position + 5 <= nearMisses.length; position += 10_007) {
             System.arraycopy("ERROR".getBytes(UTF_8), 0, nearMisses, position, 5);
         }
@@ -992,7 +995,13 @@ public class TestLiteralAlternationSpanMatcher
     // Near misses of ERROR|WARN|FATAL that its start literal filter passes, one every five bytes.
     private static String nearMissText(int length)
     {
-        return "ERxO WAxN FAxA ".repeat(length / 15 + 1).substring(0, length);
+        return nearMissText("ERxO WAxN FAxA ", length);
+    }
+
+    // The near misses repeated to `length` characters.
+    private static String nearMissText(String nearMisses, int length)
+    {
+        return nearMisses.repeat(length / nearMisses.length() + 1).substring(0, length);
     }
 
     private static byte[] nearMisses(int length)

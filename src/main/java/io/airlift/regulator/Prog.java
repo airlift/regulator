@@ -62,6 +62,9 @@ final class Prog
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
     private static final int MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET = 16;
+    // The results of walkByteOffset other than an instruction count.
+    private static final int BYTE_OFFSET_ASSERTION = -1;
+    private static final int BYTE_OFFSET_MATCH = -2;
     // Bounds the work of the start literal filter's path walk, before paths merge into groups.
     private static final int MAXIMUM_START_POSITION_PATHS = 128;
     // The literal search needs at least two bytes; a one-byte literal keeps ordinary matching.
@@ -1379,74 +1382,19 @@ final class Prog
         boolean[] visited = new boolean[size()];
 
         for (int offset = 0; offset <= MAXIMUM_FIXED_DISTANCE_BYTE_OFFSET && currentInstructionCount > 0; offset++) {
-            Arrays.fill(visited, false);
             byte[] candidates = new byte[256];
-            int candidateCount = 0;
-            int byteInstructionCount = 0;
-            boolean canMatchAtCurrentOffset = false;
-            for (int currentInstructionIndex = 0; currentInstructionIndex < currentInstructionCount; currentInstructionIndex++) {
-                int stackPointer = 0;
-                stack[stackPointer++] = currentInstructions[currentInstructionIndex];
-
-                while (stackPointer > 0) {
-                    int instructionId = stack[--stackPointer];
-                    if (instructionId <= 0 || instructionId >= size() || visited[instructionId]) {
-                        continue;
-                    }
-                    visited[instructionId] = true;
-
-                    Inst instruction = inst(instructionId);
-                    switch (instruction.opcode()) {
-                        case BYTE_RANGE -> {
-                            candidateCount += addStartByteRange(candidates, instruction);
-                            byteInstructions[byteInstructionCount++] = instructionId;
-                            if (!instruction.last()) {
-                                stack[stackPointer++] = instructionId + 1;
-                            }
-                        }
-                        case CAPTURE, NOP -> {
-                            if (!instruction.last()) {
-                                stack[stackPointer++] = instructionId + 1;
-                            }
-                            stack[stackPointer++] = instruction.out();
-                        }
-                        case EMPTY_WIDTH -> {
-                            return null;
-                        }
-                        case ALT, ALT_MATCH -> {
-                            if (!instruction.last()) {
-                                stack[stackPointer++] = instructionId + 1;
-                            }
-                            stack[stackPointer++] = instruction.out1();
-                            stack[stackPointer++] = instruction.out();
-                        }
-                        case MATCH -> {
-                            canMatchAtCurrentOffset = true;
-                            if (!instruction.last()) {
-                                stack[stackPointer++] = instructionId + 1;
-                            }
-                        }
-                        case FAIL -> {
-                            if (!instruction.last()) {
-                                stack[stackPointer++] = instructionId + 1;
-                            }
-                        }
-                    }
-                }
+            currentInstructionCount = walkByteOffset(stack, currentInstructions, currentInstructionCount, byteInstructions, visited, candidates);
+            if (currentInstructionCount == BYTE_OFFSET_ASSERTION) {
+                return null;
             }
-
-            if (canMatchAtCurrentOffset) {
+            if (currentInstructionCount == BYTE_OFFSET_MATCH) {
                 break;
             }
+            int candidateCount = countCandidates(candidates);
             if (offset > 0 && candidateCount > 0 && candidateCount < bestCandidateCount) {
                 bestCandidateCount = candidateCount;
                 bestCandidates = candidates;
                 bestOffset = offset;
-            }
-
-            currentInstructionCount = 0;
-            for (int index = 0; index < byteInstructionCount; index++) {
-                currentInstructions[currentInstructionCount++] = inst(byteInstructions[index]).out();
             }
         }
 
@@ -1454,6 +1402,116 @@ final class Prog
             return null;
         }
         return new FixedDistanceByteCandidates(bestCandidates, bestOffset);
+    }
+
+    /// Returns the bytes at each of the first offsets of every match, for the start class filter
+    /// of a forward DFA: one 256-entry membership table per offset; entry `b` of table `k` is
+    /// nonzero when some path from [#start()] reads `b` there, the union over all paths. The
+    /// tables cover the offsets before the shortest match ends, at most `maximumSpan` of them, so
+    /// every match holds a byte of each table at its offset. Returns null when fewer than two
+    /// offsets lie before every match end, when an offset reads no byte, when the bounded walk
+    /// reaches an assertion, and for a reversed, start-anchored, or empty-matching program, one
+    /// with prefix acceleration, or one with no start instruction. The walk is the one
+    /// [#buildFixedDistanceByteCandidates] takes.
+    byte[][] buildStartOffsetByteSets(int[] stack, int maximumSpan)
+    {
+        if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || start() == 0) {
+            return null;
+        }
+
+        byte[][] byteSets = new byte[maximumSpan][];
+        int[] currentInstructions = new int[size()];
+        int currentInstructionCount = 1;
+        currentInstructions[0] = start();
+        int[] byteInstructions = new int[size()];
+        boolean[] visited = new boolean[size()];
+
+        int span = 0;
+        while (span < maximumSpan) {
+            byte[] candidates = new byte[256];
+            currentInstructionCount = walkByteOffset(stack, currentInstructions, currentInstructionCount, byteInstructions, visited, candidates);
+            if (currentInstructionCount == BYTE_OFFSET_ASSERTION || currentInstructionCount == 0) {
+                return null;
+            }
+            if (currentInstructionCount == BYTE_OFFSET_MATCH) {
+                break;
+            }
+            byteSets[span++] = candidates;
+        }
+        return span < 2 ? null : Arrays.copyOf(byteSets, span);
+    }
+
+    /// Walks one byte offset of the paths from [#start()]: from each of the first
+    /// `currentInstructionCount` instructions of `currentInstructions`, follows the empty
+    /// transitions and marks in `candidates` every byte a byte instruction reached reads. Returns
+    /// [#BYTE_OFFSET_ASSERTION] when the walk reaches an assertion and otherwise
+    /// [#BYTE_OFFSET_MATCH] when it reaches a match, so a match can end at this offset; else it
+    /// replaces `currentInstructions` with the instructions after the byte instructions reached,
+    /// which begin the next offset, and returns their count. `stack`, `byteInstructions`, and
+    /// `visited` are scratch, the last two of [#size()] entries.
+    private int walkByteOffset(int[] stack, int[] currentInstructions, int currentInstructionCount, int[] byteInstructions, boolean[] visited, byte[] candidates)
+    {
+        Arrays.fill(visited, false);
+        int byteInstructionCount = 0;
+        boolean canMatchAtCurrentOffset = false;
+        for (int currentInstructionIndex = 0; currentInstructionIndex < currentInstructionCount; currentInstructionIndex++) {
+            int stackPointer = 0;
+            stack[stackPointer++] = currentInstructions[currentInstructionIndex];
+
+            while (stackPointer > 0) {
+                int instructionId = stack[--stackPointer];
+                if (instructionId <= 0 || instructionId >= size() || visited[instructionId]) {
+                    continue;
+                }
+                visited[instructionId] = true;
+
+                Inst instruction = inst(instructionId);
+                switch (instruction.opcode()) {
+                    case BYTE_RANGE -> {
+                        addStartByteRange(candidates, instruction);
+                        byteInstructions[byteInstructionCount++] = instructionId;
+                        if (!instruction.last()) {
+                            stack[stackPointer++] = instructionId + 1;
+                        }
+                    }
+                    case CAPTURE, NOP -> {
+                        if (!instruction.last()) {
+                            stack[stackPointer++] = instructionId + 1;
+                        }
+                        stack[stackPointer++] = instruction.out();
+                    }
+                    case EMPTY_WIDTH -> {
+                        return BYTE_OFFSET_ASSERTION;
+                    }
+                    case ALT, ALT_MATCH -> {
+                        if (!instruction.last()) {
+                            stack[stackPointer++] = instructionId + 1;
+                        }
+                        stack[stackPointer++] = instruction.out1();
+                        stack[stackPointer++] = instruction.out();
+                    }
+                    case MATCH -> {
+                        canMatchAtCurrentOffset = true;
+                        if (!instruction.last()) {
+                            stack[stackPointer++] = instructionId + 1;
+                        }
+                    }
+                    case FAIL -> {
+                        if (!instruction.last()) {
+                            stack[stackPointer++] = instructionId + 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (canMatchAtCurrentOffset) {
+            return BYTE_OFFSET_MATCH;
+        }
+        for (int index = 0; index < byteInstructionCount; index++) {
+            currentInstructions[index] = inst(byteInstructions[index]).out();
+        }
+        return byteInstructionCount;
     }
 
     private static int countCandidates(byte[] candidates)
