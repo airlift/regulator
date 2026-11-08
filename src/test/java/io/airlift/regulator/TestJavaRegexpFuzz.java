@@ -105,9 +105,9 @@ public class TestJavaRegexpFuzz
     private static final Pattern UNCOMPARED_GROUP = Pattern.compile("\\{[^}]*}");
 
     // Characters whose properties and case mappings are the same in Unicode 16.0 (JDK 25), 17.0
-    // (JDK 26), and Regulator's pinned 18.0. Capital sharp s is left out, because JDK 25 does not
-    // match it against sharp s and JDK 26 does, and so is U+0295, which Unicode 17.0 changed
-    // (JAVA_REGEXP.md). Inputs are valid UTF-8, so no lone surrogate.
+    // (JDK 26), and Regulator's pinned 18.0. Capital sharp s is left out, because JDK 25 misses
+    // some case-insensitive matches between it and sharp s that JDK 26 makes, and so is U+0295,
+    // which Unicode 17.0 changed (JAVA_REGEXP.md). Inputs are valid UTF-8, so no lone surrogate.
     private static final List<String> CHARACTERS = Stream.concat(
                     TEXT_CHARACTERS.stream(),
                     Stream.of(
@@ -365,7 +365,7 @@ public class TestJavaRegexpFuzz
         @Override
         public String filterInput(Node tree, int options, String input)
         {
-            // Capital sharp s matches sharp s only on JDK 26 (JAVA_REGEXP.md).
+            // JDK 25 misses some case-insensitive matches of capital sharp s (JAVA_REGEXP.md).
             return input.replace("\u1E9E", "");
         }
 

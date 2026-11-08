@@ -170,17 +170,25 @@ public class TestJavaRegexp
         assertThat(JavaRegexp.compile(utf8Slice("\\p{IsSeal}")).matches(utf8Slice("\uD8B4\uDC00"))).isTrue();
     }
 
-    // A case-insensitive range also matches a character whose upper case, or the lower case of its
-    // upper case, is one of the range's closing characters. Regulator matches these as JDK 26 does,
-    // whichever JVM runs it. JDK 25 does not match them, so the differential tests leave these
-    // ranges out.
+    // Regulator gives JDK 26's case-insensitive results on every JVM. JDK 25 misses these matches or
+    // rejects the pattern, and the differential tests must agree with JDK 25, so they leave these
+    // cases out. ß matches capital sharp S U+1E9E, also in a class and before an empty
+    // intersection, which keeps ß because JDK 26 stores it apart from the class's other Latin-1
+    // members. A case-insensitive range also matches a character whose upper case, or the lower
+    // case of its upper case, is one of the range's closing characters.
     @Test
-    public void testRangeClosingCharactersOnEveryJvm()
+    public void testJdk26CaseMatchesOnEveryJvm()
     {
+        for (String pattern : List.of("(?iu)ß", "(?iu)[ß]", "(?iu)[āß&&]")) {
+            assertThat(JavaRegexp.compile(utf8Slice(pattern)).matches(utf8Slice("ẞ")))
+                    .as("%s against ẞ", pattern)
+                    .isTrue();
+        }
         assertRangeMatches("ς-ς", "σ", "Σ");
         assertRangeMatches("\\x{212A}-\\x{212A}", "K", "k");
         assertRangeMatches("\\x{1FD2}-\\x{1FE4}", "\u0390", "\u03B0");
         assertRangeMatches("\\x{FB05}-\\x{FB05}", "\uFB06");
+        assertRangeMatches("\\x{1E9E}-\\x{1E9E}", "ß");
         assertRangeMatches("\\x{130}-\\x{130}", "i", "I", "ı");
         assertRangeMatches("\\x{131}-\\x{131}", "I", "i");
         assertThat(JavaRegexp.compile(utf8Slice("(?iu)[\\x{131}-\\x{131}]")).matches(utf8Slice("İ")))
