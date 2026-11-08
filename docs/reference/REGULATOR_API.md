@@ -135,6 +135,21 @@ it can never match are not counted, nor are the copies after the first of a
 repeated assertion or, in Java, of any body that matches only the empty string,
 which simplification cuts to one copy.
 
+A capture-free alternation of more than 64 nonempty literals, such as a
+dictionary of words, needs a budget sized by its literals rather than by its
+program. Trino keeps only the set for such a pattern, and compiles
+`english-10`, rebar's 43,029-word dictionary, from 2.63 MiB. RE2,
+Java, and Rust keep the program wherever it fits the budget, since its DFAs
+count and search faster, so `english-10` retains about 25 MB under the default
+budget. Under a budget the program does not fit, such as below about 40 MiB
+for `english-10`, they keep only the set instead of failing, and answer every
+operation from it. Such a pattern compiles where a temporary trie of all its
+literals fits the forward share, and then where the set and the list of
+literals that extend another fit it together. `english-10` compiles from
+3.11 MiB, a budget its temporary trie sets, and then retains about 2.8 MB.
+RE2's longest-match mode and most case-insensitive literals always need the
+program.
+
 Compiled patterns are immutable and safe to share across threads. They do not
 need to be closed. Lazily built DFA caches belong to the compiled pattern and
 are reclaimed when it is no longer reachable. Their integer and object
@@ -149,9 +164,11 @@ Within the budget, compilation and matching keep these limits:
 
 - Compilation caps instructions as RE2 does, and also charges each instruction
   as flattening emits it. A forward program that outgrows its share of the
-  budget fails to compile; a reverse program that does not fit is dropped, and
-  the pattern searches without one. A DFA that fails to initialize is
-  remembered, so later searches do not try to build it again.
+  budget fails to compile, unless the pattern is a
+  [large literal set](../../REGULATOR_DECISIONS.md#large-literal-alternations)
+  that compiles without one as described above; a reverse program that does
+  not fit is dropped, and the pattern searches without one. A DFA that fails
+  to initialize is remembered, so later searches do not try to build it again.
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
   bytes outside Trino, the dot-star literal and byte-gap ordered-literal
   matchers, the root skip of a large literal set, OnePass tables needed only

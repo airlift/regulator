@@ -303,8 +303,23 @@ final class LiteralAlternationSpanMatcher
     /// memory bound.
     static LiteralSetSpanMatcher.Trie spellLiteralSet(Regexp expression, long maximumRetainedBytes)
     {
+        return spell(expression, maximumRetainedBytes, false);
+    }
+
+    /// Spells every literal [#spellLiteralSet] would, also those that pass through an earlier
+    /// literal's match state, into a trie that marks each literal's state with its length and
+    /// is only walked, never searched, or returns `null` where [#spellLiteralSet] would. A full
+    /// match of such a set can still end at a literal the search never reports, as `samwise`
+    /// matches all of itself in `sam|samwise`.
+    static LiteralSetSpanMatcher.Trie spellEveryLiteral(Regexp expression, long maximumRetainedBytes)
+    {
+        return spell(expression, maximumRetainedBytes, true);
+    }
+
+    private static LiteralSetSpanMatcher.Trie spell(Regexp expression, long maximumRetainedBytes, boolean spellsEveryLiteral)
+    {
         boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
-        LiteralSpeller speller = new LiteralSpeller(new LiteralSetSpanMatcher.Trie(MAXIMUM_LITERAL_BYTES, maximumRetainedBytes), latin1Program);
+        LiteralSpeller speller = new LiteralSpeller(new LiteralSetSpanMatcher.Trie(MAXIMUM_LITERAL_BYTES, maximumRetainedBytes), latin1Program, spellsEveryLiteral);
         return speller.spell(expression) ? speller.trie : null;
     }
 
@@ -325,9 +340,10 @@ final class LiteralAlternationSpanMatcher
     /// that length.
     ///
     /// Where a large set's alternation ends the pattern, it skips each literal that equals or
-    /// extends an earlier one, which can never match and which [LiteralSetSpanMatcher]'s build
-    /// drops. Followed by more text, such as `(?:|a)b` in `ab` or `(?:ab|abc)d` in `abcd`, a
-    /// later alternative can still match, so a choice there keeps every literal.
+    /// extends an earlier one, which a leftmost-first search never reports and which
+    /// [LiteralSetSpanMatcher]'s build drops. Followed by more text, such as `(?:|a)b` in `ab` or
+    /// `(?:ab|abc)d` in `abcd`, a later alternative can still match, so a choice there keeps every
+    /// literal.
     private static ExtractedLiterals extractLiteralAlternatives(Regexp expression, boolean largeSet, boolean latin1Program, long maximumRetainedBytes)
     {
         ExtractionCharges charges = new ExtractionCharges(maximumRetainedBytes > Long.MAX_VALUE / EXTRACTION_BUDGET_MULTIPLE ? Long.MAX_VALUE : maximumRetainedBytes * EXTRACTION_BUDGET_MULTIPLE);
@@ -850,7 +866,8 @@ final class LiteralAlternationSpanMatcher
         private final Regexp expression;
         // True when nothing follows the expression, in it or in the expressions enclosing it.
         private final boolean endsPattern;
-        // A large set's alternation that ends the pattern skips the literals that never match.
+        // A large set's alternation that ends the pattern skips the literals a leftmost-first search
+        // never reports.
         private final boolean skipsUnmatchable;
         // The bytes the extraction could still build when the frame began, so the charges of the
         // frame and everything below it are this less the bytes left once it ends.
@@ -1098,32 +1115,36 @@ final class LiteralAlternationSpanMatcher
         }
     }
 
-    /// Spells a large set's literals into a trie for [#spellLiteralSet]. Each literal is a path in
-    /// the trie from the state its prefix reached, so a concatenation keeps its prefix as one
-    /// state: its choice of several literals must end it, so the prefix before that choice is a
-    /// single literal. Until a concatenation's child spells a second literal, the child may be a
-    /// single literal the next child extends, a choice of empty literals that adds nothing, or
-    /// the choice that ends the concatenation. Its first literal's state is marked as a match
-    /// while the rest of the child spells, as the extraction lists that literal before them, and
-    /// unmarked when the child is not the choice.
+    /// Spells a large set's literals into a trie for [#spellLiteralSet] or [#spellEveryLiteral].
+    /// Each literal is a path in the trie from the state its prefix reached, so a concatenation
+    /// keeps its prefix as one state: its choice of several literals must end it, so the prefix
+    /// before that choice is a single literal. Until a concatenation's child spells a second
+    /// literal, the child may be a single literal the next child extends, a choice of empty
+    /// literals that adds nothing, or the choice that ends the concatenation. Its first literal's
+    /// state is marked as a match while the rest of the child spells, as the extraction lists that
+    /// literal before them, and unmarked when the child is not the choice.
     private static final class LiteralSpeller
     {
-        // The state of a literal whose path passed through an earlier literal's match state, which
-        // adds nothing to the trie, or of a child after the choice, which spells nothing.
+        // The state of a child after the choice, which spells nothing, or, unless the speller
+        // spells every literal, of a literal whose path passed through an earlier literal's match
+        // state, which adds nothing to the trie.
         private static final int NO_STATE = -1;
 
         private final LiteralSetSpanMatcher.Trie trie;
         private final boolean latin1Program;
+        // Whether a literal's path continues past an earlier literal's match state.
+        private final boolean spellsEveryLiteral;
         private final List<SpellFrame> stack = new ArrayList<>();
         private final byte[] encodedRune = new byte[4];
         private long work;
         private long literalCount;
         private boolean failed;
 
-        private LiteralSpeller(LiteralSetSpanMatcher.Trie trie, boolean latin1Program)
+        private LiteralSpeller(LiteralSetSpanMatcher.Trie trie, boolean latin1Program, boolean spellsEveryLiteral)
         {
             this.trie = trie;
             this.latin1Program = latin1Program;
+            this.spellsEveryLiteral = spellsEveryLiteral;
         }
 
         private boolean spell(Regexp expression)
@@ -1215,10 +1236,11 @@ final class LiteralAlternationSpanMatcher
             deliver(stack.size(), state, length);
         }
 
-        // The trie's build walks a literal the same way, stopping at an earlier literal's match.
+        // Like the trie's build, the walk stops at an earlier literal's match, unless the speller
+        // spells every literal.
         private int walk(int state, byte value)
         {
-            if (state == NO_STATE || trie.matchLength(state) != 0) {
+            if (state == NO_STATE || (!spellsEveryLiteral && trie.matchLength(state) != 0)) {
                 return NO_STATE;
             }
             int next = trie.step(state, value);
@@ -1391,8 +1413,8 @@ final class LiteralAlternationSpanMatcher
     }
 
     /// The literals an expansion lists in priority order, and how many it would list counting
-    /// those it skipped because they can never match. The route is chosen by that count, so the
-    /// skipped literals count toward it.
+    /// those it skipped because a leftmost-first search never reports them. The route is chosen by
+    /// that count, so the skipped literals count toward it.
     record ExtractedLiterals(List<byte[]> literals, long literalCount)
     {
         /// What an extraction returns once what it builds passes its memory bound, or its

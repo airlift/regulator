@@ -743,8 +743,10 @@ text, so the pair scan rejects little that a first-byte scan would not.
   the instructions its limit admitted: nested lazy loops over nullable bodies
   flattened to tens of millions of instructions and gigabytes of heap.
   Regulator stops flattening when the charge of the emitted instructions
-  exceeds the program's share. A forward program then fails to compile, and a
-  reverse program is dropped, as any reverse program that does not fit is.
+  exceeds the program's share. A forward program then fails to compile, except
+  in a [large literal set](#large-literal-alternations), which then compiles
+  without a program, and a reverse program is dropped, as any reverse program
+  that does not fit is.
 - Java and Trino loops over a body that can match empty end on an iteration
   that consumes nothing, so flattening keeps their closures apart and does not
   multiply them. Their nests grow before flattening instead, as
@@ -1575,9 +1577,12 @@ compile-time plans for exact literal, nullable-start, contains, equality,
 prefix, and suffix expressions. Compilation selects a pattern's full-Slice
 routes once, and the pattern's class fixes them. Each language class is the
 engine shape. Its package-private shape classes (exact literal, literal kernel,
-literal alternation, fixed width, class run, byte table, and scan plan)
-override `find`. They override the count, `matches`, and `lookingAt` where
-their routes differ from the engine's. Each override makes one call to a final
+literal alternation, literal set, fixed width, class run, byte table, and scan
+plan) override `find`. They override the count, `matches`, and `lookingAt` where
+their routes differ from the engine's. The literal-set class, outside Trino, is
+the literal-alternation shape of a pattern that compiled no program, a class of
+its own because it routes `matchInternal` to the set and so leaves the
+program-bearing class untouched. Each override makes one call to a final
 route method of `CompiledPattern`, so a call site that sees one class can
 inline one route. The class selects the routes; within them, the class-run
 shape holds one immutable per-instance fact, whether it counts on the retained
@@ -1605,7 +1610,9 @@ existence semantics. APIs that accept a range, return boundaries or captures, or
 produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
 cascade when no scan plan applies, except on a Trino fixed-width pattern that
 compiled no program, whose every operation runs the [fixed-width
-matcher](#fixed-width-rare-class-candidates). A group-zero matcher of a one-byte
+matcher](#fixed-width-rare-class-candidates), and on a [large literal
+set](#large-literal-alternations) that compiled no program, whose every
+operation runs the automaton. A group-zero matcher of a one-byte
 pattern finds on the single-byte table in every language, Trino's included,
 while fewer than 64 bytes are left; a longer search runs the group-zero forward
 cursor, whose vector byte scan the table replaced, because the table, which
@@ -3285,8 +3292,9 @@ Trino compiles no program for such a pattern; every operation runs the
 automaton, as every operation of an eligible alternation of 64 or fewer runs the
 trie. RE2, Java, and Rust search the automaton for a group-zero
 `RegexpMatcher.find()`, within the matcher's region; `matches`, `lookingAt`,
-anchored, and capture operations keep the program. Full-Slice boolean `find` and
-count keep the forward DFA wherever it initializes beside the automaton: on text
+anchored, and capture operations keep the program wherever it fits the budget,
+as described below. Full-Slice boolean `find` and count keep the forward DFA
+wherever it initializes beside the automaton: on text
 where most bytes lead a literal, the automaton's walk takes several steps per
 byte, its root lookup, edge scan, and failure steps, to the DFA's one, and
 measured 1.94x to 2.47x slower on r9g and 3.16x to 3.72x on r8i. Where the DFA
@@ -3295,10 +3303,40 @@ longest-match DFA and a count the first-match DFA, which needs less memory, so
 `english-10` under the default budget finds on the automaton and counts on the
 DFA. A DFA count that gives up returns no count, and the matcher counts on the
 automaton. Trino checks the automaton against the forward-DFA budget before
-compiling a program, while the other languages charge it to that budget. The
-compile applies the same rule in every language, but a Trino pattern never
-reaches it with an automaton that fits: the program's DFA budget is smaller than
-the forward budget Trino checked.
+compiling a program, while the other languages charge it to that budget beside
+the program wherever the program fits. The compile applies the same rule in
+every language, but a Trino pattern never reaches it with an automaton that
+fits: the program's DFA budget is smaller than the forward budget Trino checked.
+
+RE2, Java, and Rust keep the program wherever it fits the budget, so
+`english-10` still retains about 25 MB under the default budget: the program and
+its reverse expression beside the 1.8 MB automaton. Only where the program does
+not fit does such a pattern compile without one. The compile that the budget
+rejected is discarded, and two checks against the forward share follow: the
+temporary trie of every literal that spells the full-match list below must fit
+it, and then the automaton must fit it together with that list. Where both pass,
+the pattern keeps only the automaton and the list, and every operation runs the
+automaton, as in Trino, with no reverse expression; otherwise the compile fails
+as it would without this route. `english-10`, whose program needs about 40 MiB,
+then compiles from 3.11 MiB, a budget the temporary trie sets, and retains about
+2.8 MB; Trino compiles it from 2.63 MiB. Dropping the program wherever the
+longest-match DFA cannot initialize, as for `english-10` under the default
+budget, was measured and rejected: with every operation on the automaton,
+full-Slice count took 1.86x to 2.34x the time on r9g and 2.46x to 3.33x on r8i,
+find on short rows 7% to 12% more on r9g and 3.5% to 5% more on r8i, and compile
+8% to 15% more. Memory is saved only at a budget that would otherwise reject the
+pattern.
+
+Without a program, a search anchored at its start walks the automaton's goto
+transitions from the root and keeps the deepest state that holds its own
+literal: every state below a literal's state belongs to an earlier literal, so
+the deepest match has priority. A full match also needs the literals the
+automaton omits: in `sam|samwise`, leftmost-first search never reports
+`samwise`, but RE2, Java, and Rust all full-match it. The pattern keeps a
+sorted array of every literal that extends another literal of the set, spelled
+from a transient trie that does not stop at match states, and a full match is
+either a literal the goto walk ends on or a member of that array. `english-10`
+has 14,562 such literals, about 0.25 MB.
 
 At the root, with the Vector API and at least 64 bytes left, the automaton skips
 the bytes that lead no literal with a vector scan for its leading bytes; walking
@@ -3315,9 +3353,11 @@ row each moved fewer than 16 bytes, as on prose, where a skip crosses only the
 punctuation and space between words. The skip, with its tables where it needs
 them, is built only where the automaton still fits the memory it may retain with
 it; otherwise the automaton walks every byte, so no pattern that compiled
-without the skip fails to compile. A skip that would cost either forward DFA its
-initialization is dropped too, since the skip changes no result, so a set the
-DFA cannot hold searches without it.
+without the skip fails to compile. Where the pattern keeps its program, a skip
+that would cost either forward DFA its initialization is dropped too, since the
+skip changes no result, so a set the DFA cannot hold searches without it. A set
+without a program has no forward DFA and builds the skip where it fits beside
+the full-match list.
 
 At a state past the root, the walk rejects a byte above the state's last edge
 first, so its scan over the sorted edges needs no bound test. Against the
@@ -3340,11 +3380,11 @@ The expansion also stops once what it builds passes 8 times the forward share,
 since building literal lists costs a few times the set they make; past it, the
 set is built literal by literal, so it is admitted exactly when the finished set
 fits. Where a choice ends the pattern, the expansion skips each literal that
-equals or extends an earlier one, which can never match, but still counts it
-toward the route's 64-literal threshold. The set also goes to the
-literal-by-literal build when colliding hashes make that check's lookups step
-past more than 8 slots per lookup in all, plus a small allowance. The trie's
-extraction has the same work bound, so a pattern past it with 64 or fewer
+equals or extends an earlier one, which a leftmost-first search never reports,
+but still counts it toward the route's 64-literal threshold. The set also goes
+to the literal-by-literal build when colliding hashes make that check's lookups
+step past more than 8 slots per lookup in all, plus a small allowance. The
+trie's extraction has the same work bound, so a pattern past it with 64 or fewer
 alternatives keeps the program too, but no memory bound: it stops at the first
 literal longer than the 64 bytes the trie takes, so it holds at most 64 such
 literals per nesting level. Deliberate limits: RE2's longest-match mode keeps

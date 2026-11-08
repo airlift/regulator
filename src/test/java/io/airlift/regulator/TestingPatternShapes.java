@@ -41,6 +41,7 @@ final class TestingPatternShapes
             case Re2.ExactLiteralRe2 _, JavaRegexp.ExactLiteralJavaRegexp _, RustRegexp.ExactLiteralRustRegexp _, TrinoCompiledPattern.ExactLiteralTrinoCompiledPattern _ -> EXACT_LITERAL;
             case Re2.LiteralKernelRe2 _, JavaRegexp.LiteralKernelJavaRegexp _, RustRegexp.LiteralKernelRustRegexp _, TrinoCompiledPattern.LiteralKernelTrinoCompiledPattern _ -> LITERAL_KERNEL;
             case Re2.LiteralAlternationRe2 _, JavaRegexp.LiteralAlternationJavaRegexp _, RustRegexp.LiteralAlternationRustRegexp _ -> LITERAL_ALTERNATION;
+            case Re2.LiteralSetRe2 _, JavaRegexp.LiteralSetJavaRegexp _, RustRegexp.LiteralSetRustRegexp _ -> LITERAL_ALTERNATION;
             case Re2.FixedWidthRe2 _, JavaRegexp.FixedWidthJavaRegexp _, RustRegexp.FixedWidthRustRegexp _, TrinoCompiledPattern.FixedWidthTrinoCompiledPattern _ -> FIXED_WIDTH;
             case Re2.ClassRunRe2 _, JavaRegexp.ClassRunJavaRegexp _, RustRegexp.ClassRunRustRegexp _, TrinoCompiledPattern.ClassRunTrinoCompiledPattern _ -> CLASS_RUN;
             case Re2.ByteTableRe2 _, JavaRegexp.ByteTableJavaRegexp _, RustRegexp.ByteTableRustRegexp _, TrinoCompiledPattern.ByteTableTrinoCompiledPattern _ -> BYTE_TABLE;
@@ -80,7 +81,9 @@ final class TestingPatternShapes
         return compiler.apply(accepted);
     }
 
-    private static <T extends CompiledPattern> boolean holdsAt(LongFunction<? extends T> compiler, long maxMemory, Predicate<? super T> holds)
+    /// Returns whether `holds` accepts the pattern `compiler` compiles at `maxMemory`, and `false`
+    /// where that budget does not compile.
+    static <T extends CompiledPattern> boolean holdsAt(LongFunction<? extends T> compiler, long maxMemory, Predicate<? super T> holds)
     {
         try {
             return holds.test(compiler.apply(maxMemory));

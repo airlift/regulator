@@ -1296,18 +1296,29 @@ ordinary engine would.
 - **Origin:** Ported from the aho-corasick crate
   ([noncontiguous.rs][ac-noncontiguous], [automaton.rs][ac-automaton]
   `try_find_fwd`, [#82], [design][d-large-alternations]), including its
-  prefilter run whenever the search returns to the start state; First
+  prefilter run whenever the search returns to the start state; Adapted from
+  its anchored leftmost-first search for a search anchored at its start; First
   described by Knuth (1973) (ordered-table search with a sentinel,
-  [TAOCP][knuth-taocp] vol. 3, §6.1) for the edge scan. Regulator: using a
-  state's last edge as the sentinel ([#160]), and the root skip's second-miss
-  trigger and byte-set scan for larger root sets ([#120]).
+  [TAOCP][knuth-taocp] vol. 3, §6.1) for the edge scan, and by the Rust regex
+  crate, which answers a plain alternation of literals with an Aho-Corasick
+  searcher and builds no regex engine ([strategy.rs][ra-alternation-literals]
+  `Pre::from_alternation_literals`), for a set without a program. Regulator:
+  using a state's last edge as the sentinel ([#160]), the root skip's
+  second-miss trigger and byte-set scan for larger root sets ([#120]), and the
+  full-match list of literals the leftmost-first automaton omits.
 - **Where:** `LiteralSetSpanMatcher.findSpan`,
   `LiteralSetSpanMatcher.walkTrie`, `LiteralSetSpanMatcher.findChild`,
-  `LiteralSetSpanMatcher.walkTrieSkippingRootBytes`
+  `LiteralSetSpanMatcher.walkTrieSkippingRootBytes`,
+  `CompiledPattern.analyzeLiteralSetWithoutProgram`,
+  `LiteralSetSpanMatcher.findPrefixEnd`,
+  `LiteralSetSpanMatcher.ExtendingLiterals.contains`
 - **Applies when:** Unanchored leftmost-first find in every regex language;
-  every Trino operation; the root skip with a vector-scannable root set and
-  64 bytes or more left, which steps byte by byte after four short scans in a
-  row
+  every Trino operation; every operation of an RE2, Java, or Rust set of
+  nonempty literals whose program does not fit the budget, where a search
+  anchored at its start keeps the deepest literal on the goto walk and a full
+  match also reads the sorted list of the literals that extend another; the
+  root skip with a vector-scannable root set and 64 bytes or more left, which
+  steps byte by byte after four short scans in a row
 - **What it does:** A capture-free alternation of more than 64 literals
   searches a leftmost-first Aho-Corasick automaton ported from the
   aho-corasick crate's noncontiguous NFA. A trie step rejects a byte above
@@ -1922,6 +1933,7 @@ change is described.
 [perl-trie]: https://github.com/Perl/perl5/blob/v5.40.0/regcomp_trie.c#L274-L320
 [postgres-like]: https://github.com/postgres/postgres/blob/REL_17_0/src/backend/utils/adt/like_match.c
 [ra-accel]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/accel.rs
+[ra-alternation-literals]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/strategy.rs#L319-L328
 [ra-builder]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/builder.rs
 [ra-byteset]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/util/prefilter/byteset.rs
 [ra-dense]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/dense.rs
