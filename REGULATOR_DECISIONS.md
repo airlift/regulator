@@ -1532,11 +1532,13 @@ also stop once a match is certain, as described in the
 [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
 
 These plans apply only when normalized expression analysis proves equivalent
-existence semantics. APIs that accept a range, return boundaries or captures,
-or produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
-cascade when no scan plan applies. A group-zero matcher of a one-byte pattern
-finds on the single-byte table in every language, Trino's included, while
-fewer than 64 bytes are left; a longer search runs the group-zero forward
+existence semantics. APIs that accept a range, return boundaries or captures, or
+produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
+cascade when no scan plan applies, except on a Trino fixed-width pattern that
+compiled no program, whose every operation runs the [fixed-width
+matcher](#fixed-width-rare-class-candidates). A group-zero matcher of a one-byte
+pattern finds on the single-byte table in every language, Trino's included,
+while fewer than 64 bytes are left; a longer search runs the group-zero forward
 cursor, whose vector byte scan the table replaced, because the table, which
 reads every byte, lost on 1024-byte rows. A pattern with a scan plan takes no
 table, so its matchers keep the plan. Unsupported shapes, position-dependent
@@ -1743,7 +1745,8 @@ its filter's three bytes stop far less often than every Cyrillic lead byte;
 without the third, `[а-я]{5}` on Russian took 2.9-3.1x and `[一-龥]{3}` on
 Chinese 1.32-1.34x the counter's time. Trino compiles its program to decide the
 order, as every language does, and keeps none only on its fixed-width subtype,
-for a pattern whose candidate never bails.
+for a pattern whose candidate never bails; every operation of a pattern that
+keeps none runs the matcher.
 
 A candidate with bytes above ASCII can be dense in text of another script, so a
 search, one find or one whole count, that has failed on at least 64 candidates

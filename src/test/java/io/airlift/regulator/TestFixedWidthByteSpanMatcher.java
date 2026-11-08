@@ -366,6 +366,10 @@ public class TestFixedWidthByteSpanMatcher
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
             assertThat(shape(regexp.re2())).as(expression).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
             assertThat(regexp.re2().fixedWidthByteSpanMatcherForDiagnostics().bailsOnDenseCandidates()).as(expression).isEqualTo(bails);
+            // Only a matcher that never bails allows compiling no program, and each pattern here
+            // whose matcher never bails compiled none, so its forward program is the placeholder
+            // that starts at zero.
+            assertThat(regexp.re2().forwardProgramForDiagnostics().start() == 0).as(expression).isEqualTo(!bails);
             if (bails) {
                 assertThat(regexp).as(expression).isExactlyInstanceOf(TrinoRegexp.class);
             }
@@ -374,6 +378,14 @@ public class TestFixedWidthByteSpanMatcher
             }
             Regex oracle = joniPattern(expression);
             verifyOperations(expression, regexp, source -> joniMatches(oracle, source), trinoSources);
+            // The compiled pattern's region and anchored matches agree with the program of the
+            // same pattern in a group, on malformed rows too. The subtype's public operations
+            // never reach these, and the patterns that bail keep their program.
+            CompiledPattern reference = TrinoRegexp.compile(utf8Slice("(" + expression + ")")).re2();
+            assertThat(shape(reference)).as(expression).isNotEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
+            for (Slice source : inputs) {
+                assertRegionMatchAgreement("Trino " + expression, regexp.re2(), reference, source);
+            }
         }
     }
 
@@ -521,6 +533,38 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
+    }
+
+    // Requires, for every region of `input`, `pattern`'s boolean find and its find, lookingAt,
+    // and matches group zero, and a matcher's lookingAt and find spans and matches boolean, to
+    // match `reference`'s.
+    private static void assertRegionMatchAgreement(String label, CompiledPattern pattern, CompiledPattern reference, Slice input)
+    {
+        RegexpMatcher matcher = pattern.matcher(input, 0);
+        RegexpMatcher referenceMatcher = reference.matcher(input, 0);
+        String inputLabel = "%s input %s".formatted(label, HexFormat.of().formatHex(input.getBytes()));
+        for (int start = 0; start <= input.length(); start++) {
+            for (int end = start; end <= input.length(); end++) {
+                String regionLabel = "%s region %s-%s".formatted(inputLabel, start, end);
+                assertThat(pattern.find(input, start, end)).as(regionLabel).isEqualTo(reference.find(input, start, end));
+                assertThat(resultSpan(pattern.findResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.findResult(input, start, end)));
+                assertThat(resultSpan(pattern.lookingAtResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.lookingAtResult(input, start, end)));
+                assertThat(resultSpan(pattern.matchesResult(input, start, end))).as(regionLabel).isEqualTo(resultSpan(reference.matchesResult(input, start, end)));
+                assertThat(matcherSpan(matcher.reset(input, start, end).lookingAt(), matcher)).as(regionLabel).isEqualTo(matcherSpan(referenceMatcher.reset(input, start, end).lookingAt(), referenceMatcher));
+                assertThat(matcher.reset(input, start, end).matches()).as(regionLabel).isEqualTo(referenceMatcher.reset(input, start, end).matches());
+                assertThat(matcherSpan(matcher.reset(input, start, end).find(), matcher)).as(regionLabel).isEqualTo(matcherSpan(referenceMatcher.reset(input, start, end).find(), referenceMatcher));
+            }
+        }
+    }
+
+    private static long resultSpan(MatchResult result)
+    {
+        return result == null ? Dfa.SEARCH_NO_MATCH : span(result.start(), result.end());
+    }
+
+    private static long matcherSpan(boolean matched, RegexpMatcher matcher)
+    {
+        return matched ? span(matcher.start(), matcher.end()) : Dfa.SEARCH_NO_MATCH;
     }
 
     // Short rows joined from ASCII, Latin-1 and UTF-8 characters, and malformed UTF-8: truncated

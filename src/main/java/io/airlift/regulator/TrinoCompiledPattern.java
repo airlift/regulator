@@ -123,9 +123,14 @@ sealed class TrinoCompiledPattern
     static final class FixedWidthTrinoCompiledPattern
             extends TrinoCompiledPattern
     {
+        // Whether the pattern compiled no program, which only a matcher that never bails allows,
+        // so that its forward program is a placeholder whose start of zero matches nothing.
+        private final boolean fixedWidthWithoutProgram;
+
         private FixedWidthTrinoCompiledPattern(Analysis analysis)
         {
             super(analysis);
+            this.fixedWidthWithoutProgram = analysis.fixedWidthWithoutProgram();
         }
 
         @Override
@@ -138,6 +143,12 @@ sealed class TrinoCompiledPattern
         long countMatches(Slice text)
         {
             return countOnFixedWidth(text);
+        }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnFixedWidth(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces, fixedWidthWithoutProgram);
         }
     }
 
