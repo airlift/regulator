@@ -2528,16 +2528,23 @@ result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
 A Unicode class's exact membership bitset ends at its last member or at U+07FF,
-whichever is later, up to 136 KiB for a class that reaches U+10FFFF; an
-ASCII-only class in any language, or a Latin-1 or Rust byte-mode class, uses 32
-bytes. A class of every non-ASCII character, such as a negated ASCII class or a
-dot that matches newline, keeps 256 bytes through U+07FF and holds everything
-past them. The general counter is built lazily by a single writer and retained
-by the compiled pattern; a class repeat instead reuses its matcher counter,
+whichever is later, up to 136 KiB for a class with members in the last planes;
+an ASCII-only class in any language, a Latin-1 class, or a Rust class with
+Unicode mode disabled uses 32 bytes. A class whose last range runs to U+10FFFF
+keeps that range as a tail instead: every code point from the range's start is
+a member, and the bitset ends at the range before the tail or at U+07FF,
+whichever is later, and also marks the tail's members it reaches. A class of
+every non-ASCII character, such as a negated ASCII class or a dot that matches
+newline, has a tail from U+0080, so it keeps 256 bytes through U+07FF and holds
+everything past them. A membership test checks a flag for a tail before
+comparing the code point with the tail's start: comparing alone made a miss 5%
+slower on a short Unicode-class row, rebar's unicode/codepoints letters-lower
+family. The general counter is built lazily by a single writer and retained by
+the compiled pattern; a class repeat instead reuses its matcher counter,
 described below, when one was retained. The lazily built counter's size is
-independent of `maxMemory`, the planning budget that charges the program 120
-and then 113 bytes per instruction and leaves the DFA caches the rest, and it
-does not scale with the expression or configured budget.
+independent of `maxMemory`, the planning budget that charges the program 120 and
+then 113 bytes per instruction and leaves the DFA caches the rest, and it does
+not scale with the expression or configured budget.
 Unsupported shapes continue through the ordinary DFA or matcher path. A
 Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
 that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
@@ -2579,19 +2586,24 @@ the leftmost-first matches, and a repeat compiled for longest match keeps the
 DFA. Count keeps its counting algorithm and reuses the matcher counter when one
 is retained for a class repeat; boolean find keeps its separate route. Planes 4
 through 13 hold no characters, so only a Unicode class with members at or past
-U+40000, such as `\PL`, `\p{Mn}`, or Unicode `\w`, needs a bitset past them;
-such a class keeps the DFA on the matcher route rather than retain up to
-136 KiB, unless it holds every non-ASCII character, as a negated ASCII class
-does. A counter's span search skips bytes that cannot begin a member before
-decoding, with one table load per byte or, for a sparse class, a vector scan
-after a short scalar prefix. A Latin-1 or byte-mode class, or a UTF-8 class of
-only ASCII members, marks exactly its members as start bytes, so the search
-reads its whole run on that table, one load per byte, cut at the repeat's
-maximum. In an unbounded repeat of a UTF-8 class of every character, such as
-`(?s:.)+`, only a byte that begins no character under the lenient read ends a
-run, so once the run reaches the minimum the search skips to that byte without
-decoding. A dot that matches newline counts as a class of every character, so
-count and Trino's class-span functions also take its repeats.
+U+40000 before its tail, such as `\p{Mn}` or Unicode `\w`, needs a bitset past
+them; such a class keeps the DFA on the matcher route rather than retain up to
+136 KiB. A class with a tail stays eligible when the range before its tail ends
+below U+40000, since its bitset ends at that range, as for `\PL`, Rust's `\D`,
+or a class of every non-ASCII character. A counter's span search skips bytes
+that cannot begin a member before decoding, with one table load per byte or, for
+a sparse class, a vector scan after a short scalar prefix. A Latin-1 or
+byte-mode class, or a UTF-8 class of only ASCII members, marks exactly its
+members as start bytes, so the search reads its whole run on that table, one
+load per byte, cut at the repeat's maximum. In an unbounded repeat of a UTF-8
+class of every character, such as `(?s:.)+`, only a byte that begins no
+character under the lenient read ends a run, so once the run reaches the minimum
+the search skips to that byte without decoding. A class of every scalar value,
+as in Rust's `(?s:.)+` in bytes mode, reads strictly instead, so its run skip
+checks each character's UTF-8 form, ASCII eight bytes at a time, and stops at a
+malformed or truncated sequence or an encoded surrogate. A dot that matches
+newline counts as a class of every character, so count and Trino's class-span
+functions also take its repeats.
 
 The span search stays small enough for C2 to inline into its callers, so the
 byte run and the region check are out of line and `TestHotMethodSize` pins its
@@ -2608,8 +2620,10 @@ repeat it without an Intel profile of replace.
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred
 to the first match: Trino pays compile cost up front so the match path stays
-lean. Each such pattern retains about 33 KB for `\pL`, and about 16 KB each for
-`\p{Lu}` and `\p{Greek}`; an ASCII or byte class retains a few hundred bytes.
+lean. Each such pattern retains about 33 KB for `\pL`, about 16 KB each for
+`\p{Lu}` and `\p{Greek}`, and about 7 KB for Rust's bytes-mode `(?s:.)+`; an
+ASCII or byte class, or a class of every non-ASCII character, retains a few
+hundred bytes.
 
 `Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter
 and the existing DFA counting path. Unsupported shapes use a fresh zero-capture

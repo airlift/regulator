@@ -36,11 +36,17 @@ final class BoundedCharacterClassCounter
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(BoundedCharacterClassCounter.class);
     private static final int COMPACT_ROUTE_MINIMUM_REPETITIONS = 32;
     private static final int COMPACT_ROUTE_MINIMUM_RANGES = 32;
-    // Planes 4 through 13 hold no characters, so only a class that reaches the last planes ends
-    // here or beyond, such as `\PL`, `\p{Mn}`, or Unicode `\w`. Its bitset would cost up to
-    // 136 KiB per pattern, unless the class holds every non-ASCII character, as a negated ASCII
-    // class does; its bitset then ends at U+07FF.
+    // Planes 4 through 13 hold no characters, so a bitset records a code point here or beyond only
+    // for a class with members in the last planes, such as `\p{Mn}` or Unicode `\w`, and would
+    // cost up to 136 KiB per pattern. A class whose last range runs to U+10FFFF, such as `\PL`, a
+    // negated class, or, in Rust bytes mode, a class of every scalar value, keeps that range as a
+    // tail instead, so its bitset ends at the range before the tail.
     private static final int LAST_MEMBER_LIMIT = 0x40000;
+    // What `firstTailMember` holds for a class without a tail: no code point reaches it.
+    private static final int NO_TAIL = Integer.MAX_VALUE;
+    // The surrogate code points are not scalar values; the first scalar value after them begins the
+    // tail of a class holding every scalar value.
+    private static final int SCALAR_TAIL_START = Character.MAX_SURROGATE + 1;
     private static final BoundedCharacterClassCounter UNSUPPORTED = new BoundedCharacterClassCounter();
     private static final RuneRange[] ALL_CHARACTERS = {new RuneRange(0, CharClass.RUNEMAX)};
     private static final RuneRange[] ALL_BYTES = {new RuneRange(0, 0xFF)};
@@ -66,10 +72,21 @@ final class BoundedCharacterClassCounter
     private final int minimum;
     private final int maximum;
     // The run length at which `findSpan` stops testing membership: the maximum, or, for an
-    // unbounded repeat of a UTF-8 class holding every character, the minimum, after which it skips
-    // the rest of the run.
+    // unbounded repeat of a UTF-8 class holding every character or every scalar value, the minimum,
+    // after which it skips the rest of the run.
     private final int decidedRunLength;
     private final boolean readsBytes;
+    // Every code point from this one on is a member, beyond the bitset or not: U+0080 for a class
+    // holding every non-ASCII character, the low end of a last range that runs to U+10FFFF for any
+    // other UTF-8 class, and `NO_TAIL` otherwise.
+    private final int firstTailMember;
+    // Whether `firstTailMember` is a code point, so a class without a tail never reads it. Comparing
+    // with `NO_TAIL` instead made the miss path of `matches` 5% slower on a short Unicode-class row
+    // (rebar's unicode/codepoints letters-lower family).
+    private final boolean hasTail;
+    // Whether the class holds every non-ASCII character, which also reads malformed sequences as
+    // members (see `Utf8.re2DecodeMalformed`). Any other class reads a malformed sequence as a
+    // nonmember, and an encoded surrogate decodes as a surrogate, which the bitset or tail decides.
     private final boolean matchesAllNonAscii;
 
     private BoundedCharacterClassCounter()
@@ -81,6 +98,8 @@ final class BoundedCharacterClassCounter
         maximum = 0;
         decidedRunLength = 0;
         readsBytes = false;
+        firstTailMember = NO_TAIL;
+        hasTail = false;
         matchesAllNonAscii = false;
     }
 
@@ -90,32 +109,40 @@ final class BoundedCharacterClassCounter
         // only ASCII characters reads alike byte by byte, as a Latin-1 class does.
         int lastHigh = ranges[ranges.length - 1].high();
         boolean readsBytes = latin1 || lastHigh <= 0x7F;
-        boolean matchesAllNonAscii = !latin1 && holdsAllNonAscii(ranges);
-        // The bitset ends at the class's last member, but a bitset that `countUtf8` reads reaches
-        // at least U+07FF, so it reads the membership of every one- and two-byte code point from it. A
-        // class holding every non-ASCII character marks only its ASCII members and every code
-        // point from U+0080 to U+07FF. `matches` rejects every code point beyond the bitset,
-        // except that such a class accepts them.
-        int lastMember = matchesAllNonAscii ? 0x7F : Math.min(CharClass.RUNEMAX, lastHigh);
-        matchingCodePoints = new long[readsBytes ? 4 : (Math.max(TWO_BYTE_LIMIT - 1, lastMember) >>> 6) + 1];
+        int firstTailMember = latin1 ? NO_TAIL : firstTailMember(ranges);
+        boolean matchesAllNonAscii = firstTailMember == 0x80;
+        // The bitset ends at the class's last member, or at the range before its tail, but a bitset
+        // that `countUtf8` reads reaches at least U+07FF, so it reads the membership of every one-
+        // and two-byte code point from it, and holds the tail's members up to there. `matches`
+        // accepts every code point of the tail and rejects every other code point beyond the bitset.
+        int bitsetWords = readsBytes ? 4 : (Math.max(TWO_BYTE_LIMIT - 1, lastBitsetCodePoint(ranges)) >>> 6) + 1;
+        int bitsetLimit = bitsetWords * Long.SIZE - 1;
+        matchingCodePoints = new long[bitsetWords];
         for (RuneRange range : ranges) {
             int low = Math.max(0, range.low());
-            int high = Math.min(latin1 ? 0xFF : lastMember, range.high());
+            int high = Math.min(bitsetLimit, range.high());
             if (low <= high) {
                 setRange(matchingCodePoints, low, high);
             }
         }
-        if (matchesAllNonAscii) {
-            setRange(matchingCodePoints, 0x80, TWO_BYTE_LIMIT - 1);
-        }
-        boolean matchesEveryCharacter = matchesAllNonAscii && matchingCodePoints[0] == -1L && matchingCodePoints[1] == -1L;
+        boolean matchesEveryCharacter = matchesAllNonAscii ? matchingCodePoints[0] == -1L && matchingCodePoints[1] == -1L : holdsEveryScalarValue(ranges, firstTailMember);
         memberStartBytes = buildMemberStartBytes(ranges, readsBytes);
         memberStartByteNibbleTables = VectorSupport.isAvailable() ? buildMemberStartByteNibbleTables(memberStartBytes) : null;
         this.minimum = minimum;
         this.maximum = maximum;
         this.decidedRunLength = maximum == -1 && matchesEveryCharacter ? minimum : maximum;
         this.readsBytes = readsBytes;
+        this.firstTailMember = firstTailMember;
+        this.hasTail = firstTailMember != NO_TAIL;
         this.matchesAllNonAscii = matchesAllNonAscii;
+    }
+
+    // Returns whether the class holds exactly the scalar values: every code point below the
+    // surrogates, none of them, and a tail from U+E000. The ranges are sorted and never adjacent,
+    // so such a class has exactly two.
+    private static boolean holdsEveryScalarValue(RuneRange[] ranges, int firstTailMember)
+    {
+        return firstTailMember == SCALAR_TAIL_START && ranges.length == 2 && ranges[0].low() == 0 && ranges[0].high() == Character.MIN_SURROGATE - 1;
     }
 
     // Marks each byte that can begin a member. A class that reads bytes marks its members. Any
@@ -244,13 +271,31 @@ final class BoundedCharacterClassCounter
 
     private static boolean needsLastPlaneBitset(RuneRange[] ranges)
     {
-        return ranges[ranges.length - 1].high() >= LAST_MEMBER_LIMIT && !holdsAllNonAscii(ranges);
+        return lastBitsetCodePoint(ranges) >= LAST_MEMBER_LIMIT;
     }
 
-    // The ranges are sorted, so only the last can hold every non-ASCII character.
-    private static boolean holdsAllNonAscii(RuneRange[] ranges)
+    // Returns the first code point of the UTF-8 class's tail: U+0080 for a class holding every
+    // non-ASCII character, the low end of a last range that runs to U+10FFFF, or `NO_TAIL`. The
+    // ranges are sorted, so only the last can run to U+10FFFF.
+    private static int firstTailMember(RuneRange[] ranges)
     {
-        return Compiler.holdsAllNonAscii(ranges[ranges.length - 1]);
+        RuneRange last = ranges[ranges.length - 1];
+        if (last.high() < CharClass.RUNEMAX) {
+            return NO_TAIL;
+        }
+        return Math.max(0x80, last.low());
+    }
+
+    // Returns the last code point that the UTF-8 class's bitset must record: the class's last
+    // member, or, for a class whose last range runs to U+10FFFF and so is its tail, the high end of
+    // the range before the tail, or -1 when the tail is the only range.
+    private static int lastBitsetCodePoint(RuneRange[] ranges)
+    {
+        RuneRange last = ranges[ranges.length - 1];
+        if (last.high() < CharClass.RUNEMAX) {
+            return last.high();
+        }
+        return ranges.length == 1 ? -1 : ranges[ranges.length - 2].high();
     }
 
     private static boolean isLargeUnicodeClass(Regexp atom)
@@ -674,7 +719,7 @@ final class BoundedCharacterClassCounter
                 runLength++;
                 if (runLength == decidedRunLength) {
                     if (maximum == -1) {
-                        position = skipCharacters(bytes, position, end);
+                        position = skipMembers(bytes, position, end);
                     }
                     return packSpan(inputOffset, contextStart, runStart, position);
                 }
@@ -733,6 +778,13 @@ final class BoundedCharacterClassCounter
         return VectorByteSetScanner.findNibbleTable(bytes, position, end - position, memberStartByteNibbleTables);
     }
 
+    // Returns the end of the run of members from `position` on, for a class whose runs `findSpan`
+    // stops testing: one holding every character, or one of every scalar value.
+    private int skipMembers(byte[] bytes, int position, int end)
+    {
+        return matchesAllNonAscii ? skipCharacters(bytes, position, end) : skipScalarValues(bytes, position, end);
+    }
+
     // Returns the end of the characters from `position` on, read as `decodeUtf8` reads them for a
     // class holding every non-ASCII character: an ASCII byte, or a lead byte and its continuation
     // bytes, valid or not. Only a byte that begins no such character ends them.
@@ -744,6 +796,61 @@ final class BoundedCharacterClassCounter
                 return position;
             }
             position += width;
+        }
+        return position;
+    }
+
+    // Returns the end of the well-formed UTF-8 characters from `position` on, which a strict class
+    // of every scalar value holds: `decodeUtf8` reads every other sequence, malformed, an encoded
+    // surrogate, or cut short by `end`, as a nonmember. ASCII text is read a word at a time. The
+    // checks repeat `Utf8.decode`'s rules for well-formed UTF-8; keep the two in step.
+    private static int skipScalarValues(byte[] bytes, int position, int end)
+    {
+        while (position < end) {
+            int first = bytes[position] & 0xFF;
+            if (first < 0x80) {
+                position++;
+                while (end - position >= Long.BYTES && ((long) LONG_HANDLE.get(bytes, position) & HIGH_BITS) == 0) {
+                    position += Long.BYTES;
+                }
+                continue;
+            }
+            int remaining = end - position;
+            if (first < 0xE0) {
+                // C0 and C1 begin only overlong encodings, and a byte below them is a continuation.
+                if (first < 0xC2 || remaining < 2 || (bytes[position + 1] & 0xC0) != 0x80) {
+                    return position;
+                }
+                position += 2;
+            }
+            else if (first < 0xF0) {
+                if (remaining < 3) {
+                    return position;
+                }
+                int second = bytes[position + 1] & 0xFF;
+                int third = bytes[position + 2] & 0xFF;
+                int codePoint = ((first & 0x0F) << 12) | ((second & 0x3F) << 6) | (third & 0x3F);
+                // Below U+0800 is overlong, and the surrogates are the code points whose bits above
+                // the low 11 are 0x1B.
+                if (((second | (third << 8)) & 0xC0C0) != 0x8080 || codePoint < TWO_BYTE_LIMIT || codePoint >>> 11 == Character.MIN_SURROGATE >>> 11) {
+                    return position;
+                }
+                position += 3;
+            }
+            else {
+                if (first > 0xF4 || remaining < 4) {
+                    return position;
+                }
+                int second = bytes[position + 1] & 0xFF;
+                int third = bytes[position + 2] & 0xFF;
+                int fourth = bytes[position + 3] & 0xFF;
+                int codePoint = ((first & 0x07) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F);
+                // Below U+10000 is overlong.
+                if (((second | (third << 8) | (fourth << 16)) & 0xC0C0C0) != 0x808080 || codePoint < 0x10000 || codePoint > CharClass.RUNEMAX) {
+                    return position;
+                }
+                position += 4;
+            }
         }
         return position;
     }
@@ -789,7 +896,7 @@ final class BoundedCharacterClassCounter
 
     private boolean matches(int codePoint)
     {
-        // The bitset alone decides a member; only a code point it rejects reads the flag.
-        return (codePoint >= 0 && codePoint < matchingCodePoints.length * Long.SIZE && (matchingCodePoints[codePoint >>> 6] & (1L << codePoint)) != 0) || (matchesAllNonAscii && codePoint > 0x7F);
+        // The bitset alone decides a member; only a code point it rejects reads the tail.
+        return (codePoint >= 0 && codePoint < matchingCodePoints.length * Long.SIZE && (matchingCodePoints[codePoint >>> 6] & (1L << codePoint)) != 0) || (hasTail && codePoint >= firstTailMember);
     }
 }
