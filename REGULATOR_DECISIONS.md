@@ -2436,6 +2436,21 @@ Shorter searches, and longer ones without vector scanning, use eight-byte SWAR
 words, so short scans pay no vector setup. A single folded byte keeps its SWAR
 byte search. Vector linkage stays in `VectorPrefixScanner`.
 
+The SWAR scans test each word and compare each candidate inside the scan, with
+no call: each data byte is ORed with the prefix byte's case bit, `0x20` for a
+letter and 0 otherwise, and compared with the lowered prefix byte. Both are set
+when the prefix is configured, broadcast for the two probe bytes and packed
+into longs for the comparison. A counted word loop stops at the first word with
+candidates, whose candidates and the starts after the last word share that one
+comparison, so each scan stays inside C2's 325-byte inline limit. The scans had
+called a 56-byte comparison helper, past C1's 35-byte inline limit. When C2
+compiled a scan before the helper's own profile had matured, it refused to
+inline the helper's case lowering as a call site of low frequency and kept that
+choice for the life of the JVM, which then ran about 3x slower on r9g:
+`(?i)user` over short log lines took 20k ns per search instead of 6.8k. Main's
+scan at this site had the same cost. The word test's 104-byte helper, which
+also lowered case through a call, had the same shape.
+
 Like the [literal prefix scan](#literal-prefix-vector-scan), each pass of the
 folded vector scan counts the whole vectors left, runs a loop that only tests
 each one for a candidate, and verifies candidates after it breaks, so C2 can
