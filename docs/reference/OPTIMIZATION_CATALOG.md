@@ -1758,19 +1758,70 @@ ordinary engine would.
   checks at fixed offsets from a literal
   ([rose_build_lookaround.cpp][hs-lookaround]); Inspired by a gap against the
   Rust regex crate on everyday span rows ([#87]). Regulator: the shared
-  fixed-width ASCII matcher and its short-row form ([#87], [#125],
-  [design][d-boolean]).
+  fixed-width matcher, its short-row form, and its classes above ASCII ([#87],
+  [#125], [#194], [design][d-boolean]).
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
   `FixedWidthByteSpanMatcher.findSpan`, `FixedWidthByteSpanMatcher.count`,
   `CompiledPattern.shortFixedWidthByteMatcher`
-- **Applies when:** Capture-free fixed-width ASCII patterns of up to 64 bytes
-  with a position that admits one byte and one that admits several; where find
-  has an inner literal search of two or more bytes, that search keeps find,
-  and this matcher serves only counts under 64 bytes and matcher finds with
-  under 64 bytes left
-- **What it does:** ASCII patterns of fixed width up to 64 bytes search with
-  `indexOf` for the first position that admits exactly one byte, then check
-  the other positions around each hit.
+- **Applies when:** Capture-free patterns, other than exact literals, of a
+  fixed count of 2 to 256 characters, in every language. The pattern is either
+  ASCII of up to 64 bytes with a position that admits exactly one byte, or has
+  a position that passes the [rare class scan](#fixed-width-rare-class-scan).
+  When find also has an inner literal search of two or more bytes, every
+  language keeps that search, and a second matcher answers only counts under 64
+  bytes and matcher finds with under 64 bytes left. A pattern that yields to the
+  engine keeps neither matcher.
+- **What it does:** The matcher scans for one position, then checks the others
+  around each hit: a byte mask for ASCII, Latin-1, and Rust byte classes, one
+  decoded character for a UTF-8 class above ASCII. ASCII patterns of up to 64
+  bytes with a position that admits exactly one byte find the first such
+  position with `indexOf`.
+
+### Fixed-width rare class scan
+
+- **Origin:** First described by Oniguruma, which picks a byte map at a
+  distance from the match start by static byte weights and scans for it
+  ([regcomp.c][onig-map-select], [regexec.c][onig-map-search]), and by .NET,
+  which ranks a pattern's fixed-distance character sets by character frequency
+  and searches for the rarest with a vector search
+  ([RegexFindOptimizations.cs][dotnet7-fixed-distance],
+  [RegexPrefixAnalyzer.cs][dotnet7-set-quality]). Regulator: the yield to the
+  engine's own scans ([#194], [design][d-fixed-width-rare]).
+- **Where:** `FixedWidthByteSpanMatcher.analyze`,
+  `FixedWidthByteSpanMatcher.scansRareCandidate`,
+  `CompiledPattern.yieldsToEngineRoute`
+- **Applies when:** Fixed-width patterns other than ASCII singleton patterns
+  of up to 64 bytes, whose rarest position English text holds under once in
+  100 bytes, in every language. The pattern keeps the engine when its program
+  skips to a literal prefix, a forward DFA would search a start literal filter,
+  or the class-run counter takes a pattern whose candidate has bytes above
+  ASCII.
+- **What it does:** The matcher scans for the first bytes of the position
+  English text holds least, rating bytes above ASCII at the rarest ASCII
+  byte's rate and preferring an ASCII position. A position with one first
+  byte is found with `indexOf`. One with several takes the byte-set vector
+  scans, the [small byte-set vector scan](#small-byte-set-vector-scan) or the
+  [range and nibble-table scans](#range-and-nibble-table-scans), with the DFA's
+  [scan productivity sampling](#scan-productivity-sampling). A byte table
+  answers searches under 64 bytes, searches the sampling demotes, and every
+  search without the Vector API.
+
+### Fixed-width dense-candidate bail
+
+- **Origin:** First described by memchr and aho-corasick, whose per-search
+  prefilter state turns the prefilter off once its skips are many and short
+  ([searcher.rs][memchr-prefilter-state], [prefilter.rs][ac-prefilter]).
+  Regulator: the thresholds and the hand-off to the engine ([#194],
+  [design][d-fixed-width-rare]).
+- **Where:** `FixedWidthByteSpanMatcher.findSpanOrBail`,
+  `FixedWidthByteSpanMatcher.countOrBail`, `CompiledPattern.findOnFixedWidth`,
+  `CompiledPattern.countOnFixedWidth`
+- **Applies when:** Rare class scans whose candidate holds bytes above ASCII,
+  in every language
+- **What it does:** A find or a whole count that has failed on at least 64
+  candidates at more than one per 32 bytes hands the rest of that search to
+  the engine. A count keeps its matches and counts on from the last match end;
+  a find restarts from its start. The next search scans again.
 
 ### Literal alternation trie
 
@@ -2782,6 +2833,7 @@ registry entry holds the trigger.
 [#173]: https://github.com/airlift/regulator/pull/173
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
+[#194]: https://github.com/airlift/regulator/pull/194
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2790,6 +2842,7 @@ registry entry holds the trigger.
 [d-concurrency]: ../../REGULATOR_DECISIONS.md#shared-dfa-concurrency
 [d-count-self-loop]: ../../REGULATOR_DECISIONS.md#count-self-loop-exit-byte-scan
 [d-direct-bitstate]: ../../REGULATOR_DECISIONS.md#bounded-direct-bitstate-capture
+[d-fixed-width-rare]: ../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates
 [d-folded-prefix]: ../../REGULATOR_DECISIONS.md#folded-prefix-candidate-scan
 [d-forward-cursor]: ../../REGULATOR_DECISIONS.md#reusable-group-zero-forward-cursor
 [d-gen-like]: ../../REGULATOR_DECISIONS.md#generated-trino-like-kernels
@@ -2899,6 +2952,7 @@ registry entry holds the trigger.
 [O-BIT-015]: OPTIMIZATION_REGISTRY.md#o-bit-005-through-o-bit-015-additional-bitstate-optimizations
 [ac-automaton]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/automaton.rs
 [ac-noncontiguous]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/nfa/noncontiguous.rs
+[ac-prefilter]: https://github.com/BurntSushi/aho-corasick/blob/7e231db4b4ac192ebc674078f2b03cd37b9ed5b9/src/prefilter.rs#L150-L265
 [ac-teddy]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/generic.rs
 [ac-teddy-readme]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/README.md
 [ac-vector]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/vector.rs#L363-L370
