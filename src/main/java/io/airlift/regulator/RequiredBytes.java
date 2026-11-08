@@ -37,11 +37,12 @@ import static java.util.Objects.requireNonNull;
 /// of [#indexIn], as Hyperscan proves a literal absent before it runs its automaton.
 final class RequiredBytes
 {
-    /// Windows at least this long skip the short-window check. Most lines of a line-by-line
-    /// search are shorter, and there the scan costs less than the find and engine setup it skips.
-    /// A window that holds the bytes is scanned twice, once here and once by the engine, and on a
-    /// long window that second scan is no longer small beside the setup. Only a literal with its
-    /// long-window search checks longer windows; see [#indexIn].
+    /// Windows at least this long skip the short-window check. Most lines of a line-by-line search
+    /// are shorter, and there the scan costs less than the find and engine setup it skips. A window
+    /// that holds the bytes is scanned twice, once here and once by the engine, and on a long
+    /// window that second scan is no longer small beside the setup. Only a literal with its
+    /// long-window search checks longer windows; see [#indexIn]. A one-of set of two or three
+    /// distinct bytes beside an inner literal search stops sooner; see [#windowLimit()].
     static final int SHORT_WINDOW_LIMIT = 256;
 
     // A one-byte literal is left to the one-of-bytes shape. A case-insensitive literal needs this
@@ -70,6 +71,9 @@ final class RequiredBytes
 
     // Whether every match holds one of `bytes` rather than all of them in sequence.
     private final boolean oneOf;
+    // Whether the fact is a single required byte, repeated to fill three, which takes the
+    // single-byte scan.
+    private final boolean singleByte;
     // The literal, its case-insensitive letters lowered, or the three bytes of the one-of-bytes
     // shape, the last repeated to fill three.
     private final byte[] bytes;
@@ -77,7 +81,8 @@ final class RequiredBytes
     // `(byte | 0x20) == letter` tests, and 0 at an exact byte, as the first byte always is. Null
     // for the one-of-bytes shape.
     private final byte[] masks;
-    // The broadcasts of the literal's first and last bytes, and the last byte's mask.
+    // The broadcasts of the literal's first and last bytes, and the last byte's mask. A single
+    // required byte keeps its broadcast as the first.
     private final long firstBroadcast;
     private final long lastBroadcast;
     private final long lastMask;
@@ -92,35 +97,52 @@ final class RequiredBytes
     // The exact literal's search of windows of SHORT_WINDOW_LIMIT bytes or more, for a pattern
     // whose compile chose the long-window check, or null.
     private final LiteralSearchKernel longWindowSearch;
+    // The short-window check runs on windows shorter than this: SHORT_WINDOW_LIMIT, or, for a
+    // one-of set of two or three distinct bytes beside an inner literal search, that search's
+    // minimum where it is lower. From that minimum the search scans each window for its literal
+    // before any engine runs unless the find skips the DFA, and the one-of scan would repeat or
+    // replace that scan. A single required byte keeps SHORT_WINDOW_LIMIT, with a scan as cheap as
+    // the search's single-byte scan: a check that changed with line length cost more on naturally
+    // mixed line lengths, as CompiledPattern.build records.
+    private final int windowLimit;
 
     private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch)
+    {
+        this(oneOf, bytes, masks, longWindowSearch, SHORT_WINDOW_LIMIT);
+    }
+
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, int windowLimit)
     {
         this.oneOf = oneOf;
         this.bytes = requireNonNull(bytes, "bytes is null");
         this.masks = masks;
         this.longWindowSearch = longWindowSearch;
         if (oneOf) {
-            this.firstBroadcast = 0;
+            // The padding repeats the last byte, so the first equals the third only when there is
+            // one byte.
+            this.singleByte = bytes[0] == bytes[2];
+            this.firstBroadcast = singleByte ? broadcast(bytes[0]) : 0;
             this.lastBroadcast = 0;
             this.lastMask = 0;
             this.gatesLastByteOnFirst = false;
         }
         else {
             int last = bytes.length - 1;
+            this.singleByte = false;
             this.firstBroadcast = broadcast(bytes[0]);
             this.lastBroadcast = broadcast(bytes[last]);
             this.lastMask = broadcast(masks[last]);
             this.gatesLastByteOnFirst = ByteFrequencies.englishText().probability(bytes[0]) < RARE_FIRST_BYTE_PROBABILITY;
         }
         this.lowBits = LOW_BITS;
+        this.windowLimit = windowLimit;
     }
 
     /// Returns the bytes every match of the `normalized` expression holds, for the short-window
     /// check and, when compilation chooses it, the long-window check, or null: a literal every
     /// match consumes, where there is one, or else up to three bytes of which every match holds
-    /// one. `minimumMatchLength` counts any required prefix, and `hasInnerLiteralSearch` says
-    /// whether the pattern has an inner literal search.
-    static RequiredBytes analyze(Regexp normalized, int minimumMatchLength, boolean hasInnerLiteralSearch)
+    /// one. `minimumMatchLength` counts any required prefix.
+    static RequiredBytes analyze(Regexp normalized, int minimumMatchLength)
     {
         // A pattern whose matches span at least SHORT_WINDOW_LIMIT bytes keeps none, since no
         // short window can hold a match, so such a pattern goes without the long-window check
@@ -129,10 +151,7 @@ final class RequiredBytes
             return null;
         }
         RequiredBytes literal = analyzeLiteral(normalized);
-        // A pattern with an inner literal search keeps no one-of check, since that search already
-        // rejects a window without its literal before any engine setup. A prefix scan does not
-        // count: it runs inside the DFA, after the find and engine setup the check saves.
-        if (literal != null || hasInnerLiteralSearch) {
+        if (literal != null) {
             return literal;
         }
         return analyzeOneOf(normalized);
@@ -508,13 +527,53 @@ final class RequiredBytes
         return found < 0 ? -1 : found - base;
     }
 
+    /// Whether the fact is up to three bytes of which every match holds one.
+    boolean isOneOf()
+    {
+        return oneOf;
+    }
+
+    /// Whether the fact is a single required byte, which takes the single-byte scan and keeps its
+    /// check of every window shorter than [#SHORT_WINDOW_LIMIT]. A pattern drops such a fact where
+    /// it is the byte of a gated one-byte search that full-Slice find runs first; see
+    /// `CompiledPattern.runsInnerLiteralSearchFirst`.
+    boolean isSingleByte()
+    {
+        return singleByte;
+    }
+
+    /// The single required byte, as an unsigned value, or `-1` for any other fact.
+    int singleByteValue()
+    {
+        return singleByte ? bytes[0] & 0xFF : -1;
+    }
+
+    /// The length below which the short-window check reads a window: [#SHORT_WINDOW_LIMIT], or
+    /// less for a one-of set of two or three distinct bytes beside an inner literal search; see
+    /// [#withWindowLimit].
+    int windowLimit()
+    {
+        return windowLimit;
+    }
+
+    /// Returns this one-of set of two or three distinct bytes with the short-window check limited
+    /// to windows shorter than `limit`, for a pattern whose inner literal search runs on the longer
+    /// ones.
+    RequiredBytes withWindowLimit(int limit)
+    {
+        if (!oneOf || singleByte) {
+            throw new IllegalStateException("not a one-of set of two or three distinct bytes: " + this);
+        }
+        return new RequiredBytes(true, bytes, masks, null, limit);
+    }
+
     /// Whether `[start, end)` of `text` holds the literal wholly, or one of the bytes.
     boolean occursIn(Slice text, int start, int end)
     {
         byte[] data = text.byteArray();
         int offset = text.byteArrayOffset() + start;
         if (oneOf) {
-            return containsOneOf(data, offset, end - start);
+            return singleByte ? containsByte(data, offset, end - start) : containsOneOf(data, offset, end - start);
         }
         return containsLiteral(data, offset, end - start);
     }
@@ -574,6 +633,47 @@ final class RequiredBytes
             }
         }
         return true;
+    }
+
+    // The scan of LiteralSearchKernel.findSingleByte and its tail, for presence only: two words
+    // and one zero-byte test per word each step, then up to two more words, the last ending at the
+    // window end, where it can overlap bytes already tested; a window shorter than a word is
+    // compared byte by byte. That method needs a kernel of its own for the byte and finds the
+    // first hit's offset, which presence does not need.
+    private boolean containsByte(byte[] data, int offset, int length)
+    {
+        int end = offset + length;
+        if (length < Long.BYTES) {
+            byte value = bytes[0];
+            for (int position = offset; position < end; position++) {
+                if (data[position] == value) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        long broadcast = firstBroadcast;
+        long low = lowBits;
+        int wordEnd = offset + (length / (2 * Long.BYTES)) * (2 * Long.BYTES);
+        int position = offset;
+        for (; position < wordEnd; position += 2 * Long.BYTES) {
+            long firstDifference = ((long) LONG_HANDLE.get(data, position)) ^ broadcast;
+            long secondDifference = ((long) LONG_HANDLE.get(data, position + Long.BYTES)) ^ broadcast;
+            if (((((firstDifference - low) & ~firstDifference) | ((secondDifference - low) & ~secondDifference)) & HIGH_BITS) != 0) {
+                return true;
+            }
+        }
+        if (end - position > Long.BYTES) {
+            long difference = ((long) LONG_HANDLE.get(data, position)) ^ broadcast;
+            if ((((difference - low) & ~difference) & HIGH_BITS) != 0) {
+                return true;
+            }
+        }
+        if (position < end) {
+            long difference = ((long) LONG_HANDLE.get(data, end - Long.BYTES)) ^ broadcast;
+            return (((difference - low) & ~difference) & HIGH_BITS) != 0;
+        }
+        return false;
     }
 
     // One word load and a zero-byte test against each of the three bytes per word, with a last

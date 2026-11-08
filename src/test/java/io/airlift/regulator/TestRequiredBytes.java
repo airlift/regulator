@@ -39,6 +39,8 @@ public class TestRequiredBytes
     private static final String NOQA_LITERAL = "# noqa";
     private static final String CODING = "^[ \\t\\f]*#.*?coding[:=][ \\t]*utf-?8";
     private static final String URI_OR_EMAIL = "([a-zA-Z][a-zA-Z0-9]*)://([^ /]+)(/[^ ]*)?|([^ @]+)@([^ @]+)";
+    private static final String EMAIL = "([^ @]+)@([^ @]+)";
+    private static final String NOQA_ASSIGNMENT = "[a-z]+=(?i:noqa)";
     // The quick form of the aws-keys pattern, whose prefix scan looks for its one-byte prefix A.
     private static final String AWS_KEY_QUICK = "(?:ASIA|AKIA|AROA|AIDA)[A-Z0-7]{16}";
     // rebar's leipzig/bounded-strings-ending-z pattern: no element is a literal of two bytes, but
@@ -105,6 +107,10 @@ public class TestRequiredBytes
         assertThat(requiredBytes(URI_OR_EMAIL)).isEqualTo("one of /@");
         assertThat(requiredBytes("ab|cd|ef")).isEqualTo("one of bcf");
         assertThat(requiredBytes("ab|cd|ef|gh")).isNull();
+        // A pattern with an inner literal search keeps its bytes too, since a find window shorter
+        // than that search's minimum skips it.
+        assertThat(Re2.compile(utf8Slice("[^=]*=.*")).innerLiteralSearchForDiagnostics()).isNotNull();
+        assertThat(requiredBytes("[^=]*=.*")).isEqualTo("one of =");
         // A prefix scan runs after the find and engine setup the check saves, so a pattern with
         // one keeps its bytes.
         assertThat(Re2.compile(utf8Slice(AWS_KEY_QUICK)).forwardProgramForDiagnostics().canPrefixAccel()).isTrue();
@@ -190,9 +196,15 @@ public class TestRequiredBytes
         CompiledPattern noqa = Re2.compile(utf8Slice(NOQA_TWEAKED));
         RequiredBytes literal = noqa.requiredBytesForDiagnostics();
         RequiredBytes oneOf = Re2.compile(utf8Slice(URI_OR_EMAIL)).requiredBytesForDiagnostics();
+        // One byte takes its own scan, two words a step, then a word and a last word that
+        // overlaps the ones before it; a window under a word is compared byte by byte.
+        RequiredBytes oneByte = Re2.compile(utf8Slice("[^@]*@.*")).requiredBytesForDiagnostics();
+        assertThat(oneByte.isSingleByte()).isTrue();
+        assertThat(oneOf.isSingleByte()).isFalse();
         Map<String, Boolean> literalSpellings = Map.of(NOQA_LITERAL, true, "# NoQA", true, "#  noqa", false, "# noq@", false);
         Map<String, Boolean> oneOfSpellings = Map.of("/", true, "@", true, ":", false);
-        for (int length = 0; length < 40; length++) {
+        Map<String, Boolean> oneByteSpellings = Map.of("@", true, "/", false);
+        for (int length = 0; length <= 40; length++) {
             for (Map.Entry<String, Boolean> spelling : literalSpellings.entrySet()) {
                 for (int offset = 0; offset + spelling.getKey().length() <= length; offset++) {
                     Slice input = line(spelling.getKey(), length, offset);
@@ -203,6 +215,11 @@ public class TestRequiredBytes
             for (Map.Entry<String, Boolean> spelling : oneOfSpellings.entrySet()) {
                 for (int offset = 0; offset + spelling.getKey().length() <= length; offset++) {
                     assertOccursAt(oneOf, line(spelling.getKey(), length, offset), spelling.getKey(), offset, spelling.getValue());
+                }
+            }
+            for (Map.Entry<String, Boolean> spelling : oneByteSpellings.entrySet()) {
+                for (int offset = 0; offset + spelling.getKey().length() <= length; offset++) {
+                    assertOccursAt(oneByte, line(spelling.getKey(), length, offset), spelling.getKey(), offset, spelling.getValue());
                 }
             }
         }
@@ -228,6 +245,72 @@ public class TestRequiredBytes
             assertThat(noqa.shortWindowLacksRequiredBytes(ending, 0, length)).as("ending check at %s", length).isFalse();
             assertThat(noqa.find(ending)).as("ending find at %s", length).isTrue();
             assertThat(noqa.matcher(ending).find()).as("ending matcher at %s", length).isTrue();
+        }
+
+        // A single required byte checks every short window beside an inner literal search too, so
+        // a line takes one route whatever its length, and the search still runs from its minimum,
+        // as for the folded literal `=noqa`. A gated one-byte search for that byte itself, the
+        // email's `@` and Trino's `=`, runs at every length in place of the check, and the pattern
+        // keeps no required bytes.
+        for (String pattern : List.of(EMAIL, NOQA_ASSIGNMENT)) {
+            for (Map.Entry<String, CompiledPattern> compiled : compile(pattern).entrySet()) {
+                String description = "%s %s".formatted(compiled.getKey(), pattern);
+                CompiledPattern regexp = compiled.getValue();
+                InnerLiteralSearch search = regexp.innerLiteralSearchForDiagnostics();
+                boolean searchesByte = pattern.equals(EMAIL) || compiled.getKey().equals("Trino");
+                assertThat(search.checksShortWindows()).as(description).isEqualTo(searchesByte);
+                assertThat(regexp.requiredBytesForDiagnostics() == null).as(description).isEqualTo(searchesByte);
+                for (int length = 0; length < RequiredBytes.SHORT_WINDOW_LIMIT; length++) {
+                    Slice input = utf8Slice("x".repeat(length));
+                    if (!searchesByte) {
+                        assertThat(regexp.shortWindowLacksRequiredBytes(input, 0, length)).as("%s at %s", description, length).isTrue();
+                    }
+                    assertThat(regexp.searchesInnerLiteralWindow(length)).as("%s at %s", description, length).isEqualTo(searchesByte || length >= search.minimumSearchBytes());
+                }
+            }
+        }
+
+        // A one-of set of two or three distinct bytes beside an inner literal search checks exactly
+        // the short windows too short for that search, whose minimum depends on its literal's kind:
+        // 64 bytes for the class pair `[?!.]["']` and 256 for the set `ing|ment`, whose bytes keep
+        // their check of every short window.
+        for (OneOfBesideSearch oneOf : List.of(
+                new OneOfBesideSearch("\\w+[?!.][\"'](?:=x|;y)", "one of =;", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
+                new OneOfBesideSearch("[a-z](?:ing|ment)", "one of gm", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES))) {
+            for (Map.Entry<String, CompiledPattern> compiled : compile(oneOf.pattern()).entrySet()) {
+                String description = "%s %s".formatted(compiled.getKey(), oneOf.pattern());
+                CompiledPattern regexp = compiled.getValue();
+                assertThat(regexp.requiredBytesForDiagnostics()).as(description).hasToString(oneOf.bytes());
+                assertThat(regexp.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(description).isEqualTo(oneOf.searchMinimum());
+                for (int length = 0; length < RequiredBytes.SHORT_WINDOW_LIMIT; length++) {
+                    Slice input = utf8Slice("x".repeat(length));
+                    assertThat(regexp.shortWindowLacksRequiredBytes(input, 0, length)).as("%s at %s", description, length).isEqualTo(!regexp.searchesInnerLiteralWindow(length));
+                }
+            }
+        }
+
+        // A window without `@` is the search's to reject at every short length, so neither find
+        // starts the forward DFA.
+        for (int length : new int[] {0, 7, 8, 63, RequiredBytes.SHORT_WINDOW_LIMIT - 1}) {
+            Slice input = utf8Slice("x".repeat(length));
+            for (Map.Entry<String, CompiledPattern> compiled : compile(EMAIL).entrySet()) {
+                String description = "%s at %s".formatted(compiled.getKey(), length);
+                CompiledPattern email = compiled.getValue();
+                assertThat(email.find(input)).as(description).isFalse();
+                assertThat(email.matcher(input).find()).as(description).isFalse();
+                assertNoForwardDfa(email, description);
+            }
+        }
+
+        // One byte short of the search's minimum, 96 bytes for the folded literal `=noqa` and 64 for
+        // Trino's `=`, the check rejects a window without `=`, and in Trino the search does, so a
+        // find starts no forward DFA there either.
+        for (Map.Entry<String, CompiledPattern> compiled : compile(NOQA_ASSIGNMENT).entrySet()) {
+            CompiledPattern folded = compiled.getValue();
+            int length = folded.innerLiteralSearchForDiagnostics().minimumSearchBytes() - 1;
+            String description = "%s at %s".formatted(compiled.getKey(), length);
+            assertThat(folded.find(utf8Slice("x".repeat(length)))).as(description).isFalse();
+            assertNoForwardDfa(folded, description);
         }
     }
 
@@ -330,6 +413,22 @@ public class TestRequiredBytes
             assertThat(spans(pattern.matcher(offsetInput))).as(language).containsExactly(offsetMatch);
             assertThat(pattern.find(offsetInput)).as(language).isTrue();
             assertThat(pattern.count(offsetInput)).as(language).isEqualTo(1);
+        }
+
+        // A literal set's search that only the class-run proof admits leaves the check as the
+        // pattern has it without that search, so the check rejects a window that lacks the literal
+        // and is shorter than the minimum a set behind a class run needs before its search runs.
+        Slice names = utf8Slice(SHORT_FILLER + "Tom and Finn\n");
+        for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(Tom|Finn)xyz").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isGreaterThan(names.length());
+            RegexpMatcher matcher = pattern.matcher(names);
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            assertThat(pattern.find(names)).as(language).isFalse();
+            assertThat(pattern.count(names)).as(language).isZero();
+            assertNoForwardDfa(pattern, language + " names");
         }
     }
 
@@ -569,7 +668,7 @@ public class TestRequiredBytes
         // allowance; one byte less, the pattern compiles without them, with the same results.
         Map<String, Map<String, Boolean>> cases = Map.of(
                 "# noqa\\d+", Map.of("x = 1  # noqa12", true, "# noqa1", true, "x = 1  # noq12", false, "x = 1  # NOQA1", false),
-                // Keeps its one-of bytes only once its inner literal search gives way at that budget.
+                // A one-of fact.
                 "[a-z]+@[a-z]+", Map.of("mail me at a@b", true, "a@b", true, "nothing to see here", false, "@ alone", false));
         for (Map.Entry<String, Map<String, Boolean>> testCase : cases.entrySet()) {
             String pattern = testCase.getKey();
@@ -783,6 +882,10 @@ public class TestRequiredBytes
     }
 
     private record ForwardDfa(String expression, Dfa.DfaInstance.Kind kind) {}
+
+    // A pattern whose one-of set of two or three distinct bytes sits beside an inner literal
+    // search, its bytes, and the search's minimum.
+    private record OneOfBesideSearch(String pattern, String bytes, int searchMinimum) {}
 
     // A pattern that takes another route than the long-window check, which `route` tells, and
     // the text of one of its matches.

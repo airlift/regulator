@@ -119,7 +119,8 @@ final class LiteralSearchKernel
     /// InnerLiteralSearch call it for such literals and [#findContains(Slice,int,int)] for longer
     /// ones. It scans two words at a time and finishes the range with [#findSingleByteTail].
     /// TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
-    /// LIKE pattern; keep the copy in step.
+    /// LIKE pattern, and RequiredBytes.containsByte holds a presence-only copy of its word
+    /// mechanics; keep the copies in step.
     int findSingleByte(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
@@ -156,7 +157,8 @@ final class LiteralSearchKernel
     /// a time. On short rows a byte loop over the bytes the word loop leaves, its trip count varying
     /// with every row, costs more than the words. Callers inline findSingleByte only while it fits
     /// C2's 325-byte FreqInlineSize, so the finish lives in its own method.
-    /// TrinoLikeKernelGenerator emits a copy of this finish; keep the copy in step.
+    /// TrinoLikeKernelGenerator emits a copy of this finish, and RequiredBytes.containsByte a
+    /// presence-only copy; keep the copies in step.
     private int findSingleByteTail(byte[] inputBytes, int inputOffset, int position, int searchEnd, int length)
     {
         if (length >= Long.BYTES) {

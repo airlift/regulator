@@ -79,19 +79,22 @@ answer, or reject the input before any engine runs.
   ClickHouse ([OptimizedRegularExpression.cpp][ch-optimized-regexp]), and the
   Rust regex crate ([regex.rs][ra-impossible]), for the word test by Muła
   (2016) ([simd-strfind][mula-strfind]), and for joined literals by the Rust
-  regex crate ([literal.rs][rs-literal]); Adapted from RE2 for the scan
-  plan's vector check (front-and-back scan, [prog.cc][re2-prog]), and from
-  PCRE2 for long windows ([required code unit][pcre2-match]); Inspired by the
-  Rust regex crate for the short-window checks ([strategy.rs][ra-strategy]),
-  and by Hyperscan for long windows ([double vermicelli][hs-vermicelli]).
-  Regulator: the 256-byte window, the one-of-three-bytes form, the conditional
-  last-byte load, the 4 KiB engine cutoff, the gated inner literal check, the
-  scan plan's one check after its first failed attempt, and a matcher's reuse
-  of the long-window literal it found ([#10], [#103], [#138], [#147], [#154],
-  [#188], [design][d-required-absence], [design][d-required-bytes],
-  [design][d-short-inner]).
+  regex crate ([literal.rs][rs-literal]); Adapted from RE2 for the scan plan's
+  vector check (front-and-back scan, [prog.cc][re2-prog]), and from PCRE2 for
+  long windows ([required code unit][pcre2-match]); Inspired by the Rust regex
+  crate for the short-window checks ([strategy.rs][ra-strategy]), and by
+  Hyperscan for long windows ([double vermicelli][hs-vermicelli]). Regulator:
+  the 256-byte window, the one-of-three-bytes form, the conditional last-byte
+  load, the one-of form kept beside an inner literal search for windows below
+  its minimum, the 4 KiB engine cutoff, the gated one-byte inner literal
+  check, which full-Slice find runs first in place of a check of the same
+  required byte, the scan plan's one check after its first failed attempt, and
+  a matcher's reuse of the long-window literal it found ([#10], [#103],
+  [#138], [#147], [#154], [#188], [#193], [design][d-required-absence],
+  [design][d-required-bytes], [design][d-min-inner-window]).
 - **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
   `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
+  `RequiredBytes.containsByte`,
   `CompiledPattern.shortWindowLacksRequiredBytes`,
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
@@ -99,12 +102,19 @@ answer, or reject the input before any engine runs.
   `InnerLiteralSearch.windowLacksLiteral`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
   `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`,
-  `InnerLiteralSearch.search`, `ScanPlan.findRequiredLiteralOperation`,
-  `ScanPlan.containsRequiredLiteral`, `VectorScanner.containsLiteral`
+  `InnerLiteralSearch.search`, `InnerLiteralSearch.checksShortWindows`,
+  `CompiledPattern.findOnInnerLiteralSearch`,
+  `ScanPlan.findRequiredLiteralOperation`, `ScanPlan.containsRequiredLiteral`,
+  `VectorScanner.containsLiteral`
 - **Applies when:** Every regex language. Required bytes: windows under 256
-  bytes; not kept for one-byte patterns that take the
-  [256-entry table](#group-zero-matcher-routes); a pattern with an inner
-  literal search keeps no one-of form; they yield to the forward DFAs, as
+  bytes, and for a one-of set of two or three distinct bytes beside an inner
+  literal search only windows under that search's
+  [minimum](#reverse-inner-literal-search) where it is lower; not kept for
+  one-byte patterns that take the
+  [256-entry table](#group-zero-matcher-routes), nor, where the pattern
+  qualifies, as the single required byte a gated one-byte inner literal search
+  scans every window for, which full-Slice find runs first instead; they yield
+  to the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
   count, and the one-shot range searches, for unanchored patterns whose
@@ -116,29 +126,36 @@ answer, or reject the input before any engine runs.
   their start. Minimum length: windows under 4 KiB, where longer ones skip the
   metadata load, and matcher finds that take the general route. First byte:
   start-anchored, non-nullable programs with no assertion before the first
-  byte. Inner literal: windows under the reverse-inner search's 64-byte
-  minimum. Scan plans: unanchored plans not led by a literal, with a later
-  case-sensitive literal that every match passes
+  byte. Inner literal: find windows under the 64-byte minimum of a gated
+  search for a one-byte exact literal, which full-Slice boolean find runs
+  first, before the ordinary engine, where the pattern qualifies. Scan plans:
+  unanchored plans not led by a literal, with a later case-sensitive literal
+  that every match passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
   every match holds one. A window that lacks them returns no match before any
   engine runs. The test reads 8-byte words; when the first byte is rare, it
   loads the last byte's word only for a word that holds the first byte. A
-  longer window is searched for an exact required literal instead, with the
-  vector pair scan from 1 KiB; where an inner literal search for one exact
-  literal stands in for that check, the routes that skip the search, BitState
-  capture of groups and a skipped DFA, scan the window for its literal
-  instead. The same early answer comes from three other facts: a window
-  shorter than the pattern's minimum match length fails before any engine
-  setup; a start-anchored search rejects a byte that cannot begin a match with
-  one table load, before OnePass or BitState setup; and a window too short for
-  the reverse-inner search is still checked for a literal hit that passes the
-  byte gates, so a short line without one runs no DFA. A scan plan, after its
-  first failed attempt, checks once that a required literal occurs in the rest
-  of the input, testing its first and last bytes in 16-byte blocks, and ends
-  the search if it does not. The required-byte reject takes ruff's `noqa` rows
-  to 0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to 0.34 to
+  single required byte takes the same scan as the inner literal search's
+  single-byte scan, two words a step. A longer window is searched for an exact
+  required literal instead, with the vector pair scan from 1 KiB; where an
+  inner literal search for one exact literal stands in for that check, the
+  routes that skip the search, BitState capture of groups and a skipped DFA,
+  scan the window for its literal instead. The same early answer comes from
+  three other facts: a window shorter than the pattern's minimum match length
+  fails before any engine setup; a start-anchored search rejects a byte that
+  cannot begin a match with one table load, before OnePass or BitState setup;
+  and a gated one-byte inner literal search scans a find window shorter than
+  its minimum for a hit that passes the gates, so a short line without one
+  runs no DFA, and one with it falls back to the ordinary engine, as for any
+  first candidate near the window start; a full-Slice find that ran the search
+  first then runs the engine's forward DFA, and where that fails its submatch
+  engines, without running the search again. A scan plan, after its first
+  failed attempt, checks once that a required literal occurs in the rest of
+  the input, testing its first and last bytes in 16-byte blocks, and ends the
+  search if it does not. The required-byte reject takes ruff's `noqa` rows to
+  0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to 0.34 to
   0.47 ([design][d-required-bytes]), and the long-window check takes the
   leipzig `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
   0.48–0.57 ms, 0.021 to 0.039 of its earlier time, in all four languages on
@@ -354,8 +371,9 @@ so the automata run only where a match can be.
   with a folded tail, the vector kernels for long searches, class pairs with
   an English-rarity gate and their own no-earlier-match proof, and the proof
   for a bounded or unbounded run of one class that can hold the literal,
-  behind assertions ([#103], [#138], [#143], [#152], [#193],
-  [design][d-class-pairs]).
+  behind assertions, and each literal kind's minimum search window, at its
+  measured crossover with the DFA ([#103], [#138], [#143], [#152], [#193],
+  [design][d-class-pairs], [design][d-min-inner-window]).
 - **Where:** `InnerLiteralSearch.analyze`, `InnerLiteralSearch.search`,
   `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
   `InnerLiteralSearch.findLiteralSetMember`,
@@ -363,7 +381,10 @@ so the automata run only where a match can be.
   `InnerLiteralSearch.usesVectorSearch`, `InnerLiteralSearch.asciiClassPair`,
   `InnerLiteralSearch.hasNoEarlierMatchAcrossLastByte`,
   `InnerLiteralSearch.findClassPairMember`,
-  `VectorByteSetScanner.findClassPair`, `InnerLiteralSearch.isClassRunPrefix`
+  `VectorByteSetScanner.findClassPair`, `InnerLiteralSearch.findInnerLiteral`,
+  `InnerLiteralSearch.isClassRunPrefix`,
+  `InnerLiteralSearch.minimumSearchBytes`,
+  `CompiledPattern.searchesInnerLiteralWindow`
 - **Applies when:** Find and count in every regex language, only when the
   prefix cannot hold an earlier match or, in leftmost-first searches, is a
   class run, and not for a one-byte literal that is a letter, digit, or
@@ -372,9 +393,16 @@ so the automata run only where a match can be.
   [dot-star literal span](#dot-star-literal-span) matcher's shape, such as
   `.*lit.*`, is left to that matcher and takes no inner literal search; the
   vector forms from 1 KiB with the Vector API; class pairs only for required
-  pieces that are neither a literal nor a literal set. Guards against
-  quadratic rescans, and a first hit that passes the byte gates within 64
-  bytes of the start, hand the search back to the ordinary engine
+  pieces that are neither a literal nor a literal set; find windows and
+  counted texts of at least 64 bytes for a class pair or one-byte literal, 96
+  for a longer single literal, 256 for a literal set, and 1 KiB for a set
+  behind a class run that only the class-run proof admits, since below them
+  the literal's scan costs more than the DFA; from 64 bytes for a count of a
+  set not behind a class run, whose one search continues across many matches,
+  and for a pattern with a fixed-width short-search matcher, which answers its
+  shorter counts and matcher finds and loses to the search from 64 bytes.
+  Guards against quadratic rescans, and a first hit that passes the byte gates
+  within 64 bytes of the start, hand the search back to the ordinary engine
 - **What it does:** For a required literal in the top-level sequence, the
   search finds the literal, runs the prefix backward to the leftmost start,
   and confirms forward. The required piece can take three other forms: one of
@@ -398,7 +426,9 @@ so the automata run only where a match can be.
   time on Intel and 0.74 on Graviton ([design][d-class-pairs]), and the
   class-run proof takes finds of `\w+[?!.]["']` in 300-byte to 2 KiB chunks of
   `sherlock.txt` to 0.03 to 0.28 of their time without it and rebar's
-  `leipzig/word-ending-nn` to 0.11 to 0.12 ([#193]).
+  `leipzig/word-ending-nn` to 0.11 to 0.12 ([#193]). With each literal kind's
+  minimum window, per-line finds of `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to
+  0.50 of their earlier time ([#193]).
 
 ### Inner literal byte gates
 
@@ -1827,6 +1857,7 @@ change is described.
 [d-large-alternations]: ../../REGULATOR_DECISIONS.md#large-literal-alternations
 [d-like]: ../../REGULATOR_DECISIONS.md#trino-like-frontend
 [d-match-every-byte]: ../../REGULATOR_DECISIONS.md#match-every-byte-shortcut
+[d-min-inner-window]: ../../REGULATOR_DECISIONS.md#minimum-inner-literal-search-window
 [d-native]: ../../REGULATOR_DECISIONS.md#bounded-dfa-pointer-transition-table
 [d-once-per-count]: ../../REGULATOR_DECISIONS.md#once-per-count-start-byte-scan-selection
 [d-onepass-assert]: ../../REGULATOR_DECISIONS.md#text-dependent-assertions-in-onepass
@@ -1838,7 +1869,6 @@ change is described.
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
 [d-row-index]: ../../REGULATOR_DECISIONS.md#dfa-row-index-without-a-divide
 [d-self-loop-skips]: ../../REGULATOR_DECISIONS.md#self-loop-exit-byte-skips-outside-counting
-[d-short-inner]: ../../REGULATOR_DECISIONS.md#short-window-inner-literal-check
 [d-short-like]: ../../REGULATOR_DECISIONS.md#short-like-literal-comparisons
 [d-small-byte-set]: ../../REGULATOR_DECISIONS.md#small-candidate-byte-vector-scan
 [d-start-class-filter]: ../../REGULATOR_DECISIONS.md#start-class-filter
