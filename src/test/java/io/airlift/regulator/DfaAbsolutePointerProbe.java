@@ -351,6 +351,7 @@ public final class DfaAbsolutePointerProbe
             long originalMemory)
             throws Exception
     {
+        WeakReference<Object> supersededOwner = dfa.absolutePointerOwnerReferenceForTesting();
         FutureTask<Long> readerTask = new FutureTask<>(() -> Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true));
         Thread reader = Thread.ofPlatform().daemon().unstarted(readerTask);
         FutureTask<Void> resetTask = new FutureTask<>(() -> {
@@ -367,6 +368,13 @@ public final class DfaAbsolutePointerProbe
             resetTask.get(10, TimeUnit.SECONDS);
             check(!dfa.absolutePointerTransitionSegment().equals(originalSegment), "reset reused the sidecar a paused reader reads");
             check(dfa.absolutePointerTransitionCount() == 0, "reset left pointer transitions in the current table");
+            // The reader's reference keeps the superseded table, and a native table's automatic
+            // arena, alive.
+            for (int i = 0; i < 5; i++) {
+                System.gc();
+                Thread.sleep(Duration.ofMillis(10));
+            }
+            check(supersededOwner.get() != null, "superseded pointer table owner was collected while a paused reader used it");
         }
         finally {
             Dfa.releasePointerReaderProbeForTesting();
@@ -375,6 +383,8 @@ public final class DfaAbsolutePointerProbe
         check(dfa.absolutePointerTransitionMemory() == originalMemory, "reset changed the replacement sidecar charge");
         // The released reader finished in the superseded tables, which are no longer charged.
         check(dfa.availableStateMemory() + dfa.retainedStateMemory() + originalMemory == dfa.stateBudget(), "reset returned the replacement sidecar charge");
+
+        awaitCollection(supersededOwner);
     }
 
     private static void exerciseGrowthOverlap(
@@ -425,7 +435,7 @@ public final class DfaAbsolutePointerProbe
             System.gc();
             Thread.sleep(Duration.ofMillis(10));
         }
-        check(reference.get() == null, "retired pointer table owner remained reachable");
+        check(reference.get() == null, "superseded pointer table owner remained reachable");
     }
 
     private static void expectTestingFailure(Runnable runnable)
