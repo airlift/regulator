@@ -2416,9 +2416,9 @@ final class Dfa
 
     private static Object[] pairedStateReferences(Object[][] pairedStateRefArrays, int stateIndex)
     {
-        // The table is rebuilt only when an exclusive search ends, so states a count adds before then
-        // have no paired row.
-        return stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
+        // The table is built only when an exclusive search ends, so a state added since then has no
+        // paired row, and once making room for a new state has released the table, no state has one.
+        return pairedStateRefArrays != null && stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
     }
 
     private static Object getStateReference(Object[] references, int index)
@@ -5657,6 +5657,8 @@ final class Dfa
         private volatile int resetCount;
         private volatile boolean countSearchBailedWhenSlow;
         private int pairedRowSelectionCount;
+        // Paired tables released to make room for a state, excluding clears at search end, rejection and reset.
+        private int pairedRowReleaseCount;
         private int byteScanFallbackCount;
         private int smallByteSetScanCount;
         private int contiguousRangeScanCount;
@@ -6378,6 +6380,7 @@ final class Dfa
                 availableStateMemory += pairedTransitionMemory;
                 pairedTransitionMemory = 0;
                 pairedContentVersion = -1;
+                pairedRowReleaseCount++;
             }
             if (absolutePointerGrowth != null) {
                 absolutePointerTransitionCount = absolutePointerGrowth.transitionCount();
@@ -6401,11 +6404,7 @@ final class Dfa
 
         boolean hasPairedTransitions(CacheTables tables, int stateOffset)
         {
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            int stateIndex = stateIndex(stateOffset);
-            return pairedStateRefArrays != null &&
-                    stateIndex < pairedStateRefArrays.length &&
-                    pairedStateRefArrays[stateIndex] != null;
+            return pairedStateReferences(tables.pairedStateRefArrays, stateIndex(stateOffset)) != null;
         }
 
         private void recordPairedSearch(int searchedBytes)
@@ -6715,6 +6714,11 @@ final class Dfa
         int pairedRowSelectionCount()
         {
             return pairedRowSelectionCount;
+        }
+
+        int pairedRowReleaseCount()
+        {
+            return pairedRowReleaseCount;
         }
 
         int byteScanFallbackCount()

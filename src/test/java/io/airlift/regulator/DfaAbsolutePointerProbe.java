@@ -94,6 +94,7 @@ public final class DfaAbsolutePointerProbe
         exerciseCountSelfLoopMatchHandOff();
         exerciseCountSelfLoopMatchHandOffWithPairedRows();
         exerciseShortSearchesAfterPairedRejection();
+        exercisePairedRowReleaseDuringSearch();
         exerciseOptionalStorageFailureAtomicity(true);
         exerciseOptionalStorageFailureAtomicity(false);
         exerciseCacheGrowthAtomicity();
@@ -527,6 +528,52 @@ public final class DfaAbsolutePointerProbe
         check(dfa.pairedTransitionMemory() == 0, "pointer request retained rejected paired transitions");
     }
 
+    // A paired search that reaches a long matching self-loop computes the loop's exit bytes, which
+    // can add a state. Near the memory limit, the room for that state comes from releasing the
+    // paired rows the search is reading, and the search must go on without them. The budgets at
+    // which this happens move with unrelated changes, so each pattern sweeps a range around them.
+    // The second pattern loops on a letter class instead of any byte, and its 20 byte classes make
+    // its paired rows about eight times larger, so it releases them at over twice the budget.
+    private static void exercisePairedRowReleaseDuringSearch()
+    {
+        exercisePairedRowReleaseSweep("(?s).*x", 17 * 1024, 24 * 1024, utf8Slice("x".repeat(64) + "a".repeat(256)));
+        exercisePairedRowReleaseSweep(
+                "^(x*a[b-z]*(\\x01c|\\x02d|\\x03e|\\x04f|\\x05g|\\x06h|\\x07i|\\x08j)?|x*a)",
+                30 * 1024,
+                50 * 1024,
+                utf8Slice("x".repeat(300) + "a" + "b".repeat(200) + "q"));
+    }
+
+    // The first search builds paired rows where they fit. The release counter is read around the
+    // repeat search because paired memory alone also drops to zero when an exclusive search ends
+    // and the rebuilt rows do not fit. These patterns release the rows midway only while computing
+    // a loop's exit bytes, which only the vector scan does during a search, so without vectors the
+    // sweep need not reach a release. The searches call the DFA directly, because the public find
+    // would hide a DFA that gave up after the release by running another engine.
+    private static void exercisePairedRowReleaseSweep(String pattern, long minimumMemory, long maximumMemory, Slice input)
+    {
+        Re2 reference = Re2.compile(utf8Slice(pattern));
+        String expected = findResult(reference, input);
+        long expectedEnd = Dfa.search(reference.forwardProgramForDiagnostics(), input, false, Prog.MatchKind.FIRST_MATCH, true);
+        boolean released = false;
+        for (long maxMemory = minimumMemory; maxMemory <= maximumMemory; maxMemory += 64) {
+            String description = pattern + " with max memory " + maxMemory;
+            Re2 re2 = Re2.compile(utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory));
+            Prog program = re2.forwardProgramForDiagnostics();
+            long matchEnd = Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true);
+            check(matchEnd != Dfa.SEARCH_FAILED, description + " gave up the first DFA search");
+            check(matchEnd == expectedEnd, description + " changed the first DFA result");
+            Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+            check(dfa.pairedTransitionMemory() == 0 || dfa.absolutePointerTransitionMemory() == 0, description + " held paired rows beside a pointer table after the first search");
+            int releaseCount = dfa.pairedRowReleaseCount();
+            check(Dfa.search(program, input, false, Prog.MatchKind.FIRST_MATCH, true) == matchEnd, description + " changed the repeat DFA result");
+            released |= dfa.pairedRowReleaseCount() > releaseCount;
+            check(dfa.pairedTransitionMemory() == 0 || dfa.absolutePointerTransitionMemory() == 0, description + " held paired rows beside a pointer table after the repeat search");
+            check(findResult(re2, input).equals(expected), description + " changed the result");
+        }
+        check(released || !VectorSupport.isAvailable(), pattern + " sweep did not release paired rows during a search");
+    }
+
     // Fails a cache insertion with the pointer table, or with paired transitions, in place.
     private static void exerciseOptionalStorageFailureAtomicity(boolean pointerTable)
     {
@@ -658,6 +705,12 @@ public final class DfaAbsolutePointerProbe
         Prog reverseProgram = Compiler.compile(parsed.regexp(), true, 0);
         reverseProgram.setDfaMemory(64L << 20);
         return reverseProgram;
+    }
+
+    private static String findResult(Re2 re2, Slice input)
+    {
+        RegexpMatcher matcher = re2.matcher(input);
+        return matcher.find() ? matcher.start() + "-" + matcher.end() : "none";
     }
 
     private static void check(boolean condition, String message)
