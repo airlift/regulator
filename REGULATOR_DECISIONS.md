@@ -854,10 +854,12 @@ Readers need no cache-generation validation, for these reasons:
   root was published, visible with the root.
 - Each slot of a generation is written at most once: for example, a transition
   goes from uncomputed to its value, a state, a state's object row (its
-  reference array), or a start state from null to its value, and a pointer
-  table entry from zero to a row's address or offset. A racy read sees the slot
-  empty or final, and references and ints do not tear. Pointer table entries
-  are 64-bit and use plain access; see
+  reference array), or a start state from null to its value, a pointer table
+  entry from zero to a row's address or offset, and a state's self-loop scan
+  description from zero to its exit set, stay ranges, or rejection. A racy read
+  sees the slot empty or final, and references and ints do not tear. Pointer
+  table entries and self-loop scan descriptions are 64-bit `long` slots with
+  plain access; see
   [Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
   for why they do not tear either.
 - Every racy reference read on a reader path is null- and bounds-checked, and an
@@ -1021,28 +1023,48 @@ Fused DFA counting may skip the interior of a self-loop state with a Vector
 byte-set scan instead of stepping the DFA one byte at a time. A state
 qualifies when every byte either returns to the same state, carrying the match
 bit when the state matches, or belongs to a small exit set: at most three
-bytes, optionally combined with every byte from 0x80 through 0xFF. The exit set
-is computed from the complete 256-byte transition row under the existing
-exclusive cache mutation protocol and cached with the state. The scan resumes
-DFA stepping at the first exit byte, so every byte that can change the state or
-its match status is still processed by the DFA in input order. In a matching
-loop, the scan records the match boundary implied by the skipped bytes. Trino
-`regexp_count` with `.*(x|y).*` over long lines is the motivating shape:
-on r9g, counting over 32 KiB of filler fell from 25.8 us to 3.6 us per
-call (0.79 to 0.11 ns per byte) against 21.3 us for Joni, and over 1 KiB
-from 911 ns to 148 ns against 699 ns for Joni; r8g and r8i moved by the
+bytes, optionally combined with every byte from 0x80 through 0xFF. A loop that
+leaves on more bytes, such as `[A-Z]*` or ASCII `\w*`, qualifies instead when
+the bytes that stay form one to four ranges of at most 128 bytes each, and the
+scan finds the first byte outside them. Either form is computed from the
+complete 256-byte transition row under the existing exclusive cache mutation
+protocol and cached with the state. The scan resumes DFA stepping at the first
+exit byte, so every byte that can change the state or its match status is still
+processed by the DFA in input order. A loop in the stay form whose next two
+bytes do not both stay is stepped past rather than scanned: such loops include
+the unanchored start state of a UTF-8 `.*` pattern, which stays only on newlines
+and invalid bytes, and would otherwise start each search over lines with a
+one-byte scan. In a matching loop, the scan records the match boundary implied
+by the skipped bytes. Trino `regexp_count` with `.*(x|y).*` over long lines is
+the motivating shape: on r9g, counting over 32 KiB of filler fell from 25.8 us
+to 3.6 us per call (0.79 to 0.11 ns per byte) against 21.3 us for Joni, and over
+1 KiB from 911 ns to 148 ns against 699 ns for Joni; r8g and r8i moved by the
 same or larger factors, and no other benchmark changed outside noise.
+
+The stay form targets counts such as rebar's `curated/14-quadratic`, which
+iterates `.*[^A-Z]|[A-Z]` over capitals: each search records one match and then
+follows `.*[^A-Z]` through the rest of the run, so stepping it was quadratic in
+the run. On Temurin 25.0.4+7, its 10x row fell from 785 us to 51.6 us on r9g
+and from 642 us to 50.8 us on r8i. Holding either form widens each state's
+cached slot from 32 to 64 bits, about 4 bytes per state or about 2% of state
+memory; the cost is accepted. A 16-byte look-ahead at each run before scanning
+it, meant to keep short runs off the scan, was tried and rejected: it gave up 7%
+to 23% of the quadratic wins.
 
 This count route is limited to the count variant of the forward search.
 Counting needs only each match end, and that variant is already kept separate
 from the group-zero cursor because extra result handling in the cursor's
 generated code measurably regresses short repeated boundary operations. The
-route runs only for searches of at least 256 bytes, the same gate that requests
-paired transitions, and it runs before that request so a qualifying search does
-not build a paired table it will not use. Shorter searches cannot amortize this
+route runs only for searches of at least 64 bytes: four 16-byte vectors,
+including the bytes stepped to reach the loop, pay for its few transitions and
+one scan. The gate sits below the 256 bytes that paired transitions still
+require, so the route also scans searches with 64 to 255 bytes remaining, such
+as the final shrinking searches of `.*[^A-Z]|[A-Z]` over a run of capitals. The
+route runs before the paired-transition request so a qualifying search does not
+build a paired table it will not use. Shorter searches cannot amortize this
 route's exit-set construction and Vector setup; the skips in
 [Self-Loop Exit-Byte Skips Outside Counting](#self-loop-exit-byte-skips-outside-counting)
-use shorter thresholds for the reasons given there. Unanchored-end,
+use their own thresholds for the reasons given there. Unanchored-end,
 non-matching start states and an available Vector API are also required; every
 other search keeps its existing route.
 
@@ -1061,7 +1083,9 @@ four consecutive scans skip fewer than 16 bytes, the search continues at the
 current state, position, and match boundary; a later walk that reaches a dead
 or full-match state ends the search instead. The paired and pointer hand-offs
 need at least 256 bytes remaining, and a shorter remainder continues through
-the compact loop. Without a pending match the search continues through the
+the compact loop. An existing pointer table is used; only a productive search,
+as defined below, requests one, and an unproductive search requests paired rows
+instead. Without a pending match a productive search continues through the
 pointer loop when a pointer table exists or can be allocated, and through the
 paired loop when the DFA already holds or has requested paired rows or no
 pointer table can be allocated, such as for an unlimited DFA. With a pending
@@ -1084,18 +1108,36 @@ compact loop, as it does after a paired search's first match. A paired search
 reached without a pending match reports the whole search length to the
 short-paired-search hint, as every other paired search does, so a short tail
 after a long scan does not disable paired transitions. The forward search's
-object-row self-loop scan still rejects exit sets with the matching or high-bit
-flags, through its `selfLoopExitByteSet` wrapper, so its behavior is unchanged;
-the skips outside counting use both flags.
+object-row self-loop scan, through its `selfLoopExitByteSet` wrapper, rejects
+matching self-loops in either form and exit sets with the high-bit flag; it
+follows non-matching loops in the stay form, including those that leave on
+every high byte. The skips outside counting use both flags.
 
 Searches whose start state never reaches a qualifying loop pay the initial walk
-on every match. After eight consecutive searches in which the route does not
-apply, the route stops attempting for the rest of the count call. A search that
-retries is counted once. The counter is reset at the start of each count, so a
-later text that does reach a qualifying loop still uses the route. As with the
-paired-transition hint, the counter is a best-effort performance hint shared by
-concurrent readers; races may change when the route engages but not the match
-result, because the ordinary route computes the same match end.
+on every match, and searches that scan only stay-form runs shorter than 16
+bytes, such as the words and gaps of `[a-zA-Z]+ing` over prose, step the first
+bytes of each run through the loop's slower transitions. Such unproductive
+searches form a streak that cuts the route off. A search advances the streak
+when it reaches no eligible loop or scans only stay-form runs shorter than 16
+bytes; any exit-form scan or a stay run of at least 16 bytes clears it, and the
+search is productive. After eight unproductive searches in a row, the route
+stops for the rest of the count of one text: one count call, or every fallback
+call sharing the count's `CountByteScanSampling`, such as the inner literal
+count's fallback counts, which each run only a few searches. The count keeps its
+own value in that sampling between calls, so a count of another text in between,
+on another thread or interleaved with it, does not decide whether it tries the
+route. A count without a sampling starts each call at zero, so a later text that
+does reach a qualifying loop still uses the route. An unproductive search that
+hands off from the scan uses an existing pointer table but never requests one;
+it requests paired rows instead, so text of short runs keeps the route the
+ordinary search takes. A search that reaches no eligible loop falls back to the
+paired or ordinary search, which requests tables as it does without the scan. A
+search is counted once the search it hands off or falls back to returns, so a
+search that a request or that search retries is counted once.
+Within a call, as with the paired-transition hint, the counter is a best-effort
+performance hint shared by concurrent readers; races may change when the route
+engages but not the match result, because the ordinary route computes the same
+match end.
 
 ## Self-Loop Exit-Byte Skips Outside Counting
 
@@ -1104,10 +1146,10 @@ Matching and reverse searches also skip self-loop runs with the exit sets the
 search's matching continuation and the
 [candidate-start cursor](#bounded-candidate-start-cursor)'s check step a
 matching self-loop run for 32 bytes. When the run continues past them, the
-Vector API is available, and the state's exit set is accepted, one to three
-bytes or every byte from 0x80 through 0xFF plus up to three ASCII bytes, a
-vector scan finishes the run at its first exit byte. Otherwise the run keeps
-stepping. Either way the run ends where stepping it would.
+Vector API is available, and the state's loop is accepted in either form the
+count route accepts, a vector scan finishes the run at its first exit byte.
+Otherwise the run keeps stepping. Either way the run ends where stepping it
+would.
 
 Backward, a reverse search of at least 64 bytes, with no byte limit, not asking
 for the earliest match, and whose start state is not a match, probes up to five
@@ -1115,10 +1157,11 @@ cached transitions back from its end. When the probe reaches a non-matching
 state that loops on itself, `findLast` or `findLastHighBitOr` skips back to the
 loop's last exit byte, and the absolute-pointer and object loops both start
 there in that state, as if they had stepped every skipped byte. An uncomputed
-transition, a match, a dead or full-match state, a rejected exit set, or no
-self-loop within five steps leaves the search as it was.
+transition, a match, a dead or full-match state, a rejected exit set or one in
+the stay form, which the backward scans do not read, or no self-loop within
+five steps leaves the search as it was.
 
-Both thresholds sit below the count route's 256 bytes. The stepped prefix
+Neither threshold exceeds the count route's 64 bytes. The stepped prefix
 bounds the cost on short runs: a run that ends within its 32 bytes, twice the
 length below which a scan's setup costs more than it skips, costs what stepping
 costs. The exit set is computed once and cached with the state, so later

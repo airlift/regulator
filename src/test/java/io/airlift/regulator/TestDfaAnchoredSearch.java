@@ -53,10 +53,9 @@ public class TestDfaAnchoredSearch
     {
         // The warm-ups fill the cache tables to just below their next growth. The long `x` run then
         // passes the matching loop's stepped prefix, so the scan computes the loop's exit-byte set;
-        // the loop leaves on too many bytes for a vector scan, so the set is rejected and the run
-        // keeps stepping, but computing it added transitions that grew the tables. The confirmation
-        // then continues through states allocated after that growth, so it must read the grown
-        // tables.
+        // the loop stays on one range, `x`, so the run is scanned in the stay form, but computing
+        // the set added transitions that grew the tables. The confirmation then continues through
+        // states allocated after that growth, so it must read the grown tables.
         Prog prog = Re2.compile(utf8Slice("(?:[ab]*a[ab]{4}|abx*![A-Z]+|abx*\\B)")).forwardProgramForDiagnostics();
         for (String warm : List.of("abxxxxxxxxxx", "b".repeat(300), "abbbbbba", "aabbabaa", "aaabbabb")) {
             Slice input = utf8Slice(warm);

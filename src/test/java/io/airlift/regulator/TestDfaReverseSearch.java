@@ -105,6 +105,11 @@ public class TestDfaReverseSearch
             assertReverseSkip(reverse, Slices.utf8Slice("=" + "x".repeat(63)), 0, 0, true);
             assertReverseSkip(reverse, Slices.utf8Slice("=" + "x".repeat(62)), 0, 0, false);
         }
+
+        // Read backward, `=[A-Z]*` loops on capitals and leaves on every other byte, too many for
+        // the exit form. The backward scans read only the exit form, so the search steps the run.
+        Prog stayForm = Compiler.compile(RegexpParser.parse(Slices.utf8Slice("=[A-Z]*"), Regexp.LIKE_PERL).regexp(), true, 0);
+        assertReverseSkip(stayForm, Slices.utf8Slice("=" + "B".repeat(1_000)), 0, 0, false);
     }
 
     @Test

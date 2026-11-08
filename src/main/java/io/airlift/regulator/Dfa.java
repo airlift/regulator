@@ -156,7 +156,17 @@ final class Dfa
     private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
     private static final long COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE = Long.MIN_VALUE + 2;
-    private static final int COUNT_SELF_LOOP_NOT_APPLICABLE_LIMIT = 8;
+    // Unproductive searches of one count in a row, after which the count's remaining searches take
+    // the ordinary routes directly. A search advances the streak when it reaches no eligible
+    // self-loop or scans only stay-form runs shorter than VectorByteSetScanner.SHORT_SCAN_BYTES;
+    // any exit-form scan or a stay run of at least that length clears it.
+    private static final int COUNT_SELF_LOOP_UNPRODUCTIVE_LIMIT = 8;
+    // A count search at least this long tries the self-loop scan. As for the reverse self-loop
+    // skip, four 16-byte vectors, including the bytes stepped to reach the loop, pay for its few
+    // transitions and one scan. It sits below MIN_PAIRED_SEARCH_BYTES so that searches with 64 to
+    // 255 bytes remaining, such as the final shrinking searches of `.*[^A-Z]|[A-Z]` over a run of
+    // capitals, scan their runs too.
+    private static final int MIN_COUNT_SELF_LOOP_SCAN_BYTES = 64;
     // A four-byte UTF-8 character inside a matching loop ends in the loop's unflagged copy, which
     // needs one more byte to return to the matching loop.
     private static final int COUNT_SELF_LOOP_MAX_STEPS = 5;
@@ -891,10 +901,17 @@ final class Dfa
         if (searchSampling == null && contextEnd - textBegin >= MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
             searchSampling = CountByteScanSampling.forSingleCount();
         }
-        // The self-loop cutoff applies to one count call; a new text may reach an eligible loop.
-        // The guard skips writing a shared field that is already zero.
-        if (dfa.countSelfLoopNotApplicableCount != 0) {
-            dfa.countSelfLoopNotApplicableCount = 0;
+        // The self-loop cutoff applies to one count of one text: this call, or every call that
+        // shares `sampling`, such as the inner literal count's fallback counts, which each run
+        // only a few searches. A new text may reach an eligible loop. The count keeps its value
+        // in `sampling` between calls, so a count that ran in between, on another thread or
+        // interleaved with this one, does not decide whether this one tries the route. The DFA
+        // field is the working copy the searches update, a racy route hint that a concurrent count
+        // can still change within this call. The guard skips writing a shared field that already
+        // holds the value.
+        int selfLoopUnproductiveCount = sampling == null ? 0 : sampling.selfLoopUnproductiveCount;
+        if (dfa.countSelfLoopUnproductiveCount != selfLoopUnproductiveCount) {
+            dfa.countSelfLoopUnproductiveCount = selfLoopUnproductiveCount;
         }
         long count = 0;
         boolean requiresExclusiveSearch = false;
@@ -941,6 +958,9 @@ final class Dfa
                             startByteScanSet,
                             resampleStartByteScanSet,
                             searchSampling);
+                    if (sampling != null) {
+                        sampling.selfLoopUnproductiveCount = dfa.countSelfLoopUnproductiveCount;
+                    }
                     // Reload, so a long exclusive count does not keep superseded tables reachable.
                     tables = dfa.tablesAfterWrite(tables);
                     if (matchEnd == SEARCH_FAILED) {
@@ -1563,39 +1583,48 @@ final class Dfa
                 dfa.shouldUseAbsolutePointersForShortSearch(tables)) {
             tables = dfa.requestAbsolutePointerTransitions(tables);
         }
-        if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
-            // The racy cutoff only selects whether the equivalent ordinary route runs directly.
-            if (!endMatch &&
-                    VectorSupport.isAvailable() &&
-                    dfa.countSelfLoopNotApplicableCount < COUNT_SELF_LOOP_NOT_APPLICABLE_LIMIT) {
-                long result = searchForwardCountSelfLoopScan(dfa, tables, bytes, textBegin, contextEnd, startOffset);
-                if (result != COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE) {
-                    return countMatchResult(result, byteScanRejected);
-                }
-                // An exclusive scan may have published grown tables whose states lie beyond these.
-                tables = dfa.tablesAfterWrite(tables);
-                // Request first: the request can retry this search, which must be counted once.
-                // The unconditional request that follows is then a no-op.
-                tables = dfa.requestPairedTransitions(tables);
-                dfa.countSelfLoopNotApplicableCount++;
+        // The cutoff is a racy route hint within one count call: a concurrent count of the same DFA
+        // can change it, and it only selects whether the equivalent ordinary route runs directly.
+        boolean selfLoopScanNotApplicable = false;
+        if (!startIsMatch &&
+                !endMatch &&
+                contextEnd - textBegin >= MIN_COUNT_SELF_LOOP_SCAN_BYTES &&
+                VectorSupport.isAvailable() &&
+                dfa.countSelfLoopUnproductiveCount < COUNT_SELF_LOOP_UNPRODUCTIVE_LIMIT) {
+            long result = searchForwardCountSelfLoopScan(dfa, tables, bytes, textBegin, contextEnd, startOffset);
+            if (result != COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE) {
+                return countMatchResult(result, byteScanRejected);
             }
+            // An exclusive scan may have published grown tables whose states lie beyond these.
+            tables = dfa.tablesAfterWrite(tables);
+            selfLoopScanNotApplicable = true;
+        }
+        // The paired request and either search can retry this search, so it counts toward the
+        // cutoff only once the search returns, and the retried search counts once.
+        if (!startIsMatch && contextEnd - textBegin >= MIN_PAIRED_SEARCH_BYTES) {
             tables = dfa.requestPairedTransitions(tables);
             if (dfa.hasPairedTransitions(tables, startOffset)) {
                 long result = searchForwardPairs(dfa, tables, bytes, textBegin, textBegin, contextEnd, contextEnd, startOffset, endMatch, false);
+                if (selfLoopScanNotApplicable) {
+                    dfa.countSelfLoopUnproductiveCount++;
+                }
                 return countMatchResult(result, byteScanRejected);
             }
         }
         long result = searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
+        if (selfLoopScanNotApplicable) {
+            dfa.countSelfLoopUnproductiveCount++;
+        }
         return countMatchResult(result, byteScanRejected);
     }
 
     // Count searches without an end anchor can skip a self-loop state whose exits are one to three
-    // bytes, or every high byte plus up to three ASCII bytes, using a vector byte-set scan. A
-    // matching self-loop extends the pending match through every skipped byte. The start state
-    // carries context flags, and UTF-8 characters pass through intermediate states, so a few bytes
-    // are stepped through the transition table to reach an eligible loop. The remaining text goes
-    // to the ordinary search routes when no eligible state follows, a transition is uncomputed, or
-    // repeated short scans show that exits are dense.
+    // bytes, or every high byte plus up to three ASCII bytes, or whose staying bytes form one to
+    // four ranges, using a vector byte-set scan. A matching self-loop extends the pending match
+    // through every skipped byte. The start state carries context flags, and UTF-8 characters pass
+    // through intermediate states, so a few bytes are stepped through the transition table to reach
+    // an eligible loop. The remaining text goes to the ordinary search routes when no eligible
+    // state follows, a transition is uncomputed, or repeated short scans show that exits are dense.
     private static long searchForwardCountSelfLoopScan(
             DfaInstance dfa,
             CacheTables tables,
@@ -1608,8 +1637,11 @@ final class Dfa
         int position = textBegin;
         int stateOffset = startOffset;
         int lastMatchBoundary = -1;
-        int exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+        long exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
         tables = dfa.tablesAfterWrite(tables);
+        if (skipsShortStayRun(dfa, tables, bytes, position, contextEnd, stateOffset, exitByteSet)) {
+            exitByteSet = 0;
+        }
         for (int step = 0; exitByteSet == 0; step++) {
             if (step == COUNT_SELF_LOOP_MAX_STEPS || position == contextEnd) {
                 return COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE;
@@ -1627,42 +1659,27 @@ final class Dfa
             stateOffset = nextState;
             exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
             tables = dfa.tablesAfterWrite(tables);
+            if (skipsShortStayRun(dfa, tables, bytes, position, contextEnd, stateOffset, exitByteSet)) {
+                exitByteSet = 0;
+            }
         }
 
-        // The guard skips writing a shared field that is already zero.
-        if (dfa.countSelfLoopNotApplicableCount != 0) {
-            dfa.countSelfLoopNotApplicableCount = 0;
-        }
+        // Whether a scan followed an exit-form loop or skipped a stay-form run of at least
+        // SHORT_SCAN_BYTES. Stay-form loops such as the words and gaps of `[a-zA-Z]+ing` over prose
+        // leave after a few bytes, and a count whose searches only scan such runs steps their
+        // first bytes through this loop's slower transitions on every search.
+        boolean productive = false;
         int shortScanCount = 0;
         scan:
         while (true) {
-            int exitPosition;
-            if ((exitByteSet & SELF_LOOP_EXIT_BYTE_SET_HIGH) != 0) {
-                exitPosition = VectorByteSetScanner.findHighBitOr(
-                        bytes,
-                        position,
-                        contextEnd - position,
-                        (byte) exitByteSet,
-                        (byte) (exitByteSet >>> 8),
-                        (byte) (exitByteSet >>> 16),
-                        (exitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK);
-            }
-            else {
-                exitPosition = VectorByteSetScanner.find(
-                        bytes,
-                        position,
-                        contextEnd - position,
-                        (byte) exitByteSet,
-                        (byte) (exitByteSet >>> 8),
-                        (byte) (exitByteSet >>> 16),
-                        (exitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK);
-            }
+            int exitPosition = findSelfLoopExit(dfa, bytes, position, contextEnd, exitByteSet);
             if (exitPosition < 0) {
                 exitPosition = contextEnd;
             }
             dfa.countSelfLoopScanCount++;
+            productive |= exitByteSet > 0 || exitPosition - position >= VectorByteSetScanner.SHORT_SCAN_BYTES;
             // Each skipped byte of a matching self-loop records a match ending before that byte.
-            if ((exitByteSet & SELF_LOOP_EXIT_BYTE_SET_MATCHING) != 0 && exitPosition > position) {
+            if (isMatchingSelfLoop(exitByteSet) && exitPosition > position) {
                 lastMatchBoundary = exitPosition - 1;
             }
             shortScanCount = VectorByteSetScanner.shortScanCount(shortScanCount, exitPosition - position);
@@ -1681,9 +1698,11 @@ final class Dfa
                     break scan;
                 }
                 if (nextState == T_DEAD) {
+                    recordCountSelfLoopScanProductivity(dfa, productive);
                     return finalizeResult(textBegin, contextEnd, false, lastMatchBoundary >= 0, lastMatchBoundary, true);
                 }
                 if (nextState == T_FULL_MATCH) {
+                    recordCountSelfLoopScanProductivity(dfa, productive);
                     return finalizeResult(textBegin, contextEnd, false, true, contextEnd, true);
                 }
                 if ((nextState & T_MATCH_BIT) != 0) {
@@ -1695,28 +1714,39 @@ final class Dfa
                 if (position < contextEnd) {
                     exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
                     tables = dfa.tablesAfterWrite(tables);
+                    if (skipsShortStayRun(dfa, tables, bytes, position, contextEnd, stateOffset, exitByteSet)) {
+                        exitByteSet = 0;
+                    }
                 }
             }
         }
 
-        // Without a pending match the search continues as a pending first match does: through the
-        // absolute-pointer loop unless the DFA holds or has requested paired rows or cannot
-        // allocate a pointer table. The scan computes every transition of the states it visits,
-        // so a paired request from here selects rows the text never exercised, and those rows
-        // block the pointer table, the faster loop on dense multibyte text.
+        // Without a pending match the search continues as a pending first match does. An existing
+        // pointer table is used; only a productive search requests one, and an unproductive search
+        // requests paired rows instead. A productive search takes paired rows only when the DFA
+        // holds or has requested them or cannot allocate a pointer table: the scan computes every
+        // transition of the states it visits, so a paired request from here selects rows the text
+        // never exercised, and those rows block the pointer table, the faster loop on dense
+        // multibyte text. Either request and every continuation search can retry this search, so
+        // each hand-off records the search's productivity after its search returns, and the
+        // retried search counts once.
         if (lastMatchBoundary < 0 && contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            if (!dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
+            if (productive && !dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestAbsolutePointerTransitions(tables);
             }
             if (dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
+                long result = searchForwardAbsolutePointers(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
+                recordCountSelfLoopScanProductivity(dfa, productive);
                 dfa.countSelfLoopNoMatchPointerHandOffCount++;
-                return searchForwardAbsolutePointers(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, -1, false, false);
+                return result;
             }
-            if (countHandoffKeepsPairedRows(dfa, tables)) {
+            if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
                     // Measure from the search start so the short-search hint sees the whole search.
-                    return searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+                    long result = searchForwardPairs(dfa, tables, bytes, textBegin, position, contextEnd, contextEnd, stateOffset, false, false);
+                    recordCountSelfLoopScanProductivity(dfa, productive);
+                    return result;
                 }
             }
         }
@@ -1724,16 +1754,17 @@ final class Dfa
         // uses. The compact loop exits its fast path on every match transition, which is every
         // transition of a matching loop. Paired rows block pointer-table allocation, so a DFA that
         // already holds or has requested paired rows keeps the paired after-match loop, as the
-        // ordinary search does, and so does a DFA that cannot allocate a pointer table.
+        // ordinary search does, and so does a DFA that cannot allocate a pointer table. As without a
+        // pending match, an existing pointer table is used; only a productive search requests one,
+        // and an unproductive search requests paired rows instead.
         if (lastMatchBoundary >= 0 &&
                 dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
                 contextEnd - position >= MIN_PAIRED_SEARCH_BYTES) {
-            if (!dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
+            if (productive && !dfa.hasAbsolutePointerTransitions(tables, stateOffset) && !countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestAbsolutePointerTransitions(tables);
             }
             if (dfa.hasAbsolutePointerTransitions(tables, stateOffset)) {
-                dfa.countSelfLoopMatchHandOffCount++;
-                return searchForwardAbsolutePointers(
+                long result = searchForwardAbsolutePointers(
                         dfa,
                         tables,
                         bytes,
@@ -1745,12 +1776,14 @@ final class Dfa
                         lastMatchBoundary,
                         false,
                         false);
+                recordCountSelfLoopScanProductivity(dfa, productive);
+                dfa.countSelfLoopMatchHandOffCount++;
+                return result;
             }
-            if (countHandoffKeepsPairedRows(dfa, tables)) {
+            if (!productive || countHandoffKeepsPairedRows(dfa, tables)) {
                 tables = dfa.requestPairedTransitions(tables);
                 if (dfa.hasPairedTransitions(tables, stateOffset)) {
-                    dfa.countSelfLoopMatchHandOffCount++;
-                    return searchForwardPairsFromState(
+                    long result = searchForwardPairsFromState(
                             dfa,
                             tables,
                             bytes,
@@ -1762,10 +1795,13 @@ final class Dfa
                             lastMatchBoundary,
                             false,
                             false);
+                    recordCountSelfLoopScanProductivity(dfa, productive);
+                    dfa.countSelfLoopMatchHandOffCount++;
+                    return result;
                 }
             }
         }
-        return searchForwardContinuation(
+        long result = searchForwardContinuation(
                 dfa,
                 tables,
                 bytes,
@@ -1778,6 +1814,42 @@ final class Dfa
                 lastMatchBoundary,
                 false,
                 false);
+        recordCountSelfLoopScanProductivity(dfa, productive);
+        return result;
+    }
+
+    // A productive search clears the count's cutoff, and an unproductive one counts toward it as a
+    // search that reached no eligible loop does. The guard skips writing a shared field that is
+    // already zero.
+    private static void recordCountSelfLoopScanProductivity(DfaInstance dfa, boolean productive)
+    {
+        if (!productive) {
+            dfa.countSelfLoopUnproductiveCount++;
+        }
+        else if (dfa.countSelfLoopUnproductiveCount != 0) {
+            dfa.countSelfLoopUnproductiveCount = 0;
+        }
+    }
+
+    // Whether the count scan steps past the eligible self-loop at stateOffset, as past an
+    // ineligible one and within the same step limit, rather than scanning its run from position:
+    // a loop in the stay form whose run is shorter than two bytes, since a transition or two costs
+    // less than a scan's setup. The stay form makes eligible states whose runs are almost always
+    // that short: the unanchored start state of a UTF-8 `.*` pattern, which stays only on newlines
+    // and invalid bytes, so that a count over lines would start each search with a one-byte scan,
+    // and the states inside a multibyte character. The exit form keeps scanning every run, whose
+    // short scans stop the route as VectorByteSetScanner.SHORT_SCAN_LIMIT describes. An accepted
+    // exit set means every transition of the state that can stay is computed.
+    private static boolean skipsShortStayRun(DfaInstance dfa, CacheTables tables, byte[] bytes, int position, int contextEnd, int stateOffset, long exitByteSet)
+    {
+        if (exitByteSet >= 0 || position == contextEnd) {
+            return false;
+        }
+        int[] transitions = tables.transitions;
+        byte[] byteMap = dfa.bytemap;
+        return (getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF)) & ~T_MATCH_BIT) != stateOffset ||
+                position + 1 == contextEnd ||
+                (getTransition(transitions, stateOffset + (byteMap[bytes[position + 1] & 0xFF] & 0xFF)) & ~T_MATCH_BIT) != stateOffset;
     }
 
     // Whether a count self-loop scan hands off to paired rows rather than the absolute-pointer
@@ -2860,17 +2932,10 @@ final class Dfa
         // A stable self-loop keeps reference decoding and the array type check off the serial
         // transition dependency chain. Keeping this loop separate also preserves the old loop's
         // generated code when sampling rejects this path.
-        int smallExitByteSet = VectorSupport.isAvailable() ? dfa.selfLoopExitByteSet(tables, stateReferences) : 0;
+        long exitByteSet = VectorSupport.isAvailable() ? dfa.selfLoopExitByteSet(tables, stateReferences) : 0;
         tables = dfa.tablesAfterWrite(tables);
-        if (smallExitByteSet != 0) {
-            int exitPosition = VectorByteSetScanner.find(
-                    bytes,
-                    position,
-                    textEnd - position,
-                    (byte) smallExitByteSet,
-                    (byte) (smallExitByteSet >>> 8),
-                    (byte) (smallExitByteSet >>> 16),
-                    smallExitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT);
+        if (exitByteSet != 0) {
+            int exitPosition = findSelfLoopExit(dfa, bytes, position, textEnd, exitByteSet);
             dfa.selfLoopExitByteScanCount++;
             int stateOffset = rowStateOffset(stateReferences, dfa.nextSize, tables.transitions);
             return ((long) (exitPosition < 0 ? textEnd : exitPosition) << 32) | (stateOffset & 0xFFFF_FFFFL);
@@ -3184,35 +3249,38 @@ final class Dfa
         }
 
         // The run's transitions carry the match bit, so an accepted set is a matching one.
-        int exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+        long exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
         if (exitByteSet == 0) {
             // Computing the loop's exit bytes may have published grown tables.
             tables = dfa.tablesAfterWrite(tables);
             return stepMatchingSelfLoopTransitions(dfa, tables, bytes, runEnd, textEnd, stateOffset);
         }
-        int exitPosition;
-        if ((exitByteSet & SELF_LOOP_EXIT_BYTE_SET_HIGH) != 0) {
-            exitPosition = VectorByteSetScanner.findHighBitOr(
-                    bytes,
-                    runEnd,
-                    textEnd - runEnd,
-                    (byte) exitByteSet,
-                    (byte) (exitByteSet >>> 8),
-                    (byte) (exitByteSet >>> 16),
-                    (exitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK);
-        }
-        else {
-            exitPosition = VectorByteSetScanner.find(
-                    bytes,
-                    runEnd,
-                    textEnd - runEnd,
-                    (byte) exitByteSet,
-                    (byte) (exitByteSet >>> 8),
-                    (byte) (exitByteSet >>> 16),
-                    (exitByteSet >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK);
-        }
+        int exitPosition = findSelfLoopExit(dfa, bytes, runEnd, textEnd, exitByteSet);
         dfa.matchingSelfLoopExitByteScanCount++;
         return exitPosition < 0 ? textEnd : exitPosition;
+    }
+
+    // Returns the first position in [position, end) whose byte leaves the self-loop that the
+    // accepted exitByteSet describes, or -1: one of its exit bytes in the exit form, or a byte
+    // outside its ranges in the stay form. Callers check VectorSupport.isAvailable() first.
+    private static int findSelfLoopExit(DfaInstance dfa, byte[] bytes, int position, int end, long exitByteSet)
+    {
+        if (exitByteSet < 0) {
+            dfa.selfLoopStayRangeScanCount++;
+            int rangeCount = (int) (((exitByteSet >>> 15) & 1) | ((exitByteSet >>> 30) & 2)) + 1;
+            return VectorByteSetScanner.findOutsideRanges(bytes, position, end - position, exitByteSet & SELF_LOOP_STAY_RANGES_MASK, rangeCount);
+        }
+        int exits = (int) exitByteSet;
+        int exitByteCount = (exits >>> SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) & SELF_LOOP_EXIT_BYTE_COUNT_MASK;
+        if ((exits & SELF_LOOP_EXIT_BYTE_SET_HIGH) != 0) {
+            return VectorByteSetScanner.findHighBitOr(bytes, position, end - position, (byte) exits, (byte) (exits >>> 8), (byte) (exits >>> 16), exitByteCount);
+        }
+        return VectorByteSetScanner.find(bytes, position, end - position, (byte) exits, (byte) (exits >>> 8), (byte) (exits >>> 16), exitByteCount);
+    }
+
+    private static boolean isMatchingSelfLoop(long exitByteSet)
+    {
+        return (exitByteSet & (exitByteSet < 0 ? SELF_LOOP_STAY_RANGES_MATCHING : SELF_LOOP_EXIT_BYTE_SET_MATCHING)) != 0;
     }
 
     private static int stepMatchingSelfLoopTransitions(
@@ -4329,11 +4397,13 @@ final class Dfa
                 continue;
             }
 
-            // The state is not a match state: the transition into it carries no match bit.
-            int exitByteSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
-            if (exitByteSet == 0) {
+            // The state is not a match state: the transition into it carries no match bit. The
+            // backward scans read only the exit form.
+            long exitSet = dfa.countSelfLoopExitByteSet(tables, stateOffset);
+            if (exitSet <= 0) {
                 return REVERSE_SELF_LOOP_NO_SKIP;
             }
+            int exitByteSet = (int) exitSet;
             int exitPosition;
             if ((exitByteSet & SELF_LOOP_EXIT_BYTE_SET_HIGH) != 0) {
                 exitPosition = VectorByteSetScanner.findLastHighBitOr(
@@ -4473,11 +4543,20 @@ final class Dfa
     static final int T_DEAD = -1;          // dead state
     static final int T_FULL_MATCH = -2;    // rest of string matches
 
-    private static final int SELF_LOOP_EXIT_BYTE_SET_REJECTED = -1;
+    private static final long SELF_LOOP_EXIT_BYTE_SET_REJECTED = -1;
     private static final int SELF_LOOP_EXIT_BYTE_COUNT_SHIFT = 24;
     private static final int SELF_LOOP_EXIT_BYTE_COUNT_MASK = 0x7;
     private static final int SELF_LOOP_EXIT_BYTE_SET_MATCHING = 1 << 27;
     private static final int SELF_LOOP_EXIT_BYTE_SET_HIGH = 1 << 28;
+    // A self-loop that leaves on more bytes than the exit form lists is described by the bytes that
+    // stay in it: one to four ranges in the layout VectorByteSetScanner.findOutsideRanges reads,
+    // range i in bits 16i to 16i + 14. The bit above each range is free there, and holds the
+    // stay form's own flags: bit 63 marks the form, which makes the set negative; bit 47 marks a
+    // matching self-loop; and bits 15 and 31 hold the range count less one, low bit first.
+    private static final long SELF_LOOP_STAY_RANGES = 1L << 63;
+    private static final long SELF_LOOP_STAY_RANGES_MATCHING = 1L << 47;
+    private static final long SELF_LOOP_STAY_RANGES_MASK = 0x7FFF_7FFF_7FFF_7FFFL;
+    private static final int SELF_LOOP_MAX_STAY_RANGES = 4;
 
     // Match bit: OR'd into transition values pointing to match states
     static final int T_MATCH_BIT = 1 << 30;
@@ -4651,10 +4730,12 @@ final class Dfa
         // State metadata (cold path)
         final StateData[] stateData;
         final Object[][] stateRefArrays;  // parallel to stateData[], indexed by stateIndex
-        // Zero is unknown, -1 is rejected, and accepted entries pack up to three exits below a
-        // three-bit count. Bit 27 marks a matching self-loop, whose transitions carry the match bit.
-        // Bit 28 marks a row where every byte 0x80..0xFF exits; the packed exits are then ASCII only.
-        final int[] selfLoopExitByteSets;
+        // Zero is unknown, -1 is rejected, and accepted entries in the exit form pack up to three
+        // exits below a three-bit count in their low 32 bits. Bit 27 marks a matching self-loop,
+        // whose transitions carry the match bit. Bit 28 marks a row where every byte 0x80..0xFF
+        // exits; the packed exits are then ASCII only. Negative accepted entries are in the stay
+        // form that SELF_LOOP_STAY_RANGES describes.
+        final long[] selfLoopExitByteSets;
         // Start state caches
         final StateData[][] startBeginText;
         final StateData[][] startBeginLine;
@@ -4674,7 +4755,7 @@ final class Dfa
                 int[] transitions,
                 StateData[] stateData,
                 Object[][] stateRefArrays,
-                int[] selfLoopExitByteSets,
+                long[] selfLoopExitByteSets,
                 StateData[][] startBeginText,
                 StateData[][] startBeginLine,
                 StateData[][] startTrinoLine,
@@ -4715,7 +4796,7 @@ final class Dfa
                     transitions,
                     new StateData[stateCapacity],
                     new Object[stateCapacity][],
-                    new int[stateCapacity],
+                    new long[stateCapacity],
                     new StateData[2][2],
                     new StateData[2][2],
                     trinoLineStarts ? new StateData[2][2] : null,
@@ -4727,7 +4808,7 @@ final class Dfa
                     null);
         }
 
-        private CacheTables withStates(int[] transitions, StateData[] stateData, Object[][] stateRefArrays, int[] selfLoopExitByteSets)
+        private CacheTables withStates(int[] transitions, StateData[] stateData, Object[][] stateRefArrays, long[] selfLoopExitByteSets)
         {
             return new CacheTables(
                     transitions,
@@ -5305,12 +5386,14 @@ final class Dfa
     /// [#forSingleCount()] holds the scan choices, a fixed-distance rejection, and a productive
     /// start-byte result, and samples the others again at each search. The outcomes only choose
     /// how candidates are found, never which candidates the DFA processes. One count owns the
-    /// object, so it is never shared between threads.
+    /// object, so it is never shared between threads. It also carries the count's self-loop
+    /// cutoff, which its next call resumes.
     static final class CountByteScanSampling
     {
         /// With fewer bytes remaining, every byte-scan choice is made without sampling, so a
-        /// count whose first call has fewer bytes remaining makes the same choices when passed
-        /// `null`.
+        /// count whose first call has fewer bytes remaining makes the same byte-scan choices when
+        /// passed `null`. Its self-loop cutoff differs: without a sampling, each call starts its
+        /// own.
         static final int MIN_SAMPLED_BYTES = Math.min(MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES, MIN_SELECTIVE_SCAN_SEARCH_BYTES);
 
         private final boolean holdsEveryOutcome;
@@ -5321,6 +5404,9 @@ final class Dfa
         private boolean fixedDistanceByteScanProductive;
         private int fixedDistanceByteScanProductivityCheckedUntil;
         private int byteScanCheckCount;
+        // The count's unproductive self-loop search streak after its last search, which its next
+        // call resumes.
+        private int selfLoopUnproductiveCount;
 
         CountByteScanSampling()
         {
@@ -5666,8 +5752,13 @@ final class Dfa
         private int countSelfLoopScanCount;
         private int countSelfLoopMatchHandOffCount;
         private int countSelfLoopNoMatchPointerHandOffCount;
-        // Consecutive count searches whose start states did not reach an eligible self-loop.
-        private int countSelfLoopNotApplicableCount;
+        // The running count's unproductive self-loop search streak, the self-loop cutoff: a search
+        // advances it when it reaches no eligible self-loop or scans only stay-form runs shorter
+        // than VectorByteSetScanner.SHORT_SCAN_BYTES; any exit-form scan or a stay run of at least
+        // that length clears it. Each count call loads it from its sampling, or zero, and stores it
+        // back after each search.
+        private int countSelfLoopUnproductiveCount;
+        private int selfLoopStayRangeScanCount;
         private int matchingSelfLoopScanCount;
         private int matchingSelfLoopExitByteScanCount;
         private int reverseSelfLoopExitByteScanCount;
@@ -6066,22 +6157,28 @@ final class Dfa
             return fixedDistanceShortSkipFallbackCount;
         }
 
-        private int selfLoopExitByteSet(CacheTables tables, Object[] stateReferences)
+        private long selfLoopExitByteSet(CacheTables tables, Object[] stateReferences)
         {
             int stateOffset = rowStateOffset(stateReferences, nextSize, tables.transitions);
-            int exitByteSet = countSelfLoopExitByteSet(tables, stateOffset);
-            // The object-row scan only follows plain self-loops with at most three exit bytes.
-            return (exitByteSet & (SELF_LOOP_EXIT_BYTE_SET_MATCHING | SELF_LOOP_EXIT_BYTE_SET_HIGH)) != 0 ? 0 : exitByteSet;
+            long exitByteSet = countSelfLoopExitByteSet(tables, stateOffset);
+            // The object-row scan follows only non-matching self-loops: in the exit form, one to
+            // three exit bytes without the high-bit flag; in the stay form, any accepted ranges,
+            // including those of a loop that leaves on every high byte.
+            boolean highExits = exitByteSet > 0 && (exitByteSet & SELF_LOOP_EXIT_BYTE_SET_HIGH) != 0;
+            return isMatchingSelfLoop(exitByteSet) || highExits ? 0 : exitByteSet;
         }
 
         // Returns zero unless every byte either stays in the state or is an exit, and the exits are
-        // one to three bytes, or every high byte plus zero to three ASCII bytes. Accepted matching
-        // self-loops carry SELF_LOOP_EXIT_BYTE_SET_MATCHING, and all-high exits carry
-        // SELF_LOOP_EXIT_BYTE_SET_HIGH. UTF-8 dot loops exit on every lead and invalid byte.
-        private int countSelfLoopExitByteSet(CacheTables tables, int stateOffset)
+        // one to three bytes, or every high byte plus zero to three ASCII bytes, or the bytes that
+        // stay form one to four ranges. The exit form is taken whenever it fits; the stay form
+        // serves loops such as `[A-Z]*` or `\w*` that leave on most bytes. Accepted matching
+        // self-loops carry SELF_LOOP_EXIT_BYTE_SET_MATCHING or SELF_LOOP_STAY_RANGES_MATCHING, and
+        // all-high exits carry SELF_LOOP_EXIT_BYTE_SET_HIGH. UTF-8 dot loops exit on every lead and
+        // invalid byte.
+        private long countSelfLoopExitByteSet(CacheTables tables, int stateOffset)
         {
             int stateIndex = stateIndex(stateOffset);
-            int exitByteSet = tables.selfLoopExitByteSets[stateIndex];
+            long exitByteSet = tables.selfLoopExitByteSets[stateIndex];
             if (exitByteSet != 0) {
                 return acceptedSelfLoopExitByteSet(exitByteSet);
             }
@@ -6120,7 +6217,7 @@ final class Dfa
             }
             int valueLimit = highExits ? 0x80 : 256;
             int exitByteCount = 0;
-            exitByteSet = 0;
+            int exits = 0;
             for (int value = 0; value < valueLimit; value++) {
                 if (getTransition(transitions, stateOffset + (bytemap[value] & 0xFF)) == selfLoop) {
                     continue;
@@ -6129,21 +6226,51 @@ final class Dfa
                     exitByteCount++;
                     break;
                 }
-                exitByteSet |= value << (exitByteCount * Byte.SIZE);
+                exits |= value << (exitByteCount * Byte.SIZE);
                 exitByteCount++;
             }
 
             exitByteSet = (exitByteCount > 0 || highExits) && exitByteCount <= 3
-                    ? exitByteSet |
+                    ? exits |
                     (exitByteCount << SELF_LOOP_EXIT_BYTE_COUNT_SHIFT) |
                     (matching ? SELF_LOOP_EXIT_BYTE_SET_MATCHING : 0) |
                     (highExits ? SELF_LOOP_EXIT_BYTE_SET_HIGH : 0)
-                    : SELF_LOOP_EXIT_BYTE_SET_REJECTED;
+                    : selfLoopStayRanges(transitions, stateOffset, selfLoop, matching);
             currentTables.selfLoopExitByteSets[stateIndex] = exitByteSet;
             return acceptedSelfLoopExitByteSet(exitByteSet);
         }
 
-        private static int acceptedSelfLoopExitByteSet(int exitByteSet)
+        // The stay form of the self-loop at stateOffset, or SELF_LOOP_EXIT_BYTE_SET_REJECTED when
+        // the bytes that stay do not form one to four ranges. A range holds at most 128 bytes, the
+        // most its seven-bit width can describe, so a longer run of staying bytes takes two.
+        private long selfLoopStayRanges(int[] transitions, int stateOffset, int selfLoop, boolean matching)
+        {
+            long ranges = 0;
+            int rangeCount = 0;
+            int value = 0;
+            while (value < 256) {
+                if (getTransition(transitions, stateOffset + (bytemap[value] & 0xFF)) != selfLoop) {
+                    value++;
+                    continue;
+                }
+                if (rangeCount == SELF_LOOP_MAX_STAY_RANGES) {
+                    return SELF_LOOP_EXIT_BYTE_SET_REJECTED;
+                }
+                int lowest = value;
+                while (value < 256 && value - lowest < 128 && getTransition(transitions, stateOffset + (bytemap[value] & 0xFF)) == selfLoop) {
+                    value++;
+                }
+                ranges |= (long) (lowest | ((value - 1 - lowest) << Byte.SIZE)) << (rangeCount * Short.SIZE);
+                rangeCount++;
+            }
+            if (rangeCount == 0) {
+                return SELF_LOOP_EXIT_BYTE_SET_REJECTED;
+            }
+            int countLessOne = rangeCount - 1;
+            return SELF_LOOP_STAY_RANGES | (matching ? SELF_LOOP_STAY_RANGES_MATCHING : 0) | ((long) (countLessOne & 1) << 15) | ((long) (countLessOne >>> 1) << 31) | ranges;
+        }
+
+        private static long acceptedSelfLoopExitByteSet(long exitByteSet)
         {
             return exitByteSet == SELF_LOOP_EXIT_BYTE_SET_REJECTED ? 0 : exitByteSet;
         }
@@ -6203,7 +6330,7 @@ final class Dfa
             long transitionBytes = sizeOfIntArray(tables.transitions.length);
             long stateDataArrayBytes = sizeOfObjectArray(stateData.length);
             long stateReferenceArrayBytes = sizeOfObjectArray(stateRefArrays.length);
-            long selfLoopExitByteSetBytes = sizeOfIntArray(tables.selfLoopExitByteSets.length);
+            long selfLoopExitByteSetBytes = sizeOfLongArray(tables.selfLoopExitByteSets.length);
             long optionalStartStateCacheBytes = optionalStartStateCacheMemory(tables);
             long stateReferenceRowBytes = 0;
             long instructionBytes = 0;
@@ -6290,7 +6417,7 @@ final class Dfa
                 stateMemory += sizeOfIntArray(toIntExact(newTransitionsLength)) - sizeOfIntArray(transitions.length);
                 stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateData.length);
                 stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateRefArrays.length);
-                stateMemory += sizeOfIntArray(newStateCount) - sizeOfIntArray(tables.selfLoopExitByteSets.length);
+                stateMemory += sizeOfLongArray(newStateCount) - sizeOfLongArray(tables.selfLoopExitByteSets.length);
             }
 
             int newCacheTableCapacity = cache.capacityAfterInsert();
@@ -6317,7 +6444,7 @@ final class Dfa
             int[] newTransitions = transitions;
             StateData[] newStateData = tables.stateData;
             Object[][] newStateRefArrays = tables.stateRefArrays;
-            int[] newSelfLoopExitByteSets = tables.selfLoopExitByteSets;
+            long[] newSelfLoopExitByteSets = tables.selfLoopExitByteSets;
             if (newTransitionsLength != transitions.length) {
                 int oldLength = transitions.length;
                 beginTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
@@ -6529,6 +6656,11 @@ final class Dfa
             return tables.absolutePointerTransitions != null;
         }
 
+        boolean absolutePointerTransitionsRequested()
+        {
+            return absolutePointerTransitionsRequested;
+        }
+
         // The table is given up for good; a withheld table is neither available nor unavailable.
         boolean absolutePointerTransitionsUnavailable()
         {
@@ -6671,9 +6803,14 @@ final class Dfa
             return countSelfLoopNoMatchPointerHandOffCount;
         }
 
-        int countSelfLoopNotApplicableCount()
+        int countSelfLoopUnproductiveCount()
         {
-            return countSelfLoopNotApplicableCount;
+            return countSelfLoopUnproductiveCount;
+        }
+
+        int selfLoopStayRangeScanCount()
+        {
+            return selfLoopStayRangeScanCount;
         }
 
         int pairedMatchContinuationToUnpairedCount()
@@ -7954,7 +8091,7 @@ final class Dfa
             return sizeOfIntArray(tables.transitions.length) +
                     sizeOfObjectArray(tables.stateData.length) +
                     sizeOfObjectArray(tables.stateRefArrays.length) +
-                    sizeOfIntArray(tables.selfLoopExitByteSets.length) +
+                    sizeOfLongArray(tables.selfLoopExitByteSets.length) +
                     optionalStartStateCacheMemory(tables) +
                     STATE_CACHE_BYTES +
                     cache.tableBytes();
@@ -8016,7 +8153,7 @@ final class Dfa
             pairedTransitionsRejected = false;
             shortPairedSearchCount = 0;
             shortAbsolutePointerSearchCount = 0;
-            countSelfLoopNotApplicableCount = 0;
+            countSelfLoopUnproductiveCount = 0;
 
             cache.clear();
 

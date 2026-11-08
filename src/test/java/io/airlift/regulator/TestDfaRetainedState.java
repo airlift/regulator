@@ -111,7 +111,7 @@ public class TestDfaRetainedState
         for (int i = 0; i < rows.length; i++) {
             rows[i] = superseded.stateRefArrays[i] == null ? null : superseded.stateRefArrays[i].clone();
         }
-        int[] selfLoopExitByteSets = superseded.selfLoopExitByteSets.clone();
+        long[] selfLoopExitByteSets = superseded.selfLoopExitByteSets.clone();
         List<Dfa.StateData> startStates = startStates(superseded);
 
         dfa.resetCacheExternal();
