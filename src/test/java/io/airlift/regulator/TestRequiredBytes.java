@@ -376,12 +376,12 @@ public class TestRequiredBytes
             assertThat(matcher.requiredLiteralScanCountForDiagnostics() - scans).as(language).isEqualTo(1);
         }
 
-        // A pattern whose literal another route already searches for, an inner literal search, a
-        // prefix scan, or a start literal filter, or whose literal is case-insensitive, does not
-        // scan for it on long windows. The DFA builds a start literal filter only with the Vector
-        // API.
+        // A pattern whose literal another route already searches for, an inner literal search for
+        // one exact literal that holds it, a prefix scan, or a start literal filter, or whose
+        // literal is case-insensitive, does not scan for it on long windows. The DFA builds a
+        // start literal filter only with the Vector API.
         List<OtherRoute> otherRoutes = new ArrayList<>(List.of(
-                new OtherRoute("\\w+,\\bz", "ab,z", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
+                new OtherRoute("\\w+foobar\\d", "abfoobar1", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
                 new OtherRoute("x(.*?,){3}z", "x,,,z", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()),
                 new OtherRoute("(.*?,){3}# [Nn]oqa", ",,,# Noqa", pattern -> !pattern.requiredBytesForDiagnostics().isExactLiteral())));
         if (VectorSupport.isAvailable()) {
@@ -414,6 +414,49 @@ public class TestRequiredBytes
             assertThat(matcher.find()).isFalse();
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
             assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        }
+    }
+
+    @Test
+    public void testBitStateCaptureRejectsWindowWithoutInnerLiteral()
+    {
+        // An inner literal search for one exact literal that holds the required literal takes the
+        // place of the long-window check, so the routes that skip that search scan for its literal
+        // instead. A find with groups of a window BitState can hold skips both DFAs and the search,
+        // and a window without the literal is rejected before BitState starts.
+        Slice letters = utf8Slice("a".repeat(8192));
+        for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+(ing)").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.innerLiteralSearchForDiagnostics()).as(language).isNotNull();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).isNull();
+            assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), letters.length(), 2)).as(language).isTrue();
+            RegexpMatcher matcher = pattern.matcher(letters);
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
+        }
+    }
+
+    @Test
+    public void testSkippedDfaRejectsWindowWithoutInnerLiteral()
+    {
+        // A find that skips the DFA skips the inner literal search too, so it scans for the
+        // search's literal instead. A Unicode word boundary makes the DFA quit on a byte outside
+        // ASCII, and after DFA_QUIT_STREAK_LIMIT finds in a row whose DFA quit, a matcher's finds
+        // skip the DFA. Every window up to the last match is longer than BitState holds, so those
+        // finds run the NFA, and the last window, which holds no literal, would be the first that
+        // BitState holds.
+        Map<String, CompiledPattern> boundaries = compile("\\b[a-z]+foobar\\b");
+        for (String language : List.of("Java", "Trino", "Rust")) {
+            CompiledPattern pattern = boundaries.get(language);
+            assertThat(pattern.forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language).isTrue();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).isNull();
+            int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - 1;
+            Slice input = utf8Slice("\u00E9 abfoobar ".repeat(6) + "-".repeat(tail));
+            RegexpMatcher matcher = pattern.matcher(input);
+            assertThat(spans(matcher)).as(language).hasSize(6);
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(language).isTrue();
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
         }
     }
 

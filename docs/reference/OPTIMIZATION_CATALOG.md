@@ -121,15 +121,20 @@ answer, or reject the input before any engine runs.
   ([#188], [design][d-required-absence]).
 - **Where:** `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
-  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`
+  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
+  `InnerLiteralSearch.windowLacksLiteral`
 - **Applies when:** Windows of 256 bytes or more in find, count, and the
   one-shot range searches, all four regex languages; unanchored patterns whose
-  required bytes are an exact literal and that have no other literal search
+  required bytes are an exact literal and that have no other literal search,
+  where an inner literal search counts only when it scans for one exact
+  literal that holds the required literal
 - **What it does:** The search scans for the required literal before any
   engine runs, with the vector pair scan from 1 KiB, and a window without it
   has no match. A matcher reuses an occurrence it found until a find passes
   it, and stops scanning after eight scans in a row find the literal within
-  256 bytes of their start.
+  256 bytes of their start. Where an inner literal search stands in for the
+  check, the routes that skip that search, BitState capture of groups and a
+  skipped DFA, scan the window for its literal instead.
 
 ### Anchored find straight to its engine
 
@@ -396,6 +401,31 @@ so the automata run only where a match can be.
   and confirms forward. It is used only when the prefix cannot hold an earlier
   match. Guards against quadratic rescans, and a first hit that passes the
   byte gates within 64 bytes of the start, hand back to the ordinary engine.
+
+### Class-run prefix proof
+
+- **Origin:** Inspired by Hyperscan, whose Rose compiler anchors literals
+  behind pure-repeat prefixes ([rose_build_castle.cpp][hs-rose-castle],
+  [rose_build_lookaround.cpp][hs-rose-leftfix]); First described by .NET for
+  an unbounded class that cannot hold the literal
+  ([RegexPrefixAnalyzer.cs][dotnet-literal-after-loop]). Extends the search
+  adapted from the Rust regex crate ([reverse_inner.rs][ra-reverse-inner]).
+  Regulator: the proof for a bounded or unbounded run that can hold the
+  literal, behind assertions ([#193]).
+- **Where:** `InnerLiteralSearch.hasNoEarlierMatch`,
+  `InnerLiteralSearch.isClassRunPrefix`
+- **Applies when:** Leftmost-first find and count in all four regex
+  languages; a prefix of empty-width assertions and one class repeated
+  `{lo,hi}`, as `\b\w+` in `\b\w+nn\b` or `.{0,2}` before a set of names; a
+  run whose minimum is two or more characters needs one-byte characters
+- **What it does:** A run of one class that matches an earlier match's span
+  also matches the shorter span ending at any later literal inside it, so the
+  reverse search from the first literal hit still finds the leftmost start.
+  Such a prefix joins the crate's three proofs that the prefix cannot hold an
+  earlier match, even where the class can hold the literal. A pattern of the
+  [dot-star literal span](#dot-star-literal-span) matcher's shape, such as
+  `.*lit.*`, is left to that matcher: no other proof admits its prefix of
+  dots, so it takes no inner literal search.
 
 ### Inner literal forms
 
@@ -2768,6 +2798,7 @@ registry entry holds the trigger.
 [#173]: https://github.com/airlift/regulator/pull/173
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
+[#193]: https://github.com/airlift/regulator/pull/193
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2907,6 +2938,7 @@ registry entry holds the trigger.
 [dotnet-fixed-distance-search]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L740-L791
 [dotnet-fixed-distance-sets]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L184-L262
 [dotnet-fixed-length]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/Symbolic/SymbolicRegexMatcher.cs#L376-L387
+[dotnet-literal-after-loop]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexPrefixAnalyzer.cs#L1123-L1186
 [dotnet-literal-find]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs#L5017-L5048
 [dotnet-node]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexNode.cs
 [dotnet-parser]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexParser.cs
@@ -2940,6 +2972,8 @@ registry entry holds the trigger.
 [hs-mcclellan-flags]: https://github.com/intel/hyperscan/blob/v4.0.0/src/nfa/mcclellan_internal.h#L39-L41
 [hs-noodle-caseless]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_engine_sse.c#L182-L200
 [hs-noodle-mask]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_build.cpp#L88-L117
+[hs-rose-castle]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_castle.cpp#L56-L82
+[hs-rose-leftfix]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_lookaround.cpp#L809-L839
 [hs-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L110-L118
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362

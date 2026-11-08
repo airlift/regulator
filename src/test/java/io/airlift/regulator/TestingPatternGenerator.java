@@ -124,6 +124,12 @@ final class TestingPatternGenerator
             new ClassRange('0', '9', 0, 0),
             new ClassRange('a', 'c', 0, 0));
 
+    // The literals and literal sets of inner literal shapes, whose letters every shape's class
+    // holds, and the runs' counts, as minimum and maximum, where -1 is unbounded.
+    private static final List<String> INNER_LITERALS = List.of("nn", "ab", "kzk", "Tom", "Finn");
+    private static final List<List<String>> INNER_LITERAL_SETS = List.of(List.of("Tom", "Sawyer", "Finn"), List.of("abc", "ckz"), List.of("sax", "Saxx", "xas"));
+    private static final int[][] INNER_RUN_COUNTS = {{1, -1}, {0, -1}, {0, 2}, {1, 3}, {2, 4}, {3, -1}};
+
     private TestingPatternGenerator() {}
 
     /// Decides whether a dialect may repeat `body` from `min` to `max` times, where a negative
@@ -239,6 +245,46 @@ final class TestingPatternGenerator
             default -> {}
         }
         return new Concat(items);
+    }
+
+    /// Returns a pattern of the inner literal search's class-run shape (InnerLiteralSearch) for
+    /// the regular-expression fuzzers, a shape random trees rarely reach: sometimes a leading
+    /// boundary, a counted or unbounded run of one class that holds the literal's letters, then a
+    /// literal or a set of literals, sometimes followed by a boundary or another run of the class.
+    static Node innerLiteralShape(Random random)
+    {
+        List<Node> items = new ArrayList<>();
+        switch (random.nextInt(3)) {
+            case 0 -> items.add(new Anchor("\\b"));
+            case 1 -> items.add(new Anchor("\\B"));
+            default -> {}
+        }
+        Node run = switch (random.nextInt(4)) {
+            case 0 -> new PerlClass('w');
+            case 1 -> new AnyCharacter();
+            case 2 -> new CharacterClass(false, List.of(List.of(new ClassRange('A', 'Z', 0, 0), new ClassRange('a', 'z', 0, 0))));
+            default -> new CharacterClass(false, List.of(List.of(new ClassRange('A', 'Z', 0, 0), new ClassRange('a', 'z', 0, 0), new ClassLiteral('é', 0))));
+        };
+        int[] count = INNER_RUN_COUNTS[random.nextInt(INNER_RUN_COUNTS.length)];
+        items.add(new Repeat(run, count[0], count[1], true, 0));
+        if (random.nextBoolean()) {
+            items.addAll(innerLiteral(INNER_LITERALS.get(random.nextInt(INNER_LITERALS.size()))));
+        }
+        else {
+            List<Node> members = INNER_LITERAL_SETS.get(random.nextInt(INNER_LITERAL_SETS.size())).stream().map(member -> (Node) new Concat(innerLiteral(member))).toList();
+            items.add(new Group(random.nextBoolean(), null, new Alternation(members)));
+        }
+        switch (random.nextInt(3)) {
+            case 0 -> items.add(new Anchor("\\b"));
+            case 1 -> items.add(new Repeat(run, 0, -1, true, 0));
+            default -> {}
+        }
+        return new Concat(items);
+    }
+
+    private static List<Node> innerLiteral(String literal)
+    {
+        return literal.codePoints().mapToObj(codePoint -> (Node) new Literal(codePoint, 0)).toList();
     }
 
     private static List<Node> planLiteral(Random random)

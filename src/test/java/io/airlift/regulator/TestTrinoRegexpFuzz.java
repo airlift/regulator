@@ -279,6 +279,11 @@ public class TestTrinoRegexpFuzz
         @Override
         public Generated generate(Random random)
         {
+            if (random.nextInt(8) == 0) {
+                // Random trees rarely reach the inner literal search's class-run proof, so one
+                // pattern in eight has its shape.
+                return new Generated(TestingPatternGenerator.innerLiteralShape(random), 0);
+            }
             return new Generated(TestingPatternGenerator.generate(random, random.nextInt(3) == 0 ? IGNORING_CASE : KEEPING_CASE), 0);
         }
 

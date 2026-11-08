@@ -313,6 +313,12 @@ public class TestRustRegexpFuzz
                 // bounds that extra compile work.
                 return new Generated(TestingPatternGenerator.scanPlanShape(random), options & ~(CASE_INSENSITIVE | SWAP_GREED));
             }
+            if (random.nextInt(8) == 0) {
+                // Random trees rarely reach the inner literal search's class-run proof, so one in
+                // eight of the rest has its shape, with the literal exact. The bytes and Unicode
+                // options decide whether a dot reads one byte, which admits longer runs.
+                return new Generated(TestingPatternGenerator.innerLiteralShape(random), options & ~CASE_INSENSITIVE);
+            }
             Node tree = TestingPatternGenerator.generate(random, VOCABULARY);
             if (random.nextInt(8) == 0) {
                 tree = TestingPatternGenerator.withLargeCounts(random, tree);

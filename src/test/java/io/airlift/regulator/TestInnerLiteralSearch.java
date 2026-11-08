@@ -65,6 +65,15 @@ public class TestInnerLiteralSearch
             "\\s[a-z]{0,12}(?:ing|ment)\\s",
             "[\"'][^\"']{0,30}[?!.][\"']",
             DATE,
+            "\\b\\w+nn\\b",
+            ".{0,2}(Tom|Sawyer|Huckleberry|Finn)",
+            ".{2,4}(Tom|Sawyer|Huckleberry|Finn)",
+            "\\w*nn",
+            "\\b\\w+n\\b",
+            "[a-z]{2,5}ing",
+            "\\B\\w+nn\\b",
+            "(?m)^.{0,3}Finn",
+            "(?:..@cbb|b)@(?:c|d)",
             // Outside RE2 the class is empty, so the program can never match.
             "\\s\\*[a&&b]{1,2}");
 
@@ -118,7 +127,7 @@ public class TestInnerLiteralSearch
         assertThat(literal("\\s[a-z]{0,12}(?:ing|ment)\\s")).isEqualTo("ing|ment");
         // A set that cannot be searched leaves a later literal to decide.
         assertThat(literal("[a-z](?:ab|cd)@x")).isEqualTo("@x");
-        assertThat(literal("\\w+[?!.][\"']@x")).isEqualTo("@x");
+        assertThat(literal("(?:\\w|--)+[?!.][\"']@x")).isEqualTo("@x");
         // A rare pair of small classes is searched as the set of its two-byte members. A quote
         // ends every member, and the prefix holds one only as its one-byte opening quote, so no
         // earlier match spans a later candidate.
@@ -146,19 +155,90 @@ public class TestInnerLiteralSearch
         String continuationBytes = IntStream.rangeClosed(0x80, 0xBF).mapToObj(value -> String.valueOf((char) value)).collect(joining());
         assertThat(RustRegexp.compile(utf8Slice("[\\w.+-]+@[\\w.-]+\\.[\\w.-]+")).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics())
                 .isEqualTo(List.of("+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz" + continuationBytes, ""));
+        // A prefix that is one class repeated, after leading assertions, also matches the shorter
+        // run that ends at a later occurrence inside an earlier match, so the reverse search from
+        // that occurrence finds the earlier match's start. The assertions are judged at that same
+        // start, so this holds for every language's word characters and boundaries.
+        for (Language language : Language.values()) {
+            for (Map.Entry<String, String> entry : List.of(
+                    Map.entry("\\b\\w+nn\\b", "nn"),
+                    Map.entry(".{0,2}(Tom|Sawyer|Huckleberry|Finn)", "Tom|Sawyer|Huckleberry|Finn"),
+                    Map.entry("\\B\\w+nn\\b", "nn"))) {
+                InnerLiteralSearch search = language.compiledPattern(entry.getKey()).innerLiteralSearchForDiagnostics();
+                assertThat(search).as("%s %s", language, entry.getKey()).isNotNull();
+                assertThat(literal(search)).as("%s %s", language, entry.getKey()).isEqualTo(entry.getValue());
+            }
+        }
+        // A pattern of the dot-star literal matcher's shape, such as `.*literal.*`, is left to that
+        // matcher, and no inner literal search is built for it. Java's dot and the Unicode dot of
+        // Rust's bytes API give no such shape, and the pattern takes the search.
+        Slice dotStar = utf8Slice(".*coolfunctionname.*");
+        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
+                Map.entry("RE2", Re2.compile(dotStar)),
+                Map.entry("RE2 Latin-1", Re2.compile(dotStar, Re2.Options.latin1())),
+                Map.entry("Trino", TrinoRegexp.compile(dotStar).re2()),
+                Map.entry("Rust", RustRegexp.compile(dotStar)))) {
+            assertThat(compiled.getValue().createDotStarLiteralSpanMatcher()).as(compiled.getKey()).isNotNull();
+            assertThat(compiled.getValue().innerLiteralSearchForDiagnostics()).as(compiled.getKey()).isNull();
+        }
+        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
+                Map.entry("Java", JavaRegexp.compile(dotStar)),
+                Map.entry("Rust bytes", RustRegexp.compile(dotStar, RUST_BYTES_OPTIONS)))) {
+            assertThat(compiled.getValue().createDotStarLiteralSpanMatcher()).as(compiled.getKey()).isNull();
+            assertThat(literal(compiled.getValue().innerLiteralSearchForDiagnostics())).as(compiled.getKey()).isEqualTo("coolfunctionname");
+        }
+        // Rust's multi-line caret is a leading assertion the DFA runs, so a run after it is a class
+        // run prefix too.
+        assertThat(literal("(?m)^.{0,3}Finn")).isEqualTo("Finn");
+        assertThat(literal("[xz]+zx")).isEqualTo("zx");
+        assertThat(literal("[a-z]+ing")).isEqualTo("ing");
+        assertThat(literal("[a-z]{0,3}xy")).isEqualTo("xy");
+        assertThat(literal("[a-z]{2,5}ing")).isEqualTo("ing");
+        // A repeated body whose minimum is at most one matches every count in between.
+        assertThat(literal("(?:[a-z][a-z]?){2}(?:foo|bar)")).isEqualTo("foo|bar");
+        assertThat(literal("\\w+(?:foo|bar)\\s")).isEqualTo("foo|bar");
+        assertThat(literal("[0-9]+(?:foo|bar)\\s")).isEqualTo("foo|bar");
+        assertThat(literal("\\w+[?!.][\"']@x")).isEqualTo("!\"|!'|.\"|.'|?\"|?'");
+        // A run with a minimum of at least two characters needs every character of the class to
+        // be one byte: a later start inside a run of multibyte characters need not fall on a
+        // character boundary of the earlier match, as in malformed input. RE2's \w and a Latin-1
+        // or Rust ASCII bytes dot qualify, and a UTF-8 dot or Rust's Unicode \w does not. \w+\w+
+        // simplifies to \w\w+, a run with a minimum of two.
+        assertThat(literal(Re2.compile(utf8Slice("\\w{2,5}nn")).innerLiteralSearchForDiagnostics())).isEqualTo("nn");
+        assertThat(literal(Re2.compile(utf8Slice("\\w+\\w+Holmes")).innerLiteralSearchForDiagnostics())).isEqualTo("Holmes");
+        assertThat(literal(Re2.compile(utf8Slice(".{2,4}(?:Tom|Sawyer)"), Re2.Options.latin1()).innerLiteralSearchForDiagnostics())).isEqualTo("Tom|Sawyer");
+        assertThat(literal(Language.RUST_BYTES_ASCII.compiledPattern(".{2,4}(?:Tom|Sawyer)").innerLiteralSearchForDiagnostics())).isEqualTo("Tom|Sawyer");
+        assertThat(Re2.compile(utf8Slice(".{2,4}(?:Tom|Sawyer)")).innerLiteralSearchForDiagnostics()).isNull();
 
         for (String pattern : List.of(
                 // No proof rules out an earlier match spanning a later occurrence: in ac@d@, the
                 // match ac@d@ spans the occurrence that c@ would confirm first.
                 "(?:a[^@]*@[^@]*d|c)@",
                 "(?:a@.*b|c)@",
-                "[xz]+zx",
-                "[a-z]+ing",
+                // The crate's issue #1354: in xzbacbbac, ..acbb|b matches [1, 7) and [2, 3) but
+                // not [1, 3), so the candidate at the first a is not the leftmost match. Its
+                // literal is one common byte; the second form reaches the proofs.
+                "(?:..acbb|b)a(?:c|d)",
+                "(?:..@cbb|b)@(?:c|d)",
+                // A class run proves nothing with an assertion after it, which a shorter run
+                // ending at a later occurrence need not satisfy, with two classes, where the
+                // shorter run may end inside the first, or with an alternation.
+                "\\w+\\Bnn",
+                ".{0,2}\\b(?:Tom|Sawyer)",
+                "[a-z]\\w*nn",
+                "(?:\\w|--)+nn",
+                // Nor does a repeated body of two or more characters, which leaves gaps between its
+                // counts: from the first hit in xyzfoozzbar, the search would report yzfoo, where
+                // the engine matches the whole of it.
+                "(?:[a-z]{2})+(?:foo|bar)",
+                // Rust's Unicode \w and dot are multibyte, so a run with a minimum of at least two
+                // is declined.
+                "\\w{2,5}nn",
                 "\\w+\\w+Holmes",
+                ".{2,4}(?:Tom|Sawyer)",
                 // As in the crate, a set never uses the proof that the prefix cannot consume the
                 // literal, since one member can cross the prefix boundary into another.
-                "\\w+(?:foo|bar)\\s",
-                "[0-9]+(?:foo|bar)\\s",
+                "[0-9]+[-.][0-9]+(?:foo|bar)\\s",
                 // The separator must exclude every member's bytes.
                 "\\s[a-z]{0,12}(?:ing|a b)\\s",
                 // The bytes C3 A9 encode é, so neither byte class is disjoint from [a-zé].
@@ -181,8 +261,8 @@ public class TestInnerLiteralSearch
                 "[a-z](?i:foo|bar)\\s",
                 "[a-z](?:foo|b\u00E4r)\\s",
                 "[a-z](?:foo|b[ae]r)\\s",
-                // A class pair whose prefix does not open with a single byte.
-                "\\w+[?!.][\"']")) {
+                // A class pair whose prefix neither opens with a single byte nor is a class run.
+                "(?:\\w|--)+[?!.][\"']")) {
             assertThat(innerLiteralSearch(pattern)).as(pattern).isNull();
         }
     }
@@ -582,6 +662,7 @@ public class TestInnerLiteralSearch
     // bar.
     private static String literal(InnerLiteralSearch search)
     {
+        assertThat(search).isNotNull();
         return Stream.of(search.literals())
                 .map(literal -> new String(literal, UTF_8))
                 .collect(joining("|"));
@@ -625,13 +706,23 @@ public class TestInnerLiteralSearch
                 "a/1 on 1/2/2024 x/y 12/25/24 3/4/ 99/99/9999 1/23/456 /1/2 7//8\n".repeat(4),
                 // Literals before a class that is empty outside RE2, in a text long enough that find
                 // and spans skip the minimum-length check.
-                "x *a y *& z *b * ".repeat(256))) {
+                "x *a y *& z *b * ".repeat(256),
+                // Class runs: an earlier match spanning a later occurrence, runs and occurrences at
+                // the text start, Unicode word characters around an occurrence, short runs across
+                // line breaks, and runs longer than the near-start minimum. The random texts below
+                // add malformed bytes.
+                "nnxnn annbnn Pennsylvannia nnnn nnn annann\n".repeat(3),
+                "nnann nn\n",
+                "Tom  Tom xxTom TomFinn HuckleberryFinn Sawyer\nFinn\n\nTom\r\nx\nyFinn ab\nTom",
+                "ännä übernn énn 東nn京 nnü ünn Ωnné ännbnn énn",
+                "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
+                "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, so filler keeps the search
             // and its later candidates in play.
             texts.add(utf8Slice(FILLER + text));
         }
-        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);

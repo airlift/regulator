@@ -33,12 +33,18 @@ import static java.util.Objects.requireNonNull;
 /// and the forward DFA of the whole pattern anchored at that start finds the end.
 ///
 /// The first confirmed candidate is the leftmost-first match only when no earlier match can span
-/// a later occurrence of `L`. [#analyze] accepts a literal or literal set only when one of the
-/// crate's proofs holds (`meta/reverse_inner.rs` `has_no_earlier_match`): `P` cannot consume every
-/// byte of a single literal `L`, `P` has a fixed length, or the first or last element of `P`,
-/// skipping elements such as assertions that match only the empty string, is a required class
-/// disjoint from the rest of `P` and from every byte of `L`. A class pair may instead pass a proof
-/// of its own, described below.
+/// a later occurrence of `L`. [#analyze] accepts a literal or literal set only when one of these
+/// proofs holds: the crate's three (`meta/reverse_inner.rs` `has_no_earlier_match`), that `P`
+/// cannot consume every byte of a single literal `L`, that `P` has a fixed length, or that the
+/// first or last element of `P`, skipping elements such as assertions that match only the empty
+/// string, is a required class disjoint from the rest of `P` and from every byte of `L`; and a
+/// fourth of Regulator's own, that `P` is leading assertions and then a run of one class, such as
+/// `\b\w+` or `.{0,2}`. Let an earlier match start at `s0`, with its prefix ending at its own
+/// occurrence `g`, and let `P` also match `[e, h)` before a later occurrence `h`, with
+/// `s0 < e <= h < g`. Then such a `P` matches `[s0, h)` too, so the reverse search from `h` finds
+/// the earlier match's start. A run whose minimum is two or more characters qualifies only when
+/// each character of its class is one byte. A class pair may instead pass a proof of its own,
+/// described below.
 ///
 /// As in the crate, a search reports [#FALLBACK], for its caller to run the ordinary engine, when
 /// the reverse search would read back past the previous candidate, or a candidate lies in text the
@@ -339,6 +345,14 @@ final class InnerLiteralSearch
         return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
     }
 
+    /// Whether the search is for one literal without case-insensitive letters that holds all of
+    /// the exact `requiredLiteral` in a row, so a window that lacks the required literal holds no
+    /// hit either.
+    boolean searchesLiteralHolding(RequiredBytes requiredLiteral)
+    {
+        return literalSearch != null && foldedBytes == null && requiredLiteral.occursIn(Slices.wrappedBuffer(literalSearch.literal()), 0, literalSearch.literalLength());
+    }
+
     /// The bytes the byte before the literal and the byte after it must be one of, each as a
     /// string in byte order, empty for no gate.
     List<String> byteGatesForDiagnostics()
@@ -414,6 +428,15 @@ final class InnerLiteralSearch
             literalStart = start + length - next < minimumLiteralLength ? -1 : findLiteral(text, next, start + length - next);
         }
         return literalStart >= 0 && literalStart - start < MINIMUM_SKIPPED_BYTES;
+    }
+
+    /// Whether the search is for one literal without case-insensitive letters and `[start, end)`
+    /// of `text` lacks it. Every match holds that literal, so such a window holds no match. A
+    /// route that skips the search scans for the literal in its place, since a pattern whose
+    /// search [holds its required literal][#searchesLiteralHolding] skips the long-window check.
+    boolean windowLacksLiteral(Slice text, int start, int end)
+    {
+        return literalSearch != null && foldedBytes == null && nextLiteral(text, start, end) < 0;
     }
 
     /// Searches `[start, end)` of `text` with assertions seeing `[contextStart, contextEnd)`, and
@@ -1081,7 +1104,8 @@ final class InnerLiteralSearch
         return literal;
     }
 
-    // meta/reverse_inner.rs has_no_earlier_match, with the helpers of meta/prefix.rs.
+    // meta/reverse_inner.rs has_no_earlier_match, with the helpers of meta/prefix.rs, and the
+    // class-run proof, which the Rust regex crate does not have.
     private static boolean hasNoEarlierMatch(Regexp prefix, byte[][] literals, CaseFolding caseFolding)
     {
         if (literals.length == 1 && !canConsumeEveryLiteralByte(prefix, literals[0])) {
@@ -1090,7 +1114,135 @@ final class InnerLiteralSearch
         if (MatchLength.analyze(prefix, caseFolding).fixed() >= 0) {
             return true;
         }
-        return hasDisjointClassSeparator(prefix, literals);
+        return hasDisjointClassSeparator(prefix, literals) || isClassRunPrefix(prefix);
+    }
+
+    // A prefix of leading assertions and then a run of one class has the property the search
+    // needs. Let an earlier match start at s0, with its prefix ending at its own occurrence g, and
+    // let the prefix also match [e, h) before a later occurrence h, with s0 < e <= h < g. Then it
+    // matches [s0, h), so the reverse search from h finds s0 or earlier. The assertions are judged at s0 on the real text, as for [s0, g). The
+    // occurrence starts with an ASCII byte, which every compiled class reads as a character of its
+    // own, so [s0, h) is a shorter run of the class, of at least one character. That is enough
+    // when the minimum is at most one. A larger minimum also needs [s0, h) to hold more characters
+    // than [e, h), which holds only when each character is one byte: a lenient UTF-8 class may
+    // read malformed bytes from e as more characters than from s0. An assertion after the run, or
+    // a second class, would let [s0, h) fail where [s0, g) matched.
+    private static boolean isClassRunPrefix(Regexp prefix)
+    {
+        ClassRun run = concatenatedClassRun(elementsAfterLeadingEmptyOnly(prefix), 0);
+        return run != null && run.leaf() != null && (run.minimum() <= 1 || hasOneByteCharacters(run.leaf()));
+    }
+
+    // The elements of the prefix's top-level concatenation, its groups looked through, from the
+    // first that does not match only the empty string, as an assertion does.
+    private static List<Regexp> elementsAfterLeadingEmptyOnly(Regexp prefix)
+    {
+        while (prefix.op() == RegexpOp.CAPTURE) {
+            prefix = prefix.child(0);
+        }
+        List<Regexp> elements = prefix.op() == RegexpOp.CONCAT ? prefix.children() : List.of(prefix);
+        int first = 0;
+        while (first < elements.size() && matchesEmptyOnly(elements.get(first), 0)) {
+            first++;
+        }
+        return elements.subList(first, elements.size());
+    }
+
+    // A run of one class: an expression that matches one character of the class, or null when
+    // the run matches only the empty string, and the least number of characters. The run matches
+    // every number of characters from its minimum up to its greatest, which the proof never needs.
+    private record ClassRun(Regexp leaf, int minimum) {}
+
+    // The run `regexp` matches, or null when it is not a run of one class or the depth limit is
+    // reached.
+    private static ClassRun classRun(Regexp regexp, int depth)
+    {
+        if (depth >= MAX_RECURSIVE_DEPTH) {
+            return null;
+        }
+        return switch (regexp.op()) {
+            case EMPTY_MATCH -> new ClassRun(null, 0);
+            case CHAR_CLASS, ANY_CHAR, ANY_BYTE -> new ClassRun(regexp, 1);
+            case LITERAL -> (regexp.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) == 0 ? new ClassRun(regexp, 1) : null;
+            case CAPTURE -> classRun(regexp.child(0), depth + 1);
+            case CONCAT -> concatenatedClassRun(regexp.children(), depth + 1);
+            case STAR, PLUS, QUEST, REPEAT -> repeatedClassRun(regexp, depth + 1);
+            default -> null;
+        };
+    }
+
+    // The counts of a concatenation add, as for the copies the simplifier makes of a counted
+    // repetition: C{2,5} becomes C C (?:C(?:C(?:C)?)?)?.
+    private static ClassRun concatenatedClassRun(List<Regexp> elements, int depth)
+    {
+        Regexp leaf = null;
+        int minimum = 0;
+        for (Regexp element : elements) {
+            ClassRun run = classRun(element, depth);
+            if (run == null) {
+                return null;
+            }
+            if (leaf == null) {
+                leaf = run.leaf();
+            }
+            else if (run.leaf() != null && !isSameClass(leaf, run.leaf())) {
+                return null;
+            }
+            minimum = addCounts(minimum, run.minimum());
+        }
+        return new ClassRun(leaf, minimum);
+    }
+
+    // A repetition of a contiguous run whose minimum is at most one is contiguous again: each
+    // count of the body overlaps or adjoins the next. A larger minimum may leave gaps: (?:CC)+
+    // matches two or four characters but not three. Admitted, (?:[a-z]{2})+(?:foo|bar) would match
+    // yzfoo from the first hit in xyzfoozzbar, where the engine matches the whole of it. With a
+    // body minimum of zero or one, the repetition's minimum is its count's minimum or zero.
+    private static ClassRun repeatedClassRun(Regexp repetition, int depth)
+    {
+        ClassRun body = classRun(repetition.child(0), depth);
+        if (body == null || body.minimum() > 1) {
+            return null;
+        }
+        return switch (repetition.op()) {
+            case STAR, QUEST -> new ClassRun(body.leaf(), 0);
+            case PLUS -> body;
+            default -> new ClassRun(body.leaf(), repetition.min() * body.minimum());
+        };
+    }
+
+    // Saturating keeps a long concatenation's minimum from wrapping around to a small one.
+    private static int addCounts(int left, int right)
+    {
+        return (int) Math.min((long) left + right, Integer.MAX_VALUE);
+    }
+
+    // Two leaves are one class when they compile to the same byte sequences: the same operation,
+    // the same encoding, and the same runes. A leaf literal never folds case.
+    private static boolean isSameClass(Regexp left, Regexp right)
+    {
+        if (left.op() != right.op() || ((left.parseFlags() ^ right.parseFlags()) & Regexp.LATIN1) != 0) {
+            return false;
+        }
+        return switch (left.op()) {
+            case LITERAL -> left.rune() == right.rune();
+            case CHAR_CLASS -> left.charClass().equals(right.charClass());
+            default -> true;
+        };
+    }
+
+    // Latin-1 and Rust bytes classes read one byte per character, as does UTF-8 for ASCII runes.
+    private static boolean hasOneByteCharacters(Regexp leaf)
+    {
+        if ((leaf.parseFlags() & Regexp.LATIN1) != 0) {
+            return true;
+        }
+        return switch (leaf.op()) {
+            case ANY_BYTE -> true;
+            case LITERAL -> leaf.rune() <= 0x7F;
+            case CHAR_CLASS -> !hasNonAscii(leaf.charClass());
+            default -> false;
+        };
     }
 
     // Not one of the crate's proofs. Used only for a class pair set, but sound for any set whose
@@ -1126,18 +1278,11 @@ final class InnerLiteralSearch
                 }
             }
         }
-        while (prefix.op() == RegexpOp.CAPTURE) {
-            prefix = prefix.child(0);
-        }
-        List<Regexp> elements = prefix.op() == RegexpOp.CONCAT ? prefix.children() : List.of(prefix);
-        int first = 0;
-        while (first < elements.size() && matchesEmptyOnly(elements.get(first), 0)) {
-            first++;
-        }
-        if (first == elements.size() || asciiByteSet(elements.get(first), 0x80) == null) {
+        List<Regexp> elements = elementsAfterLeadingEmptyOnly(prefix);
+        if (elements.isEmpty() || asciiByteSet(elements.get(0), 0x80) == null) {
             return false;
         }
-        for (int index = first + 1; index < elements.size(); index++) {
+        for (int index = 1; index < elements.size(); index++) {
             for (int value = 0; value < lastBytes.length; value++) {
                 if (lastBytes[value] && canConsumeByte(elements.get(index), (byte) value, 0)) {
                     return false;

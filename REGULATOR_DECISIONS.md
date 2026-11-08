@@ -1922,8 +1922,10 @@ the start-byte scan it replaces. In `["'][^"']{0,30}[?!.]["']` the pair is
 vector loop that tests each side against its bytes, in the mask form
 [Candidate Masks on SVE](#candidate-masks-on-sve) selects.
 
-None of the crate's proofs admits such a pattern, so the pair has its own: the
-prefix's first element that does not match only the empty string consumes
+None of the crate's proofs admits such a pattern. The
+[class-run proof](#inner-literal-class-run-prefix) admits a pair behind a run of
+one class, as in `\w+[?!.]["']`, and for any other prefix the pair has its own:
+the prefix's first element that does not match only the empty string consumes
 exactly one ASCII byte, no later prefix element can consume a member's last
 byte, and no member holds one of those bytes before its end. An earlier match
 that spanned a later candidate would then need its prefix to consume that
@@ -1996,18 +1998,26 @@ The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
 must have no other route that already searches for a literal at least as fast.
 So it has no required prefix, exact literal, literal kernel or literal search,
-inner literal search, scan plan, class counter, literal set or alternation,
-span, byte-run, word-run, or disjoint suffix-repeat matcher, or whole-input
-capture plan. Neither its forward nor its lowered program has a prefix scan, a
-transparent start literal, or a [start literal filter](#start-literal-filter)
-that its first-match DFA can run. A program whose assertions the DFA cannot run,
-or whose first-match DFA does not fit its budget, never scans for its filter, so
-the filter does not count there. A search that skips the DFA in a pattern whose
-filter counts, such as a longest-match search whose DFA alone does not fit or a
-find after a count has given up on the DFA, reads the window as it did before.
-Neither program is anchored at either end: a start-anchored search fails at the
-first byte that cannot continue, and an end-anchored one runs the reverse DFA
-from the end, so either can stop long before a scan of the whole window would.
+scan plan, class counter, literal set or alternation, span, byte-run,
+word-run, or disjoint suffix-repeat matcher, or whole-input capture plan, and
+no inner literal search for one exact literal that holds the required literal,
+whose scan already rejects a window without it. The routes that skip that
+search, BitState's capture of groups and a search that skips the DFA, scan the
+window for its literal in its place, so every window is still checked.
+An inner search for a literal
+set, a case-insensitive literal, a class pair, or a literal without the
+required one, such as the `,` of `(.*?,){13}z`, stops at hits that lack it, so
+the check runs beside that search. Neither its forward nor its lowered program
+has a prefix scan, a transparent start literal, or a
+[start literal filter](#start-literal-filter) that its first-match DFA can run.
+A program whose assertions the DFA cannot run, or whose first-match DFA does
+not fit its budget, never scans for its filter, so the filter does not count
+there. A search that skips the DFA in a pattern whose filter counts, such as a
+longest-match search whose DFA alone does not fit or a find after a count has
+given up on the DFA, reads the window as it did before. Neither program is
+anchored at either end: a start-anchored search fails at the first byte that
+cannot continue, and an end-anchored one runs the reverse DFA from the end, so
+either can stop long before a scan of the whole window would.
 A pattern with a single-byte table keeps no required bytes at all.
 
 Compilation decides this once, and the literal's search takes its memory in the
@@ -2094,6 +2104,45 @@ moves; the base already pays the same slow mode on 2,000-byte lines in 17 of 22
 launches (6.7 ms against 4.4 ms). Under either flag that changes the compiled
 code, 64-byte object alignment or a preserved frame pointer, both builds run
 fast. JMH measures the 1,100-byte row at 1.03–1.04.
+
+## Inner Literal Class-Run Prefix
+
+The Rust regex crate's three proofs reject a variable-length prefix that can
+consume the literal, such as `\b\w+` in `\b\w+nn\b` or `.{0,2}` in
+`.{0,2}(Tom|Sawyer|Huckleberry|Finn)`, so such patterns ran the DFA over every
+byte. The inner literal search also admits a prefix of leading assertions and
+then one class repeated `{lo,hi}` times. Let an earlier match start at `s0`,
+its prefix ending at its own occurrence `g`, and let the prefix also match from
+`e` to an occurrence `h` that the scan finds first, with `s0 < e <= h < g`. The occurrence starts
+with an ASCII byte, which every compiled class reads as a character of its own,
+so `[s0, h)` is a shorter run of the class, and the assertions are judged at
+`s0` as for the earlier match. The prefix matches `[s0, h)`, so the reverse
+search from the first hit finds the leftmost start. An assertion after the run,
+or a second class, could fail on the shorter span. A pattern of the dot-star
+literal matcher's shape, as `.*coolfunctionname.*` is in RE2, Trino, and Rust's
+string API, is left to that matcher: no other proof admits its prefix of dots,
+so it takes no inner literal search.
+
+A run whose minimum is two or more also needs `[s0, h)` to hold more characters
+than `[e, h)`, which holds only when each character of the class is one byte:
+lenient UTF-8 decoding may read malformed bytes from `e` as more characters
+than from `s0`. So `.{2,4}(Tom|Sawyer)` takes the search in RE2 Latin-1 and
+Rust's bytes API with Unicode off, but not in UTF-8. A repeated body must match
+a contiguous range of lengths, so a body whose minimum is two or more is
+declined: `(?:[a-z]{2})+` matches two or four letters but not three, and from
+the first hit in `xyzfoozzbar`, `(?:[a-z]{2})+(?:foo|bar)` would report `yzfoo`
+where the engine matches all of it. A
+[class pair](#inner-literal-class-pairs) asks the same proofs. Hyperscan's Rose
+singles out the same prefix shape, a pure repeat, but only to decide whether a
+match exists; .NET's `LiteralAfterLoop` (`RegexPrefixAnalyzer`) searches from
+the first hit behind a leading class loop, but only an unbounded one that
+cannot consume the literal. As for class pairs, the DFAs still decide every
+candidate, and randomized tests compare the results with the ordinary engine.
+
+Measured with rebar on one r9g and one r8i Spot host, `leipzig/word-ending-nn`
+took 0.11x the base's time on r9g and 0.12x on r8i,
+`tom-sawyer-huckle-fin-prefix-short` 0.078x and 0.056x, and `leipzig/ing` about
+0.5x on both.
 
 ## Trino LIKE Frontend
 
