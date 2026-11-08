@@ -17,6 +17,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
@@ -156,7 +157,7 @@ public class TestUpstreamPrefixAccel
                 // Every pair scan finds the same start whichever two prefix bytes it probes.
                 int firstOffset = random.nextInt(acceleratedPrefixLength - 1);
                 int secondOffset = firstOffset + 1 + random.nextInt(acceleratedPrefixLength - firstOffset - 1);
-                assertThat(Prog.findFoldCaseSwar(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                assertThat(findFoldCaseSwar(program, data, offset, length, literal, firstOffset, secondOffset))
                         .as("SWAR %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
                         .isEqualTo(expected);
                 if (VectorSupport.isAvailable()) {
@@ -171,6 +172,76 @@ public class TestUpstreamPrefixAccel
         }
         assertThat(endPairs).isTrue();
         assertThat(innerPairs).isTrue();
+    }
+
+    @Test
+    public void testFoldCaseSwarComparesEveryByte()
+    {
+        // Every byte a folded prefix can hold, at its first, third, and last offset in a short and
+        // a nine-byte prefix, against every data byte. Both SWAR kernels search 11 starts, the
+        // first eight in one word and the rest after it, with the planted start in each part. The
+        // end pair probes the first and last offsets but not the third; the configured pair
+        // probes the tested offset in one search and not in the other. The prefix's other bytes
+        // are distinct letters and the filler is a dot, so no other start can match. Under a flat
+        // distribution no pair is less than a quarter as likely as the ends, so the folded pair
+        // is the end pair the end pair kernel probes.
+        Prog program = compile("x");
+        long[] flatCounts = new long[256];
+        Arrays.fill(flatCounts, 1);
+        ByteFrequencies flat = ByteFrequencies.fromCounts(flatCounts);
+        for (String template : List.of("bcdfg", "bcdfghjkm")) {
+            int size = template.length();
+            for (int index : new int[] {0, 2, size - 1}) {
+                int probedOffset = index == 0 ? 3 : 1;
+                for (int prefixByte = 0; prefixByte < 256; prefixByte++) {
+                    byte[] prefix = template.getBytes(StandardCharsets.US_ASCII);
+                    prefix[index] = (byte) prefixByte;
+                    program.configurePrefixAccel(Slices.wrappedBuffer(prefix), true, flat);
+                    assertThat(program.prefixAccelFoldCaseFirstOffset()).isZero();
+                    assertThat(program.prefixAccelFoldCaseSecondOffset()).isEqualTo(size - 1);
+                    for (int dataByte = 0; dataByte < 256; dataByte++) {
+                        boolean folds = asciiLower(dataByte) == asciiLower(prefixByte);
+                        for (int start : new int[] {3, 10}) {
+                            byte[] data = new byte[size + 10];
+                            Arrays.fill(data, (byte) '.');
+                            System.arraycopy(prefix, 0, data, start, size);
+                            data[start + index] = (byte) dataByte;
+                            int expected = folds ? start : -1;
+                            Object[] description = {template, prefixByte, index, dataByte, start};
+                            assertThat(program.prefixAccelFoldCaseFrontAndBackSWAR(data, 0, data.length))
+                                    .as("end pair: %s with byte %s at %s against byte %s at start %s", description)
+                                    .isEqualTo(expected);
+                            assertThat(findFoldCaseSwar(program, data, 0, data.length, prefix, Math.min(index, probedOffset), Math.max(index, probedOffset)))
+                                    .as("probed: %s with byte %s at %s against byte %s at start %s", description)
+                                    .isEqualTo(expected);
+                            assertThat(findFoldCaseSwar(program, data, 0, data.length, prefix, 1, 3))
+                                    .as("not probed: %s with byte %s at %s against byte %s at start %s", description)
+                                    .isEqualTo(expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scans with findFoldCaseSwar probing any two offsets of the program's folded prefix.
+    private static int findFoldCaseSwar(Prog program, byte[] data, int offset, int length, byte[] prefix, int firstOffset, int secondOffset)
+    {
+        return program.findFoldCaseSwar(
+                data,
+                offset,
+                length,
+                firstOffset,
+                secondOffset,
+                Prog.foldCaseLowerBroadcast(prefix[firstOffset]),
+                Prog.foldCaseBitBroadcast(prefix[firstOffset]),
+                Prog.foldCaseLowerBroadcast(prefix[secondOffset]),
+                Prog.foldCaseBitBroadcast(prefix[secondOffset]));
+    }
+
+    private static int asciiLower(int value)
+    {
+        return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value;
     }
 
     private static byte randomCase(Random random, byte value)

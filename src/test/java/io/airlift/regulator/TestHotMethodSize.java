@@ -19,8 +19,11 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.classfile.Attributes;
 import java.lang.classfile.ClassFile;
+import java.lang.classfile.ClassModel;
+import java.lang.classfile.CodeModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
+import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.reflect.AccessFlag;
 import java.util.List;
 import java.util.function.Predicate;
@@ -234,6 +237,33 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseDense bytecode bytes")
                 .isPositive()
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+    }
+
+    /// Keeps the SWAR folded prefix scans small enough for C2 to inline into the folded prefix
+    /// scan in `Prog`, with their candidate comparison in their own bodies, as "Folded Prefix
+    /// Candidate Scan" in REGULATOR_DECISIONS.md records: a call to a comparison helper in `Prog`
+    /// made them smaller but ran about 3x slower once C2 left the helper's case lowering out of
+    /// line.
+    @Test
+    public void testSwarFoldedPrefixScansFitInlineSize()
+    {
+        ClassModel prog = ClassFile.of().parse(classfile(Prog.class));
+        for (String method : List.of("prefixAccelFoldCaseFrontAndBackSWAR", "findFoldCaseSwar")) {
+            assertThat(codeLength(Prog.class, method))
+                    .as("Prog.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+            List<String> progCalls = prog.methods().stream()
+                    .filter(model -> model.methodName().equalsString(method))
+                    .flatMap(model -> model.code().stream())
+                    .flatMap(CodeModel::elementStream)
+                    .filter(InvokeInstruction.class::isInstance)
+                    .map(InvokeInstruction.class::cast)
+                    .filter(invoke -> invoke.owner().equals(prog.thisClass()))
+                    .map(invoke -> invoke.name().stringValue())
+                    .toList();
+            assertThat(progCalls).as("Prog methods Prog.%s calls", method).isEmpty();
+        }
     }
 
     /// Keeps the literal and folded prefix scans larger than FreqInlineSize, so every caller calls
