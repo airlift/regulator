@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntConsumer;
+import java.util.function.ToLongFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -45,6 +46,9 @@ public class TestDfaCountMatches
     // answer it without the DFA. The input has no uppercase letters, so (?i) changes no match
     // and the pinned native RE2 counts still hold.
     private static final String STATE_GROWTH = "(?i)[a-q][^u-z]{80}x";
+    // One match of STATE_GROWTH after 2 KiB that begin none, which a DFA count counts without a
+    // reset.
+    private static final Slice SHORT_STATE_GROWTH_TEXT = utf8Slice("!".repeat(2048) + "a".repeat(81) + "x");
 
     @Test
     public void testCountsSuccessiveMatchesInOneSearchSession()
@@ -107,51 +111,173 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testCountDfaThrashingSkipsDfaUntilCacheReset()
+    public void testCountDfaThrashingBailsOnlyThatCount()
     {
-        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
         byte[] bytes = stateExplosionInput(16 * 1024);
         var input = Slices.wrappedBuffer(bytes);
-
-        // Pinned native RE2 finds five non-overlapping matches in this deterministic input.
-        RegexpMatcher matcher = pattern.matcher(input, 0);
-        int nativeMatchCount = 0;
-        while (matcher.find()) {
-            nativeMatchCount++;
+        // Dense rare-class bytes ahead of the same text, and of a short text, where the fixed-width
+        // matcher bails and hands the rest of the text to the DFA count. They begin no match.
+        byte[] denseRareClassBytes = new byte[2048 + bytes.length];
+        for (int index = 0; index < 2048; index += 2) {
+            denseRareClassBytes[index] = (byte) 0xE0;
+            denseRareClassBytes[index + 1] = '!';
         }
-        assertThat(nativeMatchCount).isEqualTo(5);
-
-        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics()
-                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
-        int resetCount = dfa.resetCount();
-        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
-
-        RegexpMatcher fallbackMatcher = pattern.matcher(input, 0);
-        int fallbackCount = 0;
-        while (fallbackMatcher.find()) {
-            fallbackCount++;
+        System.arraycopy(bytes, 0, denseRareClassBytes, 2048, bytes.length);
+        byte[] denseRareClassShortBytes = Arrays.copyOf(denseRareClassBytes, 2048 + 82);
+        Arrays.fill(denseRareClassShortBytes, 2048, 2048 + 81, (byte) 'a');
+        denseRareClassShortBytes[2048 + 81] = 'x';
+        // A literal every 16 bytes of a longer text, where the inner-literal search hands the
+        // dense run to the DFA count. In the short text, a literal at the start that begins no
+        // match sends the count to the DFA count too.
+        byte[] denseLiteralBytes = stateExplosionInput(128 * 1024);
+        for (int index = 16; index + 4 <= denseLiteralBytes.length; index += 16) {
+            System.arraycopy("0123".getBytes(US_ASCII), 0, denseLiteralBytes, index, 4);
         }
-        assertThat(fallbackCount).isEqualTo(nativeMatchCount);
-        assertThat(dfa.resetCount()).isEqualTo(resetCount);
-        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
+        Slice denseLiteralText = Slices.wrappedBuffer(denseLiteralBytes);
+        Slice denseLiteralShortText = utf8Slice("!0123" + "a".repeat(81) + "0123");
 
-        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        int resetCountAfterFallback = dfa.resetCount();
-        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        assertThat(dfa.resetCount()).isEqualTo(resetCountAfterFallback);
+        Re2 fixedWidth = Re2.compile(utf8Slice("(?i)[a-q][^u-z]{80}[x\\xE0-\\xFF]"), Re2.Options.latin1().setMaxMemory(3L << 20));
+        assertThat(fixedWidth.fixedWidthByteSpanMatcherForDiagnostics()).isNotNull();
+        // In UTF-8 mode, the finds of this pattern's fallback reach the candidate start cursor.
+        Re2 candidateCursor = Re2.compile(utf8Slice("(?i)([a-q][^u-z]{80}x)"), Re2.Options.defaults().setMaxMemory(1L << 20));
+        assertThat(candidateCursor.createCandidateStartCursor()).isNotNull();
+        Slice innerLiteralPattern = utf8Slice("([a-q][^u-z]{80}0123)");
+        Re2 innerLiteral = Re2.compile(innerLiteralPattern, Re2.Options.latin1().setMaxMemory(1L << 20));
+        assertThat(innerLiteral.innerLiteralSearchForDiagnostics()).isNotNull();
+        // Trino's count falls back on a matcher of its own.
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("(?i)([a-q][^u-z]{80}x)"), TrinoRegexp.Options.defaults().setMaxMemory(1L << 20));
 
-        dfa.resetCacheExternal();
-        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+        // Pinned native RE2 finds five non-overlapping matches of the first pattern in the growth
+        // text. The fixed-width, candidate-cursor and Trino patterns find the same five: the
+        // growth text has no uppercase letters or bytes above 0x7F, and no match begins in the
+        // dense rare-class bytes. The inner-literal count is checked against a count at the
+        // default budget.
+        for (CountBailCase countBailCase : List.of(
+                CountBailCase.of(Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20)), input, SHORT_STATE_GROWTH_TEXT, 5),
+                CountBailCase.of(fixedWidth, Slices.wrappedBuffer(denseRareClassBytes), Slices.wrappedBuffer(denseRareClassShortBytes), 5),
+                CountBailCase.of(candidateCursor, input, SHORT_STATE_GROWTH_TEXT, 5),
+                CountBailCase.of(innerLiteral, denseLiteralText, denseLiteralShortText, Re2.compile(innerLiteralPattern, Re2.Options.latin1()).count(denseLiteralText)),
+                new CountBailCase("Trino " + trino.pattern().toStringUtf8(), trino.re2(), trino::count, input, SHORT_STATE_GROWTH_TEXT, 5))) {
+            String name = countBailCase.name();
+            CompiledPattern pattern = countBailCase.pattern();
+            Slice text = countBailCase.text();
 
-        int resetCountAfterExternalReset = dfa.resetCount();
-        fallbackMatcher.reset(input);
-        int countAfterExternalReset = 0;
-        while (fallbackMatcher.find()) {
-            countAfterExternalReset++;
+            assertThat(pattern.countMatches(text)).as("%s: first count", name).isEqualTo(Dfa.COUNT_BAILED);
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+            // One bail lasts for that count only, so a later count of a short text uses the DFA.
+            assertThat(pattern.countMatches(countBailCase.shortText())).as("%s: short count", name).isEqualTo(1);
+
+            // A long count tries the DFA again and bails as the first did. The count resets as
+            // often as the DFA count alone does from the same empty cache, counting from the reset
+            // that drops a pointer table the DFA count gives back: the matcher it falls back to
+            // skips the forward DFA and its cursors, and resets nothing.
+            dfa.resetCacheExternal();
+            int resetCount = dfa.resetCount();
+            assertThat(pattern.countMatches(text)).as("%s: second count", name).isEqualTo(Dfa.COUNT_BAILED);
+            int dfaCountResets = dfa.resetCount() - Math.max(resetCount, dfa.releasedAbsolutePointerResetCount());
+            assertThat(dfaCountResets).as("%s: DFA count resets", name).isPositive();
+            dfa.resetCacheExternal();
+            resetCount = dfa.resetCount();
+            assertThat(countBailCase.count().applyAsLong(text)).as("%s: fallback count", name).isEqualTo(countBailCase.matches());
+            assertThat(dfa.resetCount() - Math.max(resetCount, dfa.releasedAbsolutePointerResetCount())).as("%s: fallback count resets", name).isEqualTo(dfaCountResets);
         }
-        assertThat(countAfterExternalReset).isEqualTo(nativeMatchCount);
-        assertThat(dfa.resetCount()).isGreaterThan(resetCountAfterExternalReset);
+    }
+
+    private record CountBailCase(String name, CompiledPattern pattern, ToLongFunction<Slice> count, Slice text, Slice shortText, long matches)
+    {
+        static CountBailCase of(Re2 pattern, Slice text, Slice shortText, long matches)
+        {
+            return new CountBailCase(pattern.pattern().toStringUtf8(), pattern, pattern::count, text, shortText, matches);
+        }
+    }
+
+    @Test
+    public void testCountBailStreakSkipsDfaForNextCounts()
+    {
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
+        var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
+
+        // One bailing count skips nothing: the next count runs the DFA, which completes and ends
+        // the streak.
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).isEqualTo(1);
+
+        // Two bailing counts in a row make the next 16 counts skip the DFA. A find outside a count
+        // keeps the forward DFA, so it falls back to neither the NFA nor BitState.
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        RegexpMatcher matcher = pattern.matcher(SHORT_STATE_GROWTH_TEXT);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertNextCountsSkipDfa(pattern);
+
+        // The 17th count tries the DFA again, and when it bails, the next 16 counts skip the DFA
+        // at once.
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        assertNextCountsSkipDfa(pattern);
+
+        // A retry that completes ends the streak, so one more bail skips nothing.
+        assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).isEqualTo(1);
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).isEqualTo(1);
+    }
+
+    @Test
+    public void testCountBailWindowBoundsConcurrentSkips()
+            throws Exception
+    {
+        Re2 pattern = Re2.compile(utf8Slice(STATE_GROWTH), Re2.Options.latin1().setMaxMemory(3L << 20));
+        var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_BAILED);
+
+        // At most 16 counts skip per window, whichever threads take them. A count that loses a
+        // skip to another thread runs the DFA, which counts this short text exactly.
+        int skips = 0;
+        try (ExecutorService executor = Executors.newFixedThreadPool(8)) {
+            CountDownLatch startGate = new CountDownLatch(1);
+            List<Future<Integer>> threadSkips = new ArrayList<>();
+            for (int thread = 0; thread < 8; thread++) {
+                threadSkips.add(executor.submit(() -> {
+                    startGate.await();
+                    int skipped = 0;
+                    for (int call = 0; call < 8; call++) {
+                        long count = pattern.countMatches(SHORT_STATE_GROWTH_TEXT);
+                        assertThat(count).isIn(Dfa.COUNT_BAILED, 1L);
+                        if (count == Dfa.COUNT_BAILED) {
+                            skipped++;
+                        }
+                    }
+                    return skipped;
+                }));
+            }
+            startGate.countDown();
+            for (Future<Integer> skipped : threadSkips) {
+                skips += skipped.get(10, TimeUnit.SECONDS);
+            }
+        }
+
+        // The counts that follow on one thread take what the window has left, then run the DFA.
+        long count = pattern.countMatches(SHORT_STATE_GROWTH_TEXT);
+        while (count == Dfa.COUNT_BAILED && skips <= 16) {
+            skips++;
+            count = pattern.countMatches(SHORT_STATE_GROWTH_TEXT);
+        }
+        assertThat(skips).isEqualTo(16);
+        assertThat(count).isEqualTo(1);
+        assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).isEqualTo(1);
+    }
+
+    // A skipped count of a short text the DFA would count reports a bail, and the count that
+    // falls back is exact. The 16th skipped count reports a bail.
+    private static void assertNextCountsSkipDfa(Re2 pattern)
+    {
+        for (int skipped = 1; skipped <= 16; skipped += 2) {
+            assertThat(pattern.count(SHORT_STATE_GROWTH_TEXT)).as("skipped count %s", skipped).isEqualTo(1);
+            assertThat(pattern.countMatches(SHORT_STATE_GROWTH_TEXT)).as("skipped count %s", skipped + 1).isEqualTo(Dfa.COUNT_BAILED);
+        }
     }
 
     @Test
@@ -179,7 +305,8 @@ public class TestDfaCountMatches
     }
 
     @Test
-    public void testSuccessfulCountDfaThrashingSkipsDfaUntilCacheReset()
+    public void testSuccessfulCountDfaThrashingBailsOnlyThatCount()
+            throws Exception
     {
         for (Re2.Options options : new Re2.Options[] {Re2.Options.defaults(), Re2.Options.latin1()}) {
             // An outer capture keeps this on the general route rather than the optional
@@ -189,30 +316,23 @@ public class TestDfaCountMatches
                     options.setMaxMemory(16L << 20));
             var input = Slices.wrappedBuffer(stateExplosionInput(1024 * 1024));
 
-            // Pinned native RE2 finds 529 non-overlapping matches in this deterministic input.
-            assertThat(pattern.count(input)).isEqualTo(529);
-            assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+            try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+                assertThat(executor.submit(() -> pattern.countMatches(input)).get(10, TimeUnit.SECONDS)).isEqualTo(Dfa.COUNT_BAILED);
+            }
             Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics()
                     .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
             assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
             assertThat(dfa.byteScanFallbackCount()).isPositive();
-            assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
 
-            RegexpMatcher matcher = pattern.matcher(input, 0);
-            int fallbackCount = 0;
-            while (matcher.find()) {
-                fallbackCount++;
-            }
-            assertThat(fallbackCount).isEqualTo(529);
-
-            int resetCountAfterFallback = dfa.resetCount();
+            // One bail on another thread does not make this thread's next count skip the DFA. The
+            // count tries the DFA again and may bail, depending on collection timing; either way
+            // its fallback adds no resets, so it makes at most two after the one that drops a
+            // pointer table it gives back. Pinned native RE2 finds 529 non-overlapping matches in
+            // this deterministic input.
+            int resetCount = dfa.resetCount();
             assertThat(pattern.count(input)).isEqualTo(529);
-            assertThat(dfa.resetCount()).isEqualTo(resetCountAfterFallback);
-            assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-            assertThat(dfa.resetCount()).isEqualTo(resetCountAfterFallback);
-
-            dfa.resetCacheExternal();
-            assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+            assertThat(dfa.resetCount()).isGreaterThan(resetCount);
+            assertThat(dfa.resetCount() - Math.max(resetCount, dfa.releasedAbsolutePointerResetCount())).isLessThanOrEqualTo(2);
         }
     }
 
@@ -231,7 +351,6 @@ public class TestDfaCountMatches
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
         assertThat(dfa.byteScanFallbackCount()).isZero();
-        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
     }
 
     @Test
@@ -240,8 +359,8 @@ public class TestDfaCountMatches
         // These texts reach about 2,700 DFA states. A 2 MiB budget holds them all on object rows,
         // where the DFA never resets, but not beside the pointer table, which a fresh DFA keeps
         // through its first two resets, a native table whenever the collector runs. A count that
-        // resets too often while the DFA has the table gives the table back instead of leaving the
-        // count, and later finds, to the NFA.
+        // resets too often while the DFA has the table gives the table back instead of bailing,
+        // and later finds do not fall back to the NFA.
         Slice patternText = utf8Slice("[ab]*a[ab]{12}c");
         Re2 reference = Re2.compile(patternText);
         Random random = new Random(1);
@@ -269,7 +388,7 @@ public class TestDfaCountMatches
             Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
             assertThat(dfa.resetCount()).isZero();
 
-            assertThat(pattern.count(input)).isEqualTo(reference.count(input));
+            assertThat(pattern.countMatches(input)).isEqualTo(reference.count(input));
             assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
             RegexpMatcher matcher = pattern.matcher(input);
             assertThat(findCount(matcher)).isEqualTo(findCount(reference.matcher(input)));
@@ -303,7 +422,6 @@ public class TestDfaCountMatches
             return true;
         }, null);
 
-        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
         assertThat(result).isEqualTo(4_000L << Integer.SIZE | cached.length());
         assertThat(matchEnds[0]).isEqualTo(4_000);
         assertThat(dfa.releasedAbsolutePointerResetCount()).isPositive();
@@ -333,7 +451,7 @@ public class TestDfaCountMatches
                 assertThat(resetsMade.await(10, TimeUnit.SECONDS)).isTrue();
                 dfa.beginSearch(true);
                 try {
-                    assertThat(count.get(10, TimeUnit.SECONDS)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+                    assertThat(count.get(10, TimeUnit.SECONDS)).isEqualTo(Dfa.COUNT_BAILED);
                 }
                 finally {
                     dfa.cancelExclusiveSearch();
@@ -343,7 +461,6 @@ public class TestDfaCountMatches
                 executor.shutdownNow();
             }
         }
-        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
     }
 
     @Test
@@ -444,8 +561,7 @@ public class TestDfaCountMatches
             }
         }
 
-        assertThat(result).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
+        assertThat(result).isEqualTo(Dfa.COUNT_BAILED);
         int releasedResetCount = dfa.releasedAbsolutePointerResetCount();
         assertThat(releasedResetCount).isPositive();
         assertThat(dfa.resetCount() - Math.max(startResetCount, releasedResetCount)).isEqualTo(2);

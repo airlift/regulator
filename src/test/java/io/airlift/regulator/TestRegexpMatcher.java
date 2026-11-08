@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
@@ -242,11 +243,19 @@ public class TestRegexpMatcher
         // Case folding keeps the pattern off the disjoint-suffix repeat matcher, which would
         // answer it without the DFA.
         Re2 pattern = Re2.compile(Slices.utf8Slice("(?i)[a-q][^u-z]{80}x"), Re2.Options.latin1().setMaxMemory(4L << 20));
-        Slice input = Slices.wrappedBuffer(stateExplosionInput(1 << 20));
+        // The only match ends the text, so the forward DFA thrashes on the way to it and fails.
+        byte[] bytes = stateExplosionInput(64 << 10);
+        for (int index = 0; index < bytes.length; index++) {
+            if (bytes[index] == 'x') {
+                bytes[index] = '.';
+            }
+        }
+        Arrays.fill(bytes, bytes.length - 82, bytes.length - 1, (byte) 'a');
+        bytes[bytes.length - 1] = 'x';
+        Slice input = Slices.wrappedBuffer(bytes);
         Nfa.Workspace workspace = new Nfa.Workspace();
         int[] groupZero = new int[2];
 
-        assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
         assertThat(pattern.matchInto(input, 0, input.length(), CompiledPattern.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
         assertThat(pattern.matchInto(input, 0, input.length(), CompiledPattern.Anchor.UNANCHORED, groupZero, null, null, workspace)).isTrue();
         assertThat(workspace.groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);

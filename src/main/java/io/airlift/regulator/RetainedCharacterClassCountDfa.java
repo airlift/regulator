@@ -87,8 +87,9 @@ final class RetainedCharacterClassCountDfa
             return compactCounter.count(input);
         }
 
+        // A count whose DFA bails, or skips it after a streak of bails, counts on the class counter.
         long count = Dfa.countMatches(countProgram, input, Prog.MatchKind.FIRST_MATCH);
-        if (count != Dfa.COUNT_UNSUPPORTED) {
+        if (count >= 0) {
             return count;
         }
         return compactCounter.count(input);

@@ -96,15 +96,15 @@ public class TestDfaStartStateFailure
         // digits pass the byte gates, but no prefix match ends at it, so no forward DFA runs. The
         // hyphen after 2ab1 would make the reverse search read back to the first one, so the
         // search falls back, and both start-state failures reach the ordinary count. The inner
-        // literal route leaves bail recording to that count, which does not record a start-state
-        // failure, so the next count succeeds.
+        // literal route passes that count's result through, and a start-state failure is not a
+        // bail, so the count reports the DFA unsupported rather than bailed, and the next count
+        // succeeds.
         Re2 pattern = Re2.compile(utf8Slice("[a-z0-9]+[0-9]-[0-9]+"));
         Slice input = utf8Slice(".".repeat(68) + "1-2ab1-12" + ".".repeat(100));
         Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         dfa.failStateAllocationsForTesting(2);
 
         assertThat(pattern.countMatches(input)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
-        assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
         assertThat(pattern.countMatches(input)).isEqualTo(1);
     }
 

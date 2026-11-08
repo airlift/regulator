@@ -59,6 +59,27 @@ public class BenchmarkDfaCache
     private static final long STATE_GROWTH_FILL_MEMORY = 4_329_290;
     // At 4 MiB the next insert still doubles the state-cache table without a reset.
     private static final long STATE_GROWTH_INSERT_MEMORY = 4L << 20;
+    // At a 16 MiB pattern budget, a count of this pattern over the 1 MiB state-growth row resets
+    // the DFA too often and bails. An outer capture keeps it on the general route rather than the
+    // capture-free suffix scanner or the fixed-width matcher.
+    private static final String THRASHING_COUNT = "([a-q][^u-z]{23}x)";
+    private static final long THRASHING_COUNT_MEMORY = 16L << 20;
+    private static final int THRASHING_COUNT_ROW_SIZE = 1 << 20;
+    private static final int SHORT_COUNT_ROW_SIZE = 1024;
+    // The same shape with a short repeat counts the same row without a reset.
+    private static final String NEVER_THRASHING_COUNT = "([a-q][^u-z]{3}x)";
+    // In Latin-1 mode the fixed-width matcher counts this pattern. On the state-growth row with
+    // every fourth byte 0xE0, its scan bails on the dense rare-class bytes, and the DFA count it
+    // hands the rest of the row to resets too often and bails.
+    private static final String FIXED_WIDTH_THRASHING_COUNT = "[a-q][^u-z]{23}[x\\xE0-\\xFF]";
+    private static final int DENSE_RARE_CLASS_STRIDE = 4;
+    // In UTF-8 mode at a 1 MiB pattern budget, a count of this pattern over the 16 KiB start of
+    // the state-growth row resets the DFA too often and bails. On that row, unlike the 1 MiB one,
+    // the candidate start cursor passes its productivity check, so the finds that count the row
+    // after the bail would reach the forward DFA through the cursor if they did not skip it.
+    private static final String CANDIDATE_CURSOR_THRASHING_COUNT = "(?i)([a-q][^u-z]{80}x)";
+    private static final long CANDIDATE_CURSOR_THRASHING_COUNT_MEMORY = 1L << 20;
+    private static final int CANDIDATE_CURSOR_ROW_SIZE = 16 << 10;
 
     @State(Scope.Benchmark)
     public static class SharedWarmState
@@ -392,6 +413,85 @@ public class BenchmarkDfaCache
         }
     }
 
+    /// Rows for one shared compiled pattern whose long-row count bails: the short rows that follow
+    /// one bailing count, and long rows that bail every time, so that most of their counts skip the
+    /// DFA after two in a row bail. Every invocation also shares a pattern whose count of the same
+    /// long row never bails, and rows that bail every time on the fixed-width matcher, over a long
+    /// row dense in its rare class, and on a pattern whose fallback finds skip its candidate start
+    /// cursor, over a 16 KiB row where that cursor is productive.
+    @State(Scope.Benchmark)
+    public static class ThrashingCountState
+    {
+        private Slice longRow;
+        private Slice shortRow;
+        private Slice denseRareClassRow;
+        private Slice candidateCursorRow;
+        private Re2 thrashingPattern;
+        private Re2 neverThrashingPattern;
+        private Re2 fixedWidthThrashingPattern;
+        private Re2 candidateCursorThrashingPattern;
+
+        @Setup(Level.Trial)
+        public void setup()
+        {
+            byte[] input = stateGrowthInput(THRASHING_COUNT_ROW_SIZE);
+            longRow = Slices.wrappedBuffer(input);
+            shortRow = Slices.wrappedBuffer(input, 0, SHORT_COUNT_ROW_SIZE);
+            byte[] denseRareClassInput = input.clone();
+            for (int index = 0; index < denseRareClassInput.length; index += DENSE_RARE_CLASS_STRIDE) {
+                denseRareClassInput[index] = (byte) 0xE0;
+            }
+            denseRareClassRow = Slices.wrappedBuffer(denseRareClassInput);
+            candidateCursorRow = Slices.wrappedBuffer(input, 0, CANDIDATE_CURSOR_ROW_SIZE);
+            thrashingPattern = Re2.compile(Slices.utf8Slice(THRASHING_COUNT), Re2.Options.defaults().setMaxMemory(THRASHING_COUNT_MEMORY));
+            neverThrashingPattern = Re2.compile(Slices.utf8Slice(NEVER_THRASHING_COUNT), Re2.Options.defaults().setMaxMemory(THRASHING_COUNT_MEMORY));
+            fixedWidthThrashingPattern = Re2.compile(Slices.utf8Slice(FIXED_WIDTH_THRASHING_COUNT), Re2.Options.latin1().setMaxMemory(THRASHING_COUNT_MEMORY));
+            candidateCursorThrashingPattern = Re2.compile(Slices.utf8Slice(CANDIDATE_CURSOR_THRASHING_COUNT), Re2.Options.defaults().setMaxMemory(CANDIDATE_CURSOR_THRASHING_COUNT_MEMORY));
+            // The one long count whose bail the short counts follow.
+            thrashingPattern.count(longRow);
+        }
+
+        Re2 thrashingPattern()
+        {
+            return thrashingPattern;
+        }
+
+        Re2 neverThrashingPattern()
+        {
+            return neverThrashingPattern;
+        }
+
+        Slice longRow()
+        {
+            return longRow;
+        }
+
+        Slice shortRow()
+        {
+            return shortRow;
+        }
+
+        Re2 fixedWidthThrashingPattern()
+        {
+            return fixedWidthThrashingPattern;
+        }
+
+        Re2 candidateCursorThrashingPattern()
+        {
+            return candidateCursorThrashingPattern;
+        }
+
+        Slice denseRareClassRow()
+        {
+            return denseRareClassRow;
+        }
+
+        Slice candidateCursorRow()
+        {
+            return candidateCursorRow;
+        }
+    }
+
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
     public long searchSharedWarm(SharedWarmState state)
@@ -440,6 +540,41 @@ public class BenchmarkDfaCache
     public boolean growStateCacheOnNextInsert(NextInsertGrowthState state)
     {
         return find(state.pattern, state.growthText);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    public long countShortRowAfterThrashingCount(ThrashingCountState state)
+    {
+        return state.thrashingPattern.count(state.shortRow);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    public long countThrashingRow(ThrashingCountState state)
+    {
+        return state.thrashingPattern.count(state.longRow);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    public long countNeverThrashingRow(ThrashingCountState state)
+    {
+        return state.neverThrashingPattern.count(state.longRow);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    public long countFixedWidthThrashingRow(ThrashingCountState state)
+    {
+        return state.fixedWidthThrashingPattern.count(state.denseRareClassRow);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    public long countCandidateCursorThrashingRow(ThrashingCountState state)
+    {
+        return state.candidateCursorThrashingPattern.count(state.candidateCursorRow);
     }
 
     private static long search(Prog program, Slice text, boolean anchored)

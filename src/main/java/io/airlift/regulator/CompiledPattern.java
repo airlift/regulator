@@ -2689,6 +2689,9 @@ abstract sealed class CompiledPattern
         }
 
         RegexpMatcher matcher = matcher(input, 0);
+        if (optimizedCount == Dfa.COUNT_BAILED) {
+            matcher.markSkipsForwardDfa();
+        }
         long count = 0;
         while (matcher.find()) {
             count++;
@@ -2696,15 +2699,17 @@ abstract sealed class CompiledPattern
         return count;
     }
 
-    /// Returns the number of matches, or `-1` when only a matcher can count them.
+    /// Returns the number of matches; `-1` when only a matcher can count them; or
+    /// [Dfa#COUNT_BAILED] when a DFA count gave up, or skipped the DFA after a streak of DFA counts
+    /// that gave up, so the matcher that counts them should skip the forward DFA.
     long countMatches(Slice text)
     {
         return countOnEngine(text);
     }
 
-    /// The count of the ordinary engine, or `-1` when only a matcher can count: the disjoint
-    /// suffix-repeat matcher, the single attempt of a start-anchored pattern, the class counter,
-    /// or the DFA count.
+    /// The count of the ordinary engine: the disjoint suffix-repeat matcher, the single attempt of
+    /// a start-anchored pattern, the class counter, or the DFA count. Returns `-1` when only a
+    /// matcher can count, and [Dfa#COUNT_BAILED] when the DFA count bailed.
     private long countOnEngine(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -2776,9 +2781,9 @@ abstract sealed class CompiledPattern
 
     /// The count of the fixed-width byte span matcher. A count that bails on dense candidates
     /// keeps its matches and counts the rest of the text from the end of the last one, or from
-    /// the text start, on the ordinary count, the count of the pattern without the matcher. The
-    /// pattern reads no context, so the matches after a match end are those of the text that
-    /// follows it.
+    /// the text start, on the ordinary count, the count of the pattern without the matcher, and
+    /// where that count bails, this count bails. The pattern reads no context, so the matches
+    /// after a match end are those of the text that follows it.
     final long countOnFixedWidth(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -2788,7 +2793,7 @@ abstract sealed class CompiledPattern
         }
         int resume = FixedWidthByteSpanMatcher.resumeAfterBail(count);
         long rest = countOnEngine(text.slice(resume, text.length() - resume));
-        return rest < 0 ? -1 : FixedWidthByteSpanMatcher.countBeforeBail(count) + rest;
+        return rest < 0 ? rest : FixedWidthByteSpanMatcher.countBeforeBail(count) + rest;
     }
 
     /// The count of the compact class counter, on the retained count DFA when it has one.
@@ -2867,17 +2872,12 @@ abstract sealed class CompiledPattern
     /// text start or the previous match end, or a search falls back for another reason, the
     /// ordinary count takes over from there and hands back at the first match end whose next
     /// candidate is not near. Its start-byte scan selection then holds for the whole dense run,
-    /// instead of being made again for each match, and it records its own failures. The ordinary
-    /// counts share their start-byte selection and productivity checks, so one that starts within
-    /// 64 KiB of an earlier sample does not repeat them. Every match holds the literal, so none is
-    /// empty and each step advances.
+    /// instead of being made again for each match, and where it bails, this count bails. The
+    /// ordinary counts share their start-byte selection and productivity checks, so one that
+    /// starts within 64 KiB of an earlier sample does not repeat them. Every match holds the
+    /// literal, so none is empty and each step advances.
     private long countInnerLiteralMatches(InnerLiteralSearch innerLiteralSearch, Slice text)
     {
-        // As in the ordinary count, a forward DFA that failed a count leaves later counts to the
-        // matcher.
-        if (Dfa.countSearchBailedWhenSlow(partialProg, Prog.MatchKind.FIRST_MATCH)) {
-            return -1;
-        }
         int length = text.length();
         IntPredicate continueCounting = next -> innerLiteralSearch.fallsBackNearStart(text, next, length);
         // The first fallback with enough text left to sample allocates the shared sampling, and
@@ -2900,7 +2900,7 @@ abstract sealed class CompiledPattern
             }
             long counted = Dfa.countMatches(partialProg, text, position, Prog.MatchKind.FIRST_MATCH, continueCounting, sampling);
             if (counted < 0) {
-                return -1;
+                return counted;
             }
             count += Dfa.countStopCount(counted);
             position = Dfa.countStopPosition(counted);
@@ -3626,8 +3626,9 @@ abstract sealed class CompiledPattern
         // ===== Phase 1-2: DFA Forward + Reverse Search (Unanchored) =====
         // Use two-phase DFA to find match boundaries without extracting submatches. An unanchored
         // search with an inner literal search runs it first and falls back to the two-phase DFA.
-        boolean dfaSearchSkippedOrFailed = prog.hasDfaUnsupportedAssertions() ||
-                (captureCount == 1 && Dfa.countSearchBailedWhenSlow(prog, matchKind));
+        // A matcher counting after its count's DFA bailed skips both phases and the inner literal
+        // search for group zero of partialProg, the program its count ran on.
+        boolean dfaSearchSkippedOrFailed = prog.hasDfaUnsupportedAssertions() || (captureCount == 1 && prog == partialProg && skipsForwardDfa(workspaces));
         int matchStart = -1;
         int matchEnd = -1;
         // Patterns such as \C* and Latin1 (?s).* accept every byte sequence.
@@ -4283,6 +4284,12 @@ abstract sealed class CompiledPattern
         if (workspaces instanceof RegexpMatcher matcher) {
             matcher.setDfaQuitStreak(dfaQuitStreak);
         }
+    }
+
+    // Only a matcher carries the mark of a count whose DFA count bailed.
+    private static boolean skipsForwardDfa(MatchWorkspaces workspaces)
+    {
+        return workspaces instanceof RegexpMatcher matcher && matcher.skipsForwardDfa();
     }
 
     private static boolean candidateStartCursorQuit(MatchWorkspaces workspaces)
