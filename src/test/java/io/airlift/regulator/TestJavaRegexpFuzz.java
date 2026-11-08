@@ -332,6 +332,11 @@ public class TestJavaRegexpFuzz
             if (random.nextInt(16) == 0) {
                 options |= LITERAL;
             }
+            if (random.nextInt(8) == 0) {
+                // Random trees rarely reach the inner literal search's class-run proof, so one
+                // pattern in eight has its shape, with the literal exact.
+                return new Generated(TestingPatternGenerator.innerLiteralShape(random), options & ~(LITERAL | CASE_INSENSITIVE));
+            }
             return new Generated(TestingPatternGenerator.generate(random, VOCABULARY), options);
         }
 

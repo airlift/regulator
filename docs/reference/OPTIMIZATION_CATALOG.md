@@ -96,6 +96,7 @@ answer, or reject the input before any engine runs.
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
+  `InnerLiteralSearch.windowLacksLiteral`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
   `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`,
   `InnerLiteralSearch.search`, `ScanPlan.findRequiredLiteralOperation`,
@@ -107,8 +108,9 @@ answer, or reject the input before any engine runs.
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
   count, and the one-shot range searches, for unanchored patterns whose
-  required bytes are an exact literal and that have no other literal search;
-  a pattern whose long-window search does not fit beside the forward DFAs
+  required bytes are an exact literal and that have no other literal search,
+  where an inner literal search counts unless only the class-run proof admits
+  it; a pattern whose long-window search does not fit beside the forward DFAs
   keeps the short-window check; a matcher reuses an occurrence until a find
   passes it, and stops after eight scans in a row find it within 256 bytes of
   their start. Minimum length: windows under 4 KiB, where longer ones skip the
@@ -124,19 +126,21 @@ answer, or reject the input before any engine runs.
   engine runs. The test reads 8-byte words; when the first byte is rare, it
   loads the last byte's word only for a word that holds the first byte. A
   longer window is searched for an exact required literal instead, with the
-  vector pair scan from 1 KiB. The same early answer comes from three other
-  facts: a window shorter than the pattern's minimum match length fails
-  before any engine setup; a start-anchored search rejects a byte that cannot
-  begin a match with one table load, before OnePass or BitState setup; and a
-  window too short for the reverse-inner search is still checked for a
-  literal hit that passes the byte gates, so a short line without one runs no
-  DFA. A scan plan, after its first failed attempt, checks once that a
-  required literal occurs in the rest of the input, testing its first and
-  last bytes in 16-byte blocks, and ends the search if it does not. The
-  required-byte reject takes ruff's `noqa` rows to 0.41 to 0.68 of their
-  earlier time and lh3lh3's `uri-or-email` to 0.34 to 0.47
-  ([design][d-required-bytes]), and the long-window check takes the leipzig
-  `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
+  vector pair scan from 1 KiB; where an inner literal search for one exact
+  literal stands in for that check, the routes that skip the search, BitState
+  capture of groups and a skipped DFA, scan the window for its literal
+  instead. The same early answer comes from three other facts: a window
+  shorter than the pattern's minimum match length fails before any engine
+  setup; a start-anchored search rejects a byte that cannot begin a match with
+  one table load, before OnePass or BitState setup; and a window too short for
+  the reverse-inner search is still checked for a literal hit that passes the
+  byte gates, so a short line without one runs no DFA. A scan plan, after its
+  first failed attempt, checks once that a required literal occurs in the rest
+  of the input, testing its first and last bytes in 16-byte blocks, and ends
+  the search if it does not. The required-byte reject takes ruff's `noqa` rows
+  to 0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to 0.34 to
+  0.47 ([design][d-required-bytes]), and the long-window check takes the
+  leipzig `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
   0.48–0.57 ms, 0.021 to 0.039 of its earlier time, in all four languages on
   Graviton and Intel ([#188]).
 
@@ -341,10 +345,17 @@ so the automata run only where a match can be.
   ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy],
   [teddy.rs][ra-teddy], [literal.rs][rs-literal], [#90]); First described by
   Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask])
-  and for class pairs ([shufti.c][hs-shufti-double]). Regulator: the exact
-  head with a folded tail, the vector kernels for long searches, and class
-  pairs with an English-rarity gate and their own no-earlier-match proof
-  ([#103], [#138], [#143], [#152], [design][d-class-pairs]).
+  and for class pairs ([shufti.c][hs-shufti-double]), and by .NET for a prefix
+  of an unbounded class that cannot hold the literal
+  ([RegexPrefixAnalyzer.cs][dotnet-literal-after-loop]); Inspired by
+  Hyperscan, whose Rose compiler anchors literals behind pure-repeat prefixes,
+  for class-run prefixes ([rose_build_castle.cpp][hs-rose-castle],
+  [rose_build_lookaround.cpp][hs-rose-leftfix]). Regulator: the exact head
+  with a folded tail, the vector kernels for long searches, class pairs with
+  an English-rarity gate and their own no-earlier-match proof, and the proof
+  for a bounded or unbounded run of one class that can hold the literal,
+  behind assertions ([#103], [#138], [#143], [#152], [#193],
+  [design][d-class-pairs]).
 - **Where:** `InnerLiteralSearch.analyze`, `InnerLiteralSearch.search`,
   `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
   `InnerLiteralSearch.findLiteralSetMember`,
@@ -352,14 +363,18 @@ so the automata run only where a match can be.
   `InnerLiteralSearch.usesVectorSearch`, `InnerLiteralSearch.asciiClassPair`,
   `InnerLiteralSearch.hasNoEarlierMatchAcrossLastByte`,
   `InnerLiteralSearch.findClassPairMember`,
-  `VectorByteSetScanner.findClassPair`
+  `VectorByteSetScanner.findClassPair`, `InnerLiteralSearch.isClassRunPrefix`
 - **Applies when:** Find and count in every regex language, only when the
-  prefix cannot hold an earlier match, and not for a one-byte literal that is
-  a letter, digit, or whitespace; the vector forms from 1 KiB with the Vector
-  API; class pairs only for required pieces that are neither a literal nor a
-  literal set. Guards against quadratic rescans, and a first hit that passes
-  the byte gates within 64 bytes of the start, hand the search back to the
-  ordinary engine
+  prefix cannot hold an earlier match or, in leftmost-first searches, is a
+  class run, and not for a one-byte literal that is a letter, digit, or
+  whitespace; a class run whose minimum is two or more characters needs
+  one-byte characters, and a pattern of the
+  [dot-star literal span](#dot-star-literal-span) matcher's shape, such as
+  `.*lit.*`, is left to that matcher and takes no inner literal search; the
+  vector forms from 1 KiB with the Vector API; class pairs only for required
+  pieces that are neither a literal nor a literal set. Guards against
+  quadratic rescans, and a first hit that passes the byte gates within 64
+  bytes of the start, hand the search back to the ordinary engine
 - **What it does:** For a required literal in the top-level sequence, the
   search finds the literal, runs the prefix backward to the leftmost start,
   and confirms forward. The required piece can take three other forms: one of
@@ -369,12 +384,21 @@ so the automata run only where a match can be.
   checked by an OR mask; or two adjacent elements that each consume one of at
   most three ASCII bytes, such as `[?!.]["']`, which English text rarely holds
   as a pair (estimated below once in 500 bytes), scanned for its two-byte
-  members with a counted loop. Long searches for one exact ASCII literal use
-  the vector byte-set scan for one byte and the vector pair scan otherwise.
-  Leipzig `shing` and mariomka `email` counts take 0.06 to 0.10 of their
-  earlier time ([#90]), and class pairs take `quotes-bounded` to 0.54 of the
-  start-byte scan's time on Intel and 0.74 on Graviton
-  ([design][d-class-pairs]).
+  members with a counted loop. The prefix may also be a class run: empty-width
+  assertions and one class repeated `{lo,hi}`, as `\b\w+` in `\b\w+nn\b` or
+  `.{0,2}` before a set of names, even where the class can hold the literal. A
+  run that matches an earlier match's span also matches the shorter span
+  ending at any later literal inside it, so the reverse search from the first
+  literal hit still finds the leftmost start. A pattern that only this proof
+  gives a search keeps the long-window required literal check as it has it
+  without one. Long searches for one exact ASCII literal use the vector
+  byte-set scan for one byte and the vector pair scan otherwise. Leipzig
+  `shing` and mariomka `email` counts take 0.06 to 0.10 of their earlier time
+  ([#90]), class pairs take `quotes-bounded` to 0.54 of the start-byte scan's
+  time on Intel and 0.74 on Graviton ([design][d-class-pairs]), and the
+  class-run proof takes finds of `\w+[?!.]["']` in 300-byte to 2 KiB chunks of
+  `sherlock.txt` to 0.03 to 0.28 of their time without it and rebar's
+  `leipzig/word-ending-nn` to 0.11 to 0.12 ([#193]).
 
 ### Inner literal byte gates
 
@@ -1783,6 +1807,7 @@ change is described.
 [#165]: https://github.com/airlift/regulator/pull/165
 [#176]: https://github.com/airlift/regulator/pull/176
 [#188]: https://github.com/airlift/regulator/pull/188
+[#193]: https://github.com/airlift/regulator/pull/193
 [#194]: https://github.com/airlift/regulator/pull/194
 [#195]: https://github.com/airlift/regulator/pull/195
 [#201]: https://github.com/airlift/regulator/pull/201
@@ -1915,6 +1940,7 @@ change is described.
 [dotnet-fixed-distance-search]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L740-L791
 [dotnet-fixed-distance-sets]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexFindOptimizations.cs#L184-L262
 [dotnet-fixed-length]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/Symbolic/SymbolicRegexMatcher.cs#L376-L387
+[dotnet-literal-after-loop]: https://github.com/dotnet/runtime/blob/fa5277b025010740ca3255dcf7a0a3e2cb681acb/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexPrefixAnalyzer.cs#L1123-L1186
 [dotnet-literal-find]: https://github.com/dotnet/runtime/blob/v7.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexCompiler.cs#L5017-L5048
 [dotnet-node]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexNode.cs
 [dotnet-runner-mode]: https://github.com/dotnet/runtime/blob/v8.0.0/src/libraries/System.Text.RegularExpressions/src/System/Text/RegularExpressions/RegexRunnerMode.cs
@@ -1944,6 +1970,8 @@ change is described.
 [hs-mcclellan-flags]: https://github.com/intel/hyperscan/blob/v4.0.0/src/nfa/mcclellan_internal.h#L39-L41
 [hs-noodle-caseless]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_engine_sse.c#L182-L200
 [hs-noodle-mask]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_build.cpp#L88-L117
+[hs-rose-castle]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_castle.cpp#L56-L82
+[hs-rose-leftfix]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_lookaround.cpp#L809-L839
 [hs-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L110-L118
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
