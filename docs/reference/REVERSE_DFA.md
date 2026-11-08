@@ -15,9 +15,16 @@ For an ordinary unanchored search, `CompiledPattern.matchOnOrdinaryEngine` perfo
 3. A capture engine only when the caller requested captures not already known
    from the two boundaries.
 
-A pattern with an inner literal search first scans for the literal, skips a
-hit whose neighboring bytes no match can hold, runs a reverse DFA of the prefix
-anchored at each other hit, and confirms forward; it falls back to steps 1–3.
+A pattern with an inner literal search, in a search window of at least that
+search's
+[minimum](../../REGULATOR_DECISIONS.md#minimum-inner-literal-search-window),
+first scans for the literal, skips a hit whose neighboring bytes no match can
+hold, runs a reverse DFA of the prefix anchored at each other hit, and confirms
+forward; it falls back to steps 1–3. A shorter window runs steps 1–3, except
+that a count or matcher find of a pattern that keeps a short-search fixed-width
+matcher runs that matcher instead, and a find of a one-byte literal with byte
+gates first checks the window for a hit that passes them, reporting no match
+without one.
 
 End-anchored programs can start with an anchored reverse search. This quickly
 rejects text whose suffix cannot match and avoids scanning every possible start

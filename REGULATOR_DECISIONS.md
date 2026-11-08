@@ -1579,24 +1579,32 @@ are dense.
 
 The fixed-width matcher checks every occurrence of its candidate's first bytes,
 such as the `s` of `[a-z]shing`, which English text holds far more often than
-`shing`. Every
-language, Trino included, therefore keeps the DFA's inner literal search when
-its literal, or every literal of its set, has two or more bytes. A find whose
-input lacks the literal reports no match without running the DFA, and one whose
-literal first appears within the input's first 64 bytes runs the plain DFA. A
-count searches for the literal only in inputs of 64 bytes or more. Counts of
-fewer bytes, and matcher finds with fewer than 64 bytes left, run a second
-fixed-width matcher that answers only those short searches, since there the
-plain DFA measured Trino count 1.72-1.79x slower than the matcher on r9g and
-1.36-1.40x on r8i, and iteration 1.12-1.16x on r9g. The pattern keeps that
-matcher when it fits the forward DFA budget beside the search; full-Slice find
-stays on the DFA, whose check for the missing literal wins on short rows too. A
+`shing`. Every language, Trino included, therefore keeps the DFA's inner literal
+search when its literal, or every literal of its set or class pair, has two or
+more bytes. Where the pattern keeps the second, short-search matcher described
+below, after its yield to the engine's own scans and its DFA budget check, the
+search runs in windows of at least 64 bytes, whatever its literal kind's
+[minimum](#minimum-inner-literal-search-window); otherwise that minimum applies.
+There a find whose input lacks the literal reports no match without running the
+DFA, and one whose literal first appears within the input's first 64 bytes runs
+the plain DFA. Shorter counts, and matcher finds with fewer than 64 bytes left,
+run a second fixed-width matcher that answers only those short searches, since
+on rows shorter than 64 bytes the plain DFA measured Trino count 1.72-1.79x
+slower than the matcher on r9g and 1.36-1.40x on r8i, and iteration 1.12-1.16x
+on r9g. From 64 bytes the matcher measured slower than the search on counts of
+`[a-z]shing`, a single literal, as [Minimum Inner Literal Search
+Window](#minimum-inner-literal-search-window) records; for a fixed-width class
+pair that is unmeasured. The pattern keeps that matcher when it fits the forward
+DFA budget beside the search. Full-Slice find stays on the DFA, whose quick
+reject of a row without the literal beat the matcher on short rows too; in a
+window shorter than 64 bytes that reject is now the [required bytes
+check](#short-window-required-bytes-reject), where the pattern keeps one. A
 Trino pattern on its fixed-width subtype otherwise keeps no program, and the
 search needs one, so a pattern whose `maxMemory` leaves no room for its program
-keeps the matcher and compiles wherever the matcher fits. Where
-the program fits but neither the search nor the matcher fits beside it, as for
-`[a-z]shing` from 2567 to 2797 bytes, the pattern also keeps the matcher on the
-route without a program.
+keeps the matcher and compiles wherever the matcher fits. Where the program fits
+but neither the search nor the matcher fits beside it, as for `[a-z]shing` from
+2567 to 2797 bytes, the pattern also keeps the matcher on the route without a
+program.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -1723,37 +1731,129 @@ faster on English text, `[a-q][^u-z]{80}x`, which the DFA kept, 5-34% faster,
 program makes its single-use contains of an ISO date 11-15% slower to compile
 and run once.
 
-## Short-Window Inner Literal Check
+## Minimum Inner Literal Search Window
 
 A line-by-line search calls the matcher once per line, and most lines are
-shorter than 64 bytes, too short for the inner literal search to skip enough
-text to repay its reverse search and anchored confirmation. The search still
-checks each such window for its literal: a window without it has no match, and
-one whose first occurrence lies within 64 bytes of its start runs the ordinary
-engine. A single literal's scan over at least 1024 bytes, where vector support
+short. A matcher's or full-Slice find whose search window is shorter than the
+inner literal search's minimum runs the ordinary engine or a fixed-width
+pattern's short-search matcher, except that a gated exact one-byte search
+first rejects windows without a gate-passing hit. Nor, except for a literal
+set as below, does a whole-text count of a shorter text run the search. A
+matcher's find or a full-Slice boolean find first takes the
+[short-window required bytes reject](#short-window-required-bytes-reject) where
+the pattern keeps required bytes, which a ranged find and `findInto` do not;
+`.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks
+them. The search owns each window from its minimum. One-of required bytes of
+two or three bytes check only the windows below both that minimum and 256
+bytes. A single one-of byte and a literal of two or more bytes keep their check
+of every window below 256 bytes, the byte with a scan as cheap as the search's
+single-byte scan: a check that changed with line length cost 4–8% on naturally
+mixed line lengths, 1.06x main's time on r9g and 1.04–1.06x on r8i for lh3lh3
+lines under 128 bytes, although each length range alone tied. Where the one-of
+bytes differ from the inner literal, as `\w+:[a-z]+@` searches for `:` but
+requires `@`, a window the check leaves to the search that holds the literal
+but none of the bytes runs the search, as it did before such a pattern kept
+one-of bytes. The short-search matcher is described in
+[Boolean Partial-Match Specializations](#boolean-partial-match-specializations).
+A literal kind's minimum is where its scan measured faster than the DFA. The
+minimums were measured in A/B rounds on r9g and r8i Spot hosts, rebar on one
+host of each and JMH average time on one or two, in chunks of English text cut
+to each window length.
+
+- A [class pair](#inner-literal-class-pairs) and a one-byte literal search from
+  64 bytes. With a 1024-byte minimum, finds of `\s[a-z]+[?!.]["']` in windows of
+  64 to 1023 bytes took 2.0 to 3.0x the pair scan's time on r9g and 1.4 to 2.4x
+  on r8i, and lh3lh3's date lines of 64 to 127 bytes, searched for `/`, took
+  1.37x on r9g and 1.43x on r8i, its email lines, for `@`, 1.15x and 1.30x.
+- A single literal of two or more bytes searches from 96 bytes, also a
+  case-insensitive literal searched by its exact head. Its word-at-a-time scan
+  took 5 to 15% longer than the DFA in 63- to 65-byte windows for `ing` in
+  `[a-zA-Z]+ing`, about the same at 96 to 100 bytes, and 5 to 13% less at 127. A
+  128-byte minimum left `\w+\s+Holmes` up to 7% slower than the search in 112-
+  and 127-byte windows on r9g.
+- A literal set searches from 256 bytes, where its scan takes the scalar filter
+  below the vector byte-set scan's cutoff,
+  `Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES`, 1024 bytes. The crossover
+  depends on the set: in 300- to 1023-byte windows the DFA took up to 1.18x the
+  search's time for `[a-z](?:ing|ment)` on r9g, and between 0.90x and 1.07x on
+  r8i, while the search of `\s[a-z]{0,12}(?:ing|ment)\s` took 1.2 to 1.8x the
+  DFA's time at every length below the cutoff. Finds through both searches
+  took 1.5 to 2.7x the DFA's time in 64- and 128-byte windows. A count of such
+  a set searches from 64 bytes, as before these minimums: one count search
+  continues across many matches, so its scan pays off sooner, while each find
+  starts a fresh search. Counts of `[a-z](?:ing|ment)` on 64- and 128-byte
+  texts took 1.09 to 1.22x the search's time on the DFA on r9g, and 0.90 to
+  0.95x on r8i.
+- A literal set behind a class run that only the [class-run
+  proof](#inner-literal-class-run-prefix) admits searches from the vector
+  cutoff. Below it, finds of `.{0,2}(Tom|Sawyer|Huckleberry|Finn)` through the
+  search took 1.8 to 2.4x the DFA's time in windows of 300 to 1023 bytes on r9g
+  and 2.5 to 2.7x on r8i. Without the class-run proof the pattern ran on the DFA
+  at every length, so the higher minimum keeps it there below the cutoff. A
+  single literal or class pair behind such a run keeps its kind's minimum:
+  `[a-zA-Z]+ing` and `\w+[?!.]["']` ran in 0.19 to 0.32x the DFA's time from 300
+  bytes.
+- A pattern with a short-search fixed-width matcher runs the search from 64
+  bytes, whatever its literal kind, because a shorter window runs that matcher,
+  not the DFA. The matcher took 2.7 to 5.8x the search's time on 64- to 127-byte
+  counts of `[a-z]shing` on r9g and r8i, so such a pattern keeps the 64-byte
+  handoff it had before these minimums. That was measured on a single literal;
+  for a fixed-width class pair the handoff is unmeasured.
+
+Short windows were once checked for the literal, a window without it having no
+match. On short lines that cost more than it saved: a matcher's find loop
+probed the start of each window for the literal ahead of its cursors, and a
+window whose start lacked it then ran the inner literal search, which scanned
+those bytes again, where a literal set's filter costs more than the DFA cursor
+on a short line. With `.{0,2}(Tom|Sawyer|Huckleberry|Finn)` admitted to the
+search, a grep-style find per line of `sherlock.txt` (45 bytes on average) took
+1.7x the base's 97 ns a line on r9g and 2.4x its 90 ns on r8i, with rebar on
+one Spot host of each; `[a-zA-Z]+ing` took 7% longer, and a 58-byte count-spans
+row of `[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ.*` 15 ns longer. A one-byte literal
+with byte gates keeps that check in a find window below 64 bytes, after its
+required byte's check passes, so a window whose hits all fail the gates has no
+match without the forward DFA: 41,614 of lh3lh3's 43,452 date lines under 64
+bytes that hold `/` are rejected that way.
+
+A find loop probes a window of at least the minimum, or any window for a gated
+exact one-byte search, before its cursors, reading at most 63 bytes plus the
+longest literal's length. A literal hit that passes
+the byte gates and starts within 64 bytes of the window start keeps the cursors,
+as the ordinary engine falls back there: the search could skip no more than
+those bytes, which cannot repay its reverse search and anchored confirmation.
+Any other window takes the inner literal search. A wider probe, which read up to
+255 bytes plus the literal and failed a window it read whole without finding the
+literal, cost 7 to 9% on long find loops, since the search scanned again what
+the probe had read. It bought little: where a pattern keeps its literal of two
+or more bytes as required bytes, they already reject a window shorter than 256
+bytes that lacks it.
+
+A single literal's scan over at least 1024 bytes, where vector support
 is available, uses the prefix scans' kernels and cutoff: the vector byte-set
 scan for a one-byte literal and the fused pair scan for a longer one. A shorter
-scan, including that check, uses the word-at-a-time scan. A case-insensitive
-literal, such as `# noqa` in `\s*# (?i:noqa)`, keeps the word-at-a-time scan
-for its exact head, `# `, and checks the rest of each hit with ASCII case
-folding, at every length. Whole-text counts keep their 64-byte minimum.
+scan, including the find loop's probe, uses the word-at-a-time scan. A
+case-insensitive literal, such as `# noqa` in `\s*# (?i:noqa)`, keeps the
+word-at-a-time scan for its exact head, `# `, and checks the rest of each hit
+with ASCII case folding, at every length.
 
-The accepted costs were measured before RE2, Java, and Rust shared the
-fixed-width matchers, 3 hosts a side. The Rust `reallyreallyhard0-32` row checks
-a 32-byte window per call and takes 1.067x the base's time native and 1.062x
-safe on r9g, and 1.095x and 1.107x on r8i; it stays ahead of the Rust crate, at
-0.70x of its time on r9g and 0.77x on r8i. Everyday email reused contains takes
-1.049x on r8i native, because every email holds `@` and the check never rules
-one out; r9g and r8i safe tie. Holmes, `around-holmes-english` in Rust, takes
-1.216x native and 1.126x safe on r8i, a row that already lost to the crate.
+The earlier check of short windows was accepted with costs measured before RE2,
+Java, and Rust shared the fixed-width matchers, 3 hosts a side. The Rust
+`reallyreallyhard0-32` row checked a 32-byte window per call and took 1.067x the
+base's time native and 1.062x safe on r9g, and 1.095x and 1.107x on r8i; it
+stayed ahead of the Rust crate, at 0.70x of its time on r9g and 0.77x on r8i.
+Everyday email reused contains took 1.049x on r8i native, because every email
+holds `@` and the check never ruled one out; r9g and r8i safe tied. Holmes,
+`around-holmes-english` in Rust, took 1.216x native and 1.126x safe on r8i, a
+row that already lost to the crate. These rows have not been measured since
+short windows stopped running the search.
 
-A separate scan for short windows cost more on short lines. Email reused
-contains took 1.9 ns more than the base on r9g native and 4.0 ns more on r8i
-native, against 0.4 ns and 1.9 ns with the shared scan, and lh3lh3's short date
-lines gave back 6 to 7 points on r9g safe. Holmes tied the base on Graviton,
-1.012x native, only because of how C2 then compiled the shared scan: the same
-check on an earlier base ran it 1.66x slower. A later change to the shared scans
-or their callers must therefore measure Holmes on r9g again.
+For that check, a separate scan for short windows cost more on short lines.
+Email reused contains took 1.9 ns more than the base on r9g native and 4.0 ns
+more on r8i native, against 0.4 ns and 1.9 ns with the shared scan, and
+lh3lh3's short date lines gave back 6 to 7 points on r9g safe. Holmes tied the
+base on Graviton, 1.012x native, only because of how C2 then compiled the shared
+scan: the same check on an earlier base ran it 1.66x slower. A later change to
+the shared scans or their callers must therefore measure Holmes on r9g again.
 
 Since long inner literal searches moved to the fused pair scan, Holmes runs
 through that scan. Inlined, C2 copied the scan's vector loop into the callers it
@@ -1777,7 +1877,9 @@ ran the inner literal search or the forward DFA over every line, although only
 the few lines that hold that literal or byte can match. Each compiled pattern
 therefore keeps at most one fact about the bytes every match holds, and a
 search window shorter than 256 bytes that lacks them reports no match before
-any engine runs.
+any engine runs. For one-of bytes of two or three bytes beside an inner literal
+search, the window must also be shorter than that search's
+[minimum](#minimum-inner-literal-search-window).
 
 The fact takes one of two shapes:
 
@@ -1804,9 +1906,8 @@ The fact takes one of two shapes:
   `,z`; a counted group that does not capture stays whole, and in `(?:\d+,){2}y`
   its suffix `,` joins `y`. An element literal still takes precedence, even over
   a rarer run.
-- Otherwise, unless the pattern has an inner literal search (which already
-  rejects such a window before any engine setup), up to three ASCII bytes of
-  which every match holds one, such as `/` and `@` for
+- Otherwise, up to three ASCII bytes of which every match holds one, such as
+  `/` and `@` for
   `[a-z]+://\S+|[^ @]+@[^ @]+`. An alternation takes the union of its branches'
   bytes, and a concatenation the bytes of its element that is rarest in English
   text. A case-insensitive letter gives no byte: one byte cannot cover both
@@ -1832,7 +1933,9 @@ a word that holds the first byte. A common first byte keeps both tests on every
 word: the same gate on the `c` of `coding` mispredicted and cost 14 to 15% on
 that row.
 The one-of-bytes scan loads each word once and tests it against all three
-bytes.
+bytes. A single byte takes the inner literal search's single-byte scan instead:
+two words a step, one zero-byte test per word, and a last word that overlaps
+the one before it.
 
 Windows of 256 bytes or more skip the check. Most lines of a line search are
 shorter, and there the scan costs less than the find and engine setup it saves.
@@ -1843,7 +1946,15 @@ windows too, with a literal search and the bounds described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, keeps no fact: no short window can hold such a match, so such a
-pattern goes without the long-window check too.
+pattern goes without the long-window check too. One-of bytes of two or three
+bytes beside an inner literal search check only windows shorter than that
+search's [minimum](#minimum-inner-literal-search-window), where it is lower than
+256 bytes: from there the search scans each window for its literal before any
+engine runs unless the find skips the DFA, and the one-of scan would repeat or
+replace that scan. A single one-of byte keeps every window below 256 bytes,
+since its scan costs as little as the search's single-byte scan and a check
+that changed with line length cost 4–8% on lh3lh3's naturally mixed line
+lengths, although each length range alone tied.
 
 Two hooks run the check, both before any engine setup: the matcher's general
 find route, on the rest of its region right after the minimum-length check,
@@ -1855,14 +1966,18 @@ hook inside the ordinary engine would still pay the find and engine prologue:
 on r8i the uri-or-email row took 0.445 of the base's time with the early hooks
 and 0.551 with the check in the engine.
 
-The [short-window inner literal check](#short-window-inner-literal-check)
-found that a separate short-window literal scan cost more on short lines than
-sharing the inner literal search's own. This check is not a second route for
-that search: it rejects a window before the engine starts, and a window that
-holds the literal still runs the engine, which scans for it again. That second
-scan is the cost to watch, on the rows that decision names: Holmes
-`around-holmes-english` on r9g, Rust `reallyreallyhard0-32`, Everyday email
-reused contains on r8i, and lh3lh3 date.
+An earlier check of short windows, recorded under [Minimum Inner Literal Search
+Window](#minimum-inner-literal-search-window), found that a separate
+short-window literal scan cost more on short lines than sharing the inner
+literal search's own. Windows shorter than the search's minimum no longer run
+that search, so a find window shorter than both 256 bytes and that minimum gets
+no literal check but this one, where the pattern keeps it. A literal set's or
+class pair's windows of 256 to 1023 bytes get none, unless the pattern keeps a
+short-search fixed-width matcher. It rejects a window before the engine starts,
+and a window that holds the literal still runs the engine, which scans for it
+again. That second scan is the cost to watch, on the rows that decision names:
+Holmes `around-holmes-english` on r9g, Rust `reallyreallyhard0-32`, Everyday
+email reused contains on r8i, and lh3lh3 date.
 
 The fact only saves work, so its memory gives way. It is reserved after
 compilation's routes and after the OnePass tables of a program with a
@@ -1903,8 +2018,9 @@ faster on r8i: the matcher's larger find could stop HotSpot from inlining the
 inner literal search and its word-at-a-time loop into it, the mode RE2 and Rust
 already ran in at 117 µs. That mode is gone: where vector support is available,
 a search that long now takes the pair scan, which runs out of line in every
-language, as the
-[short-window inner literal check](#short-window-inner-literal-check) records.
+language, as
+[Minimum Inner Literal Search Window](#minimum-inner-literal-search-window)
+records.
 The row has not been remeasured with this check since.
 
 ## Inner Literal Class Pairs
@@ -1975,10 +2091,14 @@ A pattern without a gate keeps the search loop without the check, and a gated
 pattern runs a copy of the loop with it. With the check in one shared loop,
 patterns without a gate measured up to about 4% slower, on lh3lh3 uri
 (Graviton) and lh3lh3 email (Intel) before their prefixes were gated. The gated
-copy finds the first hit before it enters the loop, so a window without one, as
-most lines of a grep are, returns without paying for the loop's entry: entered
-for every line, it made lh3lh3 email 3–7% slower on Graviton and 5–7% on Intel
-than with no gate. Measured
+copy finds the first hit before it enters the loop, so a window without one,
+such as a long line without the literal or the tail a count has left, returns
+without paying for the loop's entry. When every line of a grep still ran the
+search, entering the loop for each one made lh3lh3 email 3–7% slower on
+Graviton and 5–7% on Intel than with no gate; lines shorter than the
+[minimum](#minimum-inner-literal-search-window) now skip the search, except
+that a gated exact one-byte search, as email's `@` is, first rejects those
+without a gate-passing hit. Measured
 3 hosts a side, the gates take `ing-suffix-limited-space` to 0.78x on r8i and
 0.83x on r9g, `ing-whitespace` to 0.78x and 0.77x, `before-after-holmes` to
 0.71x and 0.76x, and `mariomka/email` to 0.91x and 0.90x.
@@ -2004,15 +2124,20 @@ no inner literal search for one exact literal that holds the required literal,
 whose scan already rejects a window without it. The routes that skip that
 search, BitState's capture of groups and a search that skips the DFA, scan the
 window for its literal in its place, so every window is still checked.
-An inner search for a literal
-set, a case-insensitive literal, a class pair, or a literal without the
-required one, such as the `,` of `(.*?,){13}z`, stops at hits that lack it, so
-the check runs beside that search. Neither its forward nor its lowered program
-has a prefix scan, a transparent start literal, or a
+An inner search for a literal set, a case-insensitive literal, a class pair, or
+a literal without the required one, such as the `,` of `(.*?,){13}z`, stops at
+hits that lack it, so the check runs beside that search. The search must also
+run on every window the check covers: one whose
+[minimum window](#minimum-inner-literal-search-window) is over 256 bytes, as a
+literal set's is behind a class run, leaves the shorter windows to the ordinary
+engine. No single literal's minimum is over 256 bytes today, so for the
+one-literal search that would take the check's place, the rule guards a future
+kind of single literal with a longer minimum. Neither its forward nor its
+lowered program has a prefix scan, a transparent start literal, or a
 [start literal filter](#start-literal-filter) that its first-match DFA can run.
-A program whose assertions the DFA cannot run, or whose first-match DFA does
-not fit its budget, never scans for its filter, so the filter does not count
-there. A search that skips the DFA in a pattern whose filter counts, such as a
+A program whose assertions the DFA cannot run, or whose first-match DFA does not
+fit its budget, never scans for its filter, so the filter does not count there.
+A search that skips the DFA in a pattern whose filter counts, such as a
 longest-match search whose DFA alone does not fit or a find after a count has
 given up on the DFA, reads the window as it did before. Neither program is
 anchored at either end: a start-anchored search fails at the first byte that
@@ -2422,8 +2547,8 @@ the scan leave and re-enter its test loop at nearly every vector.
 Running out of line is also intended: every caller calls the scan's compiled
 method rather than an inlined copy shaped by the caller's profiles and compile
 order, which ran Holmes up to 1.8x apart, as
-[Short-Window Inner Literal Check](#short-window-inner-literal-check) records, so
-`TestHotMethodSize` also keeps the method above the inline limit.
+[Minimum Inner Literal Search Window](#minimum-inner-literal-search-window)
+records, so `TestHotMethodSize` also keeps the method above the inline limit.
 
 ## Candidate Masks on SVE
 
@@ -3010,8 +3135,9 @@ its start literal filter's candidates, or the occurrences of a literal behind a
 leading assertion, and verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
-literal search takes, a window of at least 64 bytes whose first literal hit lies
-at least 64 bytes past its start, skips the cursor.
+literal search takes, a window of at least the search's
+[minimum](#minimum-inner-literal-search-window) whose first literal hit lies at
+least 64 bytes past its start, skips the cursor.
 
 Eligibility is deliberately narrow: first-match semantics, no required prefix,
 no anchors or empty-width instructions, a non-nullable variable-length program,
@@ -3083,8 +3209,8 @@ assertion that could refuse one, start where the search did. One-character
 expressions such as `\pL` start at the lead byte of a valid UTF-8 character
 that ends at the boundary. Other matches retain the existing reverse DFA
 boundary recovery. A search the inner literal search takes, a window of at least
-64 bytes whose first literal hit lies at least 64 bytes past its start, skips the
-cursor.
+the search's [minimum](#minimum-inner-literal-search-window) whose first literal
+hit lies at least 64 bytes past its start, skips the cursor.
 
 The one-character rule takes 0.55x to 0.61x the base's time on the dense letter
 rows. Its first shape, measured on 97dd595b with 2 hosts a side, made r8i

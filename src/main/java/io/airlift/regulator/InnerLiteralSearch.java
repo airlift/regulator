@@ -51,10 +51,35 @@ import static java.util.Objects.requireNonNull;
 /// previous anchored confirmation already read, which keeps the work linear, or when a DFA fails.
 /// It also falls back when its first candidate lies fewer than [#MINIMUM_SKIPPED_BYTES] past the
 /// search start. The prefix lies before the literal, so the search could skip no more than that,
-/// which cannot repay the reverse search and the anchored confirmation. In a window shorter than
-/// that, the search is therefore only a check for a candidate: a window without a hit that passes
-/// the byte gates has no match, as for the many short lines of a line-by-line search, and any
-/// other runs the ordinary engine.
+/// which cannot repay the reverse search and the anchored confirmation.
+///
+/// Apart from a gated exact one-byte search, a find never runs it on a search window shorter than
+/// [#minimumSearchBytes], nor a count on a whole text shorter than [#minimumCountBytes], though a
+/// count's later searches cover whatever text remains; the exception is a pattern that keeps a
+/// short-search fixed-width matcher, which runs the search from
+/// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] whatever its literal kind. A shorter window, as for
+/// the many short lines of a line-by-line search, runs the ordinary engine, or that fixed-width
+/// matcher for a count or matcher find, except that a gated exact one-byte search first rejects a
+/// find window without a gate-passing hit. A matcher's find or a full-Slice
+/// boolean find first takes the short-window required bytes reject where the pattern keeps
+/// required bytes, though a ranged find and `findInto` do not: a literal of two or more bytes, and
+/// one-of bytes that are one byte, check windows shorter than 256 bytes, and other one-of bytes
+/// only those too short for the search, which itself scans a longer window for its literal before
+/// any engine runs unless the find skips the DFA. The minimums are where the literal's scan
+/// measured faster than the ordinary engine on r9g and r8i: a class pair's scan and a one-byte
+/// literal's from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], a longer or case-insensitive single
+/// literal's word-at-a-time scan from [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES], and a set's scalar
+/// filter from [#MINIMUM_LITERAL_SET_SEARCH_BYTES], or behind a class run that only the class-run
+/// proof admits from [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES], where the vector scan takes
+/// over. A count of a set not behind a class run searches from
+/// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES]: one count search continues across many matches, so
+/// its scan pays off sooner, while each find starts a fresh search. The fixed-width matcher took
+/// 2.7 to 5.8 times the search's time on 64- to 127-byte counts of `[a-z]shing`, a single literal;
+/// for a fixed-width class pair it is unmeasured. A find loop also keeps its cursors, as the
+/// ordinary engine falls back, where its first candidate
+/// [lies near the window start][#fallsBackNearStart]. A one-byte exact literal with byte gates
+/// also runs on a shorter find window, as a [check][#checksShortWindows] for a hit that passes
+/// them.
 ///
 /// A case-insensitive ASCII literal is searched by its exact head, and each hit is checked for the
 /// folded rest. Two adjacent elements that each match one of a few ASCII bytes, such as the
@@ -70,9 +95,14 @@ import static java.util.Objects.requireNonNull;
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
-    // A whole-text count of a shorter text skips the search. On such a text the search could
-    // only check for a hit that passes the byte gates, which the count gains little from.
-    static final int MINIMUM_TEXT_BYTES = 64;
+    // A search window, or a whole-text count's text, shorter than this skips the search of a
+    // single literal of two or more bytes. Its word-at-a-time scan lost to the DFA in 64-byte
+    // windows and won from 100 bytes, on r9g and r8i.
+    static final int MINIMUM_SINGLE_LITERAL_SEARCH_BYTES = 96;
+    // A find window shorter than this skips a literal set's search. Its scalar filter lost to the
+    // DFA in 64- and 128-byte windows on r9g and r8i, and for `ing|ment` won again by 300 bytes on
+    // r9g.
+    static final int MINIMUM_LITERAL_SET_SEARCH_BYTES = 256;
     // A first candidate closer than this to the search start leaves too few bytes to skip.
     static final int MINIMUM_SKIPPED_BYTES = 64;
 
@@ -123,10 +153,13 @@ final class InnerLiteralSearch
     private final long suffixGate0;
     private final long suffixGate1;
     private final boolean hasByteGates;
+    private final int minimumSearchBytes;
+    private final int minimumCountBytes;
+    private final boolean checksShortWindows;
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, ByteGate prefixGate, ByteGate suffixGate, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, boolean behindClassRun, ByteGate prefixGate, ByteGate suffixGate, Prog reversePrefixProgram, Prog forwardProgram)
     {
         this.literalSearch = literalSearch;
         this.foldedBytes = foldedBytes;
@@ -162,6 +195,29 @@ final class InnerLiteralSearch
         this.suffixGate0 = suffixGate.word0();
         this.suffixGate1 = suffixGate.word1();
         this.hasByteGates = (prefixGate0 | prefixGate1 | prefixGate2 | prefixGate3 | suffixGate0 | suffixGate1) != 0;
+        // A short window costs a literal set's scalar filter more than the DFA it would replace,
+        // and behind a class run, which only the class-run proof admits, a set's search lost to
+        // the DFA up to the vector scan's cutoff. A class pair's scan and a one-byte literal's
+        // beat the DFA from 64 bytes. A case-insensitive literal is a single one, searched by its
+        // head.
+        if (literalSearch == null && classPairBytes == null) {
+            this.minimumSearchBytes = behindClassRun ? Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES : MINIMUM_LITERAL_SET_SEARCH_BYTES;
+        }
+        else if (literalSearch == null) {
+            this.minimumSearchBytes = CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
+        }
+        else {
+            this.minimumSearchBytes = foldedBytes == null && literalSearch.literalLength() == 1 ? CompiledPattern.MINIMUM_LONG_SEARCH_BYTES : MINIMUM_SINGLE_LITERAL_SEARCH_BYTES;
+        }
+        // One count search continues across many matches, so a set's scan pays off sooner there
+        // than in a find, which starts a fresh search: counts of `[a-z](?:ing|ment)` on 64- and
+        // 128-byte texts took 1.09 to 1.22 times the search's time on the DFA on r9g, and 0.90 to
+        // 0.95 times on r8i.
+        this.minimumCountBytes = literalSearch == null && classPairBytes == null && !behindClassRun ? CompiledPattern.MINIMUM_LONG_SEARCH_BYTES : minimumSearchBytes;
+        // A gated one-byte literal keeps the check below its minimum that every inner literal
+        // search ran before the minimums: of lh3lh3's date lines under 64 bytes that hold `/`,
+        // 41,614 of 43,452 fail the digit gates and then skip the forward DFA.
+        this.checksShortWindows = hasByteGates && literalSearch != null && foldedBytes == null && literalSearch.literalLength() == 1;
         this.reversePrefixProgram = requireNonNull(reversePrefixProgram, "reversePrefixProgram is null");
         this.forwardProgram = requireNonNull(forwardProgram, "forwardProgram is null");
     }
@@ -208,7 +264,7 @@ final class InnerLiteralSearch
         // The byte before the literal ends the prefix, so the reverse prefix program names the
         // bytes it can be, whatever the prefix's shape.
         ByteGate prefixGate = ByteGate.of(reversePrefixProgram.boundaryBytes()).unlessHolding(literalEdgeBytes(innerLiteral.literals(), foldedLiteral, false));
-        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, prefixGate, innerLiteral.suffixGate(), reversePrefixProgram, forwardProgram);
+        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, literalSet, literalSetFilter, classPairBytes, innerLiteral.behindClassRun(), prefixGate, innerLiteral.suffixGate(), reversePrefixProgram, forwardProgram);
     }
 
     /// Returns the shortest literal length [#analyze] would search the normalized `regexp` for:
@@ -282,8 +338,9 @@ final class InnerLiteralSearch
                 }
             }
             Regexp prefix = index == 1 ? children.get(0) : Regexp.concat(regexp.parseFlags(), children.subList(0, index));
-            boolean admitted = hasNoEarlierMatch(prefix, literals, caseFolding) || (classPair != null && hasNoEarlierMatchAcrossLastByte(prefix, literals));
-            if (!admitted) {
+            boolean provenOtherwise = hasNoEarlierMatch(prefix, literals, caseFolding) || (classPair != null && hasNoEarlierMatchAcrossLastByte(prefix, literals));
+            boolean behindClassRun = !provenOtherwise && isClassRunPrefix(prefix);
+            if (!provenOtherwise && !behindClassRun) {
                 if (classPair != null) {
                     continue;
                 }
@@ -295,7 +352,7 @@ final class InnerLiteralSearch
                 int literalElements = foldedLiteral != null ? foldedLiteral.elements() : classPair != null ? 2 : 1;
                 suffixGate = suffixGate(children, index + literalElements).unlessHolding(literalEdgeBytes(literals, foldedLiteral, true));
             }
-            return new InnerLiteral(prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), suffixGate);
+            return new InnerLiteral(prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), behindClassRun, suffixGate);
         }
         return null;
     }
@@ -304,8 +361,9 @@ final class InnerLiteralSearch
     // for a class pair, whose sides' bytes are `classPairBytes`; `literals` holds the single
     // literal or the members. A case-insensitive literal's `literal` is its exact head, and
     // `foldedLiteral` holds the whole literal, or is null. `suffixGate` holds the bytes the byte
-    // after a hit may be, or is `ByteGate.NONE` for no gate.
-    private record InnerLiteral(Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, ByteGate suffixGate) {}
+    // after a hit may be, or is `ByteGate.NONE` for no gate. `behindClassRun` says that only the
+    // class-run proof admits the prefix.
+    private record InnerLiteral(Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, boolean behindClassRun, ByteGate suffixGate) {}
 
     // As the crate's top_concat does, a capturing group in the top-level concatenation is looked
     // through, and a concatenation inside it joins the top level, so `(\s*)(# x)` has the inner
@@ -378,6 +436,41 @@ final class InnerLiteralSearch
     int minimumLiteralLength()
     {
         return minimumLiteralLength;
+    }
+
+    /// The fewest bytes of a find's search window that its callers run the search on where the
+    /// alternative is the ordinary engine:
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a class pair or a one-byte literal,
+    /// [#MINIMUM_SINGLE_LITERAL_SEARCH_BYTES] for a longer or case-insensitive single literal, and
+    /// [#MINIMUM_LITERAL_SET_SEARCH_BYTES] for a literal set, or
+    /// [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] for one behind a class run that only the
+    /// class-run proof admits. A pattern with a short-search fixed-width matcher, whose shorter
+    /// counts and matcher finds run that matcher instead, runs the search from
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES], and a search that
+    /// [checks shorter windows][#checksShortWindows] runs on them too; see
+    /// [CompiledPattern#searchesInnerLiteralWindow].
+    int minimumSearchBytes()
+    {
+        return minimumSearchBytes;
+    }
+
+    /// Whether a find runs the search on a window shorter than [#minimumSearchBytes] too, for a
+    /// one-byte exact literal with byte gates. There the search is only a check: a window whose
+    /// hits all fail the gates has no match, and one with a hit that passes them falls back near
+    /// its start to the ordinary engine. A whole-text count keeps [#minimumCountBytes].
+    boolean checksShortWindows()
+    {
+        return checksShortWindows;
+    }
+
+    /// The fewest bytes of a whole-text count's text that it runs the search on where the
+    /// alternative is the ordinary engine: [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] for a literal
+    /// set not behind a class run, whose one search continues across the count's matches, and
+    /// [#minimumSearchBytes] for every other kind. A pattern with a short-search fixed-width
+    /// matcher counts through the search from [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES].
+    int minimumCountBytes()
+    {
+        return minimumCountBytes;
     }
 
     /// The reversed program of the prefix before the literal, whose longest-match DFA finds a
@@ -507,9 +600,9 @@ final class InnerLiteralSearch
         return forward;
     }
 
-    // The search of a pattern with a byte gate. A window without a hit, as most lines of a grep
-    // are, returns here without entering the loop; see REGULATOR_DECISIONS.md, Inner Literal Byte
-    // Gates.
+    // The search of a pattern with a byte gate. A window without a hit, such as a long line
+    // without the literal or the tail a count has left, returns here without entering the loop;
+    // see REGULATOR_DECISIONS.md, Inner Literal Byte Gates.
     private long searchGated(Slice text, int contextStart, int contextEnd, int start, int end)
     {
         int literalStart = nextLiteral(text, start, end);
@@ -536,9 +629,9 @@ final class InnerLiteralSearch
                 // so the bound on how far back the next reverse search may read stays where it
                 // was: raising it, as after a rejection, would make the second `ing` of `singing`
                 // fall back. Nor does the hit make the search fall back: near the start, where a
-                // slash after a letter would send a short line holding a date to the ordinary
-                // engine, or inside text a confirmation read, since a skipped hit runs no DFA to
-                // read that text again.
+                // slash after a letter would send a window holding a date to the ordinary engine,
+                // or inside text a confirmation read, since a skipped hit runs no DFA to read that
+                // text again.
                 continue;
             }
             if (firstCandidate && literalStart - start < MINIMUM_SKIPPED_BYTES) {
@@ -1104,8 +1197,9 @@ final class InnerLiteralSearch
         return literal;
     }
 
-    // meta/reverse_inner.rs has_no_earlier_match, with the helpers of meta/prefix.rs, and the
-    // class-run proof, which the Rust regex crate does not have.
+    // meta/reverse_inner.rs has_no_earlier_match, with the helpers of meta/prefix.rs. The class-run
+    // proof, which the Rust regex crate does not have, is checked apart, since it sets a set's
+    // minimum window.
     private static boolean hasNoEarlierMatch(Regexp prefix, byte[][] literals, CaseFolding caseFolding)
     {
         if (literals.length == 1 && !canConsumeEveryLiteralByte(prefix, literals[0])) {
@@ -1114,7 +1208,7 @@ final class InnerLiteralSearch
         if (MatchLength.analyze(prefix, caseFolding).fixed() >= 0) {
             return true;
         }
-        return hasDisjointClassSeparator(prefix, literals) || isClassRunPrefix(prefix);
+        return hasDisjointClassSeparator(prefix, literals);
     }
 
     // A prefix of leading assertions and then a run of one class has the property the search

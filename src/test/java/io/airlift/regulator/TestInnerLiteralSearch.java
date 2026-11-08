@@ -357,9 +357,9 @@ public class TestInnerLiteralSearch
     @Test
     public void testHighBytePrefixGateAgreesWithOrdinaryEngine()
     {
-        // Any byte from 0x80 to 0xFF can end this prefix, and hits after any high byte, past the
-        // filler that keeps the search from falling back near its start, agree with the ordinary
-        // engine.
+        // Any byte from 0x80 to 0xFF can end this prefix, and hits after any high byte agree with
+        // the ordinary engine. The filler reaches the single literal's minimum, so every input
+        // runs the search, and keeps it from falling back near its start.
         String pattern = "(?-u:[\\x80-\\xFF])@xy";
         InnerLiteralSearch search = RustRegexp.compile(utf8Slice(pattern), RUST_BYTES_OPTIONS).innerLiteralSearchForDiagnostics();
         String highBytes = IntStream.rangeClosed(0x80, 0xFF).mapToObj(value -> String.valueOf((char) value)).collect(joining());
@@ -367,7 +367,7 @@ public class TestInnerLiteralSearch
 
         Engine actual = Language.RUST_BYTES.compile(pattern);
         Engine expected = Language.RUST_BYTES.compile("(?:" + pattern + ")|\\b\\B");
-        byte[] filler = FILLER.getBytes(UTF_8);
+        byte[] filler = "-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES).getBytes(UTF_8);
         for (byte[] hits : List.of(
                 new byte[] {(byte) 0xFF, '@', 'x', 'y'},
                 new byte[] {(byte) 0xC3, '@', 'x', 'y'},
@@ -431,12 +431,13 @@ public class TestInnerLiteralSearch
         // A ranged find keeps the whole Slice as assertion context, so its closing \b sees the
         // byte past the window, while a matcher region is its own context. The Slice starts inside
         // its backing array, and the literal lies past the near-start fallback, in a window short
-        // enough for the word-at-a-time scan and in one long enough for the vector scan.
+        // enough for the word-at-a-time scan and in one long enough for the vector scan, both long
+        // enough for the search.
         String regex = "\\b\\w+\\s+Holmes\\s+\\w+\\b";
         Re2 pattern = Re2.compile(utf8Slice(regex));
         InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
         Re2 ordinary = Re2.compile(utf8Slice("(?:" + regex + ")|\\b\\B"));
-        for (String filler : List.of(FILLER, "-".repeat(1100))) {
+        for (String filler : List.of("-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES), "-".repeat(1100))) {
             String window = filler + "Sherlock Holmes sa";
             int start = 2;
             int end = start + window.length();
@@ -491,15 +492,17 @@ public class TestInnerLiteralSearch
     }
 
     @Test
-    public void testShortWindowWithoutLiteralSkipsOrdinaryEngine()
+    public void testRequiredBytesCoexistWithInnerLiteralSearch()
     {
-        // Under the minimum skip, a window that holds the literal runs the ordinary engine, and
-        // one without it has no match, so the forward DFA never starts.
+        // A window shorter than the search's minimum runs the ordinary engine where it holds the
+        // literal, and the required bytes, which a pattern with an inner literal search keeps too,
+        // reject one without it, so the forward DFA never starts.
         for (String regex : List.of("[\\w.+-]+@[\\w.-]+\\.\\w+", "(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?([A-Z]+[0-9]+))?)")) {
             for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.RUST_BYTES)) {
                 String description = language + " " + regex;
                 CompiledPattern pattern = language.compiledPattern(regex);
                 assertThat(pattern.innerLiteralSearchForDiagnostics()).as(description).isNotNull();
+                assertThat(pattern.requiredBytesForDiagnostics()).as(description).isNotNull();
                 Slice absent = utf8Slice("    return contact.support(value)");
                 assertThat(pattern.find(absent)).as(description).isFalse();
                 assertThat(pattern.matcher(absent).find()).as(description).isFalse();
@@ -517,6 +520,70 @@ public class TestInnerLiteralSearch
                 assertThat(forwardStateCount(pattern)).as(description).isPositive();
             }
         }
+    }
+
+    @Test
+    public void testSearchesWindowsFromMinimum()
+    {
+        // A search window shorter than the search's minimum, a literal set's 256 bytes or 1024
+        // behind a class run, a longer single literal's 96, or 64 for a one-byte literal or class
+        // pair, never runs the inner literal search, except a gated exact one-byte search, which
+        // first rejects a window without a gate-passing hit: a matcher's find and a full-Slice
+        // find run the ordinary engine there. A whole-text count keeps the same minimum, except a
+        // literal set's not behind a class run, 64 bytes.
+        // A window at the minimum runs the search, the only route that starts its reverse prefix
+        // DFA, or, where a literal ending a minimum window would still fall back near its start,
+        // the shortest window that puts the literal past that fallback. Each window lies inside a
+        // longer Slice, as a matcher region, and ends with the literal, inside any required bytes
+        // check.
+        for (MinimumWindow entry : List.of(
+                new MinimumWindow(".{0,2}(Tom|Sawyer|Huckleberry|Finn)", "Finn", Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES, Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES),
+                new MinimumWindow("\\s[a-z]{0,12}(?:ing|ment)\\s", " moment ", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
+                new MinimumWindow("[a-z](?:ing|ment)", "ament", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
+                new MinimumWindow("\\w+\\s+Holmes", "a Holmes", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
+                new MinimumWindow("\\s*(?i:# noqa)", "# NoQA", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
+                new MinimumWindow("\\w+@", "a@", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
+                new MinimumWindow("\\w+[?!.][\"']", "a?\"", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES))) {
+            String regex = entry.regex();
+            String literal = entry.literal();
+            for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.RUST_BYTES)) {
+                CompiledPattern ordinary = language.compiledPattern("(?:" + regex + ")|\\b\\B");
+                InnerLiteralSearch search = language.compiledPattern(regex).innerLiteralSearchForDiagnostics();
+                assertThat(search).as("%s %s", language, regex).isNotNull();
+                int minimum = search.minimumSearchBytes();
+                int countMinimum = search.minimumCountBytes();
+                assertThat(minimum).as("%s %s", language, regex).isEqualTo(entry.minimum());
+                assertThat(countMinimum).as("%s %s", language, regex).isEqualTo(entry.countMinimum());
+                for (int length : IntStream.of(countMinimum - 1, Math.max(countMinimum, InnerLiteralSearch.MINIMUM_SKIPPED_BYTES + literal.length()), minimum - 1, Math.max(minimum, InnerLiteralSearch.MINIMUM_SKIPPED_BYTES + literal.length())).distinct().toArray()) {
+                    String description = "%s %s %s".formatted(language, regex, length);
+                    boolean searches = length >= minimum;
+                    Slice text = utf8Slice("ab" + "-".repeat(length - literal.length()) + literal + "cd");
+                    Slice window = text.slice(2, length);
+
+                    CompiledPattern matcherPattern = language.compiledPattern(regex);
+                    RegexpMatcher matcher = matcherPattern.matcher(text, 0).reset(text, 2, 2 + length);
+                    RegexpMatcher expected = ordinary.matcher(text, 0).reset(text, 2, 2 + length);
+                    assertThat(matcher.find()).as(description).isTrue();
+                    assertThat(expected.find()).as(description).isTrue();
+                    assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expected.start(), expected.end()));
+                    assertThat(reversePrefixStateCount(matcherPattern) > 0).as(description).isEqualTo(searches);
+
+                    CompiledPattern findPattern = language.compiledPattern(regex);
+                    assertThat(findPattern.find(window)).as(description).isTrue();
+                    assertThat(reversePrefixStateCount(findPattern) > 0).as(description).isEqualTo(searches);
+
+                    CompiledPattern countPattern = language.compiledPattern(regex);
+                    assertThat(countPattern.count(window)).as(description).isEqualTo(ordinary.count(window));
+                    assertThat(reversePrefixStateCount(countPattern) > 0).as(description).isEqualTo(length >= countMinimum);
+                }
+            }
+        }
+    }
+
+    private static long reversePrefixStateCount(CompiledPattern pattern)
+    {
+        Dfa.DfaInstance dfa = pattern.innerLiteralSearchForDiagnostics().reversePrefixProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        return dfa == null ? 0 : dfa.cacheSnapshot().stateCount();
     }
 
     private static long forwardStateCount(CompiledPattern pattern)
@@ -539,7 +606,8 @@ public class TestInnerLiteralSearch
     @Test
     public void testFallsBackWhenLiteralIsNearStart()
     {
-        String filler = ".".repeat(200);
+        // Every text is long enough for the search of a literal set.
+        String filler = ".".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES);
         // A search skips at most the bytes before its first candidate, as in a uuid whose hyphen
         // sits 8 bytes in, so a first candidate closer than the minimum falls back to the ordinary
         // engine. A hit whose neighboring bytes no match can hold is no candidate, so in
@@ -592,6 +660,19 @@ public class TestInnerLiteralSearch
         assertThat(search.search(text, 0, text.length(), 0, text.length())).isEqualTo(Dfa.SEARCH_NO_MATCH);
         assertThat(stateCount(search.reversePrefixProgramForDiagnostics())).isZero();
         assertThat(stateCount(pattern.forwardProgramForDiagnostics())).isZero();
+
+        // A one-byte literal with byte gates still checks a window shorter than its minimum for a
+        // hit that passes them, once the window holds its required byte. No date ends a day or
+        // month in a letter, so a short line whose every slash follows one has no match, and
+        // neither find starts the forward DFA.
+        Slice line = utf8Slice("and/or a/b");
+        for (Language language : List.of(Language.RE2, Language.JAVA, Language.TRINO, Language.RUST, Language.RUST_BYTES)) {
+            CompiledPattern date = language.compiledPattern(DATE);
+            assertThat(date.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language.name()).isGreaterThan(line.length());
+            assertThat(date.find(line)).as(language.name()).isFalse();
+            assertThat(date.matcher(line).find()).as(language.name()).isFalse();
+            assertThat(forwardStateCount(date)).as(language.name()).isZero();
+        }
     }
 
     @Test
@@ -620,7 +701,7 @@ public class TestInnerLiteralSearch
         assertNearStart(
                 "([A-Za-z]awyer|[A-Za-z]inn)\\s",
                 List.of(),
-                List.of(".".repeat(61) + "awyxinn " + ".".repeat(200)));
+                List.of(".".repeat(61) + "awyxinn " + ".".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES)));
     }
 
     private static void assertNearStart(String regex, List<String> nearTexts, List<String> farTexts)
@@ -718,16 +799,34 @@ public class TestInnerLiteralSearch
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
                 "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
             texts.add(utf8Slice(text));
-            // A search whose first hit is near its start falls back, so filler keeps the search
-            // and its later candidates in play.
-            texts.add(utf8Slice(FILLER + text));
+            // A search whose first hit is near its start falls back, and a text shorter than the
+            // search's minimum never runs it, so filler long enough for a literal set's search
+            // keeps the search and its later candidates in play.
+            texts.add(utf8Slice("-".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) + text));
+        }
+        // Windows just under and at each minimum the search needs: without a literal, with one at
+        // the start, and with one at the end, past the near-start minimum.
+        for (int length : new int[] {
+                InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1,
+                InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES,
+                Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES - 1,
+                Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES,
+        }) {
+            texts.add(utf8Slice("x".repeat(length)));
+            for (String literal : List.of(" Holmes", "Tom", "nn", "ing", "@")) {
+                String filler = "x".repeat(length - literal.length());
+                texts.add(utf8Slice(literal + filler));
+                texts.add(utf8Slice(filler + literal));
+            }
         }
         String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
             if (textIndex % 2 == 1) {
-                output.writeBytes(FILLER.getBytes(UTF_8));
+                // Filler as long as a literal set's minimum lets every literal kind's search run
+                // on these texts.
+                output.writeBytes("-".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES).getBytes(UTF_8));
             }
             int length = output.size() + random.nextInt(240);
             while (output.size() < length) {
@@ -784,6 +883,8 @@ public class TestInnerLiteralSearch
     }
 
     private record SmallBudget(String pattern, long maxMemory, String match, boolean keepsSearch) {}
+
+    private record MinimumWindow(String regex, String literal, int minimum, int countMinimum) {}
 
     private enum Language
     {

@@ -593,9 +593,9 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(pattern.innerLiteralSearchForDiagnostics().literals()).as(label).isDeepEqualTo(new byte[][] {"shing".getBytes(ISO_8859_1)});
         }
 
-        // Trino follows the same rule: its plain subtype answers contains, and count on long
-        // inputs, on the ordinary engine, which searches for shing, and agrees with RE2's general
-        // engine.
+        // Trino follows the same rule: its plain subtype answers contains, and count, on the
+        // ordinary engine, which searches for shing in inputs of at least MINIMUM_LONG_SEARCH_BYTES,
+        // and agrees with RE2's general engine; the last block below covers shorter counts.
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[a-z]shing"));
         assertThat(trino).isExactlyInstanceOf(TrinoRegexp.class);
         assertThat(trino.re2().hasRetainedFixedWidthByteSpanMatcher()).isFalse();
@@ -609,7 +609,8 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(trino.count(input)).as(text).isEqualTo(expectedCount);
         }
 
-        // A rare class pair is a two-byte inner literal too, searched for as its members.
+        // A rare class pair is a two-byte inner literal too, searched for as its members in inputs
+        // of at least MINIMUM_LONG_SEARCH_BYTES; these shorter ones check that its routes agree.
         TrinoRegexp classPair = TrinoRegexp.compile(utf8Slice("[a-z][?!.][\"']x"));
         assertThat(classPair).isExactlyInstanceOf(TrinoRegexp.class);
         assertThat(classPair.re2().innerLiteralSearchForDiagnostics().literals()).isDeepEqualTo(new byte[][] {"!\"".getBytes(ISO_8859_1), "!'".getBytes(ISO_8859_1), ".\"".getBytes(ISO_8859_1), ".'".getBytes(ISO_8859_1), "?\"".getBytes(ISO_8859_1), "?'".getBytes(ISO_8859_1)});
@@ -621,37 +622,40 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(classPair.count(input)).as(text).isEqualTo(expectedCount);
         }
 
-        // The inner literal search runs only on at least MINIMUM_LONG_SEARCH_BYTES bytes, so on
-        // fewer every language, Trino included, counts and finds matcher spans with a second,
-        // short-search fixed-width matcher, which builds no program search, while full-Slice find
-        // stays on the engine. Each search covers the last 63 or 64 bytes of a 1024-byte input
-        // that ends in ishing, so the find that resumes after the match has no bytes left.
-        byte[] bytes = "x".repeat(1024).getBytes(ISO_8859_1);
-        System.arraycopy("ishing".getBytes(ISO_8859_1), 0, bytes, 1018, 6);
-        Slice longInput = wrappedBuffer(bytes);
-        for (int length : List.of(63, 64)) {
-            Slice input = longInput.slice(longInput.length() - length, length);
-            boolean shortSearch = length < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
-            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
-                String label = "%s count of %s bytes".formatted(entry.getKey(), length);
-                CompiledPattern pattern = entry.getValue();
-                assertThat(pattern.shortFixedWidthByteMatcher()).as(label).isNotNull();
-                assertThat(pattern.count(input)).as(label).isEqualTo(1);
-                assertProgramSearchUnless(shortSearch, pattern, label);
-            }
-            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
-                String label = "%s matcher find with %s bytes left".formatted(entry.getKey(), length);
-                CompiledPattern pattern = entry.getValue();
-                RegexpMatcher matcher = pattern.matcher(longInput, 0);
-                assertThat(matcher.find(longInput.length() - length)).as(label).isTrue();
-                assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(1018, 1024);
-                assertThat(matcher.find()).as(label).isFalse();
-                assertProgramSearchUnless(shortSearch, pattern, label);
-            }
-            for (Map.Entry<String, CompiledPattern> entry : shingPatterns().entrySet()) {
-                String label = "%s find of %s bytes".formatted(entry.getKey(), length);
-                assertThat(entry.getValue().find(input)).as(label).isTrue();
-                assertProgramSearch(entry.getValue(), label);
+        // A pattern with a short-search fixed-width matcher runs the inner literal search from
+        // MINIMUM_LONG_SEARCH_BYTES, for a single literal, whose own minimum is longer, as for a
+        // class pair. On fewer bytes every language, Trino included, counts and finds matcher
+        // spans with that matcher, which builds no program search, while full-Slice find stays on
+        // the engine. Each search covers the last bytes of a 1024-byte input that ends in a match,
+        // so the find that resumes after the match has no bytes left.
+        for (Map.Entry<String, String> example : List.of(Map.entry("[a-z]shing", "ishing"), Map.entry("[a-z][?!.][\"']x", "a?\"x"))) {
+            String expression = example.getKey();
+            int matchStart = 1024 - example.getValue().length();
+            Slice longInput = utf8Slice("x".repeat(matchStart) + example.getValue());
+            for (int length : List.of(CompiledPattern.MINIMUM_LONG_SEARCH_BYTES - 1, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1)) {
+                Slice input = longInput.slice(longInput.length() - length, length);
+                boolean shortSearch = length < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
+                for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
+                    String label = "%s count of %s bytes".formatted(entry.getKey(), length);
+                    CompiledPattern pattern = entry.getValue();
+                    assertThat(pattern.shortFixedWidthByteMatcher()).as(label).isNotNull();
+                    assertThat(pattern.count(input)).as(label).isEqualTo(1);
+                    assertProgramSearchUnless(shortSearch, pattern, label);
+                }
+                for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
+                    String label = "%s matcher find with %s bytes left".formatted(entry.getKey(), length);
+                    CompiledPattern pattern = entry.getValue();
+                    RegexpMatcher matcher = pattern.matcher(longInput, 0);
+                    assertThat(matcher.find(longInput.length() - length)).as(label).isTrue();
+                    assertThat(List.of(matcher.start(), matcher.end())).as(label).containsExactly(matchStart, 1024);
+                    assertThat(matcher.find()).as(label).isFalse();
+                    assertProgramSearchUnless(shortSearch, pattern, label);
+                }
+                for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
+                    String label = "%s find of %s bytes".formatted(entry.getKey(), length);
+                    assertThat(entry.getValue().find(input)).as(label).isTrue();
+                    assertProgramSearch(entry.getValue(), label);
+                }
             }
         }
 
@@ -744,12 +748,12 @@ public class TestFixedWidthByteSpanMatcher
                 "Rust bytes (?-u)" + expression, RustRegexpParser.parse(utf8Slice("(?-u)" + expression), bytes.syntaxFlags(), bytes.nestLimit()).regexp());
     }
 
-    // Freshly compiles [a-z]shing in every language, Trino included, so no earlier search has
+    // Freshly compiles `expression` in every language, Trino included, so no earlier search has
     // built a DFA.
-    private static Map<String, CompiledPattern> shingPatterns()
+    private static Map<String, CompiledPattern> innerLiteralPatterns(String expression)
     {
-        Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns("[a-z]shing"));
-        patterns.put("Trino [a-z]shing", TrinoRegexp.compile(utf8Slice("[a-z]shing")).re2());
+        Map<String, CompiledPattern> patterns = new LinkedHashMap<>(re2JavaAndRustPatterns(expression));
+        patterns.put("Trino " + expression, TrinoRegexp.compile(utf8Slice(expression)).re2());
         return patterns;
     }
 
