@@ -237,7 +237,10 @@ public class TestRe2BooleanPlans
             // A literal kernel counts a dot-star literal's spans; Trino counts them on its own
             // dot-star subtype, so its literal-kernel class counts on the engine.
             case LITERAL_KERNEL -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "matches", "lookingAt") : Set.of("find", "countMatches", "matches", "lookingAt");
-            case LITERAL_ALTERNATION, FIXED_WIDTH, BYTE_TABLE -> Set.of("find", "countMatches");
+            case LITERAL_ALTERNATION, BYTE_TABLE -> Set.of("find", "countMatches");
+            // Trino's fixed-width class overrides the program hook for every pattern, which runs
+            // the matcher where the pattern compiled no program.
+            case FIXED_WIDTH -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "countMatches", "matchInternal") : Set.of("find", "countMatches");
             case CLASS_RUN -> Set.of("find", "countMatches", "matchInternal");
             case SCAN_PLAN -> Set.of("find", "countMatches", "matches", "lookingAt", "matchInternal");
         };

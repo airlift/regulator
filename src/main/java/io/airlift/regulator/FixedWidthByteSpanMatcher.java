@@ -535,6 +535,14 @@ final class FixedWidthByteSpanMatcher
         return bailsOnDenseCandidates;
     }
 
+    /// Returns an upper bound on the bytes a match spans: one for each position where every
+    /// position reads one byte, and otherwise four for each position, the most any character
+    /// spans, even where some positions read only one byte.
+    int maximumMatchBytes()
+    {
+        return kinds == null ? width : 4 * width;
+    }
+
     /// Returns the number of non-overlapping matches in `input`. Matches are never empty, so
     /// each search resumes where the previous match ended.
     long count(Slice input)

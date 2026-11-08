@@ -191,6 +191,8 @@ abstract sealed class CompiledPattern
     ///         runs the literal kernel of its find plan rather than the plan
     /// @param literalSetCount whether a [Shape#LITERAL_ALTERNATION] pattern's count runs on its
     ///         literal set rather than the DFA count
+    /// @param fixedWidthWithoutProgram whether a Trino [Shape#FIXED_WIDTH] pattern compiled no
+    ///         program, so that every call of its placeholder forward program runs the matcher
     record Analysis(
             int flags,
             long maxMemory,
@@ -217,6 +219,7 @@ abstract sealed class CompiledPattern
             boolean singleAttemptCount,
             boolean literalKernelFind,
             boolean literalSetCount,
+            boolean fixedWidthWithoutProgram,
             RequiredBytes requiredBytes)
     {
         Analysis
@@ -537,7 +540,8 @@ abstract sealed class CompiledPattern
                 Map.of(),
                 null,
                 null,
-                null);
+                null,
+                true);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -614,7 +618,8 @@ abstract sealed class CompiledPattern
                     Map.of(),
                     compactBoundedCharacterClass,
                     null,
-                    null);
+                    null,
+                    false);
         }
 
         // For "^literal...", compile only the suffix and check the required prefix before matching.
@@ -902,7 +907,8 @@ abstract sealed class CompiledPattern
                 parsed.capturingGroupNames(),
                 null,
                 requiredBytes,
-                finalLineEndOnePass);
+                finalLineEndOnePass,
+                false);
     }
 
     /// Returns the bytes of `prefix`, sharing the literal sequence's first literal when it holds
@@ -942,7 +948,8 @@ abstract sealed class CompiledPattern
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass,
             RequiredBytes requiredBytes,
-            Prog.OnePassTables finalLineEndOnePass)
+            Prog.OnePassTables finalLineEndOnePass,
+            boolean fixedWidthWithoutProgram)
     {
         // The shape full-Slice find takes, in the order each route was added. A pattern whose find
         // runs the ordinary engine on the forward program alone is general, and only a general
@@ -1089,6 +1096,7 @@ abstract sealed class CompiledPattern
                 singleAttemptCount,
                 literalKernelFind,
                 literalSetCount,
+                fixedWidthWithoutProgram,
                 reservedRequiredBytes);
     }
 
@@ -3250,7 +3258,8 @@ abstract sealed class CompiledPattern
     }
 
     /// The engine hook through which every call of a program over a region runs: the ordinary
-    /// engine. The class-run and scan-plan shapes override it.
+    /// engine. The class-run and scan-plan shapes override it, as does Trino's fixed-width shape,
+    /// which runs the matcher where the pattern compiled no program.
     boolean matchInternal(
             Prog prog,
             Slice text,
@@ -3274,6 +3283,55 @@ abstract sealed class CompiledPattern
             return matchCompactBoundedCharacterClass(text, contextStart, end, start, anchor, groupOffsets);
         }
         return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+    }
+
+    /// The [#matchInternal] route of a Trino fixed-width pattern. Where `fixedWidthWithoutProgram`
+    /// is set, the pattern compiled no program, and every call of its placeholder forward program
+    /// runs the fixed-width matcher, which reports group zero only, as a pattern without captures
+    /// needs. Only a matcher that never bails on dense candidates allows compiling no program,
+    /// since a matcher that can bail keeps its program to hand the search to. Every other call
+    /// runs the ordinary engine.
+    final boolean matchInternalOnFixedWidth(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces, boolean fixedWidthWithoutProgram)
+    {
+        if (fixedWidthWithoutProgram && prog == partialProg) {
+            return matchFixedWidthByteSpan(text, contextStart, start, end, anchor, groupOffsets);
+        }
+        return matchOnOrdinaryEngine(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+    }
+
+    /// Matches `[start, end)` of `text` on the fixed-width matcher, with groups relative to
+    /// `contextStart`. The pattern has no assertion, so nothing outside the region reaches the
+    /// result. One start has at most one match, which is then the leftmost, so an anchored call
+    /// searches no further past `start` than the matcher's upper bound on the bytes a match spans
+    /// and checks where the match it finds starts.
+    private boolean matchFixedWidthByteSpan(Slice text, int contextStart, int start, int end, Anchor anchor, int[] groups)
+    {
+        FixedWidthByteSpanMatcher matcher = booleanPlans.fixedWidthByteMatcher();
+        int searchEnd = end;
+        if (anchor != Anchor.UNANCHORED && end - start > matcher.maximumMatchBytes()) {
+            if (anchor == Anchor.ANCHOR_BOTH) {
+                return false;
+            }
+            searchEnd = start + matcher.maximumMatchBytes();
+        }
+        long span = matcher.findSpanOrBail(text, start, searchEnd);
+        if (span < 0) {
+            return false;
+        }
+
+        int matchStart = (int) (span >>> 32);
+        int matchEnd = (int) span;
+        if (anchor != Anchor.UNANCHORED && matchStart != start) {
+            return false;
+        }
+        if (anchor == Anchor.ANCHOR_BOTH && matchEnd != end) {
+            return false;
+        }
+        if (groups != null) {
+            groups[0] = matchStart - contextStart;
+            groups[1] = matchEnd - contextStart;
+        }
+        return true;
     }
 
     /// The [#matchInternal] route of a pattern with a scan plan. A call of the forward program
