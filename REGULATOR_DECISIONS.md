@@ -972,15 +972,18 @@ has none to find. Probing it after each match transition cost
 `ing-suffix-limited-space` about 2.7%, measured on the exploration build.
 
 Some eligible expressions produce repeated matches before pairing can amortize
-its entry and terminal handling. After 16 paired searches return within 16
-bytes, the DFA rejects the paired table. The search that observes the
-threshold keeps its result; the next search that requests paired transitions
-or a pointer table releases the paired table's complete memory charge under
-the existing exclusive cache protocol, and paired transitions stay disabled
-until the next cache reset. The observation counter is a best-effort
-performance hint shared by concurrent readers; races may change when rejection
-occurs but cannot change matching behavior. A cache reset clears the hint and
-allows the new cache generation to be evaluated again.
+its entry and terminal handling. After 16 paired matches that end fewer than
+16 bytes from where their search started, with no paired match ending 16 or
+more bytes from its start between them, the DFA rejects the paired table. The
+search that observes the threshold keeps its result; the next search that
+requests paired transitions or a pointer table releases the paired table's
+complete memory charge under the existing exclusive cache protocol, and paired
+transitions stay disabled until the next cache reset. The observation counter
+is a best-effort performance hint shared by concurrent readers; races may
+change when rejection occurs but cannot change matching behavior. A cache
+reset clears the rejection and the counter, and enables paired transitions for
+the new cache generation only when the DFA holds no pointer table, has none
+withheld, and has not given one back.
 
 ## DFA Row Index Without A Divide
 
@@ -1236,29 +1239,28 @@ takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
 
 ## Bounded DFA Pointer Transition Table
 
-Eligible forward one-byte DFA searches may use a private table of 64-bit
-pointer transition entries after the existing paired-table selection does not
-produce a usable route. With native access the table is native memory whose
-entries are the absolute addresses of rows; without it the table is a Java
-`long[]` whose entries are the byte offsets of rows in the array. Neither form
-executes native code, loads a JNI library, creates a file, or exposes a pointer
-through the public API. Long searches request it immediately when pairing is
-unavailable.
-Short searches request it after 16 repeated calls, so one isolated short search
-does not prevent the same DFA instance from later selecting a paired table. The
-observation count is only a performance hint; races can change promotion timing
-but not matching behavior. A requested table is allocated when the exclusive
-search that requests it ends. The first allocation waits once while the DFA
-could still build paired rows and has computed no transition, so a search that
-ends before computing one, such as a word boundary at a byte-order mark, does
-not decide between paired rows and the table. Waiting only once keeps a DFA that
-never computes a transition from retrying every search exclusively. A
-finite-budget DFA initially allocates a small row-rounded table and
-geometrically enlarges it as the graph grows. Each allocation is limited so that
-the remaining budget can still hold the minimum Java state behind every
-additional pointer row. The integer and object transition tables remain
-authoritative, and every zero entry delegates to the unchanged object
-continuation.
+Eligible one-byte DFA searches, forward and longest-match reverse, may use a
+private table of 64-bit pointer transition entries after the existing
+paired-table selection does not produce a usable route. With native access the
+table is native memory whose entries are the absolute addresses of rows;
+without it the table is a Java `long[]` whose entries are the byte offsets of
+rows in the array. Neither form executes native code, loads a JNI library,
+creates a file, or exposes a pointer through the public API. Long searches
+request it immediately when pairing is unavailable. Short searches request it
+after 16 repeated calls, so one isolated short search does not prevent the
+same DFA instance from later selecting a paired table. The observation count
+is only a performance hint; races can change promotion timing but not matching
+behavior. A requested table is allocated when the exclusive search that
+requests it ends. The first allocation waits once while the DFA could still
+build paired rows and has computed no transition, so a search that ends before
+computing one, such as a word boundary at a byte-order mark, does not decide
+between paired rows and the table. Waiting only once keeps a DFA that never
+computes a transition from retrying every search exclusively. A finite-budget
+DFA initially allocates a small row-rounded table and geometrically enlarges
+it as the graph grows. Each allocation is limited so that the remaining budget
+can still hold the minimum Java state behind every additional pointer row. The
+integer and object transition tables remain authoritative, and every zero
+entry delegates to the unchanged object continuation.
 
 One process-wide choice, fixed when the DFA class initializes, selects the
 form: native memory when the containing module has native access enabled, the

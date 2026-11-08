@@ -265,14 +265,16 @@ bytes. Without the module, or on a JVM whose vectors fall outside the supported
 searches use scalar or SWAR scanners.
 
 Every DFA keeps its transitions in Java object rows, heap arrays whose entries
-reference the next state's row. Eligible forward DFA searches may also use an
+reference the next state's row. Eligible DFA searches may also use an
 optional internal pointer table of DFA transition entries, each eight bytes. Its
 initial row-rounded capacity is based on the DFA graph already built; it grows
 geometrically when useful, remains charged to the existing DFA budget, and is
 reclaimed with the compiled pattern. A table that a reset or growth replaces
 becomes reclaimable once in-flight searches finish, and under memory pressure
 the table can be withheld, leaving searches on Java object rows until it is
-allocated again.
+allocated again. A DFA that would otherwise fall back to the NFA for resetting
+too often gives the table back instead, and its searches stay on Java object
+rows for the rest of the compiled pattern's life.
 
 Native access puts the table in a small native-memory allocation whose entries
 are row addresses. This uses native memory, not native code, a JNI library, or
