@@ -313,39 +313,48 @@ final class Utf8
 
     static int encode(byte[] output, int offset, int codePoint)
     {
-        int length = encodedLength(codePoint);
-        if (length == 1) {
-            output[offset] = (byte) codePoint;
+        if (!Character.isValidCodePoint(codePoint)) {
+            throw new IllegalArgumentException("invalid rune: " + codePoint);
         }
-        else if (length == 2) {
+        // Branch on the code point, never on a length computed first: "UTF-8 Encoding By Code
+        // Point" in REGULATOR_DECISIONS.md records the C2 miscompile (JDK-8376400) this avoids.
+        if (codePoint <= 0x7F) {
+            output[offset] = (byte) codePoint;
+            return offset + 1;
+        }
+        if (codePoint <= 0x7FF) {
             output[offset] = (byte) (0xC0 | (codePoint >>> 6));
             output[offset + 1] = (byte) (0x80 | (codePoint & 0x3F));
+            return offset + 2;
         }
-        else if (length == 3) {
+        if (codePoint <= 0xFFFF) {
             output[offset] = (byte) (0xE0 | (codePoint >>> 12));
             output[offset + 1] = (byte) (0x80 | ((codePoint >>> 6) & 0x3F));
             output[offset + 2] = (byte) (0x80 | (codePoint & 0x3F));
+            return offset + 3;
         }
-        else {
-            output[offset] = (byte) (0xF0 | (codePoint >>> 18));
-            output[offset + 1] = (byte) (0x80 | ((codePoint >>> 12) & 0x3F));
-            output[offset + 2] = (byte) (0x80 | ((codePoint >>> 6) & 0x3F));
-            output[offset + 3] = (byte) (0x80 | (codePoint & 0x3F));
-        }
-        return offset + length;
+        output[offset] = (byte) (0xF0 | (codePoint >>> 18));
+        output[offset + 1] = (byte) (0x80 | ((codePoint >>> 12) & 0x3F));
+        output[offset + 2] = (byte) (0x80 | ((codePoint >>> 6) & 0x3F));
+        output[offset + 3] = (byte) (0x80 | (codePoint & 0x3F));
+        return offset + 4;
     }
 
     static void encode(SliceOutput output, int codePoint)
     {
-        int length = encodedLength(codePoint);
-        if (length == 1) {
+        if (!Character.isValidCodePoint(codePoint)) {
+            throw new IllegalArgumentException("invalid rune: " + codePoint);
+        }
+        // Branch on the code point, never on a length computed first: "UTF-8 Encoding By Code
+        // Point" in REGULATOR_DECISIONS.md records the C2 miscompile (JDK-8376400) this avoids.
+        if (codePoint <= 0x7F) {
             output.writeByte(codePoint);
         }
-        else if (length == 2) {
+        else if (codePoint <= 0x7FF) {
             output.writeByte(0xC0 | (codePoint >>> 6));
             output.writeByte(0x80 | (codePoint & 0x3F));
         }
-        else if (length == 3) {
+        else if (codePoint <= 0xFFFF) {
             output.writeByte(0xE0 | (codePoint >>> 12));
             output.writeByte(0x80 | ((codePoint >>> 6) & 0x3F));
             output.writeByte(0x80 | (codePoint & 0x3F));
