@@ -6643,6 +6643,7 @@ final class Dfa
         {
             AbsolutePointerTransitions absolutePointers = tables.absolutePointerTransitions;
             return absolutePointers != null &&
+                    stateOffset >= nextSize &&
                     stateOffset + nextSize <= absolutePointers.entryCapacity();
         }
 
