@@ -1040,6 +1040,10 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("(?:){2}")).contains(utf8Slice(""))).isTrue();
         assertThatThrownBy(() -> joniPattern(utf8Slice("(?:){2}"))).isInstanceOf(NullPointerException.class);
 
+        // Pinned Joni fails here. The pattern's final f would end inside ﬁ's fi fold, so Regulator finds no match.
+        assertThat(TrinoRegexp.compile(utf8Slice("(?i)İsf")).contains(utf8Slice("İsﬁ"))).isFalse();
+        assertThatThrownBy(() -> joniFind(utf8Slice("(?i)İsf"), utf8Slice("İsﬁ"))).isInstanceOf(ArrayIndexOutOfBoundsException.class);
+
         // Pinned Joni reads \\u12 as U+0012 and [\\u] as U+0000; modern Joni rejects both.
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("\\u12"))).isInstanceOf(RegexpParseException.class);
         assertThat(joniFind(utf8Slice("\\u12"), utf8Slice("\u0012"))).isTrue();
