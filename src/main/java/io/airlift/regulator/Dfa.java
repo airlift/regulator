@@ -47,8 +47,8 @@ import static java.util.Objects.requireNonNull;
 /// object rows remain authoritative for every fallback.
 final class Dfa
 {
-    static final long MAX_PAIRED_TRANSITION_MEMORY = 64 * 1024;
-    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = 16 * 1024;
+    static final long MAX_PAIRED_TRANSITION_MEMORY = 32 * 1024;
+    private static final long MAX_PARTIAL_PAIRED_TRANSITION_MEMORY = 8 * 1024;
     private static final int CONSERVATIVE_REFERENCE_BYTES = Long.BYTES;
     private static final int MIN_PAIRED_SEARCH_BYTES = 256;
     private static final int MIN_SELECTIVE_SCAN_SEARCH_BYTES = 4 * 1024;
@@ -1785,7 +1785,7 @@ final class Dfa
     // hold paired rows, which block one.
     private static boolean countHandoffKeepsPairedRows(DfaInstance dfa, CacheTables tables)
     {
-        return dfa.absolutePointerTransitionsUnavailable || dfa.pairedTransitionsRequested || tables.pairedStateRefArrays != null;
+        return dfa.absolutePointerTransitionsUnavailable || dfa.pairedTransitionsRequested || tables.pairedTransitions != null;
     }
 
     private static long countMatchResult(long result, boolean byteScanRejected)
@@ -2414,11 +2414,17 @@ final class Dfa
         transitions[index] = value;
     }
 
-    private static Object[] pairedStateReferences(Object[][] pairedStateRefArrays, int stateIndex)
+    private static int pairedRowOffset(int[] pairedRowOffsets, int stateIndex)
     {
-        // The table is rebuilt only when an exclusive search ends, so states a count adds before then
-        // have no paired row.
-        return stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
+        // The table is built only when an exclusive search ends, so a state added since then has no
+        // paired row; nor does any state once adding a state released the table to make room.
+        return pairedRowOffsets != null && stateIndex < pairedRowOffsets.length ? pairedRowOffsets[stateIndex] : NO_PAIRED_ROW;
+    }
+
+    // Reads the paired slot at `byteOffset`, a byte offset into the paired table.
+    private static int getPairedTransition(MemorySegment pairedTransitions, int byteOffset)
+    {
+        return pairedTransitions.get(ValueLayout.JAVA_INT_UNALIGNED, byteOffset);
     }
 
     private static Object getStateReference(Object[] references, int index)
@@ -2910,36 +2916,30 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-        byte[] byteMap = dfa.bytemap;
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
-        Object[] stateRefs = pairedStateRefArrays[dfa.stateIndex(startOffset)];
-        int position = textBegin;
-
-        while (position + 1 < textEnd) {
-            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
-                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
-            Object nextRef = getStateReference(stateRefs, pairedClass);
-            if (nextRef == null) {
-                return searchForwardPairsAfterMiss(
-                        dfa,
-                        tables,
-                        bytes,
-                        resultBegin,
-                        position,
-                        textEnd,
-                        ctxEnd,
-                        stateRefs,
-                        endMatch,
-                        wantEarliestMatch);
-            }
-            stateRefs = (Object[]) nextRef;
-            position += 2;
+        long pairedStop = stepPairedRows(
+                tables.pairedTransitions,
+                tables.pairedRowOffsets[dfa.stateIndex(startOffset)],
+                bytes,
+                dfa.bytemap,
+                dfa.nextSize,
+                textBegin,
+                textEnd);
+        int position = (int) (pairedStop >>> 32);
+        int stateOffset = (int) pairedStop;
+        if (position + 1 < textEnd) {
+            return searchForwardPairsAfterMiss(
+                    dfa,
+                    tables,
+                    bytes,
+                    resultBegin,
+                    position,
+                    textEnd,
+                    ctxEnd,
+                    stateOffset,
+                    endMatch,
+                    wantEarliestMatch);
         }
 
-        // Paired rows are complete when published, so their row metadata needs no check.
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
@@ -2955,16 +2955,13 @@ final class Dfa
             int position,
             int textEnd,
             int ctxEnd,
-            Object[] stateRefs,
+            int stateOffset,
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
         if (dfa.kind == DfaInstance.Kind.FIRST_MATCH &&
                 !endMatch &&
                 !wantEarliestMatch) {
-            int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             byte[] byteMap = dfa.bytemap;
             long pairedTransition = decodePairedTransition(
                     tables,
@@ -2991,12 +2988,33 @@ final class Dfa
             }
         }
 
-        int stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
         long result = searchForward(dfa, tables, bytes, position, textEnd, ctxEnd, stateOffset, false, true, endMatch, wantEarliestMatch);
         if (result >= 0) {
             return result + (position - resultBegin);
         }
         return result;
+    }
+
+    // Steps from the paired row at `rowOffset` two bytes at a time while each pair reaches a paired
+    // row, and returns the position it stopped at, before textEnd - 1 only at a pair without a
+    // paired row, packed with the offset of the state it stopped in as `position << 32 | offset`.
+    // The loop is its own small method so that it carries only these values: in a larger loop
+    // body, C2 on x86 sometimes kept the row offset in a vector register.
+    private static long stepPairedRows(MemorySegment pairedTransitions, int rowOffset, byte[] bytes, byte[] byteMap, int nextSize, int position, int textEnd)
+    {
+        while (position + 1 < textEnd) {
+            int pairedClass = ((byteMap[bytes[position] & 0xFF] & 0xFF) * nextSize) +
+                    (byteMap[bytes[position + 1] & 0xFF] & 0xFF);
+            int nextRowOffset = getPairedTransition(pairedTransitions, rowOffset + (pairedClass * Integer.BYTES));
+            if (nextRowOffset < 0) {
+                break;
+            }
+            rowOffset = nextRowOffset;
+            position += 2;
+        }
+        // Paired rows are complete when published, so their state offsets need no check.
+        int stateOffset = getPairedTransition(pairedTransitions, rowOffset + (nextSize * nextSize * Integer.BYTES));
+        return ((long) position << 32) | (stateOffset & 0xFFFF_FFFFL);
     }
 
     private static long searchForwardPairsAfterMatch(
@@ -3041,10 +3059,9 @@ final class Dfa
             boolean endMatch,
             boolean wantEarliestMatch)
     {
-        int nextSize = dfa.nextSize;
-        int pairedClassCount = nextSize * nextSize;
         long pairedTransition;
-        Object[] stateRefs;
+        MemorySegment pairedTransitions;
+        int rowOffset;
 
         while (true) {
             int matchingSelfLoopEnd = scanMatchingSelfLoopTransitions(dfa, tables, bytes, position, textEnd, stateOffset);
@@ -3056,8 +3073,9 @@ final class Dfa
                 lastMatchBoundary = position - 1;
             }
 
-            stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
-            if (stateRefs == null) {
+            pairedTransitions = tables.pairedTransitions;
+            rowOffset = pairedRowOffset(tables.pairedRowOffsets, dfa.stateIndex(stateOffset));
+            if (rowOffset < 0) {
                 return searchForwardContinuation(
                         dfa,
                         tables,
@@ -3074,18 +3092,16 @@ final class Dfa
             }
             pairedTransition = 0;
 
-            while (position + 1 < textEnd) {
-                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
-                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
-                int pairedClass = (firstClass * nextSize) + secondClass;
-                Object nextRef = getStateReference(stateRefs, pairedClass);
-                if (nextRef != null) {
-                    stateRefs = (Object[]) nextRef;
-                    position += 2;
-                    continue;
+            while (true) {
+                long pairedStop = stepPairedRows(pairedTransitions, rowOffset, bytes, dfa.bytemap, dfa.nextSize, position, textEnd);
+                position = (int) (pairedStop >>> 32);
+                stateOffset = (int) pairedStop;
+                if (position + 1 >= textEnd) {
+                    break;
                 }
 
-                stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
+                int firstClass = dfa.bytemap[bytes[position] & 0xFF] & 0xFF;
+                int secondClass = dfa.bytemap[bytes[position + 1] & 0xFF] & 0xFF;
                 pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
                 int outcome = (int) pairedTransition;
                 switch (outcome) {
@@ -3099,8 +3115,8 @@ final class Dfa
                     case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
                         stateOffset = (int) (pairedTransition >>> 32);
                         position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        stateRefs = pairedStateReferences(tables.pairedStateRefArrays, dfa.stateIndex(stateOffset));
-                        if (stateRefs == null) {
+                        rowOffset = pairedRowOffset(tables.pairedRowOffsets, dfa.stateIndex(stateOffset));
+                        if (rowOffset < 0) {
                             return searchForwardContinuation(
                                     dfa,
                                     tables,
@@ -3145,7 +3161,6 @@ final class Dfa
                 position += consumedBytes;
                 continue;
             }
-            stateOffset = ((StateData) getStateReference(stateRefs, pairedClassCount)).offset();
             return searchForwardContinuation(
                     dfa,
                     tables,
@@ -4490,6 +4505,9 @@ final class Dfa
     private static final int PAIR_NORMAL_FIRST = 3;
     private static final int PAIR_NORMAL_SECOND = 4;
 
+    // A paired row offset for a state without a paired row, or a pair whose target has none.
+    private static final int NO_PAIRED_ROW = -1;
+
     // Maximum transitions array length - ensures offsets fit below T_MATCH_BIT
     private static final int MAX_TRANSITIONS_LENGTH = 1 << 30;
 
@@ -4665,9 +4683,14 @@ final class Dfa
         // assertion that decodes the text have the second.
         final StateData[][] startAfterCarriageReturn;
         final StateData[][] startAfterNonAscii;
-        // Indexed by stateIndex and sized at the last rebuild; unselected rows are null. Built
-        // whole before publication and never written after.
-        final Object[][] pairedStateRefArrays;
+        // Paired rows, built whole before publication and never written after. The first is indexed
+        // by stateIndex and sized at the last rebuild: the byte offset of the state's row in the
+        // second, or NO_PAIRED_ROW for an unselected state. The second, a segment over an int array,
+        // holds one row of `nextSize * nextSize + 1` ints for each selected state: for each pair of
+        // byte classes the byte offset of the row that pair reaches, or NO_PAIRED_ROW, then the
+        // state's own offset. Byte offsets keep the scaling off a step's chain of dependent loads.
+        final int[] pairedRowOffsets;
+        final MemorySegment pairedTransitions;
         final AbsolutePointerTransitions absolutePointerTransitions;
 
         private CacheTables(
@@ -4682,7 +4705,8 @@ final class Dfa
                 StateData[][] startAfterNonWord,
                 StateData[][] startAfterCarriageReturn,
                 StateData[][] startAfterNonAscii,
-                Object[][] pairedStateRefArrays,
+                int[] pairedRowOffsets,
+                MemorySegment pairedTransitions,
                 AbsolutePointerTransitions absolutePointerTransitions)
         {
             this.transitions = transitions;
@@ -4696,7 +4720,8 @@ final class Dfa
             this.startAfterNonWord = startAfterNonWord;
             this.startAfterCarriageReturn = startAfterCarriageReturn;
             this.startAfterNonAscii = startAfterNonAscii;
-            this.pairedStateRefArrays = pairedStateRefArrays;
+            this.pairedRowOffsets = pairedRowOffsets;
+            this.pairedTransitions = pairedTransitions;
             this.absolutePointerTransitions = absolutePointerTransitions;
         }
 
@@ -4724,6 +4749,7 @@ final class Dfa
                     carriageReturnStarts ? new StateData[2][2] : null,
                     nonAsciiStarts ? new StateData[2][2] : null,
                     null,
+                    null,
                     null);
         }
 
@@ -4741,11 +4767,12 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
+                    pairedRowOffsets,
+                    pairedTransitions,
                     absolutePointerTransitions);
         }
 
-        private CacheTables withPairedStateRefArrays(Object[][] pairedStateRefArrays)
+        private CacheTables withPairedTransitions(int[] pairedRowOffsets, MemorySegment pairedTransitions)
         {
             return new CacheTables(
                     transitions,
@@ -4759,7 +4786,8 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
+                    pairedRowOffsets,
+                    pairedTransitions,
                     absolutePointerTransitions);
         }
 
@@ -4777,7 +4805,8 @@ final class Dfa
                     startAfterNonWord,
                     startAfterCarriageReturn,
                     startAfterNonAscii,
-                    pairedStateRefArrays,
+                    pairedRowOffsets,
+                    pairedTransitions,
                     absolutePointerTransitions);
         }
     }
@@ -6299,7 +6328,7 @@ final class Dfa
             long absolutePointerMemory = absolutePointerGrowthSize == null ? 0 : absolutePointerGrowthSize.memoryDelta();
             boolean releasePairedTransitions = false;
             if (availableStateMemory - absolutePointerMemory < stateMemory) {
-                releasePairedTransitions = tables.pairedStateRefArrays != null &&
+                releasePairedTransitions = tables.pairedTransitions != null &&
                         availableStateMemory + pairedTransitionMemory - absolutePointerMemory >= stateMemory;
                 if (!releasePairedTransitions) {
                     return null;
@@ -6349,7 +6378,7 @@ final class Dfa
             // superseded reference) follow it, and an error in them abandons the segment uncounted.
             CacheTables newTables = tables;
             if (releasePairedTransitions) {
-                newTables = newTables.withPairedStateRefArrays(null);
+                newTables = newTables.withPairedTransitions(null, null);
             }
             if (absolutePointerGrowth != null) {
                 newTables = newTables.withAbsolutePointerTransitions(absolutePointerGrowth.transitions());
@@ -6393,11 +6422,11 @@ final class Dfa
 
         boolean hasPairedTransitions(CacheTables tables, int stateOffset)
         {
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
+            int[] pairedRowOffsets = tables.pairedRowOffsets;
             int stateIndex = stateIndex(stateOffset);
-            return pairedStateRefArrays != null &&
-                    stateIndex < pairedStateRefArrays.length &&
-                    pairedStateRefArrays[stateIndex] != null;
+            return pairedRowOffsets != null &&
+                    stateIndex < pairedRowOffsets.length &&
+                    pairedRowOffsets[stateIndex] >= 0;
         }
 
         private void recordPairedSearch(int searchedBytes)
@@ -6546,35 +6575,26 @@ final class Dfa
 
         int pairedTransitionRowCount()
         {
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
+            MemorySegment pairedTransitions = tables.pairedTransitions;
+            if (pairedTransitions == null) {
                 return 0;
             }
-
-            int rowCount = 0;
-            for (Object[] pairedStateRefArray : pairedStateRefArrays) {
-                if (pairedStateRefArray != null) {
-                    rowCount++;
-                }
-            }
-            return rowCount;
+            return toIntExact(pairedTransitions.byteSize() / pairedRowBytes());
         }
 
         int pairedTransitionCount()
         {
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
+            MemorySegment pairedTransitions = tables.pairedTransitions;
+            if (pairedTransitions == null) {
                 return 0;
             }
 
             int pairedClassCount = nextSize * nextSize;
+            int pairedRowBytes = pairedRowBytes();
             int transitionCount = 0;
-            for (Object[] pairedStateRefArray : pairedStateRefArrays) {
-                if (pairedStateRefArray == null) {
-                    continue;
-                }
+            for (int rowOffset = 0; rowOffset < pairedTransitions.byteSize(); rowOffset += pairedRowBytes) {
                 for (int pairedClass = 0; pairedClass < pairedClassCount; pairedClass++) {
-                    if (pairedStateRefArray[pairedClass] != null) {
+                    if (getPairedTransition(pairedTransitions, rowOffset + (pairedClass * Integer.BYTES)) >= 0) {
                         transitionCount++;
                     }
                 }
@@ -6605,17 +6625,15 @@ final class Dfa
                 return 0;
             }
             CacheTables tables = this.tables;
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
+            MemorySegment pairedTransitions = tables.pairedTransitions;
+            if (pairedTransitions == null) {
                 return 0;
             }
 
+            int pairedRowBytes = pairedRowBytes();
             int continuationCount = 0;
-            for (Object[] pairedStateRefs : pairedStateRefArrays) {
-                if (pairedStateRefs == null) {
-                    continue;
-                }
-                int stateOffset = ((StateData) pairedStateRefs[nextSize * nextSize]).offset();
+            for (int rowOffset = 0; rowOffset < pairedTransitions.byteSize(); rowOffset += pairedRowBytes) {
+                int stateOffset = getPairedTransition(pairedTransitions, rowOffset + pairedRowBytes - Integer.BYTES);
                 for (int firstClass = 0; firstClass < nextSize; firstClass++) {
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
                         int outcome = (int) decodePairedTransition(tables, stateOffset, firstClass, secondClass);
@@ -6674,17 +6692,15 @@ final class Dfa
                 return 0;
             }
             CacheTables tables = this.tables;
-            Object[][] pairedStateRefArrays = tables.pairedStateRefArrays;
-            if (pairedStateRefArrays == null) {
+            MemorySegment pairedTransitions = tables.pairedTransitions;
+            if (pairedTransitions == null) {
                 return 0;
             }
 
+            int pairedRowBytes = pairedRowBytes();
             int continuationCount = 0;
-            for (Object[] pairedStateRefs : pairedStateRefArrays) {
-                if (pairedStateRefs == null) {
-                    continue;
-                }
-                int stateOffset = ((StateData) pairedStateRefs[nextSize * nextSize]).offset();
+            for (int rowOffset = 0; rowOffset < pairedTransitions.byteSize(); rowOffset += pairedRowBytes) {
+                int stateOffset = getPairedTransition(pairedTransitions, rowOffset + pairedRowBytes - Integer.BYTES);
                 for (int firstClass = 0; firstClass < nextSize; firstClass++) {
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
                         long pairedTransition = decodePairedTransition(tables, stateOffset, firstClass, secondClass);
@@ -6717,7 +6733,8 @@ final class Dfa
         long estimatedPairedTransitionMemory()
         {
             int stateLimit = Math.min(nextFreeOffset / nextSize, tables.stateData.length);
-            return pairedOuterMemory(stateLimit) + (long) stateCount * pairedRowMemory();
+            // Capped at the rows one array can hold, far beyond every paired cap.
+            return pairedTransitionMemory(stateLimit, Math.min(stateCount, Integer.MAX_VALUE / pairedRowLength()));
         }
 
         long availableStateMemory()
@@ -6747,16 +6764,19 @@ final class Dfa
             Object[][] stateRefArrays = tables.stateRefArrays;
             int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
             int pairedClassCount = nextSize * nextSize;
-            long outerMemory = pairedOuterMemory(stateLimit);
-            long rowMemory = pairedRowMemory();
+            int pairedRowLength = pairedRowLength();
             long maximumMemory = Math.min(MAX_PAIRED_TRANSITION_MEMORY, availableStateMemory);
-            if (outerMemory + rowMemory > maximumMemory) {
+            if (pairedTransitionMemory(stateLimit, 1) > maximumMemory) {
                 return;
             }
 
-            int maximumRows = (int) Math.min(stateCount, (maximumMemory - outerMemory) / rowMemory);
+            int maximumRows = (int) Math.min(stateCount, (maximumMemory - pairedTransitionMemory(stateLimit, 0)) / pairedRowBytes());
+            // Aligning the table's size can add up to four bytes, less than one row.
+            if (pairedTransitionMemory(stateLimit, maximumRows) > maximumMemory) {
+                maximumRows--;
+            }
             boolean completeTable = maximumRows >= stateCount;
-            if (!completeTable && outerMemory + (2 * rowMemory) > MAX_PARTIAL_PAIRED_TRANSITION_MEMORY) {
+            if (!completeTable && pairedTransitionMemory(stateLimit, 2) > MAX_PARTIAL_PAIRED_TRANSITION_MEMORY) {
                 return;
             }
             boolean[] selectedRows = selectPairedRows(tables, stateLimit, maximumRows);
@@ -6770,7 +6790,7 @@ final class Dfa
                 return;
             }
 
-            long memory = outerMemory + (selectedRowCount * rowMemory);
+            long memory = pairedTransitionMemory(stateLimit, selectedRowCount);
             // A partial table is useful only for the common entry-to-hot-loop shape.
             // Broader partial tables consume state budget and cache without reducing
             // the dependent-load chain consistently enough to justify their cost.
@@ -6780,11 +6800,16 @@ final class Dfa
                 return;
             }
 
-            Object[][] pairedRows = new Object[stateLimit][];
+            int[] pairedRowOffsets = new int[stateLimit];
+            Arrays.fill(pairedRowOffsets, NO_PAIRED_ROW);
+            int[] pairedTransitions = new int[selectedRowCount * pairedRowLength];
+            Arrays.fill(pairedTransitions, NO_PAIRED_ROW);
+            int nextRowIndex = 0;
             for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
                 if (selectedRows[stateIndex]) {
-                    pairedRows[stateIndex] = new Object[pairedClassCount + 1];
-                    pairedRows[stateIndex][pairedClassCount] = stateData[stateIndex];
+                    pairedRowOffsets[stateIndex] = nextRowIndex * Integer.BYTES;
+                    pairedTransitions[nextRowIndex + pairedClassCount] = stateData[stateIndex].offset();
+                    nextRowIndex += pairedRowLength;
                 }
             }
 
@@ -6792,8 +6817,8 @@ final class Dfa
 
             for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
                 Object[] source = stateRefArrays[stateIndex];
-                Object[] sourcePairs = pairedRows[stateIndex];
-                if (sourcePairs == null) {
+                int sourceRowOffset = pairedRowOffsets[stateIndex];
+                if (sourceRowOffset < 0) {
                     continue;
                 }
                 for (int firstClass = 0; firstClass < nextSize; firstClass++) {
@@ -6803,9 +6828,9 @@ final class Dfa
                     for (int secondClass = 0; secondClass < nextSize; secondClass++) {
                         if (intermediate[secondClass] instanceof Object[] target) {
                             StateData targetData = (StateData) target[nextSize];
-                            Object[] pairedTarget = pairedRows[stateIndex(targetData.offset())];
-                            sourcePairs[(firstClass * nextSize) + secondClass] = pairedTarget;
-                            if (pairedTarget != null) {
+                            int targetRowOffset = pairedRowOffsets[stateIndex(targetData.offset())];
+                            pairedTransitions[(sourceRowOffset / Integer.BYTES) + (firstClass * nextSize) + secondClass] = targetRowOffset;
+                            if (targetRowOffset >= 0) {
                                 transitionCount++;
                             }
                         }
@@ -6818,7 +6843,7 @@ final class Dfa
 
             // Allocate the new tables before charging, so a failed allocation leaves the charge
             // unchanged; the rows are complete before the tables publish them.
-            CacheTables pairedTables = tables.withPairedStateRefArrays(pairedRows);
+            CacheTables pairedTables = tables.withPairedTransitions(pairedRowOffsets, MemorySegment.ofArray(pairedTransitions));
             availableStateMemory -= memory;
             pairedTransitionMemory = memory;
             this.tables = pairedTables;
@@ -6835,7 +6860,7 @@ final class Dfa
                     tables.absolutePointerTransitions != null ||
                     absolutePointerTransitionsUnavailable ||
                     absolutePointerTransitionAllocationFailed ||
-                    tables.pairedStateRefArrays != null) {
+                    tables.pairedTransitions != null) {
                 return;
             }
             // A search that ended before computing a transition, such as one whose word boundary
@@ -7204,31 +7229,33 @@ final class Dfa
             return selectedCount;
         }
 
-        private long pairedOuterMemory(int stateLimit)
+        // A paired row: one slot for each pair of byte classes, then the state's offset.
+        private int pairedRowLength()
         {
-            return alignToEight(16L + (long) stateLimit * CONSERVATIVE_REFERENCE_BYTES);
+            return (nextSize * nextSize) + 1;
         }
 
-        private long pairedRowMemory()
+        private int pairedRowBytes()
         {
-            int pairedClassCount = nextSize * nextSize;
-            return alignToEight(16L + ((long) pairedClassCount + 1) * CONSERVATIVE_REFERENCE_BYTES);
+            return pairedRowLength() * Integer.BYTES;
+        }
+
+        // The retained size of a paired table with `rowCount` rows and its row offsets for
+        // `stateLimit` states.
+        private long pairedTransitionMemory(int stateLimit, int rowCount)
+        {
+            return sizeOfIntArray(stateLimit) + sizeOfIntArray(rowCount * pairedRowLength());
         }
 
         private void clearPairedTransitions()
         {
             CacheTables tables = this.tables;
-            if (tables.pairedStateRefArrays != null) {
-                this.tables = tables.withPairedStateRefArrays(null);
+            if (tables.pairedTransitions != null) {
+                this.tables = tables.withPairedTransitions(null, null);
             }
             availableStateMemory += pairedTransitionMemory;
             pairedTransitionMemory = 0;
             pairedContentVersion = -1;
-        }
-
-        private static long alignToEight(long value)
-        {
-            return (value + 7) & ~7L;
         }
 
         StateData analyzeStart(CacheTables tables, Slice context, int textBegin, int textEnd, boolean anchored, boolean runForward)
@@ -7843,7 +7870,7 @@ final class Dfa
                     cacheContentVersion,
                     availableStateMemory,
                     retainedStateMemory,
-                    tables.pairedStateRefArrays,
+                    tables.pairedTransitions,
                     pairedTransitionRowCount(),
                     pairedTransitionMemory,
                     pairedContentVersion,

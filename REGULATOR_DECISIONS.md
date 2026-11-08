@@ -896,7 +896,7 @@ fused count keeps the root it began with for the whole current attempt.
 Each root reaches at most one allowance of Java memory plus the paired rows it
 carried. Releasing paired rows refunds their charge, and states built afterward
 fill arrays an older root still shares, so a root that carried paired rows can
-reach one allowance plus those rows, at most 64 KiB. A superseded root becomes
+reach one allowance plus those rows, at most 32 KiB. A superseded root becomes
 eligible for collection once no search retains it. A charge would require
 knowing when the last reader of a generation finishes, which is the reader
 registration this design removes; as with the member table under
@@ -937,14 +937,25 @@ for small DFA graphs. The table is demand-built only after a search of at least
 and is charged against the DFA state budget. Normal state allocation discards
 the table before reporting budget exhaustion.
 
-Eligibility uses a 64 KiB retained-size estimate with eight-byte references and
-includes row overhead. This conservative absolute cap is independent of the
-configured memory budget: larger budgets must not enable cache-hostile global
-transition expansion. When the complete graph does not fit, partial pairing is
-limited to exactly two selected rows and 16 KiB. Selection considers cached
-forward entry states before states with observed self-loops. Broader and larger
-partial tables remain on the compact path to bound retained memory and avoid
-cache-hostile global transition expansion.
+The table is one flat `int` array with a row for each selected state, holding
+the byte offset of the row each pair of byte classes reaches and then the
+state's own offset, plus an array of each state's row offset. The search reads
+the array through a heap memory segment, as the heap pointer table does, so a
+step adds the pair's byte offset to the row's and loads, with no decode or
+scaling between one load and the next. The two-byte loop is its own small
+method: inside the larger search method, C2 on Intel sometimes kept the
+loop-carried row in a vector register, and fresh JVMs ran the same search in a
+fast mode or one about 1.5 times slower.
+Eligibility charges both arrays' retained sizes, and the caps bound that size
+to 32 KiB, which keeps the table within an Intel L1 data cache; this is the
+bound the earlier estimate of eight bytes per reference gave in practice. This
+absolute cap is independent of the configured memory budget: larger budgets
+must not enable cache-hostile global transition expansion. When the complete
+graph does not fit, partial pairing is limited to exactly two selected rows and
+8 KiB. Selection considers cached forward entry states before states with
+observed self-loops. Broader and larger partial tables remain on the compact
+path to bound retained memory and avoid cache-hostile global transition
+expansion.
 
 The paired loop decodes already-computed normal, dead, full-match, and match
 transitions directly. After a first-match candidate, it preserves the candidate
@@ -959,7 +970,7 @@ state or stops matching: it steps the first 32 bytes, then may finish the run
 with a [vector scan for the state's exit bytes](#self-loop-exit-byte-skips-outside-counting).
 It records the match boundary the consumed bytes imply and leaves the first
 exceptional byte to the existing paired decoder. This avoids repeatedly
-decoding a deliberately null paired reference without adding another
+decoding a deliberately missing paired transition without adding another
 transition representation.
 
 The reverse search and the inner literal search's anchored confirmation scan a
