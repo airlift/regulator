@@ -40,6 +40,7 @@ public class TestOptionalVectorScanner
                 .contains("io.airlift.regulator.ScanPlanRun source:")
                 .doesNotContain("io.airlift.regulator.VectorScanner source:")
                 .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
+                .doesNotContain("io.airlift.regulator.VectorBlockMaskScanner source:")
                 .doesNotContain("jdk.incubator.vector.");
 
         // With the module, the probe still takes the scalar scans if its preferred vector is too
@@ -51,6 +52,7 @@ public class TestOptionalVectorScanner
         assertThat(enabled.classLoadLog()).contains("jdk.incubator.vector.ByteVector");
         assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorScanner source:")).isEqualTo(vectorScans);
         assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorByteSetScanner source:")).isEqualTo(vectorScans);
+        assertThat(enabled.classLoadLog().contains("io.airlift.regulator.VectorBlockMaskScanner source:")).isEqualTo(vectorScans);
     }
 
     @Test
@@ -64,7 +66,8 @@ public class TestOptionalVectorScanner
         assertThat(smallVectors.output()).contains("OK scalar");
         assertThat(smallVectors.classLoadLog())
                 .doesNotContain("io.airlift.regulator.VectorScanner source:")
-                .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:");
+                .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
+                .doesNotContain("io.airlift.regulator.VectorBlockMaskScanner source:");
     }
 
     /// A forked probe JVM runs at this JVM's vector width, such as that of CI's 8-byte and 16-byte

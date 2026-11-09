@@ -1546,16 +1546,17 @@ ordinary engine would.
 - **Applies when:** Capture-free patterns, other than exact literals, of a
   fixed count of 2 to 256 characters, in every language, whose scanned
   position is an ASCII singleton (below) or passes the
-  [rare class scan](#fixed-width-rare-class-scan). When find also has an inner
+  [rare class scan](#fixed-width-rare-class-scan), or that qualify for the
+  [block search](#fixed-width-block-search). When find also has an inner
   literal search of two or more bytes, every language keeps that search, and a
   second matcher answers only counts under 64 bytes and matcher finds with
   under 64 bytes left. A pattern that yields to the engine keeps neither. The
   `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
-- **What it does:** The matcher scans for one position, then checks the others
-  around each hit: a byte mask for ASCII, Latin-1, and Rust byte classes, one
-  decoded character for a UTF-8 class above ASCII. When an ASCII pattern of up
-  to 64 bytes has a position accepting exactly one byte, the matcher scans for
-  the byte accepted by the first such position, as the
+- **What it does:** In its candidate form the matcher scans for one position,
+  then checks the others around each hit: a byte mask for ASCII, Latin-1, and
+  Rust byte classes, one decoded character for a UTF-8 class above ASCII. When
+  an ASCII pattern of up to 64 bytes has a position accepting exactly one byte,
+  the matcher scans for the byte accepted by the first such position, as the
   [rare class scan](#fixed-width-rare-class-scan) scans a position of one first
   byte. In `AB{n}x`, where `A` is a class of ASCII characters, `B` a character
   class without `x`, `x` one ASCII character, and `n` an exact count from 1 to
@@ -1580,7 +1581,7 @@ ordinary engine would.
   Regulator: the yield to the engine's own scans and the handoff thresholds
   ([#194], [design][d-fixed-width-rare]).
 - **Where:** `FixedWidthByteSpanMatcher.analyze`,
-  `FixedWidthByteSpanMatcher.scansRareCandidate`,
+  `FixedWidthByteSpanMatcher.yieldsToEngineScans`,
   `FixedWidthByteSpanMatcher.countOrBail`,
   `FixedWidthByteSpanMatcher.findSpanOrBail`,
   `CompiledPattern.yieldsToEngineRoute`
@@ -1608,6 +1609,41 @@ ordinary engine would.
   earlier time on Graviton and 0.52 to 0.54 on Intel, its
   `sherlock/repeated-class-negation` to 0.47 and 0.36, and dense ISO dates to
   0.59 to 0.61 and 0.50 to 0.52.
+
+### Fixed-width block search
+
+- **Origin:** First described by Baeza-Yates and Gonnet (1992) and Wu and
+  Manber's agrep (1992), whose Shift-And keeps a bit for each pattern position
+  and a mask for each character ([Shift-And][bg-shift-and], [agrep][wm-agrep]),
+  and by Hyperscan's Teddy literal matcher, which classifies every byte of a
+  block for each of a literal's first one to four bytes and shifts each result
+  by that byte's offset, the previous block supplying the bits shifted in
+  ([teddy.c][hs-teddy-shift]). Regulator: the transposed form, whose bits are
+  a block's text positions, with class words built from byte ranges by the
+  Vector API, and its admission by English start rates
+  ([design][d-fixed-width-rare]).
+- **Where:** `FixedWidthByteSpanMatcher.analyze`,
+  `FixedWidthByteSpanMatcher.searchBlocks`, `VectorBlockMaskScanner.members`,
+  `VectorBlockMaskScanner.membersSve`
+- **Applies when:** Fixed-width patterns in every language that take neither
+  an ASCII singleton scan nor a rare candidate, when the Vector API is
+  available, the pattern is at most 64 positions wide, every position reads
+  one byte, it has two to four distinct classes of at most four byte ranges or
+  the complement of at most four, and the product of its positions' English
+  byte probabilities estimates a start probability of at most 1/64. In UTF-8
+  its classes are ASCII only, so Rust's Unicode `\w` keeps the engine. It
+  yields to the engine as the [rare class scan](#fixed-width-rare-class-scan)
+  does
+- **What it does:** The search tests every start of a 64-byte block at once:
+  it builds one word per distinct class, a bit for each byte of the block the
+  class holds, shifts each position's word down by the position's offset with
+  the next block's word supplying the bits past the block, and ANDs them, so
+  the bits left are the block's match starts. Counts and rebar's count-spans
+  (sums of matched lengths) of `\w{5}\s\w{6}\s\w{7}` in RE2, Trino, Java, and
+  Rust bytes take 0.21 to 0.26 of their earlier time on r8i and 0.27 to 0.39
+  on r9g, and rebar's `hyperscan/fixed-length-words-nosom` and
+  `hyperscan/fixed-length-words-som` rows go from 0.66 to 0.69 of the Rust
+  regex crate's time to 0.17 to 0.22 ([#224], [design][d-fixed-width-rare]).
 
 ### Literal alternation trie
 
@@ -2146,6 +2182,7 @@ change is described.
 [#202]: https://github.com/airlift/regulator/pull/202
 [#208]: https://github.com/airlift/regulator/pull/208
 [#216]: https://github.com/airlift/regulator/pull/216
+[#224]: https://github.com/airlift/regulator/pull/224
 [#226]: https://github.com/airlift/regulator/pull/226
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
@@ -2321,6 +2358,7 @@ change is described.
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
+[hs-teddy-shift]: https://github.com/intel/hyperscan/blob/v5.4.2/src/fdr/teddy.c#L927-L953
 [hs-vermicelli]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/vermicelli.h#L463-L516
 [jdk-arraylist]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/ArrayList.java
 [jdk-cowal]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/java.base/share/classes/java/util/concurrent/CopyOnWriteArrayList.java
@@ -2411,3 +2449,4 @@ change is described.
 [v8-bm-skip]: https://github.com/v8/v8/blob/4.2.70.1/src/jsregexp.cc#L3733-L3798
 [v8-quick-check]: https://github.com/v8/v8/blob/4.2.70.1/src/jsregexp.cc#L2691-L2718
 [v8-subject-sample]: https://github.com/v8/v8/blob/63481c19453c72221531058be6d2e94adf3ebc66/src/regexp/regexp.cc#L1403-L1418
+[wm-agrep]: https://doi.org/10.1145/135239.135244

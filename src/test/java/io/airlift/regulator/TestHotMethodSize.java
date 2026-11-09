@@ -302,6 +302,27 @@ public class TestHotMethodSize
                 .contains("findFoldedLiteralVector");
     }
 
+    /// Keeps the steps of the fixed-width matcher's block search small enough for C2 to inline
+    /// into its block loop: each class word, in either form, and the shift and AND of each
+    /// class's positions. The loop builds every block's words at one place for each class, so a
+    /// word C2 leaves out of line costs a call for each class of each 64-byte block.
+    @Test
+    public void testBlockSearchStepsFitInlineSize()
+    {
+        for (String method : List.of("members", "membersSve")) {
+            assertThat(codeLength(VectorBlockMaskScanner.class, method))
+                    .as("VectorBlockMaskScanner.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+        for (String method : List.of("blockMembers", "blockStarts", "startsFrom")) {
+            assertThat(codeLength(FixedWidthByteSpanMatcher.class, method))
+                    .as("FixedWidthByteSpanMatcher.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps the SWAR folded prefix scans small enough for C2 to inline into the folded prefix
     /// scan in `Prog`, with their candidate comparison in their own bodies, as "Folded Prefix
     /// Candidate Scan" in REGULATOR_DECISIONS.md records: a call to a comparison helper in `Prog`

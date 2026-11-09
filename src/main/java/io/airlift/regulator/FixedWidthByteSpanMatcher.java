@@ -18,6 +18,7 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -44,6 +45,14 @@ import static java.util.Objects.requireNonNull;
 /// bytes of its span that are not continuation bytes. Of two matches, the one that starts later
 /// therefore has the candidate's character later too, and one start has at most one match, so
 /// the first hit that verifies is the leftmost match and also the longest one there.
+///
+/// When neither an ASCII singleton scan nor a rare candidate applies, a pattern such as
+/// `\w{5}\s\w{6}\s\w{7}`, whose positions all read one byte, instead tests every start of a
+/// 64-byte block at once, a Shift-And whose bits are text positions: one word per distinct class,
+/// a bit for each byte of the block it holds, which the Vector API builds; each position's word
+/// shifted down by the position's offset, the next block's word supplying the bits past the block;
+/// and the AND of those, whose bits are the block's match starts. The lowest is the leftmost
+/// match, and a count takes them from the lowest, skipping each start inside the match before it.
 final class FixedWidthByteSpanMatcher
         implements GroupZeroSpanSearch
 {
@@ -65,8 +74,8 @@ final class FixedWidthByteSpanMatcher
     // An ASCII singleton pattern, whose every position is an ASCII byte or an ASCII class, which
     // is at most this wide, and which has a singleton position, one of a single member, scans for
     // its first singleton position whatever its probability: one byte, which the one-byte vector
-    // scan or Slice.indexOf finds, so its route depends on no frequency estimate. Any other
-    // pattern must earn its candidate under MAXIMUM_CANDIDATE_PROBABILITY.
+    // scan or Slice.indexOf finds, so its route depends on no frequency estimate. Other candidate
+    // scans need MAXIMUM_CANDIDATE_PROBABILITY; a pattern without one may take the block search.
     private static final int ASCII_SINGLETON_WIDTH = 64;
     // englishText() rates every byte at or above 0x80 as common as a space, which keeps literal
     // probes on ASCII bytes. English text holds those bytes about as rarely as its rarest ASCII
@@ -108,6 +117,22 @@ final class FixedWidthByteSpanMatcher
     private static final int VECTOR_SCAN = -1;
     private static final int SCALAR_SCAN = -2;
 
+    // The block search, for a pattern whose every position reads one byte and that takes neither
+    // an ASCII singleton scan nor a rare candidate. It needs the Vector API, which builds a
+    // block's class words, and a pattern at most a block wide, whose match ends at the latest in
+    // the next block. Its cost per block is the class words plus a shift and an AND for each
+    // position, whatever the text holds, so it takes a pattern of two to four distinct classes,
+    // each of at most four byte ranges or the complement of at most four, where the product of its
+    // positions' English byte probabilities estimates a start probability of at most 1/64:
+    // \w{5}\s\w{6}\s\w{7} rates about 0.0005. A pattern of one class is a class repeat, which the
+    // class-run counter counts, and a pattern whose starts are denser than that matches so often
+    // that its matches, not its blocks, bound a count.
+    private static final int BLOCK_BYTES = Long.SIZE;
+    private static final int MAXIMUM_BLOCK_CLASSES = 4;
+    // Four ranges fill the four 16-bit slots of a class's packed long.
+    private static final int MAXIMUM_BLOCK_CLASS_RANGES = 4;
+    private static final double MAXIMUM_BLOCK_START_PROBABILITY = 1.0 / BLOCK_BYTES;
+
     // How a search reads each position of a pattern whose characters are not all one byte.
     private static final byte ONE_BYTE = 0;
     private static final byte ALL_NON_ASCII = 1;
@@ -116,7 +141,7 @@ final class FixedWidthByteSpanMatcher
     private final int width;
     // The bytes each position accepts, the ASCII ones of a UTF-8 position, in 1 << maskShift
     // words: two where no position accepts a byte above ASCII, as in every UTF-8 pattern, and
-    // otherwise four.
+    // otherwise four. Null for the block search, which reads its classes instead.
     private final long[] masks;
     private final int maskShift;
     // Each position's reading, or null when every position reads one byte.
@@ -125,9 +150,10 @@ final class FixedWidthByteSpanMatcher
     // null where kinds is.
     private final int[][] runeRanges;
     private final int candidateOffset;
-    // Whether the candidate was chosen as rare, under MAXIMUM_CANDIDATE_PROBABILITY, and whether
-    // a search of it bails on dense candidates.
-    private final boolean rareCandidate;
+    // Whether the search scans a rare candidate, one chosen under MAXIMUM_CANDIDATE_PROBABILITY,
+    // or searches blocks, either of which yields to the engine's scans, and whether a search of
+    // the candidate bails on dense candidates.
+    private final boolean yieldsToEngineScans;
     private final boolean bailsOnDenseCandidates;
     // The candidate's first byte where only one byte can begin its character, found with the
     // one-byte vector scan on long searches where the Vector API is available and with
@@ -138,14 +164,31 @@ final class FixedWidthByteSpanMatcher
     private final byte[] candidateTable;
     private final int candidateScanSet;
     private final byte[] candidateNibbleTables;
+    // The block search's classes, with candidateOffset -1, or null where the search scans a
+    // candidate.
+    private final BlockClasses blockClasses;
 
-    private FixedWidthByteSpanMatcher(List<Position> positions, boolean readsCharacters, boolean latin1NonAscii, int candidateOffset, boolean rareCandidate)
+    private FixedWidthByteSpanMatcher(List<Position> positions, boolean readsCharacters, boolean latin1NonAscii, int candidateOffset, boolean yieldsToEngineScans, BlockClasses blockClasses)
     {
         width = positions.size();
         maskShift = latin1NonAscii ? 2 : 1;
-        masks = new long[width << maskShift];
         kinds = readsCharacters ? new byte[width] : null;
         runeRanges = readsCharacters ? new int[width][] : null;
+        this.candidateOffset = candidateOffset;
+        this.yieldsToEngineScans = yieldsToEngineScans;
+        this.blockClasses = blockClasses;
+        if (blockClasses != null) {
+            // The block search reads its classes, not the masks, and its positions all read one
+            // byte, so kinds and runeRanges are null too.
+            masks = null;
+            bailsOnDenseCandidates = false;
+            candidate = null;
+            candidateTable = null;
+            candidateScanSet = 0;
+            candidateNibbleTables = null;
+            return;
+        }
+        masks = new long[width << maskShift];
         for (int index = 0; index < width; index++) {
             Position position = positions.get(index);
             System.arraycopy(position.mask(), 0, masks, index << maskShift, 1 << maskShift);
@@ -154,8 +197,6 @@ final class FixedWidthByteSpanMatcher
                 runeRanges[index] = position.runeRanges();
             }
         }
-        this.candidateOffset = candidateOffset;
-        this.rareCandidate = rareCandidate;
 
         long[] candidateBytes = candidateBytes(positions.get(candidateOffset));
         bailsOnDenseCandidates = holdsNonAsciiByte(candidateBytes);
@@ -223,10 +264,114 @@ final class FixedWidthByteSpanMatcher
         }
         boolean asciiSingletonPattern = isAsciiSingletonPattern(positions);
         int candidateOffset = asciiSingletonPattern ? firstSingleton(positions) : rarestCandidate(positions);
+        // The block search applies when neither an ASCII singleton scan nor a rare candidate does.
         if (candidateOffset < 0) {
+            BlockClasses blockClasses = readsCharacters ? null : blockClasses(positions);
+            if (blockClasses == null) {
+                return null;
+            }
+            return new FixedWidthByteSpanMatcher(positions, false, latin1NonAscii, -1, true, blockClasses);
+        }
+        return new FixedWidthByteSpanMatcher(positions, readsCharacters, latin1NonAscii, candidateOffset, !asciiSingletonPattern, null);
+    }
+
+    /// Returns the classes of the [block search][#BLOCK_BYTES] of a pattern whose every position
+    /// reads one byte, or null where the search does not take the pattern.
+    private static BlockClasses blockClasses(List<Position> positions)
+    {
+        if (positions.size() > BLOCK_BYTES || !VectorSupport.isAvailable()) {
             return null;
         }
-        return new FixedWidthByteSpanMatcher(positions, readsCharacters, latin1NonAscii, candidateOffset, !asciiSingletonPattern);
+        ByteFrequencies frequencies = ByteFrequencies.englishText();
+        List<long[]> classes = new ArrayList<>();
+        List<Double> classProbabilities = new ArrayList<>();
+        List<List<Integer>> classOffsets = new ArrayList<>();
+        double startProbability = 1;
+        for (int offset = 0; offset < positions.size(); offset++) {
+            long[] mask = positions.get(offset).mask();
+            int classIndex = 0;
+            while (classIndex < classes.size() && !Arrays.equals(classes.get(classIndex), mask)) {
+                classIndex++;
+            }
+            if (classIndex == classes.size()) {
+                if (classIndex == MAXIMUM_BLOCK_CLASSES) {
+                    return null;
+                }
+                classes.add(mask);
+                classProbabilities.add(englishProbability(mask, frequencies));
+                classOffsets.add(new ArrayList<>());
+            }
+            startProbability *= classProbabilities.get(classIndex);
+            classOffsets.get(classIndex).add(offset);
+        }
+        if (classes.size() < 2 || startProbability > MAXIMUM_BLOCK_START_PROBABILITY) {
+            return null;
+        }
+
+        int classCount = classes.size();
+        long[] ranges = new long[classCount];
+        int[] rangeCounts = new int[classCount];
+        long[] inversions = new long[classCount];
+        int[][] offsets = new int[classCount][];
+        byte[] table = new byte[256];
+        for (int index = 0; index < classCount; index++) {
+            long[] mask = classes.get(index);
+            int count = rangeCount(mask);
+            if (count <= MAXIMUM_BLOCK_CLASS_RANGES) {
+                ranges[index] = packedRanges(mask);
+                rangeCounts[index] = count;
+            }
+            else {
+                long[] complement = new long[4];
+                for (int word = 0; word < 4; word++) {
+                    complement[word] = ~mask[word];
+                }
+                int complementCount = rangeCount(complement);
+                if (complementCount > MAXIMUM_BLOCK_CLASS_RANGES) {
+                    return null;
+                }
+                ranges[index] = packedRanges(complement);
+                rangeCounts[index] = complementCount;
+                inversions[index] = -1;
+            }
+            offsets[index] = classOffsets.get(index).stream().mapToInt(Integer::intValue).toArray();
+            for (int value = 0; value < 256; value++) {
+                if (containsByte(mask, value)) {
+                    table[value] |= (byte) (1 << index);
+                }
+            }
+        }
+        return new BlockClasses(ranges, rangeCounts, inversions, offsets, table);
+    }
+
+    /// Returns the number of runs of consecutive bytes in `bytes`.
+    private static int rangeCount(long[] bytes)
+    {
+        int count = 0;
+        for (int value = 0; value < 256; value++) {
+            if (containsByte(bytes, value) && (value == 0 || !containsByte(bytes, value - 1))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /// Returns the runs of `bytes`, at most four, in the layout [VectorBlockMaskScanner] reads.
+    private static long packedRanges(long[] bytes)
+    {
+        long ranges = 0;
+        int shift = 0;
+        for (int value = 0; value < 256; value++) {
+            if (containsByte(bytes, value) && (value == 0 || !containsByte(bytes, value - 1))) {
+                int highest = value;
+                while (highest < 255 && containsByte(bytes, highest + 1)) {
+                    highest++;
+                }
+                ranges |= ((long) ((highest - value) << Byte.SIZE | value)) << shift;
+                shift += Short.SIZE;
+            }
+        }
+        return ranges;
     }
 
     static TrinoRegexp createTrinoRegexp(TrinoCompiledPattern pattern, Regexp regexp)
@@ -234,11 +379,11 @@ final class FixedWidthByteSpanMatcher
         FixedWidthByteSpanMatcher spanMatcher = pattern.createFixedWidthByteSpanMatcher(regexp);
         // The fixed-width subtype never bails. A matcher that can bail leaves every operation to
         // the compiled pattern, whose routes hand a bailed search to its program. A matcher that
-        // scans a rare candidate answers only where the compiled pattern retained it, having
-        // yielded to no route of the program.
+        // scans a rare candidate or searches blocks answers only where the compiled pattern
+        // retained it, having yielded to no route of the program.
         if (spanMatcher == null ||
                 spanMatcher.bailsOnDenseCandidates() ||
-                (spanMatcher.scansRareCandidate() && !pattern.hasRetainedFixedWidthByteSpanMatcher())) {
+                (spanMatcher.yieldsToEngineScans() && !pattern.hasRetainedFixedWidthByteSpanMatcher())) {
             return null;
         }
         return new TrinoRegexp.FixedWidthByteTrinoRegexp(pattern, spanMatcher);
@@ -265,6 +410,9 @@ final class FixedWidthByteSpanMatcher
         }
         if (candidateNibbleTables != null) {
             size += SizeOf.sizeOf(candidateNibbleTables);
+        }
+        if (blockClasses != null) {
+            size += blockClasses.estimatedRetainedSize();
         }
         return size;
     }
@@ -309,12 +457,7 @@ final class FixedWidthByteSpanMatcher
         for (int index = 0; index < positions.size(); index++) {
             long[] candidateBytes = candidateBytes(positions.get(index));
             boolean ascii = !holdsNonAsciiByte(candidateBytes);
-            double probability = 0;
-            for (int value = 0; value < 256; value++) {
-                if (containsByte(candidateBytes, value)) {
-                    probability += value < 0x80 ? frequencies.probability((byte) value) : NON_ASCII_PROBABILITY;
-                }
-            }
+            double probability = englishProbability(candidateBytes, frequencies);
             if (probability < MAXIMUM_CANDIDATE_PROBABILITY &&
                     (rarest < 0 || (ascii && !rarestAscii) || (ascii == rarestAscii && probability < rarestProbability))) {
                 rarest = index;
@@ -323,6 +466,19 @@ final class FixedWidthByteSpanMatcher
             }
         }
         return rarest;
+    }
+
+    /// Returns how often English text holds one of `bytes`, rating each byte at or above 0x80 at
+    /// [#NON_ASCII_PROBABILITY].
+    private static double englishProbability(long[] bytes, ByteFrequencies frequencies)
+    {
+        double probability = 0;
+        for (int value = 0; value < 256; value++) {
+            if (containsByte(bytes, value)) {
+                probability += value < 0x80 ? frequencies.probability((byte) value) : NON_ASCII_PROBABILITY;
+            }
+        }
+        return probability;
     }
 
     /// Returns the bytes that can begin the character of `position`: its one-byte members, and
@@ -522,11 +678,18 @@ final class FixedWidthByteSpanMatcher
         return candidateOffset;
     }
 
-    /// Returns whether the candidate was chosen as rare, under [#MAXIMUM_CANDIDATE_PROBABILITY],
-    /// as for every pattern but an [ASCII singleton pattern][#isAsciiSingletonPattern].
-    boolean scansRareCandidate()
+    boolean searchesBlocksForDiagnostics()
     {
-        return rareCandidate;
+        return blockClasses != null;
+    }
+
+    /// Returns whether the search yields to the engine's scans: whether its candidate was chosen
+    /// as rare, under [#MAXIMUM_CANDIDATE_PROBABILITY], as for every pattern but an
+    /// [ASCII singleton pattern][#isAsciiSingletonPattern], or it tests blocks for want of one.
+    /// Either way the pattern's frequencies, not one byte the text holds, chose the route.
+    boolean yieldsToEngineScans()
+    {
+        return yieldsToEngineScans;
     }
 
     /// Returns whether [#findSpanOrBail] and [#countOrBail] can bail: whether the candidate holds
@@ -552,7 +715,11 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(input, 0)) {
             return searchLong(input, 0, true, false);
         }
-        return kinds == null ? searchBytes(input, 0, true, false) : searchCharacters(input, 0, true, false);
+        return kinds != null
+                ? searchCharacters(input, 0, true, false)
+                : blockClasses != null
+                  ? searchBlocks(input, 0, true)
+                  : searchBytes(input, 0, true, false);
     }
 
     /// Returns [#count(Slice)], or, where the count bails on dense candidates, a negative value
@@ -566,7 +733,11 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(input, 0)) {
             return searchLong(input, 0, true, bailsOnDenseCandidates);
         }
-        return kinds == null ? searchBytes(input, 0, true, bailsOnDenseCandidates) : searchCharacters(input, 0, true, bailsOnDenseCandidates);
+        return kinds != null
+                ? searchCharacters(input, 0, true, bailsOnDenseCandidates)
+                : blockClasses != null
+                  ? searchBlocks(input, 0, true)
+                  : searchBytes(input, 0, true, bailsOnDenseCandidates);
     }
 
     static long countBeforeBail(long bailedCount)
@@ -594,7 +765,11 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(input, start)) {
             return searchLong(input, start, false, false);
         }
-        return kinds == null ? searchBytes(input, start, false, false) : searchCharacters(input, start, false, false);
+        return kinds != null
+                ? searchCharacters(input, start, false, false)
+                : blockClasses != null
+                  ? searchBlocks(input, start, false)
+                  : searchBytes(input, start, false, false);
     }
 
     /// Returns the span of the first match lying entirely in `[start, end)` of `input`,
@@ -611,7 +786,11 @@ final class FixedWidthByteSpanMatcher
         if (usesSingleByteVectorScan(region, start)) {
             return searchLong(region, start, false, bailsOnDenseCandidates);
         }
-        return kinds == null ? searchBytes(region, start, false, bailsOnDenseCandidates) : searchCharacters(region, start, false, bailsOnDenseCandidates);
+        return kinds != null
+                ? searchCharacters(region, start, false, bailsOnDenseCandidates)
+                : blockClasses != null
+                  ? searchBlocks(region, start, false)
+                  : searchBytes(region, start, false, bailsOnDenseCandidates);
     }
 
     /// Returns the first match's span at or after `start`, or with `counting`, the number of
@@ -660,6 +839,121 @@ final class FixedWidthByteSpanMatcher
             candidatePosition = found + 1;
         }
         return counting ? count : Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// [#searchBytes] for a pattern that [searches blocks][#BLOCK_BYTES]. A block starts at each
+    /// multiple of 64 bytes past `start`, and a start's bit is set in the AND of its positions'
+    /// shifted class words only where every position holds its byte: bytes past the input end
+    /// are in no class, so no set bit starts a match that would end past it.
+    private long searchBlocks(Slice input, int start, boolean counting)
+    {
+        int length = input.length();
+        int lastStart = length - width;
+        if (start < 0 || start > lastStart) {
+            return counting ? 0 : Dfa.SEARCH_NO_MATCH;
+        }
+
+        byte[] bytes = input.byteArray();
+        int offset = input.byteArrayOffset();
+        BlockClasses classes = blockClasses;
+        int[][] offsets = classes.offsets();
+        int classCount = offsets.length;
+        // The search begins a block before start, whose words are empty, so it has no starts:
+        // the position at offset zero reads the empty word alone. Every block's words are then
+        // built where the loop builds the next block's, one call site for each class.
+        long first = 0;
+        long second = 0;
+        long third = 0;
+        long fourth = 0;
+        long count = 0;
+        // The earliest start a match can take, the end of the last match counted.
+        int resume = start;
+        int block = start - BLOCK_BYTES;
+        while (true) {
+            // nextLength, the bytes from the next block to the input end, lies between
+            // width - BLOCK_BYTES and the input length. On an input within BLOCK_BYTES of
+            // Integer.MAX_VALUE, length - block can wrap, but the wrapping subtraction still
+            // yields nextLength exactly. nextPosition can wrap there too once the next block
+            // starts past the input end; it is read only where nextLength is positive, where it
+            // lies before the end.
+            int nextLength = length - block - BLOCK_BYTES;
+            int nextPosition = offset + block + BLOCK_BYTES;
+            long nextFirst = blockMembers(classes, 0, bytes, nextPosition, nextLength);
+            long nextSecond = blockMembers(classes, 1, bytes, nextPosition, nextLength);
+            long nextThird = classCount > 2 ? blockMembers(classes, 2, bytes, nextPosition, nextLength) : 0;
+            long nextFourth = classCount > 3 ? blockMembers(classes, 3, bytes, nextPosition, nextLength) : 0;
+            long starts = blockStarts(first, nextFirst, offsets[0], -1);
+            starts = blockStarts(second, nextSecond, offsets[1], starts);
+            if (classCount > 2) {
+                starts = blockStarts(third, nextThird, offsets[2], starts);
+            }
+            if (classCount > 3) {
+                starts = blockStarts(fourth, nextFourth, offsets[3], starts);
+            }
+            starts &= startsFrom(resume - block);
+            while (starts != 0) {
+                int matchStart = block + Long.numberOfTrailingZeros(starts);
+                int matchEnd = matchStart + width;
+                if (!counting) {
+                    return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
+                }
+                count++;
+                resume = matchEnd;
+                starts &= startsFrom(resume - block);
+            }
+            // lastStart is at least start, so lastStart - BLOCK_BYTES cannot overflow, while
+            // lastStart - block can on an input within BLOCK_BYTES of Integer.MAX_VALUE.
+            if (block > lastStart - BLOCK_BYTES) {
+                return counting ? count : Dfa.SEARCH_NO_MATCH;
+            }
+            block += BLOCK_BYTES;
+            first = nextFirst;
+            second = nextSecond;
+            third = nextThird;
+            fourth = nextFourth;
+        }
+    }
+
+    /// Returns the word of block class `classIndex` for the block at `position` of `bytes`, of
+    /// which `available` bytes lie before the input end: the Vector API's word for a whole block,
+    /// and otherwise the table's bits for the bytes there, none where `available` is not positive.
+    private static long blockMembers(BlockClasses classes, int classIndex, byte[] bytes, int position, int available)
+    {
+        if (available >= BLOCK_BYTES) {
+            long ranges = classes.ranges()[classIndex];
+            int rangeCount = classes.rangeCounts()[classIndex];
+            long word = VectorSupport.SVE_128
+                    ? VectorBlockMaskScanner.membersSve(bytes, position, ranges, rangeCount)
+                    : VectorBlockMaskScanner.members(bytes, position, ranges, rangeCount);
+            return word ^ classes.inversions()[classIndex];
+        }
+        byte[] table = classes.table();
+        long members = 0;
+        for (int index = 0; index < available; index++) {
+            members |= (long) ((table[bytes[position + index] & 0xFF] >>> classIndex) & 1) << index;
+        }
+        return members;
+    }
+
+    /// Returns `starts` with the bits cleared where a position at one of `offsets` lacks its
+    /// byte: the class's word for the block, `current`, shifted down by the offset, with the
+    /// next block's word, `next`, supplying the bits past the block. The second shift of `next`
+    /// is split in two so an offset of zero shifts all of `next` out.
+    private static long blockStarts(long current, long next, int[] offsets, long starts)
+    {
+        for (int offset : offsets) {
+            starts &= (current >>> offset) | ((next << (63 - offset)) << 1);
+        }
+        return starts;
+    }
+
+    /// Returns the mask of a block's starts at or after `skip` bytes into it.
+    private static long startsFrom(int skip)
+    {
+        if (skip <= 0) {
+            return -1;
+        }
+        return skip >= BLOCK_BYTES ? 0 : -1L << skip;
     }
 
     /// [#searchBytes] for a pattern whose characters are not all one byte. [#searchLongCharacters]
@@ -977,4 +1271,23 @@ final class FixedWidthByteSpanMatcher
     /// members), how a search reads its character, its inclusive rune ranges where that reading
     /// needs them, and whether it holds exactly one member.
     private record Position(long[] mask, byte kind, int[] runeRanges, boolean literal) {}
+
+    /// The classes of the block search: each class's ranges in the layout
+    /// [VectorBlockMaskScanner] reads, their count, `-1` where the ranges are the class's
+    /// complement and `0` elsewhere, and the offsets of its positions. Bit `c` of `table[b]` is
+    /// set where class `c` holds byte `b`, which builds the words of the bytes past the last
+    /// whole block.
+    private record BlockClasses(long[] ranges, int[] rangeCounts, long[] inversions, int[][] offsets, byte[] table)
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(BlockClasses.class);
+
+        long estimatedRetainedSize()
+        {
+            long size = INSTANCE_SIZE + SizeOf.sizeOf(ranges) + SizeOf.sizeOf(rangeCounts) + SizeOf.sizeOf(inversions) + SizeOf.sizeOf(offsets) + SizeOf.sizeOf(table);
+            for (int[] classOffsets : offsets) {
+                size += SizeOf.sizeOf(classOffsets);
+            }
+            return size;
+        }
+    }
 }
