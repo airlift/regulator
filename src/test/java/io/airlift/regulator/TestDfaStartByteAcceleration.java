@@ -31,6 +31,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static io.airlift.regulator.Dfa.SEARCH_NO_MATCH;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -690,6 +692,39 @@ public class TestDfaStartByteAcceleration
         // class leaves too few narrow positions.
         assertThat(firstMatchDfa("(?i)ab|cd").startLiteralFilter()).isNull();
         assertThat(firstMatchDfa("(?i)a[a-z]+|b[a-z]+").startLiteralFilter()).isNull();
+    }
+
+    @Test
+    public void testStartLiteralFilterReadsPastTheFirstBytes()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        // Without Unicode, only the names' ASCII letters fold. The names begin with common English
+        // letters. The filter checks their first, fourth, and eighth bytes.
+        RustRegexp names = RustRegexp.compile(
+                Slices.utf8Slice("Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty"),
+                RustRegexp.Options.bytes().setUnicode(false).setCaseInsensitive(true));
+        StartLiteralFilter filter = names.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter();
+        assertThat(List.of(filter.firstOffset(), filter.secondOffset(), filter.thirdOffset())).containsExactly(0, 3, 7);
+
+        // Each folded Cyrillic letter is two paths, so seven names branch into more paths than
+        // the walk keeps by their twelfth byte. The walk also gives up at an assertion before its
+        // last position. Either way the filter reads the first six bytes.
+        for (String pattern : List.of("(?i)Холмс|Уотсон|Адлер|Мориарти|Шерлок|Хадсон|Лестрейд", "(?i)holmes\\b|watson\\b")) {
+            Prog program = compile(pattern);
+            assertThat(program.buildStartPositionByteSets(new int[3 * program.size() + 1], StartLiteralFilter.PATH_POSITIONS)).as(pattern).isNull();
+            StartLiteralFilter shallowFilter = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter();
+            assertThat(shallowFilter).as(pattern).isNotNull();
+            assertThat(shallowFilter.thirdOffset()).as(pattern).isLessThan(StartLiteralFilter.SHALLOW_PATH_POSITIONS);
+        }
+
+        // Thirty-three identifiers that share their first six bytes split into more groups than a
+        // filter holds within twelve bytes, so the filter is built from the first six.
+        String identifiers = IntStream.range(0, 33)
+                .mapToObj(index -> "/user/" + IntStream.of(index / 25, index / 5 % 5, index % 5)
+                        .mapToObj(digit -> String.valueOf("03569".charAt(digit)).repeat(2))
+                        .collect(Collectors.joining()))
+                .collect(Collectors.joining("|"));
+        assertThat(Re2.compile(Slices.utf8Slice(identifiers)).literalAlternationSpanMatcherForDiagnostics().startLiteralFilterForDiagnostics()).isNotNull();
     }
 
     @Test
@@ -1551,15 +1586,16 @@ public class TestDfaStartByteAcceleration
                 new FixedDistanceCase("(?:ab|cd){2}:[0-9]", "abcd:7"));
     }
 
-    // The 02-literal-alternate and name-alt rows, folds that add a multibyte path (Kelvin sign
-    // for k and long s for s), a Cyrillic literal whose cases differ in a lead-byte bit the
-    // ASCII cases do not, so one position's mask has two bits, two literals for the narrowest
-    // scanner, and a rare start set of mixed bytes, which takes the filter wherever vector
-    // scanning is enabled.
+    // Exact and case-insensitive name alternations from the 02-literal-alternate and name-alt
+    // rows, folds that add a multibyte path (Kelvin sign for k and long s for s), a Cyrillic
+    // literal whose cases differ in a lead-byte bit the ASCII cases do not, so one position's
+    // mask has two bits, two literals for the narrowest scanner, and a rare start set of mixed
+    // bytes, which takes the filter wherever vector scanning is enabled.
     private static List<String> startLiteralFilterPatterns()
     {
         return List.of(
                 "(?i)Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty",
+                "Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty",
                 "(?i)Sherlock|Holmes|Watson",
                 "(?i)Sher[a-z]+|Hol[a-z]+",
                 "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",

@@ -4074,7 +4074,12 @@ final class Dfa
 
         long[][] paths = prog.buildStartPositionByteSets(stack, StartLiteralFilter.PATH_POSITIONS);
         if (paths == null) {
-            return null;
+            // A program that branches into more paths than the walk keeps by the last position, or
+            // reaches an assertion before the last position, can still fit in the first six.
+            paths = prog.buildStartPositionByteSets(stack, StartLiteralFilter.SHALLOW_PATH_POSITIONS);
+            if (paths == null) {
+                return null;
+            }
         }
         StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText());
         if (filter == null || filter.density() * START_LITERAL_FILTER_NARROWING_FACTOR > startByteProbability) {

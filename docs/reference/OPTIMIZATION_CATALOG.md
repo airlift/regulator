@@ -681,9 +681,11 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   frequency-ordered fixed-distance sets
   ([RegexPrefixAnalyzer.cs][dotnet7-set-quality]) for choosing positions.
   Inspired by a gap against the Rust regex crate and RE2 ([#89]). Regulator:
-  three positions from the first six bytes, two groups tested in one pass,
-  the Vector API nibble kernel, the density estimate and adoption gates, and
-  the x86-only short shift under C2 ([#89], [#98], [#110], [#142],
+  three positions from the first twelve bytes, falling back to the first six
+  when the twelve-byte filter cannot be built or the six-byte one has the
+  lower estimated density, two groups tested in one pass, the Vector API
+  nibble kernel, the density estimate and adoption gates, and the x86-only
+  short shift under C2 ([#89], [#98], [#110], [#142],
   [design][d-start-filter]).
 - **Where:** `Prog.buildStartPositionByteSets`, `StartLiteralFilter.build`,
   `StartLiteralFilter.canMerge`, `StartLiteralFilter.find`,
