@@ -393,12 +393,14 @@ public class TestHotMethodSize
     }
 
     /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the
-    /// start state, at the size it was measured at with the start class filter. Raise the limit
-    /// only after measuring a new scan.
+    /// start state, at the size it was measured at with the start class filter, and the literal
+    /// filter's dispatch at the size it was measured at with its scalar start check. Raise a
+    /// limit only after measuring a new scan.
     @Test
     public void testStartScanDispatchStaysAtMeasuredSize()
     {
         assertThat(codeLength(Dfa.class, "findByteSetCandidate")).as("Dfa.findByteSetCandidate bytecode bytes").isPositive().isLessThanOrEqualTo(214);
+        assertThat(codeLength(VectorByteSetScanner.class, "findLiteralSet")).as("VectorByteSetScanner.findLiteralSet bytecode bytes").isPositive().isLessThanOrEqualTo(136);
     }
 
     /// Caps the exact literal alternation's root-table loop, which inlines the trie walk, at the

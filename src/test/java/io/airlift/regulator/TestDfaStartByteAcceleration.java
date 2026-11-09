@@ -780,9 +780,13 @@ public class TestDfaStartByteAcceleration
         assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
         Random random = new Random(96);
         Set<Integer> scannerWidths = new HashSet<>();
+        Set<Boolean> twoGroupExactBytes = new HashSet<>();
         for (String pattern : startLiteralFilterPatterns()) {
             StartLiteralFilter filter = firstMatchDfa(pattern).startLiteralFilter();
             scannerWidths.add(filter.values().length / 3);
+            if (filter.values().length / 3 == 2) {
+                twoGroupExactBytes.add(filter.exactBytes());
+            }
             for (int iteration = 0; iteration < 200; iteration++) {
                 byte[] text = literalText(random, pattern, 1 + random.nextInt(4_096));
                 int offset = random.nextInt(Math.min(8, text.length));
@@ -801,23 +805,46 @@ public class TestDfaStartByteAcceleration
                 assertThat(VectorByteSetScanner.findLiteralSet(text, offset, length, filter))
                         .as("pattern %s offset=%s length=%s", pattern, offset, length)
                         .isEqualTo(expected);
+                assertExactTwoLiteralScans(pattern, filter, text, offset, length, expected);
             }
 
-            // The first bytes of one literal end a zero-filled window that ends the array: the only
-            // accepted position lands in the last lane of a full vector or at each offset of the
-            // scalar tail, and a scan that reads past the window fails.
+            // The first bytes of one literal sit at every position of zero-filled windows of up to
+            // 200 bytes, past three 64-byte vectors, that end the array: the only accepted
+            // position lands in every lane of a full vector and at each offset of the scalar tail,
+            // and a scan that reads past the window fails. A scan that starts at the literal
+            // returns its start, and one whose window ends a byte before the literal's last probe,
+            // in an array that goes on past it, returns -1.
             byte[] literal = literals(pattern)[0].getBytes(StandardCharsets.UTF_8);
             int span = filter.thirdOffset() + 1;
             for (int end = span; end <= 200; end++) {
-                byte[] text = new byte[end];
-                System.arraycopy(literal, 0, text, end - span, span);
-                assertThat(filter.find(text, 0, end)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
-                assertThat(VectorByteSetScanner.findLiteralSet(text, 0, end, filter)).as("pattern %s end=%s", pattern, end).isEqualTo(end - span);
+                for (int start = 0; start <= end - span; start++) {
+                    byte[] text = new byte[end];
+                    System.arraycopy(literal, 0, text, start, span);
+                    assertThat(filter.find(text, 0, end)).as("pattern %s start=%s end=%s", pattern, start, end).isEqualTo(start);
+                    assertThat(VectorByteSetScanner.findLiteralSet(text, 0, end, filter)).as("pattern %s start=%s end=%s", pattern, start, end).isEqualTo(start);
+                    assertExactTwoLiteralScans(pattern, filter, text, 0, end, start);
+                    assertThat(VectorByteSetScanner.findLiteralSet(text, start, end - start, filter)).as("pattern %s from start=%s end=%s", pattern, start, end).isEqualTo(start);
+                    assertThat(VectorByteSetScanner.findLiteralSet(text, start, span - 1, filter)).as("pattern %s short window start=%s end=%s", pattern, start, end).isEqualTo(-1);
+                }
             }
         }
-        // Two-group filters run the compare kernel; four- and eight-group filters share the
-        // nibble kernel, the eight-group one with group bits up to the sign bit.
+        // Two-group filters run the compare kernel, with and without masks; four- and eight-group
+        // filters share the nibble kernel, the eight-group one with group bits up to the sign bit.
         assertThat(scannerWidths).containsExactlyInAnyOrder(2, 4, 8);
+        assertThat(twoGroupExactBytes).containsExactlyInAnyOrder(true, false);
+        // The Tom and river alternation's two literals are case-sensitive, so its filter has no
+        // masks.
+        assertThat(firstMatchDfa("Tom.{10,25}river|river.{10,25}Tom").startLiteralFilter().exactBytes()).isTrue();
+    }
+
+    // Both forms of the two-literal scan without masks find what the filter's scalar scan finds.
+    private static void assertExactTwoLiteralScans(String pattern, StartLiteralFilter filter, byte[] text, int offset, int length, int expected)
+    {
+        if (filter.values().length / 3 == 2 && filter.exactBytes()) {
+            String description = "pattern %s offset=%s length=%s".formatted(pattern, offset, length);
+            assertThat(VectorByteSetScanner.findTwoExactLiterals(text, offset, length, filter)).as(description).isEqualTo(expected);
+            assertThat(VectorByteSetScanner.findTwoExactLiteralsXor(text, offset, length, filter)).as("XOR " + description).isEqualTo(expected);
+        }
     }
 
     @Test
@@ -1589,8 +1616,8 @@ public class TestDfaStartByteAcceleration
     // Exact and case-insensitive name alternations from the 02-literal-alternate and name-alt
     // rows, folds that add a multibyte path (Kelvin sign for k and long s for s), a Cyrillic
     // literal whose cases differ in a lead-byte bit the ASCII cases do not, so one position's
-    // mask has two bits, two literals for the narrowest scanner, and a rare start set of mixed
-    // bytes, which takes the filter wherever vector scanning is enabled.
+    // mask has two bits, two literals for the narrowest scanner, with and without case pairs, and
+    // a rare start set of mixed bytes, which takes the filter wherever vector scanning is enabled.
     private static List<String> startLiteralFilterPatterns()
     {
         return List.of(
@@ -1604,6 +1631,7 @@ public class TestDfaStartByteAcceleration
                 "(?i)kelvin|sky|kiss",
                 "(?i)Holmes|Watson|рст",
                 "(?i)Holmes|Watson",
+                "the[a-z]+|and[a-z]+",
                 "Sherlock|Holmes|Watson|Irene|Adler|John|Baker");
     }
 

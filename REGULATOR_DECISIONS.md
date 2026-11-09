@@ -3374,9 +3374,10 @@ of its two groups' differences, and the class-pair scan the unsigned minimum of
 each side's differences from its up to three bytes. Everywhere else these five
 compare each byte and AND the masks, except that on x86 with 64-byte vectors
 the literal prefix scan of a single literal compares its second byte under the
-first byte's mask, as a later paragraph records. The JVM's `UseSVE` flag is
-read once, through the HotSpot diagnostic MXBean, on aarch64 only; if the flag
-cannot be read, the scans compare and AND.
+first byte's mask, as a later paragraph records, and the start literal filter's
+check of two literals without masks takes the XOR form, as that section
+records. The JVM's `UseSVE` flag is read once, through the HotSpot diagnostic
+MXBean, on aarch64 only; if the flag cannot be read, the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -3429,13 +3430,15 @@ and AVX2, whose compares take no mask, keep the platform choice. The two forms
 are separate methods, so each compiles only its own candidate test.
 
 The masked compare's gate, `VectorSupport.X86_WITH_64_BYTE_VECTORS`, is x86
-with a 64-byte preferred byte vector. r8i (Granite Rapids) is the only x86 host
-measured under it. Other x86 hosts with 64-byte vectors, such as Ice Lake, AMD
-Zen 4 and 5, and Cascade Lake, take the masked compare unmeasured; Cascade Lake
-(AWS r5) ran it only in an A/B against main that also held later start literal
-filter scan changes, which did not separate it. SVE wider than 16 bytes,
-including 512-bit SVE, as on A64FX, and any other architecture with 64-byte
-vectors keep the platform choice, since the gate tests for x86.
+with a 64-byte preferred byte vector. It also gates the XOR form of the check of
+two literals without masks under
+[Start Literal Filter](#start-literal-filter). r8i (Granite Rapids) is the only
+x86 host measured under it. Other x86 hosts with 64-byte vectors, such as Ice
+Lake, AMD Zen 4 and 5, and Cascade Lake, take both forms unmeasured; Cascade
+Lake (AWS r5) ran them only in an A/B against main that also held the start
+literal filter's other scan changes, which did not separate them. SVE wider than
+16 bytes, including 512-bit SVE, as on A64FX, and any other architecture with
+64-byte vectors keep the platform choice, since the gate tests for x86.
 
 The folded pair kernels, the counted and dense forms that the folded prefix
 scan and the folded inner literal search share, take the XOR form under the
@@ -3723,6 +3726,57 @@ XOR arithmetic written inline in the loop rather than in helpers, likewise took
 scanners. 32-byte vectors, as with AVX2 or 256-bit SVE, were not measured and
 keep theirs too. A rare small set or range whose filter would hold more
 literals, and so need the nibble lookup, keeps its scanner on every platform.
+
+A two-literal filter without masks, whose literals have zero masks at the three
+chosen positions, as for `Tom.{10,25}river|river.{10,25}Tom`, compares the
+loaded bytes without ORing a mask into each. Its check takes the XOR form
+described under [Candidate Masks on SVE](#candidate-masks-on-sve) where the
+filter with masks does, on SVE with 16-byte vectors, and also on x86 with
+64-byte vectors, as with AVX-512: comparing the six bytes into mask registers
+and joining them with four `kandq` and a `korq` kept more masks live than r8i's
+seven mask registers hold, and in r8i's assembly one spilled and was reloaded
+every step. NEON, AVX2, and SVE wider than 16 bytes keep compare-and-AND, as the
+filter with masks does; none was measured in the XOR form. The x86 gate is the
+masked pair compare's, whose hosts that section lists.
+
+The x86 evidence for the XOR form is mixed. Older r8i runs, of earlier forms of
+both checks and before the scalar start check below, took 0.948x main's time
+for `imported/leipzig/tom-river` in the XOR form against 0.958x with compare and
+AND, but 0.927x against 0.892x for `synthetic/window-guard-trip`, where compare
+and AND was faster; those runs may differ in more than the check. In an A/B
+against main with every scan change this record describes for the prefix scan
+and the start literal filter in place, r8i ran `tom-river` at 0.978x main's
+time, `window-guard-trip` at 0.941x, and `synthetic/window-dense-fail` at
+0.993x.
+
+The folded pair kernels' XOR form, under that section, is a different kernel
+and keeps its own gate. It searches for one folded literal through two probes,
+ORs `0x20` into the loaded bytes at letter probes, XORs each probe with its
+lower-case byte, ORs the two differences, and compares with zero, with every
+vector kept in the kernel. This check takes three positions of two exact
+literals, ORs each literal's three differences, joins the literals by an
+unsigned minimum, and compares with zero, through the helper the filter with
+masks already uses. The folded kernels take the XOR form only under
+`VectorSupport.SVE_128`; r8i ran them in the compare-and-AND form only.
+
+Before either form, the dispatch checks the start with the filter's scalar
+compare and returns it when it is accepted, so a scan that would stop at once
+skips broadcasting the six probes. In `imported/leipzig/tom-river`, over dense
+Tom and river matches, 4,836 of the row's 4,924 scans stopped at their start, so
+the vector setup bought no skipping; longer scans keep the vector loop. Without
+the check, with the start literal filter's other scan changes in place, Rust
+`synthetic/window-dense-fail` ran 6 of 8 forks in a slow mode on r8i and took
+1.074x main's time. In every build of the scan stack profiled, 74% to 89% of
+its cycles sat in the DFA transition loop inlined into the forward DFA's
+scan-acceleration search, not in the vector scanner, and C2's register
+allocation of that loop split forks into a fast and a slow mode: stack spills
+were 22% of the slow fork's 40 hottest instructions, against 16% for main. With
+the check all 8 forks ran fast, at 0.98x main's time, and on both platforms
+`tom-river` and `window-guard-trip` stayed at 0.98x or less: `tom-river` at
+0.98x on r8i and 0.90x on r9g, and `window-guard-trip` at 0.98x and 0.87x. The
+check sits in the dispatch rather than in the scans because on
+NEON a scan grown by it was compiled past the size at which C2 inlines an
+already compiled method.
 
 The filter uses English frequencies even when the pattern was compiled with
 other byte frequencies. Fixed estimates are enough for the common sets, which

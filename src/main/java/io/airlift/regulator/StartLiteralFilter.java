@@ -24,9 +24,11 @@ import java.util.List;
 /// literal has one byte, or two bytes that differ in one bit, such as the two cases of an ASCII
 /// letter or of a Cyrillic letter's UTF-8 bytes. The scalar and two-group scans OR every group's
 /// differing bits into the input byte before comparing, so one OR per position serves every
-/// group, and a group may accept up to four bytes there. A filter of more than two groups also
-/// holds nibble tables of one bit per group, looked up by a byte's low and high nibbles; a group's
-/// bit is set in both entries exactly when the group accepts the byte.
+/// group, and a group may accept up to four bytes there; the two-group vector scan of a filter
+/// with no masks, whose literals are exact, compares the loaded bytes as they are. A filter of
+/// more than two groups also holds nibble tables of one bit per group, looked up by a byte's low
+/// and high nibbles; a group's bit is set in both entries exactly when the group accepts the
+/// byte.
 ///
 /// The filter is a superset of the match starts: a group's position may accept more bytes than
 /// its literal, but never fewer. Matches that begin with up to eight such groups, each at least
@@ -70,6 +72,8 @@ final class StartLiteralFilter
     private final byte firstMask;
     private final byte secondMask;
     private final byte thirdMask;
+    // True when no position has a mask, so each group accepts one byte at each position.
+    private final boolean exactBytes;
     // Three bytes per group, padded to the scanner's width with copies of the first group.
     private final byte[] values;
     private final int groupCount;
@@ -85,6 +89,7 @@ final class StartLiteralFilter
         this.firstMask = masks[0];
         this.secondMask = masks[1];
         this.thirdMask = masks[2];
+        this.exactBytes = (masks[0] | masks[1] | masks[2]) == 0;
         this.values = values;
         this.groupCount = groupCount;
         this.nibbleTables = nibbleTables;
@@ -382,6 +387,14 @@ final class StartLiteralFilter
     byte thirdMask()
     {
         return thirdMask;
+    }
+
+    /// True when no position has a mask, so each group accepts exactly its own byte at each
+    /// position, as for literals without case pairs; the two-group vector scan then skips the
+    /// masks.
+    boolean exactBytes()
+    {
+        return exactBytes;
     }
 
     byte[] values()
