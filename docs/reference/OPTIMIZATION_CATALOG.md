@@ -721,6 +721,7 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   `Dfa.buildStartLiteralFilter`,
   `VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals`,
   `VectorByteSetScanner.findTwoLiterals`,
+  `VectorByteSetScanner.findTwoExactLiterals`,
   `VectorByteSetScanner.findLiteralNibbles`,
   `StartLiteralFilter.buildNibbleTables`,
   `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`
@@ -741,7 +742,11 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   from English frequencies and fixed UTF-8 weights. With one or two groups,
   each position is loaded once and compared with both groups, the three
   comparisons of a group are ANDed, and a lane is a candidate when either
-  group matches. With 3 to 8 groups, two nibble lookups per position give
+  group matches. Literals with zero masks at the three positions skip the OR,
+  and on 128-bit SVE and on x86 with 64-byte vectors their two groups are
+  checked with one compare, as in the
+  [one-compare candidate masks](#one-compare-candidate-masks).
+  With 3 to 8 groups, two nibble lookups per position give
   every group's bit at once; each step loads one vector at the third position
   and shifts in the first two positions' bits from the previous step, on x86
   with a 16-bit lane shift and a mask instead of a byte shift. Rust, RE2, and
@@ -774,6 +779,7 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   `VectorPrefixScanner.findFoldCaseDenseSve`,
   `VectorScanner.findRunStopSve`, `VectorByteSetScanner.findTwoSve`,
   `VectorByteSetScanner.findTwoLiteralsSve`,
+  `VectorByteSetScanner.findTwoExactLiteralsXor`,
   `VectorByteSetScanner.findClassPairSve`,
   `VectorByteSetScanner.findClassSequencePairSve`,
   `VectorByteSetScanner.findClassSequenceTripleSve`,
@@ -782,9 +788,10 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
 - **Applies when:** aarch64 with 128-bit SVE; NEON and x86 compare each probe
   and combine with AND or OR, except that x86 with 64-byte vectors compares a
   single literal's second prefix byte under the first byte's mask, as the
-  [front-and-back prefix scan](#front-and-back-prefix-scan) describes. The RE2
-  run stop runs on every platform, for runs that accept non-ASCII characters,
-  such as `[^,]*`, in RE2, Java, and Rust plans
+  [front-and-back prefix scan](#front-and-back-prefix-scan) describes, and
+  takes the XOR form for the start literal filter's check of two literals
+  without case masks. The RE2 run stop runs on every platform, for runs that
+  accept non-ASCII characters, such as `[^,]*`, in RE2, Java, and Rust plans
 - **What it does:** Each candidate byte is XORed with its probe, the
   differences are joined with OR (all must match) or a lane-wise unsigned
   minimum (any may match), and the result is compared with zero once. This

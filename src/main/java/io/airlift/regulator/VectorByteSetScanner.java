@@ -32,6 +32,16 @@ final class VectorByteSetScanner
     // literal set's root skip apply the rule through shortScanCount.
     static final int SHORT_SCAN_BYTES = 16;
     static final int SHORT_SCAN_LIMIT = 4;
+    // Whether the two-literal scan of a filter without masks takes the XOR form: under
+    // VectorSupport.SVE_128, as the other two-literal scan does, and under
+    // VectorSupport.X86_WITH_64_BYTE_VECTORS, which names the hosts measured and unmeasured. On
+    // r8i, comparing each of the six bytes into its own mask register and joining the masks with
+    // four kandq and a korq leaves more masks live than r8i's seven mask registers hold, so in
+    // r8i's assembly one mask spilled and reloaded every step; the XOR form compares once. NEON,
+    // where the XOR form took 1.05x the compare-and-AND form's time for
+    // Tom.{10,25}river|river.{10,25}Tom, and other hosts keep compare and AND: AVX2 and SVE wider
+    // than 16 bytes were not measured. C2 folds this constant, so the scan compiles one form.
+    private static final boolean TWO_EXACT_LITERALS_XOR = VectorSupport.SVE_128 || VectorSupport.X86_WITH_64_BYTE_VECTORS;
 
     private VectorByteSetScanner() {}
 
@@ -213,14 +223,33 @@ final class VectorByteSetScanner
     // and benchmark evidence. Finds the first position where one of the filter's literals
     // matches at all three of its positions. For two groups, each vector step loads three
     // vectors, ORs each once with its position's mask, and checks both groups against those
-    // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance. For more, each
+    // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance; a filter without
+    // masks skips the ORs and picks its form by TWO_EXACT_LITERALS_XOR. For more, each
     // step loads one vector, at the third position, looks up every group's bit for all three
     // positions by nibble, and shifts the first two positions' bits into place from the previous
     // step's; the high nibbles take the shift VectorSupport.SHIFT_NIBBLES_AS_SHORTS selects.
+    //
+    // A two-group filter without masks first checks the start with the filter's scalar compare
+    // and returns it when accepted, before its scan broadcasts the six probes: in a run of dense
+    // matches of Tom.{10,25}river|river.{10,25}Tom, nearly every scan the forward DFA's
+    // start-byte skip makes stops at its start, so the vector setup bought no skipping. Without
+    // the check, on r8i, C2's register allocation of the DFA loop that calls this, where such rows
+    // spend most of their cycles, compiled most JVM forks of a dense row into a slower form that
+    // spills more to the stack. The check is here rather than in the scans because on NEON it
+    // grew a scan's compiled code past the size at which C2 inlines a method it has already
+    // compiled. "Start Literal Filter" in REGULATOR_DECISIONS.md records the measurements.
     static int findLiteralSet(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         return switch (filter.values().length / 3) {
-            case 2 -> VectorSupport.SVE_128 ? findTwoLiteralsSve(data, offset, length, filter) : findTwoLiterals(data, offset, length, filter);
+            case 2 -> {
+                if (!filter.exactBytes()) {
+                    yield VectorSupport.SVE_128 ? findTwoLiteralsSve(data, offset, length, filter) : findTwoLiterals(data, offset, length, filter);
+                }
+                if (filter.accepts(data, offset, offset + length)) {
+                    yield offset;
+                }
+                yield TWO_EXACT_LITERALS_XOR ? findTwoExactLiteralsXor(data, offset, length, filter) : findTwoExactLiterals(data, offset, length, filter);
+            }
             case 4, 8 -> findLiteralNibbles(data, offset, length, filter);
             default -> throw new IllegalArgumentException("literal filter width must be two, four, or eight");
         };
@@ -285,7 +314,70 @@ final class VectorByteSetScanner
             ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstMask);
             ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondMask);
             ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset).or(thirdMask);
-            VectorMask<Byte> matches = sveTwoLiteralMatches(first, second, third, firstValue0, secondValue0, thirdValue0, firstValue1, secondValue1, thirdValue1);
+            VectorMask<Byte> matches = xorTwoLiteralMatches(first, second, third, firstValue0, secondValue0, thirdValue0, firstValue1, secondValue1, thirdValue1);
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    // findTwoLiterals for a filter without masks: each loaded vector is compared as it is, which
+    // saves an OR per position and the three registers that hold the masks. The XOR form is
+    // findTwoExactLiteralsXor; keep the two in step.
+    static int findTwoExactLiterals(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset);
+            VectorMask<Byte> matches = literalMatches(first, second, third, firstValue0, secondValue0, thirdValue0)
+                    .or(literalMatches(first, second, third, firstValue1, secondValue1, thirdValue1));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    // findTwoExactLiterals in the XOR form TWO_EXACT_LITERALS_XOR selects. It is a separate
+    // method, as findTwoLiteralsSve is, so that each body holds one form and tests can call both
+    // on any platform. Keep the two in step.
+    static int findTwoExactLiteralsXor(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] values = filter.values();
+        ByteVector firstValue0 = ByteVector.broadcast(SPECIES, values[0]);
+        ByteVector secondValue0 = ByteVector.broadcast(SPECIES, values[1]);
+        ByteVector thirdValue0 = ByteVector.broadcast(SPECIES, values[2]);
+        ByteVector firstValue1 = ByteVector.broadcast(SPECIES, values[3]);
+        ByteVector secondValue1 = ByteVector.broadcast(SPECIES, values[4]);
+        ByteVector thirdValue1 = ByteVector.broadcast(SPECIES, values[5]);
+        int firstOffset = filter.firstOffset();
+        int secondOffset = filter.secondOffset();
+        int thirdOffset = filter.thirdOffset();
+        int end = offset + length;
+        // The third position of the last vector's last lane must lie before the end.
+        int vectorEnd = end - thirdOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += SPECIES.length()) {
+            ByteVector first = ByteVector.fromArray(SPECIES, data, position + firstOffset);
+            ByteVector second = ByteVector.fromArray(SPECIES, data, position + secondOffset);
+            ByteVector third = ByteVector.fromArray(SPECIES, data, position + thirdOffset);
+            VectorMask<Byte> matches = xorTwoLiteralMatches(first, second, third, firstValue0, secondValue0, thirdValue0, firstValue1, secondValue1, thirdValue1);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }
@@ -359,8 +451,9 @@ final class VectorByteSetScanner
     }
 
     /// Returns the lanes where `first`, `second`, and `third` equal either group of values, by
-    /// XOR, OR, UMIN, and one compare with zero; see [VectorSupport#SVE_128].
-    private static VectorMask<Byte> sveTwoLiteralMatches(
+    /// XOR, OR, UMIN, and one compare with zero; see [VectorSupport#SVE_128] and
+    /// [#TWO_EXACT_LITERALS_XOR].
+    private static VectorMask<Byte> xorTwoLiteralMatches(
             ByteVector first,
             ByteVector second,
             ByteVector third,

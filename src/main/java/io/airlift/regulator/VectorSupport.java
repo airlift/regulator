@@ -36,7 +36,8 @@ final class VectorSupport
     private static final boolean X86 = isX86(System.getProperty("os.arch"));
 
     // Whether this JVM runs on x86 with a 64-byte preferred byte vector, the gate of the scans'
-    // x86 64-lane forms: the literal prefix scan's masked pair compare. They were measured with
+    // x86 64-lane forms: the literal prefix scan's masked pair compare and the XOR form of the
+    // start literal filter's check of two literals without masks. They were measured with
     // AVX-512 on r8i (Granite Rapids), the only x86 host measured in them. Hosts nobody measured
     // keep the form other widths take, so the gate tests for x86: 512-bit SVE, as on A64FX, and
     // other architectures with 64-byte vectors keep compare and AND. x86 hosts with 64-byte
@@ -50,7 +51,8 @@ final class VectorSupport
     // with zero, because SVE compares and the AND or OR that joins their masks are predicate
     // operations. NEON, x86, and other SVE widths compare each byte and join the masks, except
     // that under X86_WITH_64_BYTE_VECTORS the literal prefix scan of a single literal compares
-    // its second byte under the first byte's mask. That section records why and the
+    // its second byte under the first byte's mask, and the start literal filter's check of two
+    // literals without masks takes the XOR form too. That section records why and the
     // measurements; RE2 run stops take their XOR form on every platform. C2 folds this constant,
     // so each scan compiles one form.
     static final boolean SVE_128 = sve128();
