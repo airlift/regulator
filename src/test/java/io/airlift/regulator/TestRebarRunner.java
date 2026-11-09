@@ -135,6 +135,9 @@ class TestRebarRunner
         // Sixteen newlines put several in one two-word step, so the search must pick the earliest.
         assertCounts(run("grep", bytes("^$"), false, bytes("\n".repeat(16))), 16, 16);
         assertCounts(run("grep", bytes("^a\rb$"), false, bytes("a\rb\r\n")), 1, 1);
+        // Only a "\r\n" terminator loses its '\r'; a final line without a '\n' keeps it.
+        assertCounts(run("grep", bytes("\r$"), false, bytes("a\r\nb\r")), 1, 1);
+        assertCounts(run("grep-captures", bytes("(\r)$"), false, bytes("a\r\nb\r")), 2, 2);
         // Lines longer than a two-word step make later lines' searches enter the two-word loop from a nonzero start.
         String longLines = "0123456789abcdefghij\r\n0123456789abcdefghijklmnopq\n0123456789\n";
         assertCounts(run("grep", bytes(""), false, bytes(longLines.repeat(3))), 9, 9);

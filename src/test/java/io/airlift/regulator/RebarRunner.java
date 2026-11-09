@@ -255,7 +255,7 @@ public final class RebarRunner
         int lineStart = 0;
         while (lineStart < haystack.length()) {
             int lineEnd = lineEnd(haystack, bytes, byteArrayOffset, lineStart);
-            int contentEnd = contentEnd(bytes, byteArrayOffset, lineStart, lineEnd);
+            int contentEnd = contentEnd(haystack, bytes, byteArrayOffset, lineStart, lineEnd);
             if (pattern.find(haystack.slice(lineStart, contentEnd - lineStart))) {
                 count++;
             }
@@ -270,7 +270,7 @@ public final class RebarRunner
         int lineStart = 0;
         while (lineStart < haystack.length()) {
             int lineEnd = lineEnd(haystack, bytes, byteArrayOffset, lineStart);
-            int contentEnd = contentEnd(bytes, byteArrayOffset, lineStart, lineEnd);
+            int contentEnd = contentEnd(haystack, bytes, byteArrayOffset, lineStart, lineEnd);
             matcher.reset(haystack, lineStart, contentEnd);
             while (matcher.find()) {
                 count += countParticipatingGroups(matcher);
@@ -317,9 +317,12 @@ public final class RebarRunner
         return (value - LOW_BITS) & ~value & HIGH_BITS;
     }
 
-    private static int contentEnd(byte[] bytes, int byteArrayOffset, int lineStart, int lineEnd)
+    /// Returns the end of the line's content. Like bstr's `lines()`, which the Rust runners use,
+    /// this strips a `\r` only when it precedes the `\n` that ends the line, so a final line without
+    /// a `\n` keeps its trailing `\r`.
+    private static int contentEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart, int lineEnd)
     {
-        if (lineEnd > lineStart && bytes[byteArrayOffset + lineEnd - 1] == '\r') {
+        if (lineEnd < haystack.length() && lineEnd > lineStart && bytes[byteArrayOffset + lineEnd - 1] == '\r') {
             return lineEnd - 1;
         }
         return lineEnd;
