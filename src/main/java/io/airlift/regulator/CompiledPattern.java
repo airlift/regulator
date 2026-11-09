@@ -1294,27 +1294,31 @@ abstract sealed class CompiledPattern
         // judged again after it. A pattern with a single-byte table keeps none: its group-zero
         // matchers find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a
         // check ahead of the table would scan such a window twice. An exact literal of a pattern
-        // with no other literal route takes its long-window search into the same charge, and the
-        // search-end bound's search where it has one; where that larger charge does not fit, it
-        // keeps the long-window search without the bound, and then the short-window check alone,
-        // if that charge fits. An inner literal search is such a route unless only the class-run
-        // proof admits it.
+        // with no other literal route takes its long-window search into the same charge, with the
+        // search-end bound's search where it has one. If the full charge does not fit, the bound
+        // is removed and the charge retried. If that fails, the pattern keeps only the
+        // short-window check when eligible and affordable, and otherwise keeps no check. An inner
+        // literal search is such a route unless only the class-run proof admits it.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
         }
         RequiredBytes reservedRequiredBytes = null;
         if (requiredBytes != null && singleByteMatcher == null) {
-            RequiredBytes preferred;
+            RequiredBytes preferred = null;
             if (requiredBytes.isExactLiteral() && checksRequiredLiteralOnLongWindows(booleanPlans, requiredPrefix, exactLiteralLength, partialProg, compactBoundedCharacterClass, matcherClass)) {
                 preferred = boundsSearchEnd(partialProg, booleanPlans.loweredProgram())
                         ? requiredBytes.withLongWindowSearchAndBound()
                         : requiredBytes.withLongWindowSearch();
             }
-            else {
+            // A literal of a pattern whose matches span at least the short-window limit serves
+            // only the long-window check, so a pattern without that check keeps none.
+            if (preferred == null && !requiredBytes.isLongWindowsOnly()) {
                 preferred = requiredBytes.withoutLongWindowSearch();
             }
-            reservedRequiredBytes = reserveRequiredBytes(forwardBudgetProgram, preferred);
+            if (preferred != null) {
+                reservedRequiredBytes = reserveRequiredBytes(forwardBudgetProgram, preferred);
+            }
         }
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
@@ -1517,8 +1521,8 @@ abstract sealed class CompiledPattern
     /// Reserves the required bytes beside `program`'s forward DFAs and returns those kept:
     /// `preferred` where its charge fits, or else, for a literal with its search-end bound, the
     /// same literal with its long-window search alone, or else, for a literal with its
-    /// long-window search, the same literal without that search, for the short-window check
-    /// alone, where each smaller charge fits, or else null.
+    /// long-window search that does not serve long windows only, the same literal without that
+    /// search, for the short-window check alone, where each smaller charge fits, or else null.
     private static RequiredBytes reserveRequiredBytes(Prog program, RequiredBytes preferred)
     {
         if (tryReserveBesideForwardDfas(program, preferred.estimatedRetainedSize())) {
@@ -1530,7 +1534,7 @@ abstract sealed class CompiledPattern
                 return unbounded;
             }
         }
-        if (preferred.searchesLongWindows()) {
+        if (preferred.searchesLongWindows() && !preferred.isLongWindowsOnly()) {
             RequiredBytes shortWindowOnly = preferred.withoutLongWindowSearch();
             if (tryReserveBesideForwardDfas(program, shortWindowOnly.estimatedRetainedSize())) {
                 return shortWindowOnly;
@@ -1942,8 +1946,9 @@ abstract sealed class CompiledPattern
     /// The route is charged first, against the allowance with the required bytes' memory handed
     /// back. The required bytes are then judged again by the rule that admitted them: they stay
     /// only if every forward DFA that initializes after the route's charge still does after
-    /// theirs. Where a literal with its long-window search no longer fits, it keeps the
-    /// short-window check alone if that smaller charge fits.
+    /// theirs. If their full charge no longer fits, the search-end bound is removed and the
+    /// charge retried. If that fails, they keep only the short-window check when eligible and
+    /// affordable. Otherwise they keep no check.
     boolean tryReserveForwardDfaMemory(long retainedSize)
     {
         if (!mayReserveForwardDfaMemory(booleanPlans, retainedSize)) {

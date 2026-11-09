@@ -118,13 +118,16 @@ final class RequiredBytes
     // The search for the last occurrence of `suffix`, for a pattern whose compile chose the
     // search-end bound, or null. Where the suffix is the literal, it is also longWindowSearch.
     private final LiteralSearchKernel suffixSearch;
+    // Whether the literal serves the long-window check alone, for a pattern whose matches span at
+    // least SHORT_WINDOW_LIMIT bytes.
+    private final boolean longWindowsOnly;
 
     private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch)
     {
-        this(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, SHORT_WINDOW_LIMIT);
+        this(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, false, SHORT_WINDOW_LIMIT);
     }
 
-    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch, int windowLimit)
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit)
     {
         this.oneOf = oneOf;
         this.bytes = requireNonNull(bytes, "bytes is null");
@@ -132,6 +135,7 @@ final class RequiredBytes
         this.longWindowSearch = longWindowSearch;
         this.suffix = suffix;
         this.suffixSearch = suffixSearch;
+        this.longWindowsOnly = longWindowsOnly;
         if (oneOf) {
             // The padding repeats the last byte, so the first equals the third only when there is
             // one byte.
@@ -158,16 +162,15 @@ final class RequiredBytes
     /// check and, when compilation chooses it, the long-window check, or null: a literal every
     /// match consumes, where there is one, with the exact bytes every match ends with, where
     /// there are any, for the search-end bound; or else up to three bytes of which every match
-    /// holds one. `minimumMatchLength` counts any required prefix.
+    /// holds one. `minimumMatchLength` counts any required prefix. A pattern whose matches span at
+    /// least [#SHORT_WINDOW_LIMIT] bytes keeps only an exact literal, for the long-window check
+    /// alone; see [#isLongWindowsOnly].
     static RequiredBytes analyze(Regexp normalized, int minimumMatchLength)
     {
-        // A pattern whose matches span at least SHORT_WINDOW_LIMIT bytes keeps none, since no
-        // short window can hold a match, so such a pattern goes without the long-window check
-        // too.
-        if (minimumMatchLength >= SHORT_WINDOW_LIMIT) {
-            return null;
-        }
         RequiredBytes literal = analyzeLiteral(normalized, requiredSuffix(normalized));
+        if (minimumMatchLength >= SHORT_WINDOW_LIMIT) {
+            return literal != null && literal.isExactLiteral() ? new RequiredBytes(false, literal.bytes, literal.masks, null, literal.suffix, null, true, SHORT_WINDOW_LIMIT) : null;
+        }
         if (literal != null) {
             return literal;
         }
@@ -626,7 +629,7 @@ final class RequiredBytes
         if (!isExactLiteral()) {
             throw new IllegalStateException("not an exact literal: " + this);
         }
-        return new RequiredBytes(false, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes)), null, null);
+        return new RequiredBytes(false, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes)), null, null, longWindowsOnly, SHORT_WINDOW_LIMIT);
     }
 
     /// Returns this exact literal with its long-window search and, where every match ends with
@@ -642,7 +645,7 @@ final class RequiredBytes
         }
         LiteralSearchKernel lastOccurrence = LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(suffix));
         LiteralSearchKernel literalSearch = suffix == bytes ? lastOccurrence : LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes));
-        return new RequiredBytes(false, bytes, masks, literalSearch, suffix, lastOccurrence);
+        return new RequiredBytes(false, bytes, masks, literalSearch, suffix, lastOccurrence, longWindowsOnly, SHORT_WINDOW_LIMIT);
     }
 
     /// Returns this literal with its long-window search but without the search-end bound
@@ -656,13 +659,28 @@ final class RequiredBytes
     }
 
     /// Returns these bytes without the long-window search and the search-end bound, for the
-    /// short-window check alone: this, where they have neither.
+    /// short-window check alone: this, where they have neither. A literal that serves long windows
+    /// only has no short-window check to keep.
     RequiredBytes withoutLongWindowSearch()
     {
+        if (longWindowsOnly) {
+            throw new IllegalStateException("long windows only: " + this);
+        }
         if (longWindowSearch == null && suffix == null) {
             return this;
         }
-        return new RequiredBytes(oneOf, bytes, masks, null, null, null, windowLimit);
+        return new RequiredBytes(oneOf, bytes, masks, null, null, null, false, windowLimit);
+    }
+
+    /// Whether the literal serves the long-window check alone: every match of its pattern spans
+    /// at least [#SHORT_WINDOW_LIMIT] bytes, so no short window holds one, and the pattern keeps
+    /// the literal only where compilation chooses the long-window check. Every short-window hook
+    /// rejects a window shorter than the pattern's fewest match bytes before it scans for the
+    /// bytes, so the short-window check never runs for it. Without a required prefix, which the
+    /// long-window check excludes, those fewest bytes are the ones the analysis counted.
+    boolean isLongWindowsOnly()
+    {
+        return longWindowsOnly;
     }
 
     /// Whether the compile chose the long-window check for this literal; see [#indexIn].
@@ -758,7 +776,7 @@ final class RequiredBytes
         if (!oneOf || singleByte) {
             throw new IllegalStateException("not a one-of set of two or three distinct bytes: " + this);
         }
-        return new RequiredBytes(true, bytes, masks, null, null, null, limit);
+        return new RequiredBytes(true, bytes, masks, null, null, null, false, limit);
     }
 
     /// Whether `[start, end)` of `text` holds the literal wholly, or one of the bytes.

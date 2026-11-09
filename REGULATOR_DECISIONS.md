@@ -2112,13 +2112,16 @@ setup. An exact literal of a pattern with no other literal route checks long
 windows too, with a literal search and the bounds described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
-prefix, keeps no fact: no short window can hold such a match, so such a pattern
-goes without the long-window check too. A one-of set of two or three distinct
-bytes beside an inner literal search checks only windows shorter than that
-search's [minimum](#minimum-inner-literal-search-window), where it is lower than
-256 bytes: from there the search scans each window for its literal before any
-engine runs unless the find skips the DFA, and the one-of scan would repeat or
-replace that scan. A single required byte keeps every window below 256 bytes,
+prefix, needs no fact for short windows, since none can hold such a match. Where
+the long-window check is chosen, the pattern keeps its literal for that check
+alone, with the [search-end bound](#required-suffix-bound-on-long-windows) where
+it has one, and otherwise it keeps no fact. Every short-window hook rejects a
+window shorter than a match on its length first. A one-of set of two or three
+distinct bytes beside an inner literal search checks only windows shorter than
+that search's [minimum](#minimum-inner-literal-search-window), where it is lower
+than 256 bytes: from there the search scans each window for its literal before
+any engine runs unless the find skips the DFA, and the one-of scan would repeat
+or replace that scan. A single required byte keeps every window below 256 bytes,
 since its scan costs as little as the search's single-byte scan and a check that
 changed with line length cost more on naturally mixed line lengths, as that
 section records. Where the pattern qualifies, a gated one-byte search for the
@@ -2317,10 +2320,12 @@ either can stop long before a scan of the whole window would. A pattern with a
 single-byte table keeps no required bytes at all.
 
 Compilation decides this once, and the literal's search takes its memory in the
-required bytes' charge. Where that larger charge does not fit, at compile time
-or once a frontend route such as Trino's ordered-literal matcher is charged
-ahead of it, the pattern keeps the short-window check alone if its smaller
-charge fits, and otherwise keeps neither.
+required bytes' charge, with the search-end bound's search where the pattern
+has one. That charge may not fit at compile time, or once a frontend route such
+as Trino's ordered-literal matcher is charged ahead of it. If the full charge
+does not fit, the bound is removed and the charge retried. If that fails, the
+pattern keeps only the short-window check, when its matches can fit a short
+window and that smaller charge fits, and otherwise keeps no check.
 
 Four hooks run the check before any engine setup:
 
@@ -2478,9 +2483,10 @@ final LF. Rust's Unicode word boundary is sound because the suffix is ASCII.
 The bound's search is a reverse scan for the last occurrence, the forward
 literal scan mirrored: a vector pair scan from 1 KiB and a word scan below it,
 both handing off to a reverse KMP once their comparisons pass the scan's
-budget, so the scan stays linear. Its memory joins the required bytes' charge;
-where that does not fit, the pattern keeps the long-window check without the
-bound, and then the short-window check alone.
+budget, so the scan stays linear. Its memory joins the required bytes' charge.
+If the full charge does not fit, the bound is removed and the charge retried. If
+that fails, the pattern keeps only the short-window check, when its matches can
+fit a short window and that smaller charge fits, and otherwise keeps no check.
 
 Count and the one-shot unanchored searches take the bound in place of the
 forward check: no occurrence counts or finds nothing, and otherwise the DFA
