@@ -118,6 +118,20 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the fixed-width matcher's searches small enough for C2 to inline into its count and
+    /// span entries, which the compiled pattern's fixed-width routes inline in turn: a short row
+    /// searches once, and a find over long text once for each match.
+    @Test
+    public void testFixedWidthSearchesFitInlineSize()
+    {
+        for (String method : List.of("searchBytes", "searchCharacters", "searchLongBytes", "searchLongCharacters")) {
+            assertThat(codeLength(FixedWidthByteSpanMatcher.class, method))
+                    .as("FixedWidthByteSpanMatcher.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps each public entry of a generated pattern class small enough for C2 to inline into a
     /// caller that holds the pattern as a constant; the attempt loop and searches stay static
     /// calls. The patterns cover start-anchored and unanchored plans, a search that hands off to

@@ -1428,14 +1428,16 @@ ordinary engine would.
   `AB{n}x` form takes capture-free, case-sensitive patterns of that shape
 - **What it does:** The matcher scans for one position, then checks the others
   around each hit: a byte mask for ASCII, Latin-1, and Rust byte classes, one
-  decoded character for a UTF-8 class above ASCII. ASCII patterns of up to 64
-  bytes with a position that admits exactly one byte scan with `indexOf` for
-  the byte the first such position accepts. In `AB{n}x`, where `A` is a class
-  of ASCII characters, `B` a character class without `x`, `x` one ASCII
-  character, and `n` an exact count from 1 to 1000, the matcher finds `x` with
-  `indexOf` and validates the repeat backward, stopping at the previous `x`,
-  so no run is validated twice. RE2 ISO date and phone number contains run in
-  0.42 to 0.47 of the general engine's time ([#87]).
+  decoded character for a UTF-8 class above ASCII. When an ASCII pattern of up
+  to 64 bytes has a position accepting exactly one byte, the matcher scans for
+  the byte accepted by the first such position, as the
+  [rare class scan](#fixed-width-rare-class-scan) scans a position of one first
+  byte. In `AB{n}x`, where `A` is a class of ASCII characters, `B` a character
+  class without `x`, `x` one ASCII character, and `n` an exact count from 1 to
+  1000, the matcher finds `x` with `indexOf` and validates the repeat backward,
+  stopping at the previous `x`, so no run is validated twice. RE2 ISO date and
+  phone number contains run in 0.42 to 0.47 of the general engine's time
+  ([#87]).
 
 ### Fixed-width rare class scan
 
@@ -1469,13 +1471,18 @@ ordinary engine would.
 - **What it does:** The matcher sums the estimated English-text frequencies
   of each position's first bytes, rating bytes above ASCII at the rarest ASCII
   byte's rate, and scans for the first bytes of the position with the lowest
-  sum, preferring an ASCII position. A position with one first byte is found
-  with `indexOf`; one with several takes the
-  [vector byte-set scan](#start-byte-and-byte-set-scans) with the DFA's
-  sampling of scan productivity, or a byte table without the Vector API.
-  Counts of `[0-9]{4}` run 19 to 34 times faster, and a class repeat that once
-  overran the DFA, such as `[a-q][^u-z]{80}[x\xE0-\xFF]`, 740 to 1,390 times
-  faster ([#194]).
+  sum, preferring an ASCII position. A position with one first byte takes the
+  one-byte [vector byte-set scan](#start-byte-and-byte-set-scans) on searches
+  of at least 1,024 candidate positions and `Slice.indexOf` on shorter ones or
+  without the Vector API; one with several takes the vector byte-set scan with
+  the DFA's sampling of scan productivity, or a byte table without the Vector
+  API. Counts of `[0-9]{4}` run 19 to 34 times faster, and a class repeat that
+  once overran the DFA, such as `[a-q][^u-z]{80}[x\xE0-\xFF]`, 740 to 1,390
+  times faster ([#194]). The one-byte vector scan takes rebar's
+  `leipzig/certain-long-strings-ending-x`, over 16 MB of text, to 0.47 of its
+  earlier time on Graviton and 0.52 to 0.54 on Intel, its
+  `sherlock/repeated-class-negation` to 0.47 and 0.36, and dense ISO dates to
+  0.59 to 0.61 and 0.50 to 0.52.
 
 ### Literal alternation trie
 

@@ -1813,12 +1813,20 @@ leftmost match; in byte mode every position is one byte.
 The matcher verifies the other positions around each candidate, the character
 of one chosen position. An ASCII singleton pattern, at most 64 bytes of ASCII
 bytes and classes with a position of one member, takes that position's byte
-whatever its rate, found with `indexOf`. Any other pattern takes the position
-whose first bytes English text holds least, only when that is under once in
-100 bytes, preferring a position whose first bytes are all ASCII and rating
-bytes above ASCII at the rarest ASCII byte's rate. It finds a candidate of one
-first byte with `indexOf` and one of several with the DFA's small byte-set
-vector scans, sampling their productivity as the DFA's start-byte scan does.
+whatever its rate. Any other pattern takes the position whose first bytes
+English text holds least, only when that is under once in 100 bytes, preferring
+a position whose first bytes are all ASCII and rating bytes above ASCII at the
+rarest ASCII byte's rate. It finds a candidate of one first byte as a one-byte
+literal search does, with the vector byte-set scan in a search of at least 1,024
+candidate positions where vector support is available and `Slice.indexOf`'s
+word-at-a-time scan otherwise, and one of several with the DFA's small byte-set
+vector scans, sampling their productivity as the DFA's start-byte scan does. A
+search chooses the one-byte scan once, where it begins, and a long one runs a
+loop of its own: a length test on each candidate search, or the array the vector
+scan reads held live across a short one, made short rows up to 3.6% slower on
+Graviton and 8.5% on x86-64. The accepted shape takes Trino `isoDate`
+`reusedCount` from 21.4 to 22.1 ns on x86-64, 1.035 of its earlier time, and
+ties on Graviton.
 Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
 keeps that pattern as fast as the engine on Russian text; scanning the letter
 took 1.3-2.1x the time.

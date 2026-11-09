@@ -137,6 +137,52 @@ public class TestFixedWidthByteSpanMatcher
         assertThat(matcher.findSpanOrBail(input, 0, 17)).isEqualTo(span(12, 17));
         assertThat(matcher.findSpanOrBail(input, 13, 22)).isEqualTo(span(17, 22));
         assertThat(matcher.findSpanOrBail(input, 13, 21)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+
+        // The character search scans for a one-byte candidate, here the x, with the vector scan in
+        // a search of at least 1,024 candidate positions where the Vector API is available. A
+        // false candidate and the match lie well past the first vectors of a view that starts
+        // inside its array, and the match ends the view.
+        FixedWidthByteSpanMatcher ending = matcher("[a-q][^u-z]{13}x");
+        String filler = "b".repeat(1100);
+        Slice longBacking = utf8Slice("!" + filler + "zx" + filler + "x?");
+        Slice longInput = wrappedBuffer(longBacking.byteArray(), longBacking.byteArrayOffset() + 1, longBacking.length() - 2);
+        int matchEnd = longInput.length();
+        assertSpan(ending, longInput, 0, matchEnd - 15, matchEnd);
+        assertThat(ending.count(longInput)).isEqualTo(1);
+        assertThat(ending.findSpanOrBail(longInput, 0, matchEnd - 1)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(ending.findSpanOrBail(longInput, 0, matchEnd)).isEqualTo(span(matchEnd - 15, matchEnd));
+
+        // The byte search does the same, and a long count keeps the vector scan for the short rest
+        // of the input after a match: a match at the start, then a false `-` candidate and
+        // adjacent matches at the end.
+        Slice longDatesBacking = utf8Slice("!12-34" + filler + "12-x4 12-3412-34?");
+        Slice longDates = wrappedBuffer(longDatesBacking.byteArray(), longDatesBacking.byteArrayOffset() + 1, longDatesBacking.length() - 2);
+        int lateMatch = longDates.length() - 10;
+        assertThat(matcher.count(longDates)).isEqualTo(3);
+        assertSpan(matcher, longDates, 1, lateMatch, lateMatch + 5);
+        assertThat(matcher.findSpanOrBail(longDates, 1, longDates.length() - 1)).isEqualTo(span(lateMatch, lateMatch + 5));
+
+        // A start past the end finds nothing, even one so far past it that its distance to the
+        // end would wrap into a long search.
+        assertThat(matcher.findSpan(Slices.EMPTY_SLICE, Integer.MAX_VALUE)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+    }
+
+    @Test
+    public void testSingleByteVectorScanCutoff()
+    {
+        // A search with a one-byte candidate takes the vector scan once it has 1,024 candidate
+        // positions, one for each match start, where the Vector API is available, whatever its
+        // start.
+        FixedWidthByteSpanMatcher ending = matcher("[a-q][^u-z]{13}x");
+        int width = 15;
+        for (int start : new int[] {0, 7}) {
+            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_023 + width - 1)), start)).isFalse();
+            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_024 + width - 1)), start)).isEqualTo(VectorSupport.isAvailable());
+            assertThat(ending.usesSingleByteVectorScan(utf8Slice("b".repeat(start + 1_025 + width - 1)), start)).isEqualTo(VectorSupport.isAvailable());
+        }
+
+        // A candidate of several bytes, here the ten digits, keeps its byte-set scan.
+        assertThat(matcher("[0-9]{4}").usesSingleByteVectorScan(utf8Slice("b".repeat(4_096)), 0)).isFalse();
     }
 
     @Test
@@ -441,6 +487,17 @@ public class TestFixedWidthByteSpanMatcher
         Regex oracle = joniPattern(expression);
         verifyOperations(expression, trino, source -> joniMatches(oracle, source), List.of(dense, denseFromStart, english));
 
+        // A search of at least 1,024 candidate positions that scans for a one-byte candidate with
+        // the vector scan, where the Vector API is available, bails the same way. The letters а
+        // to п share one lead byte.
+        FixedWidthByteSpanMatcher longMatcher = matcher("[а-п]{3}[.,]");
+        Slice longDense = utf8Slice("дом, " + "да он и ни ".repeat(100));
+        long longBailed = longMatcher.countOrBail(longDense);
+        assertThat(longBailed).isNegative();
+        assertThat(FixedWidthByteSpanMatcher.countBeforeBail(longBailed)).isEqualTo(1);
+        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longBailed)).isEqualTo("дом,".getBytes(UTF_8).length);
+        assertThat(longMatcher.findSpanOrBail(longDense, 7, longDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
+
         // The byte search bails the same way. In Latin-1 and Rust's byte mode, [\xE0-\xFF]{3}[.,]
         // scans for the bytes à to ÿ, which this Latin-1 text of short words holds at nearly
         // every letter.
@@ -463,6 +520,18 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(pattern.find(byteDense)).as(label).isTrue();
             assertMatcherSpans(pattern, byteDense, 0, byteDense.length(), label);
         }
+
+        // So does a byte search of at least 1,024 candidate positions that scans for a one-byte
+        // candidate, here à, with the vector scan where the Vector API is available.
+        Re2 longBytePattern = Re2.compile(utf8Slice("[a-z]{3}\\xE0"), Re2.Options.latin1());
+        assertThat(shape(longBytePattern)).isEqualTo(CompiledPattern.Shape.FIXED_WIDTH);
+        FixedWidthByteSpanMatcher longByteMatcher = longBytePattern.fixedWidthByteSpanMatcherForDiagnostics();
+        Slice longByteDense = wrappedBuffer(("abcà" + "à ".repeat(600)).getBytes(ISO_8859_1));
+        long longByteBailed = longByteMatcher.countOrBail(longByteDense);
+        assertThat(longByteBailed).isNegative();
+        assertThat(FixedWidthByteSpanMatcher.countBeforeBail(longByteBailed)).isEqualTo(1);
+        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longByteBailed)).isEqualTo(4);
+        assertThat(longByteMatcher.findSpanOrBail(longByteDense, 4, longByteDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
 
         // The target's candidate, x and the first byte of à to ÿ, fails at most twice in each
         // sentence of that text, under once per 32 bytes, and the count never bails.
