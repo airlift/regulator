@@ -3282,17 +3282,27 @@ the scalar first-position result.
 When a forward DFA's start bytes are common in text, such as the few lead bytes
 shared by many Cyrillic or Chinese characters or the cases of an English letter,
 scanning for them stops often. If every match begins with one of at most eight
-literals of at least three bytes, read six bytes deep with case pairs that
+literals of at least three bytes, read twelve bytes deep with case pairs that
 differ in one bit kept as one literal, the DFA instead checks three byte
 positions of those literals together. It picks the three positions with the
 lowest estimated acceptance, from English ASCII frequencies and fixed estimates
-for UTF-8 lead and continuation bytes, and it is used only when that is
-estimated to stop at least four times less often than the start bytes. Vector
-code checks a vector of positions at a time on searches of at least 1 KiB,
-comparing the bytes of up to two literal groups directly and, for more, looking
-up one bit per group from the low and high nibbles of each of the three bytes;
-shorter searches use the same check one position at a time, except for the rare
-start sets below.
+for UTF-8 lead and continuation bytes. Positions past the first bytes let it
+skip letters that many words begin with: the case-insensitive Sherlock names
+take their first, fourth, and eighth bytes, which stop 0.73x as often as the
+first, second, and fourth on `sherlock-casei-en`'s text. The deeper reach also
+lets the filter test the rare final byte of short fixed-width patterns, such as
+the `[.,]` of `[а-я]{3}[.,]`, which then keep the engine under the [fixed-width
+yield rule](#fixed-width-rare-class-candidates). Literals that stay distinct
+past the sixth byte can need more groups than a filter holds, which merge within
+the first six bytes, so a filter from the first six bytes is also built. It is
+taken when its estimate is lower or when the deeper one cannot be built, as when
+the program branches past the walk's path limit or reaches an assertion inside
+the twelve bytes. The filter is used only when it is estimated to stop at least
+four times less often than the start bytes. Vector code checks a vector of
+positions at a time on searches of at least 1 KiB, comparing the bytes of up to
+two literal groups directly and, for more, looking up one bit per group from the
+low and high nibbles of each of the three bytes; shorter searches use the same
+check one position at a time, except for the rare start sets below.
 
 The nibble lookup loads one vector per step, at the third position, as the Rust
 crate's Teddy does. It looks up all three positions' bits from that vector and

@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /// Three byte positions of every literal a match can begin with, checked together to find the
@@ -36,8 +37,15 @@ final class StartLiteralFilter
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(StartLiteralFilter.class);
 
     // Paths are read this deep, so a filter can skip UTF-8 lead bytes, which many letters of a
-    // script share, and test the continuation bytes of two or three characters.
-    static final int PATH_POSITIONS = 6;
+    // script share, and test the continuation bytes of several characters, or bytes past letters
+    // that many words begin with. All three positions must fit in a 16-byte window, the
+    // narrowest vector the nibble scan runs on, because it carries the first two positions' bits
+    // over from the previous vector step.
+    static final int PATH_POSITIONS = 12;
+    // Paths that stay distinct past the sixth byte can need more groups than a filter holds,
+    // which merge within the first six bytes, so a filter is also built from these first
+    // positions, and the lower estimate wins.
+    static final int SHALLOW_PATH_POSITIONS = 6;
     private static final int MAXIMUM_GROUPS = 8;
     private static final int FILTER_POSITIONS = 3;
     // Bounds the groups merged from the paths; the three chosen positions can still fold them
@@ -84,12 +92,28 @@ final class StartLiteralFilter
     }
 
     /// Builds a filter from the byte sets [Prog#buildStartPositionByteSets] returns, at the three
-    /// positions with the lowest estimated density. Returns null when the paths merge into more
-    /// than [#MAXIMUM_PATH_GROUPS] groups, when no three positions are narrow in every group, or
-    /// when every choice needs more than two mask bits at a position or more than
+    /// positions with the lowest estimated density, from all the paths' positions or from their
+    /// first [#SHALLOW_PATH_POSITIONS]. Returns null when, at each depth it tries, the paths merge
+    /// into more than [#MAXIMUM_PATH_GROUPS] groups, no three positions are narrow in every group,
+    /// or every choice needs more than two mask bits at a position or more than
     /// [#MAXIMUM_GROUPS] distinct groups.
     static StartLiteralFilter build(long[][] paths, ByteFrequencies byteFrequencies)
     {
+        int positionCount = paths[0].length / 4;
+        StartLiteralFilter filter = build(paths, positionCount, byteFrequencies);
+        if (positionCount > SHALLOW_PATH_POSITIONS) {
+            StartLiteralFilter shallowFilter = build(paths, SHALLOW_PATH_POSITIONS, byteFrequencies);
+            if (filter == null || (shallowFilter != null && shallowFilter.density < filter.density)) {
+                return shallowFilter;
+            }
+        }
+        return filter;
+    }
+
+    private static StartLiteralFilter build(long[][] paths, int positionCount, ByteFrequencies byteFrequencies)
+    {
+        // Each group holds the first positionCount positions, which bound the merge and the
+        // candidate positions.
         List<long[]> groups = new ArrayList<>();
         for (long[] path : paths) {
             boolean merged = false;
@@ -106,13 +130,12 @@ final class StartLiteralFilter
                 if (groups.size() == MAXIMUM_PATH_GROUPS) {
                     return null;
                 }
-                groups.add(path.clone());
+                groups.add(Arrays.copyOf(path, positionCount * 4));
             }
         }
 
         // A candidate position is narrow in every group, and its mask has at most two bits: more
         // would accept more than four bytes for each group's byte.
-        int positionCount = paths[0].length / 4;
         int[] positions = new int[positionCount];
         byte[] candidateMasks = new byte[positionCount];
         int candidateCount = 0;

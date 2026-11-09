@@ -293,6 +293,19 @@ public class TestFixedWidthByteSpanMatcher
         Regexp cyrillicTree = RustRegexpParser.parse(utf8Slice("(?i)Шерлок Холмс"), rust.syntaxFlags(), rust.nestLimit()).regexp();
         assertThat(cyrillic.createFixedWidthByteSpanMatcher(cyrillicTree).candidateOffsetForDiagnostics()).isEqualTo(1);
         assertThat(cyrillic.hasRetainedFixedWidthByteSpanMatcher()).isEqualTo(!VectorSupport.isAvailable());
+        // [а-я]{3}[.,] keeps the engine the same way in every language. Its filter tests the lead
+        // byte of the first letter and the [.,] six bytes later, which stop far less often than
+        // the lead byte of every Cyrillic letter.
+        String shortCyrillic = "[а-я]{3}[.,]";
+        for (Map.Entry<String, CompiledPattern> entry : Map.of(
+                "RE2 " + shortCyrillic, Re2.compile(utf8Slice(shortCyrillic)),
+                "Java " + shortCyrillic, JavaRegexp.compile(utf8Slice(shortCyrillic)),
+                "Rust " + shortCyrillic, RustRegexp.compile(utf8Slice(shortCyrillic)),
+                "Trino " + shortCyrillic, TrinoRegexp.compile(utf8Slice(shortCyrillic)).re2()).entrySet()) {
+            Prog program = entry.getValue().forwardProgramForDiagnostics();
+            assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
+            assertThat(shape(entry.getValue())).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable() ? CompiledPattern.Shape.ENGINE : CompiledPattern.Shape.FIXED_WIDTH);
+        }
         // So it does where the forward program skips to a literal prefix, or the class-run
         // counter counts the pattern, in every language.
         for (String expression : List.of("abc[^u-z]{80}x", "[а-я]{5}")) {
@@ -438,22 +451,23 @@ public class TestFixedWidthByteSpanMatcher
     @Test
     public void testDenseCandidatesBail()
     {
-        // [а-я]{3}[.,] scans the lead bytes of Cyrillic letters, rare in English text, and a
+        // [а-я]{6}[.,] scans the lead bytes of Cyrillic letters, rare in English text, and a
         // Russian text of short words fails at nearly every letter. Once at least 64 candidates
         // have failed at more than one per 32 bytes, the search hands the rest to the program,
         // and every route agrees with the general engine. The count keeps the match before the
-        // bail and counts the rest from its end.
-        String expression = "[а-я]{3}[.,]";
+        // bail and counts the rest from its end. Its [.,] lies past the twelve bytes a start
+        // literal filter reads, so no filter takes the pattern from the matcher.
+        String expression = "[а-я]{6}[.,]";
         String filler = "и я да он мы ".repeat(20);
-        Slice dense = utf8Slice("слово, " + filler + "дом. сад, лес.");
-        Slice denseFromStart = utf8Slice(filler + "дом.");
+        Slice dense = utf8Slice("работа, " + filler + "машина. страна, письмо.");
+        Slice denseFromStart = utf8Slice(filler + "машина.");
         // A region that starts after the first match and ends inside the last one.
-        int regionStart = "слово, ".getBytes(UTF_8).length;
+        int regionStart = "работа, ".getBytes(UTF_8).length;
         int regionEnd = dense.length() - 1;
         // English text keeps the scan: its only Cyrillic letters are those of one word at its end,
         // which matches.
         Slice english = utf8Slice("The next morning a café near the old railway station served a quiet breakfast to the travelers who had arrived late. ".repeat(40) +
-                "Слово, then more text.");
+                "Словарь, then more text.");
         Map<String, CompiledPattern> patterns = Map.of(
                 "RE2 " + expression, Re2.compile(utf8Slice(expression)),
                 "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
@@ -468,7 +482,7 @@ public class TestFixedWidthByteSpanMatcher
             long bailed = matcher.countOrBail(dense);
             assertThat(bailed).as(label).isNegative();
             assertThat(FixedWidthByteSpanMatcher.countBeforeBail(bailed)).as(label).isEqualTo(1);
-            assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).as(label).isEqualTo("слово,".getBytes(UTF_8).length);
+            assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(bailed)).as(label).isEqualTo("работа,".getBytes(UTF_8).length);
             assertThat(matcher.findSpanOrBail(denseFromStart, 0, denseFromStart.length())).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
             assertThat(matcher.findSpanOrBail(dense, regionStart, regionEnd)).as(label).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
             for (Slice input : List.of(dense, denseFromStart, english)) {
@@ -490,13 +504,13 @@ public class TestFixedWidthByteSpanMatcher
         // A search of at least 1,024 candidate positions that scans for a one-byte candidate with
         // the vector scan, where the Vector API is available, bails the same way. The letters а
         // to п share one lead byte.
-        FixedWidthByteSpanMatcher longMatcher = matcher("[а-п]{3}[.,]");
-        Slice longDense = utf8Slice("дом, " + "да он и ни ".repeat(100));
+        FixedWidthByteSpanMatcher longMatcher = matcher("[а-п]{6}[.,]");
+        Slice longDense = utf8Slice("голова, " + "да он и ни ".repeat(100));
         long longBailed = longMatcher.countOrBail(longDense);
         assertThat(longBailed).isNegative();
         assertThat(FixedWidthByteSpanMatcher.countBeforeBail(longBailed)).isEqualTo(1);
-        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longBailed)).isEqualTo("дом,".getBytes(UTF_8).length);
-        assertThat(longMatcher.findSpanOrBail(longDense, 7, longDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
+        assertThat(FixedWidthByteSpanMatcher.resumeAfterBail(longBailed)).isEqualTo("голова,".getBytes(UTF_8).length);
+        assertThat(longMatcher.findSpanOrBail(longDense, "голова,".getBytes(UTF_8).length, longDense.length())).isEqualTo(FixedWidthByteSpanMatcher.BAILED);
 
         // The byte search bails the same way. In Latin-1 and Rust's byte mode, [\xE0-\xFF]{3}[.,]
         // scans for the bytes à to ÿ, which this Latin-1 text of short words holds at nearly
