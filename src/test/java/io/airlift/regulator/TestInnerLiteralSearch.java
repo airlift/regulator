@@ -82,7 +82,17 @@ public class TestInnerLiteralSearch
             "(?m)^.{0,3}Finn",
             "(?:..@cbb|b)@(?:c|d)",
             // Outside RE2 the class is empty, so the program can never match.
-            "\\s\\*[a&&b]{1,2}");
+            "\\s\\*[a&&b]{1,2}",
+            // Gates further before the literal, behind a leading assertion the walk reads as
+            // empty, and gates after it that word boundaries set, alone, narrowing a class, or
+            // ruling out every byte of one.
+            "\\s[a-z]+@",
+            "\\b[a-z]{2}\\b@x",
+            "\\w+nn\\B",
+            "\\w+nn\\b\\s",
+            "[a-z]+@\\b",
+            "[a-z]+nn\\b[a-z]",
+            "[a-z]+#(?i:noqa)\\b");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -156,6 +166,21 @@ public class TestInnerLiteralSearch
                 Map.entry(DATE, List.of("0123456789", "0123456789")))) {
             assertThat(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).as(entry.getKey()).isEqualTo(entry.getValue());
         }
+        // The bytes further before the literal gate a hit too, as far as the reverse prefix
+        // program limits them: two bytes before Holmes lies whitespace or a word byte.
+        InnerLiteralSearch holmesSearch = Re2.compile(utf8Slice("\\w+\\s+Holmes")).innerLiteralSearchForDiagnostics();
+        assertThat(holmesSearch.byteGatesForDiagnostics()).isEqualTo(List.of("\t\n\f\r ", ""));
+        assertThat(holmesSearch.deeperPrefixGatesForDiagnostics()).isEqualTo(List.of("\t\n\f\r 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"));
+        // A word boundary after a literal that ends in a word byte gates the byte after it to
+        // the ASCII bytes that are not word bytes, and every byte past ASCII, which may begin a
+        // word character; the window's end passes, and the context decides.
+        String notWordBytes = IntStream.range(0, 0x100)
+                .filter(value -> value >= 0x80 || !(Character.isLetterOrDigit(value) || value == '_'))
+                .mapToObj(value -> String.valueOf((char) value))
+                .collect(joining());
+        InnerLiteralSearch nnSearch = Re2.compile(utf8Slice("\\b\\w+nn\\b")).innerLiteralSearchForDiagnostics();
+        assertThat(nnSearch.byteGatesForDiagnostics()).isEqualTo(List.of("", notWordBytes));
+        assertThat(nnSearch.deeperPrefixGatesForDiagnostics()).isEmpty();
         // The gate before the literal comes from the bytes that can end the prefix, so a prefix
         // that is not one ASCII class gates too: Rust's Unicode \w ends a character of more than
         // one byte with a continuation byte, shown here as its Latin-1 char.
@@ -470,6 +495,38 @@ public class TestInnerLiteralSearch
                 assertThat(matcher.find()).as(description).isTrue();
                 assertThat(expectedMatcher.find()).as(description).isTrue();
                 assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+            }
+        }
+    }
+
+    @Test
+    public void testByteGatesAgreeWithOrdinaryEngineInWindows()
+    {
+        // The gates judge a hit against its window, not the Slice around it: a byte the prefix
+        // must consume two bytes before Holmes fails before the window start, and a word boundary
+        // after nn passes at the window end, where a ranged find's context, the whole Slice, sees
+        // the word byte past it, and a matcher region, its own context, does not.
+        String filler = "-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES);
+        byte[] backing = ("abcxa Holmes " + filler + " Penn" + "id").getBytes(UTF_8);
+        Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
+        for (String regex : List.of("\\w+\\s+Holmes", "\\b\\w+nn\\b")) {
+            Re2 pattern = Re2.compile(utf8Slice(regex));
+            Re2 ordinary = Re2.compile(utf8Slice("(?:" + regex + ")|\\b\\B"));
+            for (int start : new int[] {0, 1, 2, 3}) {
+                for (int end : new int[] {text.length() - 2, text.length()}) {
+                    String description = "%s [%s, %s)".formatted(regex, start, end);
+                    int[] actual = new int[2];
+                    int[] expected = new int[2];
+                    assertThat(pattern.findInto(text, start, end, actual)).as(description).isEqualTo(ordinary.findInto(text, start, end, expected));
+                    assertThat(actual).as(description).isEqualTo(expected);
+                    RegexpMatcher matcher = pattern.matcher(text).reset(text, start, end);
+                    RegexpMatcher expectedMatcher = ordinary.matcher(text).reset(text, start, end);
+                    while (expectedMatcher.find()) {
+                        assertThat(matcher.find()).as(description).isTrue();
+                        assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+                    }
+                    assertThat(matcher.find()).as(description).isFalse();
+                }
             }
         }
     }
@@ -952,6 +1009,8 @@ public class TestInnerLiteralSearch
                 "nnann nn\n",
                 "Tom  Tom xxTom TomFinn HuckleberryFinn Sawyer\nFinn\n\nTom\r\nx\nyFinn ab\nTom",
                 "ännä übernn énn 東nn京 nnü ünn Ωnné ännbnn énn",
+                // A combining mark after a word, which Java's boundaries read as part of it.
+                "Finn\u0301 Penn\u0301x inn\u0300 a\u0301 Holmes\u0301 Holmes",
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
                 "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
             texts.add(utf8Slice(text));
@@ -975,7 +1034,7 @@ public class TestInnerLiteralSearch
                 texts.add(utf8Slice(filler + literal));
             }
         }
-        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä", "\u0301"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);

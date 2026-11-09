@@ -2210,15 +2210,38 @@ r9g, and `sherlock/quotes` 0.71x and 0.98x.
 The inner literal search skips a hit before either DFA runs when a byte beside
 it cannot be one of a match. The byte before the hit must be one that can end
 the prefix: one the reverse prefix program can consume first. Taking them from
-the program gates any prefix that cannot match the empty string and has no
-assertion at its end, such as the digits that end the day and month of
+the program gates any prefix that cannot match the empty string, such as the
+digits that end the day and month of
 `([0-9][0-9]?)/([0-9][0-9]?)/([0-9][0-9]([0-9][0-9])?)`, or Rust's Unicode
 `\w`, which ends a character of more than one byte with a continuation byte.
+The same walk of the program gives the bytes up to three further back, as
+Hyperscan's Rose lookaround checks several offsets around a literal: two bytes
+before the `Holmes` of `\w+\s+Holmes` is whitespace or a word byte. The walk is
+sound because it reads the byte program the reverse DFA runs, so encoding,
+malformed UTF-8, and case folding are already in its bytes, and because it only
+widens a set: it unions every thread's bytes at each offset, reads assertions,
+captures, and no-ops as matching the empty string, and stops before the first
+offset a thread can reach a match before, since a shorter match leaves that
+byte free. Each set it keeps is on a byte every match consumes, so a hit too
+near the window start for that byte is skipped too.
+
 The byte after a literal, or a set whose members share one length, must lie in
 the element after it when that element is a single ASCII byte class, alone or
 repeated at least once; elements that match only the empty string, such as
 `\b`, are looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules
 out the `ing` of `kingdom`, as the crate's prefilter does by searching `ing\s`.
+A `\b` or `\B` among the elements looked past, right after a literal whose last
+bytes are all word bytes or all not, says whether the next character is a word
+character. Every language's boundary reads an ASCII character as a word
+character exactly when it is `[0-9A-Za-z_]`, whatever its Unicode or Java
+options, so the gate narrows the class after it to those ASCII bytes, or with
+no class there is the gate itself. A byte past ASCII may begin, or continue, a
+character of either kind, so it passes, and so does the window's end, where
+the boundary reads the context; the class gate, on a byte the match consumes,
+still fails both. Rust's start, end, and half boundaries give no gate. For
+rebar's `leipzig/word-ending-nn`, `\b\w+nn\b`, whose gate before `nn` is
+dropped since it holds `n`, the gate after it rejects every hit that ends
+inside a word.
 
 A skipped hit is no candidate. It leaves the bound on how far back the next
 reverse search may read where it was, since no reverse search ran; raising it,
@@ -2234,8 +2257,11 @@ although no date could end there.
 A gate that holds the literal's own byte at that edge, of either case for a
 case-insensitive letter, is dropped. It borders runs of its own bytes, as
 `[a-z]` does before `shing` inside a word, so it passes nearly every hit and
-only adds its test. The gates are held as words in the search itself, so they
-take no memory beyond the instance size the search's budget already charges.
+only adds its test. The gates further back are not dropped this way, and are
+checked only once the byte before the hit passes. The gates on the bytes next
+to a hit are held as words in the search itself, so they take no memory beyond
+the instance size the search's budget already charges; those further back are
+an array the search's retained size counts, left out when it would not fit.
 
 A pattern without a gate keeps the search loop without the check, and a gated
 pattern runs a copy of the loop with it. With the check in one shared loop,
