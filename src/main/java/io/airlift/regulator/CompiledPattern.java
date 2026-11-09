@@ -1449,9 +1449,10 @@ abstract sealed class CompiledPattern
     // or a find after a count gave up on the DFA, reads the window as before. The required bytes
     // are reserved later, and only where they leave every DFA that initializes now able to, so the
     // budget is judged without them. The DFA kind decides the start bytes only for a program that
-    // can match empty, which has no start literal filter, so one kind answers for every search.
-    // For a folded run that stands in for no prefix, the filter is the one the program's start
-    // bytes would carry without the run.
+    // can match empty, which has no start literal filter, so one kind answers for every search,
+    // except that a program whose folded run starts every match keeps them only in its
+    // first-match DFA, the kind asked here. For a folded run that stands in for no prefix, the
+    // filter is the one the program's start bytes would carry without the run.
     private static boolean searchesStartLiteralFilter(Prog program)
     {
         return !program.hasDfaUnsupportedAssertions() &&
@@ -1994,7 +1995,9 @@ abstract sealed class CompiledPattern
     private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Regexp suffixRegexp, boolean longestMatch, Prog program)
     {
         // The DFA kind decides the start bytes only for a program that can match empty, and a
-        // fixed-width pattern never matches empty, so one kind answers for every search.
+        // fixed-width pattern never matches empty, so one kind answers for every search, except
+        // that a program whose folded run starts every match keeps them only in its first-match
+        // DFA, the kind asked here.
         return matcher.scansRareCandidate() &&
                 (program.canSkipToStartCandidate() ||
                         (matcher.bailsOnDenseCandidates() && BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch) != null) ||
