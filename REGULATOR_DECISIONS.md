@@ -3470,7 +3470,15 @@ until the scan compares it with zero. A form that returned the mask from a
 helper had that helper left out of line at one of its two call sites, boxed a
 mask on every search, and took 1.62x for `zqj` on r9g with JDK 25. A vector
 returned from a helper left out of line is boxed the same way, so the scan's
-helper keeps a single call site.
+helper keeps a single call site. The reverse scan for a required suffix's last
+occurrence tests the at most three vectors below its last block of four with
+compare and AND on every platform. The XOR form written in line there allocates
+nothing either, but it made the scan about 1,072 bytecode bytes against compare
+and AND's 1,029, past the size `TestHotMethodSize` caps it at. A helper there
+that takes the probe vectors is left out of line when C2 compiles the scan
+before the profile of the branch into the tail has matured, and it then boxes
+both vectors once per call, as it did in a fresh JVM on a 1 MiB row with SVE and
+16-byte vectors.
 
 On x86 with 64-byte vectors, as with AVX-512 on r8i, the literal prefix scan of
 a single literal compares its second byte under the mask of the first; the

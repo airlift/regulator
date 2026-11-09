@@ -356,7 +356,7 @@ public class TestHotMethodSize
     /// further changes code that was measured only at this size. Keep every vector and mask inside
     /// the method or in helpers C2 inlines at each call site: one returned from a helper that C2
     /// left out of line was boxed on every search. The reverse scan that bounds a long search's
-    /// end stays out of line for the same reason, capped at the size it was written at.
+    /// end stays out of line for the same reason, capped at the size it was measured at.
     @Test
     public void testPrefixScanStaysOutOfLineAtMeasuredSize()
     {
@@ -383,7 +383,7 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
                 .as("VectorPrefixScanner.findLast bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(500);
+                .isLessThanOrEqualTo(1029);
         // The literal set scan runs the same loop under the same rules, capped at the size it was
         // added at.
         assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))

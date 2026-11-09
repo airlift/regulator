@@ -23,6 +23,9 @@ import java.util.Arrays;
 final class VectorPrefixScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_PREFERRED;
+    // The vectors each step of findLast's block loops tests. Both loops are unrolled by hand for
+    // these four, loading vectors at 3, 2, 1 and 0 vectors above the block's low end.
+    private static final int LAST_BLOCK_VECTORS = 4;
 
     // Whether the literal prefix scans, Prog's prefix scan and Prog.findLiteral, take
     // findPairMasked, which compares the secondary bytes under the mask of the primary compare,
@@ -299,9 +302,11 @@ final class VectorPrefixScanner
     // Returns the last occurrence of literal, -1, or -2 - resumeEnd when the failed candidates
     // pass LiteralSearchKernel's comparison budget, counted down from the last candidate, and the
     // search must continue with LiteralSearchKernel.findLastKmp over the range up to resumeEnd.
-    // It mirrors findPair: the vectors step down from the last candidate, and a vector's
-    // candidates are verified highest lane first. It keeps findPair's platform candidate test on
-    // every host, as it was not measured in findPairMasked's masked form.
+    // It mirrors findPair: the vectors step down from the last candidate, and a vector's candidates
+    // are verified highest lane first. Its block loops and its verification keep findPair's
+    // platform candidate test on every host, as it was not measured in findPairMasked's masked
+    // form, and the at most three vectors below its last block are tested with compare and AND on
+    // every platform.
     static int findLast(byte[] data, int offset, int length, byte[] literal, int primaryOffset, int secondaryOffset)
     {
         int literalSize = literal.length;
@@ -310,6 +315,8 @@ final class VectorPrefixScanner
             return -1;
         }
 
+        int vectorLength = SPECIES.length();
+        int blockLength = LAST_BLOCK_VECTORS * vectorLength;
         int candidateEnd = offset + candidateCount;
         int vectorStart = candidateEnd - SPECIES.loopBound(candidateCount);
         ByteVector primaryVector = ByteVector.broadcast(SPECIES, literal[primaryOffset]);
@@ -320,62 +327,114 @@ final class VectorPrefixScanner
         int position = candidateEnd;
 
         while (position > vectorStart) {
-            // As in findPair, the loop only tests each vector for a candidate, and the candidate
-            // test follows "Candidate Masks on SVE": keep every vector and mask in this method or
-            // in a helper C2 inlines at each call site.
-            int steps = (position - vectorStart) / SPECIES.length();
-            int step = 0;
-            for (; step < steps; step++) {
-                int stepPosition = position - (step + 1) * SPECIES.length();
-                if (VectorSupport.SVE_128
-                        ? lastPairDifference(data, stepPosition, primaryOffset, secondaryOffset, primaryVector, secondaryVector).compare(VectorOperators.EQ, (byte) 0).anyTrue()
-                        : ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector)
-                          .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).compare(VectorOperators.EQ, secondaryVector))
-                          .anyTrue()) {
+            // As in findPair, the loops only test vectors for a candidate, and the candidate test
+            // follows "Candidate Masks on SVE": keep every vector and mask in this method or in a
+            // helper C2 inlines at each call site. The block loops step down a block of
+            // LAST_BLOCK_VECTORS vectors at a time and test its vectors highest first, each loaded
+            // at a constant offset from the block's low end, as findPair's unrolled loads are above
+            // its step position. Loads at offsets below a descending position each took their own
+            // address arithmetic on r9g, and the extra live values spilled the probe bytes. The
+            // vectors below the last whole block are tested one at a time.
+            int blocks = (position - vectorStart) / blockLength;
+            int block = 0;
+            if (VectorSupport.SVE_128) {
+                for (; block < blocks; block++) {
+                    int low = position - (block + 1) * blockLength;
+                    int primaryLow = low + primaryOffset;
+                    int secondaryLow = low + secondaryOffset;
+                    if (ByteVector.fromArray(SPECIES, data, primaryLow + 3 * vectorLength).lanewise(VectorOperators.XOR, primaryVector)
+                            .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, secondaryLow + 3 * vectorLength).lanewise(VectorOperators.XOR, secondaryVector))
+                            .compare(VectorOperators.EQ, (byte) 0).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow + 2 * vectorLength).lanewise(VectorOperators.XOR, primaryVector)
+                                    .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, secondaryLow + 2 * vectorLength)
+                                            .lanewise(VectorOperators.XOR, secondaryVector))
+                                    .compare(VectorOperators.EQ, (byte) 0).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow + vectorLength).lanewise(VectorOperators.XOR, primaryVector)
+                                    .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, secondaryLow + vectorLength).lanewise(VectorOperators.XOR, secondaryVector))
+                                    .compare(VectorOperators.EQ, (byte) 0).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow).lanewise(VectorOperators.XOR, primaryVector)
+                                    .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, secondaryLow).lanewise(VectorOperators.XOR, secondaryVector))
+                                    .compare(VectorOperators.EQ, (byte) 0).anyTrue()) {
+                        break;
+                    }
+                }
+            }
+            else {
+                for (; block < blocks; block++) {
+                    int low = position - (block + 1) * blockLength;
+                    int primaryLow = low + primaryOffset;
+                    int secondaryLow = low + secondaryOffset;
+                    if (ByteVector.fromArray(SPECIES, data, primaryLow + 3 * vectorLength).compare(VectorOperators.EQ, primaryVector)
+                            .and(ByteVector.fromArray(SPECIES, data, secondaryLow + 3 * vectorLength).compare(VectorOperators.EQ, secondaryVector)).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow + 2 * vectorLength).compare(VectorOperators.EQ, primaryVector)
+                                    .and(ByteVector.fromArray(SPECIES, data, secondaryLow + 2 * vectorLength).compare(VectorOperators.EQ, secondaryVector)).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow + vectorLength).compare(VectorOperators.EQ, primaryVector)
+                                    .and(ByteVector.fromArray(SPECIES, data, secondaryLow + vectorLength).compare(VectorOperators.EQ, secondaryVector)).anyTrue() ||
+                            ByteVector.fromArray(SPECIES, data, primaryLow).compare(VectorOperators.EQ, primaryVector)
+                                    .and(ByteVector.fromArray(SPECIES, data, secondaryLow).compare(VectorOperators.EQ, secondaryVector)).anyTrue()) {
+                        break;
+                    }
+                }
+            }
+            position -= block * blockLength;
+            // The vectors to verify from position down: all four vectors of the block the loop
+            // stopped in, highest first, or the one vector below the blocks that holds a candidate.
+            int vectors = LAST_BLOCK_VECTORS;
+            if (block == blocks) {
+                // The at most three vectors below the blocks are tested with compare and AND on
+                // every platform, an exception to "Candidate Masks on SVE". The XOR form written in
+                // line here allocates nothing either, but it made this method about 1,072 bytecode
+                // bytes against compare and AND's 1,029, past the size TestHotMethodSize caps it
+                // at. A helper that takes the probe vectors is left out of line when C2 compiles
+                // this method before the profile of the branch into the tail has matured, and it
+                // then boxes both vectors once per call, as it did in a fresh JVM on a 1 MiB row
+                // with SVE and 16-byte vectors.
+                int steps = (position - vectorStart) / vectorLength;
+                int step = 0;
+                for (; step < steps; step++) {
+                    int stepPosition = position - (step + 1) * vectorLength;
+                    if (ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector)
+                            .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).compare(VectorOperators.EQ, secondaryVector))
+                            .anyTrue()) {
+                        break;
+                    }
+                }
+                position -= step * vectorLength;
+                if (step == steps) {
                     break;
                 }
+                vectors = 1;
             }
-            position -= step * SPECIES.length();
-            if (step == steps) {
-                break;
+            for (; vectors > 0; vectors--) {
+                // Rebuild this vector's candidates as bits, the XOR form in line as in findPair.
+                int vectorPosition = position - vectorLength;
+                ByteVector primary = ByteVector.fromArray(SPECIES, data, vectorPosition + primaryOffset);
+                ByteVector secondary = ByteVector.fromArray(SPECIES, data, vectorPosition + secondaryOffset);
+                long candidateBits = VectorSupport.SVE_128
+                        ? primary.lanewise(VectorOperators.XOR, primaryVector).lanewise(VectorOperators.OR, secondary.lanewise(VectorOperators.XOR, secondaryVector))
+                          .compare(VectorOperators.EQ, (byte) 0).toLong()
+                        : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
+                while (candidateBits != 0) {
+                    int lane = 63 - Long.numberOfLeadingZeros(candidateBits);
+                    int candidate = vectorPosition + lane;
+                    // Keep sparse verification in this method, as in findPair.
+                    int literalIndex = 0;
+                    while (literalIndex < literal.length && data[candidate + literalIndex] == literal[literalIndex]) {
+                        literalIndex++;
+                    }
+                    if (literalIndex == literal.length) {
+                        return candidate;
+                    }
+                    comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, literalIndex);
+                    if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, lastCandidate - candidate)) {
+                        return -2 - (candidate + literalSize - 1);
+                    }
+                    candidateBits ^= 1L << lane;
+                }
+                position = vectorPosition;
             }
-            // Rebuild this vector's candidates as bits, the XOR form in line as in findPair.
-            int vectorPosition = position - SPECIES.length();
-            ByteVector primary = ByteVector.fromArray(SPECIES, data, vectorPosition + primaryOffset);
-            ByteVector secondary = ByteVector.fromArray(SPECIES, data, vectorPosition + secondaryOffset);
-            long candidateBits = VectorSupport.SVE_128
-                    ? primary.lanewise(VectorOperators.XOR, primaryVector).lanewise(VectorOperators.OR, secondary.lanewise(VectorOperators.XOR, secondaryVector))
-                      .compare(VectorOperators.EQ, (byte) 0).toLong()
-                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
-            while (candidateBits != 0) {
-                int lane = 63 - Long.numberOfLeadingZeros(candidateBits);
-                int candidate = vectorPosition + lane;
-                // Keep sparse verification in this method, as in findPair.
-                int literalIndex = 0;
-                while (literalIndex < literal.length && data[candidate + literalIndex] == literal[literalIndex]) {
-                    literalIndex++;
-                }
-                if (literalIndex == literal.length) {
-                    return candidate;
-                }
-                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, literalIndex);
-                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, lastCandidate - candidate)) {
-                    return -2 - (candidate + literalSize - 1);
-                }
-                candidateBits ^= 1L << lane;
-            }
-            position = vectorPosition;
         }
         return findLastScalar(data, offset, position - offset, literal, primaryOffset, secondaryOffset, comparisonEnd, lastCandidate);
-    }
-
-    /// A copy of [#pairDifference] for `findLast`'s scan loop, so each helper has one call site.
-    /// A second call site of either can leave it out of line, and the vector it returns is then
-    /// boxed.
-    private static ByteVector lastPairDifference(byte[] data, int position, int primaryOffset, int secondaryOffset, ByteVector primaryVector, ByteVector secondaryVector)
-    {
-        return ByteVector.fromArray(SPECIES, data, position + primaryOffset).lanewise(VectorOperators.XOR, primaryVector)
-                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, position + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector));
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly

@@ -78,8 +78,11 @@ answer, or reject the input before any engine runs.
   ([re_intuit_start][perl-regexec]), Go regexp ([exec.go][go-exec-minlen]),
   ClickHouse ([OptimizedRegularExpression.cpp][ch-optimized-regexp]), and the
   Rust regex crate ([regex.rs][ra-impossible]), for the word test by Muła
-  (2016) ([simd-strfind][mula-strfind]), and for joined literals by the Rust
-  regex crate ([literal.rs][rs-literal]); Adapted from RE2 for the scan plan's
+  (2016) ([simd-strfind][mula-strfind]), for joined literals by the Rust
+  regex crate ([literal.rs][rs-literal]), and for the search-end bound's
+  reverse block loop by memchr, which steps down four vectors at a time
+  and loads them at constant offsets from the block's low end
+  ([memchr.rs][memchr-rfind]); Adapted from RE2 for the scan plan's
   vector check (front-and-back scan, [prog.cc][re2-prog]), from PCRE2 for
   long windows ([required code unit][pcre2-match]), and from Hyperscan for the
   search-end bound, whose reverse double vermicelli scans back from the end
@@ -215,9 +218,13 @@ answer, or reject the input before any engine runs.
   where the forward check stops, the search-end bound takes its count to 0.014
   to 0.026 of main's time on Intel and 0.040 on Graviton, on the first
   megabyte and on the whole 16 MB, in all four languages
-  ([design][d-required-suffix]). The maximum-length reject takes rebar's
-  `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to
-  0.62 on Graviton and 0.72 to 0.75 on Intel.
+  ([design][d-required-suffix]). On the leipzig `bounded-strings-ending-z` rows
+  with one `,z` in the first kilobyte, a reverse scan that steps down four
+  vectors at a time, each loaded at a constant offset from the block's low end,
+  takes the count to 0.94 to 0.96 of the time with the reverse scan before it on
+  Graviton, and the first megabyte's count to 0.97 to 0.98 on Intel. The
+  maximum-length reject takes rebar's `opt/fixed-length` rows from 1.3 to 4.7
+  times the crate's time to 0.59 to 0.62 on Graviton and 0.72 to 0.75 on Intel.
 
 ### Match starts without a reverse DFA
 
@@ -2436,6 +2443,7 @@ change is described.
 [memchr-packedpair]: https://github.com/BurntSushi/memchr/blob/2.8.3/src/arch/generic/packedpair.rs
 [memchr-prefilter-state]: https://github.com/BurntSushi/memchr/blob/2.8.3/src/memmem/searcher.rs#L876-L938
 [memchr-rank]: https://github.com/BurntSushi/memchr/blob/2.8.3/src/arch/all/packedpair/default_rank.rs
+[memchr-rfind]: https://github.com/BurntSushi/memchr/blob/2.8.3/src/arch/generic/memchr.rs#L254-L329
 [memchr-short-haystack]: https://github.com/BurntSushi/memchr/blob/2.8.3/src/memmem/searcher.rs#L369-L373
 [mula-range]: https://github.com/WojciechMula/simd-byte-lookup/blob/870eccb54b6ad8888619cceecc3d5ea6a12d213b/lib/Range.py#L20-L33
 [mula-strfind]: http://0x80.pl/notesen/2016-11-28-simd-strfind.html

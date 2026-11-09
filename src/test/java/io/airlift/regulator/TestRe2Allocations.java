@@ -18,7 +18,13 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -479,6 +485,70 @@ public class TestRe2Allocations
             assertThat(allocatedBytes / 10_000).as("generateBytecode=%s", generateBytecode).isLessThanOrEqualTo(2 * 24);
         }
     }
+
+    @Test
+    public void testSuffixBoundCountAllocatesOnlyFallbackPredicate()
+            throws Exception
+    {
+        // rebar's bounded-strings-ending-z pattern over a 1 MiB row whose only ",z" sits about 600
+        // bytes in, so each count's search end comes from a reverse scan over almost the whole
+        // row, and no line holds 13 commas, so the count is 0. Each count may allocate only the
+        // inner literal count's fallback predicate, a lambda of 24 bytes with compressed class
+        // pointers. With SVE and 16-byte vectors, a helper that took the probe vectors on the
+        // branch into the reverse scan's tail added 96 more: on a row this long, C2 compiled the
+        // scan before the profile of that branch had matured, left the helper out of line, and
+        // boxed both vectors once per count. On 64 KiB rows the profile matured first and nothing
+        // was boxed, and a JVM whose earlier tests had already compiled the scan boxed nothing
+        // either, so the counts run in a child JVM.
+        ProbeResult result = runSuffixBoundCountProbe();
+        System.out.print(result.output());
+        assertThat(result.exitCode()).as(result.output()).isZero();
+        // The child takes this JVM's candidate test, so it tests the form this JVM takes.
+        assertThat(result.output()).contains("SVE_128 " + VectorSupport.SVE_128);
+    }
+
+    private static ProbeResult runSuffixBoundCountProbe()
+            throws IOException, InterruptedException
+    {
+        List<String> command = new ArrayList<>();
+        command.add(System.getProperty("java.home") + "/bin/java");
+        if (Dfa.nativeAccessEnabled()) {
+            command.add("--enable-native-access=ALL-UNNAMED");
+        }
+        // The child runs at this JVM's vector width, and so takes the same candidate test.
+        command.addAll(TestingJvmArguments.vectorWidthOptions());
+        command.add("--add-modules");
+        command.add("jdk.incubator.vector");
+        command.add("-cp");
+        command.add(System.getProperty("java.class.path"));
+        command.add(SuffixBoundCountAllocationProbe.class.getName());
+
+        Path output = Files.createTempFile("regulator-suffix-bound-probe-", ".log");
+        try {
+            ProcessBuilder processBuilder = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .redirectOutput(output.toFile());
+            processBuilder.environment().remove("JDK_JAVA_OPTIONS");
+            Process process = processBuilder.start();
+            try {
+                assertThat(process.waitFor(Duration.ofSeconds(60)))
+                        .as("suffix bound probe timed out: %s", Files.readString(output))
+                        .isTrue();
+                return new ProbeResult(process.exitValue(), Files.readString(output, StandardCharsets.UTF_8));
+            }
+            finally {
+                if (process.isAlive()) {
+                    process.destroyForcibly();
+                    assertThat(process.waitFor(Duration.ofSeconds(10))).as("suffix bound probe did not terminate").isTrue();
+                }
+            }
+        }
+        finally {
+            Files.deleteIfExists(output);
+        }
+    }
+
+    private record ProbeResult(int exitCode, String output) {}
 
     private static int runScanPlanOperations(TrinoCompiledPattern anchored, TrinoCompiledPattern folded, TrinoCompiledPattern unanchored, TrinoCompiledPattern handoff, Slice url, Slice header, Slice link, int[] groups)
     {
