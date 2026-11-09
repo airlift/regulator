@@ -82,6 +82,15 @@ public class TestInnerLiteralSearch
             "(?m)^.{0,3}Finn",
             "(?:..@cbb|b)@(?:c|d)",
             "(?i:k)ey = value",
+            "\\w+\\s(?i)holmes\\b",
+            "\\w+ (?i)sherlock holmes",
+            "[a-z]+(?i)error:",
+            "\\d+ (?i)password",
+            "(?i)\\w+ holmes",
+            "\\w+(?i:holmes)",
+            "\\w+\\s(?i:ho)",
+            "(?:QHO)?(?i:ho)",
+            "[a-z](?i: noqa)@x",
             // Outside RE2 the class is empty, so the program can never match.
             "\\s\\*[a&&b]{1,2}");
 
@@ -106,12 +115,22 @@ public class TestInnerLiteralSearch
         // case-insensitive letter; the literal is shown with those letters lowered.
         assertThat(literal("(\\s*)((?:# [Nn][Oo][Qq][Aa])(?::\\s?(([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
         assertThat(literal("(?P<spaces>\\s*)(?P<noqa>(?i:# noqa)(?::\\s?(?P<codes>([A-Z]+[0-9]+(?:[,\\s]+)?)+))?)")).isEqualTo("# noqa");
-        // Without an exact head the folded literal is not searched, and with a head of one common
-        // byte it is not searched either, so a later literal decides.
-        assertThat(innerLiteralSearch("\\s+(?i:noqa)")).isNull();
+        // A folded literal without an exact head, or with a head of one common byte, is searched
+        // only by the folded pair kernel, so it needs the Vector API; without it, a later literal
+        // decides. RE2's s also folds to the long s, so RE2's literal ends before it. Such a
+        // literal also gives way to a later one searched from shorter windows, as `@x` is, but not
+        // to a later element no proof admits, as the `x` after `\w+`.
         InnerLiteralSearch commonHeadSearch = Re2.compile(utf8Slice("[a-z](?i: noqa)@x")).innerLiteralSearchForDiagnostics();
-        assertThat(commonHeadSearch).isNotNull();
         assertThat(literal(commonHeadSearch)).isEqualTo("@x");
+        for (Map.Entry<String, String> entry : List.of(
+                Map.entry("\\w+\\s(?i)holmes\\b", "holme"),
+                Map.entry("\\s+(?i:noqa)", "noqa"),
+                Map.entry("\\w+(?i:holmes)", "holme"),
+                Map.entry("\\w+\\s(?i:holmes)\\w+x", "holme"))) {
+            for (InnerLiteralSearch search : Arrays.asList(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics(), innerLiteralSearch(entry.getKey()))) {
+                assertThat(search == null ? null : literal(search)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable() ? entry.getValue() : null);
+            }
+        }
         // A group that does not capture joins the top level too.
         assertThat(literal("\\s(?:[a-z]+@)[a-z]+\\s")).isEqualTo("@");
         assertThat(literal("(\\w+)(@(\\w+))")).isEqualTo("@");
@@ -276,11 +295,12 @@ public class TestInnerLiteralSearch
                 "\\w+(?:@\\w+)+",
                 // Nor are the copies of a counted repetition, which the crate keeps as one element.
                 "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])",
-                // Anchored, prefix-accelerated, folded with no exact head, common single-byte, and
-                // overlong literals.
+                // The proofs count both cases of a folded letter: in QHOho, the match QHOho spans
+                // the occurrence HO, though the prefix cannot consume the lowered literal ho.
+                "(?:QHO)?(?i:ho)",
+                // Anchored, prefix-accelerated, common single-byte, and overlong literals.
                 "^\\w+@\\w+",
                 "Holmes\\w+@",
-                "\\w+(?i:holmes)",
                 "\\w+ \\w+",
                 "[a-z]" + "xy".repeat(32) + "z",
                 // Sets with a member under three bytes, more than eight members, or a folded,
@@ -317,8 +337,13 @@ public class TestInnerLiteralSearch
                 "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}",
                 "[a-z]{8}-[0-9]{4}",
                 "\\d{4}-\\d{2}-\\d{2}",
-                // A case-insensitive literal counts its whole length, not its exact head's.
+                // A case-insensitive literal counts its whole length, not its exact head's. One
+                // without an exact head is searched only with the Vector API, and gives way to a
+                // later literal searched from shorter windows; the prediction agrees either way.
                 "[a-z]{3}#(?i:noqa)",
+                "[a-z]{3}(?i:noqa)[0-9]",
+                "[a-z](?i: noqa)@x",
+                "[a-z]{3}(?i:noqa)[0-9]#[0-9]",
                 // A rare class pair counts its two bytes.
                 "[a-z][?!.][\"']x",
                 // A common byte, a prefix the program accelerates, a folded run it accelerates
@@ -564,24 +589,33 @@ public class TestInnerLiteralSearch
     public void testSearchesWindowsFromMinimum()
     {
         // A search window shorter than the search's minimum, a literal set's 256 bytes or 1024
-        // behind a class run, a longer single literal's 96, or 64 for a one-byte literal or class
-        // pair, never runs the inner literal search, except a gated one-byte search, which first
-        // rejects a window without a gate-passing hit: a matcher's find and a full-Slice find run
-        // the ordinary engine there. A whole-text count keeps the same minimum, except a literal
-        // set's not behind a class run, 64 bytes.
+        // behind a class run, 1024 for a case-insensitive literal without an exact head, a longer
+        // single literal's 96, or 64 for a one-byte literal or class pair, never runs the inner
+        // literal search, except a gated one-byte search, which first rejects a window without a
+        // gate-passing hit: a matcher's find and a full-Slice find run the ordinary engine there. A
+        // whole-text count keeps the same minimum, except a literal set's not behind a class run,
+        // 64 bytes.
         // A window at the minimum runs the search, the only route that starts its reverse prefix
         // DFA, or, where a literal ending a minimum window would still fall back near its start,
         // the shortest window that puts the literal past that fallback. Each window lies inside a
         // longer Slice, as a matcher region, and ends with the literal, inside any required bytes
         // check.
-        for (MinimumWindow entry : List.of(
+        List<MinimumWindow> windows = new ArrayList<>(List.of(
                 new MinimumWindow(".{0,2}(Tom|Sawyer|Huckleberry|Finn)", "Finn", Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES, Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES),
                 new MinimumWindow("\\s[a-z]{0,12}(?:ing|ment)\\s", " moment ", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("[a-z](?:ing|ment)", "ament", InnerLiteralSearch.MINIMUM_LITERAL_SET_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
                 new MinimumWindow("\\w+\\s+Holmes", "a Holmes", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
                 new MinimumWindow("\\s*(?i:# noqa)", "# NoQA", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES),
                 new MinimumWindow("\\w+@", "a@", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES),
-                new MinimumWindow("\\w+[?!.][\"']", "a?\"", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES))) {
+                new MinimumWindow("\\w+[?!.][\"']", "a?\"", CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES)));
+        if (VectorSupport.isAvailable()) {
+            windows.add(new MinimumWindow("\\s+(?i:noqa)", " NoQa", Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES, Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES));
+            // A literal only the kernel searches gives way to a later one with a shorter minimum,
+            // here `@x`. Without the Vector API, the common byte that starts the folded group
+            // ends Java's and Rust's analysis, so they have no search there.
+            windows.add(new MinimumWindow("[a-z](?i: noqa)@x", "a NoQa@x", InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES));
+        }
+        for (MinimumWindow entry : windows) {
             String regex = entry.regex();
             String literal = entry.literal();
             for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.RUST_BYTES)) {
@@ -873,9 +907,18 @@ public class TestInnerLiteralSearch
             assertThat(search.usesVectorSearch(1_024)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
             assertThat(search.usesVectorSearch(1_025)).as(entry.getKey()).isEqualTo(VectorSupport.isAvailable());
         }
-        // A case-insensitive literal keeps its exact head's scan and folded check.
+        // A case-insensitive literal takes the folded pair kernel from 1024 bytes too, and below
+        // that its exact head's scan and folded check.
         InnerLiteralSearch folded = Re2.compile(utf8Slice("(\\s*)((?i:# noqa)(?::\\s?([A-Z]+[0-9]+))?)")).innerLiteralSearchForDiagnostics();
-        assertThat(folded.usesVectorSearch(4_096)).isFalse();
+        assertThat(literal(folded)).isEqualTo("# noqa");
+        assertThat(folded.usesVectorSearch(1_023)).isFalse();
+        assertThat(folded.usesVectorSearch(1_024)).isEqualTo(VectorSupport.isAvailable());
+        // A kernel hit is checked again from the literal's first exact letter: `aaNOQA` passes
+        // the kernel's test for `Aanoqa`, which accepts either case of `A`, but fails the check,
+        // so the search never runs its reverse prefix.
+        CompiledPattern exactLetters = Re2.compile(utf8Slice("\\sAa(?i:noqa)"));
+        assertThat(exactLetters.find(utf8Slice("-".repeat(1_024) + " aaNOQA"))).isFalse();
+        assertThat(reversePrefixStateCount(exactLetters)).isZero();
     }
 
     @Test
@@ -983,6 +1026,10 @@ public class TestInnerLiteralSearch
                 "nnxnn annbnn Pennsylvannia nnnn nnn annann\n".repeat(3),
                 "nnann nn\n",
                 "Tom  Tom xxTom TomFinn HuckleberryFinn Sawyer\nFinn\n\nTom\r\nx\nyFinn ab\nTom",
+                // Case-insensitive literals: mixed-case hits, near misses that differ in one
+                // letter, the literal's other case right before it, and a hit ending the text.
+                "Sherlock HOLMES holmez HoLmEs's xholmes\tholme SHERLOCK HOLMeS a b@ noqa@x NOQA@x\n" +
+                        "ERROR: error; xError:y erro: 12 PassWord 3 passwor 4 PASSWORD QHOho QHO hO\tHo QhOHO Holmes",
                 "ännä übernn énn 東nn京 nnü ünn Ωnné ännbnn énn",
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
                 "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
@@ -994,14 +1041,15 @@ public class TestInnerLiteralSearch
         }
         // Windows just under and at each minimum the search needs: without a literal, with one at
         // the start, and with one at the end, past the near-start minimum.
-        for (int length : new int[] {
+        for (int length : IntStream.of(
                 InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1,
                 InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES,
                 Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES - 1,
                 Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES,
-        }) {
+                Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES - 1,
+                Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES).distinct().toArray()) {
             texts.add(utf8Slice("x".repeat(length)));
-            for (String literal : List.of(" Holmes", "Tom", "nn", "ing", "@")) {
+            for (String literal : List.of(" Holmes", "Tom", "nn", "ing", "@", " hOLMeS", "QHOho", "1 PassWord")) {
                 String filler = "x".repeat(length - literal.length());
                 texts.add(utf8Slice(literal + filler));
                 texts.add(utf8Slice(filler + literal));

@@ -1939,6 +1939,15 @@ to each window length.
   single literal or class pair behind such a run keeps its kind's minimum:
   `[a-zA-Z]+ing` and `\w+[?!.]["']` ran in 0.19 to 0.32x the DFA's time from 300
   bytes.
+- A case-insensitive literal with no exact head, or with a head of one common
+  byte, searches from the vector cutoff, 1024 bytes, where vector support is
+  available, and takes no search otherwise. Only the folded pair kernel
+  searches such a literal; below its cutoff the pattern runs the DFA. This
+  minimum reuses the folded prefix scan's vector cutoff and is unmeasured for
+  this search. Such a literal gives way to a later element's search, judged by
+  that element's own literal as without vector support, where that search
+  starts from a shorter window: `[a-z](?i: noqa)@x` searches `@x` from 96
+  bytes.
 - A pattern with a short-search fixed-width matcher runs the search from 64
   bytes, whatever its literal kind, because a shorter window runs that matcher,
   not the DFA. The matcher took 2.7 to 5.8x the search's time on 64- to 127-byte
@@ -1976,9 +1985,20 @@ A single literal's scan over at least 1024 bytes, where vector support
 is available, uses the prefix scans' kernels and cutoff: the vector byte-set
 scan for a one-byte literal and the fused pair scan for a longer one. A shorter
 scan, including the find loop's probe, uses the word-at-a-time scan. A
-case-insensitive literal, such as `# noqa` in `\s*# (?i:noqa)`, keeps the
-word-at-a-time scan for its exact head, `# `, and checks the rest of each hit
-with ASCII case folding, at every length.
+case-insensitive literal, such as `# noqa` in `\s*# (?i:noqa)`, takes the
+prefix scans' folded pair kernel over its first nine bytes from the same cutoff,
+and checks the rest of each hit with ASCII case folding. The kernel accepts
+either case of every letter, so each hit is checked again from the first exact
+letter among the kernel's bytes, or from their end when they hold none. A
+shorter scan keeps the word-at-a-time scan for the exact head, `# `, and the
+same check. A literal with no exact head, such as `holmes` in
+`\w+\s(?i)holmes\b`, which RE2 and Rust search as `holme` because `s` also
+folds to the long s, or with only one common byte before its first folded
+letter, is searched only by the kernel. With no exact head, the no-earlier-match
+proofs count both cases of every letter, exact ones included; a one-byte head
+is proven by that byte. The prefix of `(?:QHO)?(?i:ho)` cannot consume the
+lowered `ho`, but its match `QHOho` spans the occurrence `HO`, so the search
+would report `HO`; such a pattern takes no search.
 
 The earlier check of short windows was accepted with costs measured before RE2,
 Java, and Rust shared the fixed-width matchers, 3 hosts a side. The Rust
@@ -2881,15 +2901,16 @@ prefix scan's case-mapped pair bytes, the scan plan's contains search, the two
 three-byte groups of the [start literal filter](#start-literal-filter)'s
 two-literal check, and the two sides of an
 [inner literal class pair](#inner-literal-class-pairs); a later paragraph
-covers scans that stop at any of several bytes. Where C2 compiles
-vector code with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5),
-each loaded vector is XORed with its probe byte, the differences are ORed, and
-one compare with zero gives the mask; the start literal filter first takes the
-unsigned minimum of its two groups' differences, and the class-pair scan the
-unsigned minimum of each side's differences from its up to three bytes.
-Everywhere else these five compare each byte and AND the masks. The JVM's
-`UseSVE` flag is read once, through the HotSpot diagnostic MXBean, on aarch64
-only; if the flag cannot be read, the scans compare and AND.
+covers scans that stop at any of several bytes. The folded inner literal search
+shares the folded prefix scan's kernels. Where C2 compiles vector code with SVE
+and a 16-byte preferred byte vector, as on r9g (Graviton5), each loaded vector
+is XORed with its probe byte, the differences are ORed, and one compare with
+zero gives the mask; the start literal filter first takes the unsigned minimum
+of its two groups' differences, and the class-pair scan the unsigned minimum of
+each side's differences from its up to three bytes. Everywhere else these five
+compare each byte and AND the masks. The JVM's `UseSVE` flag is read once,
+through the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be
+read, the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -2924,21 +2945,22 @@ two call sites, boxed a mask on every search, and took 1.62x for `zqj` on r9g
 with JDK 25. A vector returned from a helper left out of line is boxed the same
 way, so the scan's helper keeps a single call site.
 
-The folded pair kernels, the counted and dense forms of the folded prefix scan,
-take the XOR form under the same key, through one selector for each kernel.
-Their loaded bytes are ORed with `0x20` first at letter probes, and the XOR form
-then XORs each probe's bytes with its lower-case byte. On r9g with JDK 25 it
-took 0.84x to 0.89x the compare-and-AND form's time for case-insensitive
-sherlock in all four languages, 0.75x to 0.76x for `twain-insensitive`, 0.71x
-for Hyperscan's casei English, and 0.83x to 0.86x for `name-holmes-casei`, and
-was flat for `the-casei` and `alt-sherlock-casei-en`; it ran about the same
-instructions per operation, at higher IPC. r8i keeps compare and AND by
-construction and was unchanged, 0.996x geometric mean over 21 cells. An
-earlier 1.06x loss for case-insensitive sherlock was measured before the
-folded scan's counted loop. NEON keeps compare and AND; the XOR form under
-`-XX:UseSVE=0` is unmeasured. SVE with other preferred widths, such as 32
-bytes on Graviton3, is unmeasured and keeps compare and AND; the scans with
-fixed 16-byte vectors follow the same preferred-width key.
+The folded pair kernels, the counted and dense forms that the folded prefix
+scan and the folded inner literal search share, take the XOR form under the
+same key, through one selector for each kernel. Their loaded bytes are ORed with
+`0x20` first at letter probes, and the XOR form then XORs each probe's bytes
+with its lower-case byte. On r9g with JDK 25 it took 0.84x to 0.89x the
+compare-and-AND form's time for case-insensitive sherlock in all four languages,
+0.75x to 0.76x for `twain-insensitive`, 0.71x for Hyperscan's casei English, and
+0.83x to 0.86x for `name-holmes-casei`, and was flat for `the-casei` and
+`alt-sherlock-casei-en`; it ran about the same instructions per operation, at
+higher IPC. r8i keeps compare and AND by construction and was unchanged, 0.996x
+geometric mean over 21 cells. An earlier 1.06x loss for case-insensitive
+sherlock was measured before the folded scan's counted loop. NEON keeps compare
+and AND; the XOR form under `-XX:UseSVE=0` is unmeasured. SVE with other
+preferred widths, such as 32 bytes on Graviton3, is unmeasured and keeps compare
+and AND; the scans with fixed 16-byte vectors follow the same preferred-width
+key.
 
 The two- and three-byte scans of the
 [small candidate-byte vector scan](#small-candidate-byte-vector-scan), and the

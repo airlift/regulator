@@ -82,6 +82,10 @@ final class Prog
 
     record FixedDistanceByteCandidates(byte[] candidates, int offset) {}
 
+    // The probe pair a folded pair kernel tests and whether the dense kernel scans it; see
+    // foldedPairScan.
+    record FoldedPairScan(int firstOffset, int secondOffset, boolean dense) {}
+
     // Single instruction in regexp program.
     public static final class Inst
     {
@@ -1679,6 +1683,21 @@ final class Prog
         return 1 - Math.pow(1 - pairProbability, lanes) >= DENSE_FOLD_CASE_VECTOR_SHARE;
     }
 
+    /// Returns the probe pair of the folded pair kernels' scan for the first `size` bytes of
+    /// `bytes`, which [ByteFrequencies#foldedProbePair] chooses under the caller's
+    /// `byteFrequencies`, or under English text in place of the default uniform one, and whether
+    /// the dense kernel scans it, as [#usesDenseFoldCaseScan] decides from how many vectors the
+    /// same distribution predicts hold a candidate. The folded prefix scan and the folded inner
+    /// literal search both choose here.
+    static FoldedPairScan foldedPairScan(byte[] bytes, int size, ByteFrequencies byteFrequencies)
+    {
+        ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
+        ByteFrequencies.FoldedProbePair pair = pairFrequencies.foldedProbePair(bytes, size);
+        boolean dense = VectorSupport.isAvailable() &&
+                usesDenseFoldCaseScan(pairFrequencies.foldedProbePairProbability(bytes, pair), VectorSupport.preferredByteLanes());
+        return new FoldedPairScan(pair.firstOffset(), pair.secondOffset(), dense);
+    }
+
     /// Returns the folded bytes the prefix scan searches for, a prefix or a run behind a lead.
     byte[] prefixAccelFoldCaseBytesForDiagnostics()
     {
@@ -1854,16 +1873,11 @@ final class Prog
             // Limit to the same nine-byte prefix used by upstream ShiftDFA.
             this.prefixSize = Math.min(bytes.length, MAX_FOLD_CASE_PREFIX_BYTES);
             this.prefixFrontBroadcastMask = 0;
-            // The pair scans probe the pair ByteFrequencies.foldedProbePair chooses under the
-            // caller's distribution, or under English text in place of the default uniform one,
-            // and the same distribution predicts how many vectors hold a candidate.
-            ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
-            ByteFrequencies.FoldedProbePair pair = pairFrequencies.foldedProbePair(bytes, prefixSize);
+            FoldedPairScan pair = foldedPairScan(bytes, prefixSize, byteFrequencies);
             this.prefixFoldCaseFirstOffset = pair.firstOffset();
             this.prefixFoldCaseSecondOffset = pair.secondOffset();
             this.prefixFoldCaseEndPair = pair.firstOffset() == 0 && pair.secondOffset() == prefixSize - 1;
-            this.prefixFoldCaseDense = VectorSupport.isAvailable() &&
-                    usesDenseFoldCaseScan(pairFrequencies.foldedProbePairProbability(bytes, pair), VectorSupport.preferredByteLanes());
+            this.prefixFoldCaseDense = pair.dense();
             long lowerBytes = 0;
             long caseBits = 0;
             for (int index = 0; index < Math.min(prefixSize, Long.BYTES); index++) {
