@@ -55,7 +55,8 @@ rarer byte of the literal. When a literal is in the middle of a pattern, as in
 `\w+@example\.com`, the search finds the literal first and then
 [runs the automaton backward and forward from it](reference/OPTIMIZATION_CATALOG.md#reverse-inner-literal-search),
 a technique adapted from `regex-automata`, the crate that implements the Rust
-`regex` crate's engines.
+`regex` crate's engines. A count whose matches all end at the literal's end
+[runs only the backward automaton](../REGULATOR_DECISIONS.md#inner-literal-counts-to-the-literal-end).
 
 **Multi-literal and byte-set filters.** Patterns that begin with one of a few
 literals use a
