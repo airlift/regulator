@@ -63,7 +63,10 @@ literals use a
 [nibble-table filter](reference/OPTIMIZATION_CATALOG.md#start-literal-filter)
 adapted from Hyperscan's Teddy algorithm, by way of the `aho-corasick` crate's
 implementation. It checks up to eight literal groups at three byte positions,
-with one vector load per position each step. Large literal alternations use an
+with one vector load per position each step. For three to eight groups on Linux
+x86 with 64-byte vectors whose `/proc/cpuinfo` flags list `avx512vbmi`, it
+takes one load instead and moves the later positions' bits into place with one
+byte permute for each later position. Large literal alternations use an
 Aho-Corasick automaton ported from the same crate. Patterns that can only start
 at a small set of bytes scan for that set.
 

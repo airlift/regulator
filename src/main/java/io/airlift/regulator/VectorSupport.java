@@ -16,11 +16,19 @@ package io.airlift.regulator;
 import com.sun.management.HotSpotDiagnosticMXBean;
 import jdk.incubator.vector.ByteVector;
 
+import java.io.BufferedReader;
+import java.io.IOException;
 import java.lang.management.ManagementFactory;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 /// Reports whether the vector scanners can run, which candidate-mask form their multi-byte
 /// scans take ([#SVE_128] and [#X86_WITH_64_BYTE_VECTORS]), and how the start literal filter's
-/// nibble scan shifts ([#SHIFT_NIBBLES_AS_SHORTS]). They need the optional `jdk.incubator.vector`
+/// nibble scan shifts ([#SHIFT_NIBBLES_AS_SHORTS]) and whether it can take one load per step
+/// ([#hasAvx512Vbmi()]). They need the optional `jdk.incubator.vector`
 /// module and a preferred byte vector of 16 to 64 lanes. With fewer lanes, the lookup wraps the
 /// 16-entry nibble tables; with more, the replicated tables hold only 64 bytes, and
 /// `VectorMask.toLong()` throws for masks wider than 64 lanes. Other JVMs use the scalar or SWAR
@@ -36,13 +44,14 @@ final class VectorSupport
     private static final boolean X86 = isX86(System.getProperty("os.arch"));
 
     // Whether this JVM runs on x86 with a 64-byte preferred byte vector, the gate of the scans'
-    // x86 64-lane forms: the literal prefix scan's masked pair compare and the XOR form of the
-    // start literal filter's check of two literals without masks. They were measured with
-    // AVX-512 on r8i (Granite Rapids), the only x86 host measured in them. Hosts nobody measured
-    // keep the form other widths take, so the gate tests for x86: 512-bit SVE, as on A64FX, and
-    // other architectures with 64-byte vectors keep compare and AND. x86 hosts with 64-byte
-    // vectors other than r8i, such as Ice Lake, AMD Zen 4 and 5, and Cascade Lake, take the
-    // forms unmeasured. C2 folds this constant.
+    // x86 64-lane forms: the literal prefix scan's masked pair compare, the XOR form of the start
+    // literal filter's check of two literals without masks, and, where [#hasAvx512Vbmi()] also
+    // holds, the filter's one-load nibble scan. They were measured with AVX-512 on r8i (Granite
+    // Rapids), the only x86 host measured in them. Hosts nobody measured keep the forms other
+    // widths take, so the gate tests for x86: 512-bit SVE, as on A64FX, and other architectures
+    // with 64-byte vectors keep those forms. x86 hosts with 64-byte vectors other than r8i, such
+    // as Ice Lake, AMD Zen 4 and 5, and Cascade Lake, take the forms unmeasured; Cascade Lake
+    // lacks VBMI, so its nibble scan keeps a load at each position. C2 folds this constant.
     static final boolean X86_WITH_64_BYTE_VECTORS = AVAILABLE && X86 && PreferredSpecies.length() == 64;
 
     // Whether C2 compiles this JVM's vector code with SVE and a 16-byte preferred byte vector, as
@@ -81,6 +90,38 @@ final class VectorSupport
     static int preferredByteLanes()
     {
         return PreferredSpecies.length();
+    }
+
+    /// Returns whether the CPU has AVX-512 VBMI, whose byte permute moves 64 byte lanes in one
+    /// instruction; without it, C2 emulates that permute in many. HotSpot has no flag for it, so
+    /// on Linux the first call reads the first `flags` line of `/proc/cpuinfo`, once. Every other
+    /// OS, and a file that cannot be read or has no flags line, reports false. Call it only on
+    /// x86 with 64-byte vectors, so other JVMs never read the file.
+    static boolean hasAvx512Vbmi()
+    {
+        return "Linux".equals(System.getProperty("os.name")) && CpuInfoFlags.AVX512_VBMI;
+    }
+
+    /// Returns whether the first `flags` line of `/proc/cpuinfo` text lists AVX-512 VBMI, reading
+    /// no further than that line; text without one, false.
+    static boolean cpuInfoListsAvx512Vbmi(BufferedReader cpuInfo)
+            throws IOException
+    {
+        for (String line = cpuInfo.readLine(); line != null; line = cpuInfo.readLine()) {
+            int colon = line.indexOf(':');
+            if (colon >= 0 && "flags".equals(line.substring(0, colon).trim())) {
+                return flagsListAvx512Vbmi(line.substring(colon + 1));
+            }
+        }
+        return false;
+    }
+
+    /// Returns whether a `/proc/cpuinfo` flags list, the text after a `flags` line's colon, holds
+    /// the whole token `avx512vbmi`, the kernel's name for AVX-512 VBMI, which has no underscore.
+    /// The lookalike `avx512_vbmi2` names VBMI2, another extension, and alone does not count.
+    private static boolean flagsListAvx512Vbmi(String flags)
+    {
+        return List.of(flags.trim().split("\\s+")).contains("avx512vbmi");
     }
 
     private static boolean isX86(String arch)
@@ -135,6 +176,27 @@ final class VectorSupport
         {
             HotSpotDiagnosticMXBean diagnostics = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
             return Integer.parseInt(diagnostics.getVMOption("UseSVE").getValue()) > 0;
+        }
+    }
+
+    // Loaded only on Linux, by a gate that has already found x86 with 64-byte vectors, so other
+    // JVMs never read /proc/cpuinfo.
+    private static final class CpuInfoFlags
+    {
+        static final boolean AVX512_VBMI = readAvx512Vbmi();
+
+        private CpuInfoFlags() {}
+
+        private static boolean readAvx512Vbmi()
+        {
+            try (BufferedReader cpuInfo = Files.newBufferedReader(Path.of("/proc/cpuinfo"), ISO_8859_1)) {
+                return cpuInfoListsAvx512Vbmi(cpuInfo);
+            }
+            catch (IOException | RuntimeException ignored) {
+                // A file that cannot be read keeps the per-position nibble scan rather than
+                // failing this class's initialization.
+                return false;
+            }
         }
     }
 }

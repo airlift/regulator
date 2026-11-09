@@ -43,6 +43,20 @@ final class VectorByteSetScanner
     // than 16 bytes were not measured. C2 folds this constant, so the scan compiles one form.
     private static final boolean TWO_EXACT_LITERALS_XOR = VectorSupport.SVE_128 || VectorSupport.X86_WITH_64_BYTE_VECTORS;
 
+    // Whether the nibble scan of three to eight groups takes one load per step and moves the
+    // later positions' bits into place, rather than a load at each position. Only under
+    // VectorSupport.X86_WITH_64_BYTE_VECTORS, which names the hosts measured and unmeasured, and
+    // with AVX-512 VBMI, as on r8i, where one vpermb for each later position moves its bits and
+    // rows the scan serves took 0.89x to 1.00x the sliding scan's time, against up to 1.078x of
+    // it with a load at each position. Without VBMI, as on Cascade Lake (r5), C2 emulates the
+    // permute, and the one-load form took up to 1.13x main's time on rows the per-position form
+    // held at 0.99x to 1.03x of main's, so x86 without VBMI keeps a load at each position.
+    // VectorSupport.hasAvx512Vbmi reads VBMI on Linux only; x86 on other OSes is unmeasured and
+    // keeps a load at each position, as do NEON, AVX2, and SVE, 512-bit SVE's 64-byte vectors
+    // included. "Start Literal Filter" in REGULATOR_DECISIONS.md records the measurements. C2
+    // folds this constant, so the scan compiles one form.
+    private static final boolean ONE_LOAD_NIBBLES = VectorSupport.X86_WITH_64_BYTE_VECTORS && VectorSupport.hasAvx512Vbmi();
+
     private VectorByteSetScanner() {}
 
     /// Returns the number of short scans in a row after a scan that skipped `skippedBytes`, given
@@ -224,9 +238,10 @@ final class VectorByteSetScanner
     // matches at all three of its positions. For two groups, each vector step loads three
     // vectors, ORs each once with its position's mask, and checks both groups against those
     // three, by compare and AND or, under VectorSupport.SVE_128, by XOR distance; a filter without
-    // masks skips the ORs and picks its form by TWO_EXACT_LITERALS_XOR. For more, each step loads
-    // the three vectors and looks up every group's bit for each position by nibble; the high
-    // nibbles take the shift VectorSupport.SHIFT_NIBBLES_AS_SHORTS selects.
+    // masks skips the ORs and picks its form by TWO_EXACT_LITERALS_XOR. For more, each step
+    // looks up every group's bit for each position by nibble, from a load at each position or,
+    // under ONE_LOAD_NIBBLES, from one load; the high nibbles take the shift
+    // VectorSupport.SHIFT_NIBBLES_AS_SHORTS selects.
     //
     // A two-group filter without masks first checks the start with the filter's scalar compare
     // and returns it when accepted, before its scan broadcasts the six probes: in a run of dense
@@ -249,7 +264,7 @@ final class VectorByteSetScanner
                 }
                 yield TWO_EXACT_LITERALS_XOR ? findTwoExactLiteralsXor(data, offset, length, filter) : findTwoExactLiterals(data, offset, length, filter);
             }
-            case 4, 8 -> findLiteralNibbles(data, offset, length, filter);
+            case 4, 8 -> ONE_LOAD_NIBBLES ? findLiteralNibblesOneLoad(data, offset, length, filter) : findLiteralNibbles(data, offset, length, filter);
             default -> throw new IllegalArgumentException("literal filter width must be two, four, or eight");
         };
     }
@@ -395,8 +410,9 @@ final class VectorByteSetScanner
     // copy for the three-input AND that C2 fuses it into. Each step loads a vector at each of the
     // three positions rather than shifting the first two positions' bits in from the previous
     // step's, as the Rust crate's Teddy does, since each such shift costs a lane permute and a
-    // blend. The loads overlap, and the third ends before the end.
-    private static int findLiteralNibbles(byte[] data, int offset, int length, StartLiteralFilter filter)
+    // blend. The loads overlap, and the third ends before the end. The one-load form is
+    // findLiteralNibblesOneLoad; keep the two in step.
+    static int findLiteralNibbles(byte[] data, int offset, int length, StartLiteralFilter filter)
     {
         byte[] tables = filter.nibbleTables();
         int tableBytes = StartLiteralFilter.NIBBLE_TABLE_BYTES;
@@ -432,6 +448,52 @@ final class VectorByteSetScanner
                     .and(second.selectFrom(secondLow).and(secondHighNibbles.selectFrom(secondHigh)))
                     .and(third.selectFrom(thirdLow).and(thirdHighNibbles.selectFrom(thirdHigh)));
             VectorMask<Byte> matches = groupBits.compare(VectorOperators.NE, (byte) 0);
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+        return filter.find(data, position, end - position);
+    }
+
+    // findLiteralNibbles in the form ONE_LOAD_NIBBLES selects, as Hyperscan's AVX-512 VBMI Teddy
+    // scans: each step loads one vector at the first position, looks up all three positions'
+    // bits from it, and moves the second and third positions' bits down by their distance from
+    // the first with one lane permute each. The permute indexes wrap, so a lane whose third byte
+    // lies past the vector reads another lane's bits; the compare skips those lanes, and each
+    // step advances by the lanes it checked. The third position is at most eleven bytes past the
+    // first, within StartLiteralFilter.PATH_POSITIONS, so a step advances at least the vector's
+    // lanes less eleven, 53 at the 64 lanes this form runs on. It is a separate method because
+    // both forms in one body would exceed C2's 325-byte limit for inlining a hot method.
+    static int findLiteralNibblesOneLoad(byte[] data, int offset, int length, StartLiteralFilter filter)
+    {
+        byte[] tables = filter.nibbleTables();
+        int tableBytes = StartLiteralFilter.NIBBLE_TABLE_BYTES;
+        ByteVector firstLow = ByteVector.fromArray(SPECIES, tables, 0);
+        ByteVector firstHigh = ByteVector.fromArray(SPECIES, tables, tableBytes);
+        ByteVector secondLow = ByteVector.fromArray(SPECIES, tables, 2 * tableBytes);
+        ByteVector secondHigh = ByteVector.fromArray(SPECIES, tables, 3 * tableBytes);
+        ByteVector thirdLow = ByteVector.fromArray(SPECIES, tables, 4 * tableBytes);
+        ByteVector thirdHigh = ByteVector.fromArray(SPECIES, tables, 5 * tableBytes);
+        int firstOffset = filter.firstOffset();
+        int secondDistance = filter.secondOffset() - firstOffset;
+        int thirdDistance = filter.thirdOffset() - firstOffset;
+        ByteVector secondLanes = ByteVector.zero(SPECIES).addIndex(1).add((byte) secondDistance);
+        ByteVector thirdLanes = ByteVector.zero(SPECIES).addIndex(1).add((byte) thirdDistance);
+        int step = SPECIES.length() - thirdDistance;
+        VectorMask<Byte> checkedLanes = SPECIES.indexInRange(0, step);
+        int end = offset + length;
+        // The load must end before the end; the last checked lane's third byte is its last byte.
+        int vectorEnd = end - firstOffset - SPECIES.length();
+        int position = offset;
+        for (; position <= vectorEnd; position += step) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, data, position + firstOffset);
+            ByteVector highNibbles = VectorSupport.SHIFT_NIBBLES_AS_SHORTS
+                    ? bytes.reinterpretAsShorts().lanewise(VectorOperators.LSHR, 4).reinterpretAsBytes()
+                    : bytes.lanewise(VectorOperators.LSHR, 4);
+            ByteVector groupBits = bytes.selectFrom(firstLow).and(highNibbles.selectFrom(firstHigh))
+                    .and(secondLanes.selectFrom(bytes.selectFrom(secondLow).and(highNibbles.selectFrom(secondHigh))))
+                    .and(thirdLanes.selectFrom(bytes.selectFrom(thirdLow).and(highNibbles.selectFrom(thirdHigh))));
+            VectorMask<Byte> matches = groupBits.compare(VectorOperators.NE, (byte) 0, checkedLanes);
             if (matches.anyTrue()) {
                 return position + matches.firstTrue();
             }

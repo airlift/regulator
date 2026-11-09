@@ -697,8 +697,10 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
 ### Start literal filter
 
 - **Origin:** Adapted from Hyperscan's Teddy, by way of the aho-corasick crate
-  ([teddy][ac-teddy-readme]), for the nibble bucket lookup, and from the Rust
-  regex crate's three-byte rule ([teddy.rs][ra-teddy]); First described by V8
+  ([teddy][ac-teddy-readme]), for the nibble bucket lookup, from Hyperscan's
+  AVX-512 VBMI Teddy for one load per step whose later positions' bits a byte
+  permute moves into place ([teddy.c][hs-teddy-vbmi]), and from the Rust regex
+  crate's three-byte rule ([teddy.rs][ra-teddy]); First described by V8
   irregexp for merging literals that differ in a bit through a mask
   ([jsregexp.cc][v8-quick-check]), by Muła (2016) for comparing a needle's
   bytes at two offsets and ANDing the masks ([simd-strfind][mula-strfind]),
@@ -722,8 +724,9 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   `VectorByteSetScanner.findTwoLiterals`,
   `VectorByteSetScanner.findTwoExactLiterals`,
   `VectorByteSetScanner.findLiteralNibbles`,
+  `VectorByteSetScanner.findLiteralNibblesOneLoad`,
   `StartLiteralFilter.buildNibbleTables`,
-  `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`
+  `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`, `VectorSupport.hasAvx512Vbmi`
 - **Applies when:** Vector API; in the DFA, vector scanning from 1 KiB and
   scalar filtering on shorter windows, except filters selected only for vector
   scans; the literal alternation matcher from 64 bytes. The DFA adopts the
@@ -731,7 +734,9 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   start-byte scan's and the start set has at most 16 bytes; a start set with
   estimated English frequency below 5% also needs more than three start bytes
   that are not one range, or at most two groups and 64-byte vectors. The nibble
-  kernel needs 16 to 64 lanes
+  kernel needs 16 to 64 lanes; its one-load form needs Linux x86 with 64-byte
+  vectors whose first `/proc/cpuinfo` flags line lists `avx512vbmi`
+  (`VectorByteSetScanner.ONE_LOAD_NIBBLES`)
 - **What it does:** For at most eight groups of leading literals of three or
   more bytes, the filter tests three positions per group at once and stops
   only where all three fit some group, a superset of the literals' starts; the
@@ -748,7 +753,13 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   With 3 to 8 groups, two nibble lookups per position give
   every group's bit at once; each step loads one vector at each of the three
   positions, and on x86 takes high nibbles with a 16-bit lane shift instead of
-  a byte shift. Rust, RE2, and
+  a byte shift. The one-load form instead loads one vector at the first
+  position and moves the second and third positions' bits into place with one
+  byte permute each, which takes Intel `sherlock-casei-ru` to 0.89 to 0.90 and
+  `tom-sawyer-huckle-fin-insensitive` to 0.95 of the sliding scan's time, a
+  scan that loaded only the third position and shifted the other positions'
+  bits in from the previous step. Other hosts keep a load at each position:
+  without VBMI, as on Cascade Lake, the permute is emulated. Rust, RE2, and
   Java `name-alt4-casei` and `name-alt5-casei` and Rust and RE2 `sherlock-ru`
   take 0.13 to 0.24 of their earlier time on Graviton and 0.05 to 0.15 on
   Intel ([#89]).
@@ -2396,6 +2407,7 @@ change is described.
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
 [hs-teddy-shift]: https://github.com/intel/hyperscan/blob/v5.4.2/src/fdr/teddy.c#L927-L953
+[hs-teddy-vbmi]: https://github.com/intel/hyperscan/blob/v5.4.2/src/fdr/teddy.c#L218-L234
 [hs-vermicelli]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/vermicelli.h#L463-L516
 [jdk-arraylist]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/ArrayList.java
 [jdk-cowal]: https://github.com/openjdk/jdk/blob/jdk-21-ga/src/java.base/share/classes/java/util/concurrent/CopyOnWriteArrayList.java
