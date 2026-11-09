@@ -349,11 +349,11 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
                 new RejectedPattern("65 words", Language.TRINO, words, 9_227, 9_227, 1, 2_000),
                 new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_843, 269_843, 1_000, 200_000),
-                new RejectedPattern(Language.TRINO, fixedWidth, 9_613, 9_613, 1, 2_000),
+                new RejectedPattern(Language.TRINO, fixedWidth, 9_625, 9_625, 1, 2_000),
                 new RejectedPattern(Language.RE2, fixedWidth, 161_867, 161_867, 1, 2_000),
                 // 255 copies of a class of supplementary code points need more instructions than
                 // any program holds, but Trino's fixed-width matcher compiles them.
-                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 793_525, 793_525, 2_000),
+                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 793_537, 793_537, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
                 new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_846, 1),
                 new RejectedPattern(Language.SET, List.of("foo"), 4_846, 4_846, 2_000),

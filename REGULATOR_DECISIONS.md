@@ -1811,7 +1811,7 @@ Trino pattern on its fixed-width subtype otherwise keeps no program, and the
 search needs one, so a pattern whose `maxMemory` leaves no room for its program
 keeps the matcher and compiles wherever the matcher fits. Where the program fits
 but neither the search nor the matcher fits beside it, as for `[a-z]shing` from
-2567 to 2797 bytes, the pattern also keeps the matcher on the route without a
+2567 to 2821 bytes, the pattern also keeps the matcher on the route without a
 program.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
@@ -1915,17 +1915,41 @@ Preferring the ASCII digit of `[0-9][^\n]{10}[а-я]` over its Cyrillic letter
 keeps that pattern as fast as the engine on Russian text; scanning the letter
 took 1.3-2.1x the time.
 
-Such a pattern, its short-search matcher included, yields to the engine where
-the engine has its own scan: when the program skips to a literal prefix, when a
-forward DFA would search a start literal filter, or, for a candidate with bytes
-above ASCII, when the class-run counter takes the pattern. Without the first
-two, `(?i)Шерлок Холмс` on Russian text took 89-234x the engine's time, since
-its filter's three bytes stop far less often than every Cyrillic lead byte;
-without the third, `[а-я]{5}` on Russian took 2.9-3.1x and `[一-龥]{3}` on
-Chinese 1.32-1.34x the counter's time. Trino compiles its program to decide the
-order, as every language does, and keeps none only on its fixed-width subtype,
-for a pattern whose candidate never bails; every operation of a pattern that
-keeps none runs the matcher.
+When neither an ASCII singleton scan nor a rare candidate applies, a pattern
+such as `\w{5}\s\w{6}\s\w{7}`, whose positions all read one byte, tests every
+start of a 64-byte block at once instead, the Shift-And idea turned so that a
+word's bits are text positions, as Hyperscan's Teddy shifts the classified
+block for each of a literal's first one to four bytes by that byte's offset.
+The Vector API builds one word per distinct class, a bit for each byte of the
+block the class holds, from at most four byte ranges or the complement of at
+most four; each position's word is shifted down by the position's offset, the
+next block's word supplying the bits past the block, and the AND of them holds
+the block's match starts, which a count takes from the lowest, skipping each
+start inside the match before it. The search needs the Vector API, a pattern
+at most 64 positions wide, and two to four distinct classes, and takes a
+pattern only when the product of its positions' English byte probabilities
+estimates a start probability of at most 1/64: the block costs its words and
+one shift and AND for each position whatever the text holds. In UTF-8 it takes
+only ASCII classes, which no byte above ASCII joins, so a search needs no
+fallback on such bytes or on malformed input. Rust's Unicode `\w` and `\s`
+hold characters above ASCII, so that form of the pattern keeps the engine. It
+yields to the engine scans below, as a rare candidate does. Counts and rebar's
+count-spans (sums of matched lengths) of that pattern take 0.21-0.26 of their
+earlier time on r8i and 0.27-0.39 on r9g, and rebar's
+`hyperscan/fixed-length-words-nosom` and `hyperscan/fixed-length-words-som`
+rows go from 0.66-0.69 of the Rust regex crate's time to 0.17-0.22.
+
+A pattern the matcher takes, its short-search matcher included, yields to the
+engine where the engine has its own scan: when the program skips to a literal
+prefix, when a forward DFA would search a start literal filter, or, for a
+candidate with bytes above ASCII, when the class-run counter takes the pattern.
+Without the first two, `(?i)Шерлок Холмс` on Russian text took 89-234x the
+engine's time, since its filter's three bytes stop far less often than every
+Cyrillic lead byte; without the third, `[а-я]{5}` on Russian took 2.9-3.1x and
+`[一-龥]{3}` on Chinese 1.32-1.34x the counter's time. Trino compiles its program
+to decide the order, as every language does, and keeps none only on its
+fixed-width subtype, for a pattern whose search never bails; every operation of
+a pattern that keeps none runs the matcher.
 
 A candidate with bytes above ASCII can be dense in text of another script, so a
 search, one find or one whole count, that has failed on at least 64 candidates
@@ -3325,6 +3349,12 @@ least the bounds' difference by unsigned maximum, subtracts that difference,
 ORs the offsets, and compares once with zero, where the other form compares
 each offset's distance unsigned and ANDs the masks.
 
+The block class words of the
+[fixed-width block search](#fixed-width-rare-class-candidates) take the same
+key, `membersSve` in place of `members`, and the r9g counts that put the whole
+search at 0.27-0.39 of its earlier time ran the SVE form, as perfasm showed in
+`membersSve`, but the two forms were never measured against each other.
+
 In each scan both forms find the same candidates. The x86 CI builds run the
 compare forms, and the arm64 CI build runs the suite with the XOR forms and
 fails if they are not selected.
@@ -3727,7 +3757,7 @@ describes; the class filter replaces only the start set's own scan. A
 fixed-width pattern does not yield to it: unlike the start literal filter, it
 is not among the engine routes the
 [fixed-width matcher](#fixed-width-rare-class-candidates) yields to, since the
-matcher's rare candidate already replaces the plain start scan.
+matcher's rare candidate or block search already replaces the plain start scan.
 
 On rebar mariomka/ip the filter counts 3.2-3.5 times faster than the start set's
 own scan on r9g and 4.3-4.6 times on r8i. Checking only a pair gives 3.0-3.4 and

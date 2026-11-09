@@ -134,6 +134,14 @@ public final class VectorScannerProbe
         check(nibbleAlternation.contains(utf8Slice("-".repeat(100) + "zinc" + "-".repeat(10))), "xray|yoke|zinc|hymn: find failed");
         check((nibbleAlternation.literalAlternationSpanMatcher().filterStopCountForDiagnostics() > 0) == expectedVectorScans, "xray|yoke|zinc|hymn: unexpected route");
 
+        // The fixed-width matcher tests every start of a 64-byte block of \w{5}\s\w{6}\s\w{7} at
+        // once only with the Vector API; without it, the engine keeps the pattern.
+        Re2 words = Re2.compile(utf8Slice("\\w{5}\\s\\w{6}\\s\\w{7}"));
+        check(words.hasRetainedFixedWidthByteSpanMatcher() == expectedVectorScans, "\\w{5}\\s\\w{6}\\s\\w{7}: unexpected route");
+        Slice wordText = utf8Slice(("-".repeat(64) + "abcde abcdef abcdefg").repeat(3));
+        check(words.count(wordText) == 3, "\\w{5}\\s\\w{6}\\s\\w{7}: count failed");
+        check(words.find(wordText), "\\w{5}\\s\\w{6}\\s\\w{7}: find failed");
+
         System.out.printf("OK %s%n", expectedVectorScans ? "vector" : "scalar");
     }
 
