@@ -152,10 +152,12 @@ public class TestPrefixProbeAcceleration
             assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
         }
         // In Trino, ffi is also the ffi ligature, the ff ligature and i, or f and the fi ligature.
-        // The first character outside ASCII ends the runs, read in the folded literal only when
-        // the literal needs a multi-character fold, as affidavit does.
+        // The first character outside ASCII ends the runs, read in the folded literal, where the
+        // Kelvin sign and the long s are k and s and take the leads k and s take.
         assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)affidavit")).re2(), "davit", 4, 5, 0, 2);
         assertThat(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u00E9clair")).re2().forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u212Aworld")).re2(), "world", 1, 3, 0, 4);
+        assertFoldedRun(TrinoRegexp.compile(Slices.utf8Slice("(?i)\u017Fworld")).re2(), "world", 1, 2, 0, 4);
     }
 
     @Test
@@ -167,10 +169,15 @@ public class TestPrefixProbeAcceleration
                 Re2.compile(Slices.utf8Slice("(?i)Sherlock Holmes")),
                 RustRegexp.compile(Slices.utf8Slice("Sherlock Holmes"), RustRegexp.Options.defaults().setCaseInsensitive(true)),
                 Re2.compile(Slices.utf8Slice("(?i)kiss the sky")),
-                RustRegexp.compile(Slices.utf8Slice("kiss the sky"), RustRegexp.Options.defaults().setCaseInsensitive(true)));
+                RustRegexp.compile(Slices.utf8Slice("kiss the sky"), RustRegexp.Options.defaults().setCaseInsensitive(true)),
+                // Trino literals spelled with the Kelvin sign and the long s, whose run lies
+                // behind a lead that takes any spelling of k or s.
+                TrinoRegexp.compile(Slices.utf8Slice("(?i)\u212Aworld")).re2(),
+                TrinoRegexp.compile(Slices.utf8Slice("(?i)\u017Fworld")).re2());
         List<String> texts = new ArrayList<>();
         texts.addAll(foldedRunTexts(List.of("Sherlock Holmes", "\u017Fherloc\u212A HOLME\u017F", "SHERLOCK holmes"), "Xherlock Holmes"));
         texts.addAll(foldedRunTexts(List.of("kiss the sky", "\u212Ai\u017F\u017F THE \u017F\u212Ay", "KISS the SKY"), "kis the sky"));
+        texts.addAll(foldedRunTexts(List.of("\u212AWORLD", "kworld", "\u017Fworld", "SWorld"), "xworld"));
         for (CompiledPattern pattern : patterns) {
             assertThat(pattern.forwardProgramForDiagnostics().prefixAccelMaximumLead()).as(pattern.pattern().toStringUtf8()).isPositive();
             RegexpMatcher anchored = pattern.matcher(Slices.EMPTY_SLICE);

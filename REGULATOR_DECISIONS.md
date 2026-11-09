@@ -2742,7 +2742,7 @@ members' widths in the program's encoding, and, in a Trino literal, stretches of
 characters whose orbits leave ASCII or that a multi-character fold covers, which
 take the widths their folds take. In a Trino literal, the first character
 outside ASCII ends the runs, read in the folded literal, where `ß` continues as
-`ss`, only when the literal needs a multi-character fold. A lead whose widths
+`ss` and the Kelvin sign and the long s are `k` and `s`. A lead whose widths
 differ by more than eight bytes also ends them. A case-sensitive ASCII letter
 also ends the runs, and a run must hold an ASCII letter: exact bytes are what
 inner literal search and the case-sensitive scans serve, and a run scan takes

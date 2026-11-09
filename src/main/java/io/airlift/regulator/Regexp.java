@@ -256,8 +256,8 @@ final class Regexp
     /// multi-character fold such as `ss` for `ß` covers, which take the widths their folds take.
     /// The walk stops at any other element and once the leads may differ by more than eight bytes.
     /// In a fully case-folded literal it also stops at the first character outside ASCII, read in
-    /// the folded literal, where `ß` continues as `ss`, only when the literal needs a
-    /// multi-character fold. Runs longer than nine bytes are split.
+    /// the folded literal, where `ß` continues as `ss` and the Kelvin sign and the long s are `k`
+    /// and `s`. Runs longer than nine bytes are split.
     List<FoldedRun> foldedRunsForAccel(CaseFolding caseFolding)
     {
         FoldedRunBuilder builder = new FoldedRunBuilder();
@@ -311,11 +311,12 @@ final class Regexp
     // simple fold orbit, and each multi-character fold whose folded characters the literal holds
     // also matches its sources in their place. A character whose orbit stays in ASCII and that no
     // such fold covers matches its ASCII cases at its own place, so it is a run byte; every path
-    // passes it, since no fold spans it.
+    // passes it, since no fold spans it. The walk reads the folded literal, in which the Kelvin
+    // sign is k and the long s is s, so they take the lead their orbits take, as k and s do.
     private static void addFullCaseFoldRuns(FoldedRunBuilder builder, int[] literalRunes, CaseFolding caseFolding)
     {
         boolean multiCharacter = caseFolding.requiresFullCaseFold(literalRunes);
-        int[] folded = multiCharacter ? caseFolding.fold(literalRunes) : literalRunes;
+        int[] folded = caseFolding.fold(literalRunes);
         boolean[] variable = new boolean[folded.length];
         for (int index = 0; index < folded.length; index++) {
             if (multiCharacter) {
