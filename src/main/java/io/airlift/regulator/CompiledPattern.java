@@ -18,7 +18,9 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.function.IntPredicate;
 
@@ -298,10 +300,11 @@ abstract sealed class CompiledPattern
     // The single-byte table of a one-byte pattern, which route selection builds when its memory
     // fits, or null. Group-zero matchers, the byte-table shape, and Trino share it.
     private final SingleByteMatcher singleByteMatcher;
-    // The bytes every match holds, checked on a short window before any engine runs, and for an
-    // exact literal with its long-window search on a long window too, or null. Not final only so
-    // that a frontend route can take back their memory before the frontend's pattern, whose final
-    // field publishes this one, is constructed.
+    // The bytes every match holds, checked on a short window before any engine runs, or null.
+    // Where the compile chose a long-window search, a long window is checked too: for the exact
+    // literal itself, or for a literal beside another literal route. Not final only so that a
+    // frontend route can take back their memory before the frontend's pattern, whose final field
+    // publishes this one, is constructed.
     private RequiredBytes requiredBytes;
 
     private volatile Prog reverseProg;
@@ -577,6 +580,7 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 null,
+                null,
                 true,
                 null);
     }
@@ -792,6 +796,7 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 null,
+                null,
                 false,
                 extendingLiterals);
         // Every operation runs on the set only where the set is the shape's route for find and
@@ -864,6 +869,7 @@ abstract sealed class CompiledPattern
                     0,
                     Map.of(),
                     compactBoundedCharacterClass,
+                    null,
                     null,
                     null,
                     false,
@@ -1201,6 +1207,7 @@ abstract sealed class CompiledPattern
                 parsed.capturingGroupNames(),
                 null,
                 requiredBytes,
+                normalizedSuffixRegexp,
                 finalLineEndOnePass,
                 false,
                 null);
@@ -1243,6 +1250,7 @@ abstract sealed class CompiledPattern
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass,
             RequiredBytes requiredBytes,
+            Regexp requiredBytesRegexp,
             Prog.OnePassTables finalLineEndOnePass,
             boolean fixedWidthWithoutProgram,
             LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals)
@@ -1311,8 +1319,9 @@ abstract sealed class CompiledPattern
         // matchers find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a
         // check ahead of the table would scan such a window twice. An exact literal of a pattern
         // with no other literal route takes its long-window search into the same charge, with the
-        // search-end bound's search where it has one. If the full charge does not fit, the bound
-        // is removed and the charge retried. If that fails, the pattern keeps only the
+        // search-end bound's search where it has one. A literal searched beside another literal
+        // route takes its long-window search without the bound. If the full charge does not fit,
+        // the bound is removed and the charge retried. If that fails, the pattern keeps only the
         // short-window check when eligible and affordable, and otherwise keeps no check. An inner
         // literal search is such a route unless only the class-run proof admits it.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
@@ -1322,10 +1331,25 @@ abstract sealed class CompiledPattern
         RequiredBytes reservedRequiredBytes = null;
         if (requiredBytes != null && singleByteMatcher == null) {
             RequiredBytes preferred = null;
-            if (requiredBytes.isExactLiteral() && checksRequiredLiteralOnLongWindows(booleanPlans, requiredPrefix, exactLiteralLength, partialProg, compactBoundedCharacterClass, matcherClass)) {
-                preferred = boundsSearchEnd(partialProg, booleanPlans.loweredProgram())
-                        ? requiredBytes.withLongWindowSearchAndBound()
-                        : requiredBytes.withLongWindowSearch();
+            if (mayCheckRequiredLiteralOnLongWindows(booleanPlans, requiredPrefix, exactLiteralLength, partialProg, compactBoundedCharacterClass, matcherClass)) {
+                if (requiredBytes.isExactLiteral() && checksRequiredLiteralOnLongWindows(booleanPlans, partialProg)) {
+                    preferred = boundsSearchEnd(partialProg, booleanPlans.loweredProgram())
+                            ? requiredBytes.withLongWindowSearchAndBound()
+                            : requiredBytes.withLongWindowSearch();
+                }
+                else {
+                    // A pattern with another literal route searches long windows for its rarest
+                    // exact literal that the route does not already search for, without the
+                    // search-end bound. Required bytes that are not an exact literal, of a
+                    // pattern with no such route, have no long-window search. The literal comes
+                    // first, so a pattern without one never builds the start-byte tables that
+                    // the route check may need. The short-window check keeps the required bytes
+                    // either way.
+                    byte[] literal = RequiredBytes.literalBesideRoutes(requiredBytesRegexp, routeLiterals(booleanPlans));
+                    if (literal != null && (requiredBytes.isExactLiteral() || !checksRequiredLiteralOnLongWindows(booleanPlans, partialProg))) {
+                        preferred = requiredBytes.withBesideRouteSearch(literal);
+                    }
+                }
             }
             // A literal of a pattern whose matches span at least the short-window limit serves
             // only the long-window check, so a pattern without that check keeps none.
@@ -1415,30 +1439,25 @@ abstract sealed class CompiledPattern
                 reservedRequiredBytes);
     }
 
-    /// Whether a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more is also checked for
-    /// the pattern's exact required literal before any engine runs. A match lies inside the
-    /// window, so a window without the literal holds none, in every language and search mode.
-    /// The check is left to a pattern whose engine reads the whole of a window that holds no
-    /// match, and which no other route already searches for a literal at least as fast. So the
-    /// pattern has no required prefix, exact literal, literal kernel or search, scan plan, class
-    /// counter, literal set or alternation, span, byte-run, word-run, or disjoint suffix-repeat
-    /// matcher, or whole-input capture plan, and no inner literal search but one that
-    /// [only the class-run proof adds][InnerLiteralSearch#addedByClassRunProof]. The pattern
-    /// decides as it would without such a search, so that proof neither adds the check to a
-    /// pattern nor takes it away.
-    /// Neither its forward nor its lowered program is anchored at either end, where the engine
-    /// can stop early, or has a prefix scan, a transparent start literal, or a start literal
-    /// filter that its first-match DFA can run. A program whose folded run stands in for no
-    /// prefix is judged as without the run: the run is no prefix scan, and the start literal
-    /// filter is the one its start bytes would carry; see [Prog#prefixRunAddsPrefixScan].
-    /// Whether the first-match DFA initializes is still judged on the program the search runs,
-    /// whose start-byte tables the run replaces, so in the few hundred bytes of budget between
-    /// the two programs' initialization charges the decision can differ from the program
-    /// without the run. Such a program has no transparent start literal either way, since that
-    /// needs an assertion before the first byte, where [Regexp#foldedRunsForAccel] stops. A
-    /// pattern with a single-byte table is not checked here: the caller keeps no required bytes
-    /// for it at all.
-    private static boolean checksRequiredLiteralOnLongWindows(
+    /// Whether a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more may be checked for a
+    /// required literal before any engine runs, by the pattern's exact literal or by a literal
+    /// beside another literal route; [#checksRequiredLiteralOnLongWindows] tells which. A match
+    /// lies inside the window, so a window without the literal holds none, in every language and
+    /// search mode. The check is left to a pattern whose engine reads the whole of a window that
+    /// holds no match. So the pattern has no required prefix, and neither its forward nor its
+    /// lowered program is anchored at either end, where the engine can stop early. It also has
+    /// none of the shapes whose routes answer without the ordinary engine: an exact literal, a
+    /// literal kernel or search, a class counter, a literal set or alternation, or a span,
+    /// byte-run, word-run, disjoint suffix-repeat, or whole-input capture matcher.
+    ///
+    /// Its inner literal search, if any, is for a literal that
+    /// [begins every match][InnerLiteralSearch#literalBeginsEveryMatch], which lands where a
+    /// match would start, as a prefix scan does, or one that
+    /// [only the class-run proof adds][InnerLiteralSearch#addedByClassRunProof]. Any other inner
+    /// literal search finds its literal inside a match, and already scans each window that
+    /// reaches it for that literal. Where nearly every line holds the other literal near its end,
+    /// a check for that literal beside the search doubles the scan and never rejects.
+    private static boolean mayCheckRequiredLiteralOnLongWindows(
             BooleanPlans booleanPlans,
             byte[] requiredPrefix,
             int exactLiteralLength,
@@ -1452,9 +1471,7 @@ abstract sealed class CompiledPattern
         return requiredPrefix == null && exactLiteralLength <= 0 &&
                 (find == BooleanPlanKind.GENERAL || find == BooleanPlanKind.LOWERED_PROGRAM) &&
                 compactBoundedCharacterClass == null && matcherClass == null &&
-                booleanPlans.scanPlan() == null &&
                 booleanPlans.literalSearch() == null &&
-                (innerLiteralSearch == null || innerLiteralSearch.addedByClassRunProof()) &&
                 booleanPlans.literalSet() == null &&
                 booleanPlans.literalAlternationMatcher() == null &&
                 booleanPlans.fixedWidthByteMatcher() == null &&
@@ -1463,11 +1480,66 @@ abstract sealed class CompiledPattern
                 booleanPlans.wordRunMatcher() == null &&
                 booleanPlans.disjointSuffixRepeatMatcher() == null &&
                 booleanPlans.wholeInputCapturePlan() == null &&
-                readsWholeWindowWithoutLiteralScan(partialProg) &&
-                (loweredProgram == null || readsWholeWindowWithoutLiteralScan(loweredProgram)) &&
+                !partialProg.anchorStart() && !partialProg.anchorEnd() &&
+                (loweredProgram == null || (!loweredProgram.anchorStart() && !loweredProgram.anchorEnd())) &&
+                (innerLiteralSearch == null || innerLiteralSearch.addedByClassRunProof() || innerLiteralSearch.literalBeginsEveryMatch());
+    }
+
+    /// Whether a pattern that [may check long windows][#mayCheckRequiredLiteralOnLongWindows]
+    /// has no other literal route that starts where a match starts, so that it checks long
+    /// windows for its own exact required literal. Such a route is a scan plan, an inner literal
+    /// search that the class-run proof does not alone add, or, in the forward or lowered
+    /// program, a prefix scan, a transparent start literal, or a start literal filter that its
+    /// first-match DFA can run. A pattern with one of those checks long windows for a literal
+    /// beside it instead; see [RequiredBytes#literalBesideRoutes]. The pattern decides as it
+    /// would without a search that only the class-run proof adds, so that proof neither adds the
+    /// check to a pattern nor takes it away.
+    ///
+    /// A program whose folded run stands in for no prefix is judged as without the run: the run
+    /// is no prefix scan, and the start literal filter is the one its start bytes would carry;
+    /// see [Prog#prefixRunAddsPrefixScan]. Whether the first-match DFA initializes is still
+    /// judged on the program the search runs, whose start-byte tables the run replaces, so in the
+    /// few hundred bytes of budget between the two programs' initialization charges the decision
+    /// can differ from the program without the run. Such a program has no transparent start
+    /// literal either way, since that needs an assertion before the first byte, where
+    /// [Regexp#foldedRunsForAccel] stops. A pattern with a single-byte table is not checked here:
+    /// the caller keeps no required bytes for it at all.
+    private static boolean checksRequiredLiteralOnLongWindows(BooleanPlans booleanPlans, Prog partialProg)
+    {
+        Prog loweredProgram = booleanPlans.loweredProgram();
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        return booleanPlans.scanPlan() == null &&
+                (innerLiteralSearch == null || innerLiteralSearch.addedByClassRunProof()) &&
+                !scansForStartLiteral(partialProg) &&
+                (loweredProgram == null || !scansForStartLiteral(loweredProgram)) &&
                 // Last, since it builds the start-byte tables.
                 !searchesStartLiteralFilter(partialProg) &&
                 (loweredProgram == null || !searchesStartLiteralFilter(loweredProgram));
+    }
+
+    // The literals that a pattern's route searches for, which the long-window check beside it
+    // does not search for again: the scan plan's literal, which is exact, and the literal of an
+    // inner literal search for one literal, with its fold masks where it is case-insensitive,
+    // unless only the class-run proof adds that search. A leading inner literal is usually among
+    // the start bytes too, but their collection can stop before it, as at the assertion
+    // alternation of `(?:\b|\B)Holmes.*?foobar`. The members of a literal set stay out: a search
+    // for `the` or `and` does not make a check for `the` redundant, since a window may hold `and`
+    // alone.
+    private static List<RequiredBytes.RouteLiteral> routeLiterals(BooleanPlans booleanPlans)
+    {
+        List<RequiredBytes.RouteLiteral> literals = new ArrayList<>();
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        if (innerLiteralSearch != null && !innerLiteralSearch.addedByClassRunProof()) {
+            byte[][] innerLiterals = innerLiteralSearch.literals();
+            if (innerLiterals.length == 1) {
+                literals.add(new RequiredBytes.RouteLiteral(innerLiterals[0], innerLiteralSearch.foldedMasks()));
+            }
+        }
+        ScanPlan scanPlan = booleanPlans.scanPlan();
+        if (scanPlan != null && scanPlan.requiredLiteral() != null) {
+            literals.add(new RequiredBytes.RouteLiteral(scanPlan.requiredLiteral(), null));
+        }
+        return literals;
     }
 
     // Whether `program` has a start literal filter that its first-match DFA can run. A program
@@ -1505,11 +1577,9 @@ abstract sealed class CompiledPattern
         return loweredProgram == null && !partialProg.hasDfaUnsupportedAssertions();
     }
 
-    private static boolean readsWholeWindowWithoutLiteralScan(Prog program)
+    private static boolean scansForStartLiteral(Prog program)
     {
-        return !program.anchorStart() && !program.anchorEnd() &&
-                (!program.canPrefixAccel() || program.prefixRunAddsPrefixScan()) &&
-                program.transparentStartLiteral() == null;
+        return (program.canPrefixAccel() && !program.prefixRunAddsPrefixScan()) || program.transparentStartLiteral() != null;
     }
 
     /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns

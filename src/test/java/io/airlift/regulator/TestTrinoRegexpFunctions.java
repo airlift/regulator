@@ -343,8 +343,8 @@ public class TestTrinoRegexpFunctions
 
         // A long leading literal whose first byte recurs keeps a prefix shift table, charged after
         // flattening, which can take enough of the remaining allowance to leave the matcher out.
-        // It keeps no required bytes: its matches span more than 256 bytes, too many for a short
-        // window, and its prefix scan keeps it from the long-window check.
+        // It keeps no required bytes, since its prefix scan leaves no literal to check beside it:
+        // the `a` run is its start bytes, and `b` is one byte.
         String literal = "a".repeat(320);
         TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
         assertThat(fallback.usesOrderedLiteralMatcherForDiagnostics()).isFalse();

@@ -511,12 +511,57 @@ final class InnerLiteralSearch
         return Arrays.stream(literalSet).map(byte[]::clone).toArray(byte[][]::new);
     }
 
+    /// The masks of a case-insensitive literal, `0x20` at each case-insensitive letter of its one
+    /// [#literals] member, or null for any other search.
+    byte[] foldedMasks()
+    {
+        return foldedMasks == null ? null : foldedMasks.clone();
+    }
+
     /// Whether only the class-run proof gives the pattern an inner literal search: without that
     /// proof, [#analyze] returns none. Such a pattern checks long windows for its required literal
     /// just as it would without the search; see `CompiledPattern.checksRequiredLiteralOnLongWindows`.
     boolean addedByClassRunProof()
     {
         return addedByClassRunProof;
+    }
+
+    /// Whether every match begins with the literal: the prefix before it matches only the empty
+    /// string, as the word boundary before `the` in `\bthe\b.*?,z` does, so the prefix consumes
+    /// no byte, and its reverse program reaches no byte instruction. A hit then lands where a
+    /// match would start, as a prefix scan's does, and not inside a match, as the hit for `,` in
+    /// `\w+,\bz` does; see `CompiledPattern.mayCheckRequiredLiteralOnLongWindows`.
+    boolean literalBeginsEveryMatch()
+    {
+        Prog program = reversePrefixProgram;
+        boolean[] visited = new boolean[program.size()];
+        // Each instruction is visited once and pushes at most three others, after the start.
+        int[] stack = new int[3 * program.size() + 1];
+        int stackPointer = 0;
+        stack[stackPointer++] = program.start();
+        while (stackPointer > 0) {
+            int instructionId = stack[--stackPointer];
+            if (instructionId <= 0 || instructionId >= program.size() || visited[instructionId]) {
+                continue;
+            }
+            visited[instructionId] = true;
+            Prog.Inst instruction = program.inst(instructionId);
+            if (instruction.opcode() == InstOp.BYTE_RANGE) {
+                return false;
+            }
+            if (!instruction.last()) {
+                stack[stackPointer++] = instructionId + 1;
+            }
+            switch (instruction.opcode()) {
+                case ALT, ALT_MATCH -> {
+                    stack[stackPointer++] = instruction.out1();
+                    stack[stackPointer++] = instruction.out();
+                }
+                case CAPTURE, EMPTY_WIDTH, NOP -> stack[stackPointer++] = instruction.out();
+                default -> {}
+            }
+        }
+        return true;
     }
 
     /// The bytes the byte before the literal and the byte after it must be one of, each as a
@@ -676,8 +721,9 @@ final class InnerLiteralSearch
     /// Whether the search is for one literal without case-insensitive letters and `[start, end)`
     /// of `text` lacks it. Every match holds that literal, so such a window holds no match. A
     /// route that skips the search scans for the literal in its place, since a pattern with a
-    /// search the class-run proof does not [add][#addedByClassRunProof] skips the long-window
-    /// check.
+    /// search the class-run proof does not [add][#addedByClassRunProof] never checks long windows
+    /// for this literal: such a search inside a match keeps the pattern from the long-window
+    /// check, and one for a literal that begins every match checks only for a literal beside it.
     boolean windowLacksLiteral(Slice text, int start, int end)
     {
         return literalSearch != null && foldedBytes == null && nextLiteral(text, start, end) < 0;
