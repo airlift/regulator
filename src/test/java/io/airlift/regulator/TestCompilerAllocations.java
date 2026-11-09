@@ -24,6 +24,7 @@ import java.lang.management.MemoryMXBean;
 import java.lang.ref.Reference;
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
@@ -79,6 +80,61 @@ public class TestCompilerAllocations
 
         assertThat(analysis.literalSequence().exactLiteral()).isEqualTo(utf8Slice("y".repeat(500) + "x".repeat(50_000)));
         assertThat(allocatedBytes).isLessThan(64_000_000);
+    }
+
+    @Test
+    public void testAlternationsNestedInSingleCountsFlattenOnce()
+    {
+        // Parsing keeps x{1} in every language but Rust, so it cannot flatten an alternation
+        // nested in one. Simplification drops the count, and it flattened such a chain by copying
+        // every level below at each level, and merged a class growing level after level again at
+        // each. Rust's parser factors the first pattern below into alternations of empty matches
+        // nested as deep, which simplification flattened the same way. At 4,000 levels, every
+        // compile but Rust's of the flags and code-point patterns, which Rust's parser already
+        // flattens, allocated 3.5 to 13 KB per pattern byte; flattened once, about 200 to 600
+        // bytes per pattern byte.
+        record Chain(String pattern, String deepest) {}
+
+        record Language(String name, Function<Slice, CompiledPattern> compile) {}
+
+        int depth = 4_000;
+        StringBuilder flagLevels = new StringBuilder();
+        StringBuilder runeLevels = new StringBuilder();
+        for (int level = 0; level < depth; level++) {
+            String flags = (level % 2 == 0) ? "i" : "-i";
+            flagLevels.append("zz|(?").append(flags).append(":a){1}|(?").append(flags).append(":b){1}|zz|(?").append(flags).append(":");
+            runeLevels.append("\\x{").append(Integer.toHexString(0x100 + 2 * level)).append("}|(?:");
+        }
+        String closes = "){1}".repeat(depth);
+        List<Chain> chains = List.of(
+                // Alternatives that stay apart.
+                new Chain("aa|(?:".repeat(depth) + "bb" + closes, "bb"),
+                // Literals whose flags differ from their own alternation's but match the enclosing
+                // one's, which merges them.
+                new Chain(flagLevels + "bb" + closes, "bb"),
+                // A class that takes in one more code point at each level.
+                new Chain(runeLevels + "x" + closes, "x"));
+        List<Language> languages = List.of(
+                new Language("RE2", Re2::compile),
+                new Language("Java", JavaRegexp::compile),
+                new Language("Trino", pattern -> TrinoRegexp.compile(pattern).re2()),
+                new Language("Rust", pattern -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setNestLimit(10 * depth))));
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        long threadId = Thread.currentThread().threadId();
+        for (Language language : languages) {
+            // A first compile loads and initializes the classes the language's compile uses, so
+            // that only the compile itself is measured.
+            assertThat(language.compile().apply(utf8Slice(chains.getFirst().pattern()))).isNotNull();
+            for (Chain chain : chains) {
+                Slice slice = utf8Slice(chain.pattern());
+                long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+                CompiledPattern compiled = language.compile().apply(slice);
+                long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+                String description = language.name() + " " + chain.pattern().substring(0, 20);
+                assertThat(allocatedBytes).as(description).isLessThan(1_000L * slice.length());
+                assertThat(compiled.matches(utf8Slice(chain.deepest()))).as(description).isTrue();
+            }
+        }
     }
 
     @Test

@@ -45,7 +45,7 @@ import static java.lang.Math.min;
 //
 // CharClassBuilder builds flat classes, this class does the set algebra across bracket levels,
 // and the simplifier's PendingClass is a merged class that grows while it is compared for
-// equality.
+// equality, or in full simplification one that only grows.
 final class RuneRangeSet
 {
     // A set at most this many times as heavy as the other set of an operation is combined

@@ -183,61 +183,75 @@ final class Simplifier
                 ConcatBuilder builder = new ConcatBuilder(caseFolding);
                 yield addConcatChildrenRecursive(builder, regexp, mode, budget, caseFolding, depth) ? builder.build(flags, regexp) : Regexp.noMatch(flags);
             }
-            case ALTERNATE -> (mode == Mode.PARSE)
-                    ? toRegexp(simplifyAlternativeForParse(regexp, caseFolding, depth, false))
-                    : simplifyAlternateRecursive(mode, budget, caseFolding, flags, regexp, depth);
+            case ALTERNATE -> toRegexp(simplifyAlternative(regexp, mode, budget, caseFolding, depth, false));
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
 
-    // Simplifies an alternative of a parse-mode alternation. The result may be pending (see
-    // PendingAlternation): an alternation leaves its factored alternatives unbuilt for the
-    // enclosing alternation, and so does a concatenation whose one pending child has only empty
-    // matches around it, directly or through nested concatenations.
-    private static Object simplifyAlternativeForParse(Regexp regexp, CaseFolding caseFolding, int depth, boolean pending)
+    // Simplifies an alternative of an alternation. The result may be pending: an alternation
+    // leaves its alternatives unbuilt for the enclosing alternation, factored in parse mode (see
+    // PendingAlternation) and flattened in full mode (see FlatAlternation). A concatenation whose
+    // one pending child has only empty matches around it, directly or through nested
+    // concatenations, passes that child through, and so does a full-mode x{1}.
+    private static Object simplifyAlternative(Regexp regexp, Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int depth, boolean pending)
     {
+        if (neverMatches(budget, regexp)) {
+            return neverMatchingResult(regexp);
+        }
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return new SimplifyWalker(Mode.PARSE, null, caseFolding).walk(regexp, pending ? SimplifyWalker.PENDING_PARENT : null);
+            return new SimplifyWalker(mode, budget, caseFolding).walk(regexp, pending ? SimplifyWalker.PENDING_PARENT : null);
         }
         int flags = regexp.parseFlags();
         if (regexp.op() == RegexpOp.ALTERNATE) {
             List<Object> children = new ArrayList<>(regexp.childCount());
             for (Regexp child : regexp.children()) {
-                children.add(simplifyAlternativeForParse(child, caseFolding, depth + 1, true));
+                children.add(simplifyAlternative(child, mode, budget, caseFolding, depth + 1, true));
             }
-            return simplifyAlternateForParse(caseFolding, flags, children, pending);
+            return (mode == Mode.PARSE)
+                    ? simplifyAlternateForParse(caseFolding, flags, children, pending)
+                    : simplifyAlternateForFull(caseFolding, flags, children, pending);
         }
         if (regexp.op() == RegexpOp.CONCAT) {
             PendingConcat concat = new PendingConcat(caseFolding);
-            if (!addConcatChildrenForParse(concat, regexp, caseFolding, depth)) {
+            if (!addAlternativeConcatChildren(concat, regexp, mode, budget, caseFolding, depth)) {
                 return Regexp.noMatch(flags);
             }
             return concat.build(flags, regexp);
         }
-        return simplifyRecursive(regexp, Mode.PARSE, null, caseFolding, depth + 1);
+        if (isSingleCopy(mode, regexp)) {
+            return simplifyAlternative(regexp.child(0), mode, budget, caseFolding, depth + 1, pending);
+        }
+        return simplifyRecursive(regexp, mode, budget, caseFolding, depth + 1);
     }
 
     // Adds the simplified children of a concatenation in an alternative, as
-    // addConcatChildrenRecursive does, except that alternations and concatenations may stay
-    // pending.
-    private static boolean addConcatChildrenForParse(PendingConcat concat, Regexp regexp, CaseFolding caseFolding, int depth)
+    // addConcatChildrenRecursive does, except that a child simplifyAlternative leaves pending
+    // stays pending.
+    private static boolean addAlternativeConcatChildren(PendingConcat concat, Regexp regexp, Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int depth)
     {
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
             Regexp child = regexp.child(childIndex);
             if (child.op() == RegexpOp.CONCAT && depth + 1 < MAX_RECURSIVE_DEPTH) {
                 concat.builder.beginNested();
-                if (!addConcatChildrenForParse(concat, child, caseFolding, depth + 1)) {
+                if (!addAlternativeConcatChildren(concat, child, mode, budget, caseFolding, depth + 1)) {
                     return false;
                 }
                 concat.builder.endNested();
             }
-            else if (!concat.add((child.op() == RegexpOp.ALTERNATE || child.op() == RegexpOp.CONCAT)
-                    ? simplifyAlternativeForParse(child, caseFolding, depth + 1, true)
-                    : simplifyRecursive(child, Mode.PARSE, null, caseFolding, depth + 1))) {
+            else if (!concat.add((child.op() == RegexpOp.ALTERNATE || child.op() == RegexpOp.CONCAT || isSingleCopy(mode, child))
+                    ? simplifyAlternative(child, mode, budget, caseFolding, depth + 1, true)
+                    : simplifyRecursive(child, mode, budget, caseFolding, depth + 1))) {
                 return false;
             }
         }
         return true;
+    }
+
+    // Full simplification turns x{1} into x itself, whatever x is: it charges the expansion
+    // nothing and caps no count, so a pending x passes through it.
+    private static boolean isSingleCopy(Mode mode, Regexp regexp)
+    {
+        return mode != Mode.PARSE && regexp.op() == RegexpOp.REPEAT && regexp.min() == 1 && regexp.max() == 1;
     }
 
     // A concatenation in an alternative, built from simplified children that may be pending.
@@ -281,8 +295,8 @@ final class Simplifier
     }
 
     // Values are simplified regexps, except that a concatenation directly inside another one
-    // yields a NestedConcat, which the enclosing concatenation adds in place, and that parse-mode
-    // alternations and their alternatives may yield pending values (see PendingAlternation).
+    // yields a NestedConcat, which the enclosing concatenation adds in place, and that
+    // alternations and their alternatives may yield pending values (see simplifyAlternative).
     private static final class SimplifyWalker
             extends RegexpWalker<Object>
     {
@@ -316,7 +330,6 @@ final class Simplifier
         }
 
         @Override
-        @SuppressWarnings("unchecked")
         protected Object postVisit(Regexp regexp, Object parentValue, Object preValue, List<Object> simplifiedChildren)
         {
             if (neverMatches(budget, regexp)) {
@@ -353,9 +366,15 @@ final class Simplifier
                 case STAR -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.STAR, regexp);
                 case PLUS -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.PLUS, regexp);
                 case QUEST -> simplifyUnary(flags, toRegexp(simplifiedChildren.getFirst()), UnaryOp.QUEST, regexp);
-                case REPEAT -> discardsChild(mode, regexp)
-                        ? simplifyZeroRepeat(flags, regexp)
-                        : simplifyRepeat(mode, budget, caseFolding, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
+                case REPEAT -> {
+                    if (discardsChild(mode, regexp)) {
+                        yield simplifyZeroRepeat(flags, regexp);
+                    }
+                    if (isSingleCopy(mode, regexp)) {
+                        yield simplifiedChildren.getFirst();
+                    }
+                    yield simplifyRepeat(mode, budget, caseFolding, flags, regexp, toRegexp(simplifiedChildren.getFirst()));
+                }
                 case CONCAT -> {
                     Object lone = loneValue(simplifiedChildren);
                     if (parentValue instanceof Regexp parent && parent.op() == RegexpOp.CONCAT) {
@@ -366,21 +385,19 @@ final class Simplifier
                     }
                     yield simplifyConcat(flags, regexp, simplifiedChildren, caseFolding);
                 }
-                // Only a concatenation's children can be nested concatenations, and full mode never
-                // produces pending values, so the cast is safe.
                 case ALTERNATE -> (mode == Mode.PARSE)
                         ? simplifyAlternateForParse(caseFolding, flags, simplifiedChildren, takesPending(parentValue))
-                        : simplifyAlternate(caseFolding, flags, (List<Regexp>) (List<?>) simplifiedChildren);
+                        : simplifyAlternateForFull(caseFolding, flags, simplifiedChildren, takesPending(parentValue));
                 case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
             };
         }
 
         // An alternation stays pending where an enclosing alternation may take it over, directly
-        // or through a concatenation that passes it through.
-        private static boolean takesPending(Object parentValue)
+        // or through a concatenation or, in full mode, an x{1} that passes it through.
+        private boolean takesPending(Object parentValue)
         {
             return parentValue == PENDING_PARENT ||
-                    (parentValue instanceof Regexp parent && (parent.op() == RegexpOp.ALTERNATE || parent.op() == RegexpOp.CONCAT));
+                    (parentValue instanceof Regexp parent && (parent.op() == RegexpOp.ALTERNATE || parent.op() == RegexpOp.CONCAT || isSingleCopy(mode, parent)));
         }
 
         // Returns EMPTY when every child is an empty match, the lone pending value when every
@@ -505,7 +522,9 @@ final class Simplifier
             return Regexp.concat(flags, repeatedChildren);
         }
 
-        // Special case: x{1} is just x.
+        // Special case: x{1} is just x. isSingleCopy relies on this case staying free, with no
+        // charge to the expansion budget, and uncapped, so full simplification can skip this
+        // method for x{1}.
         if (min == 1 && max == 1) {
             return childRegexp;
         }
@@ -1121,12 +1140,11 @@ final class Simplifier
             if (simplifiedAlternatives.size() == 1) {
                 return simplifiedAlternatives.getFirst();
             }
-            int flagsWithoutFoldCase = flags & ~Regexp.FOLD_CASE;
             List<Summary> merged = new ArrayList<>(simplifiedAlternatives.size());
             int alternativeIndex = 0;
             while (alternativeIndex < simplifiedAlternatives.size()) {
                 int scanIndex = alternativeIndex;
-                while (scanIndex < simplifiedAlternatives.size() && mergeable(simplifiedAlternatives.get(scanIndex), flags, flagsWithoutFoldCase)) {
+                while (scanIndex < simplifiedAlternatives.size() && mergeable(simplifiedAlternatives.get(scanIndex), flags)) {
                     scanIndex++;
                 }
                 if (scanIndex - alternativeIndex < 2) {
@@ -1146,7 +1164,7 @@ final class Simplifier
                 if (!charge(2 * mergedRanges)) {
                     return NO_MATCH;
                 }
-                Regexp mergedClass = mergeAlternateCharClassesWherePossible(caseFolding, flags, run).getFirst();
+                Regexp mergedClass = FlatAlternation.mergeRun(flags, run, caseFolding);
                 if (mergedClass.op() == RegexpOp.CHAR_CLASS) {
                     mergedClasses.add(mergedClass);
                 }
@@ -1172,9 +1190,9 @@ final class Simplifier
             return new Summary(Kind.ALTERNATE, add(instructions, Math.max(0, matching - 1)), nullable, noMatch, assertions, null, merged, null, flags, null);
         }
 
-        private static boolean mergeable(Summary summary, int flags, int flagsWithoutFoldCase)
+        private static boolean mergeable(Summary summary, int flags)
         {
-            return summary.kind() == Kind.LEAF && mergeableAlternateSub(summary.leaf(), flags, flagsWithoutFoldCase);
+            return summary.kind() == Kind.LEAF && FlatAlternation.admits(summary.leaf(), flags);
         }
 
         private Summary leaf(Regexp leaf)
@@ -1664,58 +1682,283 @@ final class Simplifier
         return regexp.op() == RegexpOp.LITERAL || regexp.op() == RegexpOp.LITERAL_STRING;
     }
 
-    private static Regexp simplifyAlternate(CaseFolding caseFolding, int flags, List<Regexp> children)
+    /// Simplifies a full-mode alternation: flattens child alternations, drops the children that
+    /// never match, and merges each run of two or more literals and classes that the
+    /// alternation's flags admit into one class, as [FlatAlternation] describes. When pending, the
+    /// alternatives stay a list, so an enclosing alternation takes them over without copying them.
+    /// A lone class that the merges built stays a list of one too, so an enclosing alternation can
+    /// merge it further without building it.
+    private static Object simplifyAlternateForFull(CaseFolding caseFolding, int flags, List<Object> children, boolean pending)
     {
-        List<Regexp> simplifiedAlternatives = new ArrayList<>();
-        for (Regexp simplifiedChild : children) {
-            if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
-                continue;
-            }
-            if (simplifiedChild.op() == RegexpOp.ALTERNATE) {
-                simplifiedAlternatives.addAll(simplifiedChild.children());
-            }
-            else {
-                simplifiedAlternatives.add(simplifiedChild);
+        FlatAlternation alternation = new FlatAlternation(flags);
+        for (Object child : children) {
+            switch (child) {
+                case Regexp regexp when regexp.op() == RegexpOp.NO_MATCH -> {}
+                case Regexp regexp when regexp.op() == RegexpOp.ALTERNATE -> {
+                    for (Regexp alternative : regexp.children()) {
+                        alternation.add(alternative);
+                    }
+                }
+                case Regexp regexp -> alternation.add(regexp);
+                case FlatAlternation childAlternation -> alternation.addAll(childAlternation);
+                default -> throw new IllegalArgumentException("not a simplified alternative: " + child);
             }
         }
-
-        return simplifyAlternatives(caseFolding, flags, simplifiedAlternatives);
-    }
-
-    private static Regexp simplifyAlternatives(CaseFolding caseFolding, int flags, List<Regexp> simplifiedAlternatives)
-    {
-        if (simplifiedAlternatives.isEmpty()) {
+        alternation.mergeRuns(caseFolding);
+        if (alternation.size == 0) {
             return Regexp.noMatch(flags);
         }
-        if (simplifiedAlternatives.size() == 1) {
-            return simplifiedAlternatives.getFirst();
+        if (pending && (alternation.size > 1 || alternation.first.alternative instanceof PendingClass)) {
+            return alternation;
         }
-
-        List<Regexp> merged = mergeAlternateCharClassesWherePossible(caseFolding, flags, simplifiedAlternatives);
-        if (merged.size() == 1) {
-            return merged.getFirst();
-        }
-
-        return Regexp.alternate(flags, merged);
+        return alternation.toRegexp();
     }
 
-    private static Regexp simplifyAlternateRecursive(Mode mode, ExpansionBudget budget, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
+    /// The alternatives of a full-mode alternation, kept as a linked list rather than built into a
+    /// Regexp node, so that an enclosing alternation can take them over.
+    ///
+    /// An alternation takes its child alternations' alternatives as its own, and merges each
+    /// maximal run of the literals and classes its flags admit: a literal with exactly the
+    /// alternation's flags, and a class with the alternation's flags or with them with FOLD_CASE
+    /// cleared. A nested chain such as `a|(?:b|(?:c|...){1}){1}`, which parsing cannot flatten
+    /// through the counts, would copy and rescan every level below at each level. But the merges
+    /// are local: two neighbors are in one run only if each admits the alternation's flags, a
+    /// literal admitting one flags value and a class at most two. So when two literals or classes
+    /// become neighbors, the list records the first of them under each flags value both admit, and
+    /// an alternation merges only the runs through the pairs recorded under its own flags. Every
+    /// run of two or more has such a pair, and the merges leave no pair under those flags, since a
+    /// run takes in every neighbor that admits them. A merged class keeps its ranges in a
+    /// [PendingClass], so a class that grows at each level is not copied at each.
+    private static final class FlatAlternation
     {
-        List<Regexp> simplifiedAlternatives = new ArrayList<>();
-        for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, mode, budget, caseFolding, depth + 1);
-            if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
-                continue;
-            }
-            if (simplifiedChild.op() == RegexpOp.ALTERNATE) {
-                simplifiedAlternatives.addAll(simplifiedChild.children());
+        private final int flags;
+        private FlatNode first;
+        private FlatNode last;
+        private int size;
+        // The left node of each pair of neighbors that would merge under a flags value, by that
+        // value. Entries go stale once a merge removes their node. Allocated when the first pair
+        // is recorded.
+        private Map<Integer, List<FlatNode>> pairs;
+        // The number of nodes recorded in pairs, stale ones included, so addAll can add the smaller
+        // set of pairs to the larger.
+        private int pairCount;
+
+        private FlatAlternation(int flags)
+        {
+            this.flags = flags;
+        }
+
+        void add(Regexp alternative)
+        {
+            FlatNode node = new FlatNode(alternative);
+            if (last == null) {
+                first = node;
             }
             else {
-                simplifiedAlternatives.add(simplifiedChild);
+                last.next = node;
+                node.previous = last;
+                addPairs(last);
+            }
+            last = node;
+            size++;
+        }
+
+        // Takes over the child's list and its recorded pairs, adding the smaller set of pairs to
+        // the larger.
+        void addAll(FlatAlternation child)
+        {
+            if (child.pairCount > pairCount) {
+                Map<Integer, List<FlatNode>> smaller = pairs;
+                pairs = child.pairs;
+                pairCount = child.pairCount;
+                child.pairs = smaller;
+            }
+            if (child.pairs != null) {
+                for (Map.Entry<Integer, List<FlatNode>> entry : child.pairs.entrySet()) {
+                    for (FlatNode left : entry.getValue()) {
+                        addPair(entry.getKey(), left);
+                    }
+                }
+            }
+            if (last == null) {
+                first = child.first;
+            }
+            else {
+                last.next = child.first;
+                child.first.previous = last;
+                addPairs(last);
+            }
+            last = child.last;
+            size += child.size;
+        }
+
+        // Merges each run that has a pair recorded under this alternation's flags.
+        void mergeRuns(CaseFolding caseFolding)
+        {
+            List<FlatNode> lefts = (pairs == null) ? null : pairs.remove(flags);
+            if (lefts == null) {
+                return;
+            }
+            pairCount -= lefts.size();
+            for (FlatNode left : lefts) {
+                // A merge can have removed the pair, or replaced its right neighbor. The left node
+                // still admits these flags unless it was merged: a node is filed only under flags
+                // it admits, and its alternative never changes until it is merged.
+                if (left.merged || !admits(left.next.alternative, flags)) {
+                    continue;
+                }
+                FlatNode start = left;
+                while (start.previous != null && admits(start.previous.alternative, flags)) {
+                    start = start.previous;
+                }
+                FlatNode end = left.next;
+                while (end.next != null && admits(end.next.alternative, flags)) {
+                    end = end.next;
+                }
+                merge(start, end, caseFolding);
             }
         }
 
-        return simplifyAlternatives(caseFolding, flags, simplifiedAlternatives);
+        // The alternative an alternation with these flags merges a run of two or more it admits into.
+        static Regexp mergeRun(int flags, List<Regexp> run, CaseFolding caseFolding)
+        {
+            FlatAlternation alternation = new FlatAlternation(flags);
+            run.forEach(alternation::add);
+            alternation.merge(alternation.first, alternation.last, caseFolding);
+            return alternation.toRegexp();
+        }
+
+        // Replaces the run from start to end with one class, or the literal or wildcard it
+        // simplifies to. Upstream RE2 has no such merge, so each member keeps the meaning it has
+        // alone: a literal adds what CharClassBuilder.addRangeFlags adds for it under
+        // literalMergeFlags, and a class, which already holds its folded ranges whatever the
+        // alternation's flags, adds its ranges. The members' order does not change the union, so
+        // the largest pending class takes in the others.
+        private void merge(FlatNode start, FlatNode end, CaseFolding caseFolding)
+        {
+            PendingClass merged = null;
+            for (FlatNode node = start; node != end.next; node = node.next) {
+                if (node.alternative instanceof PendingClass pendingClass && (merged == null || pendingClass.rangeCount() > merged.rangeCount())) {
+                    merged = pendingClass;
+                }
+            }
+            if (merged == null) {
+                merged = new PendingClass();
+            }
+            int count = 0;
+            for (FlatNode node = start; node != end.next; node = node.next) {
+                node.merged = true;
+                count++;
+                switch (node.alternative) {
+                    case PendingClass pendingClass -> {
+                        if (pendingClass != merged) {
+                            merged.addRanges(pendingClass);
+                        }
+                    }
+                    case Regexp regexp when regexp.op() == RegexpOp.LITERAL -> merged.addRunes(regexp, caseFolding);
+                    case Regexp regexp when regexp.op() == RegexpOp.CHAR_CLASS -> merged.addRanges(regexp.charClass());
+                    default -> throw new IllegalArgumentException("not a mergeable alternative: " + node.alternative);
+                }
+            }
+            merged.removeAbove(Regexp.maxRune(flags));
+
+            // Only a class of one or two ranges can simplify to a literal or a wildcard.
+            Object alternative;
+            if (merged.rangeCount() > 2) {
+                merged.flags = flags;
+                alternative = merged;
+            }
+            else {
+                alternative = simplifyCharClass(Mode.FULL, flags, merged.toCharClass(), null);
+            }
+            FlatNode node = new FlatNode(alternative);
+            node.previous = start.previous;
+            node.next = end.next;
+            if (node.previous == null) {
+                first = node;
+            }
+            else {
+                node.previous.next = node;
+                addPairs(node.previous);
+            }
+            if (node.next == null) {
+                last = node;
+            }
+            else {
+                node.next.previous = node;
+                addPairs(node);
+            }
+            size -= count - 1;
+        }
+
+        // Records the pair of left and its next neighbor under each flags value both admit.
+        private void addPairs(FlatNode left)
+        {
+            int leftFlags;
+            switch (left.alternative) {
+                case PendingClass pendingClass -> leftFlags = pendingClass.flags;
+                case Regexp regexp when regexp.op() == RegexpOp.LITERAL || regexp.op() == RegexpOp.CHAR_CLASS -> leftFlags = regexp.parseFlags();
+                default -> {
+                    return;
+                }
+            }
+            if (admits(left.next.alternative, leftFlags)) {
+                addPair(leftFlags, left);
+            }
+            // A class also admits its flags with FOLD_CASE; a literal never admits those.
+            int foldedFlags = leftFlags | Regexp.FOLD_CASE;
+            if (foldedFlags != leftFlags && admits(left.alternative, foldedFlags) && admits(left.next.alternative, foldedFlags)) {
+                addPair(foldedFlags, left);
+            }
+        }
+
+        private void addPair(int pairFlags, FlatNode left)
+        {
+            if (pairs == null) {
+                pairs = new HashMap<>();
+            }
+            pairs.computeIfAbsent(pairFlags, _ -> new ArrayList<>()).add(left);
+            pairCount++;
+        }
+
+        // Whether an alternation with these flags merges the alternative into a class.
+        private static boolean admits(Object alternative, int flags)
+        {
+            return switch (alternative) {
+                case PendingClass pendingClass -> pendingClass.flags == flags || pendingClass.flags == (flags & ~Regexp.FOLD_CASE);
+                case Regexp regexp when regexp.op() == RegexpOp.LITERAL -> regexp.parseFlags() == flags;
+                case Regexp regexp when regexp.op() == RegexpOp.CHAR_CLASS -> regexp.parseFlags() == flags || regexp.parseFlags() == (flags & ~Regexp.FOLD_CASE);
+                default -> false;
+            };
+        }
+
+        // A list of one alternative stands for that alternative.
+        Regexp toRegexp()
+        {
+            if (size == 1) {
+                return Simplifier.toRegexp(first.alternative);
+            }
+            List<Regexp> alternatives = new ArrayList<>(size);
+            for (FlatNode node = first; node != null; node = node.next) {
+                alternatives.add(Simplifier.toRegexp(node.alternative));
+            }
+            return Regexp.alternate(flags, alternatives);
+        }
+    }
+
+    private static final class FlatNode
+    {
+        // A Regexp, or a PendingClass standing for the class a merge built.
+        private final Object alternative;
+        private FlatNode previous;
+        private FlatNode next;
+        // Whether a merge replaced this alternative.
+        private boolean merged;
+
+        private FlatNode(Object alternative)
+        {
+            this.alternative = alternative;
+        }
     }
 
     /// Simplifies a parse-mode alternation: flattens child alternations, collapses scalar
@@ -2158,11 +2401,13 @@ final class Simplifier
         }
     }
 
-    /// A class that round 3 merged, kept as a set of ranges until a Regexp node is needed. A list's
-    /// end class can take in another literal at each enclosing level, and building a Regexp node
-    /// each time would copy the class at each level. The set keeps its rune count and ASCII letters
-    /// current, so comparing it with a class of another size costs nothing, and with one of its size
-    /// no more than that class's ranges.
+    /// A class that round 3 or a full-mode merge built, kept as a set of ranges until a Regexp node
+    /// is needed. A list's end class can take in another literal at each enclosing level, and
+    /// building a Regexp node each time would copy the class at each level. Round 3 keeps it with
+    /// its alternation's flags with FOLD_CASE cleared. A full-mode merge keeps it with the
+    /// alternation's flags, and keeps it pending only when it has more than two ranges. The set
+    /// keeps its rune count and ASCII letters current, so comparing it with a class of another size
+    /// costs nothing, and with one of its size no more than that class's ranges.
     private static final class PendingClass
             implements Factorable
     {
@@ -2179,6 +2424,10 @@ final class Simplifier
         // ASCII A-Z and a-z coverage bitmasks (bit 0 = 'A'/'a').
         private int upper;
         private int lower;
+        // The flags its node is built with. Round 3 sets its alternation's flags with FOLD_CASE
+        // cleared, the flags its own runes are added under when round 3 merges it again. A
+        // full-mode merge sets its alternation's flags, which admits and addPairs read as a class
+        // node's flags.
         private int flags;
 
         int rangeCount()
@@ -2228,9 +2477,35 @@ final class Simplifier
             }
         }
 
-        // Merging this class again adds what CharClassBuilder.addRangeFlags would add for its own
-        // ranges under its flags. Round 3 clears FOLD_CASE from them, so that is the class without
-        // a newline it may not hold, and under ASCII_FOLD_CASE with the other case of its letters.
+        // Adds a class's ranges as they are, as a full-mode merge does.
+        void addRanges(CharClass charClass)
+        {
+            for (RuneRange runeRange : charClass.rangeView()) {
+                addRange(runeRange.low(), runeRange.high());
+            }
+        }
+
+        void addRanges(PendingClass other)
+        {
+            other.ranges.forEach(this::addRange);
+        }
+
+        void removeAbove(int runeLimit)
+        {
+            while (!ranges.isEmpty() && ranges.lastKey() > runeLimit) {
+                removeRange(ranges.lastEntry());
+            }
+            Map.Entry<Integer, Integer> last = ranges.lastEntry();
+            if (last != null && last.getValue() > runeLimit) {
+                removeRange(last);
+                putRange(last.getKey(), runeLimit);
+            }
+        }
+
+        // When round 3 merges this class again, it adds what CharClassBuilder.addRangeFlags would
+        // add for the class's own ranges under its flags; a full-mode merge adds them as they are.
+        // Round 3 clears FOLD_CASE from those flags, so that is the class without a newline it may
+        // not hold, and under ASCII_FOLD_CASE with the other case of its letters.
         void addOwnRunesUnderFlags()
         {
             if (excludesNewline(flags)) {
@@ -2421,6 +2696,8 @@ final class Simplifier
         return switch (value) {
             case Regexp regexp -> regexp;
             case PendingAlternation alternation -> alternation.toRegexp();
+            case FlatAlternation alternation -> alternation.toRegexp();
+            case PendingClass pendingClass -> pendingClass.toRegexp();
             case Factorable alternative -> build(alternative);
             default -> throw new IllegalArgumentException("not a simplified value: " + value);
         };
@@ -2514,67 +2791,6 @@ final class Simplifier
             }
         }
         return original != null ? original : Regexp.charClass(flags, charClass);
-    }
-
-    private static List<Regexp> mergeAlternateCharClassesWherePossible(CaseFolding caseFolding, int flags, List<Regexp> alternatives)
-    {
-        ArrayList<Regexp> mergedAlternatives = new ArrayList<>(alternatives.size());
-
-        int flagsWithoutFoldCase = flags & ~Regexp.FOLD_CASE;
-        int alternativeIndex = 0;
-        while (alternativeIndex < alternatives.size()) {
-            Regexp alternative = alternatives.get(alternativeIndex);
-
-            if (!mergeableAlternateSub(alternative, flags, flagsWithoutFoldCase)) {
-                mergedAlternatives.add(alternative);
-                alternativeIndex++;
-                continue;
-            }
-
-            CharClassBuilder mergedClassBuilder = new CharClassBuilder();
-            int scanIndex = alternativeIndex;
-            int count = 0;
-            while (scanIndex < alternatives.size()) {
-                Regexp scanAlternative = alternatives.get(scanIndex);
-                if (!mergeableAlternateSub(scanAlternative, flags, flagsWithoutFoldCase)) {
-                    break;
-                }
-                // Upstream RE2 has no such merge, so each member keeps the meaning it has alone. A
-                // class already holds its folded ranges, whatever the alternation's flags.
-                if (scanAlternative.op() == RegexpOp.LITERAL) {
-                    addLiteral(mergedClassBuilder, scanAlternative, caseFolding);
-                }
-                else {
-                    for (RuneRange runeRange : scanAlternative.charClass().ranges()) {
-                        mergedClassBuilder.addRange(runeRange.low(), runeRange.high());
-                    }
-                }
-                count++;
-                scanIndex++;
-            }
-
-            if (count >= 2) {
-                mergedClassBuilder.removeAbove(Regexp.maxRune(flags));
-                mergedAlternatives.add(simplifyCharClass(Mode.FULL, flags, mergedClassBuilder.toCharClass(), null));
-            }
-            else {
-                mergedAlternatives.add(alternative);
-            }
-            alternativeIndex = scanIndex;
-        }
-
-        return mergedAlternatives;
-    }
-
-    private static boolean mergeableAlternateSub(Regexp alternative, int flags, int flagsWithoutFoldCase)
-    {
-        if (alternative.op() == RegexpOp.LITERAL) {
-            return alternative.parseFlags() == flags;
-        }
-        if (alternative.op() == RegexpOp.CHAR_CLASS) {
-            return alternative.parseFlags() == flags || alternative.parseFlags() == flagsWithoutFoldCase;
-        }
-        return false;
     }
 
     /// Factors common prefixes out of an alternation in three rounds, as upstream parse.cc does:
@@ -2844,11 +3060,6 @@ final class Simplifier
         }
         merged.flags = flags & ~Regexp.FOLD_CASE;
         return merged;
-    }
-
-    private static void addLiteral(CharClassBuilder builder, Regexp literal, CaseFolding caseFolding)
-    {
-        builder.addRangeFlags(literal.rune(), literal.rune(), literalMergeFlags(literal), caseFolding);
     }
 
     // The compiler matches a literal folded without full case folding, the form [Kk] simplifies
