@@ -43,9 +43,10 @@ public class TestOptionalScanKernel
         try {
             runProbe(List.of("-Xlog:class+load=info:file=" + classLoadLog));
             String loadedClasses = Files.readString(classLoadLog);
-            // The probe loads the vector scanner unless its preferred vector is outside the supported
-            // 16-to-64-lane range.
-            assertThat(loadedClasses.contains("io.airlift.regulator.VectorScanner source:")).isEqualTo(PreferredVectorLengthProbe.expectVectorScans());
+            // The vector scanners need a preferred vector of 16 to 64 lanes.
+            assertThat(loadedClasses.contains("io.airlift.regulator.VectorScanner source:"))
+                    .as("VectorScanner loads exactly when vector scanning is supported")
+                    .isEqualTo(PreferredVectorLengthProbe.expectVectorScans());
             assertThat(loadedClasses)
                     .contains("io.airlift.regulator.ScanPlan source:")
                     .contains("io.airlift.regulator.TrinoLikePattern source:")
@@ -129,6 +130,7 @@ public class TestOptionalScanKernel
     {
         List<String> command = new ArrayList<>();
         command.add(System.getProperty("java.home") + "/bin/java");
+        command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.addAll(options);
         command.add("--add-modules");
         command.add("jdk.incubator.vector");

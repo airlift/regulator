@@ -71,6 +71,9 @@ public class TestOptionalVectorPrefixScanner
             List<String> command = new ArrayList<>();
             command.add(System.getProperty("java.home") + "/bin/java");
             command.add("-Xlog:class+load=info:file=" + classLoadLog);
+            // The probe runs at this JVM's vector width, such as that of CI's 8-byte build. Those
+            // options come first, so a test's own `-XX:MaxVectorSize=8` wins over them.
+            command.addAll(TestingJvmArguments.vectorWidthOptions());
             command.addAll(jvmArguments);
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));

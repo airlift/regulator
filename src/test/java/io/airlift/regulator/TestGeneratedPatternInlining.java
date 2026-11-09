@@ -629,6 +629,7 @@ public class TestGeneratedPatternInlining
         Path vmLog = directory.resolve("vm.log");
         List<String> command = new ArrayList<>();
         command.add(System.getProperty("java.home") + "/bin/java");
+        command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.add("--add-modules");
         command.add("jdk.incubator.vector");
         // Compile in the foreground, and keep the probe's driver interpreted so C2 compiles each

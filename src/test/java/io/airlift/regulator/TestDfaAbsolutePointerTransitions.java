@@ -65,6 +65,8 @@ public class TestDfaAbsolutePointerTransitions
         if (enableNativeAccess) {
             command.add("--enable-native-access=ALL-UNNAMED");
         }
+        // The probe's checks depend on whether vectors are available.
+        command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.add("-Dio.airlift.regulator.dfa.pointer-reader-probe=true");
         command.add("--illegal-native-access=deny");
         command.add("--add-modules");
