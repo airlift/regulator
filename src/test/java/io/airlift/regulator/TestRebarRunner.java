@@ -279,7 +279,8 @@ class TestRebarRunner
                 .hasSize(expectedCounts.length);
         for (int index = 0; index < expectedCounts.length; index++) {
             String[] fields = samples.get(index).split(",");
-            assertThat(Long.parseLong(fields[0])).isPositive();
+            // A sample of a few bytes can finish within one tick of a coarse clock, so its duration may be zero.
+            assertThat(Long.parseLong(fields[0])).isNotNegative();
             assertThat(Long.parseLong(fields[1])).isEqualTo(expectedCounts[index]);
         }
     }
