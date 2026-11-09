@@ -70,6 +70,9 @@ final class BoundedCharacterClassCounter
     private final boolean[] memberStartBytes;
     private final byte[] memberStartByteNibbleTables;
     private final int minimum;
+    // The fewest bytes a match spans. The minimum times a member's shortest encoding. Every
+    // reading of a member, malformed ones included, takes at least that many bytes.
+    private final int minimumBytes;
     private final int maximum;
     // The run length at which `findSpan` stops testing membership: the maximum, or, for an
     // unbounded repeat of a UTF-8 class holding every character or every scalar value, the minimum,
@@ -95,6 +98,7 @@ final class BoundedCharacterClassCounter
         memberStartBytes = null;
         memberStartByteNibbleTables = null;
         minimum = 0;
+        minimumBytes = 0;
         maximum = 0;
         decidedRunLength = 0;
         readsBytes = false;
@@ -129,6 +133,9 @@ final class BoundedCharacterClassCounter
         memberStartBytes = buildMemberStartBytes(ranges, readsBytes);
         memberStartByteNibbleTables = VectorSupport.isAvailable() ? buildMemberStartByteNibbleTables(memberStartBytes) : null;
         this.minimum = minimum;
+        // The ranges are sorted, so the first low end has the shortest encoding.
+        int memberBytes = latin1 ? 1 : Utf8.encodedLength(Math.max(0, ranges[0].low()));
+        this.minimumBytes = (int) Math.min(Integer.MAX_VALUE, (long) minimum * memberBytes);
         this.maximum = maximum;
         this.decidedRunLength = maximum == -1 && matchesEveryCharacter ? minimum : maximum;
         this.readsBytes = readsBytes;
@@ -386,8 +393,7 @@ final class BoundedCharacterClassCounter
     // loops are in `countBytes`, `countUtf8`, and `countDecoded`.
     long count(Slice input)
     {
-        // Every code point takes at least one byte, so an input shorter than the minimum can hold no match.
-        if (input.length() < minimum) {
+        if (input.length() < minimumBytes) {
             return 0;
         }
         byte[] bytes = input.byteArray();
@@ -642,6 +648,9 @@ final class BoundedCharacterClassCounter
     /// the run's end.
     boolean contains(Slice input)
     {
+        if (input.length() < minimumBytes) {
+            return false;
+        }
         byte[] bytes = input.byteArray();
         int position = input.byteArrayOffset();
         int end = position + input.length();

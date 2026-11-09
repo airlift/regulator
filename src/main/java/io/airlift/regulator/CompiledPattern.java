@@ -262,6 +262,12 @@ abstract sealed class CompiledPattern
     private final byte[] requiredPrefix;
     private final boolean requiredPrefixFoldCase;
     private final int matchLength;
+    // The fewest bytes a searched span can have and still hold a match, and an upper bound on
+    // them, from the whole expression: its minimum length, which counts a required prefix, and
+    // ExpressionAnalysis.maximumSpanLength. A search of a span outside them fails before any
+    // engine runs.
+    private final int minimumSpanLength;
+    private final int maximumSpanLength;
     // Every match is one character as the program reads it, as for \pL or (?s:.).
     private final boolean singleCharacterMatch;
     private final int exactLiteralLength;
@@ -313,6 +319,8 @@ abstract sealed class CompiledPattern
         this.requiredPrefix = analysis.requiredPrefix();
         this.requiredPrefixFoldCase = analysis.requiredPrefixFoldCase();
         this.matchLength = analysis.matchLength();
+        this.minimumSpanLength = expressionAnalysis.length().minimum();
+        this.maximumSpanLength = expressionAnalysis.maximumSpanLength();
         this.singleCharacterMatch = requiredPrefix == null && matchesOneUtf8Character(suffixRegexp);
         this.exactLiteralLength = analysis.exactLiteralLength();
         this.partialProg = requireNonNull(analysis.partialProg(), "partialProg is null");
@@ -399,6 +407,8 @@ abstract sealed class CompiledPattern
         this.requiredPrefix = pattern.requiredPrefix;
         this.requiredPrefixFoldCase = pattern.requiredPrefixFoldCase;
         this.matchLength = pattern.matchLength;
+        this.minimumSpanLength = pattern.minimumSpanLength;
+        this.maximumSpanLength = pattern.maximumSpanLength;
         this.singleCharacterMatch = pattern.singleCharacterMatch;
         this.exactLiteralLength = pattern.exactLiteralLength;
         this.booleanPlans = pattern.booleanPlans;
@@ -2010,7 +2020,7 @@ abstract sealed class CompiledPattern
     {
         Prog prog = partialProg;
         int length = text.length();
-        if (length < MINIMUM_LENGTH_CHECK_LIMIT && length < minimumMatchLength()) {
+        if ((length < MINIMUM_LENGTH_CHECK_LIMIT && length < minimumMatchLength()) || length > maximumSpanLength) {
             return false;
         }
         byte[] anchoredStartBytes = prog.anchoredStartBytes();
@@ -2028,10 +2038,25 @@ abstract sealed class CompiledPattern
         return matchOnOrdinaryEngine(prog, text, 0, length, 0, length, Anchor.UNANCHORED, groups, matcher);
     }
 
-    /// Returns the fewest bytes any match spans, or 0 when it can be empty.
+    /// Returns the fewest bytes any match of the compiled suffix spans, or 0 when it can be empty.
+    /// It leaves out a stripped required prefix, which the whole expression's minimum counts.
     int minimumMatchLength()
     {
         return MatchLength.minimum(matchLength);
+    }
+
+    /// Returns the fewest bytes a searched span can have and still hold a match, counting a
+    /// stripped required prefix.
+    int minimumSpanLength()
+    {
+        return minimumSpanLength;
+    }
+
+    /// Returns an upper bound on the bytes a searched span can have and still hold a match, or
+    /// [Integer#MAX_VALUE] where no maximum is known; see [ExpressionAnalysis#maximumSpanLength()].
+    int maximumSpanLength()
+    {
+        return maximumSpanLength;
     }
 
     /// Whether `[start, end)` of `input` is shorter than the required bytes'
@@ -2360,10 +2385,18 @@ abstract sealed class CompiledPattern
     }
 
     /// Runs the attempt of a start-anchored plan: the partial or end-anchored executor, ASCII-folded
-    /// or not, as the plan's facts pick. Each executor is too large for C2 to inline, so this
-    /// static selector keeps their calls out of the routes that use it.
-    private static boolean matchStartAnchoredScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
+    /// or not, as the plan's facts pick, after rejecting a context too long to hold a match of a
+    /// pattern anchored at both ends. Like a failed executor, the rejection clears the groups.
+    /// Each executor is too large for C2 to inline, so this selector keeps their calls out of the
+    /// routes that use it.
+    private boolean matchStartAnchoredScanPlan(ScanPlan plan, Slice text, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
+        if (contextEnd - contextStart > maximumSpanLength) {
+            if (groups != null) {
+                Arrays.fill(groups, -1);
+            }
+            return false;
+        }
         if (plan.usesAsciiFoldedExecutor()) {
             return plan.isPartialMatch()
                     ? plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, fullMatch, groups)
@@ -2987,6 +3020,13 @@ abstract sealed class CompiledPattern
     /// in UTF-8 mode or one byte in Latin-1 mode. No capture values are returned.
     public long count(Slice input)
     {
+        requireNonNull(input, "text is null");
+        // ScanKernelGenerator.definePatternCount emits this check for a generated class; keep in
+        // step.
+        int length = input.length();
+        if (length < minimumSpanLength || length > maximumSpanLength) {
+            return 0;
+        }
         long optimizedCount = countMatches(input);
         if (optimizedCount >= 0) {
             return optimizedCount;
@@ -3936,6 +3976,15 @@ abstract sealed class CompiledPattern
         int searchLength = end - start;
         // Keep the metadata load off long searches whose existing rejection path is already constant time.
         if (searchLength < MINIMUM_LENGTH_CHECK_LIMIT && searchLength < MatchLength.minimum(matchLength)) {
+            return false;
+        }
+        // Only a pattern anchored at both ends has a span bound, and it is checked only on an
+        // anchored search: where the program records the start anchor, or a stripped prefix or the
+        // caller anchors the search. An alternation whose branches each carry the anchor, such as
+        // (^aa$)|(^aaa$), leaves the program unanchored, so its search falls through to the engine
+        // with the same answer; count and matcher finds reject it earlier. The span's length
+        // counts a stripped prefix.
+        if (anchored && searchLength + strippedPrefixLength > maximumSpanLength) {
             return false;
         }
         // With one table load before any engine setup, a start-anchored program rejects a first

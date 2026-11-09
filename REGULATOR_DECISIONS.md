@@ -1591,20 +1591,21 @@ kernel, whether a start-anchored plan counts with one attempt, and whether
 short boolean calls run on the ordinary engine. The literal-kernel routes each
 switch on their own plan kind, so the kind one operation runs stays out of
 another's branch profile. Only a pattern that cannot match empty takes a shape
-other than the engine. With compressed references, the `Re2` layout is 112
+other than the engine. With compressed references, the `Re2` layout is 120
 bytes, including references to the shared single-byte table, the
 [matcher counter](#bounded-character-class-counting), and the
 [required bytes](#short-window-required-bytes-reject), plus the base pattern's
 per-pattern ordinary-engine flags, the last of which, whether full-Slice find
 runs a [gated one-byte search first](#minimum-inner-literal-search-window), took
-it from 104. The scan-plan shape's three facts fit in the base pattern's
-padding, so its layout is 112 bytes too. A pattern with a scan plan takes the
-scan-plan shape. Its full-Slice `find` keeps the literal contains, prefix,
-equality, and final-line equality kernels, and its `matches` and `lookingAt`
-keep their literal kernels, which answer without reading past the literal. Its
-other boolean calls run the plan, apart from the short-input and count routes
-that leave it for the ordinary engine. Scan-plan boolean calls also stop once a
-match is certain, as described in the
+it from 104 to 112, and the shortest and longest span that can hold a match,
+which took it to 120. The scan-plan shape's three facts fit in the base
+pattern's padding, so its layout is 120 bytes too. A pattern with a scan plan
+takes the scan-plan shape. Its full-Slice `find` keeps the literal contains,
+prefix, equality, and final-line equality kernels, and its `matches` and
+`lookingAt` keep their literal kernels, which answer without reading past the
+literal. Its other boolean calls run the plan, apart from the short-input and
+count routes that leave it for the ordinary engine. Scan-plan boolean calls
+also stop once a match is certain, as described in the
 [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
 
 These plans apply only when normalized expression analysis proves equivalent
@@ -4658,7 +4659,7 @@ plans; the last bullets record the rules and measurements specific to each.
   is non-sealed so that the hidden class extends it. The pattern a caller holds
   is the generated class, and a caller's call site that sees one pattern binds
   its entries directly; callers still cannot extend the pattern classes. The
-  generated class adds no fields, so it keeps the scan-plan shape's 112-byte
+  generated class adds no fields, so it keeps the scan-plan shape's 120-byte
   layout.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
   stays interpreted, as in Trino. Unlike Trino, a count that skips the plan

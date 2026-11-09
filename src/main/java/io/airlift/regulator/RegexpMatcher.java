@@ -72,6 +72,9 @@ public final class RegexpMatcher
     // The fewest bytes a match spans, so findGeneral fails a find whose rest of the region is
     // shorter before any engine runs.
     private final int minimumMatchLength;
+    // An upper bound on the bytes a region can have and still hold a match, so findGeneral fails
+    // a find of a longer region before any engine runs. See CompiledPattern.maximumSpanLength.
+    private final int maximumSpanLength;
     // The pattern's required literal that findGeneral checks the rest of a long region for, or
     // null. See CompiledPattern.longWindowRequiredLiteral.
     private final RequiredBytes longWindowRequiredLiteral;
@@ -152,6 +155,7 @@ public final class RegexpMatcher
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
         this.minimumMatchLength = pattern.minimumMatchLength();
+        this.maximumSpanLength = pattern.maximumSpanLength();
         this.longWindowRequiredLiteral = pattern.longWindowRequiredLiteral();
         reset(input);
     }
@@ -382,8 +386,10 @@ public final class RegexpMatcher
             invalidateMatch();
             return false;
         }
-        // A match lies inside the rest of the region, whatever context a Rust search reads.
-        if (regionLength - nextFindStart < minimumMatchLength) {
+        // A match of a pattern anchored at both ends spans all of its context but a final line
+        // terminator, and the context holds the region. A match lies inside the rest of the
+        // region, whatever context a Rust search reads.
+        if (regionLength - nextFindStart < minimumMatchLength || regionLength > maximumSpanLength) {
             return failFind();
         }
         // So do the bytes every match holds.

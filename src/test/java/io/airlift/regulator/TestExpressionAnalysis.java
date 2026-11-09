@@ -94,6 +94,29 @@ public class TestExpressionAnalysis
     }
 
     @Test
+    public void testMaximumSpanLength()
+    {
+        // Only a pattern of bounded length anchored at both ends bounds its span: by its longest
+        // match, plus the final line terminator that the language's $ also matches before.
+        assertThat(analyze("^a{2,5}$").maximumSpanLength()).isEqualTo(5);
+        assertThat(analyze("\\A(?:(aa)|(aaa))\\z").maximumSpanLength()).isEqualTo(3);
+        assertThat(analyze("^a$|^💰$").maximumSpanLength()).isEqualTo(4);
+        assertThat(analyze("^.$").maximumSpanLength()).isEqualTo(4);
+        assertThat(maximumSpanLength(Re2.compile(utf8Slice("^.$"), Re2.Options.latin1()))).isEqualTo(1);
+        for (String pattern : List.of("^a+$", "^a", "a$", "^a|b$", "^a$|b", "^a$|b$", "^a$|^b", "(?:^a$)*", "^a$b?", "(?m)^a$")) {
+            assertThat(analyze(pattern).maximumSpanLength()).as(pattern).isEqualTo(Integer.MAX_VALUE);
+        }
+        assertThat(maximumSpanLength(RustRegexp.compile(utf8Slice("^a$")))).isEqualTo(1);
+        assertThat(maximumSpanLength(TrinoRegexp.compile(utf8Slice("^a$")).re2())).isEqualTo(2);
+        assertThat(maximumSpanLength(JavaRegexp.compile(utf8Slice("^a$")))).isEqualTo(4);
+        assertThat(maximumSpanLength(JavaRegexp.compile(utf8Slice("^a\\Z")))).isEqualTo(4);
+        assertThat(maximumSpanLength(JavaRegexp.compile(utf8Slice("(?d)^a$")))).isEqualTo(2);
+        assertThat(maximumSpanLength(JavaRegexp.compile(utf8Slice("^a\\z")))).isEqualTo(1);
+        // An alternation allows the largest final terminator of its branches.
+        assertThat(maximumSpanLength(JavaRegexp.compile(utf8Slice("^a$|^b\\z")))).isEqualTo(4);
+    }
+
+    @Test
     public void testNormalizedEncodedLengthMatchesRawAnalysisOverCorpora()
     {
         // The compiler stores the encoded match length of the simplified expression, so
@@ -425,6 +448,11 @@ public class TestExpressionAnalysis
     private static ExpressionAnalysis analyze(String pattern)
     {
         return Re2.compile(utf8Slice(pattern)).expressionAnalysisForDiagnostics();
+    }
+
+    private static int maximumSpanLength(CompiledPattern pattern)
+    {
+        return pattern.expressionAnalysisForDiagnostics().maximumSpanLength();
     }
 
     private static void collectAtoms(Prefilter prefilter, List<Slice> atoms)
