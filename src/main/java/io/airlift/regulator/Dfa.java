@@ -654,7 +654,7 @@ final class Dfa
                 if (runForward && canReturnEmptyAtStart(dfa, bytes, textBegin, textEnd, startIsMatch, endMatch)) {
                     return 0;
                 }
-                boolean canPrefixAccel = runForward && prog.canPrefixAccel() && !anchoredEffective && (startData.flag() & FLAG_EMPTY_MASK) == 0;
+                boolean canPrefixAccel = runForward && prog.canPrefixAccel() && !anchoredEffective && isContextFreeStart(startData.flag());
                 boolean canSingleBytePrefixAccel = canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath();
                 byte[] requiredPrefix = prog.getRequiredPrefix();
                 boolean canAnchoredLongPrefixIntPath = runForward &&
@@ -1490,7 +1490,7 @@ final class Dfa
             return 0;
         }
 
-        boolean canPrefixAccel = prog.canPrefixAccel() && (startData.flag() & FLAG_EMPTY_MASK) == 0;
+        boolean canPrefixAccel = prog.canPrefixAccel() && isContextFreeStart(startData.flag());
         if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
             return searchForwardPrefixAccelSingleByte(
                     dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
@@ -1910,7 +1910,7 @@ final class Dfa
             return 0;
         }
 
-        boolean canPrefixAccel = prog.canPrefixAccel() && (startData.flag() & FLAG_EMPTY_MASK) == 0;
+        boolean canPrefixAccel = prog.canPrefixAccel() && isContextFreeStart(startData.flag());
         if (canPrefixAccel && prog.canUseSingleBytePrefixAccelFastPath()) {
             return searchForwardPrefixAccelSingleByte(
                     dfa, tables, prog, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, endMatch, false);
@@ -2023,9 +2023,25 @@ final class Dfa
         return searchForward(dfa, tables, bytes, textBegin, contextEnd, contextEnd, startOffset, startIsMatch, false, endMatch, false);
     }
 
+    /// Whether a forward search may skip ahead from a start state with `startFlags`, by the prefix
+    /// scan or a start-byte or fixed-distance byte scan. Each skip lands in the same start state at
+    /// a later position, so the state must hold nothing about the position it was built for: no
+    /// assertion it still needs, no assertion that held there, and no record of the byte before it.
+    /// A start state that needs no assertion keeps only its match bit (see
+    /// `workQueueToCachedState`), so the test is that no other bit is set. A start state that
+    /// needs `\b` fails it wherever the search starts, so a skip never judges the boundary by the
+    /// byte before the search rather than the byte before the landing. The test guards routes no
+    /// current scan takes: a prefix scan is configured only for a prefix that crosses no assertion,
+    /// and a program that meets an assertion before its first byte has no start-byte candidates
+    /// (`Prog.buildStartByteCandidates`), which the fixed-distance candidates are built from.
+    static boolean isContextFreeStart(int startFlags)
+    {
+        return (startFlags & ~FLAG_MATCH) == 0;
+    }
+
     static boolean canUseStartByteAcceleration(DfaInstance dfa, boolean anchored, boolean runForward, int startFlags)
     {
-        return runForward && !anchored && dfa.canStartByteAcceleration() && (startFlags & FLAG_EMPTY_MASK) == 0;
+        return runForward && !anchored && dfa.canStartByteAcceleration() && isContextFreeStart(startFlags);
     }
 
     static boolean canUseFixedDistanceByteAcceleration(boolean anchored, boolean runForward, int startFlags, int searchLength)
@@ -2033,7 +2049,7 @@ final class Dfa
         return searchLength >= MIN_SELECTIVE_SCAN_SEARCH_BYTES &&
                 runForward &&
                 !anchored &&
-                (startFlags & FLAG_EMPTY_MASK) == 0;
+                isContextFreeStart(startFlags);
     }
 
     static int selectByteScanSet(int byteScanSet, byte[] candidates, byte[] bytes, int position, int textEnd)
