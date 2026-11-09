@@ -267,10 +267,13 @@ so the automata run only where a match can be.
   `VectorPrefixScanner.findFoldCaseSve`,
   `VectorPrefixScanner.findFoldCaseDenseSve`,
   `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
-  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`
-- **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB, with
-  the in-loop kernel for probe pairs that the distribution that chose them
-  predicts in 15% or more of vectors, as for common pairs in 64-byte vectors.
+  `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`,
+  `InnerLiteralSearch.findFoldedLiteralVector`
+- **Applies when:** `(?i)` ASCII prefixes, and the vector form for a
+  case-insensitive [inner literal](#reverse-inner-literal-search); the vector
+  form from 1 KiB, with the in-loop kernel for probe pairs that the
+  distribution that chose them predicts in 15% or more of vectors, as for
+  common pairs in 64-byte vectors.
   Folded runs: case-insensitive patterns under Unicode case folding with no
   folded prefix, or whose folded prefix stops at a letter whose fold leaves
   ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
@@ -397,6 +400,7 @@ so the automata run only where a match can be.
   `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
   `InnerLiteralSearch.findLiteralSetMember`,
   `InnerLiteralSearch.findFoldedLiteral`,
+  `InnerLiteralSearch.findFoldedLiteralVector`,
   `InnerLiteralSearch.usesVectorSearch`, `InnerLiteralSearch.asciiClassPair`,
   `InnerLiteralSearch.hasNoEarlierMatchAcrossLastByte`,
   `InnerLiteralSearch.findClassPairMember`,
@@ -416,7 +420,9 @@ so the automata run only where a match can be.
   counted texts of at least 64 bytes for a class pair or one-byte literal, 96
   for a longer single literal, 256 for a literal set, and 1 KiB for a set
   behind a class run that only the class-run proof admits, since below them
-  the literal's scan costs more than the DFA; from 64 bytes for a count of a
+  the literal's scan costs more than the DFA; 1 KiB, the folded prefix scan's
+  vector cutoff and unmeasured for this search, for a case-insensitive literal
+  whose exact head is empty or one common byte; from 64 bytes for a count of a
   set not behind a class run, whose one search continues across many matches,
   and for a pattern with a fixed-width short-search matcher, which answers its
   shorter counts and matcher finds and loses to the search from 64 bytes.
@@ -429,28 +435,34 @@ so the automata run only where a match can be.
   the literal holds behind one, as in `(?i:x)?\d+ = value`.
   The required piece can take three other forms: one of
   up to 8 ASCII literals of 3 to 64 bytes, searched with the start literal
-  filter; a literal with case-insensitive ASCII letters after exact bytes,
-  such as `# (?i:noqa)`, found by its exact leading bytes with the rest
-  checked by an OR mask; or two adjacent elements that each consume one of at
-  most three ASCII bytes, such as `[?!.]["']`, which English text rarely holds
-  as a pair (estimated below once in 500 bytes), scanned for its two-byte
-  members with a counted loop. The prefix may also be a class run: empty-width
-  assertions and one class repeated `{lo,hi}`, as `\b\w+` in `\b\w+nn\b` or
-  `.{0,2}` before a set of names, even where the class can hold the literal. A
-  run that matches an earlier match's span also matches the shorter span
-  ending at any later literal inside it, so the reverse search from the first
-  literal hit still finds the leftmost start. A pattern that only this proof
-  gives a search keeps the long-window required literal check as it has it
-  without one. Long searches for one exact ASCII literal use the vector
-  byte-set scan for one byte and the vector pair scan otherwise. Leipzig
-  `shing` and mariomka `email` counts take 0.06 to 0.10 of their earlier time
-  ([#90]), class pairs take `quotes-bounded` to 0.54 of the start-byte scan's
-  time on Intel and 0.74 on Graviton ([design][d-class-pairs]), and the
-  class-run proof takes finds of `\w+[?!.]["']` in 300-byte to 2 KiB chunks of
-  `sherlock.txt` to 0.03 to 0.28 of their time without it and rebar's
-  `leipzig/word-ending-nn` to 0.11 to 0.12 ([#193]). With each literal kind's
-  minimum window, per-line finds of `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to
-  0.50 of their earlier time ([#193]).
+  filter; a literal with case-insensitive ASCII letters, such as `# (?i:noqa)`,
+  found from 1 KiB with the Vector API by the folded pair kernel over its
+  first nine bytes and in shorter windows by its exact leading bytes, such as
+  `# `, with the rest checked by an OR mask; or two adjacent elements that
+  each consume one of at most three ASCII bytes, such as `[?!.]["']`, which
+  English text rarely holds as a pair (estimated below once in 500 bytes),
+  scanned for its two-byte members with a counted loop. A case-insensitive
+  literal whose exact leading bytes are none or one common byte, such as
+  `noqa` in `\s+(?i:noqa)`, is found only by the kernel. With no exact leading
+  bytes its proofs count both cases of every letter, exact ones included; a
+  one-byte head is proven by that byte. The prefix may also be a class run:
+  empty-width assertions and one class repeated `{lo,hi}`, as `\b\w+` in
+  `\b\w+nn\b` or `.{0,2}` before a set of names, even where the class can hold
+  the literal. A run that matches an earlier match's span also matches the
+  shorter span ending at any later literal inside it, so the reverse search
+  from the first literal hit still finds the leftmost start. A pattern that
+  only this proof gives a search keeps the long-window required literal check
+  as it has it without one. Long searches for one exact ASCII literal use the
+  vector byte-set scan for one byte and the vector pair scan otherwise.
+  Leipzig `shing` and mariomka `email` counts take 0.06 to 0.10 of their
+  earlier time ([#90]), class pairs take `quotes-bounded` to 0.54 of the
+  start-byte scan's time on Intel and 0.74 on Graviton
+  ([design][d-class-pairs]), and the class-run proof takes finds of
+  `\w+[?!.]["']` in 300-byte to 2 KiB chunks of `sherlock.txt` to 0.03 to 0.28
+  of their time without it and rebar's `leipzig/word-ending-nn` to 0.11 to
+  0.12 ([#193]). With each literal kind's minimum window, per-line finds of
+  `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to 0.50 of their earlier time
+  ([#193]).
 
 ### Inner literal byte gates
 
@@ -664,14 +676,14 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   replaces a compare per probe. RE2 run-stop needles are ASCII, so that scan
   XORs the block with the needle and does one signed compare below 1, which
   finds needle bytes and every non-ASCII byte together; several needles
-  combine by lane-wise unsigned minimum. The folded prefix scan's pair kernels
-  first OR `0x20` into the loaded bytes at letter probes, then XOR each probe's
-  bytes with its lower-case byte. On Graviton with JDK 25, the two-byte
-  candidate scans take Leipzig `∞|✓` to 0.45 of its earlier time and RE2
-  `aqj` to 0.82 ([#132]), the RE2 run stop takes `LONG_SET` to 0.39 and
-  `LONG_PATH` to 0.67 to 0.68, and the two to 0.76 to 0.88 on Intel
-  ([#135]), and the folded pair kernels take most long case-insensitive scans
-  to 0.71 to 0.89.
+  combine by lane-wise unsigned minimum. The folded pair kernels of the folded
+  prefix scan and inner literal search first OR `0x20` into the loaded bytes
+  at letter probes, then XOR each probe's bytes with its lower-case byte. On
+  Graviton with JDK 25, the two-byte candidate scans take Leipzig `∞|✓` to
+  0.45 of its earlier time and RE2 `aqj` to 0.82 ([#132]), the RE2 run stop
+  takes `LONG_SET` to 0.39 and `LONG_PATH` to 0.67 to 0.68, and the two to
+  0.76 to 0.88 on Intel ([#135]), and the folded pair kernels take most long
+  case-insensitive scans to 0.71 to 0.89.
 
 ### Call-free pair word scan
 

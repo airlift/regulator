@@ -110,11 +110,12 @@ final class VectorPrefixScanner
                 .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, position + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector));
     }
 
-    // The folded pair kernels' entry points, which the folded prefix scan in Prog calls:
-    // findFoldCase and findFoldCaseDense, or under VectorSupport.SVE_128 their XOR forms, as
-    // "Candidate Masks on SVE" in REGULATOR_DECISIONS.md describes. They pass only ints and
-    // arrays, so every vector and mask stays inside the kernels, and their two returns keep them
-    // within MaxInlineSize, where a conditional expression's jump would not.
+    // The folded pair kernels' entry points, which the folded prefix scan in Prog and the folded
+    // inner literal search call: findFoldCase and findFoldCaseDense, or under
+    // VectorSupport.SVE_128 their XOR forms, as "Candidate Masks on SVE" in REGULATOR_DECISIONS.md
+    // describes. They pass only ints and arrays, so every vector and mask stays inside the
+    // kernels, and their two returns keep them within MaxInlineSize, where a conditional
+    // expression's jump would not.
     static int findFoldCasePair(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         if (VectorSupport.SVE_128) {
@@ -139,11 +140,11 @@ final class VectorPrefixScanner
     // folded prefix is compared. The prefix holds at most nine bytes, so failed comparisons stay
     // bounded and the scan needs no KMP budget.
     //
-    // The folded prefix scan in Prog calls this kernel through findFoldCasePair when few vectors
-    // are predicted to hold a candidate of the probe pair, and findFoldCaseDense through
-    // findFoldCaseDensePair otherwise; see Prog.usesDenseFoldCaseScan. With sparse candidates the
-    // counted test loop runs long stretches without leaving. The XOR form is findFoldCaseSve;
-    // keep the two in step.
+    // The folded prefix scan in Prog and the folded inner literal search call this kernel through
+    // findFoldCasePair when few vectors are predicted to hold a candidate of the probe pair, and
+    // findFoldCaseDense through findFoldCaseDensePair otherwise; see Prog.usesDenseFoldCaseScan.
+    // With sparse candidates the counted test loop runs long stretches without leaving. The XOR
+    // form is findFoldCaseSve; keep the two in step.
     static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
@@ -276,14 +277,14 @@ final class VectorPrefixScanner
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds what findFoldCase finds, verifying each vector's candidates inside the vector loop.
     //
-    // The folded prefix scan in Prog calls this kernel through findFoldCaseDensePair when many
-    // vectors are predicted to hold a candidate of the probe pair, as for a common pair in 64-byte
-    // vectors; see Prog.usesDenseFoldCaseScan. There the counted loop leaves and re-enters on many
-    // vectors, and its exit, candidate rebuild, and re-entry cost more than testing and verifying
-    // each vector in one loop. Keep this method within FreqInlineSize, as TestHotMethodSize
-    // checks, and every vector and mask inside it: a vector or mask passed to or returned from a
-    // helper C2 leaves out of line is boxed. The XOR form is findFoldCaseDenseSve; keep the two in
-    // step.
+    // The folded prefix scan in Prog and the folded inner literal search call this kernel through
+    // findFoldCaseDensePair when many vectors are predicted to hold a candidate of the probe pair,
+    // as for a common pair in 64-byte vectors; see Prog.usesDenseFoldCaseScan. There the counted
+    // loop leaves and re-enters on many vectors, and its exit, candidate rebuild, and re-entry
+    // cost more than testing and verifying each vector in one loop. Keep this method within
+    // FreqInlineSize, as TestHotMethodSize checks, and every vector and mask inside it: a vector
+    // or mask passed to or returned from a helper C2 leaves out of line is boxed. The XOR form is
+    // findFoldCaseDenseSve; keep the two in step.
     static int findFoldCaseDense(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
