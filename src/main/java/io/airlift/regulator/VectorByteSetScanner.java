@@ -42,6 +42,12 @@ final class VectorByteSetScanner
         return skippedBytes < SHORT_SCAN_BYTES ? shortScanCount + 1 : 0;
     }
 
+    /// Returns the largest multiple of the vector length at most `length`.
+    static int vectorLoopBound(int length)
+    {
+        return SPECIES.loopBound(length);
+    }
+
     static boolean shouldSampleCandidateDensity()
     {
         return SPECIES.length() > 16;
@@ -152,7 +158,8 @@ final class VectorByteSetScanner
     // slot holds the unsigned lower bound in its low byte and `highest - lowest` (at most 127) in
     // its high byte. A byte is in a range when its distance above the lower bound, as an unsigned
     // byte, is at most `highest - lowest`, one subtraction and one unsigned compare per range. The
-    // forward DFA's self-loop scans call it for loops described by the bytes that stay in them.
+    // forward DFA's self-loop scans call it for loops described by the bytes that stay in them,
+    // and the class-run counter for a long run of a byte class.
     static int findOutsideRanges(byte[] data, int offset, int length, long ranges, int rangeCount)
     {
         ByteVector firstLowest = ByteVector.broadcast(SPECIES, (byte) ranges);

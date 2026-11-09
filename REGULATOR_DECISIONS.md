@@ -3410,8 +3410,11 @@ or a class of every non-ASCII character. A counter's span search skips bytes
 that cannot begin a member before decoding, with one table load per byte or, for
 a sparse class, a vector scan after a short scalar prefix. A Latin-1 or
 byte-mode class, or a UTF-8 class of only ASCII members, marks exactly its
-members as start bytes, so the search reads its whole run on that table, one
-load per byte, cut at the repeat's maximum. In an unbounded repeat of a UTF-8
+members as start bytes, so the search reads its run on that table, one load per
+byte, cut at the repeat's maximum. When the Vector API is available, the class
+fits in four ranges of at most 128 bytes each, and the maximum allows a longer
+run, a run still going after 128 bytes, or 64 with 64-byte vectors, is finished
+by the self-loop exit byte scan over whole vectors and the table after them. In an unbounded repeat of a UTF-8
 class of every character, such as `(?s:.)+`, only a byte that begins no
 character under the lenient read ends a run, so once the run reaches the minimum
 the search skips to that byte without decoding. A class of every scalar value,
@@ -3432,6 +3435,21 @@ over Intel, so this is accepted. Splitting the search into a byte method and a
 decoding method, the decoding method being the search as it was before the byte
 runs, cleared Intel position but made Intel Trino replace 12% slower; do not
 repeat it without an Intel profile of replace.
+
+The vector handoff of a long byte run is chosen per vector width at class
+initialization. Handing off costs more than the table steps it saves on a run
+that ends soon after: on Graviton's 16-byte vectors a 64-byte handoff made
+subtitle lines 3% slower, and at 128 bytes the line rows are 1-1.3% slower,
+where long runs such as rebar's `i1095-word-repetition` take 0.81x the time. On
+Intel's 64-byte vectors the 64-byte handoff keeps long runs fastest (0.55x for
+`i1095-word-repetition`, 0.40x for 256-byte word runs), but 13.5% of Rust source
+lines and 7.2% of subtitle lines pass it, so those rows are 5-10% slower: the
+handoff adds 2-4% instructions, and on subtitles the run loop, which returns at
+a nonmember from inside the loop, takes about 2.5x main's branch misses. Testing
+each run's end against the limit after the loop instead won the Intel line rows
+but made Graviton word rows 3-4% slower, and Intel's 4-6%. Graviton is weighted
+over Intel, so the Intel line rows are accepted. 32-byte vectors keep the
+128-byte handoff unmeasured.
 
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred

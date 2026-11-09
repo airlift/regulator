@@ -334,7 +334,7 @@ public class TestUpstreamCompileMemoryBudget
                 // The flattened program fits but leaves too little for a long prefix's shift table.
                 new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 421_049, 421_049, 100_000, 419_093),
                 // A compact counter in place of a program measures exactly what it needs.
-                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 50_963, 50_963, 1, 8_000),
+                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 50_987, 50_987, 1, 8_000),
                 // The figure covers every route: the literal set that compiles without a program,
                 // and Trino's literal alternation, literal set and fixed-width matcher.
                 new RejectedPattern(Language.RE2, fruits, 8_147, 8_147, 1, 2_000),

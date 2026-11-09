@@ -65,10 +65,34 @@ final class BoundedCharacterClassCounter
     private static final long INVALID_CHUNK = -1L;
     // The first code point that takes three UTF-8 bytes.
     private static final int TWO_BYTE_LIMIT = 0x800;
+    // A byte run is read on the start-byte table for this many bytes before a vector scan for its
+    // first nonmember takes over. Handing off costs more than the table steps it saves on a run
+    // that ends soon after, so word, field, and most line runs must end within it. With r9g's
+    // 16-byte vectors, a 64-byte handoff cost subtitle lines 3% and 128 bytes cost them under 1%.
+    // With r8i's 64-byte vectors, 64 bytes kept long runs fastest; the 7-13% of subtitle and
+    // source lines that pass it cost those rows 5-10%, as "Bounded Character-Class Counting" in
+    // REGULATOR_DECISIONS.md records. 32-byte vectors, as with AVX2 or 256-bit SVE, were not
+    // measured and keep 128 bytes. VectorSupport is checked first because preferredByteLanes loads
+    // the Vector API.
+    private static final int STEPPED_RUN_BYTES = VectorSupport.isAvailable() && VectorSupport.preferredByteLanes() >= 64 ? 64 : 128;
+    // The most ranges VectorByteSetScanner.findOutsideRanges reads, and the most bytes one holds.
+    private static final int MAX_MEMBER_RANGES = 4;
+    private static final int MAX_MEMBER_RANGE_BYTES = 128;
 
     private final long[] matchingCodePoints;
     private final boolean[] memberStartBytes;
     private final byte[] memberStartByteNibbleTables;
+    // A byte class's members as one to four ranges in the layout
+    // VectorByteSetScanner.findOutsideRanges reads, which `vectorRunEnd` scans a long run's end with,
+    // and their count, or zero without the Vector API, when the members need more ranges, or when
+    // the repeat's maximum ends every run within the stepped prefix.
+    private final long memberRanges;
+    private final byte memberRangeCount;
+    // The run length at which `byteRunEnd` stops stepping on the table: STEPPED_RUN_BYTES for a
+    // class whose long runs take the vector scan, and otherwise the maximum, or Integer.MAX_VALUE
+    // for an unbounded repeat, so a counter that never hands a run off steps to the same limit as
+    // without the scan.
+    private final int steppedRunLength;
     private final int minimum;
     // The fewest bytes a match spans. The minimum times a member's shortest encoding. Every
     // reading of a member, malformed ones included, takes at least that many bytes.
@@ -97,6 +121,9 @@ final class BoundedCharacterClassCounter
         matchingCodePoints = null;
         memberStartBytes = null;
         memberStartByteNibbleTables = null;
+        memberRanges = 0;
+        memberRangeCount = 0;
+        steppedRunLength = 0;
         minimum = 0;
         minimumBytes = 0;
         maximum = 0;
@@ -132,6 +159,16 @@ final class BoundedCharacterClassCounter
         boolean matchesEveryCharacter = matchesAllNonAscii ? matchingCodePoints[0] == -1L && matchingCodePoints[1] == -1L : holdsEveryScalarValue(ranges, firstTailMember);
         memberStartBytes = buildMemberStartBytes(ranges, readsBytes);
         memberStartByteNibbleTables = VectorSupport.isAvailable() ? buildMemberStartByteNibbleTables(memberStartBytes) : null;
+        long memberRanges = 0;
+        int memberRangeCount = 0;
+        if (readsBytes && VectorSupport.isAvailable() && (maximum == -1 || maximum > STEPPED_RUN_BYTES)) {
+            memberRanges = packMemberRanges(memberStartBytes);
+            memberRangeCount = memberRanges == -1 ? 0 : (int) (((memberRanges >>> 15) & 1) | ((memberRanges >>> 30) & 2)) + 1;
+            memberRanges = memberRangeCount == 0 ? 0 : memberRanges & 0x7FFF_7FFF_7FFF_7FFFL;
+        }
+        this.memberRanges = memberRanges;
+        this.memberRangeCount = (byte) memberRangeCount;
+        this.steppedRunLength = memberRangeCount != 0 ? STEPPED_RUN_BYTES : maximum == -1 ? Integer.MAX_VALUE : maximum;
         this.minimum = minimum;
         // The ranges are sorted, so the first low end has the shortest encoding.
         int memberBytes = latin1 ? 1 : Utf8.encodedLength(Math.max(0, ranges[0].low()));
@@ -176,6 +213,35 @@ final class BoundedCharacterClassCounter
             }
         }
         return startBytes;
+    }
+
+    // Packs a byte class's members, which a class that reads bytes marks as its start bytes, into
+    // ranges of at most MAX_MEMBER_RANGE_BYTES bytes, range i in bits 16i to 16i + 15: its lowest
+    // byte, then its highest less its lowest, which is at most 127 and leaves bit 15 of every
+    // range free. The count less one goes in bits 15 and 31, as in the DFA's stay ranges. Returns
+    // -1 when the members need more than MAX_MEMBER_RANGES ranges.
+    private static long packMemberRanges(boolean[] members)
+    {
+        long ranges = 0;
+        int rangeCount = 0;
+        int value = 0;
+        while (value < 256) {
+            if (!members[value]) {
+                value++;
+                continue;
+            }
+            if (rangeCount == MAX_MEMBER_RANGES) {
+                return -1;
+            }
+            int lowest = value;
+            while (value < 256 && value - lowest < MAX_MEMBER_RANGE_BYTES && members[value]) {
+                value++;
+            }
+            ranges |= (long) (lowest | ((value - 1 - lowest) << Byte.SIZE)) << (rangeCount * Short.SIZE);
+            rangeCount++;
+        }
+        int countLessOne = rangeCount - 1;
+        return rangeCount == 0 ? -1 : ranges | ((long) (countLessOne & 1) << 15) | ((long) (countLessOne >>> 1) << 31);
     }
 
     // A sparse class has few start bytes, which the vector nibble scan finds. The tables are null
@@ -318,6 +384,11 @@ final class BoundedCharacterClassCounter
     boolean scansMemberStartsWithVectorsForDiagnostics()
     {
         return memberStartByteNibbleTables != null;
+    }
+
+    boolean scansRunEndsWithVectorsForDiagnostics()
+    {
+        return memberRangeCount != 0;
     }
 
     boolean skipsEveryCharacterRunsForDiagnostics()
@@ -748,11 +819,40 @@ final class BoundedCharacterClassCounter
 
     // Returns the end of the run of members from `runStart`, which holds a member, cut at the
     // repeat's maximum. Each member is one byte and the start bytes are exactly the members, so the
-    // run is read on the start-byte table, one load per byte, without decoding.
+    // run is read on the start-byte table, one load per byte, without decoding. A run still going
+    // after STEPPED_RUN_BYTES is finished by a vector scan for the first byte outside the member
+    // ranges, where the class has them. A nonmember returns from inside the loop, so only a run that
+    // reaches the stepped limit pays for the handoff test; testing every run's end against the limit
+    // after the loop cost Graviton 3-4% on word and line runs that never hand off.
     private int byteRunEnd(byte[] bytes, int runStart, int end)
     {
-        int runEnd = maximum == -1 ? end : (int) Math.min(end, (long) runStart + maximum);
-        int position = runStart + 1;
+        // No overflow: end is at least zero, and runStart + steppedRunLength is formed only below end.
+        int steppedEnd = runStart < end - steppedRunLength ? runStart + steppedRunLength : end;
+        for (int position = runStart + 1; position < steppedEnd; position++) {
+            if (!memberStartBytes[bytes[position] & 0xFF]) {
+                return position;
+            }
+        }
+        if (memberRangeCount == 0) {
+            return steppedEnd;
+        }
+        return vectorRunEnd(bytes, steppedEnd, maximum == -1 ? end : (int) Math.min(end, (long) runStart + maximum));
+    }
+
+    // Returns the first position in [position, runEnd) whose byte is outside the member ranges, or
+    // runEnd. Whole vectors take the range scan and the bytes after the last one the table, which
+    // is cheaper than the scan's scalar tail. Kept out of line so that `byteRunEnd`, which only a
+    // long run leaves, stays small enough for C2 to inline into `findSpan`.
+    private int vectorRunEnd(byte[] bytes, int position, int runEnd)
+    {
+        int vectorEnd = position + VectorByteSetScanner.vectorLoopBound(runEnd - position);
+        if (vectorEnd > position) {
+            int stop = VectorByteSetScanner.findOutsideRanges(bytes, position, vectorEnd - position, memberRanges, memberRangeCount);
+            if (stop >= 0) {
+                return stop;
+            }
+            position = vectorEnd;
+        }
         while (position < runEnd && memberStartBytes[bytes[position] & 0xFF]) {
             position++;
         }
