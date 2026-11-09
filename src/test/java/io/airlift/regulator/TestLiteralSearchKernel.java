@@ -232,6 +232,193 @@ public class TestLiteralSearchKernel
         }
     }
 
+    /// The last-occurrence search over ranges of every length up to 40, so it finishes with every
+    /// overlapping first word and every one-at-a-time tail, with the literal at each position in
+    /// turn and again at the range start where it does not overlap the match, so only the later
+    /// one is the last, as an exact-length array and as a view whose neighbors are copies of the
+    /// literal. Like every last-occurrence search, it takes literals of at least two bytes.
+    @Test
+    public void testLastOccurrenceShortRangeTails()
+    {
+        for (String literalText : List.of("ab", "abc", "abcdefghij")) {
+            byte[] literal = literalText.getBytes(US_ASCII);
+            LiteralSearchKernel kernel = lastOccurrenceKernel(literal);
+            for (int length = 0; length <= 40; length++) {
+                for (int match = -1; match <= Math.max(-1, length - literal.length); match++) {
+                    byte[] text = new byte[length];
+                    Arrays.fill(text, (byte) 'x');
+                    if (match >= literal.length) {
+                        System.arraycopy(literal, 0, text, 0, literal.length);
+                    }
+                    if (match >= 0) {
+                        System.arraycopy(literal, 0, text, match, literal.length);
+                    }
+                    for (Slice input : List.of(Slices.wrappedBuffer(text), view(text, literal))) {
+                        String description = "literal %s, length %s, match %s, array offset %s".formatted(literalText, length, match, input.byteArrayOffset());
+                        assertLastSearch(kernel, literal, input, 0, length, match, description);
+                    }
+                }
+            }
+        }
+
+        // Without its last two bytes, "aba`bxxxxxxxab" leaves the word at the range start, which
+        // flags a false candidate at 3, a borrow above the partial match at 2, ahead of the match
+        // at 0; verification rejects it and goes on down.
+        byte[] falseCandidate = "aba`bxxxxxxxab".getBytes(US_ASCII);
+        byte[] literal = {'a', 'b'};
+        LiteralSearchKernel kernel = lastOccurrenceKernel(literal);
+        for (Slice input : List.of(Slices.wrappedBuffer(falseCandidate), offsetSlice(falseCandidate))) {
+            assertLastSearch(kernel, literal, input, 0, input.length(), 12, "false candidate");
+            assertLastSearch(kernel, literal, input, 0, input.length() - 2, 0, "false candidate below the end");
+        }
+    }
+
+    @Test
+    public void testLastOccurrenceCandidateWorkBound()
+    {
+        // Long partial matches switch to the reverse KMP early, counted down from the last
+        // candidate: each candidate compares eight bytes and covers one, so the tenth passes the
+        // budget, and the search goes on over the bytes below it
+        String periodic = "a".repeat(1024);
+        String literal = "aaaaaaaba";
+        byte[] literalBytes = literal.getBytes(US_ASCII);
+        LiteralSearchKernel kernel = lastOccurrenceKernel(literalBytes);
+        Slice periodicInput = offsetSlice((literal + periodic).getBytes(US_ASCII));
+        int lastCandidate = periodicInput.length() - literal.length();
+        assertLastKmpHandoff(kernel, literalBytes, periodicInput, 0, periodicInput.length(), lastKmpHandoff(lastCandidate, lastCandidate, 7, literal.length()), 0);
+        assertLastKmpHandoff(kernel, literalBytes, periodicInput, 0, periodicInput.length() - 512, lastKmpHandoff(lastCandidate - 512, lastCandidate - 512, 7, literal.length()), 0);
+
+        // Text without candidates counts as covered, including the text the scan skips before it
+        // verifies its first candidate
+        Slice skippedInput = offsetSlice((literal + periodic + "x".repeat(512)).getBytes(US_ASCII));
+        assertLastKmpHandoff(kernel, literalBytes, skippedInput, 0, skippedInput.length(), lastKmpHandoff(skippedInput.length() - literal.length(), lastCandidate, 7, literal.length()), 0);
+
+        // A literal whose last byte recurs keeps its own reversed shift table, and the reverse KMP
+        // finds an occurrence that overlaps the partial matches above it
+        String recurring = "abaabaab";
+        byte[] recurringBytes = recurring.getBytes(US_ASCII);
+        LiteralSearchKernel recurringKernel = lastOccurrenceKernel(recurringBytes);
+        Slice recurringInput = offsetSlice(("x" + recurring + "ab".repeat(600)).getBytes(US_ASCII));
+        assertThat(recurringKernel.lastKmpHandoffEndForDiagnostics(recurringInput, 0, recurringInput.length())).isPositive();
+        assertLastSearch(recurringKernel, recurringBytes, recurringInput, 0, recurringInput.length(), 1, "recurring last byte");
+
+        // The retained size counts that table: `baa` reversed starts with a recurring byte, so it
+        // has its own, while `abc` shares the border-free table, which counts nothing.
+        Slice ownTable = Slices.utf8Slice("baa");
+        assertThat(LiteralSearchKernel.sharingWithLastOccurrence(ownTable).estimatedRetainedSize()).isGreaterThan(LiteralSearchKernel.sharing(ownTable).estimatedRetainedSize());
+        Slice sharedTable = Slices.utf8Slice("abc");
+        assertThat(LiteralSearchKernel.sharingWithLastOccurrence(sharedTable).estimatedRetainedSize()).isEqualTo(LiteralSearchKernel.sharing(sharedTable).estimatedRetainedSize());
+    }
+
+    /// Random texts over small alphabets, so candidates and partial matches are dense, and
+    /// periodic ones, searched in random ranges of Slices with nonzero array offsets, against a
+    /// naive last index: the word scan, the vector scan with its reverse KMP finish, and the
+    /// dispatch of [Prog#findLastLiteral], which takes the vector scan from 1 KiB.
+    @Test
+    public void testLastOccurrenceRandomizedAgainstNaiveSearch()
+    {
+        Random random = new Random(0x5EED);
+        for (int iteration = 0; iteration < 4_000; iteration++) {
+            int alphabet = 1 + random.nextInt(3);
+            // The dispatch, like every last-occurrence search, takes literals of at least two
+            // bytes.
+            int literalLength = switch (random.nextInt(3)) {
+                case 0 -> 2;
+                case 1 -> 64;
+                default -> 2 + random.nextInt(15);
+            };
+            byte[] literal = new byte[literalLength];
+            for (int index = 0; index < literalLength; index++) {
+                literal[index] = (byte) ('a' + random.nextInt(alphabet + 1));
+            }
+            byte[] bytes = new byte[random.nextInt(iteration % 4 == 0 ? 3000 : 200)];
+            if (random.nextBoolean()) {
+                for (int index = 0; index < bytes.length; index++) {
+                    bytes[index] = (byte) ('a' + random.nextInt(alphabet));
+                }
+            }
+            else {
+                // A periodic text of the literal with one byte changed per period.
+                for (int index = 0; index < bytes.length; index++) {
+                    bytes[index] = index % literalLength == literalLength - 1 ? (byte) 'z' : literal[index % literalLength];
+                }
+            }
+            for (int copies = random.nextInt(3); copies > 0 && bytes.length >= literalLength; copies--) {
+                System.arraycopy(literal, 0, bytes, random.nextInt(bytes.length - literalLength + 1), literalLength);
+            }
+            Slice input = offsetSlice(bytes);
+            int offset = random.nextInt(bytes.length + 1);
+            int length = random.nextInt(bytes.length - offset + 1);
+            int expected = naiveLastIndex(bytes, offset, length, literal);
+            assertLastSearch(lastOccurrenceKernel(literal), literal, input, offset, length, expected, "iteration %s, offset %s, length %s, literal %s".formatted(iteration, offset, length, new String(literal, US_ASCII)));
+        }
+    }
+
+    /// Requires the last-occurrence searches to find the last occurrence of `literal` wholly in
+    /// the range at `match`, Slice-relative, or nowhere when it is -1: the word scan of
+    /// [LiteralSearchKernel#findLastContains], the vector scan where vectors are available, each
+    /// finished with the reverse KMP where it hands off, and [Prog#findLastLiteral].
+    private static void assertLastSearch(LiteralSearchKernel kernel, byte[] literal, Slice input, int offset, int length, int match, String description)
+    {
+        int arrayOffset = input.byteArrayOffset();
+        int expected = match < 0 ? -1 : arrayOffset + match;
+        byte[] data = input.byteArray();
+        assertThat(kernel.findLastContains(data, arrayOffset + offset, length)).as(description).isEqualTo(expected);
+        assertThat(Prog.findLastLiteral(data, arrayOffset + offset, length, literal, kernel)).as(description).isEqualTo(expected);
+        assertThat(kernel.findLastKmp(data, arrayOffset + offset, arrayOffset + offset + length)).as(description).isEqualTo(expected);
+        if (VectorSupport.isAvailable()) {
+            int found = VectorPrefixScanner.findLast(data, arrayOffset + offset, length, literal, Prog.pairOffset(literal), literal.length - 1);
+            if (found < -1) {
+                found = kernel.findLastKmp(data, arrayOffset + offset, -2 - found);
+            }
+            assertThat(found).as(description + " vector").isEqualTo(expected);
+        }
+    }
+
+    /// Requires the word scan and, where vectors are available, the vector scan of
+    /// [LiteralSearchKernel#findLastContains] and [Prog#findLastLiteral] to hand off to the reverse
+    /// KMP at the Slice-relative `resumeEnd`, and the search to find the literal at `match`.
+    private static void assertLastKmpHandoff(LiteralSearchKernel kernel, byte[] literal, Slice input, int offset, int length, int resumeEnd, int match)
+    {
+        assertThat(kernel.lastKmpHandoffEndForDiagnostics(input, offset, length)).isEqualTo(resumeEnd);
+        if (VectorSupport.isAvailable()) {
+            int arrayOffset = input.byteArrayOffset();
+            int found = VectorPrefixScanner.findLast(input.byteArray(), arrayOffset + offset, length, literal, Prog.pairOffset(literal), literal.length - 1);
+            assertThat(-2 - found - arrayOffset).as("vector handoff").isEqualTo(resumeEnd);
+        }
+        assertLastSearch(kernel, literal, input, offset, length, match, "handoff at " + resumeEnd);
+    }
+
+    /// Returns where a last-occurrence search whose last candidate is at `lastCandidate` hands off
+    /// to the reverse KMP when every candidate, one per byte down from `firstCandidate`, matches
+    /// `prefixLength` bytes and then fails: the end of the range that holds every occurrence below
+    /// the failed candidate.
+    private static int lastKmpHandoff(int lastCandidate, int firstCandidate, int prefixLength, int literalLength)
+    {
+        int comparisonEnd = -lastCandidate - LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET;
+        for (int candidate = firstCandidate; ; candidate--) {
+            comparisonEnd += prefixLength + 1;
+            if (comparisonEnd > -candidate) {
+                return candidate + literalLength - 1;
+            }
+        }
+    }
+
+    private static int naiveLastIndex(byte[] bytes, int offset, int length, byte[] literal)
+    {
+        for (int candidate = offset + length - literal.length; candidate >= offset; candidate--) {
+            if (Arrays.equals(bytes, candidate, candidate + literal.length, literal, 0, literal.length)) {
+                return candidate;
+            }
+        }
+        return -1;
+    }
+
+    private static LiteralSearchKernel lastOccurrenceKernel(byte[] literal)
+    {
+        return LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(literal.clone()));
+    }
+
     /// Requires [LiteralSearchKernel#findContains(Slice,int,int)] to switch to KMP at `kmpHandoff`,
     /// or not at all when it is -1, and both overloads to find the literal at `match`, or nowhere
     /// when it is -1. The byte-array overload takes and returns absolute array indexes.

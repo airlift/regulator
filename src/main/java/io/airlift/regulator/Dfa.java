@@ -810,7 +810,15 @@ final class Dfa
 
     static long countMatches(Prog prog, Slice context, Prog.MatchKind matchKind)
     {
-        long result = countMatches(prog, context, 0, matchKind, COUNT_EVERY_MATCH, null);
+        return countMatches(prog, context, context.length(), matchKind);
+    }
+
+    /// Counts the matches in the first `end` bytes of `context` as
+    /// [#countMatches(Prog,Slice,Prog.MatchKind)] counts all of it, with assertions seeing those
+    /// bytes as the whole context.
+    static long countMatches(Prog prog, Slice context, int end, Prog.MatchKind matchKind)
+    {
+        long result = countMatches(prog, context, 0, end, matchKind, COUNT_EVERY_MATCH, null);
         return result < 0 ? result : countStopCount(result);
     }
 
@@ -834,6 +842,15 @@ final class Dfa
     /// [CountByteScanSampling#forSingleCount()] among its own searches.
     static long countMatches(Prog prog, Slice context, int start, Prog.MatchKind matchKind, IntPredicate continueCounting, CountByteScanSampling sampling)
     {
+        return countMatches(prog, context, start, context.length(), matchKind, continueCounting, sampling);
+    }
+
+    /// Counts the matches from `start` to `end` as
+    /// [#countMatches(Prog,Slice,int,Prog.MatchKind,IntPredicate,CountByteScanSampling)] counts
+    /// them to the context end, with assertions seeing the first `end` bytes of `context` as the
+    /// whole context; the stop position is `end` when no match remains.
+    static long countMatches(Prog prog, Slice context, int start, int end, Prog.MatchKind matchKind, IntPredicate continueCounting, CountByteScanSampling sampling)
+    {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
         requireNonNull(matchKind, "matchKind is null");
@@ -841,11 +858,14 @@ final class Dfa
         if (matchKind != Prog.MatchKind.FIRST_MATCH && matchKind != Prog.MatchKind.LONGEST_MATCH) {
             throw new IllegalArgumentException("unsupported count match kind: " + matchKind);
         }
-        if (start < 0 || start > context.length()) {
+        if (end < 0 || end > context.length()) {
+            throw new IllegalArgumentException("end is out of bounds");
+        }
+        if (start < 0 || start > end) {
             throw new IllegalArgumentException("start is out of bounds");
         }
         if (prog.start() == 0) {
-            return countStopResult(0, context.length());
+            return countStopResult(0, end);
         }
         if (prog.anchorStart()) {
             return COUNT_UNSUPPORTED;
@@ -870,7 +890,7 @@ final class Dfa
         if (dfa.takeCountSkip()) {
             return COUNT_BAILED;
         }
-        long result = countMatches(prog, context, start, continueCounting, sampling, dfa);
+        long result = countMatches(prog, context, start, end, continueCounting, sampling, dfa);
         if (result == COUNT_BAILED) {
             dfa.recordCountBail();
         }
@@ -881,11 +901,11 @@ final class Dfa
     }
 
     @SuppressWarnings("UnusedException")
-    private static long countMatches(Prog prog, Slice context, int start, IntPredicate continueCounting, CountByteScanSampling sampling, DfaInstance dfa)
+    private static long countMatches(Prog prog, Slice context, int start, int end, IntPredicate continueCounting, CountByteScanSampling sampling, DfaInstance dfa)
     {
         byte[] bytes = context.byteArray();
         int contextBegin = context.byteArrayOffset();
-        int contextEnd = contextBegin + context.length();
+        int contextEnd = contextBegin + end;
         int textBegin = contextBegin + start;
         Prog.FixedDistanceByteCandidates fixedDistanceCandidates = contextEnd - textBegin >= MIN_SELECTIVE_SCAN_SEARCH_BYTES
                 ? dfa.fixedDistanceByteCandidates()
@@ -992,7 +1012,7 @@ final class Dfa
                         return COUNT_BAILED;
                     }
                     if (matchEnd == SEARCH_NO_MATCH) {
-                        return countStopResult(count, context.length());
+                        return countStopResult(count, end);
                     }
                     if (matchEnd <= 0) {
                         return COUNT_UNSUPPORTED;
@@ -1024,7 +1044,7 @@ final class Dfa
                         return countStopResult(count, textBegin - contextBegin);
                     }
                 }
-                return countStopResult(count, context.length());
+                return countStopResult(count, end);
             }
             catch (StartStateAllocationException | QuitSearchException ignored) {
                 return COUNT_UNSUPPORTED;

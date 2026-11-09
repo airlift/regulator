@@ -46,6 +46,9 @@ final class LiteralSearchKernel
 
     private final byte[] literal;
     private final int[] prefixShifts;
+    // The prefix shifts of the reversed literal, for the searches of its last occurrence, or null
+    // for a kernel that does not search for it; see sharingWithLastOccurrence.
+    private final int[] lastOccurrenceShifts;
     private final long frontBroadcast;
     private final long backBroadcast;
     // LOW_BITS, read from a field so the word loops of the contains search hold it in a register:
@@ -56,13 +59,14 @@ final class LiteralSearchKernel
 
     LiteralSearchKernel(Slice literal)
     {
-        this(requireNonNull(literal, "literal is null").getBytes());
+        this(requireNonNull(literal, "literal is null").getBytes(), false);
     }
 
-    private LiteralSearchKernel(byte[] literal)
+    private LiteralSearchKernel(byte[] literal, boolean findsLastOccurrence)
     {
         this.literal = requireNonNull(literal, "literal is null");
         this.prefixShifts = computePrefixShifts(literal);
+        this.lastOccurrenceShifts = findsLastOccurrence ? computePrefixShifts(reversed(literal)) : null;
         this.frontBroadcast = broadcast(this.literal[0]);
         this.backBroadcast = broadcast(this.literal[this.literal.length - 1]);
         this.lowBits = LOW_BITS;
@@ -77,17 +81,29 @@ final class LiteralSearchKernel
     /// whole backing array. The caller must never change those bytes.
     static LiteralSearchKernel sharing(Slice literal)
     {
+        return sharing(literal, false);
+    }
+
+    /// Returns a kernel for `literal`, sharing its bytes as [#sharing] does, that also finds the
+    /// literal's last occurrence in a range; see [#findLastContains].
+    static LiteralSearchKernel sharingWithLastOccurrence(Slice literal)
+    {
+        return sharing(literal, true);
+    }
+
+    private static LiteralSearchKernel sharing(Slice literal, boolean findsLastOccurrence)
+    {
         requireNonNull(literal, "literal is null");
         byte[] bytes = literal.byteArray();
         if (literal.byteArrayOffset() == 0 && literal.length() == bytes.length) {
-            return new LiteralSearchKernel(bytes);
+            return new LiteralSearchKernel(bytes, findsLastOccurrence);
         }
-        return new LiteralSearchKernel(literal.getBytes());
+        return new LiteralSearchKernel(literal.getBytes(), findsLastOccurrence);
     }
 
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + prefixShiftsRetainedSize(prefixShifts);
+        return INSTANCE_SIZE + SizeOf.sizeOf(literal) + prefixShiftsRetainedSize(prefixShifts) + prefixShiftsRetainedSize(lastOccurrenceShifts);
     }
 
     /// Returns the retained size of a table from [#computePrefixShifts]: 0 for the shared table
@@ -365,8 +381,12 @@ final class LiteralSearchKernel
     /// Returns `searchStart` minus [#CANDIDATE_COMPARISON_BUDGET], the comparison end that a
     /// candidate search over text from `searchStart` begins with. Each failed candidate adds its
     /// compared bytes to it, and the search switches to KMP when the comparison end passes the
-    /// failed candidate. It never passes the current candidate by more than the literal length, so
-    /// it cannot overflow.
+    /// failed candidate. `searchStart` is the origin progress is measured from, zero or above.
+    /// The comparison end starts the budget below it, so `initialComparisonEnd(0)` is -64. It
+    /// never passes the current candidate by more than the literal length, so it cannot
+    /// overflow. A search from the end down passes origin zero, and measures each candidate by
+    /// its distance below the last candidate, since negated positions near 2 GiB would wrap below
+    /// the budget.
     static int initialComparisonEnd(int searchStart)
     {
         return searchStart - CANDIDATE_COMPARISON_BUDGET;
@@ -406,6 +426,169 @@ final class LiteralSearchKernel
             matchedLength++;
             if (matchedLength == literal.length) {
                 return position - literal.length + 1;
+            }
+        }
+        return -1;
+    }
+
+    /// Returns the array-absolute index in `input` of the last occurrence of the literal that lies
+    /// wholly in the range, or `-1`, for a kernel from [#sharingWithLastOccurrence]. It mirrors
+    /// [#findContains(byte[],int,int)]: a call-free scan of 8-byte words from the range end down
+    /// to the first word holding a possible candidate, candidates verified highest first, and
+    /// [#findLastKmp] once the failed candidates pass the same comparison budget, counted down
+    /// from the last candidate. [Prog#findLastLiteral] calls it.
+    int findLastContains(byte[] input, int offset, int length)
+    {
+        if (literal.length > length) {
+            return -1;
+        }
+        int searchEnd = offset + length;
+        int matchOffset = skipToLastContainsCandidate(input, offset, searchEnd);
+        if (matchOffset < -1) {
+            matchOffset = findLastKmp(input, offset, -2 - matchOffset);
+        }
+        return matchOffset;
+    }
+
+    /// Returns the Slice-relative end of the range where [#findLastContains] continues with
+    /// [#findLastKmp]; only tests call it. Returns -1 when the search ends, with or without a
+    /// match, before it switches to KMP, and when the range is invalid.
+    int lastKmpHandoffEndForDiagnostics(Slice input, int offset, int length)
+    {
+        requireNonNull(input, "input is null");
+        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length) {
+            return -1;
+        }
+
+        int inputOffset = input.byteArrayOffset();
+        int searchStart = inputOffset + offset;
+        int result = skipToLastContainsCandidate(input.byteArray(), searchStart, searchStart + length);
+        return result < -1 ? -2 - result - inputOffset : -1;
+    }
+
+    /// Skips down from the last candidate to the first word, or tail position, holding a possible
+    /// candidate, and returns [#verifyLastContainsCandidates] from there, or -1. It mirrors
+    /// [#skipToContainsCandidate]: the words end at the last candidate and step down, and after at
+    /// least one word the scan finishes with one word starting at the range start, which can
+    /// overlap candidates already scanned; a search of fewer than eight candidates checks them one
+    /// at a time.
+    private int skipToLastContainsCandidate(byte[] input, int searchStart, int searchEnd)
+    {
+        int backOffset = literal.length - 1;
+        int candidateEnd = searchEnd - backOffset;
+        int wordStart = candidateEnd - ((candidateEnd - searchStart) / Long.BYTES) * Long.BYTES;
+        long front = frontBroadcast;
+        long back = backBroadcast;
+        long lowBits = this.lowBits;
+        int position = candidateEnd;
+
+        for (; position > wordStart; position -= Long.BYTES) {
+            int word = position - Long.BYTES;
+            long frontDifference = ((long) LONG_HANDLE.get(input, word)) ^ front;
+            long backDifference = ((long) LONG_HANDLE.get(input, word + backOffset)) ^ back;
+            if ((((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS) != 0) {
+                return verifyLastContainsCandidates(input, searchStart, position, searchEnd);
+            }
+        }
+
+        if (position < candidateEnd) {
+            // The word loop scanned at least one word, so at least eight candidates exist, and the
+            // word starting at the range start ends at or before the end of the words already
+            // scanned. Up to seven candidates remain below them. The candidates this word shares
+            // with those words held no true candidate there. In this word they sit above the new
+            // ones, so a borrow from a true candidate below can set a false bit on them.
+            // Verification rejects such a bit, and its comparison counts toward
+            // CANDIDATE_COMPARISON_BUDGET, which can only bring the KMP handoff earlier.
+            if (position > searchStart) {
+                long frontDifference = ((long) LONG_HANDLE.get(input, searchStart)) ^ front;
+                long backDifference = ((long) LONG_HANDLE.get(input, searchStart + backOffset)) ^ back;
+                if ((((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS) != 0) {
+                    return verifyLastContainsCandidates(input, searchStart, searchStart + Long.BYTES, searchEnd);
+                }
+            }
+            return -1;
+        }
+        byte first = literal[0];
+        byte last = literal[backOffset];
+        for (position--; position >= searchStart; position--) {
+            if (input[position] == first && input[position + backOffset] == last) {
+                return verifyLastContainsCandidates(input, searchStart, position + 1, searchEnd);
+            }
+        }
+        return -1;
+    }
+
+    /// Verifies possible candidates below `verifyEnd`, highest first, where
+    /// [#skipToLastContainsCandidate] found the first one: the word that ends there, the words
+    /// below it, then the candidates below the lowest word one at a time. A word's mask can set
+    /// false bits above a true candidate, which verification rejects, so taking its highest bit
+    /// first still finds the last occurrence. Returns the match position, -1 when there is no
+    /// match, or `-2 - resumeEnd` when the search must continue with [#findLastKmp] over the
+    /// range up to `resumeEnd`, which holds every occurrence below the failed candidate. The
+    /// budget is counted as [#verifyContainsCandidates] counts it, but on each candidate's
+    /// distance below the last candidate rather than on its position, so it covers the
+    /// candidates from the last one down.
+    private int verifyLastContainsCandidates(byte[] input, int searchStart, int verifyEnd, int searchEnd)
+    {
+        int backOffset = literal.length - 1;
+        int candidateEnd = searchEnd - backOffset;
+        int wordStart = candidateEnd - ((candidateEnd - searchStart) / Long.BYTES) * Long.BYTES;
+        long lowBits = this.lowBits;
+        int lastCandidate = candidateEnd - 1;
+        int comparisonEnd = initialComparisonEnd(0);
+        int position = verifyEnd;
+
+        for (; position > wordStart; position -= Long.BYTES) {
+            int word = position - Long.BYTES;
+            long frontDifference = ((long) LONG_HANDLE.get(input, word)) ^ frontBroadcast;
+            long backDifference = ((long) LONG_HANDLE.get(input, word + backOffset)) ^ backBroadcast;
+            long candidates = ((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS;
+            while (candidates != 0) {
+                int bit = 63 - Long.numberOfLeadingZeros(candidates);
+                int candidate = word + (bit >>> 3);
+                int matchedLength = matchingPrefixLength(input, candidate);
+                if (matchedLength == literal.length) {
+                    return candidate;
+                }
+                comparisonEnd = chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (comparisonBudgetSpent(comparisonEnd, lastCandidate - candidate)) {
+                    return -2 - (candidate + backOffset);
+                }
+                candidates ^= 1L << bit;
+            }
+        }
+
+        for (position--; position >= searchStart; position--) {
+            if (input[position] == literal[0] && input[position + backOffset] == literal[backOffset]) {
+                int matchedLength = matchingPrefixLength(input, position);
+                if (matchedLength == literal.length) {
+                    return position;
+                }
+                comparisonEnd = chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (comparisonBudgetSpent(comparisonEnd, lastCandidate - position)) {
+                    return -2 - (position + backOffset);
+                }
+            }
+        }
+        return -1;
+    }
+
+    /// Returns the absolute offset of the last occurrence of this kernel's literal that lies in
+    /// `[searchStart, searchEnd)`, or -1, for a kernel from [#sharingWithLastOccurrence]: KMP run
+    /// from the range end down, matching the reversed literal, so it stays linear in the range.
+    /// [Prog#findLastLiteral] continues a budgeted scan with it.
+    int findLastKmp(byte[] input, int searchStart, int searchEnd)
+    {
+        int[] shifts = lastOccurrenceShifts;
+        int last = literal.length - 1;
+        int matchedLength = 0;
+        for (int position = searchEnd - 1; position >= searchStart; position--) {
+            while (matchedLength >= 0 && input[position] != literal[last - matchedLength]) {
+                matchedLength = shifts[matchedLength];
+            }
+            matchedLength++;
+            if (matchedLength == literal.length) {
+                return position;
             }
         }
         return -1;
@@ -463,6 +646,15 @@ final class LiteralSearchKernel
             shifts[position] = prefixLength;
         }
         return shifts;
+    }
+
+    private static byte[] reversed(byte[] literal)
+    {
+        byte[] reversed = new byte[literal.length];
+        for (int index = 0; index < literal.length; index++) {
+            reversed[index] = literal[literal.length - 1 - index];
+        }
+        return reversed;
     }
 
     private static boolean firstByteRecurs(byte[] literal)

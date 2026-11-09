@@ -2443,6 +2443,69 @@ took 0.11x the base's time on r9g and 0.12x on r8i,
 `tom-sawyer-huckle-fin-prefix-short` 0.078x and 0.056x, and `leipzig/ing` about
 0.5x on both.
 
+## Required Suffix Bound On Long Windows
+
+The [long-window check](#required-literal-absence-on-long-windows) stops at the
+literal's first occurrence. When that occurrence is early and the rest of a long
+window holds no match, the engine still reads the whole tail: on rebar's
+`leipzig/bounded-strings-ending-z` with one `,z` in its first kilobyte, every
+language ran the forward DFA over all 16 MB. Hyperscan bounds such a scan by the
+last occurrence of the literal every match ends with. Regulator does the same
+with the search-end bound: a pattern that checks long windows for its own exact
+literal also bounds a long search's end by the last occurrence of its required
+suffix.
+
+The required suffix is exact ASCII bytes, at least two and at most the last 64,
+that every match ends with, with no zero-width op after its last byte at any
+depth. It is read from the end of the pattern's top-level concatenation, groups
+looked through: exact literals join it, a repetition of at least one copy gives
+its child's suffix and ends it, and an assertion between its bytes ends it
+there. It need not be the required literal: `(.*?;){3}abcdefgh` checks long
+windows for `abcdefgh` and bounds them by `;abcdefgh`.
+
+Every match in a window ends at the end of an occurrence of the suffix, so no
+later than the end of the last one, and a window without one holds no match.
+Ending the window there leaves the set of matches unchanged, so leftmost-first
+and longest-match spans and captures stay the same, provided no assertion of a
+match reads past the new end. No assertion of a match runs at its end, since
+none follows the suffix, and the assertions the DFA runs read at most one byte
+ahead. Java's final-terminator `$` and `\Z` and Trino's final line end read
+further, so a program with assertions the DFA cannot run takes no bound. Nor
+does a pattern with a lowered boolean program: it comes only from a final line
+end, which leaves no suffix, and its matches can end past the suffix after a
+final LF. Rust's Unicode word boundary is sound because the suffix is ASCII.
+
+The bound's search is a reverse scan for the last occurrence, the forward
+literal scan mirrored: a vector pair scan from 1 KiB and a word scan below it,
+both handing off to a reverse KMP once their comparisons pass the scan's
+budget, so the scan stays linear. Its memory joins the required bytes' charge;
+where that does not fit, the pattern keeps the long-window check without the
+bound, and then the short-window check alone.
+
+Count and the one-shot unanchored searches take the bound in place of the
+forward check: no occurrence counts or finds nothing, and otherwise the DFA
+count, or the engine, reads only up to the end of the last occurrence. Where the
+suffix does not hold the literal, as `zz` does not hold `abcdefgh` in
+`(.*?;){3}abcdefgh.*zz`, the window up to that end is still checked for the
+literal, and one without it holds no match. A pattern that only the [class-run
+proof](#inner-literal-class-run-prefix) gives an inner literal search keeps the
+check and so the bound, and its count through that search reads only up to the
+same end, as the DFA count does. A one-shot search keeps the whole text as its
+context. RE2's `replaceAll` bounds the whole text once and ends each of its
+searches there, so each search's own scan stops at once instead of scanning back
+from the text end once per match.
+
+With one `,z` placed about 600 bytes into the `bounded-strings-ending-z` text,
+where the forward check stops, a count took about 0.014 of main's time on x86
+and 0.040 on Graviton over the text's first megabyte, and 0.025 to 0.026 and
+0.040 over all 16 MB, in all four languages.
+
+The cost is the reverse scan over the window's tail when the last occurrence is
+early, where the forward check stopped at the first one. A window whose suffix
+ends it is found at once, where the forward check scanned up to it. A user loop
+over one-shot range finds on one long text pays a reverse scan over the tail
+after each match.
+
 ## Trino LIKE Frontend
 
 `TrinoLikePattern` is a separate language frontend rather than an RE2 dialect.

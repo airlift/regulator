@@ -34,7 +34,10 @@ import static java.util.Objects.requireNonNull;
 /// such as one line of a line-by-line search, is rejected with one scan of its 8-byte words before
 /// any engine runs, as the Rust crate's prefilter runs before its engines. An exact literal of a
 /// pattern that has no other literal route also rejects a long window, with the literal search
-/// of [#indexIn], as Hyperscan proves a literal absent before it runs its automaton.
+/// of [#indexIn], as Hyperscan proves a literal absent before it runs its automaton. Where every
+/// match also ends with exact bytes, the last occurrence of those bytes bounds a long window's
+/// end, as Hyperscan bounds its scan; see [#lastIndexIn]. Where those bytes do not hold the
+/// literal, the window is still checked for the literal before that end.
 final class RequiredBytes
 {
     /// Windows at least this long skip the short-window check. Most lines of a line-by-line search
@@ -105,18 +108,30 @@ final class RequiredBytes
     // the search's single-byte scan: a check that changed with line length cost more on naturally
     // mixed line lengths, as CompiledPattern.build records.
     private final int windowLimit;
+    // Whether `suffix` holds the literal as a run of its bytes, for a literal with its search-end
+    // bound, so that a window holding the suffix holds the literal too.
+    private final boolean suffixHoldsLiteral;
+    // The exact bytes every match ends with, from requiredSuffix, the literal's own array where
+    // they are the literal, or null. Only the analysis and a literal whose compile chose the
+    // search-end bound hold them.
+    private final byte[] suffix;
+    // The search for the last occurrence of `suffix`, for a pattern whose compile chose the
+    // search-end bound, or null. Where the suffix is the literal, it is also longWindowSearch.
+    private final LiteralSearchKernel suffixSearch;
 
-    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch)
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch)
     {
-        this(oneOf, bytes, masks, longWindowSearch, SHORT_WINDOW_LIMIT);
+        this(oneOf, bytes, masks, longWindowSearch, suffix, suffixSearch, SHORT_WINDOW_LIMIT);
     }
 
-    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, int windowLimit)
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch, int windowLimit)
     {
         this.oneOf = oneOf;
         this.bytes = requireNonNull(bytes, "bytes is null");
         this.masks = masks;
         this.longWindowSearch = longWindowSearch;
+        this.suffix = suffix;
+        this.suffixSearch = suffixSearch;
         if (oneOf) {
             // The padding repeats the last byte, so the first equals the third only when there is
             // one byte.
@@ -136,12 +151,14 @@ final class RequiredBytes
         }
         this.lowBits = LOW_BITS;
         this.windowLimit = windowLimit;
+        this.suffixHoldsLiteral = suffixSearch != null && Slices.wrappedBuffer(suffix).indexOf(Slices.wrappedBuffer(bytes)) >= 0;
     }
 
     /// Returns the bytes every match of the `normalized` expression holds, for the short-window
     /// check and, when compilation chooses it, the long-window check, or null: a literal every
-    /// match consumes, where there is one, or else up to three bytes of which every match holds
-    /// one. `minimumMatchLength` counts any required prefix.
+    /// match consumes, where there is one, with the exact bytes every match ends with, where
+    /// there are any, for the search-end bound; or else up to three bytes of which every match
+    /// holds one. `minimumMatchLength` counts any required prefix.
     static RequiredBytes analyze(Regexp normalized, int minimumMatchLength)
     {
         // A pattern whose matches span at least SHORT_WINDOW_LIMIT bytes keeps none, since no
@@ -150,7 +167,7 @@ final class RequiredBytes
         if (minimumMatchLength >= SHORT_WINDOW_LIMIT) {
             return null;
         }
-        RequiredBytes literal = analyzeLiteral(normalized);
+        RequiredBytes literal = analyzeLiteral(normalized, requiredSuffix(normalized));
         if (literal != null) {
             return literal;
         }
@@ -163,8 +180,9 @@ final class RequiredBytes
     /// expression is not a concatenation, at the expression itself: an ASCII literal element, or
     /// a run of ASCII literal and case-pair elements whose exact bytes before the first
     /// case-insensitive letter number at least two. Without one, it is the rarest exact literal
-    /// joined across elements; see [#joinedLiteral].
-    private static RequiredBytes analyzeLiteral(Regexp regexp)
+    /// joined across elements; see [#joinedLiteral]. It keeps `suffix`, the literal's own bytes
+    /// where they are equal.
+    private static RequiredBytes analyzeLiteral(Regexp regexp, byte[] suffix)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
             regexp = regexp.child(0);
@@ -180,15 +198,127 @@ final class RequiredBytes
         for (int index = 0; index < elements.size(); index++) {
             InnerLiteralSearch.FoldedLiteral folded = InnerLiteralSearch.foldedLiteral(elements, index);
             if (folded != null && folded.head().length >= MINIMUM_LITERAL_LENGTH) {
-                return new RequiredBytes(false, folded.bytes(), folded.masks(), null);
+                return new RequiredBytes(false, folded.bytes(), folded.masks(), null, sharedSuffix(folded.bytes(), suffix), null);
             }
             byte[] literal = InnerLiteralSearch.asciiLiteral(elements.get(index));
             if (literal != null && literal.length >= MINIMUM_LITERAL_LENGTH) {
-                return new RequiredBytes(false, literal, new byte[literal.length], null);
+                return exactLiteral(literal, suffix);
             }
         }
         byte[] joined = joinedLiteral(elements);
-        return joined == null ? null : new RequiredBytes(false, joined, new byte[joined.length], null);
+        return joined == null ? null : exactLiteral(joined, suffix);
+    }
+
+    private static RequiredBytes exactLiteral(byte[] literal, byte[] suffix)
+    {
+        return new RequiredBytes(false, literal, new byte[literal.length], null, sharedSuffix(literal, suffix), null);
+    }
+
+    // The suffix, or the literal's own array where they are equal, so one search can serve both.
+    private static byte[] sharedSuffix(byte[] literal, byte[] suffix)
+    {
+        return Arrays.equals(literal, suffix) ? literal : suffix;
+    }
+
+    /// Returns the exact ASCII bytes, at least two, that every match of the normalized `regexp`
+    /// ends with, where no zero-width op follows the last of them in any match, or null; a longer
+    /// run keeps its last [#MAXIMUM_JOINED_LITERAL_LENGTH] bytes. In a window, then, every match
+    /// ends at or before the end of the bytes' last occurrence, and no assertion of a match is
+    /// read at its end; see [#lastIndexIn]. `(.*?,){13}z` ends with `,z`, while `foo\b` and
+    /// `,z$` end with none.
+    static byte[] requiredSuffix(Regexp regexp)
+    {
+        ExactSuffix suffix = exactSuffix(regexp, 0);
+        if (suffix == null || suffix.bytes().length < MINIMUM_LITERAL_LENGTH) {
+            return null;
+        }
+        return suffix.bytes();
+    }
+
+    /// Returns the exact ASCII bytes every match of `regexp` ends with, which may be none, or null
+    /// when a zero-width op can follow its last consumed byte: an assertion or an empty match
+    /// itself, or one at the end of a group, repetition, or concatenation.
+    ///
+    /// - A literal gives its exact tail, as for [#exactAffix], and a group gives its child's.
+    /// - A repetition of at least one gives its child's, not whole, since an earlier repetition
+    ///   may come before them.
+    /// - A concatenation gives its children's bytes from its end, up to and including the first
+    ///   child that is not whole. A zero-width op between bytes ends them there.
+    /// - Anything else gives none.
+    ///
+    /// The case-fold rules are those of [#exactBytes]. The bytes are at most the last
+    /// [#MAXIMUM_JOINED_LITERAL_LENGTH], all that [#requiredSuffix] keeps. A longer literal gives
+    /// its last that many. A concatenation stops once its children have given that many, and
+    /// keeps their last that many. Either truncation clears `whole`, so no earlier bytes join
+    /// them.
+    private static ExactSuffix exactSuffix(Regexp regexp, int depth)
+    {
+        if (depth > MAX_RECURSIVE_DEPTH) {
+            return null;
+        }
+        return switch (regexp.op()) {
+            case LITERAL, LITERAL_STRING -> {
+                int[] runes = literalRunes(regexp);
+                int exactLength = Math.min(exactRuneCount(runes, foldsCase(regexp), true), MAXIMUM_JOINED_LITERAL_LENGTH);
+                yield new ExactSuffix(asciiBytes(runes, runes.length - exactLength, exactLength), exactLength == runes.length);
+            }
+            case CAPTURE -> exactSuffix(regexp.child(0), depth + 1);
+            case PLUS -> ended(exactSuffix(regexp.child(0), depth + 1));
+            case REPEAT -> regexp.min() >= 1 ? ended(exactSuffix(regexp.child(0), depth + 1)) : ExactSuffix.NONE;
+            case CONCAT -> {
+                // The children's bytes, last child first, whose last MAXIMUM_JOINED_LITERAL_LENGTH
+                // are joined in order once collected.
+                List<byte[]> collected = new ArrayList<>();
+                int length = 0;
+                boolean whole = true;
+                for (Regexp child : regexp.children().reversed()) {
+                    if (length >= MAXIMUM_JOINED_LITERAL_LENGTH) {
+                        whole = false;
+                        break;
+                    }
+                    ExactSuffix childSuffix = exactSuffix(child, depth + 1);
+                    if (childSuffix == null) {
+                        // A zero-width op after every byte the concatenation ends with leaves
+                        // none; one before them ends them.
+                        if (length == 0) {
+                            yield null;
+                        }
+                        whole = false;
+                        break;
+                    }
+                    collected.add(childSuffix.bytes());
+                    length += childSuffix.bytes().length;
+                    if (!childSuffix.whole()) {
+                        whole = false;
+                        break;
+                    }
+                }
+                int size = Math.min(length, MAXIMUM_JOINED_LITERAL_LENGTH);
+                byte[] suffix = new byte[size];
+                int end = size;
+                for (byte[] bytes : collected) {
+                    int count = Math.min(bytes.length, end);
+                    end -= count;
+                    System.arraycopy(bytes, bytes.length - count, suffix, end, count);
+                }
+                yield new ExactSuffix(suffix, whole && size == length);
+            }
+            case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> null;
+            default -> ExactSuffix.NONE;
+        };
+    }
+
+    private static ExactSuffix ended(ExactSuffix suffix)
+    {
+        return suffix == null ? null : new ExactSuffix(suffix.bytes(), false);
+    }
+
+    /// The exact bytes every match of an expression ends with. `whole` is true when these bytes
+    /// are the entire expression as one fixed string. Only then can earlier concatenation elements
+    /// extend the suffix. Truncation clears `whole`.
+    private record ExactSuffix(byte[] bytes, boolean whole)
+    {
+        static final ExactSuffix NONE = new ExactSuffix(new byte[0], false);
     }
 
     /// Returns the rarest in English text of the exact runs of at least two bytes that every
@@ -369,7 +499,7 @@ final class RequiredBytes
         for (int index = 0; index < ONE_OF_BYTES; index++) {
             padded[index] = bytes[Math.min(index, bytes.length - 1)];
         }
-        return new RequiredBytes(true, padded, null, null);
+        return new RequiredBytes(true, padded, null, null, null, null);
     }
 
     private static byte[] oneOfBytes(Regexp regexp, int depth)
@@ -496,23 +626,76 @@ final class RequiredBytes
         if (!isExactLiteral()) {
             throw new IllegalStateException("not an exact literal: " + this);
         }
-        return new RequiredBytes(false, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes)));
+        return new RequiredBytes(false, bytes, masks, LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes)), null, null);
     }
 
-    /// Returns this literal without the search [#withLongWindowSearch] adds, for the
-    /// short-window check alone.
+    /// Returns this exact literal with its long-window search and, where every match ends with
+    /// exact bytes, the search-end bound: the search [#lastIndexIn] runs for those bytes. Where
+    /// they are the literal, one search serves both.
+    RequiredBytes withLongWindowSearchAndBound()
+    {
+        if (suffix == null) {
+            return withLongWindowSearch();
+        }
+        if (!isExactLiteral()) {
+            throw new IllegalStateException("not an exact literal: " + this);
+        }
+        LiteralSearchKernel lastOccurrence = LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(suffix));
+        LiteralSearchKernel literalSearch = suffix == bytes ? lastOccurrence : LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes));
+        return new RequiredBytes(false, bytes, masks, literalSearch, suffix, lastOccurrence);
+    }
+
+    /// Returns this literal with its long-window search but without the search-end bound
+    /// [#withLongWindowSearchAndBound] adds.
+    RequiredBytes withoutSearchEndBound()
+    {
+        if (!boundsSearchEnd()) {
+            throw new IllegalStateException("no search-end bound: " + this);
+        }
+        return withLongWindowSearch();
+    }
+
+    /// Returns these bytes without the long-window search and the search-end bound, for the
+    /// short-window check alone: this, where they have neither.
     RequiredBytes withoutLongWindowSearch()
     {
-        if (!searchesLongWindows()) {
-            throw new IllegalStateException("no long-window search: " + this);
+        if (longWindowSearch == null && suffix == null) {
+            return this;
         }
-        return new RequiredBytes(false, bytes, masks, null);
+        return new RequiredBytes(oneOf, bytes, masks, null, null, null, windowLimit);
     }
 
     /// Whether the compile chose the long-window check for this literal; see [#indexIn].
     boolean searchesLongWindows()
     {
         return longWindowSearch != null;
+    }
+
+    /// Whether the compile chose the search-end bound for this literal; see [#lastIndexIn].
+    boolean boundsSearchEnd()
+    {
+        return suffixSearch != null;
+    }
+
+    /// Whether the bytes every match ends with hold the literal, for a literal with its search-end
+    /// bound. Where they do not, a window that holds them may still lack the literal, so a search
+    /// checks for it too; see `CompiledPattern.longWindowSearchEnd`.
+    boolean suffixHoldsLiteral()
+    {
+        return suffixHoldsLiteral;
+    }
+
+    /// The number of bytes every match ends with, for a literal with its search-end bound.
+    int suffixLength()
+    {
+        return suffix.length;
+    }
+
+    /// The exact bytes every match ends with, from the analysis or for a literal with its
+    /// search-end bound, or null; only tests call it.
+    byte[] suffixForDiagnostics()
+    {
+        return suffix == null ? null : suffix.clone();
     }
 
     /// Returns the Slice offset of the literal's first occurrence wholly inside `[start, end)` of
@@ -524,6 +707,17 @@ final class RequiredBytes
     {
         int base = text.byteArrayOffset();
         int found = Prog.findLiteral(text.byteArray(), base + start, end - start, bytes, longWindowSearch);
+        return found < 0 ? -1 : found - base;
+    }
+
+    /// Returns the Slice offset of the last occurrence wholly inside `[start, end)` of `text` of
+    /// the bytes every match ends with, or -1, for a literal with its search-end bound. Every
+    /// match in the window ends at or before that occurrence's end, and with none, the window
+    /// holds no match. The search mirrors [#indexIn]'s; see [Prog#findLastLiteral].
+    int lastIndexIn(Slice text, int start, int end)
+    {
+        int base = text.byteArrayOffset();
+        int found = Prog.findLastLiteral(text.byteArray(), base + start, end - start, suffix, suffixSearch);
         return found < 0 ? -1 : found - base;
     }
 
@@ -564,7 +758,7 @@ final class RequiredBytes
         if (!oneOf || singleByte) {
             throw new IllegalStateException("not a one-of set of two or three distinct bytes: " + this);
         }
-        return new RequiredBytes(true, bytes, masks, null, limit);
+        return new RequiredBytes(true, bytes, masks, null, null, null, limit);
     }
 
     /// Whether `[start, end)` of `text` holds the literal wholly, or one of the bytes.
@@ -715,8 +909,12 @@ final class RequiredBytes
 
     long estimatedRetainedSize()
     {
-        // The long-window search shares `bytes`, which its own estimate counts too.
-        return INSTANCE_SIZE + SizeOf.sizeOf(bytes) + SizeOf.sizeOf(masks) + (longWindowSearch == null ? 0 : longWindowSearch.estimatedRetainedSize() - SizeOf.sizeOf(bytes));
+        // The long-window search shares `bytes`, and the suffix search `suffix`, which their own
+        // estimates count too; where the suffix is the literal, the two are one search.
+        long suffixSize = suffix == null || suffix == bytes ? 0 : SizeOf.sizeOf(suffix);
+        long suffixSearchSize = suffixSearch == null || suffixSearch == longWindowSearch ? 0 : suffixSearch.estimatedRetainedSize() - suffixSize;
+        return INSTANCE_SIZE + SizeOf.sizeOf(bytes) + SizeOf.sizeOf(masks) + suffixSize + suffixSearchSize +
+                (longWindowSearch == null ? 0 : longWindowSearch.estimatedRetainedSize() - SizeOf.sizeOf(bytes));
     }
 
     /// The literal, its case-insensitive letters lowered, or `one of` and the distinct bytes.
