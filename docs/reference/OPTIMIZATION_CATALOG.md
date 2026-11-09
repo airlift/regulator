@@ -597,12 +597,15 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   filter skips that sample, though long searches still sample its
   productivity. The start class filter replaces the start set's own scan on
   unanchored forward DFA searches of at least 1 KiB with the Vector API and no
-  start literal filter, where a productive fixed-distance scan goes first. Its
-  start set needs a vector scan of its own and English text holding it at
-  least once in 500 bytes, and its first two or three byte ranges, taken as
-  independent, an English estimate of at most a sixteenth as often as the
-  start bytes and under once in 500 bytes. The third offset is checked only
-  when it narrows the pair's estimate at least four times
+  start literal filter, where a productive fixed-distance scan goes first; a
+  find, count, or group-zero cursor search with under 64 KiB left does not
+  sample that scan and takes either start filter when English text holds the
+  fixed-distance bytes more often than the filter passes a position. The
+  start class filter's start set needs a vector scan of its own and English
+  text holding it at least once in 500 bytes, and its first two or three byte
+  ranges, taken as independent, an English estimate of at most a sixteenth as
+  often as the start bytes and under once in 500 bytes. The third offset is
+  checked only when it narrows the pair's estimate at least four times
 - **What it does:** The DFA scans to the next byte that can leave its
   unanchored start state, runs from there, and resumes the scan when it
   returns to the start state. The byte set is built on first use, and the scan
@@ -624,7 +627,10 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   whole count takes sparse capture counts over 32 KiB to 0.49 of their
   earlier time on Graviton and 0.16 on Intel ([#9]), and the start class
   filter takes rebar mariomka/ip counts to 0.29 to 0.32 on Graviton and 0.22
-  to 0.23 on Intel ([#201]).
+  to 0.23 on Intel ([#201]). Taking either start filter on short searches
+  takes rebar's case-insensitive Sherlock names count to 0.56 on Graviton and
+  0.47 on Intel, and single finds in 4 or 16 KiB of English text to 0.12 and
+  0.09.
 
 ### Start literal filter
 

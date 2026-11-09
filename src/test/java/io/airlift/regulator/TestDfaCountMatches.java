@@ -92,13 +92,75 @@ public class TestDfaCountMatches
     @Test
     public void testShortFixedDistanceSkipUsesCompactContinuation()
     {
+        // Sparse enough for the productivity sample of a 64 KiB search to take the fixed-distance
+        // scan, which a shorter search leaves for the start class filter.
         Prog program = compile("[a-z]shing");
-        String input = "xxxxxxsxxxxxx".repeat(512) + "ashing";
+        String filler = "xxxxxxsxxxxxx";
+        String input = filler.repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES / filler.length() + 1) + "ashing";
 
         assertThat(Dfa.countMatches(program, utf8Slice(input), Prog.MatchKind.FIRST_MATCH))
                 .isEqualTo(1);
         assertThat(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).fixedDistanceShortSkipFallbackCount())
                 .isGreaterThan(0);
+    }
+
+    @Test
+    public void testUnsampledFixedDistanceScanYieldsToStartLiteralFilter()
+    {
+        // The names' fifth bytes are common in English text, so their fixed-distance scan skips
+        // little. Below the sampling threshold, counts and group-zero searches use the more
+        // selective start literal filter.
+        String expression = "(?i)Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty";
+        String filler = "the eel slept here alone, see ".repeat(100);
+        for (int nameCount : new int[] {7, 55}) {
+            Slice source = utf8Slice((filler + "irene ADLER ").repeat(nameCount));
+
+            Prog program = compileRustBytesWithoutUnicode(expression).forwardProgramForDiagnostics();
+            Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
+                    .as("length=%s", source.length())
+                    .isEqualTo(trinoMatcherCount(expression, source))
+                    .isEqualTo(nameCount);
+            assertUnsampledSearchesUseStartLiteralFilter(dfa, source);
+
+            RustRegexp pattern = compileRustBytesWithoutUnicode(expression);
+            Dfa.GroupZeroForwardCursor cursor = pattern.createGroupZeroForwardCursor();
+            int found = 0;
+            int matchEnd = 0;
+            long toMatchEnd;
+            while ((toMatchEnd = Dfa.searchGroupZeroForward(cursor, source, 0, source.length(), matchEnd)) > 0) {
+                matchEnd += (int) toMatchEnd;
+                found++;
+            }
+            assertThat(found).as("length=%s", source.length()).isEqualTo(nameCount);
+            assertUnsampledSearchesUseStartLiteralFilter(pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
+        }
+
+        // A single find of the match end, and one that only asks whether there is a match, take
+        // the filter the same way.
+        Slice source = utf8Slice((filler + "irene ADLER ").repeat(7));
+        Prog program = compileRustBytesWithoutUnicode(expression).forwardProgramForDiagnostics();
+        assertThat(Dfa.search(program, source, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(filler.length() + "irene ADLER".length());
+        assertUnsampledSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH), source);
+        program = compileRustBytesWithoutUnicode(expression).forwardProgramForDiagnostics();
+        assertThat(Dfa.search(program, source, false, Prog.MatchKind.FIRST_MATCH, false)).isNotNegative();
+        assertUnsampledSearchesUseStartLiteralFilter(program.getCachedDfa(Dfa.DfaInstance.Kind.LONGEST_MATCH), source);
+    }
+
+    // ASCII case folding, as in rebar's sherlock-casei-en row; Unicode folding gives s and k
+    // multibyte variants, which leave no fixed-distance byte.
+    private static RustRegexp compileRustBytesWithoutUnicode(String expression)
+    {
+        return RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setUnicode(false));
+    }
+
+    private static void assertUnsampledSearchesUseStartLiteralFilter(Dfa.DfaInstance dfa, Slice source)
+    {
+        assertThat(dfa.fixedDistanceByteOffset()).isEqualTo(4);
+        // Without the vector scanners there is no filter, and the fixed-distance scan runs.
+        assertThat(dfa.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(dfa.fixedDistanceShortSkipFallbackCount() == 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
+        assertThat(dfa.startLiteralFilterScanCount() > 0).as("length=%s", source.length()).isEqualTo(VectorSupport.isAvailable());
     }
 
     @Test
