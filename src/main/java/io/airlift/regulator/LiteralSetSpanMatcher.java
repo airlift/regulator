@@ -28,8 +28,8 @@ import static java.util.Objects.requireNonNull;
 /// which [LiteralAlternationSpanMatcher]'s trie walk from each position does not scale to. It
 /// searches a leftmost-first Aho-Corasick automaton ported from the `aho-corasick` crate's
 /// noncontiguous NFA (`nfa/noncontiguous.rs`) and its leftmost search (`automaton.rs`,
-/// `try_find_fwd`), which the `regex` crate uses for such patterns, so each input byte follows
-/// one transition plus the failure links it amortizes.
+/// `try_find_fwd`), which the `regex` crate uses for such patterns, so each byte the automaton
+/// reads follows one transition plus the failure links it amortizes.
 ///
 /// The trie omits a literal whose path passes through an earlier literal's match state, which
 /// a leftmost-first search never reports. A state with its own match therefore keeps
@@ -59,6 +59,29 @@ import static java.util.Objects.requireNonNull;
 /// [#DENSE_DEPTH] whose rows fit [#MAXIMUM_DENSE_ROW_BYTES] and the build's memory budget, and at
 /// none where none fits.
 ///
+/// A set of long literals, each of at least [SkipTable#MINIMUM_LENGTH] bytes, skips ahead as in
+/// Wu-Manber (Wu and Manber, "A Fast Algorithm for Multi-Pattern Searching", 1994), where its
+/// [SkipTable] fits the build's memory budget and has distance zero for at most a quarter of its
+/// hashes. The search reads windows as long as the shortest literal, at most
+/// [SkipTable#MAXIMUM_WINDOW] bytes. The table maps the last block of each window to a distance
+/// from the window start within which no literal starts, and a nonzero one moves the window start
+/// that far. A zero distance leaves a walk down the trie's edges from the window start, which
+/// reports the literal starting there that [#findPrefixEnd] would. The first window start with a
+/// literal holds the leftmost-first match. After each failed walk, the search checks the trie
+/// edges its walks have followed against [#WALK_ALLOWANCE] plus two per byte it has passed, so one
+/// walk can take the total past the allowance; then the automaton's search takes the rest from the
+/// byte after that walk's start, so a run of near misses costs linear time. Only a search of at
+/// least [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] skips ahead; a shorter one runs the automaton.
+///
+/// On text that no literal starts in, such as digits searched for words, a window step crosses at
+/// most `window - block + 1` bytes. The root's vector scan below crosses the whole run at once, so
+/// a set with that scan uses it while skipping ahead, at a window start whose byte and the next
+/// lead no literal. Until the short-scan limit ends its scans, such a set stops skipping ahead
+/// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] before the search's end, where the scan stops too,
+/// and leaves the rest to the automaton. Once the limit ends them, the search steps windows up to
+/// the last full window with a new walk allowance, so it can skip into those last bytes, and an
+/// automaton it later hands the search to starts its own short-scan count.
+///
 /// At the root, a search skips the bytes that lead no literal with a vector scan for the root's
 /// leading bytes. Such a byte leaves the state at the root and records nothing, so the skip is
 /// exact. A search at the root has no match pending, since once one is recorded no state the
@@ -68,10 +91,10 @@ import static java.util.Objects.requireNonNull;
 /// It is not the DFA's start-byte skip, which prefers its start literal filter for up to 16
 /// common start bytes, covers a single start byte with its prefix scan, and vector-scans only
 /// with [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] bytes left. A matcher with the skip is a
-/// [RootSkippingMatcher], so one without it retains only its trie arrays, any dense rows, and the
-/// object holding them, which carries the rows' fields whether or not it has rows; the skip
-/// costs nothing where it is not built. No method is overridden: the searches reach the skip's
-/// scan set by testing `this` against the subclass.
+/// [RootSkippingMatcher], so one without it retains only its trie arrays, any dense rows and skip
+/// table, and the object holding them, which carries the rows' fields whether or not it has rows;
+/// the skip costs nothing where it is not built. No method is overridden: the searches reach the
+/// skip's scan set by testing `this` against the subclass.
 sealed class LiteralSetSpanMatcher
         implements GroupZeroSpanSearch
         permits LiteralSetSpanMatcher.RootSkippingMatcher
@@ -86,6 +109,14 @@ sealed class LiteralSetSpanMatcher
     // The deepest states with dense rows, which a smaller budget or the row limit reduces.
     private static final int DENSE_DEPTH = 3;
     private static final long MAXIMUM_DENSE_ROW_BYTES = 1L << 20;
+    // The trie edges the walks at window starts may follow, beyond two per byte the search has
+    // passed, before the automaton takes the rest of the search. The check follows each failed
+    // walk, so one walk can take the total past it.
+    private static final int WALK_ALLOWANCE = 4096;
+    // The indexes of the counts a diagnostics search adds to.
+    private static final int ROOT_SKIP_COUNT = 0;
+    private static final int WINDOW_SKIP_COUNT = 1;
+    private static final int AUTOMATON_HANDOFF_COUNT = 2;
 
     private final int[] rootStateByByte;
     // The class of each byte in a dense row, or null without dense rows.
@@ -100,6 +131,8 @@ sealed class LiteralSetSpanMatcher
     // The transition of each state with a dense row on each byte class, row after row from the
     // root's, or null without dense rows.
     private final int[] denseNext;
+    // The skip ahead of a set of long literals, or null.
+    private final SkipTable skipTable;
     // The first edge of each state, plus a final entry ending the last state's edges.
     private final int[] firstEdgeByState;
     private final byte[] edgeByte;
@@ -109,7 +142,7 @@ sealed class LiteralSetSpanMatcher
 
     private LiteralSetSpanMatcher(int[] rootStateByByte, int[] firstEdgeByState, byte[] edgeByte, int[] failureByState, int[] matchLengthByState)
     {
-        this(rootStateByByte, null, 0, 0, 1, null, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+        this(rootStateByByte, null, 0, 0, 1, null, null, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
     }
 
     private LiteralSetSpanMatcher(
@@ -119,6 +152,7 @@ sealed class LiteralSetSpanMatcher
             int denseDepth,
             int denseStateCount,
             int[] denseNext,
+            SkipTable skipTable,
             int[] firstEdgeByState,
             byte[] edgeByte,
             int[] failureByState,
@@ -130,6 +164,7 @@ sealed class LiteralSetSpanMatcher
         this.denseDepth = denseDepth;
         this.denseStateCount = denseStateCount;
         this.denseNext = denseNext;
+        this.skipTable = skipTable;
         this.firstEdgeByState = firstEdgeByState;
         this.edgeByte = edgeByte;
         this.failureByState = failureByState;
@@ -146,17 +181,20 @@ sealed class LiteralSetSpanMatcher
     /// literals keep the alternation's leftmost-first priority order. `maximumRetainedBytes`
     /// bounds the states the build adds, but not the root's row or the object overhead, so a
     /// caller admits the result by its [#estimatedRetainedSize()]. The literals' extraction may
-    /// build a multiple of it; past that, the build takes the literals one at a time. The dense
-    /// rows, and then the root's skip, are built only where the matcher with them still retains at
-    /// most `maximumRetainedBytes`, the rows at a smaller depth where that is what fits, so a
-    /// matcher a caller admitted without them is admitted with them or built without them.
+    /// build a multiple of it; past that, the build takes the literals one at a time. The skip
+    /// table of a set of long literals, the dense rows, and then the root's skip, are built only
+    /// where the matcher with them still retains at most `maximumRetainedBytes`, the rows at a
+    /// smaller depth where that is what fits, so a matcher a caller admitted without them is
+    /// admitted with them or built without them. The table comes first because it takes far less
+    /// memory than the rows for a larger gain; see [Trie#build].
     static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes)
     {
-        return analyze(expression, capturingGroupCount, maximumRetainedBytes, DENSE_DEPTH);
+        return analyze(expression, capturingGroupCount, maximumRetainedBytes, DENSE_DEPTH, true);
     }
 
-    /// As [#analyze(Regexp,int,long)], with dense rows for the states up to `maximumDenseDepth`.
-    static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes, int maximumDenseDepth)
+    /// As [#analyze(Regexp,int,long)], with dense rows for the states up to `maximumDenseDepth`,
+    /// and skipping ahead in a set of long literals only where `skipsAhead` allows it.
+    static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes, int maximumDenseDepth, boolean skipsAhead)
     {
         requireNonNull(expression, "expression is null");
         if (capturingGroupCount != 0) {
@@ -168,7 +206,7 @@ sealed class LiteralSetSpanMatcher
             // Past the extraction's bound, the literals go into the trie one at a time as the
             // expansion spells them, so the set is admitted exactly when the finished set fits.
             Trie trie = LiteralAlternationSpanMatcher.spellLiteralSet(expression, maximumRetainedBytes);
-            return trie == null ? null : trie.build(maximumRetainedBytes, maximumDenseDepth);
+            return trie == null ? null : trie.build(maximumRetainedBytes, maximumDenseDepth, skipsAhead);
         }
         if (extracted == null || extracted.literalCount() <= LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES) {
             return null;
@@ -186,7 +224,7 @@ sealed class LiteralSetSpanMatcher
                 return null;
             }
         }
-        return trie.build(maximumRetainedBytes, maximumDenseDepth);
+        return trie.build(maximumRetainedBytes, maximumDenseDepth, skipsAhead);
     }
 
     /// Returns a lower bound on what the large set [#analyze] builds from the capture-free
@@ -202,9 +240,9 @@ sealed class LiteralSetSpanMatcher
         if (!attempt.spelled()) {
             return leastRetainedSizeBeyond(attempt.trie());
         }
-        // The dense rows and the root's skip are built only where they fit, so the least set has
-        // neither.
-        return attempt.trie().build(0, 0).estimatedRetainedSize();
+        // The skip table, the dense rows and the root's skip are built only where they fit, so the
+        // least set has none of them.
+        return attempt.trie().build(0, 0, false).estimatedRetainedSize();
     }
 
     /// Returns a lower bound on the memory the large set of the capture-free `expression` and its
@@ -411,9 +449,12 @@ sealed class LiteralSetSpanMatcher
         }
 
         /// Builds the automaton of the literals added, with dense rows for the states up to
-        /// `maximumDenseDepth`. `maximumRetainedBytes` decides only the depth of the dense rows and
-        /// whether the root's skip fits; whether to admit the automaton is the caller's decision.
-        private LiteralSetSpanMatcher build(long maximumRetainedBytes, int maximumDenseDepth)
+        /// `maximumDenseDepth`, and with the skip table of a set of long literals if `skipsAhead`,
+        /// unless more than a quarter of the table's hashes would have distance zero.
+        /// `maximumRetainedBytes` decides only whether the skip table fits, the depth of the dense
+        /// rows, and whether the root's skip fits; whether to admit the automaton is the caller's
+        /// decision.
+        private LiteralSetSpanMatcher build(long maximumRetainedBytes, int maximumDenseDepth, boolean skipsAhead)
         {
             // Phase 2: number the states breadth-first and fill failure links in that order, so a
             // state's failure state, which is shallower, is final when the state is reached.
@@ -490,15 +531,85 @@ sealed class LiteralSetSpanMatcher
             firstEdgeByState[stateCount] = edgeCount;
             LiteralSetSpanMatcher matcher = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
 
-            // Phase 4: dense rows for the shallowest states, at the deepest depth whose rows fit.
+            // Phase 4: the skip table of a set of long literals, where it fits. It takes the budget
+            // before the dense rows: it retains at most 64 KiB against the rows' 1 MiB, and on
+            // english-10 it brings searches to 0.21x the time without either, where the rows alone
+            // give 0.41x.
+            if (skipsAhead) {
+                matcher = matcher.withSkipTable(depthByOrder, maximumRetainedBytes);
+            }
+
+            // Phase 5: dense rows for the shallowest states, at the deepest depth whose rows fit.
             matcher = matcher.withDenseRows(depthByOrder, maximumDenseDepth, maximumRetainedBytes);
 
-            // Phase 5: the root's skip, whose scan set and any nibble tables, with the larger
+            // Phase 6: the root's skip, whose scan set and any nibble tables, with the larger
             // object holding them, are a retained charge that never costs the matcher itself:
             // where they do not fit, the matcher searches without them.
             RootSkippingMatcher rootSkipping = VectorSupport.isAvailable() ? RootSkippingMatcher.build(matcher, rootChildByByte) : null;
             return rootSkipping != null && rootSkipping.estimatedRetainedSize() <= maximumRetainedBytes ? rootSkipping : matcher;
         }
+    }
+
+    /// Returns this matcher, which has no dense rows or skip table, with the skip table of its
+    /// literals where each has at least [SkipTable#MINIMUM_LENGTH] bytes, [SkipTable#build] returns
+    /// a table, and the matcher with it retains at most `maximumRetainedBytes`, or else this
+    /// matcher. `depthByOrder` holds each state's depth, which grows with its breadth-first number.
+    private LiteralSetSpanMatcher withSkipTable(int[] depthByOrder, long maximumRetainedBytes)
+    {
+        // A state with its own match ends a literal of its depth; every other match length a
+        // state holds is its failure state's, shorter than its depth.
+        int stateCount = failureByState.length;
+        int minimumLength = Integer.MAX_VALUE;
+        for (int state = 1; state < stateCount; state++) {
+            if (matchLengthByState[state] == depthByOrder[state]) {
+                minimumLength = Math.min(minimumLength, depthByOrder[state]);
+            }
+        }
+        if (minimumLength < SkipTable.MINIMUM_LENGTH) {
+            return this;
+        }
+        // Every literal passes through a state at the window's depth, and the path to that state
+        // spells the literal's first window bytes. A state's parent is the state with the edge
+        // leading to it.
+        int window = Math.min(minimumLength, SkipTable.MAXIMUM_WINDOW);
+        int[] parentByState = new int[stateCount];
+        for (int state = 0; state < stateCount; state++) {
+            for (int edge = firstEdgeByState[state]; edge < firstEdgeByState[state + 1]; edge++) {
+                // Edge e leads to state e + 1.
+                parentByState[edge + 1] = state;
+            }
+        }
+        int windowStart = 1;
+        while (depthByOrder[windowStart] < window) {
+            windowStart++;
+        }
+        int windowEnd = windowStart;
+        while (windowEnd < stateCount && depthByOrder[windowEnd] == window) {
+            windowEnd++;
+        }
+        byte[] windowBytes = new byte[(windowEnd - windowStart) * window];
+        for (int state = windowStart; state < windowEnd; state++) {
+            int offset = (state - windowStart) * window;
+            for (int index = window - 1, pathState = state; index >= 0; index--, pathState = parentByState[pathState]) {
+                windowBytes[offset + index] = edgeByte[pathState - 1];
+            }
+        }
+        SkipTable table = SkipTable.build(windowBytes, window);
+        if (table == null || estimatedRetainedSize() + table.estimatedRetainedSize() > maximumRetainedBytes) {
+            return this;
+        }
+        return new LiteralSetSpanMatcher(
+                rootStateByByte,
+                classByByte,
+                classCount,
+                denseDepth,
+                denseStateCount,
+                denseNext,
+                table,
+                firstEdgeByState,
+                edgeByte,
+                failureByState,
+                matchLengthByState);
     }
 
     /// Returns this matcher, which has no dense rows, with dense rows for the states up to the
@@ -530,6 +641,7 @@ sealed class LiteralSetSpanMatcher
                     depth,
                     denseStateCount,
                     denseNext,
+                    skipTable,
                     firstEdgeByState,
                     edgeByte,
                     failureByState,
@@ -627,16 +739,17 @@ sealed class LiteralSetSpanMatcher
                 SizeOf.sizeOf(firstEdgeByState) +
                 SizeOf.sizeOf(edgeByte) +
                 SizeOf.sizeOf(failureByState) +
-                SizeOf.sizeOf(matchLengthByState);
+                SizeOf.sizeOf(matchLengthByState) +
+                (skipTable == null ? 0 : skipTable.estimatedRetainedSize());
         if (this instanceof RootSkippingMatcher rootSkipping) {
             return RootSkippingMatcher.INSTANCE_SIZE + trieSize + SizeOf.sizeOf(rootSkipping.rootByteNibbleTables);
         }
         return INSTANCE_SIZE + trieSize;
     }
 
-    /// Returns this matcher without the root's skip: one sharing its trie arrays and any dense
-    /// rows, or this matcher if it has none. It retains what the matcher built without the skip
-    /// would.
+    /// Returns this matcher without the root's skip: one sharing its trie arrays, any dense rows,
+    /// and any skip table, or this matcher if it has none. It retains what the matcher built
+    /// without the skip would.
     final LiteralSetSpanMatcher withoutRootSkipping()
     {
         if (this instanceof RootSkippingMatcher) {
@@ -647,6 +760,7 @@ sealed class LiteralSetSpanMatcher
                     denseDepth,
                     denseStateCount,
                     denseNext,
+                    skipTable,
                     firstEdgeByState,
                     edgeByte,
                     failureByState,
@@ -655,12 +769,13 @@ sealed class LiteralSetSpanMatcher
         return this;
     }
 
-    /// Returns this matcher without its dense rows: one sharing its trie arrays and any root skip,
-    /// or this matcher if it has none. It keeps the root skip it has and does not reconsider one
-    /// the rows left no room for.
-    final LiteralSetSpanMatcher withoutDenseRows()
+    /// Returns this matcher without the tables that only speed up its search of the trie, its
+    /// dense rows and skip table: one sharing its trie arrays and any root skip, or this matcher if
+    /// it has neither. It keeps the root skip it has and does not reconsider one the tables left
+    /// no room for.
+    final LiteralSetSpanMatcher withoutSearchTables()
     {
-        if (denseNext == null) {
+        if (denseNext == null && skipTable == null) {
             return this;
         }
         LiteralSetSpanMatcher trie = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
@@ -674,6 +789,13 @@ sealed class LiteralSetSpanMatcher
     final int denseDepthForDiagnostics()
     {
         return denseDepth;
+    }
+
+    /// Returns whether the set has a skip table, with which a search of at least
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] skips ahead by windows of its long literals.
+    final boolean skipsAheadForDiagnostics()
+    {
+        return skipTable != null;
     }
 
     /// Returns the scan set of the root's skip for [Dfa#findByteSet], or `0` without the skip.
@@ -716,7 +838,10 @@ sealed class LiteralSetSpanMatcher
     /// [VectorByteSetScanner#SHORT_SCAN_LIMIT] skips in a row each skipped fewer than
     /// [VectorByteSetScanner#SHORT_SCAN_BYTES] bytes, the rule of the forward DFA's count
     /// self-loop scan: on prose such as `word. word.`, a skip lands on the next word. The rest of
-    /// that search, and every search that may not skip, is the plain trie walk.
+    /// that search, and every search that may not skip, is the plain trie walk. A search of at
+    /// least [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] in a set with a skip table skips ahead by
+    /// windows instead, see the class doc; where the set has the root skip, it scans under the
+    /// same short-scan limit.
     final long findSpan(Slice input, int start, int end)
     {
         return findSpan(input, start, end, null);
@@ -733,45 +858,164 @@ sealed class LiteralSetSpanMatcher
     /// [ExtendingLiterals].
     final int findPrefixEnd(Slice input, int start, int end)
     {
-        byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
-        int matchEnd = -1;
+        int matchLength = (int) (walkPrefix(input.byteArray(), inputOffset + start, inputOffset + end) >>> 32);
+        return matchLength == 0 ? -1 : start + matchLength;
+    }
+
+    // Walks the trie's edges from the root along the bytes from array index `position` to array
+    // index `inputEnd`, and returns the match length of the deepest state on the walked path that
+    // ends a literal, or zero for none, in the high half, and the edges followed in the low half.
+    private long walkPrefix(byte[] bytes, int position, int inputEnd)
+    {
+        int matchLength = 0;
+        int depth = 0;
         int state = ROOT;
-        for (int position = start; position < end; position++) {
-            byte value = bytes[inputOffset + position];
+        while (position + depth < inputEnd) {
+            byte value = bytes[position + depth];
             state = state == ROOT ? rootStateByByte[value & 0xFF] : findChild(state, value);
             if (state == ROOT) {
                 break;
             }
-            if (matchLengthByState[state] == position + 1 - start) {
-                matchEnd = position + 1;
+            depth++;
+            if (matchLengthByState[state] == depth) {
+                matchLength = depth;
             }
         }
-        return matchEnd;
+        return ((long) matchLength << 32) | depth;
     }
 
-    /// Returns [#findSpan(Slice,int,int)], adding the root skips it makes to `diagnostics`.
+    /// Returns [#findSpan(Slice,int,int)], adding its root scans, window skips and automaton
+    /// handoffs to `diagnostics`.
     final long findSpanForDiagnostics(Slice input, int start, int end, SkipDiagnostics diagnostics)
     {
         requireNonNull(diagnostics, "diagnostics is null");
-        long[] rootSkipCount = new long[1];
-        long span = findSpan(input, start, end, rootSkipCount);
-        diagnostics.rootSkipCount += rootSkipCount[0];
+        long[] counts = new long[AUTOMATON_HANDOFF_COUNT + 1];
+        long span = findSpan(input, start, end, counts);
+        diagnostics.rootSkipCount += counts[ROOT_SKIP_COUNT];
+        diagnostics.windowSkipCount += counts[WINDOW_SKIP_COUNT];
+        diagnostics.automatonHandoffCount += counts[AUTOMATON_HANDOFF_COUNT];
         return span;
     }
 
-    // Picks the search's walk once, so a search that may not skip never checks for a skip. A
-    // null `rootSkipCount`, as every production search passes, counts nothing. It is an array
+    // Picks the search's walk once, so a search that may not skip root bytes never checks for a
+    // skip. A null `counts`, as every production search passes, counts nothing. It is an array
     // rather than a SkipDiagnostics because C2 does not inline a method whose signature names a
     // class that is not loaded, and production never loads SkipDiagnostics.
-    private long findSpan(Slice input, int start, int end, long[] rootSkipCount)
+    private long findSpan(Slice input, int start, int end, long[] counts)
+    {
+        if (skipTable == null || end - start < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES) {
+            return searchAutomaton(input, start, end, counts);
+        }
+        if (this instanceof RootSkippingMatcher rootSkipping) {
+            return skipAheadScanningRootBytes(input, start, end, rootSkipping.rootByteScanSet, rootSkipping.rootByteNibbleTables, counts);
+        }
+        return skipAhead(input, start, end, counts);
+    }
+
+    // The automaton's search of `[start, end)`, from the root with no match recorded.
+    private long searchAutomaton(Slice input, int start, int end, long[] counts)
     {
         if (!skipsRootBytes(end - start)) {
             int inputOffset = input.byteArrayOffset();
             return walkTrie(input, inputOffset + start, inputOffset + end, Dfa.SEARCH_NO_MATCH);
         }
         RootSkippingMatcher rootSkipping = (RootSkippingMatcher) this;
-        return walkTrieSkippingRootBytes(input, start, end, rootSkipping.rootByteScanSet, rootSkipping.rootByteNibbleTables, rootSkipCount);
+        return walkTrieSkippingRootBytes(input, start, end, rootSkipping.rootByteScanSet, rootSkipping.rootByteNibbleTables, counts);
+    }
+
+    // Skips from window start to window start until a trie walk finds a literal starting at one.
+    // Every literal has at least a window of bytes, so none starts after the last full window's
+    // start. Once a failed walk takes the edges the walks followed past their allowance, the
+    // automaton searches the rest from the next position, where no literal starts before it.
+    private long skipAhead(Slice input, int start, int end, long[] counts)
+    {
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int inputEnd = inputOffset + end;
+        SkipTable table = skipTable;
+        int lastWindowStart = inputEnd - table.window;
+        long walked = 0;
+        int searchStart = inputOffset + start;
+        int position = searchStart;
+        while (position <= lastWindowStart) {
+            int shift = table.shift(bytes, position);
+            if (shift != 0) {
+                addCount(counts, WINDOW_SKIP_COUNT);
+                position += shift;
+                continue;
+            }
+            long prefix = walkPrefix(bytes, position, inputEnd);
+            int matchLength = (int) (prefix >>> 32);
+            if (matchLength != 0) {
+                int matchStart = position - inputOffset;
+                return ((long) matchStart << 32) | ((matchStart + matchLength) & 0xFFFF_FFFFL);
+            }
+            walked += (int) prefix;
+            position++;
+            if (walked > 2L * (position - searchStart) + WALK_ALLOWANCE) {
+                addCount(counts, AUTOMATON_HANDOFF_COUNT);
+                return searchAutomaton(input, position - inputOffset, end, counts);
+            }
+        }
+        return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // The skip ahead of a search that may skip root bytes, with the root skip's scan set and any
+    // nibble tables. At a window start whose byte and the next lead no literal, it scans to the
+    // next leading byte, the rule of walkTrieSkippingRootBytes, where skipAhead would step a
+    // window at a time across text that no literal starts in. Its loop repeats skipAhead's for
+    // the reason walkTrieSkippingRootBytes repeats walkTrie's, and once the short-skip limit ends
+    // scanning, the rest of the search is skipAhead from the leading byte the last scan found.
+    // Like the automaton's root skip, it skips only from a window start at least
+    // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES before the end; the automaton searches the rest
+    // from the first window start past that, where no literal starts before it. 64 exceeds
+    // SkipTable.MAXIMUM_WINDOW, so each window it checks fits before the search's end.
+    private long skipAheadScanningRootBytes(Slice input, int start, int end, int rootByteScanSet, byte[] rootByteNibbleTables, long[] counts)
+    {
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int inputEnd = inputOffset + end;
+        SkipTable table = skipTable;
+        int lastSkipStart = inputEnd - CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
+        long walked = 0;
+        int searchStart = inputOffset + start;
+        int position = searchStart;
+        int shortScanCount = 0;
+        while (position <= lastSkipStart) {
+            if (rootStateByByte[bytes[position] & 0xFF] == ROOT && rootStateByByte[bytes[position + 1] & 0xFF] == ROOT) {
+                addCount(counts, ROOT_SKIP_COUNT);
+                int leadingBytePosition = Dfa.findByteSet(bytes, position + 1, inputEnd - position - 1, rootByteScanSet, rootByteNibbleTables);
+                if (leadingBytePosition < 0) {
+                    return Dfa.SEARCH_NO_MATCH;
+                }
+                shortScanCount = VectorByteSetScanner.shortScanCount(shortScanCount, leadingBytePosition - position - 1);
+                if (shortScanCount == VectorByteSetScanner.SHORT_SCAN_LIMIT) {
+                    return skipAhead(input, leadingBytePosition - inputOffset, end, counts);
+                }
+                position = leadingBytePosition;
+                continue;
+            }
+            int shift = table.shift(bytes, position);
+            if (shift != 0) {
+                addCount(counts, WINDOW_SKIP_COUNT);
+                position += shift;
+                continue;
+            }
+            long prefix = walkPrefix(bytes, position, inputEnd);
+            int matchLength = (int) (prefix >>> 32);
+            if (matchLength != 0) {
+                int matchStart = position - inputOffset;
+                return ((long) matchStart << 32) | ((matchStart + matchLength) & 0xFFFF_FFFFL);
+            }
+            walked += (int) prefix;
+            position++;
+            if (walked > 2L * (position - searchStart) + WALK_ALLOWANCE) {
+                addCount(counts, AUTOMATON_HANDOFF_COUNT);
+                return searchAutomaton(input, position - inputOffset, end, counts);
+            }
+        }
+        return searchAutomaton(input, position - inputOffset, end, counts);
     }
 
     // The plain trie walk from the root at array index `position` to array index `inputEnd`,
@@ -807,7 +1051,7 @@ sealed class LiteralSetSpanMatcher
     // checks and kernel calls would then sit in the loop of every search, and their calls make
     // C2 reload the trie arrays and spill the state around them. Once the short-skip limit ends
     // skipping, the rest of the search is walkTrie from the leading byte the last scan found.
-    private long walkTrieSkippingRootBytes(Slice input, int start, int end, int rootByteScanSet, byte[] rootByteNibbleTables, long[] rootSkipCount)
+    private long walkTrieSkippingRootBytes(Slice input, int start, int end, int rootByteScanSet, byte[] rootByteNibbleTables, long[] counts)
     {
         byte[] bytes = input.byteArray();
         int inputOffset = input.byteArrayOffset();
@@ -834,9 +1078,7 @@ sealed class LiteralSetSpanMatcher
                 // step it saves. Text whose misses come in short runs, such as the `. ` between
                 // words, passes that check, so the short-skip limit ends skipping there.
                 if (inputEnd - position >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && rootStateByByte[bytes[position + 1] & 0xFF] == ROOT) {
-                    if (rootSkipCount != null) {
-                        rootSkipCount[0]++;
-                    }
+                    addCount(counts, ROOT_SKIP_COUNT);
                     int leadingBytePosition = Dfa.findByteSet(bytes, position + 1, inputEnd - position - 1, rootByteScanSet, rootByteNibbleTables);
                     if (leadingBytePosition < 0) {
                         return match;
@@ -856,6 +1098,15 @@ sealed class LiteralSetSpanMatcher
             }
         }
         return match;
+    }
+
+    // Adds one to the count at `index` of a diagnostics search; every production search passes
+    // null.
+    private static void addCount(long[] counts, int index)
+    {
+        if (counts != null) {
+            counts[index]++;
+        }
     }
 
     // The transition of a state without a dense row: its edge, else its failure state's
@@ -966,11 +1217,105 @@ sealed class LiteralSetSpanMatcher
     static final class SkipDiagnostics
     {
         private long rootSkipCount;
+        private long windowSkipCount;
+        private long automatonHandoffCount;
 
         /// The vector scans that skipped from the root to the next byte leading a literal.
         long rootSkipCount()
         {
             return rootSkipCount;
+        }
+
+        /// The skips ahead from one window start to a later one.
+        long windowSkipCount()
+        {
+            return windowSkipCount;
+        }
+
+        /// The searches that skipped ahead until their walks read their allowance and then ran
+        /// the automaton.
+        long automatonHandoffCount()
+        {
+            return automatonHandoffCount;
+        }
+    }
+
+    /// The Wu-Manber skip table of a set whose literals all have at least [#MINIMUM_LENGTH]
+    /// bytes. Each window is as long as the shortest literal, at most [#MAXIMUM_WINDOW] bytes, and
+    /// its last block is three bytes for a window of six or more and two for a shorter one. Each
+    /// hash entry stores the least shift that any block with that hash allows, the distance from
+    /// that block's end to the window's end, over the blocks within any literal's first window
+    /// bytes. A hash no block has stores `window - block + 1`. Shifts are measured from the window
+    /// start, so no literal starts within a window's shift of its start, and a zero shift leaves
+    /// the trie walk to decide whether one starts there.
+    static final class SkipTable
+    {
+        static final int MINIMUM_LENGTH = 4;
+        static final int MAXIMUM_WINDOW = 16;
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(SkipTable.class);
+        private static final int MINIMUM_HASH_BITS = 10;
+        private static final int MAXIMUM_HASH_BITS = 16;
+        private static final int HASH_MULTIPLIER = 0x9E3779B1;
+
+        // The skip distance of each block hash.
+        private final byte[] shiftByHash;
+        private final int window;
+        // The shift that keeps a window's last block of the three bytes read at its end.
+        private final int blockShift;
+        // The shift that turns a block, times HASH_MULTIPLIER, into its hash.
+        private final int hashShift;
+
+        private SkipTable(byte[] shiftByHash, int window, int block, int bits)
+        {
+            this.shiftByHash = shiftByHash;
+            this.window = window;
+            this.blockShift = Byte.SIZE * (3 - block);
+            this.hashShift = Integer.SIZE - bits;
+        }
+
+        /// Returns the table of the windows packed in `windowBytes`, `window` bytes each, or
+        /// `null` where more than a quarter of its hashes have distance zero, which leaves too
+        /// little to skip.
+        private static SkipTable build(byte[] windowBytes, int window)
+        {
+            int block = window >= 6 ? 3 : 2;
+            int windowCount = windowBytes.length / window;
+            long targetEntries = (long) windowCount * (window - block + 1) * 4;
+            int bits = Math.clamp(Long.SIZE - Long.numberOfLeadingZeros(targetEntries - 1), MINIMUM_HASH_BITS, MAXIMUM_HASH_BITS);
+            byte[] shiftByHash = new byte[1 << bits];
+            Arrays.fill(shiftByHash, (byte) (window - block + 1));
+            for (int offset = 0; offset < windowBytes.length; offset += window) {
+                for (int blockEnd = block - 1; blockEnd < window; blockEnd++) {
+                    int packed = 0;
+                    for (int index = 0; index < block; index++) {
+                        packed |= (windowBytes[offset + blockEnd - block + 1 + index] & 0xFF) << (Byte.SIZE * index);
+                    }
+                    int hash = (packed * HASH_MULTIPLIER) >>> (Integer.SIZE - bits);
+                    shiftByHash[hash] = (byte) Math.min(shiftByHash[hash], window - 1 - blockEnd);
+                }
+            }
+            int zeros = 0;
+            for (byte shift : shiftByHash) {
+                if (shift == 0) {
+                    zeros++;
+                }
+            }
+            return zeros > shiftByHash.length / 4 ? null : new SkipTable(shiftByHash, window, block, bits);
+        }
+
+        private long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE + SizeOf.sizeOf(shiftByHash);
+        }
+
+        /// Returns the number of positions from the window start at array index `position` of
+        /// `bytes` at which no literal starts, or `0` where one may start at `position`.
+        private int shift(byte[] bytes, int position)
+        {
+            // The window's last three bytes, of which a block of two keeps the last two.
+            int blockEnd = position + window - 1;
+            int packed = (bytes[blockEnd - 2] & 0xFF) | (bytes[blockEnd - 1] & 0xFF) << 8 | (bytes[blockEnd] & 0xFF) << 16;
+            return shiftByHash[((packed >>> blockShift) * HASH_MULTIPLIER) >>> hashShift];
         }
     }
 
@@ -994,6 +1339,7 @@ sealed class LiteralSetSpanMatcher
                     trie.denseDepth,
                     trie.denseStateCount,
                     trie.denseNext,
+                    trie.skipTable,
                     trie.firstEdgeByState,
                     trie.edgeByte,
                     trie.failureByState,
