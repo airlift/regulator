@@ -925,13 +925,16 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
 
 - **Origin:** First described by Brodie, Taylor and Cytron (2006), whose
   multi-stride DFA takes one transition per group of bytes, composed from
-  one-byte transitions ([ISCA 2006][brodie-multistride]). Among RE2,
-  regex-automata, PCRE2, and Hyperscan, none composes a general two-byte
-  transition table; Hyperscan's McClellan wide states, which collapse linear
-  chains of states, are the closest analog. Regulator: a bounded,
-  budget-charged, self-disabling two-byte table in a lazy DFA ([#1], [#9],
-  [design][d-paired]).
+  one-byte transitions ([ISCA 2006][brodie-multistride]), and by
+  regex-automata, whose DFAs premultiply state IDs into row offsets
+  ([dense.rs][ra-dense]). Among RE2, regex-automata, PCRE2, and Hyperscan,
+  none composes a general two-byte transition table; Hyperscan's McClellan
+  wide states, which collapse linear chains of states, are the closest
+  analog. Regulator: a bounded, budget-charged, self-disabling two-byte table
+  in a lazy DFA, held on aarch64 as one flat table of byte offsets ([#1],
+  [#9], [design][d-paired]).
 - **Where:** `Dfa.searchForwardPairs`, `Dfa.searchForwardPairsAfterMiss`,
+  `Dfa.searchForwardPairsFlat`, `Dfa.searchForwardPairsFlatAfterMiss`,
   `Dfa.DfaInstance.rebuildPairedTransitions`,
   `Dfa.DfaInstance.selectPairedRows`, `Dfa.DfaInstance.recordPairedSearch`
 - **Applies when:** Forward searches of at least 256 bytes from a non-matching
@@ -942,17 +945,22 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   that each end fewer than 16 bytes from the search start, the next search
   that requests paired rows or a pointer table releases the rows; pairing
   returns at the next cache reset unless the DFA holds a pointer table, has
-  one withheld, or has given one back
+  one withheld, or has given one back. The rows are one flat table on
+  aarch64 and object rows on x86 and every other platform
 - **What it does:** Composed two-byte transitions advance two bytes per load.
   A missing paired entry falls back to the one-byte transitions, and a
   first-match search decodes a pair that holds a match and keeps pairing with
-  the match pending. The whole table is built when its estimate, with 8-byte
-  references, fits 64 KiB or the DFA's remaining budget if that is smaller;
-  otherwise two rows are paired within 16 KiB, chosen from cached start rows
-  and self-looping states, only when exactly two qualify or the budget has
-  room for only two. With native access, Trino and Java Sherlock
-  `word-ending-n` run on paired rows in 0.82 of the pointer table's time on
-  Graviton and 0.96 to 1.01 on Intel ([#162]).
+  the match pending. For object rows, the whole table is built when its
+  estimate, with 8-byte references, fits 64 KiB or the DFA's remaining budget
+  if that is smaller; otherwise two rows are paired within 16 KiB, chosen
+  from cached start rows and self-looping states, only when exactly two
+  qualify or the budget has room for only two. On aarch64 the rows are one
+  flat `int` table of byte offsets read through a heap segment, charged its
+  real size within 32 KiB (8 KiB for two rows); that form ran paired rows
+  9-21% faster than object rows on r9g and 3-72% slower on r8i, so x86 keeps
+  object rows ([design][d-paired]). With native access, the object-row form
+  ran Trino and Java Sherlock `word-ending-n` in 0.82 of the pointer table's
+  time on Graviton and 0.96 to 1.01 on Intel ([#162]).
 
 ### Self-loop exit-byte scan
 
