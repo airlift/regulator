@@ -26,6 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLiteralSearchKernel
 {
+    // A block of findLast's vector scan at the widest supported width: four vectors of 64 bytes.
+    private static final int WIDEST_BLOCK_BYTES = 4 * 64;
+
     @Test
     public void testBoundedOffsetSearch()
     {
@@ -233,17 +236,21 @@ public class TestLiteralSearchKernel
     }
 
     /// The last-occurrence search over ranges of every length up to 40, so it finishes with every
-    /// overlapping first word and every one-at-a-time tail, with the literal at each position in
-    /// turn and again at the range start where it does not overlap the match, so only the later
-    /// one is the last, as an exact-length array and as a view whose neighbors are copies of the
-    /// literal. Like every last-occurrence search, it takes literals of at least two bytes.
+    /// overlapping first word and every one-at-a-time tail of the word scan, and, where vectors are
+    /// available, up to five whole vectors of candidates and one candidate past them, so the vector
+    /// scan searches one to five vectors, a block of four and the vector below it, and the scalar
+    /// tail. The literal sits at each position in turn, so in each vector of a block, and again at
+    /// the range start where it does not overlap the match, so only the later one is the last, as
+    /// an exact-length array and as a view whose neighbors are copies of the literal. Like every
+    /// last-occurrence search, it takes literals of at least two bytes.
     @Test
     public void testLastOccurrenceShortRangeTails()
     {
         for (String literalText : List.of("ab", "abc", "abcdefghij")) {
             byte[] literal = literalText.getBytes(US_ASCII);
             LiteralSearchKernel kernel = lastOccurrenceKernel(literal);
-            for (int length = 0; length <= 40; length++) {
+            int maximumLength = VectorSupport.isAvailable() ? Math.max(40, literal.length + 5 * VectorSupport.preferredByteLanes()) : 40;
+            for (int length = 0; length <= maximumLength; length++) {
                 for (int match = -1; match <= Math.max(-1, length - literal.length); match++) {
                     byte[] text = new byte[length];
                     Arrays.fill(text, (byte) 'x');
@@ -289,9 +296,13 @@ public class TestLiteralSearchKernel
         assertLastKmpHandoff(kernel, literalBytes, periodicInput, 0, periodicInput.length() - 512, lastKmpHandoff(lastCandidate - 512, lastCandidate - 512, 7, literal.length()), 0);
 
         // Text without candidates counts as covered, including the text the scan skips before it
-        // verifies its first candidate
-        Slice skippedInput = offsetSlice((literal + periodic + "x".repeat(512)).getBytes(US_ASCII));
-        assertLastKmpHandoff(kernel, literalBytes, skippedInput, 0, skippedInput.length(), lastKmpHandoff(skippedInput.length() - literal.length(), lastCandidate, 7, literal.length()), 0);
+        // verifies its first candidate. Growing that text a byte at a time across a block of four
+        // of the widest vectors moves the candidate that passes the budget through each vector
+        // of a block of the vector scan.
+        for (int skipped = 512; skipped <= 512 + WIDEST_BLOCK_BYTES; skipped++) {
+            Slice skippedInput = offsetSlice((literal + periodic + "x".repeat(skipped)).getBytes(US_ASCII));
+            assertLastKmpHandoff(kernel, literalBytes, skippedInput, 0, skippedInput.length(), lastKmpHandoff(skippedInput.length() - literal.length(), lastCandidate, 7, literal.length()), 0);
+        }
 
         // A literal whose last byte recurs keeps its own reversed shift table, and the reverse KMP
         // finds an occurrence that overlaps the partial matches above it

@@ -62,8 +62,9 @@ final class VectorSupport
     // that under X86_WITH_64_BYTE_VECTORS the literal prefix scan of a single literal compares
     // its second byte under the first byte's mask, and the start literal filter's check of two
     // literals without masks takes the XOR form too. That section records why and the
-    // measurements; RE2 run stops take their XOR form on every platform. C2 folds this constant,
-    // so each scan compiles one form.
+    // measurements; RE2 run stops take their XOR form on every platform, and the reverse scan for
+    // a required suffix's last occurrence tests the vectors below its last block with compare and
+    // AND on every platform. C2 folds this constant, so each scan compiles one form.
     static final boolean SVE_128 = sve128();
 
     // Whether the start literal filter's nibble scan takes each byte's high nibble with a 16-bit
