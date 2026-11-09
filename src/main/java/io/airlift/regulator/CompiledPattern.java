@@ -299,7 +299,7 @@ abstract sealed class CompiledPattern
     private final boolean hasAnchoredSubmatchRoute;
     // Off the compact route, the counter that finds a class pattern's matches: the single members
     // of one large Unicode class, or the runs of a greedy class repeat. Count shares a class
-    // repeat's counter.
+    // repeat's counter, and a single class's where count takes that class as a single member.
     private final BoundedCharacterClassCounter matcherClassCounter;
     // The single-byte table of a one-byte pattern, which route selection builds when its memory
     // fits, or null. Group-zero matchers, the byte-table shape, and Trino share it.
@@ -344,23 +344,32 @@ abstract sealed class CompiledPattern
         this.singleByteMatcher = analysis.singleByteMatcher();
         this.capturingGroupCount = analysis.capturingGroupCount();
         this.capturingGroupNames = requireNonNull(analysis.capturingGroupNames(), "capturingGroupNames is null");
-        // Count reuses a class repeat's matcher counter; its own analysis takes repeats only, so a
-        // single class's counter serves matchers alone.
+        // Count reads the class counter only where no anchor, assertion, or required prefix
+        // reads beyond a match.
+        boolean countsOnClassCounter = requiredPrefix == null &&
+                !partialProg.anchorStart() &&
+                !partialProg.anchorEnd() &&
+                !partialProg.hasTextDependentAssertions();
+        // One member of a dense class, any character, or any byte counts as a repeat of one.
+        BoundedCharacterClassCounter.Repeat singleMember = countsOnClassCounter ? BoundedCharacterClassCounter.analyzeSingleMember(suffixRegexp) : null;
+        // Count reuses a class repeat's matcher counter, and a single class's where count takes
+        // that class as a single member; any other single class's counter serves matchers alone.
         boolean holdsClassRepeatCounter = matcherClassCounter != null && suffixRegexp.op() != RegexpOp.CHAR_CLASS;
-        this.boundedCharacterClassCounter = holdsClassRepeatCounter ? matcherClassCounter : analysis.compactBoundedCharacterClass();
+        boolean countsOnMatcherCounter = holdsClassRepeatCounter || (matcherClassCounter != null && singleMember != null);
+        this.boundedCharacterClassCounter = countsOnMatcherCounter ? matcherClassCounter : analysis.compactBoundedCharacterClass();
         // Only Trino builds the repeat matcher.
         this.singleByteRepeat = compilerDialect == Compiler.Dialect.TRINO && requiredPrefix == null && !partialProg.hasTextDependentAssertions()
                 ? SingleByteRepeatMatcher.analyze(suffixRegexp, expressionAnalysis.caseFolding())
                 : null;
         // A counter held from the start is never built lazily, so only a pattern without one
         // analyzes its suffix for the lazy counter's input.
-        this.classRepeat = boundedCharacterClassCounter == null && requiredPrefix == null &&
-                !partialProg.anchorStart() &&
-                !partialProg.anchorEnd() &&
-                !partialProg.hasTextDependentAssertions()
+        BoundedCharacterClassCounter.Repeat repeat = boundedCharacterClassCounter == null && countsOnClassCounter
                 ? BoundedCharacterClassCounter.analyzeRepeat(suffixRegexp)
                 : null;
-        this.hasClassRepeat = holdsClassRepeatCounter || classRepeat != null;
+        // Only count builds a single member's counter, so it is not a class repeat for the class
+        // span routes.
+        this.classRepeat = boundedCharacterClassCounter != null ? null : repeat != null ? repeat : singleMember;
+        this.hasClassRepeat = holdsClassRepeatCounter || repeat != null;
         // The reverse DFA cannot run assertions the forward DFA cannot, or full case folding, and
         // a Java count whose match depends on the reading direction compiles no reverse program.
         Prog loweredProgram = booleanPlans.loweredProgram();
@@ -3394,10 +3403,24 @@ abstract sealed class CompiledPattern
 
         BoundedCharacterClassCounter characterClassCounter = boundedCharacterClassCounter();
         if (characterClassCounter != BoundedCharacterClassCounter.unsupported()) {
-            return characterClassCounter.count(text);
+            return countOnClassCounter(characterClassCounter, text);
         }
 
         return countDfaMatches(text);
+    }
+
+    /// The count of the class counter, or, for single members that the counter's sample finds
+    /// sparse in `text`, the DFA count, which skips to their start bytes; a DFA count that bails
+    /// counts on the counter.
+    private long countOnClassCounter(BoundedCharacterClassCounter characterClassCounter, Slice text)
+    {
+        if (characterClassCounter.hasSparseSingleMembers(text)) {
+            long count = countDfaMatches(text);
+            if (count >= 0) {
+                return count;
+            }
+        }
+        return characterClassCounter.count(text);
     }
 
     /// The count of a literal-kernel pattern: on its dot-star literal matcher where it has one, and
@@ -3473,8 +3496,10 @@ abstract sealed class CompiledPattern
     /// The count of a one-byte member: the single-byte table over at most
     /// {@value #MAX_DIRECT_BYTE_SCAN_BYTES} bytes. A longer input counts where the ordinary count
     /// would take it, as does a run of one-byte members at any length: on the class counter
-    /// where the pattern has one, and otherwise on the DFA. No byte-table pattern reaches the ordinary count's
-    /// other routes, as the constructor checks, and this route skips their branches.
+    /// where the pattern has one, and otherwise on the DFA, which also counts single members that
+    /// the counter's sample finds sparse unless its count bails. No byte-table pattern reaches the
+    /// ordinary count's other routes, as the constructor checks, and this route skips their
+    /// branches.
     final long countOnByteTable(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -3483,7 +3508,7 @@ abstract sealed class CompiledPattern
         }
         BoundedCharacterClassCounter characterClassCounter = boundedCharacterClassCounter();
         if (characterClassCounter != BoundedCharacterClassCounter.unsupported()) {
-            return characterClassCounter.count(text);
+            return countOnClassCounter(characterClassCounter, text);
         }
         return countDfaMatches(text);
     }
@@ -3648,12 +3673,12 @@ abstract sealed class CompiledPattern
         if (usesCompactBoundedCharacterClassForDiagnostics()) {
             return boundedCharacterClassCounter;
         }
-        if (!hasClassRepeat) {
-            return null;
+        // A class repeat or a single member that count takes. A class repeat's matcher counter,
+        // which this pattern holds in place of its input, is the counter that input builds.
+        if (classRepeat != null) {
+            return BoundedCharacterClassCounter.create(classRepeat);
         }
-        // A class repeat's matcher counter, which this pattern holds in place of its input, is
-        // the counter that input builds.
-        return classRepeat == null ? matcherClassCounter : BoundedCharacterClassCounter.create(classRepeat);
+        return hasClassRepeat ? matcherClassCounter : null;
     }
 
     boolean hasCharacterClassSpan()

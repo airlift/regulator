@@ -36,6 +36,19 @@ final class BoundedCharacterClassCounter
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(BoundedCharacterClassCounter.class);
     private static final int COMPACT_ROUTE_MINIMUM_REPETITIONS = 32;
     private static final int COMPACT_ROUTE_MINIMUM_RANGES = 32;
+    // A single member counts on the counter only where its first bytes make up at least this
+    // share of English text, as those of (?s:.), [^\n], \w, and \pL do. The counter reads every
+    // byte, while the DFA's count of a sparse class such as [0-9] scans for its start bytes and
+    // searches only where they stop.
+    private static final double MINIMUM_SINGLE_MEMBER_PROBABILITY = 0.5;
+    // A sample reads this many windows of this many bytes, spread over the input, and judges dense
+    // text where it finds more than this many members: more than one per 16 bytes.
+    private static final int SAMPLE_WINDOWS = 4;
+    private static final int SAMPLE_WINDOW_BYTES = 256;
+    private static final int MAXIMUM_SAMPLE_MATCHING_CODE_POINTS = 64;
+    // A count of single members samples text of at least this length, where the sample decodes at
+    // most a quarter of the text, and a dense sample stops after 65 members.
+    private static final int MINIMUM_SINGLE_MEMBER_SAMPLE_BYTES = 4 * SAMPLE_WINDOWS * SAMPLE_WINDOW_BYTES;
     // Planes 4 through 13 hold no characters, so a bitset records a code point here or beyond only
     // for a class with members in the last planes, such as `\p{Mn}` or Unicode `\w`, and would
     // cost up to 136 KiB per pattern. A class whose last range runs to U+10FFFF, such as `\PL`, a
@@ -326,8 +339,8 @@ final class BoundedCharacterClassCounter
     /// minimum of at least one, so each match is a run of members cut at the repeat's maximum. A
     /// repeat compiled for longest match keeps the engine, as on the compact route, and so does a
     /// repeat that RE2 or Trino case-folds; Java and Rust fold a class while parsing it. Count
-    /// keeps its counting algorithm and reuses this counter for a class repeat; boolean find keeps
-    /// its separate route.
+    /// keeps its counting algorithm and reuses this counter for a class repeat, and for a single
+    /// class that it takes as a single member; boolean find keeps its separate route.
     static BoundedCharacterClassCounter analyzeMatcherRoute(Regexp regexp, boolean longestMatch)
     {
         if ((regexp.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) != 0) {
@@ -443,6 +456,42 @@ final class BoundedCharacterClassCounter
         while (atom.op() == CAPTURE) {
             atom = atom.child(0);
         }
+        return atomRepeat(atom, minimum, maximum);
+    }
+
+    /// Returns the class and encoding of `regexp`, one class, any character, or any byte, as a
+    /// repeat of exactly one member, or `null`. Count takes it in place of one DFA search per
+    /// match, but only for members whose first bytes make up at least half of English text. A
+    /// class that RE2 or Trino case-folds keeps the DFA, as on the matcher route.
+    static Repeat analyzeSingleMember(Regexp regexp)
+    {
+        if ((regexp.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) != 0) {
+            return null;
+        }
+        Repeat member = atomRepeat(regexp, 1, 1);
+        if (member == null) {
+            return null;
+        }
+        RuneRange[] ranges = member.ranges();
+        boolean readsBytes = member.latin1() || ranges[ranges.length - 1].high() <= 0x7F;
+        boolean[] startBytes = buildMemberStartBytes(ranges, readsBytes);
+        // The preset rates every byte from 0x80 up as the most common ASCII byte, so a class of
+        // rare non-ASCII characters such as `\p{Greek}` or Unicode `\d` would pass on its lead
+        // bytes alone. Only the ASCII start bytes score: English text is almost all ASCII.
+        ByteFrequencies byteFrequencies = ByteFrequencies.englishText();
+        double probability = 0;
+        for (int value = 0; value < 0x80; value++) {
+            if (startBytes[value]) {
+                probability += byteFrequencies.probability((byte) value);
+            }
+        }
+        return probability >= MINIMUM_SINGLE_MEMBER_PROBABILITY ? member : null;
+    }
+
+    // Returns `atom`, one class, any character, or any byte, as a repeat of it with these bounds,
+    // or `null`.
+    private static Repeat atomRepeat(Regexp atom, int minimum, int maximum)
+    {
         // A parser keeps a dot that matches newline, or a full class, as ANY_CHAR, and a Rust bytes
         // dot as ANY_BYTE.
         if (atom.op() == ANY_CHAR) {
@@ -707,7 +756,32 @@ final class BoundedCharacterClassCounter
         return invalid == 0 ? leadBits : INVALID_CHUNK;
     }
 
-    int sampleMatchingCodePointCount(Slice input, int inputOffset, int inputBytes, int maximumMatchingCodePoints)
+    /// Returns whether this is a counter of exactly one member and the sample of `input` finds
+    /// the class's members sparse. The DFA's count then scans for their start bytes and skips the
+    /// text between them, where this counter would read every byte. Text shorter than
+    /// {@value #MINIMUM_SINGLE_MEMBER_SAMPLE_BYTES} bytes keeps the counter without a sample.
+    boolean hasSparseSingleMembers(Slice input)
+    {
+        return minimum == 1 && maximum == 1 && input.length() >= MINIMUM_SINGLE_MEMBER_SAMPLE_BYTES && !hasDenseSample(input);
+    }
+
+    /// Returns whether a sample of `input`, which must hold at least one window, finds more than
+    /// one member per 16 bytes.
+    boolean hasDenseSample(Slice input)
+    {
+        int sampledMatchingCodePoints = 0;
+        int maximumWindowStart = input.length() - SAMPLE_WINDOW_BYTES;
+        for (int window = 0; window < SAMPLE_WINDOWS; window++) {
+            int windowStart = (int) (((long) maximumWindowStart * window) / (SAMPLE_WINDOWS - 1));
+            sampledMatchingCodePoints += sampleMatchingCodePointCount(input, windowStart, SAMPLE_WINDOW_BYTES, MAXIMUM_SAMPLE_MATCHING_CODE_POINTS - sampledMatchingCodePoints);
+            if (sampledMatchingCodePoints > MAXIMUM_SAMPLE_MATCHING_CODE_POINTS) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int sampleMatchingCodePointCount(Slice input, int inputOffset, int inputBytes, int maximumMatchingCodePoints)
     {
         byte[] bytes = input.byteArray();
         int position = input.byteArrayOffset() + inputOffset;

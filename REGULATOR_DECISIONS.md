@@ -4088,11 +4088,12 @@ everything past them. A membership test checks a flag for a tail before
 comparing the code point with the tail's start: comparing alone made a miss 5%
 slower on a short Unicode-class row, rebar's unicode/codepoints letters-lower
 family. The general counter is built lazily by a single writer and retained by
-the compiled pattern; a class repeat instead reuses its matcher counter,
-described below, when one was retained. The lazily built counter's size is
-independent of `maxMemory`, the planning budget that charges the program 120 and
-then 113 bytes per instruction and leaves the DFA caches the rest, and it does
-not scale with the expression or configured budget.
+the compiled pattern; a class repeat, or a single class that count takes as a
+single member, instead reuses its matcher counter, described below, when one
+was retained. The lazily built counter's size is independent of `maxMemory`, the
+planning budget that charges the program 120 and then 113 bytes per instruction
+and leaves the DFA caches the rest, and it does not scale with the expression or
+configured budget.
 Unsupported shapes continue through the ordinary DFA or matcher path. A
 Unicode class reads malformed UTF-8 as the ordinary engine's byte ranges for
 that class do, under the rule in [RE2 Scan Plans](#re2-scan-plans). A class of
@@ -4132,13 +4133,14 @@ group-zero matches for a matcher, which would otherwise restart the DFA at every
 match; the matcher counter cuts each run at the repeat's maximum, which gives
 the leftmost-first matches, and a repeat compiled for longest match keeps the
 DFA. Count keeps its counting algorithm and reuses the matcher counter when one
-is retained for a class repeat; boolean find keeps its separate route. Planes 4
-through 13 hold no characters, so only a Unicode class with members at or past
-U+40000 before its tail, such as `\p{Mn}` or Unicode `\w`, needs a bitset past
-them; such a class keeps the DFA on the matcher route rather than retain up to
-136 KiB. A class with a tail stays eligible when the range before its tail ends
-below U+40000, since its bitset ends at that range, as for `\PL`, Rust's `\D`,
-or a class of every non-ASCII character. A counter's span search skips bytes
+is retained for a class repeat, or for a single member as below; boolean find
+keeps its separate route. Planes 4 through 13 hold no characters, so only a
+Unicode class with members at or past U+40000 before its tail, such as `\p{Mn}`
+or Unicode `\w`, needs a bitset past them; such a class keeps the DFA on the
+matcher route rather than retain up to 136 KiB. A class with a tail stays
+eligible when the range before its tail ends below U+40000, since its bitset
+ends at that range, as for `\PL`, Rust's `\D`, or a class of every non-ASCII
+character. A counter's span search skips bytes
 that cannot begin a member before decoding, with one table load per byte or, for
 a sparse class, a vector scan after a short scalar prefix. A Latin-1 or
 byte-mode class, or a UTF-8 class of only ASCII members, marks exactly its
@@ -4155,6 +4157,28 @@ checks each character's UTF-8 form, ASCII eight bytes at a time, and stops at a
 malformed or truncated sequence or an encoded surrogate. A dot that matches
 newline counts as a class of every character, so count and Trino's class-span
 functions also take its repeats.
+
+Count also takes a pattern of one member, a class, any character, or any byte,
+such as `(?s:.)`, `.`, `[^\n]`, `\w`, or `\pL`, as a repeat of exactly one, in
+place of one DFA search per match, reusing a single class's matcher counter
+where one is retained; only count builds such a counter, so Trino's class-span
+functions keep their routes. Count takes only a member whose first bytes make up
+at least half of English text: the counter reads every byte, while the DFA's
+count of a sparse class such as `[0-9]` or `\s` scans for its start bytes. Only
+the member's ASCII first bytes score, since the English preset rates every byte
+from 0x80 up as the most common ASCII byte, which would admit rare non-ASCII
+classes such as `\p{Greek}` on their lead bytes alone. A dense member can still
+be sparse in the text, as ASCII `\w` is in Russian, where the counter took 4.8
+to 6.4 times the DFA count's time, so a count of at least 4 KiB samples four
+256-byte windows, as the compact counter's count DFA does, and takes the DFA
+count when they hold at most 64 members. The sample decodes at most a quarter of
+the text and stops at its 65th member, and a DFA count that bails counts on the
+counter. Each language's class carries its own reading of malformed UTF-8 and of
+line terminators, as for a repeat. When no matcher counter was retained, a
+single-member count builds its counter on first use, so the exemption from
+`maxMemory` above covers the counter and the class's ranges the pattern retains
+for it. The ranges add to the counter's size: Rust `\w` retains 112 KiB of
+counter and 22 KiB of ranges, and `[\w\p{Co}]` about 159 KiB in all.
 
 The span search stays small enough for C2 to inline into its callers, so the
 byte run and the region check are out of line and `TestHotMethodSize` pins its

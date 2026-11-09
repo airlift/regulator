@@ -553,6 +553,113 @@ public class TestBoundedCharacterClassCounter
     }
 
     @Test
+    public void testSingleMemberCountsOnClassCounter()
+    {
+        // One member of a class whose members begin most bytes of text, of any character, or of
+        // any byte counts on the class counter as a repeat of one, with no DFA search, rather than
+        // one DFA search per match. Each language's reading of malformed UTF-8 carries over: RE2's
+        // dot reads a lenient sequence as one character, Rust's bytes-mode dot and classes with
+        // Unicode enabled accept only scalar values, and Java's dot leaves out its line
+        // terminators. A capture keeps the reference count on the ordinary engine.
+        byte[] text = "ab1 éж€中𝐀😀-Zя\r\n\u0085   the Éclair\r, Жук and quiet tea\n".getBytes(UTF_8);
+        byte[] malformed = {
+                (byte) 0xC0, (byte) 0x80, 'q', (byte) 0xE0, (byte) 0x80, (byte) 0x80, (byte) 0xED, (byte) 0xA0, (byte) 0x80,
+                (byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, (byte) 0xC3, 'r', (byte) 0x80, (byte) 0xFF,
+                (byte) 0xD0, (byte) 0xB6, (byte) 0xE4, (byte) 0xB8, 's', (byte) 0xC3,
+        };
+        byte[] bytes = Arrays.copyOf(text, text.length + malformed.length);
+        System.arraycopy(malformed, 0, bytes, text.length, malformed.length);
+        List<Slice> inputs = new ArrayList<>(randomFragmentInputs());
+        inputs.addAll(longGapInputs());
+        inputs.add(Slices.wrappedBuffer(bytes));
+        inputs.add(Slices.wrappedBuffer(bytes, 1, bytes.length - 2));
+
+        List<String> patterns = List.of("(?s:.)", ".", "[^\\n]", "\\pL", "\\w");
+        RustRegexp.Options rustBytes = RustRegexp.Options.bytes();
+        for (String pattern : patterns) {
+            assertSingleMemberCount("RE2", Re2::compile, pattern, inputs);
+            assertSingleMemberCount("RE2 Latin-1", source -> Re2.compile(source, Re2.Options.latin1()), pattern, inputs);
+            assertSingleMemberCount("Java", JavaRegexp::compile, pattern.replace("\\pL", "\\p{L}"), inputs);
+            assertSingleMemberCount("Trino", source -> TrinoRegexp.compile(source).re2(), pattern.replace("\\pL", "\\p{L}"), inputs);
+            assertSingleMemberCount("Rust", RustRegexp::compile, pattern, inputs);
+            assertSingleMemberCount("Rust bytes", source -> RustRegexp.compile(source, rustBytes), pattern, inputs);
+            assertSingleMemberCount("Rust CRLF", source -> RustRegexp.compile(source, RustRegexp.Options.defaults().setCrlf(true)), pattern, inputs);
+        }
+        // Any byte, in RE2 and in Rust's bytes mode without Unicode.
+        assertSingleMemberCount("RE2", Re2::compile, "\\C", inputs);
+        assertSingleMemberCount("Rust bytes", source -> RustRegexp.compile(source, rustBytes), "(?s-u:.)", inputs);
+
+        // A large class's matcher counter is the counter count reads, not a second one.
+        for (CompiledPattern letters : List.of(Re2.compile(utf8Slice("\\pL")), RustRegexp.compile(utf8Slice("\\pL")))) {
+            assertThat(letters.classMatchCounter()).isNotNull();
+            assertThat(letters.boundedCharacterClassCounterIfComputedForDiagnostics()).isSameAs(letters.classMatchCounter());
+        }
+
+        // Trino's own count reads the same counter.
+        Slice input = Slices.wrappedBuffer(bytes);
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("(?s:.)"));
+        assertThat(trino.count(input)).isEqualTo(countWithGeneralMatcher(TrinoRegexp.compile(utf8Slice("((?s:.))")).re2(), input));
+        assertThat(trino.re2().boundedCharacterClassCounterIfComputedForDiagnostics()).isNotNull().isNotSameAs(BoundedCharacterClassCounter.unsupported());
+        assertThat(trino.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+
+        // A sparse class keeps the DFA count, whose start-byte scan skips the text between its
+        // matches; the counter would read every byte. A class of non-ASCII members is sparse in
+        // English text however many lead bytes it has.
+        for (String pattern : List.of("[0-9]", "\\s", "[aeiou]", "\\p{Greek}")) {
+            assertSparseSingleMemberCount("RE2", Re2::compile, pattern, input);
+        }
+        for (String pattern : List.of("\\d", "\\s")) {
+            assertSparseSingleMemberCount("Rust", RustRegexp::compile, pattern, input);
+        }
+
+        // A dense member can be sparse in the text: ASCII \w in Russian. A count of 4 KiB or more
+        // samples the text, and where the members are sparse, takes the DFA count; where they are
+        // dense, it keeps the counter. The malformed bytes fall between the sample windows, so
+        // they check the DFA count's reading of malformed input.
+        byte[] russian = "Шерлок Холмс сидел у камина, x1 жук ".repeat(120).getBytes(UTF_8);
+        System.arraycopy(malformed, 0, russian, 1000, malformed.length);
+        Slice english = utf8Slice("the quiet tea and clear air over the long road home ".repeat(80));
+        for (Function<Slice, CompiledPattern> compiler : List.<Function<Slice, CompiledPattern>>of(Re2::compile, JavaRegexp::compile, source -> RustRegexp.compile(source, RustRegexp.Options.bytes().setUnicode(false)))) {
+            CompiledPattern reference = compiler.apply(utf8Slice("(\\w)"));
+            CompiledPattern sparse = compiler.apply(utf8Slice("\\w"));
+            assertThat(sparse.count(Slices.wrappedBuffer(russian))).isEqualTo(countWithGeneralMatcher(reference, Slices.wrappedBuffer(russian)));
+            assertThat(sparse.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+            CompiledPattern dense = compiler.apply(utf8Slice("\\w"));
+            assertThat(dense.count(english)).isEqualTo(countWithGeneralMatcher(reference, english));
+            assertThat(dense.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+        }
+        // A class with a non-ASCII member has no byte table, so the ordinary count samples the
+        // same way.
+        Re2 accented = Re2.compile(utf8Slice("[a-zé]"));
+        Slice punctuation = utf8Slice("!".repeat(8192) + "a");
+        assertThat(accented.sharedSingleByteMatcher()).isNull();
+        assertThat(accented.count(punctuation)).isEqualTo(1);
+        assertThat(accented.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+    }
+
+    private static void assertSingleMemberCount(String language, Function<Slice, CompiledPattern> compiler, String pattern, List<Slice> inputs)
+    {
+        String description = language + " " + pattern;
+        CompiledPattern counted = compiler.apply(utf8Slice(pattern));
+        CompiledPattern reference = compiler.apply(utf8Slice("(" + pattern + ")"));
+        for (Slice input : inputs) {
+            assertThat(counted.count(input))
+                    .as("%s on %s", description, HexFormat.of().formatHex(input.getBytes()))
+                    .isEqualTo(countWithGeneralMatcher(reference, input));
+        }
+        assertThat(counted.boundedCharacterClassCounterIfComputedForDiagnostics()).as(description).isNotNull().isNotSameAs(BoundedCharacterClassCounter.unsupported());
+        assertThat(counted.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(description).isNull();
+    }
+
+    private static void assertSparseSingleMemberCount(String language, Function<Slice, CompiledPattern> compiler, String pattern, Slice input)
+    {
+        String description = language + " " + pattern;
+        CompiledPattern sparse = compiler.apply(utf8Slice(pattern));
+        assertThat(sparse.count(input)).as(description).isEqualTo(countWithGeneralMatcher(compiler.apply(utf8Slice("(" + pattern + ")")), input));
+        assertThat(sparse.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(description).isNotNull();
+    }
+
+    @Test
     public void testCountsGreedyBoundedRuns()
     {
         assertCount("[a-z]{8,13}", "abcdefgh", 1);

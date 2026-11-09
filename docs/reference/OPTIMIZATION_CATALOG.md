@@ -1349,12 +1349,17 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   ([.NET 7][dotnet7-blog]); Inspired by gaps against the Rust regex
   crate on class counts for the byte reads and branch-free updates ([#87],
   [#144]), on Unicode class extraction ([#91]), and against Hyperscan on long
-  word runs ([#216]). Regulator: splitting each run by the repeat's bounds
-  ([#1], [design][d-class-count]), a branch-free run update ([#144]), the
+  word runs ([#216]), and by rebar's `unicode/codepoints` any-one row, whose
+  count of one character made one DFA search per match ([#231]). Regulator:
+  splitting each run by the repeat's bounds ([#1], [design][d-class-count]),
+  counting single members as repeats of one ([#231]), a branch-free run
+  update ([#144]), the
   member-start table, which also reads byte and ASCII runs ([#91], [#112]),
   and the handoff of a long byte run to the
   [self-loop exit-byte scan](#self-loop-exit-byte-scan) ([#216]).
 - **Where:** `BoundedCharacterClassCounter.analyzeRepeat`,
+  `BoundedCharacterClassCounter.analyzeSingleMember`,
+  `BoundedCharacterClassCounter.hasSparseSingleMembers`,
   `BoundedCharacterClassCounter.create`,
   `BoundedCharacterClassCounter.countBytes`,
   `BoundedCharacterClassCounter.countUtf8`,
@@ -1366,9 +1371,13 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `VectorByteSetScanner.findOutsideRanges`,
   `RetainedCharacterClassCountDfa.supports`,
   `RetainedCharacterClassCountDfa.count`
-- **Applies when:** Non-nullable, unanchored greedy repeats of one class; span
-  searches serve matcher finds and anchored matching, not counts. In UTF-8,
-  with a DFA budget of at least 128 KiB, a count of a small case-sensitive
+- **Applies when:** Non-nullable, unanchored greedy repeats of one class, and
+  counts of one member of a class, any character, or any byte whose first
+  bytes make up at least half of English text; on text of 4 KiB or more whose
+  sample finds the members sparse, such a count prefers the DFA and keeps the
+  counter for a DFA count that bails. Span searches serve matcher finds and
+  anchored matching, not counts. In UTF-8, with a DFA budget of at least
+  128 KiB, a count of a small case-sensitive
   greedy class with a positive minimum runs on a DFA instead when class
   members are sparse; input of 1 MiB or more is sampled first, and shorter
   input, or input whose sample holds many members, uses the counter. The
@@ -1385,7 +1394,14 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   still going after 128 bytes, or 64 with 64-byte vectors, is finished by
   the self-loop exit-byte scan's range compares over whole vectors, with the
   table reading the rest; a run that meets a nonmember before then returns
-  from the table loop.
+  from the table loop. A count of one member of a dense class, any
+  character, or any byte runs on the counter as a repeat of one, and on text
+  of 4 KiB or more whose sample of four 256-byte windows finds the members
+  sparse, it falls back to the DFA count, which skips to their start bytes.
+  Counts of one `.`, `(?s:.)`, `[^\n]`, `\w` or `\pL` take 0.06 to 0.29 of
+  their earlier time on Graviton in every language and 0.05 to 0.26 on Intel,
+  and rebar's `unicode/codepoints` any-one row 0.36 to 0.38, where it made
+  1.1 million DFA searches for each count ([#231]).
   Letter-run counts take 0.55 to 0.62 of their earlier time on Graviton and
   0.47 to 0.49 on Intel ([#144]), and finding every `\pL` or `\p{Ll}` letter
   0.16 to 0.29 ([#91]). rebar's `i1095-word-repetition` ASCII search for
@@ -2241,6 +2257,7 @@ change is described.
 [#216]: https://github.com/airlift/regulator/pull/216
 [#224]: https://github.com/airlift/regulator/pull/224
 [#226]: https://github.com/airlift/regulator/pull/226
+[#231]: https://github.com/airlift/regulator/pull/231
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
