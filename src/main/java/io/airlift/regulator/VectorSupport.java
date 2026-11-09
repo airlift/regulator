@@ -19,8 +19,8 @@ import jdk.incubator.vector.ByteVector;
 import java.lang.management.ManagementFactory;
 
 /// Reports whether the vector scanners can run, which candidate-mask form their multi-byte
-/// scans take ([#SVE_128]), and how the start literal filter's nibble scan shifts
-/// ([#SHIFT_NIBBLES_AS_SHORTS]). They need the optional `jdk.incubator.vector`
+/// scans take ([#SVE_128] and [#X86_WITH_64_BYTE_VECTORS]), and how the start literal filter's
+/// nibble scan shifts ([#SHIFT_NIBBLES_AS_SHORTS]). They need the optional `jdk.incubator.vector`
 /// module and a preferred byte vector of 16 to 64 lanes. With fewer lanes, the lookup wraps the
 /// 16-entry nibble tables; with more, the replicated tables hold only 64 bytes, and
 /// `VectorMask.toLong()` throws for masks wider than 64 lanes. Other JVMs use the scalar or SWAR
@@ -32,13 +32,27 @@ final class VectorSupport
             .findModule("jdk.incubator.vector")
             .isPresent() && PreferredSpecies.hasSupportedLength();
 
+    // Whether this JVM runs on x86. C2 folds this constant.
+    private static final boolean X86 = isX86(System.getProperty("os.arch"));
+
+    // Whether this JVM runs on x86 with a 64-byte preferred byte vector, the gate of the scans'
+    // x86 64-lane forms: the literal prefix scan's masked pair compare. They were measured with
+    // AVX-512 on r8i (Granite Rapids), the only x86 host measured in them. Hosts nobody measured
+    // keep the form other widths take, so the gate tests for x86: 512-bit SVE, as on A64FX, and
+    // other architectures with 64-byte vectors keep compare and AND. x86 hosts with 64-byte
+    // vectors other than r8i, such as Ice Lake, AMD Zen 4 and 5, and Cascade Lake, take the
+    // forms unmeasured. C2 folds this constant.
+    static final boolean X86_WITH_64_BYTE_VECTORS = AVAILABLE && X86 && PreferredSpecies.length() == 64;
+
     // Whether C2 compiles this JVM's vector code with SVE and a 16-byte preferred byte vector, as
     // on r9g. There, the scans "Candidate Masks on SVE" in REGULATOR_DECISIONS.md names XOR each
     // byte with each probe, join the differences with OR or an unsigned minimum, and compare once
     // with zero, because SVE compares and the AND or OR that joins their masks are predicate
-    // operations. NEON, x86, and other SVE widths compare each byte and join the masks. That
-    // section records why and the measurements; RE2 run stops take their XOR form on every
-    // platform. C2 folds this constant, so each scan compiles one form.
+    // operations. NEON, x86, and other SVE widths compare each byte and join the masks, except
+    // that under X86_WITH_64_BYTE_VECTORS the literal prefix scan of a single literal compares
+    // its second byte under the first byte's mask. That section records why and the
+    // measurements; RE2 run stops take their XOR form on every platform. C2 folds this constant,
+    // so each scan compiles one form.
     static final boolean SVE_128 = sve128();
 
     // Whether the start literal filter's nibble scan takes each byte's high nibble with a 16-bit

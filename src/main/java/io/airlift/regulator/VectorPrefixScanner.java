@@ -24,13 +24,35 @@ final class VectorPrefixScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_PREFERRED;
 
+    // Whether the literal prefix scans, Prog's prefix scan and Prog.findLiteral, take
+    // findPairMasked, which compares the secondary bytes under the mask of the primary compare,
+    // rather than findPair. Only under VectorSupport.X86_WITH_64_BYTE_VECTORS, which names the
+    // hosts measured and unmeasured, where C2 emits the second compare as one compare writing a
+    // mask register under the first's mask, in place of a second compare and a kandq. Other hosts
+    // keep findPair: SVE with 16-byte vectors, as on r9g, took 1.54x to 1.76x the XOR form's time
+    // in the masked form, and NEON, AVX2, and wider SVE were not measured. "Candidate Masks on
+    // SVE" in REGULATOR_DECISIONS.md records the measurements. C2 folds this constant, so find
+    // compiles to one call.
+    private static final boolean MASKED_PAIR_COMPARE = VectorSupport.X86_WITH_64_BYTE_VECTORS;
+
     private VectorPrefixScanner() {}
+
+    // Returns the first occurrence of prefix, -1, or -2 - resume when the failed candidates pass
+    // LiteralSearchKernel's comparison budget and the search must continue with KMP at resume.
+    // Prog's prefix scan and Prog.findLiteral call it. Each form is its own method, so that each
+    // body holds one candidate test and tests can call both on any platform.
+    static int find(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset)
+    {
+        return MASKED_PAIR_COMPARE
+                ? findPairMasked(data, offset, length, prefix, primaryOffset, secondaryOffset)
+                : findPair(data, offset, length, prefix, primaryOffset, secondaryOffset);
+    }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
-    // Returns the first occurrence of prefix, -1, or -2 - resume when the failed candidates pass
-    // LiteralSearchKernel's comparison budget and the search must continue with KMP at resume.
-    static int find(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset)
+    // find's scan with the platform candidate test: the XOR form under VectorSupport.SVE_128, and
+    // compare and AND elsewhere. The masked form is findPairMasked; keep the two in step.
+    static int findPair(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset)
     {
         int prefixSize = prefix.length;
         int candidateCount = length - prefixSize + 1;
@@ -48,8 +70,9 @@ final class VectorPrefixScanner
             // Each pass counts the whole vectors left and runs a loop that only tests each one for
             // a candidate; candidates are verified after it breaks. With no verification inside,
             // C2 compiles it as an innermost counted loop, unrolled four times on r9g. The method
-            // is too large for C2 to inline into its callers in Prog; "Literal Prefix Vector Scan"
-            // in REGULATOR_DECISIONS.md records the measured trade-off.
+            // is too large for C2 to inline into find, the dispatch its callers in Prog inline;
+            // "Literal Prefix Vector Scan" in REGULATOR_DECISIONS.md records the measured
+            // trade-off.
             //
             // The candidate test follows "Candidate Masks on SVE" there: the XOR form on SVE with
             // 16-byte vectors, and compare and AND, written in line, elsewhere. Keep every vector
@@ -103,9 +126,73 @@ final class VectorPrefixScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // findPair in the form MASKED_PAIR_COMPARE selects: the candidate test compares the secondary
+    // bytes under the mask of the primary compare, written in line. With AVX-512, C2 emits the
+    // second as one compare writing a mask register under the first's mask, so the AND costs no
+    // mask instruction; where compares cannot take a mask, as with NEON, it compares and ANDs.
+    // Everything else is findPair's; keep the two in step.
+    static int findPairMasked(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset)
+    {
+        int prefixSize = prefix.length;
+        int candidateCount = length - prefixSize + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int vectorEnd = offset + SPECIES.loopBound(candidateCount);
+        ByteVector primaryVector = ByteVector.broadcast(SPECIES, prefix[primaryOffset]);
+        ByteVector secondaryVector = ByteVector.broadcast(SPECIES, prefix[secondaryOffset]);
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(offset);
+        int position = offset;
+
+        while (position < vectorEnd) {
+            // As in findPair, a counted loop only tests each vector for a candidate, and
+            // candidates are verified after it breaks.
+            int steps = (vectorEnd - position) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position + step * SPECIES.length();
+                if (ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset)
+                        .compare(VectorOperators.EQ, secondaryVector, ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector))
+                        .anyTrue()) {
+                    break;
+                }
+            }
+            position += step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            // Rebuild this vector's candidates as bits.
+            ByteVector primary = ByteVector.fromArray(SPECIES, data, position + primaryOffset);
+            ByteVector secondary = ByteVector.fromArray(SPECIES, data, position + secondaryOffset);
+            long candidateBits = secondary.compare(VectorOperators.EQ, secondaryVector, primary.compare(VectorOperators.EQ, primaryVector)).toLong();
+            while (candidateBits != 0) {
+                int candidate = position + Long.numberOfTrailingZeros(candidateBits);
+                // Keep sparse verification in this method. When composed with the DFA,
+                // C2 otherwise treats this call site as cold and leaves it out of line.
+                int prefixIndex = 0;
+                while (prefixIndex < prefix.length && data[candidate + prefixIndex] == prefix[prefixIndex]) {
+                    prefixIndex++;
+                }
+                if (prefixIndex == prefix.length) {
+                    return candidate;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, prefixIndex);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, candidate)) {
+                    return -2 - (candidate + 1);
+                }
+                candidateBits &= candidateBits - 1;
+            }
+            position += SPECIES.length();
+        }
+        return findScalar(data, position, offset + candidateCount - position, prefix, primaryOffset, secondaryOffset, comparisonEnd);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Returns the first position where one of `literals` occurs, ending by offset + length, or -1.
     // The literals are sorted by length, shortest first, and all hold the shortest one's bytes at
-    // primaryOffset and secondaryOffset, which lie before its end. The scan is find's, testing
+    // primaryOffset and secondaryOffset, which lie before its end. The scan is findPair's, testing
     // that pair, and each candidate is compared with every literal that fits before the end. Prog
     // builds at most eight literals of at most six bytes, so the comparisons at a candidate are
     // bounded and the scan keeps no comparison budget.
@@ -124,9 +211,9 @@ final class VectorPrefixScanner
         int position = offset;
 
         while (position < vectorEnd) {
-            // As in find, a counted loop only tests each vector for a candidate, and candidates are
-            // verified after it breaks. The XOR form is written in line rather than through
-            // pairDifference, which keeps its one call site in find.
+            // As in findPair, a counted loop only tests each vector for a candidate, and candidates
+            // are verified after it breaks. The XOR form is written in line rather than through
+            // pairDifference, which keeps its one call site in findPair.
             int steps = (vectorEnd - position) / SPECIES.length();
             int step = 0;
             for (; step < steps; step++) {
@@ -153,7 +240,7 @@ final class VectorPrefixScanner
                     : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
             while (candidateBits != 0) {
                 int candidate = position + Long.numberOfTrailingZeros(candidateBits);
-                // Keep sparse verification in this method, as in find.
+                // Keep sparse verification in this method, as in findPair.
                 literal:
                 for (byte[] literal : literals) {
                     if (literal.length > end - candidate) {
@@ -177,8 +264,8 @@ final class VectorPrefixScanner
     /// Returns the XOR difference of the bytes at `position + primaryOffset` from the primary probe
     /// byte, ORed with that of the bytes at `position + secondaryOffset` from the secondary one, so
     /// a lane is zero only at a candidate; see [VectorSupport#SVE_128]. Call it only from the scan
-    /// loop in `find`: a second, rarely run call site can leave it out of line, and the vector it
-    /// returns is then boxed.
+    /// loop in `findPair`: a second, rarely run call site can leave it out of line, and the vector
+    /// it returns is then boxed.
     private static ByteVector pairDifference(byte[] data, int position, int primaryOffset, int secondaryOffset, ByteVector primaryVector, ByteVector secondaryVector)
     {
         return ByteVector.fromArray(SPECIES, data, position + primaryOffset).lanewise(VectorOperators.XOR, primaryVector)
@@ -212,8 +299,9 @@ final class VectorPrefixScanner
     // Returns the last occurrence of literal, -1, or -2 - resumeEnd when the failed candidates
     // pass LiteralSearchKernel's comparison budget, counted down from the last candidate, and the
     // search must continue with LiteralSearchKernel.findLastKmp over the range up to resumeEnd.
-    // It mirrors find: the vectors step down from the last candidate, and a vector's candidates
-    // are verified highest lane first.
+    // It mirrors findPair: the vectors step down from the last candidate, and a vector's
+    // candidates are verified highest lane first. It keeps findPair's platform candidate test on
+    // every host, as it was not measured in findPairMasked's masked form.
     static int findLast(byte[] data, int offset, int length, byte[] literal, int primaryOffset, int secondaryOffset)
     {
         int literalSize = literal.length;
@@ -232,9 +320,9 @@ final class VectorPrefixScanner
         int position = candidateEnd;
 
         while (position > vectorStart) {
-            // As in find, the loop only tests each vector for a candidate, and the candidate test
-            // follows "Candidate Masks on SVE": keep every vector and mask in this method or in a
-            // helper C2 inlines at each call site.
+            // As in findPair, the loop only tests each vector for a candidate, and the candidate
+            // test follows "Candidate Masks on SVE": keep every vector and mask in this method or
+            // in a helper C2 inlines at each call site.
             int steps = (position - vectorStart) / SPECIES.length();
             int step = 0;
             for (; step < steps; step++) {
@@ -251,7 +339,7 @@ final class VectorPrefixScanner
             if (step == steps) {
                 break;
             }
-            // Rebuild this vector's candidates as bits, the XOR form in line as in find.
+            // Rebuild this vector's candidates as bits, the XOR form in line as in findPair.
             int vectorPosition = position - SPECIES.length();
             ByteVector primary = ByteVector.fromArray(SPECIES, data, vectorPosition + primaryOffset);
             ByteVector secondary = ByteVector.fromArray(SPECIES, data, vectorPosition + secondaryOffset);
@@ -262,7 +350,7 @@ final class VectorPrefixScanner
             while (candidateBits != 0) {
                 int lane = 63 - Long.numberOfLeadingZeros(candidateBits);
                 int candidate = vectorPosition + lane;
-                // Keep sparse verification in this method, as in find.
+                // Keep sparse verification in this method, as in findPair.
                 int literalIndex = 0;
                 while (literalIndex < literal.length && data[candidate + literalIndex] == literal[literalIndex]) {
                     literalIndex++;
@@ -324,8 +412,8 @@ final class VectorPrefixScanner
 
         while (position < vectorEnd) {
             // Each pass counts the whole vectors left and runs a loop that only tests each one for
-            // a candidate; candidates are verified after it breaks, as in find, so C2 can compile
-            // the test loop as an innermost counted loop.
+            // a candidate; candidates are verified after it breaks, as in findPair, so C2 can
+            // compile the test loop as an innermost counted loop.
             //
             // The candidate test compares and ANDs; findFoldCasePair takes findFoldCaseSve, the XOR
             // form, under VectorSupport.SVE_128, as "Candidate Masks on SVE" in

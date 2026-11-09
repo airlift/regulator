@@ -260,6 +260,7 @@ so the automata run only where a match can be.
   [design][d-prefix-vector]).
 - **Where:** `Prog.prefixAccel`, `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`,
   `Prog.prefixAccelStrategy`, `VectorPrefixScanner.find`,
+  `VectorPrefixScanner.findPair`, `VectorPrefixScanner.findPairMasked`,
   `VectorPrefixScanner.pairDifference`, `Prog.pairOffset`,
   `Prog.adjacentPairOffset`, `Prog.buildPrefixLiteralSet`,
   `VectorPrefixScanner.findLiteralSet`, `CompiledPattern.findExactLiteralSpan`,
@@ -273,7 +274,8 @@ so the automata run only where a match can be.
   literal set form on those vector windows when the literals every match
   begins with run past a prefix shorter than six bytes and share a byte at the
   same offset there; a Trino exact-literal span with fewer than 64 bytes left
-  uses `Slice.indexOf` instead, unless the probe byte moved
+  uses `Slice.indexOf` instead, unless the probe byte moved; the masked pair
+  compare on x86 with 64-byte vectors only
 - **What it does:** A candidate must hold the prefix's first and last bytes
   before the whole prefix is compared. RE2 tests them 32 bytes at a time with
   AVX2; Regulator tests them with the Vector API on long windows, with 8-byte
@@ -285,7 +287,14 @@ so the automata run only where a match can be.
   Graviton `aqj`, Sherlock, and `the-upper` rows to 0.51 to 0.60 of their
   earlier time and Intel `aqj`, `no-match-common`, and `line-boundary` rows to
   0.78 to 0.80, and RE2's count of `The` from 1.39 to 0.75 of native RE2's time
-  ([#140]). For a literal that starts with a multibyte UTF-8 character, the
+  ([#140]). On x86 with 64-byte vectors
+  (`VectorSupport.X86_WITH_64_BYTE_VECTORS`), the second byte is compared under
+  the first byte's mask, one AVX-512 compare in place of a compare and a mask
+  AND, which takes Intel `no-match-common` and rsc's 1 MB rows to 0.81 to 0.83
+  of the compare-and-AND form's time. On 128-bit SVE the masked form took 1.54x
+  to 1.76x the XOR form's time, so it keeps its XOR test; other hosts, 512-bit
+  SVE among them, are unmeasured in the masked form and keep compare and AND.
+  For a literal that starts with a multibyte UTF-8 character, the
   pair probes that character's last byte instead of its lead byte, which many
   characters in the same script share; that takes Russian Sherlock rows to 0.28
   on Intel and 0.84 on Graviton ([#141]). A periodic literal pairs instead its
@@ -771,9 +780,11 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   `VectorScanner.findRe2RunStop`,
   `VectorScanner.findRe2SetStop`
 - **Applies when:** aarch64 with 128-bit SVE; NEON and x86 compare each probe
-  and combine with AND or OR. The RE2 run stop runs on every platform, for
-  runs that accept non-ASCII characters, such as `[^,]*`, in RE2, Java, and
-  Rust plans
+  and combine with AND or OR, except that x86 with 64-byte vectors compares a
+  single literal's second prefix byte under the first byte's mask, as the
+  [front-and-back prefix scan](#front-and-back-prefix-scan) describes. The RE2
+  run stop runs on every platform, for runs that accept non-ASCII characters,
+  such as `[^,]*`, in RE2, Java, and Rust plans
 - **What it does:** Each candidate byte is XORed with its probe, the
   differences are joined with OR (all must match) or a lane-wise unsigned
   minimum (any may match), and the result is compared with zero once. This

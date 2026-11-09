@@ -3372,9 +3372,11 @@ is XORed with its probe byte, the differences are ORed, and one compare with
 zero gives the mask; the start literal filter first takes the unsigned minimum
 of its two groups' differences, and the class-pair scan the unsigned minimum of
 each side's differences from its up to three bytes. Everywhere else these five
-compare each byte and AND the masks. The JVM's `UseSVE` flag is read once,
-through the HotSpot diagnostic MXBean, on aarch64 only; if the flag cannot be
-read, the scans compare and AND.
+compare each byte and AND the masks, except that on x86 with 64-byte vectors
+the literal prefix scan of a single literal compares its second byte under the
+first byte's mask, as a later paragraph records. The JVM's `UseSVE` flag is
+read once, through the HotSpot diagnostic MXBean, on aarch64 only; if the flag
+cannot be read, the scans compare and AND.
 
 This is a measured platform difference. SVE compares, and the AND that joins
 their masks, are predicate operations, and on r9g they compete for execution
@@ -3394,20 +3396,46 @@ NEON has no predicates. With `-XX:UseSVE=0` the XOR form took 1.07x for `aqj`,
 compare and AND. On r8i, AVX-512 compares into mask registers and ANDs them in
 one `kandq`. A second compare masked by the first, the other form the Vector API
 offers, was mixed there: 0.85x for sherlock but 1.09x for 1 KiB `USER` probes.
-So x86 keeps compare and AND, written in line in each scan: the same compare
-and AND moved into a helper that C2 inlined took 1.07x for `aqj` on r8i with
-JDK 25.
+So x86 keeps compare and AND in the other scans, written in line in each scan:
+the same compare and AND moved into a helper that C2 inlined took 1.07x for
+`aqj` on r8i with JDK 25.
 
 The literal prefix scan's counted loop, described under
 [Literal Prefix Vector Scan](#literal-prefix-vector-scan), keeps the platform
-choice. With JDK 25 its XOR form took 1.10x to 1.13x the compare-and-AND form's
-time on r9g with `-XX:UseSVE=0` (`aqj`, `zqj`, sherlock, and
-`no-match-common`) and 1.06x for Cyrillic sherlock on r8i. On r9g the XOR
-difference stays a vector until the scan compares it with zero. A form that
-returned the mask from a helper had that helper left out of line at one of its
-two call sites, boxed a mask on every search, and took 1.62x for `zqj` on r9g
-with JDK 25. A vector returned from a helper left out of line is boxed the same
-way, so the scan's helper keeps a single call site.
+choice, except for a single literal on x86 with 64-byte vectors, as the next
+paragraph records.
+With JDK 25 its XOR form took 1.10x to 1.13x the compare-and-AND form's time on
+r9g with `-XX:UseSVE=0` (`aqj`, `zqj`, sherlock, and `no-match-common`) and
+1.06x for Cyrillic sherlock on r8i. On r9g the XOR difference stays a vector
+until the scan compares it with zero. A form that returned the mask from a
+helper had that helper left out of line at one of its two call sites, boxed a
+mask on every search, and took 1.62x for `zqj` on r9g with JDK 25. A vector
+returned from a helper left out of line is boxed the same way, so the scan's
+helper keeps a single call site.
+
+On x86 with 64-byte vectors, as with AVX-512 on r8i, the literal prefix scan of
+a single literal compares its second byte under the mask of the first; the
+literal set scan and the reverse scan for a required suffix's last occurrence,
+which was not measured in the masked form, keep compare and AND. C2 emits the masked compare as one
+compare that writes a mask register under the first compare's mask, in place of
+a second compare and a `kandq`. Over the counted loop on r8i with JDK 25 it took
+0.94x the compare-and-AND form's time for English sherlock, 0.82x to 0.83x for
+`no-match-common`, and 0.81x to 0.82x for rsc's `easy0` and `reallyhard0` over
+1 MB, and tied for 1 KiB `USER` probes; the mixed result above was measured
+before the counted loop. Forced on r9g's SVE, the masked form tested each
+16-byte vector with its own predicated compare and branch and took 1.54x to
+1.76x the XOR form's time for sherlock, `no-match-common`, and `easy0`. NEON
+and AVX2, whose compares take no mask, keep the platform choice. The two forms
+are separate methods, so each compiles only its own candidate test.
+
+The masked compare's gate, `VectorSupport.X86_WITH_64_BYTE_VECTORS`, is x86
+with a 64-byte preferred byte vector. r8i (Granite Rapids) is the only x86 host
+measured under it. Other x86 hosts with 64-byte vectors, such as Ice Lake, AMD
+Zen 4 and 5, and Cascade Lake, take the masked compare unmeasured; Cascade Lake
+(AWS r5) ran it only in an A/B against main that also held later start literal
+filter scan changes, which did not separate it. SVE wider than 16 bytes,
+including 512-bit SVE, as on A64FX, and any other architecture with 64-byte
+vectors keep the platform choice, since the gate tests for x86.
 
 The folded pair kernels, the counted and dense forms that the folded prefix
 scan and the folded inner literal search share, take the XOR form under the
