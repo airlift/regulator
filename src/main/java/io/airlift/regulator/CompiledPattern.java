@@ -99,6 +99,8 @@ abstract sealed class CompiledPattern
     // Internal construction metadata, stored outside the parser flag range to preserve the
     // pattern's compact object layout. It is consulted only by lazy reverse-program compilation.
     private static final int TRINO_COMPILER_DIALECT_FLAG = 1 << 31;
+    // The forward share of the largest budget; no budget's share is larger.
+    private static final long LARGEST_FORWARD_MEMORY = Long.MAX_VALUE - Long.MAX_VALUE / 3;
 
     // Above this size the existing rejection paths are already cheap, while loading
     // minimum-width metadata measurably affected the sub-nanosecond anchored path.
@@ -453,6 +455,7 @@ abstract sealed class CompiledPattern
 
         Regexp entireRegexp = parsed.regexp();
         CaseFolding caseFolding = parsed.caseFolding();
+        // withRequiredTrinoBudget must report what any route added here needs.
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
                 : null;
@@ -470,7 +473,7 @@ abstract sealed class CompiledPattern
             if (fixedWidthMatcher.scansRareCandidate() ||
                     innerLiteralPrecedesFixedWidth(InnerLiteralSearch.predictMinimumLiteralLength(normalizedRegexp, caseFolding))) {
                 try {
-                    Analysis analysis = build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+                    Analysis analysis = buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
                     // The pattern takes the route without a program where the program fits but
                     // no route of it precedes the matcher. That route reserves the matcher's
                     // memory from the forward budget. A matcher that scans a rare candidate takes
@@ -505,7 +508,7 @@ abstract sealed class CompiledPattern
                 return analysis;
             }
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
+        return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
     }
 
     /// Returns the analysis of a Trino fixed-width pattern that answers every operation from
@@ -520,9 +523,17 @@ abstract sealed class CompiledPattern
             int flags,
             long maxMemory)
     {
-        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        long forwardMemory = forwardMemory(maxMemory);
         ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
-        Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO, caseFolding);
+        Prog placeholderProgram;
+        try {
+            placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO, caseFolding);
+        }
+        catch (RegexpCompileMemoryLimitException ignored) {
+            // A budget too small for an empty program holds no matcher either, and the program
+            // route reports what the pattern needs.
+            return null;
+        }
         if (fixedWidthMatcher.estimatedRetainedSize() > placeholderProgram.dfaMemory()) {
             return null;
         }
@@ -563,13 +574,15 @@ abstract sealed class CompiledPattern
                 regexp.requiredPrefix(parsed.caseFolding()) == null;
     }
 
-    /// Analyzes a parsed pattern of any language. Where the program of a leftmost-first RE2, Java,
-    /// or Rust pattern does not fit the budget, a pattern that is a large capture-free literal set,
-    /// such as a dictionary of words, compiles without one wherever the set fits, and every
-    /// operation runs on the set, as Trino's large literal sets do (see
-    /// [#analyzeLiteralSetWithoutProgram]). A program that fits is always kept, since its DFAs
-    /// count and search faster than the set's automaton. Trino is excluded: it takes its set
-    /// before it compiles anything.
+    /// Analyzes a parsed pattern of RE2, Java, or Rust. Where the program of a leftmost-first
+    /// pattern does not fit the budget, a pattern that is a large capture-free literal set, such
+    /// as a dictionary of words, compiles without one wherever the set fits, and every operation
+    /// runs on the set, as Trino's large literal sets do (see [#analyzeLiteralSetWithoutProgram]).
+    /// A program that fits is always kept, since its DFAs count and search faster than the set's
+    /// automaton. Trino takes its set before it compiles anything, and analyzes its pattern in
+    /// [#analyzeParsedForTrino]. A pattern that does not fit `maxMemory` throws
+    /// [RegexpCompileMemoryLimitException] reporting a lower bound on the budget it needs by
+    /// either route.
     static Analysis build(
             Slice pattern,
             ParseResult parsed,
@@ -585,17 +598,123 @@ abstract sealed class CompiledPattern
             return buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, compilerDialect, scanPlanLanguage, scanPlanMode);
         }
         catch (RegexpCompileMemoryLimitException e) {
-            if (longestMatch || compilerDialect == Compiler.Dialect.TRINO || parsed.capturingGroupCount() != 0) {
-                throw e;
+            // A route added here needs a required budget beside requiredLiteralSetWithoutProgramBudget.
+            boolean literalSetWithoutProgram = !longestMatch && parsed.capturingGroupCount() == 0;
+            if (literalSetWithoutProgram) {
+                // The rejected compile kept nothing: its programs and plans were its own, and the
+                // parse it read is immutable.
+                Analysis analysis = analyzeLiteralSetWithoutProgram(pattern, parsed, flags, maxMemory, compilerDialect);
+                if (analysis != null) {
+                    return analysis;
+                }
             }
-            // The rejected compile kept nothing: its programs and plans were its own, and the
-            // parse it read is immutable.
-            Analysis analysis = analyzeLiteralSetWithoutProgram(pattern, parsed, flags, maxMemory, compilerDialect);
-            if (analysis == null) {
-                throw e;
+            long requiredBudget = requiredProgramBudget(e, parsed, maxMemory, longestMatch, compilerDialect);
+            if (literalSetWithoutProgram) {
+                requiredBudget = leastRequiredBudget(requiredBudget, requiredLiteralSetWithoutProgramBudget(parsed, flags, maxMemory, compilerDialect));
             }
-            return analysis;
+            throw Compiler.withRequiredBudget(e, maxMemory, requiredBudget);
         }
+    }
+
+    /// Returns the exception a Trino compile with `maxMemory` throws when `rejection` rejected
+    /// [#analyzeParsedForTrino], reporting a lower bound on the budget the pattern needs by any
+    /// route: its literal alternation `literalAlternationMatcher`, which is `null` where the
+    /// pattern has none, its large literal set, its fixed-width matcher, or its program.
+    static RegexpCompileMemoryLimitException withRequiredTrinoBudget(
+            RegexpCompileMemoryLimitException rejection,
+            ParseResult parsed,
+            int flags,
+            long maxMemory,
+            LiteralAlternationSpanMatcher literalAlternationMatcher)
+    {
+        long requiredBudget = requiredProgramBudget(rejection, parsed, maxMemory, false, Compiler.Dialect.TRINO);
+        if (literalAlternationMatcher != null) {
+            requiredBudget = leastRequiredBudget(requiredBudget, budgetForForwardMemory(literalAlternationMatcher.estimatedRetainedSize()));
+        }
+        if (parsed.capturingGroupCount() == 0) {
+            long literalSetSize = LiteralSetSpanMatcher.leastRetainedSize(parsed.regexp(), forwardMemory(maxMemory));
+            requiredBudget = leastRequiredBudget(requiredBudget, literalSetSize == Compiler.NO_BUDGET ? Compiler.NO_BUDGET : budgetForForwardMemory(literalSetSize));
+        }
+        FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed) ? FixedWidthByteSpanMatcher.analyze(parsed.regexp()) : null;
+        if (fixedWidthMatcher != null && !fixedWidthMatcher.bailsOnDenseCandidates()) {
+            // The matcher takes what the placeholder program leaves of the forward budget.
+            requiredBudget = leastRequiredBudget(requiredBudget, budgetForForwardMemory(placeholderProgramMemory(flags, Compiler.Dialect.TRINO, parsed.caseFolding(), fixedWidthMatcher.estimatedRetainedSize())));
+        }
+        return Compiler.withRequiredBudget(rejection, maxMemory, requiredBudget);
+    }
+
+    /// Returns a lower bound on the least budget with which [#buildWithProgram] compiles the
+    /// pattern `rejection` rejected with `maxMemory`, or [Compiler#NO_BUDGET] where no budget
+    /// does. The program it compiles is the suffix after a required literal prefix; a compact
+    /// pattern's counter, which it takes in place of a program, measured exactly what it needs.
+    private static long requiredProgramBudget(RegexpCompileMemoryLimitException rejection, ParseResult parsed, long maxMemory, boolean longestMatch, Compiler.Dialect compilerDialect)
+    {
+        long forwardMemory = forwardMemory(maxMemory);
+        Regexp entireRegexp = parsed.regexp();
+        if (parsed.capturingGroupCount() == 0 && !longestMatch && BoundedCharacterClassCounter.analyzeCompactRoute(entireRegexp) != null) {
+            return Compiler.requiredMeasuredBudget(rejection, forwardMemory, CompiledPattern::budgetForForwardMemory);
+        }
+        Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix(parsed.caseFolding());
+        Regexp programRegexp = prefixResult == null ? entireRegexp : prefixResult.suffix();
+        return Compiler.requiredProgramBudget(rejection, forwardMemory, CompiledPattern::budgetForForwardMemory, programRegexp, parsed.caseFolding(), compilerDialect);
+    }
+
+    /// Returns a lower bound on the least budget with which [#analyzeLiteralSetWithoutProgram]
+    /// compiles the pattern, or [Compiler#NO_BUDGET] where no budget does. The set's tries and
+    /// extending literals take what the placeholder program leaves of the forward budget; the
+    /// check that the set is the shape's route is left out, which only lowers the bound.
+    private static long requiredLiteralSetWithoutProgramBudget(ParseResult parsed, int flags, long maxMemory, Compiler.Dialect compilerDialect)
+    {
+        long setMemory = LiteralSetSpanMatcher.leastMemoryWithExtendingLiterals(parsed.regexp(), forwardMemory(maxMemory));
+        if (setMemory == Compiler.NO_BUDGET) {
+            return Compiler.NO_BUDGET;
+        }
+        return budgetForForwardMemory(placeholderProgramMemory(flags, compilerDialect, parsed.caseFolding(), setMemory));
+    }
+
+    /// Returns the least forward budget with which the placeholder program, a no-match that holds
+    /// only the program's own instructions, compiles and leaves `routeMemory` of its DFA
+    /// allowance for the route that takes it.
+    private static long placeholderProgramMemory(int flags, Compiler.Dialect compilerDialect, CaseFolding caseFolding, long routeMemory)
+    {
+        Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, 0, compilerDialect, caseFolding);
+        return Math.max(Compiler.unflattenedProgramMemory(Compiler.PROGRAM_INSTRUCTIONS), Compiler.estimatedProgramMemory(placeholderProgram) + routeMemory);
+    }
+
+    /// Returns the lesser of two required budgets, either of which may be [Compiler#NO_BUDGET].
+    private static long leastRequiredBudget(long first, long second)
+    {
+        if (first == Compiler.NO_BUDGET) {
+            return second;
+        }
+        if (second == Compiler.NO_BUDGET) {
+            return first;
+        }
+        return Math.min(first, second);
+    }
+
+    /// Returns the forward share of `maxMemory`, what [#buildWithProgram] keeps for the forward
+    /// program past the third it gives the reverse program.
+    static long forwardMemory(long maxMemory)
+    {
+        return Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+    }
+
+    /// Returns the least budget whose [forward share][#forwardMemory(long)] is at least
+    /// `forwardMemory`, or [Compiler#NO_BUDGET] where no budget's share is.
+    static long budgetForForwardMemory(long forwardMemory)
+    {
+        if (forwardMemory <= 1) {
+            return 1;
+        }
+        if (forwardMemory == 2) {
+            return 3;
+        }
+        if (forwardMemory > LARGEST_FORWARD_MEMORY) {
+            return Compiler.NO_BUDGET;
+        }
+        // From 3 up, budget b has share b - b / 3, which reaches f first at f + (f - 1) / 2.
+        return forwardMemory + (forwardMemory - 1) / 2;
     }
 
     /// Returns the analysis of a large capture-free literal set that answers every operation from
@@ -609,7 +728,7 @@ abstract sealed class CompiledPattern
     /// [#matchInternalOnLiteralSet]).
     private static Analysis analyzeLiteralSetWithoutProgram(Slice pattern, ParseResult parsed, int flags, long maxMemory, Compiler.Dialect compilerDialect)
     {
-        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        long forwardMemory = forwardMemory(maxMemory);
         Regexp entireRegexp = parsed.regexp();
         CaseFolding caseFolding = parsed.caseFolding();
         Prog placeholderProgram;
@@ -674,7 +793,7 @@ abstract sealed class CompiledPattern
             ScanPlanMode scanPlanMode)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
-        long forwardMemory = Math.max(1, maxMemory - reverseMemory);
+        long forwardMemory = forwardMemory(maxMemory);
 
         Regexp entireRegexp = parsed.regexp();
         int capturingGroupCount = parsed.capturingGroupCount();
@@ -684,8 +803,11 @@ abstract sealed class CompiledPattern
                 : null;
         if (compactBoundedCharacterClass != null) {
             long counterMemory = compactBoundedCharacterClass.estimatedRetainedSize();
-            if (counterMemory >= forwardMemory) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+            // The counter shares the forward budget with the placeholder program, a no-match that
+            // holds only the program's own instructions.
+            long placeholderMemory = Compiler.unflattenedProgramMemory(Compiler.PROGRAM_INSTRUCTIONS);
+            if (counterMemory > forwardMemory - placeholderMemory) {
+                throw new RegexpCompileMemoryLimitException(forwardMemory, counterMemory + placeholderMemory);
             }
 
             ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp, caseFolding);
@@ -813,7 +935,7 @@ abstract sealed class CompiledPattern
                 : null;
         booleanPlans = booleanPlans.withTaggedAlternationProgram(taggedAlternationProgram);
         // A capture search gets the whole forward share as its own allowance, beside the DFA caches'.
-        Nfa.planCaptureSearches(semanticProgram, forwardMemory, taggedAlternationProgram == null ? null : taggedAlternationProgram.program(), maxMemory);
+        Nfa.planCaptureSearches(semanticProgram, forwardMemory, taggedAlternationProgram == null ? null : taggedAlternationProgram.program());
         WordRunMatcher wordRunMatcher = requiredPrefix == null && loweredBooleanProgram == null
                 ? WordRunMatcher.analyze(entireRegexp, semanticProgram)
                 : null;

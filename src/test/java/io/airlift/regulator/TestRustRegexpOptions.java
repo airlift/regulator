@@ -93,7 +93,8 @@ public class TestRustRegexpOptions
         assertThatThrownBy(() -> RustRegexp.compile(
                 utf8Slice("abc"),
                 RustRegexp.Options.defaults().setMaxMemory(1)))
-                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+                .isInstanceOf(RegexpCompileMemoryLimitException.class)
+                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 1 KiB");
     }
 
     @Test

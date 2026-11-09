@@ -16,6 +16,8 @@ package io.airlift.regulator;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.LongUnaryOperator;
 
 import static java.util.Objects.requireNonNull;
 
@@ -48,6 +50,10 @@ final class Compiler
     private static final int UTF_MAX = 4;
     // No budget compiles a program of more instructions than this before flattening.
     static final int MAX_INSTRUCTIONS = 1 << 24;
+    // What a required budget is when no budget compiles the program.
+    static final long NO_BUDGET = -1;
+    // What a required budget is when no bound is proven: every budget holds it.
+    static final long UNKNOWN_BUDGET = 0;
     // The instructions a forward program holds beside its expression's: FAIL, MATCH, and the
     // leading loop of an unanchored search.
     static final int PROGRAM_INSTRUCTIONS = 4;
@@ -165,17 +171,136 @@ final class Compiler
 
     static long estimatedProgramMemory(Prog program)
     {
-        return CPP_PROG_OVERHEAD_BYTES + ((long) program.size() * FLATTENED_INSTRUCTION_BYTES) + program.onePassMemory() + program.prefixShiftsMemory();
+        return flattenedProgramMemory(program.size()) + program.onePassMemory() + program.prefixShiftsMemory();
+    }
+
+    /// Returns the least budget whose instruction limit holds `instructionCount` instructions
+    /// before flattening.
+    static long unflattenedProgramMemory(long instructionCount)
+    {
+        return CPP_PROG_OVERHEAD_BYTES + (instructionCount * UNFLATTENED_INSTRUCTION_BYTES);
+    }
+
+    /// Returns the least budget whose flatten charge holds `instructionCount` flattened
+    /// instructions.
+    static long flattenedProgramMemory(long instructionCount)
+    {
+        return CPP_PROG_OVERHEAD_BYTES + (instructionCount * FLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Throws [RegexpCompileMemoryLimitException] when the program's charged memory exceeds a
-    /// positive `maxMemory`. A long prefix's shift table is configured after flattening and comes
-    /// out of what the flatten charge left, so it can need more than remains.
+    /// positive `maxMemory`, reporting that charge as the budget the program needs. A long
+    /// prefix's shift table is configured after flattening and comes out of what the flatten
+    /// charge left, so it can need more than remains.
     static void requireProgramFits(Prog program, long maxMemory)
     {
-        if (maxMemory > 0 && estimatedProgramMemory(program) > maxMemory) {
-            throw new RegexpCompileMemoryLimitException(maxMemory);
+        if (maxMemory <= 0) {
+            return;
         }
+        long programMemory = estimatedProgramMemory(program);
+        if (programMemory > maxMemory) {
+            throw new RegexpCompileMemoryLimitException(maxMemory, programMemory);
+        }
+    }
+
+    /// Returns the exception for a program that needs more than `maxInstructions`, the
+    /// instruction limit of a positive `maxMemory` (see [#maxUnflattenedInstructions(long)]),
+    /// before flattening. It reports the budget for one more instruction as a lower bound, or no
+    /// budget once the limit is [#MAX_INSTRUCTIONS].
+    static RegexpCompileMemoryLimitException instructionLimitExceeded(long maxMemory, long maxInstructions)
+    {
+        if (maxInstructions >= MAX_INSTRUCTIONS) {
+            return RegexpCompileMemoryLimitException.fitsNoBudget(maxMemory);
+        }
+        return new RegexpCompileMemoryLimitException(maxMemory, unflattenedProgramMemory(Math.max(maxInstructions, 0) + 1));
+    }
+
+    /// Returns a lower bound on the least budget with which [#compileNormalized] compiles the
+    /// forward program of `regexp` after simplifying it in `dialect`, [#NO_BUDGET] where no
+    /// budget compiles it, or [#UNKNOWN_BUDGET] where the expression's instructions are not
+    /// counted. `rejection` is that compile's failure when it was given
+    /// `programMemory` of a rejected budget, and `budgetForProgramMemory` turns program memory
+    /// into the least budget that gives it. The bound is the larger of what the failed check
+    /// measured it needs and the budget whose instruction limit holds the expression's least
+    /// instruction count (see [Simplifier#estimateInstructions]). No budget compiles a program
+    /// past [#MAX_INSTRUCTIONS] instructions, or one the check found larger than the largest
+    /// flattened program.
+    static long requiredProgramBudget(
+            RegexpCompileMemoryLimitException rejection,
+            long programMemory,
+            LongUnaryOperator budgetForProgramMemory,
+            Regexp regexp,
+            CaseFolding caseFolding,
+            Dialect dialect)
+    {
+        Optional<Simplifier.EstimatedInstructions> counted = Simplifier.estimateInstructions(regexp, caseFolding, dialect, MAX_INSTRUCTIONS);
+        if (counted.isEmpty()) {
+            return UNKNOWN_BUDGET;
+        }
+        Simplifier.EstimatedInstructions estimate = counted.orElseThrow();
+        // FAIL and MATCH, and the leading loop of a search the expression does not anchor.
+        long programInstructions = estimate.mayAnchorStart() ? PROGRAM_INSTRUCTIONS - 2 : PROGRAM_INSTRUCTIONS;
+        return requiredBudget(rejection, programMemory, budgetForProgramMemory, estimate.count() + programInstructions);
+    }
+
+    /// Returns a lower bound on the least budget with which [#compileSet] compiles `regexp`, the
+    /// alternation of a set's patterns, unanchored where `unanchored`, [#NO_BUDGET] where no
+    /// budget compiles it, or [#UNKNOWN_BUDGET] where its instructions are not counted.
+    /// `rejection` is its failure with `maxMemory`; the bound is found as
+    /// [#requiredProgramBudget] finds a program's.
+    static long requiredSetBudget(RegexpCompileMemoryLimitException rejection, long maxMemory, Regexp regexp, boolean unanchored)
+    {
+        Optional<Simplifier.EstimatedInstructions> counted = Simplifier.estimateInstructions(regexp, CaseFolding.RE2, Dialect.RE2, MAX_INSTRUCTIONS);
+        if (counted.isEmpty()) {
+            return UNKNOWN_BUDGET;
+        }
+        // FAIL, and the leading loop of an unanchored set; each pattern's match is its own.
+        return requiredBudget(rejection, maxMemory, LongUnaryOperator.identity(), counted.orElseThrow().count() + (unanchored ? 3 : 1));
+    }
+
+    /// Returns a lower bound on the least budget that passes the check `rejection` failed, from
+    /// what that check measured alone, or [#NO_BUDGET] where no budget passes it. The check was
+    /// given `programMemory` of a rejected budget, and `budgetForProgramMemory` turns program
+    /// memory into a budget as for [#requiredProgramBudget].
+    static long requiredMeasuredBudget(RegexpCompileMemoryLimitException rejection, long programMemory, LongUnaryOperator budgetForProgramMemory)
+    {
+        return requiredBudget(rejection, programMemory, budgetForProgramMemory, 0);
+    }
+
+    /// Returns the exception a compile with `maxMemory` throws for `rejection`, reporting
+    /// `requiredBudget`, a lower bound on the least budget the pattern compiles with by any
+    /// route, or that no budget compiles it where it is [#NO_BUDGET]. A bound the rejected budget
+    /// already holds proves nothing, so it is left out. The exception keeps the rejection's stack
+    /// trace, which shows the check that failed.
+    static RegexpCompileMemoryLimitException withRequiredBudget(RegexpCompileMemoryLimitException rejection, long maxMemory, long requiredBudget)
+    {
+        RegexpCompileMemoryLimitException result;
+        if (requiredBudget == NO_BUDGET) {
+            result = RegexpCompileMemoryLimitException.fitsNoBudget(maxMemory);
+        }
+        else if (requiredBudget > maxMemory) {
+            result = new RegexpCompileMemoryLimitException(maxMemory, requiredBudget);
+        }
+        else {
+            result = new RegexpCompileMemoryLimitException(maxMemory);
+        }
+        result.setStackTrace(rejection.getStackTrace());
+        return result;
+    }
+
+    private static long requiredBudget(RegexpCompileMemoryLimitException rejection, long programMemory, LongUnaryOperator budgetForProgramMemory, long instructions)
+    {
+        RegexpCompileMemoryLimitException measured = rejection.measured();
+        if (measured.fitsNoBudget() || instructions > MAX_INSTRUCTIONS) {
+            return NO_BUDGET;
+        }
+        long requiredProgramMemory = unflattenedProgramMemory(instructions);
+        if (measured.hasRequiredMaxMemory()) {
+            // The check may have been given less than the program's memory, by an amount the
+            // budget does not change.
+            requiredProgramMemory = Math.max(requiredProgramMemory, programMemory + (measured.requiredMaxMemory() - measured.maxMemoryBytes()));
+        }
+        return budgetForProgramMemory.applyAsLong(requiredProgramMemory);
     }
 
     /// Returns how many instructions a forward program compiled without a budget emits for
@@ -199,7 +324,8 @@ final class Compiler
 
     /// Returns how many instructions a program compiled with a positive `maxMemory` may hold
     /// before it is flattened. It is not positive when `maxMemory` cannot hold the program's
-    /// overhead and one instruction.
+    /// overhead and one instruction. For a count from 1 through [#MAX_INSTRUCTIONS],
+    /// [#unflattenedProgramMemory(long)] is the least budget that allows it.
     static long maxUnflattenedInstructions(long maxMemory)
     {
         return Math.min(MAX_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES);
@@ -236,15 +362,24 @@ final class Compiler
 
     static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory)
     {
-        return compileSet(regexp, unanchored, anchorBoth, maxMemory, Dialect.RE2, CaseFolding.RE2);
+        return compileSet(regexp, unanchored, anchorBoth, maxMemory, Dialect.RE2, CaseFolding.RE2, true);
     }
 
-    static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect, CaseFolding caseFolding)
+    /// Compiles a set as [#compileSet(Regexp,boolean,boolean,long)] does for a caller that
+    /// drops the program when it does not fit, so a rejection does not keep what it would need
+    /// to measure the budget the program needs.
+    static Prog compileOptionalSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect, CaseFolding caseFolding)
+    {
+        return compileSet(regexp, unanchored, anchorBoth, maxMemory, dialect, caseFolding, false);
+    }
+
+    private static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect, CaseFolding caseFolding, boolean measuresRejection)
     {
         requireNonNull(regexp, "regexp is null");
         CompilerState compiler = new CompilerState(caseFolding);
         compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.setAnchorBoth = anchorBoth;
+        compiler.measuresRejection = measuresRejection;
 
         Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding, dialect, maxMemory);
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
@@ -344,7 +479,22 @@ final class Compiler
         compiler.skipDominatorPass = stage.ordinal() >= CompileStage.FLATTENED.ordinal() &&
                 shouldSkipDominatorPass(simplifiedRegexp, reversed, compiler.program.size());
 
-        Prog compiledProgram = compiler.finish(stage);
+        Prog compiledProgram;
+        try {
+            compiledProgram = compiler.finish(stage);
+        }
+        catch (RegexpCompileMemoryLimitException e) {
+            // A long prefix's shift table comes out of what the flatten charge leaves, and its
+            // size is known before flattening, so a budget the flattened program fits must also
+            // hold it.
+            if (configureForwardMetadata && !reversed) {
+                throw e.addToMeasurement(() -> {
+                    Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel(caseFolding);
+                    return requiredPrefixForAccel == null ? 0 : Prog.prefixShiftsMemory(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase());
+                });
+            }
+            throw e;
+        }
 
         // Match upstream: configure prefix acceleration on forward programs.
         if (configureForwardMetadata && !reversed) {
@@ -708,6 +858,9 @@ final class Compiler
         boolean reversed;
         boolean setAnchorBoth;
         boolean skipDominatorPass;
+        // Whether a flattened program that does not fit measures, when asked, what it needs. A
+        // caller that drops such a program has no use for the measurement.
+        boolean measuresRejection = true;
         Dialect dialect;
 
         Encoding encoding = Encoding.UTF8;
@@ -731,14 +884,14 @@ final class Compiler
                 return;
             }
             if (maxMemory <= CPP_PROG_OVERHEAD_BYTES) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw instructionLimitExceeded(maxMemory, 0);
             }
 
             long availableInstructionCount = maxUnflattenedInstructions(maxMemory);
             if (availableInstructionCount <= 0) {
                 // Upstream leaves max_ninst_ at zero here and every allocation fails, which surfaces
                 // as a compile failure rather than an argument error.
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw instructionLimitExceeded(maxMemory, 0);
             }
             maxInstructions = (int) availableInstructionCount;
         }
@@ -765,7 +918,7 @@ final class Compiler
                     if (++visitCount > maxVisits) {
                         // A finite budget bounds the visit limit, so exceeding it is a budget failure.
                         if (maxMemory > 0) {
-                            throw new RegexpCompileMemoryLimitException(maxMemory);
+                            throw instructionLimitExceeded(maxMemory, maxInstructions);
                         }
                         throw new RegexpCompileException("regexp compilation exceeded walkExponential limit");
                     }
@@ -972,7 +1125,7 @@ final class Compiler
                 // many lists is copied into each of them, and the flattened program can grow with
                 // the square of the program the instruction budget bounds. Charge each flattened
                 // instruction as it is emitted, so an oversized program fails before it is built.
-                program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory);
+                program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory, measuresRejection);
                 // The flatten charge counts the capture instruction words the program keeps, so
                 // build them now rather than on the first capture search, whose share leaves them out.
                 program.getOrCreateCaptureInstructionWords();
@@ -1001,9 +1154,15 @@ final class Compiler
         private int add(Prog.Inst instruction)
         {
             if (program.size() + 1 > maxInstructions) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw limitExceeded();
             }
             return program.add(instruction);
+        }
+
+        // An unbudgeted compile has a fixed instruction limit, and needs no budget to report.
+        private RegexpCompileMemoryLimitException limitExceeded()
+        {
+            return maxMemory > 0 ? instructionLimitExceeded(maxMemory, maxInstructions) : new RegexpCompileMemoryLimitException(maxMemory);
         }
 
         private Fragment noMatch()
@@ -1468,7 +1627,7 @@ final class Compiler
             }
 
             if (program.size() + 2 > maxInstructions) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw limitExceeded();
             }
 
             int startId = program.add(Prog.Inst.createCapture(2 * captureIndex, fragment.begin));

@@ -174,13 +174,21 @@ public final class Re2Set
                     : Regexp.alternate(parseFlags, patterns);
             patterns.clear();
 
-            Prog program = Compiler.compileSet(
-                    regexp,
-                    matchMode == MatchMode.FIND,
-                    matchMode == MatchMode.FULL,
-                    options.maxMemory());
+            // The program compiles with the whole budget. A rejection reports a lower bound on
+            // what the program needs, without the many-match DFA beside it, which only a compiled
+            // program can measure.
+            Prog program;
+            try {
+                program = Compiler.compileSet(regexp, matchMode == MatchMode.FIND, matchMode == MatchMode.FULL, options.maxMemory());
+            }
+            catch (RegexpCompileMemoryLimitException e) {
+                throw Compiler.withRequiredBudget(e, options.maxMemory(), Compiler.requiredSetBudget(e, options.maxMemory(), regexp, matchMode == MatchMode.FIND));
+            }
+            // The many-match DFA gets what the program leaves, and needs room to initialize. The
+            // completed program tells exactly how much.
             if (program.getCachedDfa(Dfa.DfaInstance.Kind.MANY_MATCH) == null) {
-                throw new RegexpCompileMemoryLimitException(options.maxMemory());
+                long requiredMaxMemory = Compiler.estimatedProgramMemory(program) + Dfa.DfaInstance.initializationMemory(program, Dfa.DfaInstance.Kind.MANY_MATCH);
+                throw new RegexpCompileMemoryLimitException(options.maxMemory(), requiredMaxMemory);
             }
             return new Re2Set(patternCount, program, options.maxMemory());
         }

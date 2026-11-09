@@ -127,7 +127,9 @@ capture buffers, replacement output, or collections returned by aggregate APIs.
 
 Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
-configured memory-budget failure rather than JVM heap exhaustion.
+configured memory-budget failure rather than JVM heap exhaustion, and reports
+a lower bound on the budget the pattern needs when one is proven (see
+[Limits and defaults](#limits-and-defaults)).
 
 In every language, the budget counts counted repetition as written out: `x{n}`
 costs n copies of `x`. Copies in a branch that simplification removes because
@@ -196,6 +198,24 @@ Within the budget, compilation and matching keep these limits:
   JDK's cleaner has not yet freed. A replacement that would push the counted superseded
   segments past twice the new segment's size leaves searches on Java object
   rows until the count falls.
+
+A pattern that does not compile within its budget reports a lower bound on the
+budget it needs when one is proven. The `RegexpCompileMemoryLimitException`
+message then ends "the pattern needs a larger memory budget, at least N MiB",
+rounded down to MiB, to KiB below 1 MiB, or to bytes below 1 KiB, and
+`requiredMaxMemoryBytes()` returns the unrounded bound in bytes, or an empty
+optional when there is none. No smaller budget compiles the pattern by any route
+it can take, including the literal sets and fixed-width matchers some patterns
+compile to in place of a program. Where the check that failed measures what it
+needs, as for the flattened program, a long prefix's shift table, a compact
+class counter, a capture plan, or an `Re2Set`'s DFA, the figure is often the
+least budget that compiles. Where the instruction limit stopped compilation, it
+is counted from the instructions the pattern surely compiles to. A larger budget
+may still be needed, since a later step can need more than the step that failed,
+and the DFAs may need more to search at full speed without resetting their
+caches. When no bound beyond the rejected budget is proven, the message gives no
+figure. A pattern that no route can compile within the largest program reports
+that it is too large to compile at any memory budget.
 
 ### Byte frequencies
 

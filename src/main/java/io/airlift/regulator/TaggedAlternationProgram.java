@@ -78,7 +78,7 @@ final class TaggedAlternationProgram
         }
         Prog taggedProgram;
         try {
-            taggedProgram = Compiler.compileSet(
+            taggedProgram = Compiler.compileOptionalSet(
                     Regexp.alternate(parseFlags, taggedBranches),
                     false,
                     false,

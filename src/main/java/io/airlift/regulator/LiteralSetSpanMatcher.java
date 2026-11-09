@@ -134,6 +134,59 @@ sealed class LiteralSetSpanMatcher
         return trie.build(maximumRetainedBytes);
     }
 
+    /// Returns a lower bound on what the large set [#analyze] builds from the capture-free
+    /// `expression` retains, at the least budget that admits it, or [Compiler#NO_BUDGET] where no
+    /// budget admits one. The set's literals are spelled into a trie with a budget of sixteen
+    /// times `forwardMemory`, the rejected forward budget, but at least 4 MiB and at most what a
+    /// set of the most literal bytes can fill; a set larger than that is bounded by the states
+    /// the trie held when it filled.
+    static long leastRetainedSize(Regexp expression, long forwardMemory)
+    {
+        requireNonNull(expression, "expression is null");
+        LiteralAlternationSpanMatcher.SpellAttempt attempt = LiteralAlternationSpanMatcher.attemptSpelling(expression, spellingBudget(forwardMemory), false);
+        if (!attempt.spelled()) {
+            return leastRetainedSizeBeyond(attempt.trie());
+        }
+        // The root's skip is built only where it fits, so the least set has none.
+        return attempt.trie().build(0).estimatedRetainedSize();
+    }
+
+    /// Returns a lower bound on the memory the large set of the capture-free `expression` and its
+    /// [ExtendingLiterals] take together where a pattern runs every operation on them, or
+    /// [Compiler#NO_BUDGET] where no budget holds them, measured as [#leastRetainedSize] does.
+    /// Both the trie spelling every literal and the extending literals beside the set must fit.
+    static long leastMemoryWithExtendingLiterals(Regexp expression, long forwardMemory)
+    {
+        requireNonNull(expression, "expression is null");
+        LiteralAlternationSpanMatcher.SpellAttempt attempt = LiteralAlternationSpanMatcher.attemptSpelling(expression, spellingBudget(forwardMemory), true);
+        if (!attempt.spelled()) {
+            return leastRetainedSizeBeyond(attempt.trie());
+        }
+        long setSize = leastRetainedSize(expression, forwardMemory);
+        if (setSize == Compiler.NO_BUDGET) {
+            return Compiler.NO_BUDGET;
+        }
+        long extendingLiteralsSize = attempt.trie().extendingLiterals(Long.MAX_VALUE).estimatedRetainedSize();
+        return Math.max((long) attempt.trie().stateCount * RETAINED_BYTES_PER_STATE, extendingLiteralsSize + setSize);
+    }
+
+    // Sixteen times the rejected forward budget, but at least 4 MiB: large enough to spell most
+    // sets a rejected budget nearly holds, while a rejection measures with memory in proportion
+    // to the budget it was given. From a sixteenth of the largest it is the largest, at which
+    // the literals' bytes bound the trie and the budget never stops it.
+    private static long spellingBudget(long forwardMemory)
+    {
+        long largest = (LiteralAlternationSpanMatcher.MAXIMUM_LITERAL_BYTES + 1L) * RETAINED_BYTES_PER_STATE;
+        return forwardMemory >= largest / 16 ? largest : Math.max(4L << 20, 16 * forwardMemory);
+    }
+
+    // A spelling that stopped short of a full trie stopped for its literals, at every budget; one
+    // that filled the trie needed at least one more state than the budget let it hold.
+    private static long leastRetainedSizeBeyond(Trie trie)
+    {
+        return trie.filledBudget() ? (trie.maximumStates + 1L) * RETAINED_BYTES_PER_STATE : Compiler.NO_BUDGET;
+    }
+
     /// Phase 1 of the automaton's build: the leftmost-first trie of non-empty literals, added in
     /// priority order, or, spelled by [LiteralAlternationSpanMatcher#spellEveryLiteral], of every
     /// literal; such a trie is only walked. Each state records the byte of its incoming edge and
@@ -148,6 +201,8 @@ sealed class LiteralSetSpanMatcher
         static final int FULL = -2;
 
         private final int maximumStates;
+        // Whether the budget, not the literals' bytes, bounds the states.
+        private final boolean budgetBound;
         private final int[] rootChildByByte = new int[256];
         private int capacity;
         private int[] firstChild;
@@ -162,7 +217,10 @@ sealed class LiteralSetSpanMatcher
         {
             // Literals sharing a long prefix expand to far more bytes than the trie has states, so
             // the trie arrays grow with the states added, up to the most the budget can retain.
-            maximumStates = (int) Math.min(totalLiteralBytes + 1, Math.max(1, maximumRetainedBytes / RETAINED_BYTES_PER_STATE));
+            long literalStates = totalLiteralBytes + 1;
+            long budgetStates = maximumRetainedBytes / RETAINED_BYTES_PER_STATE;
+            maximumStates = (int) Math.min(literalStates, Math.max(1, budgetStates));
+            budgetBound = budgetStates < literalStates;
             capacity = Math.min(maximumStates, INITIAL_TRIE_CAPACITY);
             firstChild = new int[capacity];
             nextSibling = new int[capacity];
@@ -213,6 +271,13 @@ sealed class LiteralSetSpanMatcher
                 insertTrieChild(state, child, firstChild, nextSibling, incomingByte);
             }
             return child;
+        }
+
+        /// Whether the trie holds all the states its budget can retain, so a spelling that stopped
+        /// may have stopped for room.
+        private boolean filledBudget()
+        {
+            return budgetBound && stateCount == maximumStates;
         }
 
         /// The length of the literal ending at `state`, or `0` where none does.

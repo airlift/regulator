@@ -144,12 +144,13 @@ sized to keep representative large DFA graphs cached without resets thrashing
 them, with or without compressed object references.
 
 Compilation that exceeds the budget throws
-`RegexpCompileMemoryLimitException`. During matching, a full DFA cache resets,
-and repeated resets fall back to the NFA, so ordinary matching never throws a
-memory-limit exception. `Re2Set` is the exception: it throws
-`RegexpMatchMemoryLimitException` rather than report no match. The budget is a
-planning budget, not an exact heap limit, and it excludes caller input, result
-objects, and output. See
+`RegexpCompileMemoryLimitException`. Where compilation proves a lower bound on
+the budget the pattern needs, the message reports it; a larger budget may still
+be needed. During matching, a full DFA cache resets, and repeated resets fall
+back to the NFA, so ordinary matching never throws a memory-limit exception.
+`Re2Set` is the exception: it throws `RegexpMatchMemoryLimitException` rather
+than report no match. The budget is a planning budget, not an exact heap
+limit, and it excludes caller input, result objects, and output. See
 [Compiled patterns](reference/REGULATOR_API.md#compiled-patterns) and
 [Memory Budgets And DFA Caching](../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching).
 

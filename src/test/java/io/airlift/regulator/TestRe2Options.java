@@ -55,7 +55,8 @@ public class TestRe2Options
     public void testSmallMemoryBudgetDoesNotBecomeUnlimited()
     {
         assertThatThrownBy(() -> Re2.compile(utf8("abc"), Re2.Options.defaults().setMaxMemory(1)))
-                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+                .isInstanceOf(RegexpCompileMemoryLimitException.class)
+                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 1 KiB");
     }
 
     @Test

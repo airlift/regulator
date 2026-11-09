@@ -18,6 +18,10 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
 import java.util.function.IntFunction;
 
 import static io.airlift.slice.SizeOf.sizeOf;
@@ -290,6 +294,161 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(tightest.boundedPassCaptureSlots()).isEqualTo(6);
     }
 
+    @Test
+    public void testRejectionReportsLowerBoundOnRequiredBudget()
+    {
+        String anchoredPrefix = "^" + "a".repeat(5000) + "(?:b?c?)*d";
+        String nestedOptional = "(?:(?:(?:(?:b?)*?){64})*?)+";
+        String fixedWidth = "(?:[é中][a-z]){127}[0-9]{2}";
+        String fruits = "apple|banana|cherry|durian|elderberry";
+        String words = randomWords(65, 7);
+        String dictionary = randomWords(3000, 11);
+        // Each pattern reports the same figure at every rejected budget listed, a figure whose
+        // predecessor fails, and compiles first at the least budget. The literal sets and
+        // matchers, the compact counter, and the sets' DFAs are charged for the objects they
+        // retain, so their figures assume the default object layout CI runs, with compressed
+        // references and class pointers and without compact object headers.
+        List<RejectedPattern> rejections = List.of(
+                // The instruction limit, estimated from the program the pattern compiles to: past
+                // a required prefix and the anchor that drops the search loop, through branches
+                // that collapse to nothing, and through repetitions the simplifier squashes.
+                new RejectedPattern("anchored prefix", Language.RE2, anchoredPrefix, 2_747, 2_971, 1, 2_000),
+                new RejectedPattern("anchored prefix", Language.JAVA, anchoredPrefix, 2_927, 3_287, 1, 2_000),
+                new RejectedPattern("anchored prefix", Language.TRINO, anchoredPrefix, 2_927, 3_287, 1, 2_000),
+                new RejectedPattern("empty repetitions", Language.RE2, "(?:" + "a{0}b{0}".repeat(9000) + "){1000}", 1_667, 1_667, 1, 1_600),
+                new RejectedPattern(Language.JAVA, "(?:a{0}){1000}", 1_667, 1_667, 1, 1_000),
+                new RejectedPattern(Language.JAVA, "(?:a|)*", 2_567, 2_567, 1, 2_000),
+                new RejectedPattern(Language.JAVA, "^(?:a|)*$", 2_567, 2_567, 1, 2_000),
+                new RejectedPattern(Language.RE2, "(?:ab[ab]+)?", 2_387, 2_462, 1, 2_000),
+                new RejectedPattern(Language.RUST, "(?:a+){2,4}", 3_107, 3_479, 1, 2_000),
+                new RejectedPattern(Language.RE2, "(?:abc){1000}", 541_487, 541_487, 1, 65_536),
+                new RejectedPattern(Language.RE2, "((((a))))|(b)(c)", 4_367, 4_367, 1, 2_000),
+                // Java compiles a repetition of a body that can match empty with more than its
+                // copies.
+                new RejectedPattern(Language.JAVA, "(?:(?:a?){10}b){100}", 577_487, 577_487, 2_000, 65_536),
+                // A larger budget gets further and learns more: the instruction limit, then the
+                // flattened program, which measures exactly what it needs.
+                new RejectedPattern(Language.RE2, nestedOptional, 48_107, 1_422_533, 2_000),
+                new RejectedPattern(Language.RE2, nestedOptional, 787_247, 1_422_533, 50_000),
+                new RejectedPattern(Language.RE2, nestedOptional, 1_422_533, 1_422_533, 800_000),
+                // The flattened program fits but leaves too little for a long prefix's shift table.
+                new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 421_049, 421_049, 100_000, 419_093),
+                // A compact counter in place of a program measures exactly what it needs.
+                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 50_963, 50_963, 1, 8_000),
+                // The figure covers every route: the literal set that compiles without a program,
+                // and Trino's literal alternation, literal set and fixed-width matcher.
+                new RejectedPattern(Language.RE2, fruits, 8_147, 8_147, 1, 2_000),
+                new RejectedPattern("65 words", Language.RE2, words, 10_213, 10_213, 1, 2_000),
+                new RejectedPattern("65 words", Language.JAVA, words, 10_213, 10_213, 1, 2_000),
+                new RejectedPattern("65 words", Language.RUST, words, 10_213, 10_213, 1, 2_000),
+                new RejectedPattern("3,000 words", Language.RUST, dictionary, 271_945, 271_945, 1_000, 200_000),
+                // Trino's literal alternation builds its start filter only with vector support.
+                new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
+                new RejectedPattern("65 words", Language.TRINO, words, 9_191, 9_191, 1, 2_000),
+                new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_807, 269_807, 1_000, 200_000),
+                new RejectedPattern(Language.TRINO, fixedWidth, 9_613, 9_613, 1, 2_000),
+                new RejectedPattern(Language.RE2, fixedWidth, 161_867, 161_867, 1, 2_000),
+                // 255 copies of a class of supplementary code points need more instructions than
+                // any program holds, but Trino's fixed-width matcher compiles them.
+                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 793_525, 793_525, 2_000),
+                // A set reports its many-match DFA's start only after its program compiled.
+                new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_846, 1),
+                new RejectedPattern(Language.SET, List.of("foo"), 4_846, 4_846, 2_000),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 2_312, 6_412, 1, 2_000),
+                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 120_392, 184_318, 2_000, 50_000),
+                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 64_470, 85_086, 20_000));
+        for (RejectedPattern rejection : rejections) {
+            for (long maxMemory : rejection.maxMemories()) {
+                assertThatThrownBy(() -> rejection.compile(maxMemory))
+                        .as("%s at %s", rejection, maxMemory)
+                        .isInstanceOfSatisfying(RegexpCompileMemoryLimitException.class, exception -> {
+                            assertThat(exception.maxMemoryBytes()).isEqualTo(maxMemory);
+                            assertThat(exception.requiredMaxMemoryBytes()).hasValue(rejection.required());
+                            assertThat(exception).hasMessage("regular expression compilation exceeded the " + maxMemory + " byte memory limit; " +
+                                    "the pattern needs a larger memory budget, at least " + RegexpCompileMemoryLimitException.formatBudget(rejection.required()));
+                        });
+            }
+            if (rejection.required() != rejection.least()) {
+                assertThatThrownBy(() -> rejection.compile(rejection.required() - 1))
+                        .as("%s below its reported budget", rejection)
+                        .isInstanceOf(RegexpCompileMemoryLimitException.class);
+            }
+            assertThatThrownBy(() -> rejection.compile(rejection.least() - 1))
+                    .as("%s below its least budget", rejection)
+                    .isInstanceOf(RegexpCompileMemoryLimitException.class);
+            assertThatCode(() -> rejection.compile(rejection.least()))
+                    .as("%s at its least budget", rejection)
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    public void testRejectionReportsWhenNoBudgetCanCompile()
+    {
+        // Eleven runs of a thousand letters need more instructions than any program holds, and no
+        // other route takes them.
+        for (Language language : Language.values()) {
+            RejectedPattern tooLarge = new RejectedPattern(language, List.of("\\p{L}{1000}".repeat(11)), 0, 0);
+            assertThatThrownBy(() -> tooLarge.compile(Re2.Options.DEFAULT_MAX_MEMORY))
+                    .as("%s", language)
+                    .isInstanceOfSatisfying(RegexpCompileMemoryLimitException.class, exception -> {
+                        assertThat(exception.requiredMaxMemoryBytes()).isEmpty();
+                        assertThat(exception).hasMessage("regular expression compilation exceeded the " + Re2.Options.DEFAULT_MAX_MEMORY + " byte memory limit; " +
+                                "the pattern is too large to compile at any memory budget");
+                    });
+        }
+    }
+
+    @Test
+    public void testRejectionReportsNoBudgetPastEstimateCap()
+    {
+        // A thousand alternations nested through x{1}, which simplifies to x, copy too many
+        // alternatives for the instruction estimate to count, so the program's route proves no
+        // bound, and neither does the least over every route. Rust's nest limit rejects so deep a
+        // nesting when it parses.
+        String nested = "aa|(?:".repeat(1000) + "bb" + "){1}".repeat(1000);
+        for (Language language : List.of(Language.RE2, Language.JAVA, Language.TRINO, Language.SET)) {
+            RejectedPattern uncounted = new RejectedPattern("nested alternations", language, nested, 0, 0);
+            assertThatThrownBy(() -> uncounted.compile(2_000))
+                    .as("%s", language)
+                    .isInstanceOfSatisfying(RegexpCompileMemoryLimitException.class, exception -> {
+                        assertThat(exception.requiredMaxMemoryBytes()).isEmpty();
+                        assertThat(exception).hasMessage("regular expression compilation exceeded the 2000 byte memory limit");
+                    });
+        }
+    }
+
+    @Test
+    public void testRequiredBudgetRoundsDown()
+    {
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(1)).isEqualTo("1 byte");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(2)).isEqualTo("2 bytes");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(1023)).isEqualTo("1023 bytes");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(1024)).isEqualTo("1 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(2047)).isEqualTo("1 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget((1 << 20) - 1)).isEqualTo("1023 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(1 << 20)).isEqualTo("1 MiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget((2 << 20) - 1)).isEqualTo("1 MiB");
+    }
+
+    @Test
+    public void testBudgetForForwardMemory()
+    {
+        // The least budget whose forward share, what it keeps past a third for the reverse
+        // program, holds the memory.
+        long budget = 1;
+        for (long forwardMemory = 1; forwardMemory <= 10_000; forwardMemory++) {
+            while (Math.max(1, budget - Math.max(1, budget / 3)) < forwardMemory) {
+                budget++;
+            }
+            assertThat(CompiledPattern.budgetForForwardMemory(forwardMemory)).as("%s", forwardMemory).isEqualTo(budget);
+        }
+        long largestForwardMemory = Long.MAX_VALUE - Long.MAX_VALUE / 3;
+        assertThat(CompiledPattern.budgetForForwardMemory(largestForwardMemory)).isEqualTo(Long.MAX_VALUE);
+        assertThat(CompiledPattern.budgetForForwardMemory(largestForwardMemory + 1)).isEqualTo(Compiler.NO_BUDGET);
+        assertThat(CompiledPattern.budgetForForwardMemory(Long.MAX_VALUE)).isEqualTo(Compiler.NO_BUDGET);
+    }
+
     private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixShiftsMemory)
     {
         int maxMemory = 4096;
@@ -336,5 +495,84 @@ public class TestUpstreamCompileMemoryBudget
     private static Regexp parse(String pattern)
     {
         return RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL).regexp();
+    }
+
+    // Every code point from U+10000 through U+4FFFF that a seeded coin keeps, as one class
+    // repeated 255 times and followed by a digit.
+    private static String supplementaryClassRun()
+    {
+        Random random = new Random(184_623);
+        StringBuilder pattern = new StringBuilder("[");
+        for (int codePoint = 0x10000; codePoint <= 0x4FFFF; codePoint++) {
+            if (random.nextBoolean()) {
+                pattern.appendCodePoint(codePoint);
+            }
+        }
+        return pattern.append("]{255}[0-9]").toString();
+    }
+
+    // Distinct lowercase words of three to ten letters, as alternatives.
+    private static String randomWords(int count, long seed)
+    {
+        Random random = new Random(seed);
+        Set<String> words = new LinkedHashSet<>();
+        while (words.size() < count) {
+            int length = 3 + random.nextInt(8);
+            StringBuilder word = new StringBuilder();
+            for (int i = 0; i < length; i++) {
+                word.append((char) ('a' + random.nextInt(26)));
+            }
+            words.add(word.toString());
+        }
+        return String.join("|", words);
+    }
+
+    private enum Language
+    {
+        RE2, JAVA, RUST, TRINO, SET
+    }
+
+    // A pattern, or a set's patterns, rejected at each of `maxMemories`, reporting `required` and
+    // compiling first at `least`. `name` identifies it in a failure.
+    private record RejectedPattern(String name, Language language, List<String> patterns, long required, long least, long... maxMemories)
+    {
+        RejectedPattern(Language language, String pattern, long required, long least, long... maxMemories)
+        {
+            this(pattern, language, pattern, required, least, maxMemories);
+        }
+
+        RejectedPattern(String name, Language language, String pattern, long required, long least, long... maxMemories)
+        {
+            this(name, language, List.of(pattern), required, least, maxMemories);
+        }
+
+        RejectedPattern(Language language, List<String> patterns, long required, long least, long... maxMemories)
+        {
+            this(String.join(", ", patterns), language, patterns, required, least, maxMemories);
+        }
+
+        void compile(long maxMemory)
+        {
+            Slice pattern = Slices.utf8Slice(patterns.getFirst());
+            switch (language) {
+                case RE2 -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
+                case JAVA -> JavaRegexp.compile(pattern, JavaRegexp.Options.defaults().setMaxMemory(maxMemory));
+                case RUST -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory));
+                case TRINO -> TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+                case SET -> {
+                    Re2Set.Builder builder = Re2Set.builder(Re2.Options.defaults().setMaxMemory(maxMemory), Re2Set.MatchMode.FIND);
+                    for (String member : patterns) {
+                        builder.add(Slices.utf8Slice(member));
+                    }
+                    builder.build();
+                }
+            }
+        }
+
+        @Override
+        public String toString()
+        {
+            return language + " " + name;
+        }
     }
 }
