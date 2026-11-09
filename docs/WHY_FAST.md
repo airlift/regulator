@@ -174,14 +174,18 @@ forward searches can use a
 that holds the composed transition for each pair of byte classes (as in RE2,
 bytes the pattern treats alike share a class), so one load advances two bytes.
 
-The whole table is built only when it fits an estimated 64 KiB, or less when
-the DFA's budget has less room. Otherwise the DFA pairs two rows within
-16 KiB, chosen from its cached start states and the states that loop on
-themselves, but only when exactly two qualify or the budget has room for only
-two. Paired rows and the pointer table never run together: the pointer table
-waits while paired rows exist, and once a pointer table is allocated the DFA
-stops pairing. Pairing also turns itself off when first-match searches keep
-finding matches that end fewer than 16 bytes from where the search started.
+For object rows, the whole table is built only when it fits an estimated
+64 KiB, or less when the DFA's budget has less room; otherwise the DFA pairs
+two rows within 16 KiB. On aarch64 the rows are one flat table of byte
+offsets, charged its real size, about half the object-row estimate, within
+32 KiB, or 8 KiB for two rows, so it pairs graphs the object-row estimate
+rejects. The two rows are chosen from the DFA's cached start states and the
+states that loop on themselves, but only when exactly two qualify or the
+budget has room for only two. Paired rows and the pointer table never run
+together: the pointer table waits while paired rows exist, and once a pointer
+table is allocated the DFA stops pairing. Pairing also turns itself off when
+first-match searches keep finding matches that end fewer than 16 bytes from
+where the search started.
 
 Brodie, Taylor, and Cytron first described the composed two-byte transition in
 2006, for hardware DFAs. Among RE2, the Rust crate's `regex-automata`, PCRE2,
@@ -189,7 +193,7 @@ and Hyperscan, none composes a general two-byte transition table; Hyperscan's
 McClellan wide states, which collapse linear chains of states, are the closest
 analog. On the Trino and Java Sherlock `word-ending-n` book-text searches with
 native access, paired rows took about 18% less time than the pointer table on
-Graviton, and a few percent less on Intel.
+Graviton, and a few percent less on Intel, on object rows.
 
 **Self-loops.** Many searches spend long runs in a state that loops on itself,
 such as the `\C*` in RE2's `a\C*b` or UTF-8 `[^\n]*`. With the Vector API, a

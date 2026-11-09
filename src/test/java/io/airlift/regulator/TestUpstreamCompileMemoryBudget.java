@@ -355,11 +355,11 @@ public class TestUpstreamCompileMemoryBudget
                 // any program holds, but Trino's fixed-width matcher compiles them.
                 new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 793_525, 793_525, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
-                new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_846, 1),
-                new RejectedPattern(Language.SET, List.of("foo"), 4_846, 4_846, 2_000),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 2_312, 6_412, 1, 2_000),
-                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 120_392, 184_318, 2_000, 50_000),
-                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 64_470, 85_086, 20_000));
+                new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_854, 1),
+                new RejectedPattern(Language.SET, List.of("foo"), 4_854, 4_854, 2_000),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 2_312, 6_420, 1, 2_000),
+                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 120_392, 184_326, 2_000, 50_000),
+                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 64_470, 85_094, 20_000));
         for (RejectedPattern rejection : rejections) {
             for (long maxMemory : rejection.maxMemories()) {
                 assertThatThrownBy(() -> rejection.compile(maxMemory))

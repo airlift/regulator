@@ -910,10 +910,12 @@ fused count keeps the root it began with for the whole current attempt.
 Each root reaches at most one allowance of Java memory plus the paired rows it
 carried. Releasing paired rows refunds their charge, and states built afterward
 fill arrays an older root still shares, so a root that carried paired rows can
-reach one allowance plus those rows, at most 64 KiB. A superseded root becomes
-eligible for collection once no search retains it. A charge would require
-knowing when the last reader of a generation finishes, which is the reader
-registration this design removes; as with the member table under
+reach one allowance plus those rows, at most the paired cap: 64 KiB for object
+rows, or 32 KiB for the flat table plus its uncharged segment view of about 72
+bytes with compressed oops. A superseded root becomes eligible for collection
+once no search retains it. A charge would require knowing when the last reader
+of a generation finishes, which is the reader registration this design removes;
+as with the member table under
 [Trino Specialized Byte Scans](#trino-specialized-byte-scans), bounded memory
 the DFA does not retain needs no charge of its own.
 
@@ -951,14 +953,56 @@ for small DFA graphs. The table is demand-built only after a search of at least
 and is charged against the DFA state budget. Normal state allocation discards
 the table before reporting budget exhaustion.
 
-Eligibility uses a 64 KiB retained-size estimate with eight-byte references and
-includes row overhead. This conservative absolute cap is independent of the
-configured memory budget: larger budgets must not enable cache-hostile global
-transition expansion. When the complete graph does not fit, partial pairing is
-limited to exactly two selected rows and 16 KiB. Selection considers cached
-forward entry states before states with observed self-loops. Broader and larger
-partial tables remain on the compact path to bound retained memory and avoid
-cache-hostile global transition expansion.
+The table takes one of two forms, chosen once at class initialization by
+platform. On every platform but aarch64, each selected state has an object row
+holding the row each pair of byte classes reaches and then the state. On
+aarch64, the rows live in one flat `int` array, one row for each selected state
+holding the byte offset of the row each pair reaches and then the state's offset
+in the DFA's transitions, plus an array of each state's row offset. The search
+reads the flat array through a heap memory segment, as the heap pointer table
+under
+[Bounded DFA Pointer Transition Table](#bounded-dfa-pointer-transition-table)
+does. Pre-scaled byte offsets lost to object rows before 1.0, but C2 on AArch64
+folds the segment's base add into the load's address, so a step adds the pair's
+byte offset to the row's and loads, with no scaling between one load and the
+next. On r9g (Graviton 4) the flat step ran paired rows 9-21% faster than object
+rows, in rebar and in all four JMH languages. On r8i the same rows ran 3-72%
+slower, slow in 12 of 12 fresh JVMs, because C2 kept the loop-carried row offset
+in a vector register. Object rows on r8i run in a fast or a slow mode by launch;
+a flat table read as a plain `int` array, whose step scales each index, removed
+that variance but cost r9g 6-18%. No single form won on both hosts, so each of
+them keeps the form it runs faster. Only r9g and r8i were measured: Graviton 2
+and 3, Apple, and other aarch64 hosts get the flat form by `os.arch` without
+measurement, and every x86 host keeps object rows. The
+`io.airlift.regulator.dfa.flat-paired-rows` system property overrides the form
+for a run, as a testing and diagnostic switch. Tests run
+`TestDfaPairedTransitions`' cases in both forms on every host: child JVMs force
+the property each way.
+
+Object rows are charged a retained-size estimate with eight-byte references that
+includes each row's header, capped at 64 KiB. The flat table is charged its two
+arrays' sizes, capped at 32 KiB. Its segment view, about 72 bytes with
+compressed oops (the `MemorySegment` and its heap session), is not charged, as
+the heap pointer table's is not. The flat slots take four bytes where the
+estimate counts eight, and the flat rows have no header, so under its cap the
+flat table pairs complete tables of more states. On the default 64-bit layout
+with compressed oops, at a `maxMemory` of 8 MiB, `^x*(a[01]{280}|a)` pairs all
+283 of its states on the flat table, charged 30,600 bytes, and none as object
+rows, whose estimate of 65,680 bytes exceeds 64 KiB. Where the DFA's free state
+budget is the smaller limit, both forms share it, so the flat table fits about
+twice the rows: at a `maxMemory` of 17 KiB, `(?s).*x` pairs all five of its
+states on the flat table and two as object rows. These absolute caps are
+independent of the configured memory budget: larger budgets must not enable
+cache-hostile global transition expansion. When the complete graph does not fit,
+partial pairing is limited to exactly two selected rows and 16 KiB of object
+rows or 8 KiB of flat table. Selection considers cached forward entry states
+before states with observed self-loops. Broader and larger partial tables remain
+on the compact path to bound retained memory and avoid cache-hostile global
+transition expansion.
+
+The cache root holds both forms' fields on every platform, so the unused pair
+costs each DFA 8 bytes of state budget with compressed oops (16 without),
+charged as fixed overhead.
 
 The paired loop decodes already-computed normal, dead, full-match, and match
 transitions directly. After a first-match candidate, it preserves the candidate
@@ -973,7 +1017,7 @@ state or stops matching: it steps the first 32 bytes, then may finish the run
 with a [vector scan for the state's exit bytes](#self-loop-exit-byte-skips-outside-counting).
 It records the match boundary the consumed bytes imply and leaves the first
 exceptional byte to the existing paired decoder. This avoids repeatedly
-decoding a deliberately null paired reference without adding another
+decoding a deliberately missing paired transition without adding another
 transition representation.
 
 The reverse search and the inner literal search's anchored confirmation scan a
