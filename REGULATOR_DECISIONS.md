@@ -1136,8 +1136,9 @@ match bits are delayed by one byte. When the first walk from the start state
 does not reach a qualifying state, the route does not apply and the ordinary
 search runs from the search start. When a later walk does not reach one, or
 four consecutive scans skip fewer than 16 bytes, the search continues at the
-current state, position, and match boundary; a later walk that reaches a dead
-or full-match state ends the search instead. The paired and pointer hand-offs
+current state, position, and match boundary, unless it re-arms its scan as
+described below; a later walk that reaches a dead or full-match state ends the
+search instead. The paired and pointer hand-offs
 need at least 256 bytes remaining, and a shorter remainder continues through
 the compact loop. An existing pointer table is used; only a productive search,
 as defined below, requests one, and an unproductive search requests paired rows
@@ -1168,6 +1169,50 @@ object-row self-loop scan, through its `selfLoopExitByteSet` wrapper, rejects
 matching self-loops in either form and exit sets with the high-bit flag; it
 follows non-matching loops in the stay form, including those that leave on
 every high byte. The skips outside counting use both flags.
+
+When the count route would hand off without a pending match, with at least 256
+bytes left, as the hand-offs need, and while its scans have skipped at least
+half of the bytes the search has covered, the route re-arms instead of handing
+off: it requests a stretch of 256 bytes, steps it through the transition table,
+stopping before an uncomputed, dead, full-match, or matching transition, then
+walks to the next qualifying loop and scans again. Each later re-arm of the same
+search doubles the stretch it requests, unless the scans since the previous
+re-arm skipped at least a quarter as many bytes as that re-arm requested, which
+starts it over at 256. Requiring as many bytes as it requested let the stretch
+grow on prose until the scans skipped 16% of the text instead of 86%.
+Comma-separated prose under `(.*?,){13}z` used to hand off within the first
+kilobyte, at a cluster of short fields, and step the rest of the text although
+most of its bytes sit in runs of 16 or more. Text whose exits are dense from the
+start keeps the hand-off to the faster pointer or paired loops. A sparse head at
+least as long as a dense tail keeps the search's share at half or more, so once
+a re-arm has requested a stretch of 8 KiB or more, the search also hands off
+when the scans since the position where that re-arm began skipped under half of
+the bytes covered since. That rule normally ends the doubling at 8 KiB: a
+stretch that long continues only when its scans skipped at least as many bytes
+as it stepped, which also starts the doubling over. A cap of 16 MiB only bounds
+the rare stretch the stepper cuts short. Through `Dfa.countMatches` on rebar's
+16,013,977-byte `bounded-strings-ending-z` text, judging that recent share from
+the first re-arm stopped re-arming the prose at byte 45,049, and a 4 KiB
+threshold at byte 5,779,992. Halving the skipped and covered totals at each
+re-arm instead stopped it at byte 2,899,451, and still took 65,377 tail bytes
+after a 4 MB head, and 130,924 after a 32 MB head, to hand off a dense tail. The
+8 KiB threshold keeps the prose's re-arms in UTF-8 and Latin-1 and hands dense
+tails off after 16,204 tail bytes behind 2, 4, and 32 MB heads. A dense patch
+after a sparse head stops the re-arms once the doubling reaches an 8 KiB stretch
+inside the dense patch, about 16 KiB in, in the probed cases: 8 and 12 KiB
+patches kept re-arming. The search then stays on the ordinary loops, and sparse
+text after the patch runs at the speed it had before the re-arm existed: behind
+a 4 MiB head, after a 64 KiB patch, the scans skip 458,877 fewer bytes than
+those of the gate without the recent-share hand-off. That case was measured
+only on `rearm-sparse-patch`, a synthetic row built to show it; no real corpus
+probed holds such a patch. On r8i the re-arm costs time on prose: counting
+`(.*?,){13}[a-z]` over opensubtitles `en-huge` takes 1.037 times as long as
+without it for RE2 and 1.028 for Java regular expressions, against 0.92 on r9g.
+It retires 30% fewer instructions, but the stepper and the short scans it adds
+run at a lower IPC than the pointer loop, with five times the branch misses. On
+the synthetic `long-gap` row, whose commas fall every 40 bytes, r8i takes 1.03
+to 1.04 times as long; the re-arm never steps there, and the cost is the
+per-exit bookkeeping, 3.3% more instructions in the walk after each exit.
 
 Searches whose start state never reaches a qualifying loop pay the initial walk
 on every match, and searches that scan only stay-form runs shorter than 16
@@ -4500,10 +4545,11 @@ nibbles. It is not the DFA's start-byte skip, which prefers its start literal
 filter for up to 16 common start bytes or its start class filter for a few
 narrow classes, covers a single start byte with its prefix scan, and
 vector-scans only with at least 1024 bytes left. The skip is exact, since a byte
-that leads no literal leaves the automaton at the root and records nothing. It starts only at a second root miss in a row, and, as in the
-DFA's count self-loop scan, stops for the rest of the search once 4 skips in a
-row each moved fewer than 16 bytes, as on prose, where a skip crosses only the
-punctuation and space between words. The skip, with its tables where it needs
+that leads no literal leaves the automaton at the root and records nothing. It starts only at a second root miss in a row, and stops for the rest of the
+search once 4 skips in a row each moved fewer than 16 bytes, as on prose, where
+a skip crosses only the punctuation and space between words. The DFA's count
+self-loop scan takes the same limit, but there it may re-arm its scan instead
+of stopping. The skip, with its tables where it needs
 them, is built only where the automaton still fits the memory it may retain with
 it; otherwise the search reads the bytes the root skip would have crossed, or
 steps by windows in a set with a skip table, so no pattern that compiled without

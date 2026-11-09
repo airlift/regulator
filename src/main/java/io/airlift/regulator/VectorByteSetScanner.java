@@ -26,10 +26,11 @@ final class VectorByteSetScanner
     private static final int HIGH_NIBBLE_TABLE_OFFSET = NIBBLE_TABLE_BYTES;
     // The low-nibble table, then the high-nibble table.
     static final int NIBBLE_TABLES_LENGTH = NIBBLE_TABLE_BYTES * 2;
-    // A loop that skips ahead with these scans stops skipping once SHORT_SCAN_LIMIT scans in a
-    // row each skipped fewer than SHORT_SCAN_BYTES bytes: the stops are dense, and a scan's setup
-    // costs more than the few bytes it skips. The forward DFA's count self-loop scan and the
-    // literal set's root skip apply the rule through shortScanCount.
+    // A loop that skips ahead with these scans takes SHORT_SCAN_LIMIT scans in a row that each
+    // skipped fewer than SHORT_SCAN_BYTES bytes as a sign that the stops are dense, where a scan's
+    // setup costs more than the few bytes it skips. The literal set's root skip then stops skipping
+    // for good. The forward DFA's count self-loop scan then decides whether its scans have paid
+    // enough to re-arm, and otherwise hands off. Both count the scans through shortScanCount.
     static final int SHORT_SCAN_BYTES = 16;
     static final int SHORT_SCAN_LIMIT = 4;
     // Whether the two-literal scan of a filter without masks takes the XOR form: under
@@ -60,7 +61,8 @@ final class VectorByteSetScanner
     private VectorByteSetScanner() {}
 
     /// Returns the number of short scans in a row after a scan that skipped `skippedBytes`, given
-    /// the `shortScanCount` before it. A caller stops skipping when it reaches [#SHORT_SCAN_LIMIT].
+    /// the `shortScanCount` before it. A caller that reaches [#SHORT_SCAN_LIMIT] takes the stops as
+    /// dense.
     static int shortScanCount(int shortScanCount, int skippedBytes)
     {
         return skippedBytes < SHORT_SCAN_BYTES ? shortScanCount + 1 : 0;

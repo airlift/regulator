@@ -834,12 +834,13 @@ sealed class LiteralSetSpanMatcher
     /// `0 <= start <= end <= input.length()`. This is the crate's leftmost search: record the
     /// match on entering a match state, and return the last one recorded on reaching [#DEAD] or
     /// the end. A search that may skip root bytes, see [#skipsRootBytes(int)], skips from a byte
-    /// without a root edge at the root to the next byte with one. It stops skipping once
+    /// without a root edge at the root to the next byte with one. It stops skipping for good once
     /// [VectorByteSetScanner#SHORT_SCAN_LIMIT] skips in a row each skipped fewer than
-    /// [VectorByteSetScanner#SHORT_SCAN_BYTES] bytes, the rule of the forward DFA's count
-    /// self-loop scan: on prose such as `word. word.`, a skip lands on the next word. The rest of
-    /// that search, and every search that may not skip, is the plain trie walk. A search of at
-    /// least [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] in a set with a skip table skips ahead by
+    /// [VectorByteSetScanner#SHORT_SCAN_BYTES] bytes: on prose such as `word. word.`, a skip lands
+    /// on the next word. The forward DFA's count self-loop scan takes the same limit, but there it
+    /// may re-arm its scan instead of stopping. The rest of that search, and every search that may
+    /// not skip, is the plain trie walk. A search of at least
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] in a set with a skip table skips ahead by
     /// windows instead, see the class doc; where the set has the root skip, it scans under the
     /// same short-scan limit.
     final long findSpan(Slice input, int start, int end)

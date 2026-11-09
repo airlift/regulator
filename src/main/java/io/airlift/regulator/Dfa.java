@@ -200,6 +200,23 @@ final class Dfa
     // A four-byte UTF-8 character inside a matching loop ends in the loop's unflagged copy, which
     // needs one more byte to return to the matching loop.
     private static final int COUNT_SELF_LOOP_MAX_STEPS = 5;
+    // After its scans stop paying, a count search whose scans have skipped at least half of the
+    // bytes it covered requests a stretch of this many bytes to step through the transition table,
+    // and then scans again from the next eligible loop. Each later re-arm of the same search
+    // doubles the stretch it requests, unless the scans since the previous re-arm skipped at least
+    // a quarter as many bytes as that re-arm requested, which starts the doubling over: on prose,
+    // a stretch that grows whenever the scans skip fewer bytes than it stepped would be stepping
+    // most bytes. Text whose exits are dense throughout hands off to the ordinary loops at once, as
+    // before. A sparse head at least as long as a dense tail keeps the whole search's share at half
+    // or more, so once a re-arm has requested COUNT_SELF_LOOP_RECENT_REARM_BYTES, a search whose
+    // scans since then skipped under half of the bytes covered since that re-arm also hands off.
+    // That rule normally ends the doubling there: a stretch that long continues only when its scans
+    // skipped at least as many bytes as it stepped, which also starts the doubling over.
+    // COUNT_SELF_LOOP_MAX_REARM_BYTES only bounds the rare stretch the stepper cuts short. "Count
+    // Self-Loop Exit-Byte Scan" in REGULATOR_DECISIONS.md records the settings tried and rejected.
+    private static final int COUNT_SELF_LOOP_REARM_BYTES = 256;
+    private static final int COUNT_SELF_LOOP_RECENT_REARM_BYTES = 8 * 1024;
+    private static final int COUNT_SELF_LOOP_MAX_REARM_BYTES = 1 << 24;
     // A matching self-loop run is stepped through the transition table for this many bytes before
     // a vector scan for its exit bytes takes over. This is two vectors at the 16-byte width, twice
     // the VectorByteSetScanner.SHORT_SCAN_BYTES below which a scan's setup costs more than the bytes
@@ -1709,7 +1726,9 @@ final class Dfa
     // through every skipped byte. The start state carries context flags, and UTF-8 characters pass
     // through intermediate states, so a few bytes are stepped through the transition table to reach
     // an eligible loop. The remaining text goes to the ordinary search routes when no eligible
-    // state follows, a transition is uncomputed, or repeated short scans show that exits are dense.
+    // state follows, a transition is uncomputed, or repeated short scans show that exits are dense,
+    // unless a search without a pending match whose scans have paid re-arms its scan, as the loop
+    // below describes.
     private static long searchForwardCountSelfLoopScan(
             DfaInstance dfa,
             CacheTables tables,
@@ -1755,12 +1774,21 @@ final class Dfa
         // first bytes through this loop's slower transitions on every search.
         boolean productive = false;
         int shortScanCount = 0;
+        // The stretch the last re-arm requested, zero before the first, the position where it
+        // began, the bytes the scans have skipped since, and the bytes they have skipped in the
+        // whole search.
+        int rearmBytes = 0;
+        int rearmPosition = textBegin;
+        long skippedBytes = 0;
+        long totalSkippedBytes = 0;
         scan:
         while (true) {
             int exitPosition = findSelfLoopExit(dfa, bytes, position, contextEnd, exitByteSet);
             if (exitPosition < 0) {
                 exitPosition = contextEnd;
             }
+            skippedBytes += exitPosition - position;
+            totalSkippedBytes += exitPosition - position;
             dfa.countSelfLoopScanCount++;
             productive |= exitByteSet > 0 || exitPosition - position >= VectorByteSetScanner.SHORT_SCAN_BYTES;
             // Each skipped byte of a matching self-loop records a match ending before that byte.
@@ -1769,14 +1797,42 @@ final class Dfa
             }
             shortScanCount = VectorByteSetScanner.shortScanCount(shortScanCount, exitPosition - position);
             position = exitPosition;
-            if (position == contextEnd || shortScanCount == VectorByteSetScanner.SHORT_SCAN_LIMIT) {
+            if (position == contextEnd) {
                 break;
             }
 
+            // After the short-scan limit, or when the steps after an exit reach no eligible loop, a
+            // search without a pending match whose scans have skipped at least half of its bytes,
+            // with at least 256 bytes left, as the hand-offs need, steps a stretch of bytes and
+            // re-arms the scan. A pending first match keeps the ordinary continuation loops, and a
+            // search whose exits are dense the faster pointer or paired loops, so both hand off as
+            // before.
+            boolean rearm = shortScanCount == VectorByteSetScanner.SHORT_SCAN_LIMIT;
             exitByteSet = 0;
             for (int step = 0; exitByteSet == 0; step++) {
-                if (step == COUNT_SELF_LOOP_MAX_STEPS || position == contextEnd) {
+                if (position == contextEnd) {
                     break scan;
+                }
+                if (rearm || step == COUNT_SELF_LOOP_MAX_STEPS) {
+                    if (lastMatchBoundary >= 0 ||
+                            contextEnd - position < MIN_PAIRED_SEARCH_BYTES ||
+                            2 * totalSkippedBytes < position - textBegin ||
+                            (rearmBytes >= COUNT_SELF_LOOP_RECENT_REARM_BYTES && 2 * skippedBytes < position - rearmPosition)) {
+                        break scan;
+                    }
+                    rearmPosition = position;
+                    rearmBytes = rearmBytes == 0 || 4 * skippedBytes >= rearmBytes ? COUNT_SELF_LOOP_REARM_BYTES : Math.min(2 * rearmBytes, COUNT_SELF_LOOP_MAX_REARM_BYTES);
+                    long stepped = stepSelfLoopRearmBytes(tables.transitions, byteMap, bytes, position, Math.min(contextEnd - position, rearmBytes), stateOffset);
+                    position = (int) (stepped >>> 32);
+                    stateOffset = (int) stepped;
+                    dfa.countSelfLoopRearmCount++;
+                    rearm = false;
+                    step = 0;
+                    shortScanCount = 0;
+                    skippedBytes = 0;
+                    if (position == contextEnd) {
+                        break scan;
+                    }
                 }
                 int nextState = getTransition(tables.transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
                 if (nextState == T_UNCOMPUTED) {
@@ -1896,6 +1952,23 @@ final class Dfa
         return result;
     }
 
+    // Steps at most `length` bytes from position through the transition table, from stateOffset,
+    // for a count self-loop scan that re-arms, stopping before a transition that is uncomputed,
+    // dead, full-match, or matching, which the caller's own steps handle. Returns the position and
+    // state reached as position << 32 | state.
+    private static long stepSelfLoopRearmBytes(int[] transitions, byte[] byteMap, byte[] bytes, int position, int length, int stateOffset)
+    {
+        int end = position + length;
+        for (; position < end; position++) {
+            int nextState = getTransition(transitions, stateOffset + (byteMap[bytes[position] & 0xFF] & 0xFF));
+            if ((nextState & (Integer.MIN_VALUE | T_MATCH_BIT)) != 0) {
+                break;
+            }
+            stateOffset = nextState;
+        }
+        return ((long) position << 32) | stateOffset;
+    }
+
     // A productive search clears the count's cutoff, and an unproductive one counts toward it as a
     // search that reached no eligible loop does. The guard skips writing a shared field that is
     // already zero.
@@ -1916,8 +1989,8 @@ final class Dfa
     // that short: the unanchored start state of a UTF-8 `.*` pattern, which stays only on newlines
     // and invalid bytes, so that a count over lines would start each search with a one-byte scan,
     // and the states inside a multibyte character. The exit form keeps scanning every run, whose
-    // short scans stop the route as VectorByteSetScanner.SHORT_SCAN_LIMIT describes. An accepted
-    // exit set means every transition of the state that can stay is computed.
+    // short scans trigger the density decision VectorByteSetScanner.SHORT_SCAN_LIMIT describes. An
+    // accepted exit set means every transition of the state that can stay is computed.
     private static boolean skipsShortStayRun(DfaInstance dfa, CacheTables tables, byte[] bytes, int position, int contextEnd, int stateOffset, long exitByteSet)
     {
         if (exitByteSet >= 0 || position == contextEnd) {
@@ -6299,6 +6372,7 @@ final class Dfa
         private int countSelfLoopScanCount;
         private int countSelfLoopMatchHandOffCount;
         private int countSelfLoopNoMatchPointerHandOffCount;
+        private int countSelfLoopRearmCount;
         // The running count's unproductive self-loop search streak, the self-loop cutoff: a search
         // advances it when it reaches no eligible self-loop or scans only stay-form runs shorter
         // than VectorByteSetScanner.SHORT_SCAN_BYTES; any exit-form scan or a stay run of at least
@@ -7482,6 +7556,11 @@ final class Dfa
         int countSelfLoopNoMatchPointerHandOffCount()
         {
             return countSelfLoopNoMatchPointerHandOffCount;
+        }
+
+        int countSelfLoopRearmCount()
+        {
+            return countSelfLoopRearmCount;
         }
 
         int countSelfLoopUnproductiveCount()

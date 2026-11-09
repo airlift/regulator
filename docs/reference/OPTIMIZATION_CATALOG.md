@@ -1033,9 +1033,9 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   against Joni and the Rust regex crate on counts ([#9], [#144], [#152]),
   against native RE2 ([#163]), and on matches ending in a long self-loop run
   ([#176]). Regulator: sampling 64 cached transitions before the
-  identity-first loop, the high-bit exit test, the count route and its
-  handoff, matching self-loops that keep their row, the stepped prefix, the
-  reverse probe, the streak of four short scans, the staying bytes as up to
+  identity-first loop, the high-bit exit test, the count route, its handoff,
+  and its re-arm, matching self-loops that keep their row, the stepped prefix,
+  the reverse probe, the streak of four short scans, the staying bytes as up to
   four ranges tested by range compares, and anchored candidate confirmation
   under a linear work budget ([#1], [#9], [#84], [#120], [#144], [#152],
   [#163], [#176], [#202], [design][d-count-self-loop],
@@ -1075,7 +1075,13 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   patterns without anchors or assertions, which falls back to the forward and
   reverse searches once its confirmations exceed a linear work budget or one
   runs past 128 transitions. After four scans in a row that each skip fewer
-  than 16 bytes, a loop steps byte by byte instead
+  than 16 bytes, a loop steps byte by byte instead, except that a search of
+  the count route without a pending match whose scans have skipped at least
+  half its bytes, after those short scans or a walk that reaches no eligible
+  loop, steps a stretch and scans again; the stretch starts at 256 bytes,
+  doubles while the scans since the last re-arm stop paying, and starts over
+  when they pay, and once it reaches 8 KiB, scans that skip under half of the
+  bytes covered hand the search off
 - **What it does:** A non-matching state that loops on every byte except 1 to
   3 exit bytes, or whose staying bytes form one to four ranges of at most 128
   bytes, vector-scans to the next byte that leaves it, and the sampled loop
