@@ -697,12 +697,12 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   `VectorSupport.SHIFT_NIBBLES_AS_SHORTS`
 - **Applies when:** Vector API; in the DFA, vector scanning from 1 KiB and
   scalar filtering on shorter windows, except filters selected only for vector
-  scans; the literal alternation trie from 64 bytes. The DFA adopts the filter
-  only when its estimated stop density is at most a quarter of the start-byte
-  scan's and the start set has at most 16 bytes; a start set with estimated
-  English frequency below 5% also needs more than three start bytes that are
-  not one range, or at most two groups and 64-byte vectors. The nibble kernel
-  needs 16 to 64 lanes
+  scans; the literal alternation matcher from 64 bytes. The DFA adopts the
+  filter only when its estimated stop density is at most a quarter of the
+  start-byte scan's and the start set has at most 16 bytes; a start set with
+  estimated English frequency below 5% also needs more than three start bytes
+  that are not one range, or at most two groups and 64-byte vectors. The nibble
+  kernel needs 16 to 64 lanes
 - **What it does:** For at most eight groups of leading literals of three or
   more bytes, the filter tests three positions per group at once and stops
   only where all three fit some group, a superset of the literals' starts; the
@@ -1527,26 +1527,38 @@ ordinary engine would.
 
 ### Literal alternation trie
 
-- **Origin:** First described by Perl, which compiles a literal alternation
-  into a trie that keeps alternation order ([regcomp_trie.c][perl-trie]), and
-  by the Rust regex crate's leftmost-first literal trie
-  ([literal_trie.rs][ra-literal-trie]); Inspired by a gap against the Rust
-  regex crate on literal alternations ([#87]). Regulator: the filter hold, the
-  dense-stretch switch, and the DFA deferral ([#87], [#148],
-  [design][d-boolean]).
+- **Origin:** First described by Perl, which compiles a literal alternation into
+  a trie that keeps alternation order ([regcomp_trie.c][perl-trie]), by the Rust
+  regex crate's leftmost-first literal trie
+  ([literal_trie.rs][ra-literal-trie]), and by Hyperscan for the masked caseless
+  check of folded literals ([noodle_build.cpp][hs-noodle-mask]); Inspired by a
+  gap against the Rust regex crate on literal alternations ([#87]). Regulator:
+  the filter hold, the dense-stretch switch, the DFA deferral, and folded
+  literals compared at the filter's stops ([#87], [#148], [design][d-boolean]).
 - **Where:** `LiteralAlternationSpanMatcher.analyze`,
-  `LiteralAlternationSpanMatcher.findSpan`,
-  `LiteralAlternationSpanMatcher.holdsFilterRoute`
-- **Applies when:** Capture-free, case-sensitive literal alternations with
-  leftmost-first matching, in every regex language; a boolean find that is
-  dense from its start defers to the DFA
+  `LiteralAlternationSpanMatcher.ExactMatcher.findSpan`,
+  `LiteralAlternationSpanMatcher.ExactMatcher.findSpanAtStop`,
+  `LiteralAlternationSpanMatcher.ExactMatcher.holdsFilterRoute`,
+  `LiteralAlternationSpanMatcher.FoldedMatcher.findSpanAtStop`
+- **Applies when:** Capture-free literal alternations with leftmost-first
+  matching, in every regex language, case-sensitive or ASCII literals whose
+  letters fold case, or are written as classes of their two cases, where the
+  language gives them exactly two cases, the folded ones only with a selective
+  filter and at most 64 bytes of literals per leading byte; a boolean find that
+  is dense from its start defers to the DFA
 - **What it does:** Up to 64 alternatives of up to 64 bytes go in a byte trie
   with a root table. When the span matcher runs with a filter and at least 64
   bytes left, the start literal filter skips non-starts; a filter route whose
   stops stayed sparse keeps the filter for the next search instead of sampling
   again. With at least 64 KiB left in the search, a dense stretch switches to
   the root-table loop. Rust Sherlock and Tom Sawyer name alternations run in
-  0.18 to 0.70 of the DFA's time ([#87]).
+  0.18 to 0.70 of the DFA's time ([#87]). Folded literals have no trie and a
+  matcher class of their own, which leaves the exact trie loop's bytecode
+  unchanged. Each filter stop, and each position on the root-table route,
+  compares them under masks that set a folded letter's case bit. Combined with
+  the twelve-byte start literal filter, folded literals take rebar's
+  case-insensitive Sherlock names count to 0.43 of main's time on Graviton and
+  0.31 on Intel.
 
 ### Aho-Corasick for large literal sets
 

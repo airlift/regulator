@@ -1303,13 +1303,13 @@ the text, so the searches of the last 64 KiB stepped 58,791 of the count's
 73,333 DFA bytes. Such a search therefore takes the start literal or class
 filter instead when English text holds the fixed-distance bytes more often
 than the filter's estimate accepts a position; a sampled search keeps its
-sample's outcome. The count then steps 13,086 DFA bytes for the same 725
-matches. On r9g / r8i the count takes 0.56x / 0.47x of main's time, and a
-single find in 4 or 16 KiB of English text 0.12x / 0.09x. Holding the count's
-last sampled fixed-distance outcome into the tail instead would not reach a
-count under 64 KiB, and a held rejection without a filter would leave a dense
-tail on the start-byte scan rather than the fixed-distance scan's handoff to
-the plain DFA.
+sample's outcome. Before folded literals took this count, it then stepped
+13,086 DFA bytes for the same 725 matches. On r9g / r8i the count takes
+0.56x / 0.47x of main's time, and a single find in 4 or 16 KiB of English text
+0.12x / 0.09x. Holding the count's last sampled fixed-distance outcome into the
+tail instead would not reach a count under 64 KiB, and a held rejection without
+a filter would leave a dense tail on the start-byte scan rather than the
+fixed-distance scan's handoff to the plain DFA.
 
 ## Bounded DFA Pointer Transition Table
 
@@ -1654,11 +1654,11 @@ and runs through the compiled pattern, which holds the program it bails to. A
 group-zero `RegexpMatcher.find()` of a fixed-width pattern, or of
 a [large literal alternation](#large-literal-alternations), searches the same
 matcher in every language, while Trino's span subtypes iterate theirs directly.
-A literal alternation's matcher searches the trie only while fewer than 64
+A literal alternation's matcher searches by itself only while fewer than 64
 bytes are left, and a longer search takes the program's search, whose
-start-byte scan the trie replaced: the DFA's candidate cursor, which the matcher
-creates on its first long search, where the literals differ in length, and the
-group-zero forward cursor where they share one. On 1 KiB rows of
+start-byte scan the matcher replaced: the DFA's candidate cursor, which the
+matcher creates on its first long search, where the literals differ in length,
+and the group-zero forward cursor where they share one. On 1 KiB rows of
 `ERROR|WARN|FATAL`, a matcher's finds without that hand-off took 2.0x the time
 on r9g and 4.4–4.6x on r8i, while 16 to 64 byte rows measured flat. The search
 reports the leftmost-first span lying entirely in the matcher's region, as the
@@ -3515,6 +3515,60 @@ begin with the stop's byte, at most 64, where the trie walked a shared prefix
 once; the measured rows have at most two literals per leading byte. The matcher
 retains its literals for the compare, grouped in a 256-entry table by leading
 byte.
+
+An alternation of ASCII literals that fold case, such as rebar's
+case-insensitive Sherlock and Tom Sawyer names in Rust's bytes mode, compares
+the same way, each literal with a mask per byte that sets a folded letter's case
+bit. Each literal is listed under its first byte, in both cases when that byte
+is a folded letter, and the filter's paths hold both cases. Such a matcher
+keeps no trie, so it is built only with a filter of at most 1/64 estimated
+density; its root table and a dense stretch compare at every position whose
+byte begins a literal. For the same reason the literals listed under one
+leading byte may total at most 64 bytes, the longest literal the trie takes,
+which caps byte compares at 64 per position; many long literals that share a
+first letter, which could cost hundreds of compares per byte on near-miss text,
+keep the general engine. It takes only ASCII literals and classes of exactly
+the two cases of an ASCII letter, so non-ASCII literals, such as Cyrillic
+names, keep the general engine. Where a language gives a letter a third case,
+as RE2 in UTF-8 mode and Rust with Unicode do for s and k (the long s and the
+Kelvin sign) and Java's `(?iu)` does for s, k, and i, the parser leaves a
+larger class and the pattern keeps the general engine, as does Trino's `(?i)`,
+which folds case fully; a Trino pattern that spells a letter as a class of its
+two cases, such as `[Tt]om|[Ss]awyer`, takes the matcher. The matcher stops
+where the DFA's filter stopped, 793 times on `sherlock-casei-en` and 12,047
+on `tom-sawyer-huckle-fin-insensitive`, and compares there instead of walking
+the DFA from each. Combined with the twelve-byte start literal filter, it takes
+the `sherlock-casei-en` count to 0.43x / 0.31x of main's time on r9g / r8i.
+
+Folded literals have a matcher class of their own, chosen when the pattern
+compiles, so an alternation of exact literals runs search methods whose
+bytecode matches what it was before folded literals, apart from constant-pool
+indices and the shorter constant loads they allow. Each search tests the
+matcher's class and calls that class's own search, so no call is virtual.
+Sharing the search loops instead put a branch to the folded literal compares at
+the root-table method's entry, before its loop, which grew the method from 184
+to 203 bytecode bytes. On r8i, exact `ERROR|WARN|FATAL` finds on short log rows
+then measured 1.052 / 1.034 of main's time in Trino / RE2, and 0.961 in Java;
+r9g was flat. Trino and RE2 retired the same instructions and branches at lower
+IPC, 4.41 against 4.66 in Trino, while the decoded-uop cache delivered 99.9% of
+uops and 64-byte code and loop alignment left Trino at 1.050, which points at
+C2's scheduling of the reshaped inlined loop rather than added work, alignment,
+or the front end. With the separate class those finds measured 1.016 / 1.022,
+and Java 0.984.
+
+The split gives back part of a gain on r9g, where a find with at least 64 KiB
+left first samples 64 positions of the filter route, as the next paragraph
+describes. In the folded class's compiled search, C2 keeps the haystack array
+on the stack and reloads it for each of the sample's three filter-byte loads,
+about 5 more instructions per sampled position. Instructions per find rose
+7-11% at the same IPC, with the same methods inlined, so a find in 64 KiB of
+English text, `casei-en-find-64k`, measured 0.311 / 0.313 of main's time in
+RE2 / Rust, against 0.287 / 0.285 with shared loops: 8-10% slower, though still
+about 3.2x faster than main. The same find in 16 KiB, which never samples,
+measured the same in RE2 with either form. The reloads are C2's register
+choice: neither wrapping the sample in a method that C2 inlines back nor
+choosing its first route before the loop changed them. The split stays, since
+it recovers the r8i exact finds and the exact class runs main's bytecode.
 
 A search with at least 64 KiB left first samples the filter's stops with the
 DFA's start-scan productivity check. When they are dense, as on a log of near

@@ -571,7 +571,7 @@ public class TestScanKernel
 
     static byte[] classfile(Class<?> type)
     {
-        try (InputStream input = type.getResourceAsStream(type.getSimpleName() + ".class")) {
+        try (InputStream input = type.getResourceAsStream("/" + type.getName().replace('.', '/') + ".class")) {
             return requireNonNull(input, type.getName()).readAllBytes();
         }
         catch (IOException e) {

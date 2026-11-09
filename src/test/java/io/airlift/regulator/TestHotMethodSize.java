@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.LiteralAlternationSpanMatcher.ExactMatcher;
+import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
 import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import org.junit.jupiter.api.Test;
@@ -364,6 +366,28 @@ public class TestHotMethodSize
     public void testStartScanDispatchStaysAtMeasuredSize()
     {
         assertThat(codeLength(Dfa.class, "findByteSetCandidate")).as("Dfa.findByteSetCandidate bytecode bytes").isPositive().isLessThanOrEqualTo(214);
+    }
+
+    /// Caps the exact literal alternation's root-table loop, which inlines the trie walk, at the
+    /// size it was measured at, and keeps the folded matcher's stop compare, byte compare, and
+    /// root-table loop within C2's inline size, so each inlines into the route loop that calls it.
+    /// A branch to the folded literal compares at the root-table method's entry, before its loop,
+    /// grew the exact method to 203 bytes and slowed short exact finds on r8i, as "Start Literal
+    /// Filter" in REGULATOR_DECISIONS.md records. Raise the exact limit only after measuring a new
+    /// loop.
+    @Test
+    public void testLiteralAlternationLoopsStayAtMeasuredAndInlineSize()
+    {
+        assertThat(codeLength(ExactMatcher.class, "findSpanInRootTable"))
+                .as("LiteralAlternationSpanMatcher.ExactMatcher.findSpanInRootTable bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(184);
+        for (String method : List.of("findSpanAtStop", "findSpanInRootTable", "matchesFolded")) {
+            assertThat(codeLength(FoldedMatcher.class, method))
+                    .as("LiteralAlternationSpanMatcher.FoldedMatcher.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
     }
 
     // Asserts that `methodName` of `type` calls both folded pair selectors and no folded pair
