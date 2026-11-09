@@ -334,12 +334,12 @@ final class VectorPrefixScanner
             // at a constant offset from the block's low end, as findPair's unrolled loads are above
             // its step position. Loads at offsets below a descending position each took their own
             // address arithmetic on r9g, and the extra live values spilled the probe bytes. The
-            // vectors below the last whole block are tested one at a time.
-            int blocks = (position - vectorStart) / blockLength;
-            int block = 0;
+            // block loops count the block's low end itself down, so each block's base is widened
+            // to 64 bits once, not each load's int index. The vectors below the last whole block
+            // are tested one at a time.
+            int low = position - blockLength;
             if (VectorSupport.SVE_128) {
-                for (; block < blocks; block++) {
-                    int low = position - (block + 1) * blockLength;
+                for (; low >= vectorStart; low -= blockLength) {
                     int primaryLow = low + primaryOffset;
                     int secondaryLow = low + secondaryOffset;
                     if (ByteVector.fromArray(SPECIES, data, primaryLow + 3 * vectorLength).lanewise(VectorOperators.XOR, primaryVector)
@@ -360,8 +360,7 @@ final class VectorPrefixScanner
                 }
             }
             else {
-                for (; block < blocks; block++) {
-                    int low = position - (block + 1) * blockLength;
+                for (; low >= vectorStart; low -= blockLength) {
                     int primaryLow = low + primaryOffset;
                     int secondaryLow = low + secondaryOffset;
                     if (ByteVector.fromArray(SPECIES, data, primaryLow + 3 * vectorLength).compare(VectorOperators.EQ, primaryVector)
@@ -376,11 +375,11 @@ final class VectorPrefixScanner
                     }
                 }
             }
-            position -= block * blockLength;
+            position = low + blockLength;
             // The vectors to verify from position down: all four vectors of the block the loop
             // stopped in, highest first, or the one vector below the blocks that holds a candidate.
             int vectors = LAST_BLOCK_VECTORS;
-            if (block == blocks) {
+            if (low < vectorStart) {
                 // The at most three vectors below the blocks are tested with compare and AND on
                 // every platform, an exception to "Candidate Masks on SVE". The XOR form written in
                 // line here allocates nothing either, but it made this method about 1,072 bytecode

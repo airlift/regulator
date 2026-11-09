@@ -383,7 +383,7 @@ public class TestHotMethodSize
         assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
                 .as("VectorPrefixScanner.findLast bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
-                .isLessThanOrEqualTo(1029);
+                .isLessThanOrEqualTo(1004);
         // The literal set scan runs the same loop under the same rules, capped at the size it was
         // added at.
         assertThat(codeLength(VectorPrefixScanner.class, "findLiteralSet"))
