@@ -97,9 +97,7 @@ final class StartClassFilter
             }
             lows[offset] = low;
             highs[offset] = high;
-            for (int value = low; value <= high; value++) {
-                probabilities[offset] += byteFrequencies.probability((byte) value);
-            }
+            probabilities[offset] = rangeProbability(byteFrequencies, low, high);
         }
         int span = byteSets.length;
         if (span == 3 && probabilities[2] * THIRD_OFFSET_NARROWING_FACTOR > 1) {
@@ -113,6 +111,23 @@ final class StartClassFilter
             return null;
         }
         return new StartClassFilter(span, lows[0], highs[0], lows[1], highs[1], lows[2], highs[2]);
+    }
+
+    /// The estimated fraction of positions the filter accepts in text of `byteFrequencies`, the
+    /// estimate [#build] admits the filter by.
+    double density(ByteFrequencies byteFrequencies)
+    {
+        double density = rangeProbability(byteFrequencies, firstLow, firstHigh) * rangeProbability(byteFrequencies, secondLow, secondHigh);
+        return span == 2 ? density : density * rangeProbability(byteFrequencies, thirdLow, thirdHigh);
+    }
+
+    private static double rangeProbability(ByteFrequencies byteFrequencies, int low, int high)
+    {
+        double probability = 0;
+        for (int value = low; value <= high; value++) {
+            probability += byteFrequencies.probability((byte) value);
+        }
+        return probability;
     }
 
     private static void checkRange(int low, int high)

@@ -747,11 +747,8 @@ final class Dfa
                 boolean fixedDistanceScanRejected = false;
                 if (fixedDistanceCandidates != null &&
                         canUseFixedDistanceByteAcceleration(anchoredEffective, true, startData.flag(), textEnd - textBegin)) {
-                    fixedDistanceScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !isByteCandidateScanProductive(
-                            fixedDistanceCandidates.candidates(),
-                            bytes,
-                            textBegin + fixedDistanceCandidates.offset(),
-                            textEnd);
+                    fixedDistanceScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !isFixedDistanceByteScanProductive(
+                            dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), textEnd);
                     if (!fixedDistanceScanRejected) {
                         int fixedDistanceSmallByteSet = selectByteScanSet(
                                 dfa.fixedDistanceSmallByteSet(),
@@ -1571,8 +1568,8 @@ final class Dfa
         if (fixedDistanceCandidates != null &&
                 canUseFixedDistanceByteAcceleration(false, true, startData.flag(), contextEnd - textBegin)) {
             byteScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !(sampling == null
-                    ? isByteCandidateScanProductive(fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd)
-                    : sampling.isFixedDistanceByteScanProductive(fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd));
+                    ? isFixedDistanceByteScanProductive(dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd)
+                    : sampling.isFixedDistanceByteScanProductive(dfa, fixedDistanceCandidates.candidates(), bytes, textBegin + fixedDistanceCandidates.offset(), contextEnd));
             if (!byteScanRejected) {
                 int fixedDistanceSmallByteSet = selectByteScanSet(
                         dfa.fixedDistanceSmallByteSet(),
@@ -1991,7 +1988,8 @@ final class Dfa
         if (fixedDistanceCandidates != null &&
                 canUseFixedDistanceByteAcceleration(false, true, startData.flag(), contextEnd - textBegin)) {
             fixedDistanceScanRejected = BYTE_SCAN_PRODUCTIVITY_CHECK_ENABLED && !(cursor == null
-                    ? isByteCandidateScanProductive(
+                    ? isFixedDistanceByteScanProductive(
+                    dfa,
                     fixedDistanceCandidates.candidates(),
                     bytes,
                     textBegin + fixedDistanceCandidates.offset(),
@@ -2170,6 +2168,18 @@ final class Dfa
     private static boolean isByteCandidateScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
     {
         return isByteCandidateScanProductive(candidates, null, null, bytes, position, textEnd, MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES, BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT);
+    }
+
+    // The productivity check samples the fixed-distance scan only from its minimum. Below the
+    // sampling minimum, prefer a start literal or class filter when its estimated stop density on
+    // English text is lower than the fixed-distance bytes' probability. The count sampling and the
+    // group-zero cursor apply the same rule.
+    private static boolean isFixedDistanceByteScanProductive(DfaInstance dfa, byte[] candidates, byte[] bytes, int position, int textEnd)
+    {
+        if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
+            return !dfa.fixedDistanceByteScanDenserThanStartFilter;
+        }
+        return isByteCandidateScanProductive(candidates, bytes, position, textEnd);
     }
 
     // With a start literal filter or a start class filter, a sampled position counts when the
@@ -4079,18 +4089,17 @@ final class Dfa
     // A filter taken for rare start bytes serves only vector searches.
     private record StartLiteralFilterChoice(StartLiteralFilter filter, boolean vectorOnly) {}
 
-    // Returns the English probability of the bytes `startByteCandidates` holds, or zero when it is
-    // null. Both start filters compare their estimates with it, whatever byte frequencies the
-    // pattern was compiled with.
-    private static double englishProbability(byte[] startByteCandidates)
+    // Returns the English probability of the candidate bytes, or zero for null. Both start filters
+    // compare their estimates with it, whatever byte frequencies the pattern was compiled with.
+    private static double englishProbability(byte[] candidates)
     {
-        if (startByteCandidates == null) {
+        if (candidates == null) {
             return 0;
         }
         ByteFrequencies byteFrequencies = ByteFrequencies.englishText();
         double probability = 0;
-        for (int value = 0; value < startByteCandidates.length; value++) {
-            if (startByteCandidates[value] != 0) {
+        for (int value = 0; value < candidates.length; value++) {
+            if (candidates[value] != 0) {
                 probability += byteFrequencies.probability((byte) value);
             }
         }
@@ -5502,9 +5511,11 @@ final class Dfa
 
         private boolean isFixedDistanceByteScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
         {
+            // Below the sampling minimum, apply the same start-filter rule as
+            // Dfa.isFixedDistanceByteScanProductive.
             if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
                 fixedDistanceByteScanProductivityRejectedUntil = 0;
-                return true;
+                return !dfa.fixedDistanceByteScanDenserThanStartFilter;
             }
             if (position < fixedDistanceByteScanProductivityRejectedUntil) {
                 return false;
@@ -5638,10 +5649,12 @@ final class Dfa
             return startByteScanProductive;
         }
 
-        private boolean isFixedDistanceByteScanProductive(byte[] candidates, byte[] bytes, int position, int textEnd)
+        private boolean isFixedDistanceByteScanProductive(DfaInstance dfa, byte[] candidates, byte[] bytes, int position, int textEnd)
         {
+            // Below the sampling minimum, apply the same start-filter rule as
+            // Dfa.isFixedDistanceByteScanProductive.
             if (textEnd - position < MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) {
-                return true;
+                return !dfa.fixedDistanceByteScanDenserThanStartFilter;
             }
             if (position < fixedDistanceByteScanProductivityCheckedUntil) {
                 return fixedDistanceByteScanProductive;
@@ -5830,6 +5843,10 @@ final class Dfa
         private final boolean quitsOnNonAscii;
         private volatile Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
         private volatile int fixedDistanceSmallByteSet;
+        // Set with the fixed-distance candidates, before they are published: whether a search too
+        // short for the productivity sample takes the start literal or class filter in place of
+        // the fixed-distance scan.
+        private volatile boolean fixedDistanceByteScanDenserThanStartFilter;
         private long fixedDistanceByteCandidateMemory;
         final int bytemapRange;
         final int nextSize;
@@ -6290,10 +6307,9 @@ final class Dfa
                         else {
                             candidates = NO_FIXED_DISTANCE_BYTE_CANDIDATES;
                         }
-                        fixedDistanceSmallByteSet = candidates == NO_FIXED_DISTANCE_BYTE_CANDIDATES ||
-                                candidates == RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET
-                                ? 0
-                                : buildSmallByteSet(candidates.candidates());
+                        boolean usable = candidates != NO_FIXED_DISTANCE_BYTE_CANDIDATES && candidates != RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET;
+                        fixedDistanceSmallByteSet = usable ? buildSmallByteSet(candidates.candidates()) : 0;
+                        fixedDistanceByteScanDenserThanStartFilter = usable && isDenserThanStartFilter(candidates.candidates());
                         fixedDistanceByteCandidates = candidates;
                     }
                 }
@@ -6303,6 +6319,23 @@ final class Dfa
             }
             return candidates == NO_FIXED_DISTANCE_BYTE_CANDIDATES ||
                     candidates == RETRY_FIXED_DISTANCE_BYTE_CANDIDATES_AFTER_RESET ? null : candidates;
+        }
+
+        // Whether English text holds the fixed-distance bytes more often than the start literal or
+        // class filter accepts a position, by the estimates the filters were admitted with.
+        private boolean isDenserThanStartFilter(byte[] fixedDistanceCandidates)
+        {
+            double filterDensity;
+            if (startLiteralFilter != null) {
+                filterDensity = startLiteralFilter.density();
+            }
+            else if (startClassFilter != null) {
+                filterDensity = startClassFilter.density(ByteFrequencies.englishText());
+            }
+            else {
+                return false;
+            }
+            return englishProbability(fixedDistanceCandidates) > filterDensity;
         }
 
         private int fixedDistanceSmallByteSet()

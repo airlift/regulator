@@ -1012,14 +1012,28 @@ public class TestDfaStartByteAcceleration
         assertThat(literals.startLiteralFilter() != null).isEqualTo(VectorSupport.isAvailable());
         assertThat(literals.startClassFilter()).isNull();
 
-        // A fixed-distance byte still runs first on the searches long enough for it.
+        // A fixed-distance byte still runs first on the searches long enough for its productivity
+        // sample. A shorter one takes the class filter, which English text passes less often than
+        // it holds the colon.
         Prog fixedDistance = compile("[a-z]:[0-9]");
         Dfa.DfaInstance fixedDistanceDfa = fixedDistance.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(fixedDistanceDfa.startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
         assertThat(fixedDistanceDfa.canFixedDistanceByteAcceleration()).isTrue();
-        Slice text = Slices.utf8Slice("a".repeat(8 * 1024) + "x:7");
+        Slice text = Slices.utf8Slice("a".repeat(Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES) + "x:7");
         assertDfaMatchesNfa(fixedDistance, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
         assertThat(fixedDistanceDfa.startClassFilterScanCount()).isZero();
+        text = Slices.utf8Slice("a".repeat(8 * 1024) + "x:7");
+        assertDfaMatchesNfa(fixedDistance, text, 0, text.length(), Prog.MatchKind.FIRST_MATCH, "[a-z]:[0-9]");
+        assertThat(fixedDistanceDfa.startClassFilterScanCount() > 0).isEqualTo(VectorSupport.isAvailable());
+        // A shorter search keeps the fixed-distance scan when English text holds its byte less often
+        // than the class filter passes a position.
+        Prog rareFixedDistance = compile("[a-z][0-9]{2}\\x01");
+        Dfa.DfaInstance rareFixedDistanceDfa = rareFixedDistance.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(rareFixedDistanceDfa.startClassFilter() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(rareFixedDistanceDfa.canFixedDistanceByteAcceleration()).isTrue();
+        text = Slices.utf8Slice("the quiet reader walks along the old road ".repeat(190));
+        assertThat(Dfa.search(rareFixedDistance, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(rareFixedDistanceDfa.startClassFilterScanCount()).isZero();
 
         // A fixed-width pattern keeps its matcher: the matcher yields to a start literal filter but
         // not to a class filter, since the matcher's own scan for its rarest position replaces the

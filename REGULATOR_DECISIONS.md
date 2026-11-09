@@ -1293,6 +1293,24 @@ case-insensitive literal count win: `02-literal-alternate sherlock-casei-en`
 takes 0.468x / 0.575x, `01-literal sherlock-casei-ru` 0.532x / 0.736x, and
 `tom-sawyer-huckle-fin-insensitive` 0.481x / 0.656x.
 
+A single find, a count search, or a group-zero cursor search with less than
+64 KiB left, a whole search under 64 KiB or the end of a longer count, does not
+sample the fixed-distance scan. It took that scan by default, and when the
+scan's first skip was short it handed the search to the plain DFA, which
+walked to the match end one byte at a time. On `sherlock-casei-en` in Rust
+bytes mode the names' fifth bytes, a space, `l`, or `e` in either case, fill
+the text, so the searches of the last 64 KiB stepped 58,791 of the count's
+73,333 DFA bytes. Such a search therefore takes the start literal or class
+filter instead when English text holds the fixed-distance bytes more often
+than the filter's estimate accepts a position; a sampled search keeps its
+sample's outcome. The count then steps 13,086 DFA bytes for the same 725
+matches. On r9g / r8i the count takes 0.56x / 0.47x of main's time, and a
+single find in 4 or 16 KiB of English text 0.12x / 0.09x. Holding the count's
+last sampled fixed-distance outcome into the tail instead would not reach a
+count under 64 KiB, and a held rejection without a filter would leave a dense
+tail on the start-byte scan rather than the fixed-distance scan's handoff to
+the plain DFA.
+
 ## Bounded DFA Pointer Transition Table
 
 Eligible one-byte DFA searches, forward and longest-match reverse, may use a
@@ -3572,11 +3590,14 @@ start literal filter taken for rare start bytes does. On long inputs the
 start-scan productivity check samples the filter's own stops.
 
 A start literal filter takes precedence outright, and fixed-distance byte
-candidates still run first on the searches long enough for them; the class
-filter replaces only the start set's own scan. A fixed-width pattern does not
-yield to it: unlike the start literal filter, it is not among the engine routes
-the [fixed-width matcher](#fixed-width-rare-class-candidates) yields to,
-since the matcher's rare candidate already replaces the plain start scan.
+candidates still run first on the searches long enough for them, except where
+an unsampled search yields to a filter, as
+[Once-Per-Count Start-Byte Scan Selection](#once-per-count-start-byte-scan-selection)
+describes; the class filter replaces only the start set's own scan. A
+fixed-width pattern does not yield to it: unlike the start literal filter, it
+is not among the engine routes the
+[fixed-width matcher](#fixed-width-rare-class-candidates) yields to, since the
+matcher's rare candidate already replaces the plain start scan.
 
 On rebar mariomka/ip the filter counts 3.2-3.5 times faster than the start set's
 own scan on r9g and 4.3-4.6 times on r8i. Checking only a pair gives 3.0-3.4 and
