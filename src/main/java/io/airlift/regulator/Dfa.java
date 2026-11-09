@@ -245,6 +245,37 @@ final class Dfa
             int end,
             int maximumBytes)
     {
+        return searchReverseCandidate(prog, context, contextStart, contextEnd, start, end, maximumBytes, true);
+    }
+
+    /// As [#searchReverseCandidate], but in the earliest-match mode, which stops at the first
+    /// start the reverse DFA reaches: a non-negative result says only that some start in
+    /// `[start, end]` exists, and a program that can match the empty string always reports one.
+    /// An [InnerLiteralSearch] count whose matches end at the literal's end needs no more.
+    static long searchReverseCandidateExists(
+            Prog prog,
+            Slice context,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int end,
+            int maximumBytes)
+    {
+        return searchReverseCandidate(prog, context, contextStart, contextEnd, start, end, maximumBytes, false);
+    }
+
+    // The reverse candidate search, which runs back to the leftmost start with
+    // `wantMatchBoundary`, and otherwise stops at the first start it reaches.
+    private static long searchReverseCandidate(
+            Prog prog,
+            Slice context,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int end,
+            int maximumBytes,
+            boolean wantMatchBoundary)
+    {
         if (maximumBytes <= 0) {
             throw new IllegalArgumentException("maximumBytes must be positive");
         }
@@ -257,7 +288,7 @@ final class Dfa
                 end,
                 true,
                 Prog.MatchKind.LONGEST_MATCH,
-                true,
+                wantMatchBoundary,
                 maximumBytes);
     }
 

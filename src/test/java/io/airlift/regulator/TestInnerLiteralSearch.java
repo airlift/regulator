@@ -106,7 +106,13 @@ public class TestInnerLiteralSearch
             "[a-z]+#(?i:noqa)\\b",
             "\\w+\\s+Holmes\\b",
             "\\w+nn\\b\\s",
-            "[a-z]+nn\\b[a-z]");
+            "[a-z]+nn\\b[a-z]",
+            // Counts that end each match at its literal's end behind a prefix of fixed length,
+            // here before a word boundary, and one kept off that route: a run before a boundary,
+            // as in `\b\w+nn\b`, whose class holds a byte that is not a word byte, so that a
+            // match may run past its first hit.
+            "[a-z]{2}ab\\b",
+            "[-a-z]+nn\\b");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -596,6 +602,8 @@ public class TestInnerLiteralSearch
         // byte the prefix must consume two bytes before Holmes fails before the window start, and a
         // word boundary after nn passes at the window end, where a ranged find's context, the
         // whole Slice, sees the word byte past it, and a matcher region, its own context, does not.
+        // Nor does a count of the window as a Slice of its own, whose nn ends exactly at its end,
+        // with the rest of the array past it.
         String filler = "-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES);
         byte[] backing = ("abcxa Holmes " + filler + " Penn" + "id").getBytes(UTF_8);
         Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
@@ -617,9 +625,91 @@ public class TestInnerLiteralSearch
                             assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
                         }
                         assertThat(matcher.find()).as(description).isFalse();
+                        Slice region = text.slice(start, end - start);
+                        assertThat(pattern.count(region)).as(description).isEqualTo(ordinary.count(region));
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    public void testCountsToLiteralEndWithReverseDfaAlone()
+    {
+        // Every match of these ends at its literal's end, so a count confirms each hit with the
+        // reverse DFA alone and never starts the forward DFA, under each proof: the separator at
+        // the prefix's end, where the byte before each Holmes is ASCII; the class run before a
+        // word boundary, where the byte after each nn is ASCII but not a word byte; a literal the
+        // prefix cannot consume, also behind a case-insensitive letter, which consumes only its two
+        // cases; a prefix of fixed length; and a class pair. Each of the count's searches ends
+        // where find's ends, as one that resumed inside the first Holmes of a Holmes Holmes would
+        // not, counting olmes Holmes too.
+        String gap = "-".repeat(InnerLiteralSearch.MINIMUM_SKIPPED_BYTES);
+        for (Map.Entry<String, String> entry : List.of(
+                Map.entry("\\w+\\s+Holmes", gap + "a Holmes" + gap + "bb \t Holmes Holmes" + gap),
+                Map.entry("\\b\\w+nn\\b", gap + "Penn " + gap + "Finn," + gap),
+                Map.entry("\\w+@", gap + "ab@" + gap + "c@" + gap),
+                Map.entry("(?i:x)?\\d+ = value", gap + "X1 = value" + gap + "x22 = value" + gap),
+                Map.entry("[a-z]{2}ab", gap + "xyab" + gap + "zzab" + gap),
+                Map.entry("[\"'][^\"']{0,30}[?!.][\"']", gap + "\"Hi!\"" + gap + "'Yes.'" + gap))) {
+            String regex = entry.getKey();
+            Slice text = utf8Slice(entry.getValue());
+            for (Language language : Language.values()) {
+                String description = "%s %s".formatted(language, regex);
+                CompiledPattern pattern = language.compiledPattern(regex);
+                assertThat(pattern.count(text)).as(description).isEqualTo(2);
+                assertThat(reversePrefixStateCount(pattern)).as(description).isPositive();
+                assertThat(forwardStateCount(pattern)).as(description).isZero();
+                assertCountEndsWhereFindEnds(pattern.innerLiteralSearchForDiagnostics(), text, description);
+            }
+        }
+
+        // Where the bytes beside a hit do not settle where its match ends, or no proof bounds the
+        // match end, the count runs the full confirmation and starts the forward DFA: a byte past
+        // ASCII before Holmes, which may end a separator character of more than one byte; one
+        // after nn, which may begin a word character; and a separator at the prefix's start, from
+        // which `\s+\w+Holmes` matches past the first Holmes. A filler of a single literal's
+        // count minimum makes the count search, and puts each hit past the near-start fallback.
+        String filler = "-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES);
+        for (Map.Entry<String, String> entry : List.of(
+                Map.entry("[A-Za-z]+[ \\x{A0}]+Holmes", "a\u00A0Holmes"),
+                Map.entry("\\b\\w+nn\\b", "Penn\u00A0"),
+                Map.entry("\\s+\\w+Holmes", " xHolmesHolmes"))) {
+            String description = "%s on %s".formatted(entry.getKey(), entry.getValue());
+            CompiledPattern pattern = Language.RE2.compiledPattern(entry.getKey());
+            Slice line = utf8Slice(filler + entry.getValue());
+            assertThat(pattern.count(line)).as(description).isEqualTo(1);
+            assertThat(reversePrefixStateCount(pattern)).as(description).isPositive();
+            assertThat(forwardStateCount(pattern)).as(description).isPositive();
+            assertCountEndsWhereFindEnds(pattern.innerLiteralSearchForDiagnostics(), line, description);
+        }
+
+        // The proofs compare the prefix with exact literal bytes, so a case-insensitive literal
+        // takes the full confirmation too, which ends the first match after the whole of #noqa,
+        // not its exact head #, from where the second #noqa has no start.
+        CompiledPattern noqa = Language.RE2.compiledPattern("[a-z]+#(?i:noqa)");
+        assertThat(noqa.count(utf8Slice(filler + "a#noqa#noqa"))).isEqualTo(1);
+        assertThat(forwardStateCount(noqa)).isPositive();
+    }
+
+    // Steps through a count of `text` as the inner literal count does, and requires each of its
+    // searches to end where a find's search from the same position ends, past that position and
+    // within the text, or to give the same answer when that finds no match or falls back.
+    private static void assertCountEndsWhereFindEnds(InnerLiteralSearch search, Slice text, String description)
+    {
+        int position = 0;
+        while (true) {
+            long countSearch = search.searchForCount(text, 0, text.length(), position, text.length());
+            long findSearch = search.search(text, 0, text.length(), position, text.length());
+            String step = "%s from %s".formatted(description, position);
+            if (findSearch < 0) {
+                assertThat(countSearch).as(step).isEqualTo(findSearch);
+                return;
+            }
+            int end = (int) findSearch;
+            assertThat((int) countSearch).as(step).isEqualTo(end);
+            assertThat(end).as(step).isGreaterThan(position).isLessThanOrEqualTo(text.length());
+            position = end;
         }
     }
 
@@ -1137,7 +1227,14 @@ public class TestInnerLiteralSearch
                 // Java's `(?U)` reads as word and space characters.
                 "\u00E9 Holmes \u00E9\u00A0Holmes Holmes\u00E9 x\u00A0\u00A0Holmes\u0301 Penn\u00E9 Penn\u00A0 \u00E9nn\u0301 nn\u00A0 a@\u00E9 b@\u0301 c@\u00A0 d@",
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
-                "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
+                "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d",
+                // A count resumes at each match end: a word that ends exactly there, a word right
+                // after it, long whitespace runs before a literal, and matches that run past the
+                // first hit with a start, one across a byte of its run's class that is not a word
+                // byte.
+                "a Holmes Holmes a HolmesX Holmes\tHolmes" + " ".repeat(150) + "Holmes" + "\t".repeat(70) + "x Holmes",
+                "xababab abab zzab xab\u00e9 Pennab nnab singinging",
+                "xnn-nn ")) {
             texts.add(utf8Slice(text));
             // A search whose first gate-passing hit is near its start falls back, and a text
             // shorter than the search's minimum never runs it, so filler long enough for a literal

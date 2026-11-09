@@ -426,9 +426,12 @@ so the automata run only where a match can be.
 - **Origin:** Adapted from the Rust regex crate
   ([reverse_inner.rs][ra-reverse-inner], [strategy.rs][ra-strategy],
   [teddy.rs][ra-teddy], [literal.rs][rs-literal], [#90]); First described by
-  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask])
-  and for class pairs ([shufti.c][hs-shufti-double]), and by .NET for a prefix
-  of an unbounded class that cannot hold the literal
+  Hyperscan for the masked caseless check ([noodle_build.cpp][hs-noodle-mask]),
+  for class pairs ([shufti.c][hs-shufti-double]), and for a count that ends
+  each match at its literal, whose Rose program asks only whether the prefix
+  engine accepts at the hit and reports the match there without its start
+  ([program_runtime.c][hs-check-prefix] `CHECK_PREFIX`), and by .NET for a
+  prefix of an unbounded class that cannot hold the literal
   ([RegexPrefixAnalyzer.cs][dotnet-literal-after-loop]); Inspired by
   Hyperscan, whose Rose compiler anchors literals behind pure-repeat prefixes,
   for class-run prefixes ([rose_build_castle.cpp][hs-rose-castle],
@@ -437,8 +440,10 @@ so the automata run only where a match can be.
   an English-rarity gate and their own no-earlier-match proof, and the proof
   for a bounded or unbounded run of one class that can hold the literal,
   behind assertions, and each literal kind's minimum search window, at its
-  measured crossover with the DFA ([#103], [#138], [#143], [#152], [#193],
-  [design][d-class-pairs], [design][d-min-inner-window]).
+  measured crossover with the DFA, and the proofs that a count's matches end
+  at their literal's end ([#103], [#138], [#143], [#152], [#193],
+  [design][d-class-pairs], [design][d-min-inner-window],
+  [design][d-count-literal-end]).
 - **Where:** `InnerLiteralSearch.analyze`, `InnerLiteralSearch.search`,
   `InnerLiteralSearch.hasNoEarlierMatch`, `Dfa.searchAnchoredWithStop`,
   `InnerLiteralSearch.findLiteralSetMember`,
@@ -450,7 +455,9 @@ so the automata run only where a match can be.
   `VectorByteSetScanner.findClassPair`, `InnerLiteralSearch.findInnerLiteral`,
   `InnerLiteralSearch.isClassRunPrefix`,
   `InnerLiteralSearch.minimumSearchBytes`,
-  `CompiledPattern.searchesInnerLiteralWindow`
+  `CompiledPattern.searchesInnerLiteralWindow`,
+  `InnerLiteralSearch.searchForCount`, `InnerLiteralSearch.countEnd`,
+  `Dfa.searchReverseCandidateExists`
 - **Applies when:** Find and count in every regex language, only when the
   prefix cannot hold an earlier match or, in leftmost-first searches, is a
   class run, and not for a one-byte literal that is a letter, digit, or
@@ -470,7 +477,17 @@ so the automata run only where a match can be.
   and for a pattern with a fixed-width short-search matcher, which answers its
   shorter counts and matcher finds and loses to the search from 64 bytes.
   Guards against quadratic rescans, and a first hit that passes the byte gates
-  within 64 bytes of the start, hand the search back to the ordinary engine
+  within 64 bytes of the start, hand the search back to the ordinary engine. A
+  count skips the forward confirmation only for exact literal bytes whose
+  matches all end at the literal's end: all members have the same byte length,
+  and the literal is followed only by elements that match nothing but the
+  empty string, without an assertion, and by `\b` after a literal ending in a
+  word byte, with an ASCII byte that is not a word byte after the hit. One of
+  five proofs must also bound the literal: a single literal the prefix cannot
+  consume every byte of, a prefix of fixed byte length, the class-pair proof,
+  the separator at the prefix's end with an ASCII byte before the hit, or the
+  class-run proof for a single literal before that `\b`, when every ASCII byte
+  of the run's class is a word byte
 - **What it does:** For a required literal in the top-level sequence, the
   search finds the literal, runs the prefix backward to the leftmost start,
   and confirms forward. A case-insensitive ASCII letter in the prefix consumes
@@ -495,17 +512,23 @@ so the automata run only where a match can be.
   shorter span ending at any later literal inside it, so the reverse search
   from the first literal hit still finds the leftmost start. A pattern that
   only this proof gives a search keeps the long-window required literal check
-  as it has it without one. Long searches for one exact ASCII literal use the
-  vector byte-set scan for one byte and the vector pair scan otherwise.
-  Leipzig `shing` and mariomka `email` counts take 0.06 to 0.10 of their
-  earlier time ([#90]), class pairs take `quotes-bounded` to 0.54 of the
-  start-byte scan's time on Intel and 0.74 on Graviton
-  ([design][d-class-pairs]), and the class-run proof takes finds of
-  `\w+[?!.]["']` in 300-byte to 2 KiB chunks of `sherlock.txt` to 0.03 to 0.28
-  of their time without it and rebar's `leipzig/word-ending-nn` to 0.11 to
-  0.12 ([#193]). With each literal kind's minimum window, per-line finds of
-  `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to 0.50 of their earlier time
-  ([#193]).
+  as it has it without one. A count, which needs only match ends, confirms a
+  hit of a pattern whose matches end at their literal's end with the reverse
+  DFA's earliest-match mode alone, which stops at the first start it finds,
+  and resumes at the literal's end; over the byte gates alone, that takes
+  `literal-suffix-nosom` counts to 0.59 to 0.63 of their time,
+  `quotes-bounded` to 0.89 to 0.90, `shing` to 0.92 to 0.94, and
+  `word-ending-nn` to 0.96 to 0.98 ([design][d-count-literal-end]). Long
+  searches for one exact ASCII literal use the vector byte-set scan for one
+  byte and the vector pair scan otherwise. Leipzig `shing` and mariomka
+  `email` counts take 0.06 to 0.10 of their earlier time ([#90]), class pairs
+  take `quotes-bounded` to 0.54 of the start-byte scan's time on Intel and
+  0.74 on Graviton ([design][d-class-pairs]), and the class-run proof takes
+  finds of `\w+[?!.]["']` in 300-byte to 2 KiB chunks of `sherlock.txt` to
+  0.03 to 0.28 of their time without it and rebar's `leipzig/word-ending-nn`
+  to 0.11 to 0.12 ([#193]). With each literal kind's minimum window, per-line
+  finds of `\s[a-z]{0,12}(?:ing|ment)\s` take 0.40 to 0.50 of their earlier
+  time ([#193]).
 
 ### Inner literal byte gates
 
@@ -2024,6 +2047,7 @@ change is described.
 [d-class-pairs]: ../../REGULATOR_DECISIONS.md#inner-literal-class-pairs
 [d-concurrency]: ../../REGULATOR_DECISIONS.md#shared-dfa-concurrency
 [d-count-fallback]: ../../REGULATOR_DECISIONS.md#count-fallback-after-repeated-bails
+[d-count-literal-end]: ../../REGULATOR_DECISIONS.md#inner-literal-counts-to-the-literal-end
 [d-count-self-loop]: ../../REGULATOR_DECISIONS.md#count-self-loop-exit-byte-scan
 [d-fixed-width-rare]: ../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates
 [d-folded-prefix]: ../../REGULATOR_DECISIONS.md#folded-prefix-candidate-scan
@@ -2171,6 +2195,7 @@ change is described.
 [hs-boundary]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/ComponentBoundary.cpp#L134-L140
 [hs-buildstate]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/buildstate.cpp#L234-L282
 [hs-castle-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/castle.c#L523-L612
+[hs-check-prefix]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L2496-L2505
 [hs-check-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L991-L1021
 [hs-lbr-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/lbr.c#L422-L516
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658

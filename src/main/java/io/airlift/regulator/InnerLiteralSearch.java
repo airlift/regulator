@@ -29,7 +29,7 @@ import static java.util.Objects.requireNonNull;
 /// where an occurrence of any member is an occurrence of `L`. This is the Rust crate's reverse
 /// inner strategy, which also covers its reverse suffix strategy (regex-automata 0.4.18
 /// `meta/strategy.rs` and `meta/reverse_inner.rs`). For each occurrence of `L` that its neighboring
-/// bytes do not rule out, a reverse DFA of `P` anchored at the occurrence finds the earliest start,
+/// bytes do not rule out, a reverse DFA of `P` anchored at the occurrence finds the leftmost start,
 /// and the forward DFA of the whole pattern anchored at that start finds the end.
 ///
 /// The first confirmed candidate is the leftmost-first match only when no earlier match can span
@@ -105,6 +105,10 @@ import static java.util.Objects.requireNonNull;
 /// that class, as the `ing` of `kingdom` is for `\s[a-zA-Z]{0,12}ing\s`, or when a word boundary
 /// or non-boundary right after it rules out the ASCII byte after it, as a word byte after the `nn`
 /// of `\b\w+nn\b` does. A skipped hit is no candidate, so it never makes the search fall back.
+///
+/// A [count's search][#searchForCount] skips the forward DFA where every match provably ends at its
+/// literal's end: it asks the reverse DFA only whether some start exists, and takes the literal's
+/// end as the match end; see REGULATOR_DECISIONS.md, Inner Literal Counts To The Literal End.
 final class InnerLiteralSearch
 {
     static final long FALLBACK = Dfa.CANDIDATE_SEARCH_FALLBACK;
@@ -194,15 +198,22 @@ final class InnerLiteralSearch
     private final boolean suffixGateFromWordBoundaries;
     private final long[] deeperPrefixGates;
     private final boolean hasByteGates;
+    // Whether a count may take a confirmed hit's literal end as its match end, once the reverse
+    // search finds any start, and whether that also needs the byte before the hit to be ASCII, or
+    // the byte after it to be an ASCII byte that is not a word byte; see [#countEnd].
+    private final boolean countsToLiteralEnd;
+    private final boolean countEndNeedsAsciiBefore;
+    private final boolean countEndNeedsNonWordAfter;
     // The minimums are derived from the literal kind and this, not kept, so that the search keeps
-    // the 128-byte layout with compressed references, in padding, that its memory budget charges.
+    // the 128-byte layout with compressed references, whose padding the booleans fill, that its
+    // memory budget charges.
     private final boolean behindClassRun;
     private final boolean checksShortWindows;
     private final Prog reversePrefixProgram;
     private final Prog forwardProgram;
     private final boolean addedByClassRunProof;
 
-    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, FoldedScan foldedScan, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, boolean behindClassRun, boolean addedByClassRunProof, ByteGate prefixGate, long[] deeperPrefixGates, ByteGate suffixGate, Prog reversePrefixProgram, Prog forwardProgram)
+    private InnerLiteralSearch(LiteralSearchKernel literalSearch, byte[] foldedBytes, byte[] foldedMasks, FoldedScan foldedScan, byte[][] literalSet, StartLiteralFilter literalSetFilter, byte[] classPairBytes, boolean behindClassRun, boolean addedByClassRunProof, ByteGate prefixGate, long[] deeperPrefixGates, ByteGate suffixGate, CountEnd countEnd, Prog reversePrefixProgram, Prog forwardProgram)
     {
         this.literalSearch = literalSearch;
         this.foldedBytes = foldedBytes;
@@ -245,6 +256,9 @@ final class InnerLiteralSearch
         this.suffixGateFromWordBoundaries = (suffixGate.word2() | suffixGate.word3()) != 0;
         this.deeperPrefixGates = deeperPrefixGates;
         this.hasByteGates = (prefixGate0 | prefixGate1 | prefixGate2 | prefixGate3 | suffixGate0 | suffixGate1) != 0 || deeperPrefixGates != null;
+        this.countsToLiteralEnd = countEnd != null;
+        this.countEndNeedsAsciiBefore = countEnd != null && countEnd.asciiBefore();
+        this.countEndNeedsNonWordAfter = countEnd != null && countEnd.nonWordAfter();
         this.behindClassRun = behindClassRun;
         // A gated one-byte search keeps the check below its minimum that every inner literal
         // search ran before the minimums: of lh3lh3's date lines under 64 bytes that hold `/`,
@@ -349,7 +363,7 @@ final class InnerLiteralSearch
             deeperPrefixGates = null;
         }
         boolean addedByClassRunProof = innerLiteral.behindClassRun() && findsNoSearchWithoutClassRunProof(regexp, forwardProgram, prefixMemory, retainedMemory, dialect, caseFolding, byteFrequencies);
-        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, foldedScan, literalSet, literalSetFilter, classPairBytes, innerLiteral.behindClassRun(), addedByClassRunProof, prefixGate, deeperPrefixGates, innerLiteral.suffixGate(), reversePrefixProgram, forwardProgram);
+        return new InnerLiteralSearch(literalSearch, foldedBytes, foldedMasks, foldedScan, literalSet, literalSetFilter, classPairBytes, innerLiteral.behindClassRun(), addedByClassRunProof, prefixGate, deeperPrefixGates, innerLiteral.suffixGate(), innerLiteral.countEnd(), reversePrefixProgram, forwardProgram);
     }
 
     // Whether the analysis would find no search without the class-run proof, which alone admitted
@@ -389,10 +403,11 @@ final class InnerLiteralSearch
 
     // The inner literal of the normalized `regexp` and the prefix before it: a single literal, the
     // members of a literal set with their filter, or the members of a class pair with its sides'
-    // bytes, and the byte gate after it, from the top-level concatenation's element `firstElement`
-    // on. With `classRunProof` false, the class-run proof admits no prefix. With
-    // `allowsFoldedKernelOnlyLiterals` false, a case-insensitive literal without a searched head
-    // is judged by its own element, as without the Vector API.
+    // bytes, the byte gate after it, and what a count needs to end a match at the literal's end,
+    // from the top-level concatenation's element `firstElement` on. With `classRunProof` false,
+    // the class-run proof admits no prefix. With `allowsFoldedKernelOnlyLiterals` false, a
+    // case-insensitive literal without a searched head is judged by its own element, as without
+    // the Vector API.
     private static InnerLiteral findInnerLiteral(Regexp regexp, CaseFolding caseFolding, boolean classRunProof, boolean allowsFoldedKernelOnlyLiterals, int firstElement)
     {
         while (regexp.op() == RegexpOp.CAPTURE) {
@@ -460,14 +475,17 @@ final class InnerLiteralSearch
                 }
                 return null;
             }
-            // The byte after the literal is known only when every member has one length.
+            // The byte after the literal, and the match end, are known only when every member has
+            // one length.
             ByteGate suffixGate = ByteGate.NONE;
+            CountEnd countEnd = null;
             if (hasOneLength(literals)) {
                 int literalElements = foldedLiteral != null ? foldedLiteral.elements() : classPair != null ? 2 : 1;
                 ByteGate lastBytes = literalEdgeBytes(literals, foldedLiteral, true);
                 suffixGate = suffixGate(children, index + literalElements, lastBytes).unlessHolding(lastBytes);
+                countEnd = countEnd(children, index + literalElements, lastBytes, prefix, literals, foldedLiteral, classPair != null, behindClassRun, caseFolding);
             }
-            return new InnerLiteral(index, prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), behindClassRun, suffixGate);
+            return new InnerLiteral(index, prefix, literal, literals, literalSetFilter, foldedLiteral, classPair == null ? null : classPair.scanBytes(), behindClassRun, suffixGate, countEnd);
         }
         return null;
     }
@@ -478,8 +496,9 @@ final class InnerLiteralSearch
     // or null without one, `literals` holds what the proofs checked, and `foldedLiteral` holds the
     // whole literal, or is null. `suffixGate` holds the bytes the byte after a hit may be, or is
     // `ByteGate.NONE` for no gate. `behindClassRun` says that only the class-run proof admits the
-    // prefix. `element` is the literal's first element in the top-level concatenation.
-    private record InnerLiteral(int element, Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, boolean behindClassRun, ByteGate suffixGate)
+    // prefix. `countEnd` says what a count needs to end a match at the literal's end, or is null
+    // when it may not. `element` is the literal's first element in the top-level concatenation.
+    private record InnerLiteral(int element, Regexp prefix, byte[] literal, byte[][] literals, StartLiteralFilter literalSetFilter, FoldedLiteral foldedLiteral, byte[] classPairBytes, boolean behindClassRun, ByteGate suffixGate, CountEnd countEnd)
     {
         // Whether this is a case-insensitive literal without a searched head, which only the
         // folded pair kernel searches.
@@ -502,6 +521,11 @@ final class InnerLiteralSearch
             return InnerLiteralSearch.minimumSearchBytes(literalSetFilter != null, classPairBytes != null, foldedLiteral != null, literal == null ? 0 : literal.length, behindClassRun);
         }
     }
+
+    // A count may end a match at its literal's end once the reverse search finds any start, and
+    // when `asciiBefore` is set the byte before the hit is ASCII, and when `nonWordAfter` is set
+    // the byte after it is an ASCII byte that is not a word byte.
+    private record CountEnd(boolean asciiBefore, boolean nonWordAfter) {}
 
     // As the crate's top_concat does, a capturing group in the top-level concatenation is looked
     // through, and a concatenation inside it joins the top level, so `(\s*)(# x)` has the inner
@@ -788,12 +812,28 @@ final class InnerLiteralSearch
     /// [#FALLBACK].
     long search(Slice text, int contextStart, int contextEnd, int start, int end)
     {
+        return search(text, contextStart, contextEnd, start, end, false);
+    }
+
+    /// As [#search], for a count, which needs only the match end: every result that is not
+    /// negative carries the end in its low half, and its start may be absent. Where every match
+    /// provably ends at its literal's end, a candidate's start is not looked for; see
+    /// REGULATOR_DECISIONS.md, Inner Literal Counts To The Literal End.
+    long searchForCount(Slice text, int contextStart, int contextEnd, int start, int end)
+    {
+        return search(text, contextStart, contextEnd, start, end, countsToLiteralEnd);
+    }
+
+    // The search, which confirms a candidate to its literal's end, as [#confirm] does, when
+    // `toLiteralEnd` is set.
+    private long search(Slice text, int contextStart, int contextEnd, int start, int end, boolean toLiteralEnd)
+    {
         // Patterns without a gate keep this loop free of the gate check, and gated ones run their
         // own copy: with the check in one shared loop, patterns without a gate measured up to
         // about 4% slower, on lh3lh3 uri (Graviton) and lh3lh3 email (Intel) before their
         // prefixes were gated; see REGULATOR_DECISIONS.md, Inner Literal Byte Gates.
         if (hasByteGates) {
-            return searchGated(text, contextStart, contextEnd, start, end);
+            return searchGated(text, contextStart, contextEnd, start, end, toLiteralEnd);
         }
         // The reverse search may read back to the end of the previous candidate, and a candidate
         // may not start inside the text the previous confirmation read.
@@ -812,7 +852,7 @@ final class InnerLiteralSearch
                 return FALLBACK;
             }
             int maximumReverseBytes = minimumMatchStart == start ? Integer.MAX_VALUE : Math.max(1, literalStart - minimumMatchStart);
-            long candidate = Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+            long candidate = confirm(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes, toLiteralEnd);
             if (candidate == Dfa.SEARCH_FAILED) {
                 candidate = confirmCandidate(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
             }
@@ -826,6 +866,42 @@ final class InnerLiteralSearch
             minimumMatchStart = literalStart + matchedLength(text, literalStart, end);
         }
         return Dfa.SEARCH_NO_MATCH;
+    }
+
+    // Confirms the candidate at `literalStart` with the single pass of
+    // [Dfa#searchReverseThenAnchoredWithStop], and returns as it does. For a count whose matches
+    // end at the literal's end, `toLiteralEnd`, where the bytes beside the hit
+    // [allow][#endsAtLiteral] it, the reverse DFA's earliest-match mode instead looks only for
+    // some start within the same bound, and the literal's end takes the place of the span.
+    private long confirm(Slice text, int contextStart, int contextEnd, int start, int literalStart, int end, int maximumReverseBytes, boolean toLiteralEnd)
+    {
+        if (toLiteralEnd && endsAtLiteral(text, start, literalStart, end)) {
+            long reverse = Dfa.searchReverseCandidateExists(reversePrefixProgram, text, contextStart, contextEnd, start, literalStart, maximumReverseBytes);
+            return reverse >= 0 ? literalStart + minimumLiteralLength : reverse;
+        }
+        return Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+    }
+
+    // Whether the bytes beside the hit at `literalStart` let the match end at the literal's end:
+    // an ASCII byte before it, where the separator at the prefix's end needs one, and an ASCII
+    // byte that is not a word byte after it, in the window, where a word boundary follows the
+    // literal; see [#countEnd].
+    private boolean endsAtLiteral(Slice text, int start, int literalStart, int end)
+    {
+        byte[] data = text.byteArray();
+        int dataOffset = text.byteArrayOffset();
+        if (countEndNeedsAsciiBefore && (literalStart <= start || data[dataOffset + literalStart - 1] < 0)) {
+            return false;
+        }
+        if (!countEndNeedsNonWordAfter) {
+            return true;
+        }
+        int literalEnd = literalStart + minimumLiteralLength;
+        if (literalEnd >= end) {
+            return false;
+        }
+        byte next = data[dataOffset + literalEnd];
+        return next >= 0 && !isAsciiWordByte(next);
     }
 
     // Confirms the candidate at `literalStart` with the two searches one at a time, for a
@@ -854,19 +930,19 @@ final class InnerLiteralSearch
     // The search of a pattern with a byte gate. A window without a hit, such as a long line
     // without the literal or the tail a count has left, returns here without entering the loop;
     // see REGULATOR_DECISIONS.md, Inner Literal Byte Gates.
-    private long searchGated(Slice text, int contextStart, int contextEnd, int start, int end)
+    private long searchGated(Slice text, int contextStart, int contextEnd, int start, int end, boolean toLiteralEnd)
     {
         int literalStart = nextLiteral(text, start, end);
         if (literalStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }
-        return searchGatedFrom(text, contextStart, contextEnd, start, end, literalStart);
+        return searchGatedFrom(text, contextStart, contextEnd, start, end, literalStart, toLiteralEnd);
     }
 
     // The search loop of a pattern with a byte gate, from the hit at `firstLiteralStart`: as in
     // search, with each hit first checked against the gates, so the fallbacks see only the hits
     // that pass.
-    private long searchGatedFrom(Slice text, int contextStart, int contextEnd, int start, int end, int firstLiteralStart)
+    private long searchGatedFrom(Slice text, int contextStart, int contextEnd, int start, int end, int firstLiteralStart, boolean toLiteralEnd)
     {
         // The reverse search may read back to the end of the previous candidate, and a candidate
         // may not start inside the text the previous confirmation read.
@@ -893,7 +969,7 @@ final class InnerLiteralSearch
             }
             firstCandidate = false;
             int maximumReverseBytes = minimumMatchStart == start ? Integer.MAX_VALUE : Math.max(1, literalStart - minimumMatchStart);
-            long candidate = Dfa.searchReverseThenAnchoredWithStop(reversePrefixProgram, forwardProgram, text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
+            long candidate = confirm(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes, toLiteralEnd);
             if (candidate == Dfa.SEARCH_FAILED) {
                 candidate = confirmCandidate(text, contextStart, contextEnd, start, literalStart, end, maximumReverseBytes);
             }
@@ -1450,7 +1526,7 @@ final class InnerLiteralSearch
         int nextWord = 0;
         for (int childIndex = index; childIndex < children.size(); childIndex++) {
             Regexp element = children.get(childIndex);
-            if (!matchesEmptyOnly(element, 0)) {
+            if (!matchesEmptyOnly(element, true, 0)) {
                 ByteGate gate = byteGate(element);
                 if (nextWord == 0) {
                     return gate;
@@ -1485,6 +1561,11 @@ final class InnerLiteralSearch
     private static boolean holdsOnlyAsciiNonWordBytes(ByteGate gate)
     {
         return ((gate.word0() & ASCII_WORD_BYTES_0) | (gate.word1() & ASCII_WORD_BYTES_1) | gate.word2() | gate.word3()) == 0;
+    }
+
+    private static boolean isAsciiWordByte(byte value)
+    {
+        return inByteGate(value, ASCII_WORD_BYTES_0, ASCII_WORD_BYTES_1, 0, 0);
     }
 
     // The gate of word boundaries alone: the ASCII word bytes for `NEXT_IS_WORD`, the other ASCII
@@ -1602,13 +1683,80 @@ final class InnerLiteralSearch
     // case.
     private static boolean hasNoEarlierMatch(Regexp prefix, byte[][] literals, boolean lettersEitherCase, CaseFolding caseFolding)
     {
-        if (literals.length == 1 && !canConsumeEveryLiteralByte(prefix, literals[0], lettersEitherCase)) {
+        if (hasLiteralOrFixedLengthProof(prefix, literals, lettersEitherCase, caseFolding)) {
             return true;
         }
-        if (MatchLength.analyze(prefix, caseFolding).fixed() >= 0) {
-            return true;
+        return hasDisjointClassSeparator(prefix, literals, lettersEitherCase, true);
+    }
+
+    // The crate's first two proofs, which also bound a count's match to its literal; see
+    // [#countEnd]: a single literal the prefix cannot consume every byte of, or a prefix of fixed
+    // length. With `lettersEitherCase`, each ASCII letter of the literal may occur in either case.
+    private static boolean hasLiteralOrFixedLengthProof(Regexp prefix, byte[][] literals, boolean lettersEitherCase, CaseFolding caseFolding)
+    {
+        return (literals.length == 1 && !canConsumeEveryLiteralByte(prefix, literals[0], lettersEitherCase)) || MatchLength.analyze(prefix, caseFolding).fixed() >= 0;
+    }
+
+    // What a count needs to end each match at its literal's end, or null when it may not; see
+    // REGULATOR_DECISIONS.md, Inner Literal Counts To The Literal End. The elements from
+    // `suffixIndex` on must add nothing to a match: each matches only the empty string without an
+    // assertion, or is a word boundary right after a literal whose last bytes, `lastBytes`, are
+    // all ASCII word bytes, which holds where the byte after the hit is an ASCII byte that is not
+    // a word byte. A match that starts at or before a hit from which the reverse search finds a
+    // start at or after the search position then has its literal at that hit under
+    // [#hasLiteralOrFixedLengthProof], the class-pair proof, the separator at the prefix's end
+    // where the byte before the hit is ASCII, and the class-run proof for a single literal before
+    // a word boundary, when every ASCII byte of the run's class is a word byte. The separator at
+    // the prefix's start, and the class-run proof without the boundary, bound only the match
+    // start: from the start of ` xHolmesHolmes`, `\s+\w+Holmes` matches past the first hit, and
+    // from the start of `xababab`, `\w+ab` does, so a count search that stopped at the first
+    // literal's end would end inside the match. Each proof compares the prefix with the literal's
+    // exact bytes, so a case-insensitive literal, whose other cases they do not see, takes the
+    // full confirmation.
+    private static CountEnd countEnd(List<Regexp> children, int suffixIndex, ByteGate lastBytes, Regexp prefix, byte[][] literals, FoldedLiteral foldedLiteral, boolean classPair, boolean behindClassRun, CaseFolding caseFolding)
+    {
+        if (foldedLiteral != null) {
+            return null;
         }
-        return hasDisjointClassSeparator(prefix, literals, lettersEitherCase);
+        boolean nonWordAfter = false;
+        for (int index = suffixIndex; index < children.size(); index++) {
+            Regexp element = children.get(index);
+            while (element.op() == RegexpOp.CAPTURE) {
+                element = element.child(0);
+            }
+            if (isPlainWordBoundary(element) && holdsOnlyAsciiWordBytes(lastBytes)) {
+                nonWordAfter = true;
+            }
+            else if (!matchesEmptyOnly(element, false, 0)) {
+                return null;
+            }
+        }
+        if (behindClassRun) {
+            return nonWordAfter && literals.length == 1 && hasAsciiWordRunClass(prefix) ? new CountEnd(false, true) : null;
+        }
+        if (hasLiteralOrFixedLengthProof(prefix, literals, false, caseFolding) || (classPair && hasNoEarlierMatchAcrossLastByte(prefix, literals))) {
+            return new CountEnd(false, nonWordAfter);
+        }
+        return hasDisjointClassSeparator(prefix, literals, false, false) ? new CountEnd(true, nonWordAfter) : null;
+    }
+
+    // Whether every ASCII byte the class of a class-run prefix matches is a word byte. The run's
+    // characters read each ASCII byte as one of their own.
+    private static boolean hasAsciiWordRunClass(Regexp prefix)
+    {
+        Regexp leaf = concatenatedClassRun(elementsAfterLeadingEmptyOnly(prefix), 0).leaf();
+        return switch (leaf.op()) {
+            case LITERAL -> leaf.rune() > 0x7F || isAsciiWordByte((byte) leaf.rune());
+            case CHAR_CLASS -> {
+                for (int value = 0; value < 0x80; value++) {
+                    if (leaf.charClass().contains(value) && !isAsciiWordByte((byte) value)) {
+                        yield false;
+                    }
+                }
+                yield true;
+            }
+            default -> false;
+        };
     }
 
     // A prefix of leading assertions and then a run of one class has the property the search
@@ -1636,7 +1784,7 @@ final class InnerLiteralSearch
         }
         List<Regexp> elements = prefix.op() == RegexpOp.CONCAT ? prefix.children() : List.of(prefix);
         int first = 0;
-        while (first < elements.size() && matchesEmptyOnly(elements.get(first), 0)) {
+        while (first < elements.size() && matchesEmptyOnly(elements.get(first), true, 0)) {
             first++;
         }
         return elements.subList(first, elements.size());
@@ -1865,11 +2013,12 @@ final class InnerLiteralSearch
         return ('a' <= rune && rune <= 'z') || ('A' <= rune && rune <= 'Z');
     }
 
-    // A required class at either end of the prefix, disjoint from the rest of the prefix and from
-    // every literal, separates the match start from each candidate: a reverse search cannot slide
-    // it across either one. The ends skip elements, such as assertions, that match only the empty
-    // string. With `lettersEitherCase`, the class must hold neither case of a literal's letter.
-    private static boolean hasDisjointClassSeparator(Regexp prefix, byte[][] literals, boolean lettersEitherCase)
+    // A required class at either end of the prefix, or only at its last when `includeFirst` is
+    // false, disjoint from the rest of the prefix and from every literal, separates the match
+    // start from each candidate: a reverse search cannot slide it across either one. The ends skip
+    // elements, such as assertions, that match only the empty string. With `lettersEitherCase`,
+    // the class must hold neither case of a literal's letter.
+    private static boolean hasDisjointClassSeparator(Regexp prefix, byte[][] literals, boolean lettersEitherCase, boolean includeFirst)
     {
         while (prefix.op() == RegexpOp.CAPTURE) {
             prefix = prefix.child(0);
@@ -1881,7 +2030,7 @@ final class InnerLiteralSearch
         int first = -1;
         int last = -1;
         for (int index = 0; index < children.size(); index++) {
-            if (!matchesEmptyOnly(children.get(index), 0)) {
+            if (!matchesEmptyOnly(children.get(index), true, 0)) {
                 if (first < 0) {
                     first = index;
                 }
@@ -1891,7 +2040,7 @@ final class InnerLiteralSearch
         if (first < 0) {
             return false;
         }
-        return hasDisjointClassSeparatorAt(children, last, literals, lettersEitherCase) || (first != last && hasDisjointClassSeparatorAt(children, first, literals, lettersEitherCase));
+        return hasDisjointClassSeparatorAt(children, last, literals, lettersEitherCase) || (includeFirst && first != last && hasDisjointClassSeparatorAt(children, first, literals, lettersEitherCase));
     }
 
     private static boolean hasDisjointClassSeparatorAt(List<Regexp> children, int separatorIndex, byte[][] literals, boolean lettersEitherCase)
@@ -1915,17 +2064,20 @@ final class InnerLiteralSearch
         return true;
     }
 
-    private static boolean matchesEmptyOnly(Regexp regexp, int depth)
+    // Whether the expression matches only the empty string, an assertion counting as one that
+    // does only when `assertionsMatchEmpty` is set.
+    private static boolean matchesEmptyOnly(Regexp regexp, boolean assertionsMatchEmpty, int depth)
     {
         if (depth >= MAX_RECURSIVE_DEPTH) {
             return false;
         }
         return switch (regexp.op()) {
-            case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT -> true;
-            case CAPTURE -> matchesEmptyOnly(regexp.child(0), depth + 1);
+            case EMPTY_MATCH -> true;
+            case BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT -> assertionsMatchEmpty;
+            case CAPTURE -> matchesEmptyOnly(regexp.child(0), assertionsMatchEmpty, depth + 1);
             case CONCAT -> {
                 for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-                    if (!matchesEmptyOnly(regexp.child(childIndex), depth + 1)) {
+                    if (!matchesEmptyOnly(regexp.child(childIndex), assertionsMatchEmpty, depth + 1)) {
                         yield false;
                     }
                 }

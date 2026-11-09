@@ -740,7 +740,9 @@ public class TestFixedWidthByteSpanMatcher
         // class pair. On fewer bytes every language, Trino included, counts and finds matcher
         // spans with that matcher, which builds no program search, while full-Slice find stays on
         // the engine. Each search covers the last bytes of a 1024-byte input that ends in a match,
-        // so the find that resumes after the match has no bytes left.
+        // so the find that resumes after the match has no bytes left. Every match of [a-z]shing
+        // ends at its literal's end, so its count of the 95-byte input, whose hit lies past the
+        // near-start fallback, confirms the hit on the reverse prefix DFA alone.
         for (Map.Entry<String, String> example : List.of(Map.entry("[a-z]shing", "ishing"), Map.entry("[a-z][?!.][\"']x", "a?\"x"))) {
             String expression = example.getKey();
             int matchStart = 1024 - example.getValue().length();
@@ -748,12 +750,19 @@ public class TestFixedWidthByteSpanMatcher
             for (int length : List.of(CompiledPattern.MINIMUM_LONG_SEARCH_BYTES - 1, CompiledPattern.MINIMUM_LONG_SEARCH_BYTES, InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1)) {
                 Slice input = longInput.slice(longInput.length() - length, length);
                 boolean shortSearch = length < CompiledPattern.MINIMUM_LONG_SEARCH_BYTES;
+                boolean literalEndCount = expression.equals("[a-z]shing") && length == InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES - 1;
                 for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
                     String label = "%s count of %s bytes".formatted(entry.getKey(), length);
                     CompiledPattern pattern = entry.getValue();
                     assertThat(pattern.shortFixedWidthByteMatcher()).as(label).isNotNull();
                     assertThat(pattern.count(input)).as(label).isEqualTo(1);
-                    assertProgramSearchUnless(shortSearch, pattern, label);
+                    if (literalEndCount) {
+                        assertNoProgramSearch(pattern, label);
+                        assertThat(pattern.innerLiteralSearchForDiagnostics().reversePrefixProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).as(label).isNotNull();
+                    }
+                    else {
+                        assertProgramSearchUnless(shortSearch, pattern, label);
+                    }
                 }
                 for (Map.Entry<String, CompiledPattern> entry : innerLiteralPatterns(expression).entrySet()) {
                     String label = "%s matcher find with %s bytes left".formatted(entry.getKey(), length);

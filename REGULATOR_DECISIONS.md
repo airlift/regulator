@@ -845,8 +845,10 @@ through one volatile field:
   exclusive search selects, or, as a count, to judge other searches' resets
   where the pointer table can be given back
 - the inner literal search runs its reverse prefix search and forward
-  confirmation in one pass over one captured root per DFA; when the pass cannot
-  finish, for example at a missing transition, the two searches run separately
+  confirmation in one pass over one captured root per DFA, except in a count
+  that [ends at the literal](#inner-literal-counts-to-the-literal-end), which
+  runs the reverse DFA alone; when the pass cannot finish, for example at a
+  missing transition, the two searches run separately
 - cache versions prevent queued builders from repeating work already published
   by another thread
 
@@ -2233,9 +2235,12 @@ byte, and no member holds one of those bytes before its end. An earlier match
 that spanned a later candidate would then need its prefix to consume that
 candidate's last byte, which only the one-byte opener could, and the opener lies
 before the candidate. A pair no proof admits is skipped, so a later literal can
-still decide. This is a performance-only deviation: the reverse prefix DFA and
-the anchored forward DFA still decide every candidate, and randomized tests
-compare the results with the ordinary engine.
+still decide. This is a performance-only deviation: in a find, and in a count
+that takes the full confirmation, the reverse prefix DFA and the anchored
+forward DFA still decide every candidate, a count that
+[ends at the literal](#inner-literal-counts-to-the-literal-end) asks the
+reverse DFA alone, and randomized tests compare the results with the ordinary
+engine.
 
 Measured 3 hosts a side with compare and AND on both platforms,
 `quotes-bounded` takes 0.54x the time of the start-byte scan on r8i and 0.74x on
@@ -2320,6 +2325,85 @@ gates further back and the `\b` gates take `word-ending-nn` counts to 0.368x on
 r9g and 0.342x on r8i, `tom-sawyer-huckle-fin-prefix-long` to 0.546x and
 0.430x, and the Holmes rows, `before-holmes`, `before-after-holmes`,
 `reverse-suffix/holmes`, and `reverse-inner/holmes`, to 0.91x–0.96x.
+
+## Inner Literal Counts To The Literal End
+
+A count needs each match's end, where the next search starts, but not its
+start. Where every match provably ends at its literal's end, the inner literal
+count confirms a hit with one earliest-match run of the reverse prefix DFA,
+which stops at the first start it reaches, and takes the literal's end as the
+match end. It skips the reverse search's run back to the leftmost start and the
+forward DFA. Find keeps its confirmation; the matcher also needs the start.
+
+Let the count search from `b`, the previous match end. Let `M` be the match the
+ordinary engine finds, leftmost-first from `b`, with start `s*` and literal at
+`x*`. Let `L` be a hit that passes the byte gates, from which the reverse search
+finds some start `s >= b`, and whose next byte settles any following `\b`, where
+every earlier hit was rejected. The count takes `L`'s end as `M`'s end, which
+needs three things.
+
+- **Every match ends at its literal's end.** All members have the same byte
+  length, and the elements after the literal are none, ones that match only the
+  empty string without an assertion, or `\b`, after a literal whose last bytes
+  are all ASCII word bytes. A `\b` holds when the byte after the hit is an ASCII
+  byte outside `[0-9A-Za-z_]`, which every language reads as a character that is
+  not a word character, and the count checks that byte, taking the full
+  confirmation for any other byte or the window's end. So a prefix match `[s,
+  L)` makes `[s, end of L)` a match, and `s* <= s`.
+- **`x* >= L`.** `M`'s literal is a hit with a start at or after `b`, which
+  passes every gate, since the gates hold for every match. Each earlier hit
+  failed a gate or had no start at or after `b`, or its forward confirmation,
+  run when the byte after it did not settle the `\b`, found no match there.
+- **`x* <= L`.** `M`'s prefix spans `[s*, x*)` with `s* <= s <= L`, so with
+  `x* > L` it would cover the start of the hit at `L`. Each proof below rules
+  that out. The count then ends at `L`'s end, as the ordinary count does, so it
+  never counts two overlapping matches: in `a Holmes Holmes`, the second
+  `Holmes` has no word starting at or after the first match's end.
+
+Five proofs give `x* <= L`. Others admit a search, but not this. Each compares
+the prefix with the literal's exact bytes, so a case-insensitive literal, whose
+other cases they do not see, takes the full confirmation.
+
+- A single literal the prefix cannot consume every byte of, the crate's first
+  proof: a prefix that covers the hit at `L` either holds the whole occurrence
+  or ends inside it at an overlapping occurrence, whose period then holds every
+  distinct byte of the literal.
+- A prefix of fixed byte length `k`: `x* = s* + k <= s + k = L`.
+- A required class `C` at the prefix's end, disjoint from the rest of the
+  prefix and from the literal's bytes, when the byte before the hit is ASCII,
+  which the count checks. `C` cannot hold the hit's first byte, an ASCII byte
+  that every compiled class reads as a character of its own, so `M`'s run of
+  `C` would start after `L`, and the rest of `M`'s prefix would cover `L - 1`.
+  But every prefix match ending at `L` ends with a character of `C`, and the
+  ASCII byte at `L - 1` is that whole character, which the rest of the prefix
+  cannot match. The separator at the prefix's start, which the crate's third
+  proof also accepts, gives no such bound: from the start of
+  ` xHolmesHolmes`, `\s+\w+Holmes` matches the whole text, past the first hit.
+- The [class-pair proof](#inner-literal-class-pairs): with `s* <= s`, the
+  prefix's one-byte opener lies before the hit's last byte, which only that
+  opener could consume.
+- The [class-run proof](#inner-literal-class-run-prefix) for a single literal
+  followed by `\b`, when every ASCII byte of the run's class is a word byte.
+  `M`'s run covers `[L, x*)`, which holds the hit's ASCII bytes, every ASCII
+  byte `M`'s run consumes is a word byte, and the byte after the hit is ASCII
+  but not a word byte. With `x*` past the hit's end the run covers that byte; at
+  the hit's end the literal starts with it, but the hit starts with a word byte;
+  inside the hit, `M`'s literal holds that byte at an offset the overlap's
+  period maps into `[L, x*)`. Without the `\b` the run proof gives no bound:
+  from the start of `xababab`, `\w+ab` matches the whole text, where the first
+  hit with a start ends after `xab`.
+
+The earliest-match run is the reverse DFA's existing earliest mode, on the same
+cached longest-match DFA, so it adds no state. It keeps the search's bounds and
+fallbacks: it reads back no further than the previous candidate's literal end
+and falls back when still alive there, a DFA failure retries the two searches
+one at a time, and the near-start and reread rules run before it.
+
+Measured with rebar 2 hosts a side on each platform, over the byte gates alone,
+the route takes `literal-suffix-nosom` counts to 0.629x on r9g and 0.591x on
+r8i, `quotes-bounded` to 0.901x and 0.885x, `shing` to 0.918x and 0.935x, and
+`word-ending-nn` to 0.958x and 0.978x. `count-spans` rows that take the route
+lose at most 1.7% on r9g and 2.8% on r8i, within noise.
 
 ## Required Literal Absence On Long Windows
 
@@ -2540,7 +2624,9 @@ singles out the same prefix shape, a pure repeat, but only to decide whether a
 match exists; .NET's `LiteralAfterLoop` (`RegexPrefixAnalyzer`) searches from
 the first hit behind a leading class loop, but only an unbounded one that
 cannot consume the literal. As for class pairs, the DFAs still decide every
-candidate, and randomized tests compare the results with the ordinary engine.
+candidate of a find or a fully confirmed count, the reverse DFA alone those of a
+count that [ends at the literal](#inner-literal-counts-to-the-literal-end), and
+randomized tests compare the results with the ordinary engine.
 
 Measured with rebar on one r9g and one r8i Spot host, `leipzig/word-ending-nn`
 took 0.11x the base's time on r9g and 0.12x on r8i,
