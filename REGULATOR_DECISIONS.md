@@ -770,7 +770,9 @@ text, so the pair scan rejects little that a first-byte scan would not.
   A reset publishes Java state and transition arrays at their initial capacity,
   so expanded tables and per-state objects return to the budget; the state hash table keeps its
   capacity and its charge. A full cache resets, and repeated reset thrashing
-  falls back to the NFA.
+  falls back to the NFA, or, for a group-zero search of a program with bounded,
+  assertion-free matches, to the position automaton (see
+  [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)).
 - A capture NFA search has its own allowance, the forward share, beside the DFA
   caches'. A search tracks K slots, the caller's, up to the slots through the
   highest surviving CAPTURE, and reports the slots past that unset: a trailing
@@ -1432,7 +1434,8 @@ residual changes only which engine runs at a threshold. The
 `([a-q][^u-z]{23}x)` sequence at a 16 MiB budget is the known example: whether
 the collector has run decides whether the count's next two-reset check finds
 more or less than the byte scan's 64 KiB minimum remaining, so that count gives
-up and counts on the NFA and BitState in one run and keeps the DFA in the other.
+up and counts on the position automaton and BitState in one run and keeps the DFA
+in the other.
 Removing the residual means making states per reset independent of collection
 timing, which changes the superseded cap that copy-on-reset's native memory
 bound rests on; that is left to a separate change.
@@ -1572,6 +1575,66 @@ up. A DFA count on another thread that completes while a window is open ends
 the streak but leaves the window, so a short row cannot cut short the window a
 thrashing row opened. The streak is a plain `int` that stops counting at two,
 and a lost update to it can open a window one bail early or one bail late.
+
+## Bit-Parallel Position Automaton After DFA Failure
+
+Upstream RE2 steps the Pike NFA over the whole text when its DFA fails. In
+Regulator, a group-zero search, boolean search, or count whose forward DFA
+cannot initialize or abandons a search, and whose range OnePass and BitState
+decline, runs a bit-parallel Glushkov position automaton instead when the
+program's matches are bounded, assertion-free, and never empty
+([catalog](docs/reference/OPTIMIZATION_CATALOG.md#bit-parallel-position-automaton-for-bounded-repeats)).
+Matches and spans stay exactly upstream's; only the engine changes. Searches
+for groups beyond group zero and many-match searches keep upstream's engines.
+
+The automaton finds E, the earliest end of any match, in one pass. The program
+has no assertions, so text outside a window cannot change what a search inside
+it finds, and no match is longer than the longest path through the position
+graph. With no earliest end there is no match. Otherwise every match ends at or
+after E, the one ending at E starts before it, and the leftmost match starts no
+later than that one, so it starts at most the longest match's length before E
+and ends at most that length after E. The leftmost-first or leftmost-longest
+match that BitState or the Pike NFA finds in that window is the one the whole
+text holds. An anchored or full match needs only the length bound.
+
+Compilation builds the automaton, never the first search that falls back, so no
+search pays for setup. Its memory is charged to the forward program's DFA
+allowance, after every route selection makes and before the required bytes, and
+it yields to the forward DFAs as the plans above do: it is kept only where every
+forward DFA that could initialize still can. Where it is kept, the DFA cache is
+smaller by its charge, 544 bytes for `abcabd` at default options, and which
+forward DFAs initialize is unchanged at every budget.
+
+A program is admitted only with at most 512 byte positions, which bounds the
+state at eight words, the matcher's workspace at 16 longs, and the build's
+tables. UTF-8 `[^u-z]{20,80}` needs more and keeps the Pike NFA, while UTF-8
+`[^u-z]{10,30}` is admitted. A target that eight or more positions step to,
+besides the one just before it, steps by one test of the state against those
+predecessors on every byte; a target with fewer steps by its predecessors'
+follow sets, which cost work only on the bytes those predecessors are live, as
+Pike NFA threads do. In UTF-8 each copy of a multibyte class begins where two
+to four sequences of the copy before it end, so eight keeps those copies on
+follow sets. A program whose tests would exceed 32 word tests a byte, about
+what the Pike NFA spends a byte on one or two live threads, is not admitted:
+without that limit, UTF-8 `[^u-z]{10,30}` counts took 2.1 times their time on
+the Pike NFA.
+
+BitState searches the window only where its visited bitmap is at most 8 KiB, a
+quarter of upstream's per-search bound; otherwise the Pike NFA searches the
+window. A window search runs once a match, so on short matches a larger clear
+costs more than the Pike NFA it replaces. In bounded-repeat counts after a DFA
+bail, such as `[a-q][^u-z]{20,80}[x\xE0-\xFF]` over English text, running
+BitState on every window that fit its text limit took 1.80 to 1.86 times main's
+time on r9g on text dense with one-byte matches; the cap brings that row to
+1.21 to 1.24 on r9g and 1.17 to 1.20 on r8i, where it costs 8 to 9% against
+BitState on every window, and keeps every sparse win. Sparse counts run in
+0.019 to 0.17 of main's time on r9g and 0.029 to 0.17 on r8i, the digit-run row
+in 0.39, and UTF-8 `{10,30}` in 0.32 to 0.67. The dense row's remaining loss
+comes from running two engines a match, an earliest-end pass and then a window
+search, where the Pike NFA ran one search that stopped at the match: about 50
+ns a match. Skipping the automaton while a matcher's recent matches are much
+shorter than the longest match would recover it, at the cost of matcher-scope
+adaptive state; that is left to a separate decision.
 
 ## Boolean Partial-Match Specializations
 
@@ -2168,9 +2231,12 @@ reused contains on r8i. lh3lh3 date, which it also names, keeps no fact now that
 its gated one-byte search runs first.
 
 The fact only saves work, so its memory gives way. It is reserved after
-compilation's routes and after the OnePass tables of a program with a
-final-line end anchor (see
+compilation's routes, after the OnePass tables of a program with a final-line
+end anchor (see
 [Text-Dependent Assertions In OnePass](#text-dependent-assertions-in-onepass)),
+and after the position automaton, which is charged to the forward program itself
+(see
+[Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)),
 from the program that holds the forward DFA allowance (the lowered boolean
 program where there is one). It is kept only if every first-match and
 longest-match DFA that could initialize before the charge, start-byte tables
@@ -3796,7 +3862,9 @@ backtracker.
 
 ## Matcher-Owned Capture Workspaces
 
-`RegexpMatcher` owns reusable OnePass, BitState, and NFA scratch storage.
+`RegexpMatcher` owns reusable OnePass, BitState, NFA, and position-automaton
+scratch storage. The position automaton's holds at most 16 longs, and only an
+automaton of more than two words of state uses it.
 BitState reuses its visited bitmap, capture scratch, and bounded initial
 traversal jobs. NFA reuses its sparse queues, traversal stacks, best-match
 storage, and primitive capture thread arena. These workspaces are private to the

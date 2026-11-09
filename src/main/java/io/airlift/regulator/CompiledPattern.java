@@ -111,6 +111,10 @@ abstract sealed class CompiledPattern
     // Up to this input length, a start-anchored search for submatches that can run OnePass skips
     // the DFA.
     private static final int ONE_PASS_SUBMATCH_MAXIMUM_LENGTH = 4096;
+    // The largest visited bitmap, in bytes, that BitState clears for one window search of the
+    // position automaton, a quarter of upstream's per-search bound: a window search runs once a
+    // match, and on short matches a larger clear costs more than the Pike NFA it replaces.
+    static final long POSITION_NFA_WINDOW_BIT_STATE_MAXIMUM_BYTES = 8L * 1024;
     private static final int LOWERED_CANDIDATE_SEARCH_BYTES = 64;
     // After this many consecutive unanchored searches of one matcher's input whose DFA failed, in
     // a program whose DFA can quit on a byte outside ASCII, the matcher's later searches of that
@@ -581,6 +585,7 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 null,
+                null,
                 true,
                 null);
     }
@@ -797,6 +802,7 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 null,
+                null,
                 false,
                 extendingLiterals);
         // Every operation runs on the set only where the set is the shape's route for find and
@@ -869,6 +875,7 @@ abstract sealed class CompiledPattern
                     0,
                     Map.of(),
                     compactBoundedCharacterClass,
+                    null,
                     null,
                     null,
                     null,
@@ -1187,6 +1194,12 @@ abstract sealed class CompiledPattern
                 requiredBytes.singleByteValue() == booleanPlans.innerLiteralSearch().oneByteLiteral()) {
             requiredBytes = null;
         }
+        // The bit-parallel automaton that the group-zero searches of a program with bounded
+        // matches run where they would otherwise step the Pike NFA over the whole text, once the
+        // forward DFA fails. It is built here, never on first match; route selection reserves it
+        // from `partialProg`'s DFA budget after every route selection makes, and it yields to the
+        // forward DFAs.
+        PositionNfa positionNfa = PositionNfa.build(semanticProgram);
 
         return selectRoutes(
                 flags,
@@ -1209,6 +1222,7 @@ abstract sealed class CompiledPattern
                 requiredBytes,
                 normalizedSuffixRegexp,
                 finalLineEndOnePass,
+                positionNfa,
                 false,
                 null);
     }
@@ -1230,7 +1244,8 @@ abstract sealed class CompiledPattern
     /// memory of the matcher class counter and the single-byte table from `partialProg`'s DFA
     /// budget, then of the OnePass tables in `finalLineEndOnePass`, which it restores to
     /// `partialProg`, and of the required bytes from the program that holds the forward DFA
-    /// budget, before any DFA can snapshot it, and builds the table.
+    /// budget, with `positionNfa` reserved between them from `partialProg`'s budget and
+    /// configured on it, all before any DFA can snapshot a budget, and builds the table.
     private static Analysis selectRoutes(
             int flags,
             long maxMemory,
@@ -1252,6 +1267,7 @@ abstract sealed class CompiledPattern
             RequiredBytes requiredBytes,
             Regexp requiredBytesRegexp,
             Prog.OnePassTables finalLineEndOnePass,
+            PositionNfa positionNfa,
             boolean fixedWidthWithoutProgram,
             LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals)
     {
@@ -1308,25 +1324,32 @@ abstract sealed class CompiledPattern
         }
         // After the routes above, the OnePass tables build released and then the required bytes
         // take their memory from the program that holds the forward DFA budget, the lowered
-        // program where there is one. Each is kept only where every forward DFA that could
-        // initialize still can; see costsDfaInitialization. The tables come after every plan and
-        // route, so they change none of them, and the literal set's DFA checks below give the
-        // same answers with or without them. A program that does not keep its tables runs on
-        // BitState or the NFA. The required bytes only save work, so they give way to the tables
-        // too, and a pattern they do not fit keeps no check. A frontend route reserved later,
-        // Trino's ordered-literal matcher, is charged ahead of the required bytes, and they are
-        // judged again after it. A pattern with a single-byte table keeps none: its group-zero
-        // matchers find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a
-        // check ahead of the table would scan such a window twice. An exact literal of a pattern
-        // with no other literal route takes its long-window search into the same charge, with the
-        // search-end bound's search where it has one. A literal searched beside another literal
-        // route takes its long-window search without the bound. If the full charge does not fit,
-        // the bound is removed and the charge retried. If that fails, the pattern keeps only the
-        // short-window check when eligible and affordable, and otherwise keeps no check. An inner
-        // literal search is such a route unless only the class-run proof admits it.
+        // program where there is one. Between them, the position automaton takes its memory from
+        // `partialProg`, whose searches run it. Each is kept only where every forward DFA that
+        // could initialize still can; see costsDfaInitialization. The tables and the automaton come
+        // after every plan and route selection makes, so they change none of them, and the literal
+        // set's DFA checks below give the same answers with or without them. A program that does
+        // not keep its tables runs on BitState or the NFA, and one that does not keep its automaton
+        // runs on the Pike NFA where it would have run the automaton. The required bytes only save
+        // work, so they give way to the tables, and to the automaton too where both charge the same
+        // program; the required bytes reject on every search, the automaton only after the DFA
+        // fails. A pattern they do not fit keeps no check. A frontend route reserved later, Trino's
+        // ordered-literal matcher, is charged ahead of the required bytes, and they are judged
+        // again after it. A pattern with a single-byte table keeps none: its group-zero matchers
+        // find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a check ahead
+        // of the table would scan such a window twice. An exact literal of a pattern with no other
+        // literal route takes its long-window search into the same charge, with the search-end
+        // bound's search where it has one. A literal searched beside another literal route takes
+        // its long-window search without the bound. If the full charge does not fit, the bound is
+        // removed and the charge retried. If that fails, the pattern keeps only the short-window
+        // check when eligible and affordable, and otherwise keeps no check. An inner literal search
+        // is such a route unless only the class-run proof admits it.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
+        }
+        if (positionNfa != null && tryReserveBesideForwardDfas(partialProg, positionNfa.estimatedRetainedSize())) {
+            partialProg.configurePositionNfa(positionNfa);
         }
         RequiredBytes reservedRequiredBytes = null;
         if (requiredBytes != null && singleByteMatcher == null) {
@@ -4265,9 +4288,9 @@ abstract sealed class CompiledPattern
     // changes without direct path tests and focused Intel and Graviton benchmarks.
 
     /// The ordinary engine: the disjoint suffix-repeat, whole-input capture, and word-run
-    /// matchers, then the DFA, OnePass, BitState, and NFA cascade. Every route that leaves a plan
-    /// or kernel for the ordinary engine calls this, as does the `matchInternal` that
-    /// ScanKernelGenerator emits for a call off the plan.
+    /// matchers, then the DFA, OnePass, BitState, and position automaton or NFA cascade. Every
+    /// route that leaves a plan or kernel for the ordinary engine calls this, as does the
+    /// `matchInternal` that ScanKernelGenerator emits for a call off the plan.
     final boolean matchOnOrdinaryEngine(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
     {
         // acceptsScanPlanArguments makes the same checks; keep in step.
@@ -4617,7 +4640,8 @@ abstract sealed class CompiledPattern
         }
 
         // ===== Phase 4: Submatch Engine Cascade =====
-        // Extract capturing group positions using OnePass → BitState → NFA cascade.
+        // Extract capturing group positions using OnePass → BitState → position automaton or
+        // NFA cascade.
 
         boolean hasExactDfaRange = !dfaSearchSkippedOrFailed && matchStart >= 0 && matchEnd >= 0;
         int submatchStart = hasExactDfaRange ? start + matchStart : start;
@@ -5023,6 +5047,10 @@ abstract sealed class CompiledPattern
                     groupOffsets,
                     bitStateWorkspace(workspaces));
         }
+        boolean groupZeroOnly = groupOffsets == null || groupOffsets.length == 2;
+        if (groupZeroOnly && prog.positionNfa() != null) {
+            return searchOnPositionNfa(prog, context, start, end, submatchAnchored, matchKind, groupOffsets, workspaces);
+        }
         if (groupOffsets != null && groupOffsets.length == 2) {
             return Nfa.searchGroupZero(
                     prog,
@@ -5043,6 +5071,74 @@ abstract sealed class CompiledPattern
                 matchKind,
                 groupOffsets,
                 nfaWorkspace(workspaces));
+    }
+
+    /// Finds group zero, or whether there is a match, with the program's position automaton, or,
+    /// for an anchored search, with its length bound alone, as [#runSubmatchEngine] would with
+    /// the Pike NFA. The program has no assertions, so the text outside a window cannot change
+    /// what a search inside it finds, and every match is at most [PositionNfa#maxLength()] bytes
+    /// long. An anchored match therefore lies in the first `maxLength` bytes, and a full match
+    /// exists only on a text no longer than that; BitState or the Pike NFA searches that window.
+    /// An unanchored search first finds E, the earliest end of any match. No match means the Pike
+    /// NFA would find none either. Otherwise every match ends at or after E, the one ending at E
+    /// starts before it, and the leftmost match starts no later than that one, so it starts in
+    /// `[E - maxLength, E)` and ends by `E + maxLength`; the leftmost-first or leftmost-longest
+    /// match found in that window is the one the whole text holds.
+    private static boolean searchOnPositionNfa(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] groupOffsets,
+            MatchWorkspaces workspaces)
+    {
+        PositionNfa positionNfa = prog.positionNfa();
+        int maxLength = positionNfa.maxLength();
+        int windowStart = start;
+        int windowEnd;
+        if (matchKind == Prog.MatchKind.FULL_MATCH) {
+            if (end - start > maxLength) {
+                return false;
+            }
+            windowEnd = end;
+        }
+        else if (anchored) {
+            windowEnd = start + Math.min(maxLength, end - start);
+        }
+        else {
+            int base = context.byteArrayOffset();
+            int earliestEnd = positionNfa.earliestEnd(prog, context.byteArray(), base + start, base + end, positionNfaWorkspace(positionNfa, workspaces));
+            if (earliestEnd < 0) {
+                return false;
+            }
+            if (groupOffsets == null) {
+                return true;
+            }
+            int matchEnd = earliestEnd - base;
+            windowStart = Math.max(start, matchEnd - maxLength);
+            windowEnd = matchEnd + Math.min(maxLength, end - matchEnd);
+        }
+
+        boolean matched;
+        // BitState searches the window where its visited bitmap is at most the cap; otherwise the
+        // Pike NFA does.
+        int bitStateMaxSize = anchored ? prog.anchoredBitStateTextMaxSize() : prog.unanchoredBitStateTextMaxSize();
+        if (prog.canBitState() && windowEnd - windowStart <= bitStateMaxSize &&
+                prog.listCount() * (windowEnd - windowStart + 1L) <= POSITION_NFA_WINDOW_BIT_STATE_MAXIMUM_BYTES * Byte.SIZE) {
+            matched = BitState.search(prog, context, windowStart, windowEnd, anchored, matchKind, groupOffsets, bitStateWorkspace(workspaces));
+        }
+        else if (groupOffsets != null) {
+            matched = Nfa.searchGroupZero(prog, context, windowStart, windowEnd, anchored, matchKind, groupOffsets, nfaWorkspace(workspaces));
+        }
+        else {
+            matched = Nfa.search(prog, context, windowStart, windowEnd, anchored, matchKind, null, nfaWorkspace(workspaces));
+        }
+        if (matched && groupOffsets != null && windowStart != start) {
+            shiftGroupOffsets(groupOffsets, windowStart - start);
+        }
+        return matched;
     }
 
     private static MatchWorkspaces fixedMatchWorkspaces(
@@ -5083,6 +5179,13 @@ abstract sealed class CompiledPattern
             return matcher.nfaWorkspace();
         }
         return ((FixedMatchWorkspaces) workspaces).nfaWorkspace();
+    }
+
+    // Only a matcher keeps the position automaton's workspace, and only for an automaton that uses
+    // one; any other search of such an automaton allocates its own.
+    private static PositionNfa.Workspace positionNfaWorkspace(PositionNfa positionNfa, MatchWorkspaces workspaces)
+    {
+        return positionNfa.usesWorkspace() && workspaces instanceof RegexpMatcher matcher ? matcher.positionNfaWorkspace() : null;
     }
 
     // Only a matcher searches its input repeatedly, so only a matcher keeps a quit streak.

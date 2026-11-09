@@ -219,7 +219,8 @@ public class TestTrinoRegexpDifferential
             Regex oracle = joniPattern(pattern);
             verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
         }
-        // Text past BitState's unanchored limit takes the Pike VM, with and without a group.
+        // Text past BitState's unanchored limit takes the Pike VM for the capture group, and,
+        // where the DFA fails, the position automaton for group zero.
         String fillerUnit = "filler text, ";
         for (String pattern : List.of("(?i)password", "(?i)(password)")) {
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
