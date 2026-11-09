@@ -132,10 +132,10 @@ final class LiteralSearchKernel
     }
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher, LiteralGapMatcher, and
-    /// InnerLiteralSearch call it for such literals and [#findContains(Slice,int,int)] for longer
-    /// ones. It scans two words at a time, reading LOW_BITS from [#lowBits], and finishes the
-    /// range with [#findSingleByteTail].
+    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher, LiteralGapMatcher,
+    /// LiteralNeighborMatcher, and InnerLiteralSearch call it for such literals and
+    /// [#findContains(Slice,int,int)] for longer ones. It scans two words at a time, reading
+    /// LOW_BITS from [#lowBits], and finishes the range with [#findSingleByteTail].
     /// TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
     /// LIKE pattern, and RequiredBytes.containsByte holds a presence-only copy of its word
     /// mechanics; keep the copies in step.
@@ -211,9 +211,10 @@ final class LiteralSearchKernel
 
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`, for a literal of at least two bytes and a valid range. LIKE, every language's regexp
-    /// contains and dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal, and
-    /// InnerLiteralSearch call it for such literals. Its word scan makes no call until it finds a
-    /// possible candidate, and a separate method verifies the candidates.
+    /// contains and dot-star spans, OrderedLiteralMatcher, LiteralGapMatcher's first literal,
+    /// LiteralNeighborMatcher, and InnerLiteralSearch call it for such literals. Its word scan
+    /// makes no call until it finds a possible candidate, and a separate method verifies the
+    /// candidates.
     int findContains(Slice input, int offset, int length)
     {
         if (literal.length > length) {

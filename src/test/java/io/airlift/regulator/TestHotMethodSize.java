@@ -426,6 +426,15 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the literal-neighbor matcher's find, which a full-Slice find of its pattern runs on
+    /// every input, small enough for C2 to inline into its route, and caps it at its size with the
+    /// one-byte literal's density sample. Raise the limit only after measuring the find again.
+    @Test
+    public void testLiteralNeighborFindStaysAtMeasuredSize()
+    {
+        assertThat(codeLength(LiteralNeighborMatcher.class, "find")).as("LiteralNeighborMatcher.find bytecode bytes").isPositive().isLessThanOrEqualTo(205);
+    }
+
     // Asserts that `methodName` of `type` calls both folded pair selectors and no folded pair
     // kernel directly.
     private static void assertCallsSelectors(Class<?> type, String methodName)

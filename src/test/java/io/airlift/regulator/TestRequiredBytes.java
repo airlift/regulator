@@ -28,6 +28,7 @@ import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
+import static io.airlift.regulator.CompiledPattern.BooleanPlanKind.LITERAL_NEIGHBORS;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -366,8 +367,10 @@ public class TestRequiredBytes
         // A single required byte checks every short window beside an inner literal search too, so
         // a line takes one route whatever its length, and the search still runs from its minimum,
         // as for the folded literal `=noqa`. A gated one-byte search for that byte itself, the
-        // email's `@` and Trino's `=`, runs at every length in place of the check, and the pattern
-        // keeps no required bytes.
+        // email's `@` and Trino's `=`, runs at every length in place of the check on the ordinary
+        // engine's route, which, for a pattern on the literal-neighbor plan, as the email is, runs
+        // only when that matcher leaves the find undecided, and the pattern keeps no required
+        // bytes.
         for (String pattern : List.of(EMAIL, NOQA_ASSIGNMENT)) {
             for (Map.Entry<String, CompiledPattern> compiled : compile(pattern).entrySet()) {
                 String description = "%s %s".formatted(compiled.getKey(), pattern);
@@ -405,8 +408,9 @@ public class TestRequiredBytes
             }
         }
 
-        // A window without `@` is the search's to reject at every short length, so neither find
-        // starts the forward DFA.
+        // A window without `@` is rejected at every short length, by the literal-neighbor matcher
+        // in full-Slice find and by the search in a matcher's find, so neither find starts the
+        // forward DFA.
         for (int length : new int[] {0, 7, 8, 63, RequiredBytes.SHORT_WINDOW_LIMIT - 1}) {
             Slice input = utf8Slice("x".repeat(length));
             for (Map.Entry<String, CompiledPattern> compiled : compile(EMAIL).entrySet()) {
@@ -818,6 +822,32 @@ public class TestRequiredBytes
             assertThat(matcher.find()).as(language).isFalse();
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
         }
+
+        // Nor is the literal-neighbor find plan, which answers full-Slice boolean find alone: the
+        // matcher and count reject a long window that lacks the literal before any engine runs, as
+        // without the plan.
+        for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+aa[a-z]+").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.findPlanForDiagnostics()).as(language).isEqualTo(LITERAL_NEIGHBORS);
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).isNotNull();
+            assertThat(pattern.count(utf8Slice(LONG_FILLER))).as(language).isZero();
+            assertNoForwardDfa(pattern, language + " [a-z]+aa[a-z]+ count");
+            RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            matcher.reset(utf8Slice(LONG_FILLER + "baab"));
+            assertThat(matcher.find()).as(language).isTrue();
+        }
+        // RE2's longest-match `[a-z]+::[0-9]+` has no inner literal search, so without the check
+        // its count would build the DFA.
+        Re2 longest = Re2.compile(utf8Slice("[a-z]+::[0-9]+"), Re2.Options.defaults().setLongestMatch(true));
+        assertThat(longest.findPlanForDiagnostics()).isEqualTo(LITERAL_NEIGHBORS);
+        assertThat(longest.innerLiteralSearchForDiagnostics()).isNull();
+        assertThat(longest.longWindowRequiredLiteral()).isNotNull();
+        assertThat(longest.count(utf8Slice("x".repeat(512)))).isZero();
+        assertNoForwardDfa(longest, "Re2 longest-match [a-z]+::[0-9]+");
+        assertThat(longest.count(utf8Slice("x".repeat(512) + " ab::12"))).isEqualTo(1);
 
         // A start literal filter that no DFA search runs is no other route. Java's $ is an
         // assertion the DFA cannot run, so the pattern scans for its literal before BitState
