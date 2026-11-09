@@ -1158,7 +1158,11 @@ those threads search.
 ## OnePass, BitState, and NFA
 
 Capture searches use RE2's OnePass, BitState, and NFA engines in RE2's order.
-These entries cover what Regulator changed or added in OnePass. BitState's
+A group-zero search of a pattern with bounded matches whose forward DFA fails
+runs the
+[bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats)
+where the NFA would step the whole text. These entries cover what Regulator
+changed or added in OnePass and in that fallback. BitState's
 bitmap, text limit, and eligibility, and the NFA's bounded capture passes, are
 in [Limits and defaults](REGULATOR_API.md#limits-and-defaults), and the
 capture work skipped for boolean and group-zero calls is in
@@ -1217,6 +1221,45 @@ capture work skipped for boolean and group-zero calls is in
   OnePass too. Java and Trino Unicode character data line searches run in
   0.61 to 0.76 of their earlier time on Graviton and 0.31 to 0.36 on Intel
   ([#128]).
+
+### Bit-parallel position automaton for bounded repeats
+
+- **Origin:** Adapted from Hyperscan's LimEx NFA, which steps one bit per
+  automaton state by shifted masks and takes the remaining edges from the
+  follow sets of its live exception states
+  ([limex_runtime_impl.h][hs-limex]); First described by Navarro and
+  Raffinot, whose bit-parallel simulation of the Glushkov position automaton
+  finds a search's earliest match end in one forward pass
+  ([New Techniques for Regular Expression Searching][nr-glushkov],
+  Algorithmica 2004); Inspired
+  by RE2, which finds a match's span with its DFA and runs a capture engine on
+  that span alone ([re2.cc][re2-re2]). Regulator: fan-in groups for targets
+  with many predecessors and their admission limit, the window around the
+  earliest end that BitState or the Pike NFA searches, and the yield to the
+  forward DFAs ([design][d-position-nfa]); base RE2 [O-DFA-013].
+- **Where:** `PositionNfa.build`, `PositionNfa.earliestEnd`,
+  `CompiledPattern.searchOnPositionNfa`, `CompiledPattern.selectRoutes`
+- **Applies when:** A group-zero search, boolean search, or count once the
+  forward DFA cannot initialize or abandons a search, and OnePass and BitState
+  decline the range, on a pattern whose matches are bounded, assertion-free,
+  and never empty, with at most 512 byte positions and at most 32 fan-in word
+  tests a byte. UTF-8 admits `[a-q][^u-z]{10,30}[x\xE0-\xFF]` but not
+  `{20,80}`, which needs more than 512 positions. Its memory yields to the
+  forward DFAs, as [Limits and defaults](REGULATOR_API.md#limits-and-defaults)
+  describes
+- **What it does:** Each byte position of the flattened program is one bit of
+  state. A step shifts the state for edges to the next position, tests it once
+  against each fan-in group (the predecessors shared by targets, such as the
+  suffix of `x{n,m}`, that eight or more other positions step to), and adds the
+  follow sets of live exception sources. One pass finds E, the earliest match
+  end, and the leftmost match lies within the longest match's length on either
+  side of E, a window that BitState searches when its visited bitmap is at most
+  8 KiB and the Pike NFA otherwise. After a DFA bail, sparse counts of
+  bounded repeats such as `[a-q][^u-z]{20,80}[x\xE0-\xFF]` take 0.019 to 0.17
+  of their earlier time on Graviton and 0.029 to 0.17 on Intel (UTF-8
+  `{10,30}` 0.32 to 0.67), while text dense with one-byte matches of a pattern
+  that also has a long alternative takes 1.17 to 1.24, about 50 ns more a
+  match for running two engines.
 
 ## Counting
 
@@ -1949,7 +1992,9 @@ in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
 
 Regulator's engines are RE2's. Its lazy DFA builds states from work queues
 into a state cache over byte classes, with dead and full-match sentinel states
-and an earliest-match exit, and falls back to the NFA when cache resets thrash.
+and an earliest-match exit, and falls back to the NFA when cache resets thrash,
+or, for a group-zero search of a pattern with bounded matches, to the
+[bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats).
 It caches start states per context as RE2 does ([O-DFA-014]), with
 Trino-line, after-CR (as regex-automata has it, [start.rs][ra-start]), and
 after-non-ASCII start contexts added ([#6], [#64]). With RE2's and .NET's
@@ -1985,7 +2030,7 @@ change is described.
 | Prefix acceleration in the DFA and NFA | [O-DFA-005], [O-RE2-004], [O-NFA-008] | `Prog.prefixAccel`, `Prog.prefixAccelSingleByteNoFoldCase`, `Prog.skipToStartCandidate` |
 | Byte classes; Regulator's builder skips small merged groups after 32 merges and renumbers active classes past 256 | [O-DFA-006], [O-PROG-003], [O-RE2-015] | `Prog.computeByteMap` |
 | Lock-free transition reads; publication changed in [Copy-on-reset readers](#copy-on-reset-readers) | [O-DFA-008] | `Dfa.DfaInstance.computeTransition` |
-| NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table) | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
+| NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero search of a pattern with bounded matches runs the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
 | Per-kind DFA budgets and a minimum state count | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory` |
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
 | Many-match DFA | [O-DFA-019] | `Dfa.searchMany` |
@@ -2118,6 +2163,7 @@ change is described.
 [d-onepass-ext]: ../../REGULATOR_DECISIONS.md#extended-onepass-captures
 [d-onepass-offsets]: ../../REGULATOR_DECISIONS.md#onepass-next-state-offsets
 [d-paired]: ../../REGULATOR_DECISIONS.md#bounded-paired-dfa-transitions
+[d-position-nfa]: ../../REGULATOR_DECISIONS.md#bit-parallel-position-automaton-after-dfa-failure
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
 [d-required-absence]: ../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
@@ -2254,6 +2300,7 @@ change is described.
 [hs-check-prefix]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L2496-L2505
 [hs-check-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L991-L1021
 [hs-lbr-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/lbr.c#L422-L516
+[hs-limex]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/limex_runtime_impl.h#L164-L238
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658
 [hs-mcclellan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellan.c
 [hs-mcclellan-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellancompile.cpp#L78-L82
@@ -2291,6 +2338,7 @@ change is described.
 [mula-universal]: https://github.com/WojciechMula/simd-byte-lookup/blob/870eccb54b6ad8888619cceecc3d5ea6a12d213b/lib/Universal.py#L13-L36
 [musl-memchr]: https://git.musl-libc.org/cgit/musl/tree/src/string/memchr.c?h=v1.2.5
 [nim-litopt]: https://nitely.github.io/2020/11/30/regex-literals-optimization.html
+[nr-glushkov]: https://users.dcc.uchile.cl/~gnavarro/ps/algor04.2.pdf
 [onig-map-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5440-L5469
 [onig-map-select]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regcomp.c#L6333-L6349
 [pcre-changelog]: https://www.pcre.org/original/changelog.txt

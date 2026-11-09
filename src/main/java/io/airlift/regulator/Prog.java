@@ -493,11 +493,15 @@ final class Prog
     // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
     private byte[] transparentStartLiteral;
     private LiteralSearchKernel transparentStartLiteralSearch;
-    // Whether an unanchored group-zero NFA search with no live thread skips to the next possible
-    // match start: with the prefix acceleration, or with the transparent start literal of a
-    // program whose assertions the DFA cannot run. One field keeps the NFA's test to a single
-    // load. The capture NFA and BitState still skip only with the prefix acceleration.
+    // Whether an unanchored group-zero NFA search, or a position automaton search, with no live
+    // thread or state skips to the next possible match start: with the prefix acceleration, or
+    // with the transparent start literal of a program whose assertions the DFA cannot run. One
+    // field keeps the NFA's test to a single load. The capture NFA and BitState still skip only
+    // with the prefix acceleration.
     private boolean skipsToStartCandidate;
+    // The bit-parallel automaton a group-zero search runs in place of the Pike NFA once the
+    // forward DFA fails, or null; see configurePositionNfa.
+    private PositionNfa positionNfa;
 
     // Required prefix for instant rejection (extracted via requiredPrefix()).
     // If pattern is "^literal..." and text doesn't contain the literal, reject immediately.
@@ -1455,6 +1459,19 @@ final class Prog
     LiteralSearchKernel transparentStartLiteralSearch()
     {
         return transparentStartLiteralSearch;
+    }
+
+    /// Retains the automaton [PositionNfa#build] built from this program, which pattern
+    /// compilation charges to this program's DFA budget.
+    void configurePositionNfa(PositionNfa positionNfa)
+    {
+        this.positionNfa = requireNonNull(positionNfa, "positionNfa is null");
+    }
+
+    /// Returns the bit-parallel automaton of this program, or null when compilation kept none.
+    PositionNfa positionNfa()
+    {
+        return positionNfa;
     }
 
     /// Returns whether [#skipToStartCandidate] may skip the input an unanchored search with no

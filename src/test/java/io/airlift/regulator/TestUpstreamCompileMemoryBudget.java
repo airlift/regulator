@@ -131,12 +131,15 @@ public class TestUpstreamCompileMemoryBudget
 
         // Compiling an exact literal configures its prefix again, which returns the first shift
         // table's charge before charging the second. A third of the budget goes to the reverse
-        // program, and the short-window required bytes take theirs from the forward DFA's.
+        // program, and the position automaton and the short-window required bytes take theirs
+        // from the forward DFA's.
         long forwardMemory = 4096;
         Re2 literal = Re2.compile(Slices.utf8Slice("abcabd"), Re2.Options.defaults().setMaxMemory(forwardMemory * 3 / 2));
         Prog forwardProgram = literal.forwardProgramForDiagnostics();
+        assertThat(forwardProgram.positionNfa()).isNotNull();
         assertThat(literal.requiredBytesRetainedSizeForDiagnostics()).isPositive();
-        assertThat(Compiler.estimatedProgramMemory(forwardProgram) + forwardProgram.dfaMemory() + literal.requiredBytesRetainedSizeForDiagnostics()).isEqualTo(forwardMemory);
+        assertThat(Compiler.estimatedProgramMemory(forwardProgram) + forwardProgram.positionNfa().estimatedRetainedSize() + forwardProgram.dfaMemory() + literal.requiredBytesRetainedSizeForDiagnostics())
+                .isEqualTo(forwardMemory);
 
         // A program over upstream's 512 instructions keeps output list ids for BitState, where
         // upstream gives it no list heads, and the flatten charge counts them as it does for every

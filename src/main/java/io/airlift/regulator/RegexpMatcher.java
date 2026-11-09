@@ -83,6 +83,7 @@ public final class RegexpMatcher
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
+    private PositionNfa.Workspace positionNfaWorkspace;
 
     private Slice input;
     private int regionStart;
@@ -867,6 +868,14 @@ public final class RegexpMatcher
             nfaWorkspace = new Nfa.Workspace();
         }
         return nfaWorkspace;
+    }
+
+    PositionNfa.Workspace positionNfaWorkspace()
+    {
+        if (positionNfaWorkspace == null) {
+            positionNfaWorkspace = new PositionNfa.Workspace();
+        }
+        return positionNfaWorkspace;
     }
 
     int dfaQuitStreak()

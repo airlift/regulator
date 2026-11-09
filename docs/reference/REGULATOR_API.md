@@ -174,13 +174,15 @@ Within the budget, compilation and matching keep these limits:
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
   bytes outside Trino, the dot-star literal and byte-gap ordered-literal
   matchers, the root skip, dense rows, and skip table of a large literal set,
-  OnePass tables needed only for Java's or Trino's final-line end anchors, and
-  required-byte checks are not kept when their memory would stop the
-  first-match or longest-match DFA from initializing. The literal searched
-  behind a leading assertion is kept only when the first-match and
-  longest-match DFAs both keep their minimum memory beside it, a minimum that
-  leaves out a forward DFA's start-byte tables. Other plans keep their memory
-  whenever it fits.
+  OnePass tables needed only for Java's or Trino's final-line end anchors, the
+  bit-parallel position automaton, which searches in place of the Pike NFA once
+  the forward DFA cannot initialize or abandons a search, for a pattern whose
+  matches are bounded, assertion-free and never empty, and required-byte checks
+  are not kept when their memory would stop the first-match or longest-match
+  DFA from initializing. The literal searched behind a leading assertion is
+  kept only when the first-match and longest-match DFAs both keep their minimum
+  memory beside it, a minimum that leaves out a forward DFA's start-byte
+  tables. Other plans keep their memory whenever it fits.
 - A large literal set keeps dense transition rows for its states up to depth 3,
   at a smaller depth where the rows' entries would pass 1 MiB or the set would
   not fit its memory, and none where no depth fits.
@@ -197,6 +199,11 @@ Within the budget, compilation and matching keep these limits:
   256 Kibit, so a longer span is captured in one pass; unanchored searches
   keep RE2's bitmap. Compilation lowers BitState's text limit until its
   bitmap, slots, job stack, and objects fit the forward program's share.
+- The bit-parallel position automaton admits a program of at most 512 byte
+  positions whose fan-in groups, each testing every word of state, make at
+  most 32 word tests a byte. The window around the earliest match end that it
+  hands on runs on BitState only where the window fits BitState's text limit
+  and its visited bitmap is at most 8 KiB, and otherwise on the Pike NFA.
 - An NFA capture search whose workspace does not fit the forward program's
   share runs several passes, each tracking group zero and a window of capture
   slots, which together report what one pass would.
