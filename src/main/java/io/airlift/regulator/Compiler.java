@@ -46,7 +46,11 @@ final class Compiler
 
     private static final int RUNES_SELF = 0x80;
     private static final int UTF_MAX = 4;
-    private static final int MAX_INSTRUCTIONS = 1 << 24;
+    // No budget compiles a program of more instructions than this before flattening.
+    static final int MAX_INSTRUCTIONS = 1 << 24;
+    // The instructions a forward program holds beside its expression's: FAIL, MATCH, and the
+    // leading loop of an unanchored search.
+    static final int PROGRAM_INSTRUCTIONS = 4;
     private static final int CPP_PROG_OVERHEAD_BYTES = 512;
     private static final int DEFAULT_DFA_MEMORY = 1 << 20;
     // The heap a program holds per instruction until it is flattened, with references counted at
@@ -172,6 +176,25 @@ final class Compiler
         if (maxMemory > 0 && estimatedProgramMemory(program) > maxMemory) {
             throw new RegexpCompileMemoryLimitException(maxMemory);
         }
+    }
+
+    /// Returns how many instructions a forward program compiled without a budget emits for
+    /// `leaf`, a node without children, or the unbudgeted instruction limit where it emits more.
+    /// The rune cache is cleared for each class, so a class emits as many instructions alone as
+    /// in any expression.
+    static long leafInstructions(Regexp leaf, CaseFolding caseFolding, boolean latin1)
+    {
+        CompilerState compiler = new CompilerState(caseFolding);
+        compiler.setup(leaf.parseFlags() | (latin1 ? Regexp.LATIN1 : 0), 0, Dialect.RE2);
+        int initialSize = compiler.program.size();
+        try {
+            compiler.compileNode(leaf, null, 0, 0);
+        }
+        catch (RegexpCompileMemoryLimitException ignored) {
+            // The leaf alone passes the unbudgeted limit, which then counts it.
+            return compiler.maxInstructions;
+        }
+        return (long) compiler.program.size() - initialSize;
     }
 
     /// Returns how many instructions a program compiled with a positive `maxMemory` may hold
