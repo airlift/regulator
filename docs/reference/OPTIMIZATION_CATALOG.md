@@ -420,7 +420,10 @@ so the automata run only where a match can be.
   within 64 bytes of the start, hand the search back to the ordinary engine
 - **What it does:** For a required literal in the top-level sequence, the
   search finds the literal, runs the prefix backward to the leftmost start,
-  and confirms forward. The required piece can take three other forms: one of
+  and confirms forward. A case-insensitive ASCII letter in the prefix consumes
+  only its two cases, so the proof that the prefix cannot consume some byte of
+  the literal holds behind one, as in `(?i:x)?\d+ = value`.
+  The required piece can take three other forms: one of
   up to 8 ASCII literals of 3 to 64 bytes, searched with the start literal
   filter; a literal with case-insensitive ASCII letters after exact bytes,
   such as `# (?i:noqa)`, found by its exact leading bytes with the rest

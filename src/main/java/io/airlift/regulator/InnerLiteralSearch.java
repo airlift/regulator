@@ -1439,9 +1439,9 @@ final class InnerLiteralSearch
         return true;
     }
 
-    // The literal is ASCII, so a non-ASCII rune, whose UTF-8 bytes are all non-ASCII, never
-    // consumes one of its bytes. A folded literal is assumed to consume any byte; a class lists
-    // every rune it matches.
+    // The literal is ASCII, so an exact non-ASCII rune, whose UTF-8 bytes are all non-ASCII, never
+    // consumes one of its bytes. A folded literal consumes any byte one of its runes can; a class
+    // lists every rune it matches.
     private static boolean canConsumeByte(Regexp regexp, byte value, int depth)
     {
         if (depth >= MAX_RECURSIVE_DEPTH) {
@@ -1449,8 +1449,15 @@ final class InnerLiteralSearch
         }
         return switch (regexp.op()) {
             case NO_MATCH, EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> false;
-            case LITERAL -> (regexp.parseFlags() & Regexp.FOLD_CASE) != 0 || regexp.rune() == value;
-            case LITERAL_STRING -> (regexp.parseFlags() & Regexp.FOLD_CASE) != 0 || containsRune(regexp.runes(), value);
+            case LITERAL -> runeCanConsumeByte(regexp.rune(), regexp.parseFlags(), value);
+            case LITERAL_STRING -> {
+                for (int rune : regexp.runes()) {
+                    if (runeCanConsumeByte(rune, regexp.parseFlags(), value)) {
+                        yield true;
+                    }
+                }
+                yield false;
+            }
             case CHAR_CLASS -> regexp.charClass().contains(value);
             case ANY_CHAR, ANY_BYTE -> true;
             case STAR, PLUS, QUEST, REPEAT, CAPTURE -> canConsumeByte(regexp.child(0), value, depth + 1);
@@ -1465,14 +1472,25 @@ final class InnerLiteralSearch
         };
     }
 
-    private static boolean containsRune(int[] runes, int rune)
+    // The value is an ASCII byte of a literal. An exact rune consumes only itself. A folded ASCII
+    // rune consumes its own byte and, for a letter, the other case's, because no fold rule joins
+    // two ASCII runes outside a case pair and no ASCII rune has a multi-character fold. A folded
+    // non-ASCII rune can fold to ASCII, as the Kelvin sign does to k, so it is assumed to consume
+    // any byte.
+    private static boolean runeCanConsumeByte(int rune, int flags, byte value)
     {
-        for (int value : runes) {
-            if (value == rune) {
-                return true;
-            }
+        if ((flags & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) == 0) {
+            return rune == value;
         }
-        return false;
+        if (rune > 0x7F) {
+            return true;
+        }
+        return rune == value || (isAsciiLetter(rune) && (rune | 0x20) == (value | 0x20));
+    }
+
+    private static boolean isAsciiLetter(int rune)
+    {
+        return ('a' <= rune && rune <= 'z') || ('A' <= rune && rune <= 'Z');
     }
 
     // A required class at either end of the prefix, disjoint from the rest of the prefix and from
