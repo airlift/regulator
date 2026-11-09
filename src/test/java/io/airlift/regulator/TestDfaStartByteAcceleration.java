@@ -57,6 +57,29 @@ public class TestDfaStartByteAcceleration
         assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, 1)).isFalse();
     }
 
+    /// The prefix, start-byte and fixed-distance byte scans land in the search's start state at
+    /// each skip, so a start state that needs an assertion never skips, wherever the search starts:
+    /// at the text start, after a word byte, and after a non-word byte, where no assertion holds
+    /// before the start. A start state that needs none skips from each of them. The start-byte and
+    /// fixed-distance gates are asserted directly; the prefix scan's gate is the same test.
+    @Test
+    public void testSkipNeedsStartStateFreeOfContext()
+    {
+        Dfa.DfaInstance dfa = compile("([a-z]+)-([0-9]+)").getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(dfa.canStartByteAcceleration()).isTrue();
+        Slice text = Slices.wrappedBuffer("a  the ".getBytes(StandardCharsets.UTF_8));
+        for (int start : new int[] {0, 1, 2}) {
+            int boundaryFlags = startFlags("\\bthe ", text, start);
+            int freeFlags = startFlags("the ", text, start);
+            assertThat(Dfa.isContextFreeStart(boundaryFlags)).as("\\bthe from %s", start).isFalse();
+            assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, boundaryFlags)).as("\\bthe from %s", start).isFalse();
+            assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, boundaryFlags, 8 * 1024)).as("\\bthe from %s", start).isFalse();
+            assertThat(Dfa.isContextFreeStart(freeFlags)).as("the from %s", start).isTrue();
+            assertThat(Dfa.canUseStartByteAcceleration(dfa, false, true, freeFlags)).as("the from %s", start).isTrue();
+            assertThat(Dfa.canUseFixedDistanceByteAcceleration(false, true, freeFlags, 8 * 1024)).as("the from %s", start).isTrue();
+        }
+    }
+
     @Test
     public void testAnchoredProgramRejectsImpossibleFirstByte()
     {
@@ -1466,6 +1489,19 @@ public class TestDfaStartByteAcceleration
     private static Dfa.DfaInstance firstMatchDfa(String pattern)
     {
         return compile(pattern).getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+    }
+
+    // The flags of the unanchored forward start state of a search of `text` from `start`.
+    private static int startFlags(String pattern, Slice text, int start)
+    {
+        Dfa.DfaInstance dfa = firstMatchDfa(pattern);
+        dfa.beginSearch(true);
+        try {
+            return dfa.analyzeStart(dfa.cacheTablesForTesting(), text, start, text.length(), false, true).flag();
+        }
+        finally {
+            dfa.endSearch(true);
+        }
     }
 
     private static int findCandidate(byte[] data, int offset, int length, String candidates)
