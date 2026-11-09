@@ -2876,17 +2876,18 @@ records, so `TestHotMethodSize` also keeps the method above the inline limit.
 ## Candidate Masks on SVE
 
 Several vector scans build a candidate mask from more than one byte compare.
-Four need every byte to match: the literal prefix scan's pair bytes, the scan
-plan's contains search, the two three-byte groups of the
-[start literal filter](#start-literal-filter)'s two-literal check, and the two
-sides of an [inner literal class pair](#inner-literal-class-pairs); a later
-paragraph covers scans that stop at any of several bytes. Where C2 compiles
+Five need every byte to match: the literal prefix scan's pair bytes, the folded
+prefix scan's case-mapped pair bytes, the scan plan's contains search, the two
+three-byte groups of the [start literal filter](#start-literal-filter)'s
+two-literal check, and the two sides of an
+[inner literal class pair](#inner-literal-class-pairs); a later paragraph
+covers scans that stop at any of several bytes. Where C2 compiles
 vector code with SVE and a 16-byte preferred byte vector, as on r9g (Graviton5),
 each loaded vector is XORed with its probe byte, the differences are ORed, and
 one compare with zero gives the mask; the start literal filter first takes the
 unsigned minimum of its two groups' differences, and the class-pair scan the
 unsigned minimum of each side's differences from its up to three bytes.
-Everywhere else these four compare each byte and AND the masks. The JVM's
+Everywhere else these five compare each byte and AND the masks. The JVM's
 `UseSVE` flag is read once, through the HotSpot diagnostic MXBean, on aarch64
 only; if the flag cannot be read, the scans compare and AND.
 
@@ -2923,11 +2924,21 @@ two call sites, boxed a mask on every search, and took 1.62x for `zqj` on r9g
 with JDK 25. A vector returned from a helper left out of line is boxed the same
 way, so the scan's helper keeps a single call site.
 
-The folded prefix scan compares and ANDs on every platform. Its loaded bytes
-are ORed with `0x20` first at letter probes, and the XOR form took 1.06x for
-case-insensitive sherlock on r9g with JDK 25. SVE with other preferred widths,
-such as 32 bytes on Graviton3, is unmeasured and keeps compare and AND; the
-scans with fixed 16-byte vectors follow the same preferred-width key.
+The folded pair kernels, the counted and dense forms of the folded prefix scan,
+take the XOR form under the same key, through one selector for each kernel.
+Their loaded bytes are ORed with `0x20` first at letter probes, and the XOR form
+then XORs each probe's bytes with its lower-case byte. On r9g with JDK 25 it
+took 0.84x to 0.89x the compare-and-AND form's time for case-insensitive
+sherlock in all four languages, 0.75x to 0.76x for `twain-insensitive`, 0.71x
+for Hyperscan's casei English, and 0.83x to 0.86x for `name-holmes-casei`, and
+was flat for `the-casei` and `alt-sherlock-casei-en`; it ran about the same
+instructions per operation, at higher IPC. r8i keeps compare and AND by
+construction and was unchanged, 0.996x geometric mean over 21 cells. An
+earlier 1.06x loss for case-insensitive sherlock was measured before the
+folded scan's counted loop. NEON keeps compare and AND; the XOR form under
+`-XX:UseSVE=0` is unmeasured. SVE with other preferred widths, such as 32
+bytes on Graviton3, is unmeasured and keeps compare and AND; the scans with
+fixed 16-byte vectors follow the same preferred-width key.
 
 The two- and three-byte scans of the
 [small candidate-byte vector scan](#small-candidate-byte-vector-scan), and the

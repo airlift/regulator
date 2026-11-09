@@ -262,6 +262,10 @@ so the automata run only where a match can be.
   `Prog.prefixAccelFoldCaseFrontAndBackSWAR`, `Prog.findFoldCaseSwar`,
   `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`,
   `Prog.usesDenseFoldCaseScan`, `VectorPrefixScanner.findFoldCaseDense`,
+  `VectorPrefixScanner.findFoldCasePair`,
+  `VectorPrefixScanner.findFoldCaseDensePair`,
+  `VectorPrefixScanner.findFoldCaseSve`,
+  `VectorPrefixScanner.findFoldCaseDenseSve`,
   `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
   `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`
 - **Applies when:** `(?i)` ASCII prefixes; the vector form from 1 KiB, with
@@ -639,6 +643,10 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   runs on non-ASCII bytes ([#43], [#132], [#134], [#135], [#152],
   [design][d-sve]).
 - **Where:** `VectorSupport.sve128`, `VectorPrefixScanner.sveMatches`,
+  `VectorPrefixScanner.findFoldCasePair`,
+  `VectorPrefixScanner.findFoldCaseDensePair`,
+  `VectorPrefixScanner.findFoldCaseSve`,
+  `VectorPrefixScanner.findFoldCaseDenseSve`,
   `VectorScanner.findRunStopSve`, `VectorByteSetScanner.findTwoSve`,
   `VectorByteSetScanner.findTwoLiteralsSve`,
   `VectorByteSetScanner.findClassPairSve`,
@@ -656,11 +664,14 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   replaces a compare per probe. RE2 run-stop needles are ASCII, so that scan
   XORs the block with the needle and does one signed compare below 1, which
   finds needle bytes and every non-ASCII byte together; several needles
-  combine by lane-wise unsigned minimum. On Graviton with JDK 25, the
-  two-byte candidate scans take Leipzig `∞|✓` to 0.45 of its earlier time and
-  RE2 `aqj` to 0.82 ([#132]), and the RE2 run stop takes `LONG_SET` to 0.39
-  and `LONG_PATH` to 0.67 to 0.68, and the two to 0.76 to 0.88 on Intel
-  ([#135]).
+  combine by lane-wise unsigned minimum. The folded prefix scan's pair kernels
+  first OR `0x20` into the loaded bytes at letter probes, then XOR each probe's
+  bytes with its lower-case byte. On Graviton with JDK 25, the two-byte
+  candidate scans take Leipzig `∞|✓` to 0.45 of its earlier time and RE2
+  `aqj` to 0.82 ([#132]), the RE2 run stop takes `LONG_SET` to 0.39 and
+  `LONG_PATH` to 0.67 to 0.68, and the two to 0.76 to 0.88 on Intel
+  ([#135]), and the folded pair kernels take most long case-insensitive scans
+  to 0.71 to 0.89.
 
 ### Call-free pair word scan
 

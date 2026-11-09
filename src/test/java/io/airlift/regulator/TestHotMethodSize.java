@@ -39,6 +39,8 @@ public class TestHotMethodSize
     // C2 inlines a hot callee only when its bytecode is at most FreqInlineSize, 325 bytes by
     // default on x86-64, AArch64 and RISC-V. PPC64 and s390x use 175 through JDK 26.
     private static final int FREQ_INLINE_SIZE = 325;
+    // C2 inlines any callee of at most MaxInlineSize, 35 bytecode bytes, even at a cold call site.
+    private static final int MAX_INLINE_SIZE = 35;
 
     /// Keeps each full-Slice find, count, matches, and lookingAt route small enough for C2 to
     /// inline into the one-line override of the pattern's shape class, and that override into
@@ -229,14 +231,39 @@ public class TestHotMethodSize
 
     /// Keeps the folded prefix scan for dense probe pairs, which verifies candidates inside its
     /// vector loop, small enough for C2 to inline into the folded prefix scan in `Prog`, as the
-    /// folded scan of that shape was measured.
+    /// folded scan of that shape was measured, in both candidate-mask forms.
     @Test
     public void testDenseFoldedPrefixScanFitsInlineSize()
     {
-        assertThat(codeLength(VectorPrefixScanner.class, "findFoldCaseDense"))
-                .as("VectorPrefixScanner.findFoldCaseDense bytecode bytes")
-                .isPositive()
-                .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        for (String method : List.of("findFoldCaseDense", "findFoldCaseDenseSve")) {
+            assertThat(codeLength(VectorPrefixScanner.class, method))
+                    .as("VectorPrefixScanner.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
+    /// Keeps the selectors that pick each folded pair kernel's candidate-mask form within
+    /// MaxInlineSize, which C2 inlines whatever the call site's profile, so a selector adds no call
+    /// between a folded pair scan and its kernel.
+    @Test
+    public void testFoldedPairSelectorsFitMaxInlineSize()
+    {
+        for (String method : List.of("findFoldCasePair", "findFoldCaseDensePair")) {
+            assertThat(codeLength(VectorPrefixScanner.class, method))
+                    .as("VectorPrefixScanner.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_INLINE_SIZE);
+        }
+    }
+
+    /// Keeps every folded pair scan on the selectors, so each takes the candidate-mask form the
+    /// platform selects. The SVE forms' own tests call the kernels directly, so off SVE hosts a
+    /// direct kernel call would go unnoticed.
+    @Test
+    public void testFoldedPairScansCallSelectors()
+    {
+        assertCallsSelectors(Prog.class, "prefixAccelFoldCase");
     }
 
     /// Keeps the SWAR folded prefix scans small enough for C2 to inline into the folded prefix
@@ -284,6 +311,11 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCase bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(405);
+        // Its XOR form, which findFoldCasePair takes under SVE, runs out of line the same way.
+        assertThat(codeLength(VectorPrefixScanner.class, "findFoldCaseSve"))
+                .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(419);
     }
 
     /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the
@@ -293,6 +325,32 @@ public class TestHotMethodSize
     public void testStartScanDispatchStaysAtMeasuredSize()
     {
         assertThat(codeLength(Dfa.class, "findByteSetCandidate")).as("Dfa.findByteSetCandidate bytecode bytes").isPositive().isLessThanOrEqualTo(214);
+    }
+
+    // Asserts that `methodName` of `type` calls both folded pair selectors and no folded pair
+    // kernel directly.
+    private static void assertCallsSelectors(Class<?> type, String methodName)
+    {
+        List<String> calls = calledMethods(type, methodName, VectorPrefixScanner.class);
+        assertThat(calls)
+                .as("VectorPrefixScanner methods %s.%s calls", type.getSimpleName(), methodName)
+                .contains("findFoldCasePair", "findFoldCaseDensePair")
+                .doesNotContain("findFoldCase", "findFoldCaseDense", "findFoldCaseSve", "findFoldCaseDenseSve");
+    }
+
+    // The names of the methods of `owner` that `methodName` of `type` calls.
+    private static List<String> calledMethods(Class<?> type, String methodName, Class<?> owner)
+    {
+        String ownerName = owner.getName().replace('.', '/');
+        return ClassFile.of().parse(classfile(type)).methods().stream()
+                .filter(model -> model.methodName().equalsString(methodName))
+                .flatMap(model -> model.code().stream())
+                .flatMap(CodeModel::elementStream)
+                .filter(InvokeInstruction.class::isInstance)
+                .map(InvokeInstruction.class::cast)
+                .filter(invoke -> invoke.owner().asInternalName().equals(ownerName))
+                .map(invoke -> invoke.name().stringValue())
+                .toList();
     }
 
     private static int codeLength(Class<?> type, String methodName)

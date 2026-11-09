@@ -429,8 +429,8 @@ final class Prog
     // ByteFrequencies.foldedProbePair; see configurePrefixAccelBytes.
     private int prefixFoldCaseFirstOffset;
     private int prefixFoldCaseSecondOffset;
-    // Whether the folded vector scan takes VectorPrefixScanner.findFoldCaseDense rather than
-    // findFoldCase, chosen when the pair is configured; see usesDenseFoldCaseScan.
+    // Whether the folded vector scan takes VectorPrefixScanner.findFoldCaseDensePair rather than
+    // findFoldCasePair, chosen when the pair is configured; see usesDenseFoldCaseScan.
     private boolean prefixFoldCaseDense;
     // Whether the folded pair is the prefix's first and last bytes, which short windows scan with
     // prefixAccelFoldCaseFrontAndBackSWAR rather than findFoldCaseSwar, which serves pairs
@@ -1617,8 +1617,8 @@ final class Prog
     }
 
     /// True when a folded multi-byte prefix scans `length` bytes with
-    /// [VectorPrefixScanner#findFoldCase] or [VectorPrefixScanner#findFoldCaseDense], under the
-    /// same cutoff as [PrefixAccelStrategy#FUSED_VECTOR].
+    /// [VectorPrefixScanner#findFoldCasePair] or [VectorPrefixScanner#findFoldCaseDensePair],
+    /// under the same cutoff as [PrefixAccelStrategy#FUSED_VECTOR].
     boolean usesVectorForFoldCasePrefix(int length)
     {
         return prefixFoldCase && prefixSize > 1 && VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
@@ -1658,9 +1658,9 @@ final class Prog
         return prefixFoldCaseSecondOffset;
     }
 
-    /// Returns whether the folded vector scan takes [VectorPrefixScanner#findFoldCaseDense]
-    /// rather than [VectorPrefixScanner#findFoldCase], as [#usesDenseFoldCaseScan] chose it for
-    /// this JVM's vectors. It is false without the Vector API.
+    /// Returns whether the folded vector scan takes [VectorPrefixScanner#findFoldCaseDensePair]
+    /// rather than [VectorPrefixScanner#findFoldCasePair], as [#usesDenseFoldCaseScan] chose it
+    /// for this JVM's vectors. It is false without the Vector API.
     boolean prefixAccelFoldCaseDense()
     {
         return prefixFoldCaseDense;
@@ -2176,9 +2176,9 @@ final class Prog
         }
         if (usesVectorForFoldCasePrefix(length)) {
             if (prefixFoldCaseDense) {
-                return VectorPrefixScanner.findFoldCaseDense(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
+                return VectorPrefixScanner.findFoldCaseDensePair(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
             }
-            return VectorPrefixScanner.findFoldCase(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
+            return VectorPrefixScanner.findFoldCasePair(data, offset, length, prefix, prefixSize, prefixFoldCaseFirstOffset, prefixFoldCaseSecondOffset);
         }
         if (prefixFoldCaseEndPair) {
             return prefixAccelFoldCaseFrontAndBackSWAR(data, offset, length);
