@@ -31,9 +31,6 @@ final class RetainedCharacterClassCountDfa
     private static final int MAXIMUM_UTF8_PATH_COST = 256;
     private static final int MAXIMUM_MATCHING_CODE_POINTS = 4096;
     private static final int MINIMUM_INPUT_BYTES = 1 << 20;
-    private static final int SAMPLE_WINDOWS = 4;
-    private static final int SAMPLE_WINDOW_BYTES = 256;
-    private static final int MAXIMUM_SAMPLE_MATCHING_CODE_POINTS = 64;
 
     private RetainedCharacterClassCountDfa() {}
 
@@ -83,7 +80,7 @@ final class RetainedCharacterClassCountDfa
 
     static long count(BoundedCharacterClassCounter compactCounter, Prog countProgram, Slice input)
     {
-        if (input.length() < MINIMUM_INPUT_BYTES || hasDenseSample(compactCounter, input)) {
+        if (input.length() < MINIMUM_INPUT_BYTES || compactCounter.hasDenseSample(input)) {
             return compactCounter.count(input);
         }
 
@@ -93,24 +90,6 @@ final class RetainedCharacterClassCountDfa
             return count;
         }
         return compactCounter.count(input);
-    }
-
-    private static boolean hasDenseSample(BoundedCharacterClassCounter compactCounter, Slice input)
-    {
-        int sampledMatchingCodePoints = 0;
-        int maximumWindowStart = input.length() - SAMPLE_WINDOW_BYTES;
-        for (int window = 0; window < SAMPLE_WINDOWS; window++) {
-            int windowStart = (int) (((long) maximumWindowStart * window) / (SAMPLE_WINDOWS - 1));
-            sampledMatchingCodePoints += compactCounter.sampleMatchingCodePointCount(
-                    input,
-                    windowStart,
-                    SAMPLE_WINDOW_BYTES,
-                    MAXIMUM_SAMPLE_MATCHING_CODE_POINTS - sampledMatchingCodePoints);
-            if (sampledMatchingCodePoints > MAXIMUM_SAMPLE_MATCHING_CODE_POINTS) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static int utf8Width(int codePoint)

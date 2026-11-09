@@ -25,10 +25,10 @@ import static java.util.Objects.requireNonNull;
 /// probability, so every case-sensitive literal scan that chooses a probe probes its first byte.
 /// The start literal filter of a pattern that begins with a few literals, the start class filter
 /// of one that begins with a few narrow classes, an inner literal search's set filter, its choice
-/// of a rare class pair, the choice and short-window scan of the bytes every match holds, and a
-/// fixed-width pattern's choice of candidate position or of its block search ignore the option and
-/// always use [#englishText()]. A case-insensitive prefix scan uses [#englishText()] only in place
-/// of [#uniform()].
+/// of a rare class pair, the choice and short-window scan of the bytes every match holds, a
+/// fixed-width pattern's choice of candidate position or of its block search, and count's choice
+/// of the class counter for a single member ignore the option and always use [#englishText()].
+/// A case-insensitive prefix scan uses [#englishText()] only in place of [#uniform()].
 ///
 /// A single-probe scan for a literal stops at every occurrence of its probe byte, so probing a
 /// rare byte hands fewer candidates to verification. The probe leaves the first byte only for a
