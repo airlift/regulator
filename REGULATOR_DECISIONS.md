@@ -2327,7 +2327,7 @@ does not fit, the bound is removed and the charge retried. If that fails, the
 pattern keeps only the short-window check, when its matches can fit a short
 window and that smaller charge fits, and otherwise keeps no check.
 
-Four hooks run the check before any engine setup:
+Five hooks run the check before any engine setup:
 
 - The matcher's general find, after the short-window check, on the rest of the
   region. The matcher remembers the occurrence its last scan found, and a find
@@ -2338,16 +2338,23 @@ Four hooks run the check before any engine setup:
   engine does. After eight scans in a row find the literal within 256 bytes of
   their start, the matcher stops scanning until the next reset: on a region
   that dense, the engine reads those bytes anyway and each scan pays its vector
-  setup for nothing.
+  setup for nothing. That is its cost: once a dense stretch stops the scans, a
+  later stretch without the literal runs the engine rather than being rejected
+  by a scan.
 - The engine shape's full-Slice `find`, in place of the short-window check.
 - Count, before the DFA count, which the class-counter and anchored counts do
   not reach.
 - The shared entry of the one-shot unanchored searches: `find` and `findInto`
-  with a range, `findInto`, and `findResult`; RE2's `replaceFirst`, `extract`,
-  and `replaceAll`, which calls it once per match, with no back-off; and each
-  retry of a Rust search after an empty match that splits a character. A
-  matcher's searches take another entry after their own check, so no search
-  scans twice.
+  with a range, `findInto`, and `findResult`; RE2's `replaceFirst` and
+  `extract`; and each retry of a Rust search after an empty match that splits a
+  character.
+- RE2's `replaceAll`, before each of its searches, on the rest of the text,
+  with the matcher's back-off within one call. A pattern with the search-end
+  bound skips this check where its suffix holds the literal, since the bound of
+  the whole text already stands in for it.
+
+A matcher's searches and `replaceAll`'s searches take another entry after their
+own check, so no search scans twice.
 
 A match lies inside the rest of the region, whatever context a Rust search or
 a Java region after a CR reads, so a literal every match consumes lies inside
@@ -2498,8 +2505,8 @@ proof](#inner-literal-class-run-prefix) gives an inner literal search keeps the
 check and so the bound, and its count through that search reads only up to the
 same end, as the DFA count does. A one-shot search keeps the whole text as its
 context. RE2's `replaceAll` bounds the whole text once and ends each of its
-searches there, so each search's own scan stops at once instead of scanning back
-from the text end once per match.
+searches there. Where the suffix holds the literal, that bound stands in for its
+loop's check, so no search scans back from the text end once per match.
 
 With one `,z` placed about 600 bytes into the `bounded-strings-ending-z` text,
 where the forward check stops, a count took about 0.014 of main's time on x86

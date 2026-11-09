@@ -102,7 +102,8 @@ answer, or reject the input before any engine runs.
   `CompiledPattern.shortWindowLacksRequiredBytes`,
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
-  `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
+  `RegexpMatcher.restOfRegionLacksRequiredLiteral`,
+  `CompiledPattern.nearRequiredLiteralScansInLoop`, `RequiredBytes.indexIn`,
   `RequiredBytes.requiredSuffix`, `CompiledPattern.longWindowSearchEnd`,
   `Prog.findLastLiteral`, `LiteralSearchKernel.findLastContains`,
   `LiteralSearchKernel.findLastKmp`, `VectorPrefixScanner.findLast`,
@@ -130,23 +131,24 @@ answer, or reject the input before any engine runs.
   to the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
-  count, and the one-shot range searches, for unanchored patterns whose
-  required bytes are an exact literal and that have no other literal search.
-  An inner literal search counts as one unless only the class-run proof admits
-  it. A pattern whose every match spans at least 256 bytes keeps its literal
-  for this check alone. Search-end bound: count, the one-shot range and
-  capture searches, and RE2's `replaceAll` of such a pattern whose matches all
-  end with at least two exact ASCII bytes and no assertion after them; not for
-  a program with assertions the DFA cannot run, such as Java's
-  final-terminator `$` and `\Z` and Trino's final line end, nor for a lowered
-  boolean program. If the full charge does not fit beside the forward DFAs,
-  the search-end bound is removed and the charge retried. If that fails, the
-  pattern keeps only the short-window check when eligible and affordable, and
-  otherwise no check. A matcher reuses an occurrence until a find passes it,
-  and stops after eight scans in a row find it within 256 bytes of their
-  start. Minimum length: windows under 4 KiB, where longer ones skip the
-  metadata load, matcher finds that take the general route, and every count,
-  generated or not; a Trino count skips only the whole-pattern minimum, as its
+  count, the one-shot range searches, and RE2's `replaceAll`, for unanchored
+  patterns whose required bytes are an exact literal and that have no other
+  literal search. An inner literal search counts as one unless only the
+  class-run proof admits it. A pattern whose every match spans at least 256
+  bytes keeps its literal for this check alone. Search-end bound: count, the
+  one-shot range and capture searches, and `replaceAll` of such a pattern
+  whose matches all end with at least two exact ASCII bytes and no assertion
+  after them; not for a program with assertions the DFA cannot run, such as
+  Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
+  lowered boolean program. If the full charge does not fit beside the forward
+  DFAs, the search-end bound is removed and the charge retried. If that fails,
+  the pattern keeps only the short-window check when eligible and affordable,
+  and otherwise no check. A matcher reuses an occurrence until a find passes
+  it. A matcher, and `replaceAll` within one call, stop scanning after eight
+  scans in a row find the literal within 256 bytes of their start. Minimum
+  length: windows under 4 KiB, where longer ones skip the metadata load,
+  matcher finds that take the general route, and every count, generated or
+  not; a Trino count skips only the whole-pattern minimum, as its
   start-anchored plans read a lone malformed byte as one character. Maximum
   length: patterns of bounded length anchored at both ends, in count, matcher
   finds, start-anchored scan plans, and anchored ordinary-engine searches.

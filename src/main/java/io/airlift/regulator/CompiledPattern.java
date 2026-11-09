@@ -3676,12 +3676,16 @@ abstract sealed class CompiledPattern
         requireNonNull(text, "text is null");
         validateRange(text, start, end);
         // The one-shot unanchored searches come here: find and findInto of a range, findInto,
-        // findResult, RE2's replaceFirst and extract, RE2's replaceAll once per match with no
-        // back-off, and each retry of a Rust search after an empty match that splits a
-        // character. None has checked for the required literal yet; a matcher's searches take
-        // matchRegionInto after their own check. The capture buffer is checked first, as the
-        // engine checks it before it reads any input. An unanchored search of a long window ends
-        // where longWindowSearchEnd bounds it, and the context keeps the whole text.
+        // findResult, RE2's replaceFirst and extract, and each retry of a Rust search after an
+        // empty match that splits a character. A pattern with a required literal never makes
+        // such a retry, since none of its matches is empty. None of these callers has checked
+        // for the required literal yet. A matcher's searches take matchRegionInto after their own
+        // check, and RE2's replaceAll takes matchIntoAfterLoopCheck after its loop's check. A
+        // caller's own loop of range finds checks on every call, without the back-off, since
+        // each call is one search and the pattern keeps no state between them. The capture
+        // buffer is checked first, as the engine checks it before it reads any input. An
+        // unanchored search of a long window ends where longWindowSearchEnd bounds it, and the
+        // context keeps the whole text.
         if (groups != null) {
             checkGroupsLength(groups);
         }
@@ -3701,6 +3705,59 @@ abstract sealed class CompiledPattern
                 anchor,
                 groups,
                 fixedMatchWorkspaces(onePassWorkspace, bitStateWorkspace, nfaWorkspace),
+                true);
+    }
+
+    /// For a library loop that runs the one-shot unanchored search once per match, from the end of
+    /// the last, as RE2's replaceAll does: checks `[start, end)` of `text` for the long-window
+    /// literal under a matcher's back-off, and returns the loop's count of scans in a row that
+    /// found the literal near their start after this one, or -1 when the window lacks the
+    /// literal and so holds no match. `nearScans` is that count before this search, 0 for the
+    /// loop's first. Once it reaches [RegexpMatcher#NEAR_REQUIRED_LITERAL_SCAN_LIMIT], the loop's
+    /// searches skip the check, as a matcher's finds do until a reset. Each match consumes the
+    /// literal, so the next search starts past the occurrence this one found, and no occurrence
+    /// is kept. A pattern with the search-end bound whose suffix holds the literal makes no check:
+    /// the loop ends its searches at [#loopSearchEnd], as that bound stands in for the check of a
+    /// one-shot search. The loop then searches with [#matchIntoAfterLoopCheck].
+    final int nearRequiredLiteralScansInLoop(Slice text, int start, int end, int nearScans)
+    {
+        RequiredBytes literal = requiredBytes;
+        if (literal == null || !literal.searchesLongWindows() || (literal.boundsSearchEnd() && literal.suffixHoldsLiteral()) || end - start < RequiredBytes.SHORT_WINDOW_LIMIT || nearScans >= RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT) {
+            return nearScans;
+        }
+        int occurrence = literal.indexIn(text, start, end);
+        if (occurrence < 0) {
+            return -1;
+        }
+        return occurrence - start < RegexpMatcher.NEAR_REQUIRED_LITERAL_BYTES ? nearScans + 1 : 0;
+    }
+
+    /// The end that every search of a library loop over all of `text`, such as RE2's replaceAll,
+    /// needs, or -1 when the text holds no match: for a pattern with the search-end bound, where
+    /// [#longWindowSearchEnd] bounds the whole text, before which every match lies, and otherwise
+    /// the text's end. The loop checks each search with [#nearRequiredLiteralScansInLoop], except
+    /// where that bound stands in for the check.
+    final int loopSearchEnd(Slice text)
+    {
+        RequiredBytes literal = requiredBytes;
+        return literal != null && literal.boundsSearchEnd() ? longWindowSearchEnd(text, 0, text.length()) : text.length();
+    }
+
+    /// The unanchored [#matchInto] of a range without its long-window check, for a library loop
+    /// that has made the check with [#nearRequiredLiteralScansInLoop]. The search it runs checks
+    /// the text and the capture buffer, so only the range is checked here.
+    final boolean matchIntoAfterLoopCheck(Slice text, int start, int end, int[] groups)
+    {
+        validateRange(text, start, end);
+        return matchRegionInto(
+                text,
+                0,
+                text.length(),
+                start,
+                end,
+                Anchor.UNANCHORED,
+                groups,
+                NO_MATCH_WORKSPACES,
                 true);
     }
 

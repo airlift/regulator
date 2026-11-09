@@ -890,6 +890,63 @@ public class TestRequiredBytes
     }
 
     @Test
+    public void testReplaceAllBacksOffOnDenseText()
+    {
+        // RE2's replaceAll runs the one-shot search once per match. For a pattern without the
+        // search-end bound, its loop checks the text from each search's start to its end for the
+        // literal, with a matcher's back-off. A text without the literal takes one scan and no
+        // engine.
+        String match = BOUNDED_STRINGS_MATCH;
+        Slice rewrite = utf8Slice("x");
+        String expression = BOUNDED_STRINGS + WITHOUT_SUFFIX;
+        Re2 pattern = Re2.compile(utf8Slice(expression));
+        Slice noMatch = utf8Slice(LONG_FILLER_WITH_LITERAL);
+        assertThat(pattern.replaceAll(noMatch, rewrite)).isEqualTo(new Re2.ReplaceAllResult(0, noMatch));
+
+        Slice noLiteral = utf8Slice(LONG_FILLER);
+        Re2 rejecting = Re2.compile(utf8Slice(expression));
+        assertThat(rejecting.replaceAll(noLiteral, rewrite)).isEqualTo(new Re2.ReplaceAllResult(0, noLiteral));
+        assertNoForwardDfa(rejecting, "replaceAll");
+
+        String sparse = (LONG_FILLER + match + "\n").repeat(3) + LONG_FILLER;
+        assertThat(pattern.replaceAll(utf8Slice(sparse), rewrite)).isEqualTo(new Re2.ReplaceAllResult(3, utf8Slice(sparse.replace(match, "x"))));
+        String dense = ("\n" + match).repeat(100);
+        assertThat(pattern.replaceAll(utf8Slice(dense), rewrite)).isEqualTo(new Re2.ReplaceAllResult(100, utf8Slice("\nx".repeat(100))));
+
+        // On the dense text each search starts at the end of a match, and its scan finds the
+        // literal near its start. After NEAR_REQUIRED_LITERAL_SCAN_LIMIT such scans the loop scans
+        // no more, so a rest without the literal is no longer rejected. One short of the limit,
+        // it still is. A scan that finds the literal far from its start starts the count over.
+        int limit = RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT;
+        assertThat(pattern.replaceAllNearLiteralScansForDiagnostics(utf8Slice(dense), rewrite)).isEqualTo(limit);
+        Slice pastLimit = utf8Slice(("\n" + match).repeat(limit) + LONG_FILLER);
+        assertThat(pattern.replaceAll(pastLimit, rewrite).replacementCount()).isEqualTo(limit);
+        assertThat(pattern.replaceAllNearLiteralScansForDiagnostics(pastLimit, rewrite)).isEqualTo(limit);
+        Slice belowLimit = utf8Slice(("\n" + match).repeat(limit - 1) + LONG_FILLER);
+        assertThat(pattern.replaceAll(belowLimit, rewrite).replacementCount()).isEqualTo(limit - 1);
+        assertThat(pattern.replaceAllNearLiteralScansForDiagnostics(belowLimit, rewrite)).isEqualTo(-1);
+        Slice restarted = utf8Slice(("\n" + match).repeat(limit - 1) + LONG_FILLER + match + ("\n" + match).repeat(limit - 1) + LONG_FILLER);
+        assertThat(pattern.replaceAll(restarted, rewrite).replacementCount()).isEqualTo(2 * limit - 1);
+        assertThat(pattern.replaceAllNearLiteralScansForDiagnostics(restarted, rewrite)).isEqualTo(-1);
+
+        // A pattern with the bound makes no such scan: one bound of the whole text ends every
+        // search, and a text without the bytes its matches end with runs no engine.
+        Re2 bounded = Re2.compile(utf8Slice(BOUNDED_STRINGS));
+        assertThat(bounded.requiredBytesForDiagnostics().boundsSearchEnd()).isTrue();
+        assertThat(bounded.replaceAll(noLiteral, rewrite)).isEqualTo(new Re2.ReplaceAllResult(0, noLiteral));
+        assertNoForwardDfa(bounded, "bounded replaceAll");
+        assertThat(bounded.replaceAll(utf8Slice(dense), rewrite)).isEqualTo(new Re2.ReplaceAllResult(100, utf8Slice("\nx".repeat(100))));
+        assertThat(bounded.replaceAllNearLiteralScansForDiagnostics(utf8Slice(dense), rewrite)).isZero();
+
+        // Where those bytes do not hold the literal, the bound stands in for no check, so the loop
+        // still scans: past the one match, the rest holds no literal and runs no search.
+        Re2 apart = Re2.compile(utf8Slice("(.*?;){3}abcdefgh.*zz"));
+        Slice apartText = utf8Slice("a;b;c;abcdefghzz\n" + "a;b;c;zz\n".repeat(60).stripTrailing());
+        assertThat(apart.replaceAll(apartText, rewrite).replacementCount()).isEqualTo(1);
+        assertThat(apart.replaceAllNearLiteralScansForDiagnostics(apartText, rewrite)).isEqualTo(-1);
+    }
+
+    @Test
     public void testFindAfterFailedFindRereadsInput()
     {
         // A find after a failed one reads the input again, as the engine does, so a match written
