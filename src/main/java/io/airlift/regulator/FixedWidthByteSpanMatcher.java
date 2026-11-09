@@ -64,9 +64,9 @@ final class FixedWidthByteSpanMatcher
     private static final double MAXIMUM_CANDIDATE_PROBABILITY = 0.01;
     // An ASCII singleton pattern, whose every position is an ASCII byte or an ASCII class, which
     // is at most this wide, and which has a singleton position, one of a single member, scans for
-    // its first singleton position whatever its probability: one byte, which Slice.indexOf
-    // finds, so its route depends on no frequency estimate. Any other pattern must earn its
-    // candidate under MAXIMUM_CANDIDATE_PROBABILITY.
+    // its first singleton position whatever its probability: one byte, which the one-byte vector
+    // scan or Slice.indexOf finds, so its route depends on no frequency estimate. Any other
+    // pattern must earn its candidate under MAXIMUM_CANDIDATE_PROBABILITY.
     private static final int ASCII_SINGLETON_WIDTH = 64;
     // englishText() rates every byte at or above 0x80 as common as a space, which keeps literal
     // probes on ASCII bytes. English text holds those bytes about as rarely as its rarest ASCII
@@ -129,8 +129,9 @@ final class FixedWidthByteSpanMatcher
     // a search of it bails on dense candidates.
     private final boolean rareCandidate;
     private final boolean bailsOnDenseCandidates;
-    // The candidate's first byte where only one byte can begin its character, which
-    // Slice.indexOf finds.
+    // The candidate's first byte where only one byte can begin its character, found with the
+    // one-byte vector scan on long searches where the Vector API is available and with
+    // Slice.indexOf otherwise.
     private final Slice candidate;
     // Otherwise its first bytes, scanned for with Dfa.findByteSet where the Vector API takes
     // them (candidateScanSet nonzero) and with this table elsewhere.
@@ -548,6 +549,9 @@ final class FixedWidthByteSpanMatcher
     long count(Slice input)
     {
         requireNonNull(input, "input is null");
+        if (usesSingleByteVectorScan(input, 0)) {
+            return searchLong(input, 0, true, false);
+        }
         return kinds == null ? searchBytes(input, 0, true, false) : searchCharacters(input, 0, true, false);
     }
 
@@ -559,6 +563,9 @@ final class FixedWidthByteSpanMatcher
     long countOrBail(Slice input)
     {
         requireNonNull(input, "input is null");
+        if (usesSingleByteVectorScan(input, 0)) {
+            return searchLong(input, 0, true, bailsOnDenseCandidates);
+        }
         return kinds == null ? searchBytes(input, 0, true, bailsOnDenseCandidates) : searchCharacters(input, 0, true, bailsOnDenseCandidates);
     }
 
@@ -584,6 +591,9 @@ final class FixedWidthByteSpanMatcher
     long findSpan(Slice input, int start)
     {
         requireNonNull(input, "input is null");
+        if (usesSingleByteVectorScan(input, start)) {
+            return searchLong(input, start, false, false);
+        }
         return kinds == null ? searchBytes(input, start, false, false) : searchCharacters(input, start, false, false);
     }
 
@@ -598,12 +608,17 @@ final class FixedWidthByteSpanMatcher
     {
         requireNonNull(input, "input is null");
         Slice region = end == input.length() ? input : input.slice(0, end);
+        if (usesSingleByteVectorScan(region, start)) {
+            return searchLong(region, start, false, bailsOnDenseCandidates);
+        }
         return kinds == null ? searchBytes(region, start, false, bailsOnDenseCandidates) : searchCharacters(region, start, false, bailsOnDenseCandidates);
     }
 
     /// Returns the first match's span at or after `start`, or with `counting`, the number of
     /// matches from there; or, with `bailing`, [#BAILED] or a bailed count once the candidates
-    /// that fail are dense.
+    /// that fail are dense. [#searchLongBytes] copies this loop for a
+    /// [long one-byte candidate search][#usesSingleByteVectorScan]; its matching, restart, and
+    /// bail logic must stay the same as this one's.
     private long searchBytes(Slice input, int start, boolean counting, boolean bailing)
     {
         int lastStart = input.length() - width;
@@ -647,7 +662,9 @@ final class FixedWidthByteSpanMatcher
         return counting ? count : Dfa.SEARCH_NO_MATCH;
     }
 
-    /// [#searchBytes] for a pattern whose characters are not all one byte.
+    /// [#searchBytes] for a pattern whose characters are not all one byte. [#searchLongCharacters]
+    /// copies this loop for a [long one-byte candidate search][#usesSingleByteVectorScan]; its
+    /// matching, restart, and bail logic must stay the same as this one's.
     private long searchCharacters(Slice input, int start, boolean counting, boolean bailing)
     {
         // The candidate's character starts after at least one byte for each earlier position and
@@ -684,6 +701,113 @@ final class FixedWidthByteSpanMatcher
                 if (scanChoice >= 0 && Integer.compareUnsigned(candidatePosition, lastCandidate) <= 0) {
                     scanChoice = resampledScanChoice(input, scanChoice, firstCandidate, candidatePosition, lastCandidate + 1);
                 }
+                continue;
+            }
+            if (bailing && ++failures >= MINIMUM_BAIL_FAILURES && failures * BYTES_PER_BAIL_FAILURE > found + 1 - firstCandidate) {
+                return counting ? bailedCount(count, searchStart) : BAILED;
+            }
+            candidatePosition = found + 1;
+        }
+        return counting ? count : Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// Returns whether a search of `input` from `start` scans for a one-byte candidate with the
+    /// vector byte-set scan, as a one-byte literal search does: a search of at least
+    /// [Prog#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] candidate positions where the Vector API is
+    /// available, which runs in [#searchLong]. A shorter search keeps the word-at-a-time scan of
+    /// `Slice.indexOf` in [#searchBytes] or [#searchCharacters], which compile as they would
+    /// without the vector scan: a length test on each candidate search made short rows up to
+    /// 3.6% slower on Graviton, and holding the array for the vector call up to 8.5% slower on
+    /// x86-64. Each entry makes the choice before it dispatches on the reading, since the length
+    /// test would push [#searchCharacters] past C2's inline size (`TestHotMethodSize`).
+    boolean usesSingleByteVectorScan(Slice input, int start)
+    {
+        // The search has a candidate position for each match start from start to
+        // input.length() - width. The length test keeps start alone on its right, so it cannot
+        // wrap for a start far past the end: the left side is at least
+        // -(MAXIMUM_WIDTH + (Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES - 1)).
+        return VectorSupport.isAvailable() && start >= 0 && input.length() - width - (Prog.FUSED_PREFIX_VECTOR_MINIMUM_BYTES - 1) >= start && candidate != null;
+    }
+
+    /// [#searchBytes] or [#searchCharacters] for a
+    /// [long one-byte candidate search][#usesSingleByteVectorScan].
+    private long searchLong(Slice input, int start, boolean counting, boolean bailing)
+    {
+        return kinds == null ? searchLongBytes(input, start, counting, bailing) : searchLongCharacters(input, start, counting, bailing);
+    }
+
+    /// [#searchBytes] for a [long one-byte candidate search][#usesSingleByteVectorScan]. Every
+    /// candidate is found with the vector scan, including those in the short rest of the input
+    /// after a match.
+    private long searchLongBytes(Slice input, int start, boolean counting, boolean bailing)
+    {
+        // The entry test guarantees a nonnegative start with at least 1,024 candidate positions,
+        // so the search needs no range check.
+        int lastCandidate = input.length() - width + candidateOffset;
+        int firstCandidate = start + candidateOffset;
+        int candidatePosition = firstCandidate;
+        long count = 0;
+        int lastMatchEnd = start;
+        long failures = 0;
+        // lastCandidate is at least firstCandidate, so an unsigned compare also ends the loop on a
+        // candidate position that overflowed past Integer.MAX_VALUE.
+        while (Integer.compareUnsigned(candidatePosition, lastCandidate) <= 0) {
+            int found = findCandidateVector(input, candidatePosition, lastCandidate + 1);
+            if (found < 0) {
+                break;
+            }
+            int matchStart = found - candidateOffset;
+            if (matchesBytes(input, matchStart)) {
+                int matchEnd = matchStart + width;
+                if (!counting) {
+                    return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
+                }
+                count++;
+                lastMatchEnd = matchEnd;
+                candidatePosition = matchEnd + candidateOffset;
+                continue;
+            }
+            if (bailing && ++failures >= MINIMUM_BAIL_FAILURES && failures * BYTES_PER_BAIL_FAILURE > found + 1 - firstCandidate) {
+                return counting ? bailedCount(count, lastMatchEnd) : BAILED;
+            }
+            candidatePosition = found + 1;
+        }
+        return counting ? count : Dfa.SEARCH_NO_MATCH;
+    }
+
+    /// [#searchCharacters] for a [long one-byte candidate search][#usesSingleByteVectorScan].
+    /// Every candidate is found with the vector scan, including those in the short rest of the
+    /// input after a match.
+    private long searchLongCharacters(Slice input, int start, boolean counting, boolean bailing)
+    {
+        // The candidate's character starts after at least one byte for each earlier position and
+        // leaves at least one for itself and each later one. The entry test guarantees a
+        // nonnegative start with at least 1,024 candidate positions, so the search needs no range
+        // check.
+        int lastCandidate = input.length() - (width - candidateOffset);
+        int firstCandidate = start + candidateOffset;
+        byte[] bytes = input.byteArray();
+        int offset = input.byteArrayOffset();
+        int end = offset + input.length();
+        int candidatePosition = firstCandidate;
+        int searchStart = start;
+        long count = 0;
+        long failures = 0;
+        // lastCandidate is at least firstCandidate, so an unsigned compare also ends the loop on a
+        // candidate position that overflowed past Integer.MAX_VALUE.
+        while (Integer.compareUnsigned(candidatePosition, lastCandidate) <= 0) {
+            int found = findCandidateVector(input, candidatePosition, lastCandidate + 1);
+            if (found < 0) {
+                break;
+            }
+            long span = matchAround(bytes, offset, offset + searchStart, offset + found, end);
+            if (span >= 0) {
+                if (!counting) {
+                    return span;
+                }
+                count++;
+                searchStart = (int) span;
+                candidatePosition = searchStart + candidateOffset;
                 continue;
             }
             if (bailing && ++failures >= MINIMUM_BAIL_FAILURES && failures * BYTES_PER_BAIL_FAILURE > found + 1 - firstCandidate) {
@@ -752,6 +876,15 @@ final class FixedWidthByteSpanMatcher
             }
         }
         return -1;
+    }
+
+    /// Returns the next one-byte candidate in `[from, to)` of `input`, or `-1`, with the vector
+    /// byte-set scan.
+    private int findCandidateVector(Slice input, int from, int to)
+    {
+        int offset = input.byteArrayOffset();
+        int found = VectorByteSetScanner.find(input.byteArray(), offset + from, to - from, candidate.getByte(0), (byte) 0, (byte) 0, 1);
+        return found < 0 ? -1 : found - offset;
     }
 
     private boolean matchesBytes(Slice input, int start)
