@@ -301,6 +301,10 @@ public class TestLiteralAlternationSpanMatcher
         assertLiteralSetFind(
                 Re2.compile(utf8Slice(words(65) + "|caf[\\x00\\xE9\\xFF]"), Re2.Options.latin1()),
                 latin1Backing.slice(1, latin1Backing.length() - 2));
+        // Every byte follows p, so the dense rows read 256 byte classes, with no class shared by
+        // the bytes labeling no edge, and a class from 128 up is read unsigned.
+        String everyByteAfterP = IntStream.range(0, 256).mapToObj(value -> "p\\x{" + Integer.toHexString(value) + "}z").collect(Collectors.joining("|"));
+        assertLiteralSetFind(Re2.compile(utf8Slice(everyByteAfterP), Re2.Options.latin1()), wrappedBuffer(new byte[] {'p', (byte) 0xFF, 'z'}));
 
         // Longest-match search keeps the program, so its forward budget is the uncharged control.
         Re2 longestMatch = Re2.compile(dictionary, Re2.Options.defaults().setLongestMatch(true));
@@ -338,6 +342,13 @@ public class TestLiteralAlternationSpanMatcher
                 assertThat(pattern.forwardProgramForDiagnostics().start()).as(label).isNotZero();
                 assertThat(pattern.countsOnLiteralSetForDiagnostics()).as(label).isEqualTo(budget < countEdge);
                 assertThat(pattern.literalSetSpanMatcherForDiagnostics().rootByteScanSetForDiagnostics()).as(label).isEqualTo(budget >= skipEdge ? scanSet : 0);
+                // The dense rows yield to a forward DFA they would cost: at the least budget of
+                // either DFA, and at the least budget that keeps the root skip, a DFA initializes
+                // only beside the set without them, while one byte below the first-match DFA's,
+                // where it initializes beside neither, the set keeps them.
+                if (budget == countEdge - 1 || budget == countEdge || budget == findEdge || budget == skipEdge) {
+                    assertThat(pattern.literalSetSpanMatcherForDiagnostics().denseDepthForDiagnostics() > 0).as(label).isEqualTo(budget == countEdge - 1);
+                }
                 assertThat(pattern.find(wordsInput)).as(label).isTrue();
                 assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH) != null).as(label).isEqualTo(budget >= findEdge);
                 assertThat(pattern.countMatches(wordsInput)).as(label).isEqualTo(3);
@@ -431,7 +442,7 @@ public class TestLiteralAlternationSpanMatcher
         // program's least budget, which the longest-match compile shows, it compiles as the set,
         // within a few times the set's own size; at the set's own size it is rejected.
         String expression = IntStream.range(0, 4096).mapToObj(index -> Integer.toString(index * 7919, 36)).collect(Collectors.joining("|"));
-        long setSize = literalSet(expression).withoutRootSkipping().estimatedRetainedSize();
+        long setSize = literalSet(expression).withoutDenseRows().withoutRootSkipping().estimatedRetainedSize();
         long budget = 4 * setSize;
         assertThatThrownBy(() -> Re2.compile(utf8Slice(expression), Re2.Options.defaults().setMaxMemory(budget).setLongestMatch(true)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
@@ -548,7 +559,11 @@ public class TestLiteralAlternationSpanMatcher
             String expression = String.join("|", literals);
             Re2 pattern = Re2.compile(utf8Slice(expression));
             assertThat(pattern.literalSetSpanMatcherForDiagnostics()).as(expression).isNotNull();
-            LiteralSetSpanMatcher trinoScanner = literalSet(expression);
+            // Dense rows for no state, then for every state up to each depth through 3, so failure
+            // paths end at the root's row alone or at dense rows up to each depth.
+            List<LiteralSetSpanMatcher> trinoScanners = IntStream.rangeClosed(0, 3)
+                    .mapToObj(denseDepth -> optionalLiteralSet(expression, TrinoRegexp.Options.defaults().maxMemory(), denseDepth))
+                    .toList();
 
             for (int inputIndex = 0; inputIndex < 5; inputIndex++) {
                 Slice input = randomInput(random, literals, tokens);
@@ -558,15 +573,60 @@ public class TestLiteralAlternationSpanMatcher
                     long expected = generalMatcher.find(start)
                             ? ((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL)
                             : Dfa.SEARCH_NO_MATCH;
-                    assertThat(trinoScanner.findSpan(input, start, input.length()))
-                            .as("pattern %s input %s start %s", expression, input.toStringUtf8(), start)
-                            .isEqualTo(expected);
                     // A region that ends halfway to the input end cuts the matches that cross it.
                     int end = start + (input.length() - start) / 2;
-                    expected = generalMatcher.reset(input, start, end).find() ? ((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL) : Dfa.SEARCH_NO_MATCH;
-                    assertThat(trinoScanner.findSpan(input, start, end)).as("pattern %s input %s region %s-%s", expression, input.toStringUtf8(), start, end).isEqualTo(expected);
+                    long expectedInRegion = generalMatcher.reset(input, start, end).find()
+                            ? ((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL)
+                            : Dfa.SEARCH_NO_MATCH;
+                    for (LiteralSetSpanMatcher trinoScanner : trinoScanners) {
+                        int denseDepth = trinoScanner.denseDepthForDiagnostics();
+                        assertThat(trinoScanner.findSpan(input, start, input.length()))
+                                .as("pattern %s dense depth %s input %s start %s", expression, denseDepth, input.toStringUtf8(), start)
+                                .isEqualTo(expected);
+                        assertThat(trinoScanner.findSpan(input, start, end))
+                                .as("pattern %s dense depth %s input %s region %s-%s", expression, denseDepth, input.toStringUtf8(), start, end)
+                                .isEqualTo(expectedInRegion);
+                    }
                 }
             }
+        }
+    }
+
+    @Test
+    public void testLiteralSetDenseRows()
+    {
+        // The states up to depth 3 keep dense rows. Under a budget one byte short of the rows at
+        // a depth, the build takes the deepest depth whose rows fit, and at the trie's own size
+        // none, where the set retains exactly what it does without dense rows.
+        String dictionary = leadingByteWords("abcdefgh", 63) + "|abcde|bcd";
+        long maxMemory = TrinoRegexp.Options.defaults().maxMemory();
+        LiteralSetSpanMatcher literalSet = literalSet(dictionary);
+        assertThat(literalSet.denseDepthForDiagnostics()).isEqualTo(3);
+        long trieSize = optionalLiteralSet(dictionary, maxMemory, 0).withoutRootSkipping().estimatedRetainedSize();
+        assertThat(literalSet.withoutDenseRows().withoutRootSkipping().estimatedRetainedSize()).isEqualTo(trieSize);
+        for (int denseDepth = 1; denseDepth <= 3; denseDepth++) {
+            long size = optionalLiteralSet(dictionary, maxMemory, denseDepth).withoutRootSkipping().estimatedRetainedSize();
+            assertThat(optionalLiteralSet(dictionary, size).denseDepthForDiagnostics()).as("depth %s", denseDepth).isEqualTo(denseDepth);
+            assertThat(optionalLiteralSet(dictionary, size - 1).denseDepthForDiagnostics()).as("depth %s", denseDepth).isEqualTo(denseDepth - 1);
+        }
+        LiteralSetSpanMatcher trieOnly = optionalLiteralSet(dictionary, trieSize);
+        assertThat(trieOnly.denseDepthForDiagnostics()).isZero();
+        assertThat(trieOnly.estimatedRetainedSize()).isEqualTo(trieSize);
+        // Rows of all 18,279 states up to depth 3 of the four-letter words over 26 letters would
+        // take 27 classes of 4 bytes each, almost 2 MB, past the 1 MiB the rows may take, so
+        // their states keep rows only up to depth 2.
+        String fourLetterWords = IntStream.range(0, 26 * 26 * 26)
+                .mapToObj(index -> "" + (char) ('a' + index / 676) + (char) ('a' + index / 26 % 26) + (char) ('a' + index % 26) + "z")
+                .collect(Collectors.joining("|"));
+        assertThat(literalSet(fourLetterWords).denseDepthForDiagnostics()).isEqualTo(2);
+
+        // A rejection's lower bound on the budget a set needs counts the set without its dense
+        // rows or root skip, which the build adds only where they fit, so it never exceeds what
+        // the set built with them retains.
+        String base36Words = IntStream.range(0, 4096).mapToObj(index -> Integer.toString(index * 7919, 36)).collect(Collectors.joining("|"));
+        for (String expression : List.of(dictionary, fourLetterWords, base36Words)) {
+            Regexp parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL).regexp();
+            assertThat(LiteralSetSpanMatcher.leastRetainedSize(parsed, maxMemory)).as(expression.substring(0, 20)).isLessThanOrEqualTo(literalSet(expression).estimatedRetainedSize());
         }
     }
 
@@ -756,22 +816,25 @@ public class TestLiteralAlternationSpanMatcher
         TrinoRegexp setRoute = TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(4096));
         assertThat(setRoute.usesLiteralSetMatcherForDiagnostics()).isTrue();
         assertThat(setRoute.re2()).isNull();
-        // One that does not fit cannot compile a program either, which retains more than the set,
-        // so Trino never takes the set's literal-alternation shape.
-        long setSize = literalSet(dictionary).estimatedRetainedSize();
+        // One that does not fit, even without its dense rows, cannot compile a program either,
+        // which retains more than the set, so Trino never takes the set's literal-alternation
+        // shape.
+        long setSize = literalSet(dictionary).withoutDenseRows().estimatedRetainedSize();
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice(dictionary), TrinoRegexp.Options.defaults().setMaxMemory(setSize)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
 
         // A set without the root's skip, which one leading byte is too few for and eight only
-        // fit with more memory, retains only its five trie arrays and an object holding them,
-        // so Trino takes the set under the smallest budget whose forward share holds that.
+        // fit with more memory, and without dense rows retains only its five trie arrays and an
+        // object holding them, so Trino takes the set under the smallest budget whose forward
+        // share holds that.
         for (String largeDictionary : List.of(words(1024), words(4096), leadingByteWords("abcdefgh", 63) + "|abcde|bcd", leadingByteWords("acegikmo", 1024), leadingByteWords("abcdefgh", 4096))) {
-            LiteralSetSpanMatcher literalSet = literalSet(largeDictionary);
+            LiteralSetSpanMatcher literalSet = literalSet(largeDictionary).withoutDenseRows();
             if (literalSet.rootByteScanSetForDiagnostics() != 0) {
                 literalSet = optionalLiteralSet(largeDictionary, literalSet.estimatedRetainedSize() - 1);
             }
             assertThat(literalSet.rootByteScanSetForDiagnostics()).isZero();
-            long tablelessSize = literalSet.estimatedRetainedSize() - instanceSize(literalSet.getClass()) + instanceSize(TrieArrays.class);
+            assertThat(literalSet.denseDepthForDiagnostics()).isZero();
+            long tablelessSize = literalSet.estimatedRetainedSize() - instanceSize(literalSet.getClass()) + instanceSize(LiteralSetFields.class);
             long edgeMemory = tablelessSize;
             while (edgeMemory - Math.max(1, edgeMemory / 3) < tablelessSize) {
                 edgeMemory++;
@@ -780,18 +843,15 @@ public class TestLiteralAlternationSpanMatcher
             assertThat(edgeRoute.usesLiteralSetMatcherForDiagnostics()).isTrue();
         }
 
-        // The root's skip never costs a forward DFA. Under the least budget at which a forward
-        // DFA initializes beside the set without it, it still does. The longest-match compile
-        // charges no set, so its program's DFA memory, with its required bytes' charge added
-        // back, less the set without its skip, is what the DFA has beside that set.
+        // The root's skip and the dense rows never cost a forward DFA. Under the least budget at
+        // which a forward DFA initializes beside the set without them, it still does. The
+        // longest-match compile charges no set, so its program's DFA memory, with its required
+        // bytes' charge added back, less the set without its skip or rows, is what the DFA has
+        // beside that set.
         String fiveLeadingByteDictionary = IntStream.range(0, 70)
                 .mapToObj(index -> "pqrst".charAt(index % 5) + Integer.toString(index, 3) + (index % 2 == 0 ? "q" : ""))
                 .collect(Collectors.joining("|"));
-        LiteralSetSpanMatcher fiveLeadingByteSet = literalSet(fiveLeadingByteDictionary);
-        if (fiveLeadingByteSet.rootByteScanSetForDiagnostics() != 0) {
-            fiveLeadingByteSet = optionalLiteralSet(fiveLeadingByteDictionary, fiveLeadingByteSet.estimatedRetainedSize() - 1);
-        }
-        long tablelessSetSize = fiveLeadingByteSet.estimatedRetainedSize();
+        long tablelessSetSize = literalSet(fiveLeadingByteDictionary).withoutDenseRows().withoutRootSkipping().estimatedRetainedSize();
         Prog program = Re2.compile(utf8Slice(fiveLeadingByteDictionary)).forwardProgramForDiagnostics();
         for (Dfa.DfaInstance.Kind kind : List.of(Dfa.DfaInstance.Kind.FIRST_MATCH, Dfa.DfaInstance.Kind.LONGEST_MATCH)) {
             // A forward DFA's budget is half the program's DFA memory.
@@ -1405,9 +1465,25 @@ public class TestLiteralAlternationSpanMatcher
         return LiteralSetSpanMatcher.analyze(parsed.regexp(), parsed.capturingGroupCount(), maximumRetainedBytes);
     }
 
-    // The five arrays of a literal set's trie, whose holder is what a set without the root's skip
-    // retains beyond them.
-    private record TrieArrays(int[] rootStateByByte, int[] firstEdgeByState, byte[] edgeByte, int[] failureByState, int[] matchLengthByState) {}
+    private static LiteralSetSpanMatcher optionalLiteralSet(String pattern, long maximumRetainedBytes, int maximumDenseDepth)
+    {
+        ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
+        return LiteralSetSpanMatcher.analyze(parsed.regexp(), parsed.capturingGroupCount(), maximumRetainedBytes, maximumDenseDepth);
+    }
+
+    // The fields of a literal set: its five trie arrays and the dense rows' arrays and counts,
+    // whose holder is what a set without the root's skip retains beyond its arrays.
+    private record LiteralSetFields(
+            int[] rootStateByByte,
+            byte[] classByByte,
+            int classCount,
+            int denseDepth,
+            int denseStateCount,
+            int[] denseNext,
+            int[] firstEdgeByState,
+            byte[] edgeByte,
+            int[] failureByState,
+            int[] matchLengthByState) {}
 
     private static void assertSpan(
             LiteralAlternationSpanMatcher scanner,

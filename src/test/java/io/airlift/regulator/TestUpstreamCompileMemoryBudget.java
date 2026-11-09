@@ -338,14 +338,14 @@ public class TestUpstreamCompileMemoryBudget
                 // The figure covers every route: the literal set that compiles without a program,
                 // and Trino's literal alternation, literal set and fixed-width matcher.
                 new RejectedPattern(Language.RE2, fruits, 8_147, 8_147, 1, 2_000),
-                new RejectedPattern("65 words", Language.RE2, words, 10_213, 10_213, 1, 2_000),
-                new RejectedPattern("65 words", Language.JAVA, words, 10_213, 10_213, 1, 2_000),
-                new RejectedPattern("65 words", Language.RUST, words, 10_213, 10_213, 1, 2_000),
-                new RejectedPattern("3,000 words", Language.RUST, dictionary, 271_945, 271_945, 1_000, 200_000),
+                new RejectedPattern("65 words", Language.RE2, words, 10_249, 10_249, 1, 2_000),
+                new RejectedPattern("65 words", Language.JAVA, words, 10_249, 10_249, 1, 2_000),
+                new RejectedPattern("65 words", Language.RUST, words, 10_249, 10_249, 1, 2_000),
+                new RejectedPattern("3,000 words", Language.RUST, dictionary, 271_981, 271_981, 1_000, 200_000),
                 // Trino's literal alternation builds its start filter only with vector support.
                 new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
-                new RejectedPattern("65 words", Language.TRINO, words, 9_191, 9_191, 1, 2_000),
-                new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_807, 269_807, 1_000, 200_000),
+                new RejectedPattern("65 words", Language.TRINO, words, 9_227, 9_227, 1, 2_000),
+                new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_843, 269_843, 1_000, 200_000),
                 new RejectedPattern(Language.TRINO, fixedWidth, 9_613, 9_613, 1, 2_000),
                 new RejectedPattern(Language.RE2, fixedWidth, 161_867, 161_867, 1, 2_000),
                 // 255 copies of a class of supplementary code points need more instructions than

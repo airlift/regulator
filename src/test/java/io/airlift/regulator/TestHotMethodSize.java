@@ -102,6 +102,19 @@ public class TestHotMethodSize
         }
     }
 
+    /// Keeps the large literal set's walks and sparse transition small enough for C2 to inline into
+    /// the search that picks them and, for the transition, into each walk's loop.
+    @Test
+    public void testLiteralSetSearchFitsInlineSize()
+    {
+        for (String method : List.of("walkTrie", "walkTrieSkippingRootBytes", "sparseTransition")) {
+            assertThat(codeLength(LiteralSetSpanMatcher.class, method))
+                    .as("LiteralSetSpanMatcher.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+        }
+    }
+
     /// Keeps each public entry of a generated pattern class small enough for C2 to inline into a
     /// caller that holds the pattern as a constant; the attempt loop and searches stay static
     /// calls. The patterns cover start-anchored and unanchored plans, a search that hands off to

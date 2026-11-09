@@ -1421,7 +1421,10 @@ ordinary engine would.
   ([noncontiguous.rs][ac-noncontiguous], [automaton.rs][ac-automaton]
   `try_find_fwd`, [#82], [design][d-large-alternations]), including its
   prefilter run whenever the search returns to the start state; Adapted from
-  its anchored leftmost-first search for a search anchored at its start; First
+  its anchored leftmost-first search for a search anchored at its start, and
+  from its noncontiguous NFA's dense rows for shallow states
+  ([noncontiguous.rs][ac-noncontiguous] `densify`), which here hold each
+  state's complete transition, failure links resolved, one depth deeper; First
   described by Knuth (1973) (ordered-table search with a sentinel,
   [TAOCP][knuth-taocp] vol. 3, §6.1) for the edge scan, and by the Rust regex
   crate, which answers a plain alternation of literals with an Aho-Corasick
@@ -1432,6 +1435,8 @@ ordinary engine would.
   full-match list of literals the leftmost-first automaton omits.
 - **Where:** `LiteralSetSpanMatcher.findSpan`,
   `LiteralSetSpanMatcher.walkTrie`, `LiteralSetSpanMatcher.findChild`,
+  `LiteralSetSpanMatcher.sparseTransition`,
+  `LiteralSetSpanMatcher.withDenseRows`,
   `LiteralSetSpanMatcher.walkTrieSkippingRootBytes`,
   `CompiledPattern.analyzeLiteralSetWithoutProgram`,
   `LiteralSetSpanMatcher.findPrefixEnd`,
@@ -1442,16 +1447,24 @@ ordinary engine would.
   anchored at its start keeps the deepest literal on the goto walk and a full
   match also reads the sorted list of the literals that extend another; the
   root skip with a vector-scannable root set and 64 bytes or more left, which
-  steps byte by byte after four short scans in a row
+  steps byte by byte after four short scans in a row; dense rows for the
+  states up to depth 3, or the deepest depth whose rows fit 1 MiB and the
+  build's memory budget, and none where they alone would keep a forward DFA
+  from initializing
 - **What it does:** A capture-free alternation of more than 64 literals
   searches a leftmost-first Aho-Corasick automaton ported from the
-  aho-corasick crate's noncontiguous NFA. A trie step rejects a byte above
+  aho-corasick crate's noncontiguous NFA. A sparse trie step rejects a byte above
   the state's last edge first, so its scan over the sorted edges needs no
-  bound test. At the trie root, from the second root miss in a row, the
-  matcher skips to the next root byte with a byte-set scan. rebar's
-  43,029-word `english-10` dictionary search runs 300 to 590 times faster than
-  the NFA it fell back to, now 1.3 to 1.4 times the regex crate's time
-  ([#82]).
+  bound test. The states up to a small depth, which take most transitions,
+  keep a dense row over byte classes holding their complete transition, so
+  only deeper states scan edges and follow failure links. At the trie root,
+  from the second root miss in a row, the matcher skips to the next root byte
+  with a byte-set scan. rebar's 43,029-word `english-10` dictionary search
+  runs 300 to 590 times faster than the NFA it fell back to, 1.3 to 1.4 times
+  the regex crate's time ([#82]). Dense rows cut that search to 0.41 to 0.49
+  of its time without them, 0.60 to 0.69 of the crate's, and `english-15`'s
+  to 0.43 to 0.54 of its time without them, still 1.35 to 2.29 times the
+  crate's, at 801 KB more retained memory for `english-10`.
 
 ### Word-run plan
 
