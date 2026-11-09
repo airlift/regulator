@@ -167,6 +167,12 @@ public class TestUpstreamPrefixAccel
                     assertThat(VectorPrefixScanner.findFoldCaseDense(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
                             .as("dense vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
                             .isEqualTo(expected);
+                    assertThat(VectorPrefixScanner.findFoldCaseSve(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                            .as("SVE vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
+                            .isEqualTo(expected);
+                    assertThat(VectorPrefixScanner.findFoldCaseDenseSve(data, offset, length, literal, acceleratedPrefixLength, firstOffset, secondOffset))
+                            .as("SVE dense vector %s probing %s and %s at offset %s length %s", prefix, firstOffset, secondOffset, offset, length)
+                            .isEqualTo(expected);
                 }
             }
         }

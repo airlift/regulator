@@ -110,6 +110,27 @@ final class VectorPrefixScanner
                 .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, position + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector));
     }
 
+    // The folded pair kernels' entry points, which the folded prefix scan in Prog calls:
+    // findFoldCase and findFoldCaseDense, or under VectorSupport.SVE_128 their XOR forms, as
+    // "Candidate Masks on SVE" in REGULATOR_DECISIONS.md describes. They pass only ints and
+    // arrays, so every vector and mask stays inside the kernels, and their two returns keep them
+    // within MaxInlineSize, where a conditional expression's jump would not.
+    static int findFoldCasePair(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        if (VectorSupport.SVE_128) {
+            return findFoldCaseSve(data, offset, length, prefix, prefixSize, firstOffset, secondOffset);
+        }
+        return findFoldCase(data, offset, length, prefix, prefixSize, firstOffset, secondOffset);
+    }
+
+    static int findFoldCaseDensePair(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        if (VectorSupport.SVE_128) {
+            return findFoldCaseDenseSve(data, offset, length, prefix, prefixSize, firstOffset, secondOffset);
+        }
+        return findFoldCaseDense(data, offset, length, prefix, prefixSize, firstOffset, secondOffset);
+    }
+
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds the first occurrence of the first prefixSize bytes of prefix under the folded
@@ -118,9 +139,11 @@ final class VectorPrefixScanner
     // folded prefix is compared. The prefix holds at most nine bytes, so failed comparisons stay
     // bounded and the scan needs no KMP budget.
     //
-    // Prog chooses this kernel when few vectors are predicted to hold a candidate of the probe
-    // pair, and findFoldCaseDense otherwise; see Prog.usesDenseFoldCaseScan. With sparse
-    // candidates the counted test loop runs long stretches without leaving.
+    // The folded prefix scan in Prog calls this kernel through findFoldCasePair when few vectors
+    // are predicted to hold a candidate of the probe pair, and findFoldCaseDense through
+    // findFoldCaseDensePair otherwise; see Prog.usesDenseFoldCaseScan. With sparse candidates the
+    // counted test loop runs long stretches without leaving. The XOR form is findFoldCaseSve;
+    // keep the two in step.
     static int findFoldCase(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
@@ -145,10 +168,10 @@ final class VectorPrefixScanner
             // a candidate; candidates are verified after it breaks, as in find, so C2 can compile
             // the test loop as an innermost counted loop.
             //
-            // The candidate test compares and ANDs on every platform: "Candidate Masks on SVE" in
-            // REGULATOR_DECISIONS.md records that the XOR form lost for this scan on r9g. Keep
-            // every vector and mask in this method: a vector or mask returned from a helper C2
-            // leaves out of line is boxed on every search.
+            // The candidate test compares and ANDs; findFoldCasePair takes findFoldCaseSve, the XOR
+            // form, under VectorSupport.SVE_128, as "Candidate Masks on SVE" in
+            // REGULATOR_DECISIONS.md describes. Keep every vector and mask in this method: a vector
+            // or mask returned from a helper C2 leaves out of line is boxed on every search.
             int steps = (vectorEnd - position) / SPECIES.length();
             int step = 0;
             for (; step < steps; step++) {
@@ -186,15 +209,81 @@ final class VectorPrefixScanner
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findFoldCase in the XOR form, which findFoldCasePair takes under
+    // VectorSupport.SVE_128: each probe's case-mapped bytes are XORed with its lower-case byte,
+    // the differences are ORed, and one compare with zero gives the candidates. It is a separate
+    // method so that each form compiles on its own and findFoldCase keeps the size it was
+    // measured at. Keep the two in step.
+    static int findFoldCaseSve(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        int candidateCount = length - prefixSize + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int vectorEnd = offset + SPECIES.loopBound(candidateCount);
+        // The case bits and probes are those of findFoldCase.
+        byte firstLowerCase = asciiLower(prefix[firstOffset]);
+        byte secondLowerCase = asciiLower(prefix[secondOffset]);
+        ByteVector firstCaseBit = ByteVector.broadcast(SPECIES, caseBit(firstLowerCase));
+        ByteVector secondCaseBit = ByteVector.broadcast(SPECIES, caseBit(secondLowerCase));
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, firstLowerCase);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, secondLowerCase);
+        int position = offset;
+
+        while (position < vectorEnd) {
+            // The counted test loop of findFoldCase. Keep every vector and mask in this method: a
+            // vector or mask returned from a helper C2 leaves out of line is boxed on every search.
+            int steps = (vectorEnd - position) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position + step * SPECIES.length();
+                if (ByteVector.fromArray(SPECIES, data, stepPosition + firstOffset).or(firstCaseBit).lanewise(VectorOperators.XOR, firstVector)
+                        .or(ByteVector.fromArray(SPECIES, data, stepPosition + secondOffset).or(secondCaseBit).lanewise(VectorOperators.XOR, secondVector))
+                        .compare(VectorOperators.EQ, (byte) 0)
+                        .anyTrue()) {
+                    break;
+                }
+            }
+            position += step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            // Rebuild this vector's candidates as bits.
+            long candidateBits = ByteVector.fromArray(SPECIES, data, position + firstOffset).or(firstCaseBit).lanewise(VectorOperators.XOR, firstVector)
+                    .or(ByteVector.fromArray(SPECIES, data, position + secondOffset).or(secondCaseBit).lanewise(VectorOperators.XOR, secondVector))
+                    .compare(VectorOperators.EQ, (byte) 0)
+                    .toLong();
+            while (candidateBits != 0) {
+                int candidate = position + Long.numberOfTrailingZeros(candidateBits);
+                // Keep sparse verification in this method. When composed with the DFA,
+                // C2 otherwise treats this call site as cold and leaves it out of line.
+                int prefixIndex = 0;
+                while (prefixIndex < prefixSize && asciiLower(data[candidate + prefixIndex]) == asciiLower(prefix[prefixIndex])) {
+                    prefixIndex++;
+                }
+                if (prefixIndex == prefixSize) {
+                    return candidate;
+                }
+                candidateBits &= candidateBits - 1;
+            }
+            position += SPECIES.length();
+        }
+        return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds what findFoldCase finds, verifying each vector's candidates inside the vector loop.
     //
-    // Prog chooses this kernel when many vectors are predicted to hold a candidate of the probe
-    // pair, as for a common pair in 64-byte vectors; see Prog.usesDenseFoldCaseScan. There the
-    // counted loop leaves and re-enters on many vectors, and its exit, candidate rebuild, and
-    // re-entry cost more than testing and verifying each vector in one loop. Keep this method
-    // within FreqInlineSize, as TestHotMethodSize checks, and every vector and mask inside it: a
-    // vector or mask passed to or returned from a helper C2 leaves out of line is boxed.
+    // The folded prefix scan in Prog calls this kernel through findFoldCaseDensePair when many
+    // vectors are predicted to hold a candidate of the probe pair, as for a common pair in 64-byte
+    // vectors; see Prog.usesDenseFoldCaseScan. There the counted loop leaves and re-enters on many
+    // vectors, and its exit, candidate rebuild, and re-entry cost more than testing and verifying
+    // each vector in one loop. Keep this method within FreqInlineSize, as TestHotMethodSize
+    // checks, and every vector and mask inside it: a vector or mask passed to or returned from a
+    // helper C2 leaves out of line is boxed. The XOR form is findFoldCaseDenseSve; keep the two in
+    // step.
     static int findFoldCaseDense(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
     {
         int candidateCount = length - prefixSize + 1;
@@ -229,7 +318,58 @@ final class VectorPrefixScanner
             long candidateBits = candidates.toLong();
             while (candidateBits != 0) {
                 int candidate = probePosition - firstOffset + Long.numberOfTrailingZeros(candidateBits);
-                // Keep sparse verification in this method. When composed with the DFA,
+                // Keep candidate verification in this method. When composed with the DFA,
+                // C2 otherwise treats this call site as cold and leaves it out of line.
+                int prefixIndex = 0;
+                while (prefixIndex < prefixSize && asciiLower(data[candidate + prefixIndex]) == asciiLower(prefix[prefixIndex])) {
+                    prefixIndex++;
+                }
+                if (prefixIndex == prefixSize) {
+                    return candidate;
+                }
+                candidateBits &= candidateBits - 1;
+            }
+        }
+        int position = probePosition - firstOffset;
+        return findFoldCaseScalar(data, position, offset + candidateCount - position, prefix, prefixSize);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. findFoldCaseDense in the XOR form, which findFoldCaseDensePair
+    // takes under VectorSupport.SVE_128, with the candidate test of findFoldCaseSve. Keep this
+    // method within FreqInlineSize, as TestHotMethodSize checks, and every vector and mask inside
+    // it. Keep the two in step.
+    static int findFoldCaseDenseSve(byte[] data, int offset, int length, byte[] prefix, int prefixSize, int firstOffset, int secondOffset)
+    {
+        int candidateCount = length - prefixSize + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int vectorEnd = offset + SPECIES.loopBound(candidateCount);
+        // The case bits, probes, and stepped probe position are those of findFoldCaseDense.
+        byte firstLowerCase = asciiLower(prefix[firstOffset]);
+        byte secondLowerCase = asciiLower(prefix[secondOffset]);
+        ByteVector firstCaseBit = ByteVector.broadcast(SPECIES, caseBit(firstLowerCase));
+        ByteVector secondCaseBit = ByteVector.broadcast(SPECIES, caseBit(secondLowerCase));
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, firstLowerCase);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, secondLowerCase);
+        int distance = secondOffset - firstOffset;
+        int probePosition = offset + firstOffset;
+        int probeEnd = vectorEnd + firstOffset;
+
+        for (; probePosition < probeEnd; probePosition += SPECIES.length()) {
+            VectorMask<Byte> candidates = ByteVector.fromArray(SPECIES, data, probePosition)
+                    .or(firstCaseBit)
+                    .lanewise(VectorOperators.XOR, firstVector)
+                    .or(ByteVector.fromArray(SPECIES, data, probePosition + distance)
+                            .or(secondCaseBit)
+                            .lanewise(VectorOperators.XOR, secondVector))
+                    .compare(VectorOperators.EQ, (byte) 0);
+            long candidateBits = candidates.toLong();
+            while (candidateBits != 0) {
+                int candidate = probePosition - firstOffset + Long.numberOfTrailingZeros(candidateBits);
+                // Keep candidate verification in this method. When composed with the DFA,
                 // C2 otherwise treats this call site as cold and leaves it out of line.
                 int prefixIndex = 0;
                 while (prefixIndex < prefixSize && asciiLower(data[candidate + prefixIndex]) == asciiLower(prefix[prefixIndex])) {
