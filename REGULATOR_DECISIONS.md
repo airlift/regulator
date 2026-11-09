@@ -2775,14 +2775,15 @@ DFA's start-byte scan. The engine returns to its start state at each byte it
 steps before it reaches the run, where a new scan would find the same run and
 return the position it was given, through the run less the least lead, so the
 DFA, NFA, and BitState searches skip those scans. A run that every match starts
-with, with no folded prefix, keeps the start bytes beside it, and a find loop
-without captures whose start bytes carry a start literal filter keeps verifying
-their candidates, which yields each match's start and end in one pass where a
-match found from the run needs a reverse pass for its start. On the run,
-counting the spans of Trino's `(?i)think` over English had taken 1.037x main's
-time on r9g, and with the filter it takes 0.996x; `(?i)Holmes` and
-`(?i)process`, whose start bytes carry no filter, keep the run in every search
-and take 0.10x and 0.67x. The
+with, with no folded prefix, keeps the start bytes beside it only in a
+first-match DFA whose start bytes carry a start literal filter, and a find loop
+without captures keeps verifying their candidates there, which yields each
+match's start and end in one pass where a match found from the run needs a
+reverse pass for its start. Every other DFA keeps and charges no start-byte
+tables. On the run, counting the spans of Trino's `(?i)think` over English had
+taken 1.037x main's time on r9g, and with the filter it takes 0.996x;
+`(?i)Holmes` and `(?i)process`, whose start bytes carry no filter, keep the run
+in every search and take 0.10x and 0.67x. The
 [long-window required-literal check](#required-literal-absence-on-long-windows)
 judges a program whose run stands in for no prefix as the program without the
 run, counting the start literal filter its start bytes would carry, while a run

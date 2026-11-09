@@ -22,6 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.function.Function;
 
@@ -222,13 +223,13 @@ public class TestPrefixProbeAcceleration
     @Test
     public void testLeadingFoldedRunKeepsFilteredCandidateCursor()
     {
-        // Every match of Trino's (?i)think and (?i)Holmes starts with its folded run, and the DFA
-        // keeps its start bytes beside the run. A find loop verifies candidates from them only
-        // where they carry the start literal filter, as think's do with the Vector API, which
+        // Every match of Trino's (?i)think and (?i)Holmes starts with its folded run, and a
+        // first-match DFA whose start bytes carry a start literal filter keeps them beside the run.
+        // A find loop verifies candidates from them there, as think's do with the Vector API, which
         // yields each match's start without a reverse pass; with 64-byte vectors there is no run
         // and the start bytes serve as before. Holmes's start bytes carry no filter, so its find
-        // loop takes the run. The run of (?i)Sherlock Holmes lies behind a lead, so its DFA has
-        // no start bytes to verify.
+        // loop takes the run. The run of (?i)Sherlock Holmes lies behind a lead, so its DFA has no
+        // start bytes to verify.
         String filler = "filler text, ".repeat(100);
         Slice text = Slices.utf8Slice(filler + "I THINK " + filler + "Holmes thinks " + filler + "Sherlock HOLMES " + filler);
         assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)think")).re2(), text, 2, VectorSupport.isAvailable());
@@ -237,6 +238,25 @@ public class TestPrefixProbeAcceleration
             assertCandidateCursorFinds(holmes, text, 2, false);
         }
         assertCandidateCursorFinds(TrinoRegexp.compile(Slices.utf8Slice("(?i)Sherlock Holmes")).re2(), text, 1, false);
+
+        // Only the first-match DFA whose start bytes carry the filter keeps and charges the start
+        // tables; the run takes their place in every other DFA, which would never read them. So
+        // think keeps them in its first-match DFA alone, with the Vector API, and Holmes in none.
+        // With 64-byte vectors neither word has a run, as above, and the tables serve as before.
+        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
+            Map<String, List<Dfa.DfaInstance.Kind>> tableKinds = Map.of(
+                    "(?i)think", VectorSupport.isAvailable() ? List.of(Dfa.DfaInstance.Kind.FIRST_MATCH) : List.of(),
+                    "(?i)Holmes", List.of());
+            for (Map.Entry<String, List<Dfa.DfaInstance.Kind>> entry : tableKinds.entrySet()) {
+                Prog program = TrinoRegexp.compile(Slices.utf8Slice(entry.getKey())).re2().forwardProgramForDiagnostics();
+                assertThat(program.prefixRunStartsEveryMatch()).as(entry.getKey()).isTrue();
+                for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
+                    assertThat(Dfa.DfaInstance.initializationMemory(program, kind) > Dfa.DfaInstance.minimumMemory(program, kind))
+                            .as("%s %s start tables", entry.getKey(), kind)
+                            .isEqualTo(entry.getValue().contains(kind));
+                }
+            }
+        }
     }
 
     @Test

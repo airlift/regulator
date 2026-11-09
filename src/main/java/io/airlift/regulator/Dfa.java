@@ -6023,7 +6023,9 @@ final class Dfa
 
         /// Returns whether a DFA of `kind` over `prog` searches for its start literal filter in
         /// place of its start bytes, which this selects as the start-byte tables do, building none
-        /// of the tables that follow the selection.
+        /// of the tables that follow the selection. A program whose folded run starts every match
+        /// keeps the tables only in its first-match DFA, so for such a program this answers for
+        /// that kind alone: a DFA of another kind keeps no filter.
         static boolean searchesStartLiteralFilter(Prog prog, Kind kind)
         {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
@@ -6055,6 +6057,11 @@ final class Dfa
         // searches. The literal filter comes first, and the class filter replaces only a start
         // set's own vector scan: a contiguous range, two or three bytes, or the nibble tables of a
         // mixed set.
+        //
+        // A folded run that every match starts with takes the place of the start bytes in every
+        // search but the candidate cursor's, which reads only a first-match DFA whose start bytes
+        // carry a start literal filter; see CompiledPattern.createCandidateStartCursor. Every
+        // other DFA of such a program keeps and charges no start-byte tables.
         private record StartByteTables(
                 byte[] candidates,
                 boolean nullableCandidates,
@@ -6064,13 +6071,22 @@ final class Dfa
                 StartClassFilter classFilter,
                 byte[] nibbleTables)
         {
+            private static final StartByteTables NONE = new StartByteTables(null, false, 0, null, false, null, null);
+
             static StartByteTables build(Prog prog, Kind kind, int[] stack)
             {
+                boolean prefixRunStartsEveryMatch = prog.prefixRunStartsEveryMatch();
+                if (prefixRunStartsEveryMatch && kind != Kind.FIRST_MATCH) {
+                    return NONE;
+                }
                 StartLiteralFilterSelection selection = StartLiteralFilterSelection.select(prog, kind, stack);
+                StartLiteralFilterChoice literalFilterChoice = selection.literalFilterChoice();
+                if (prefixRunStartsEveryMatch && literalFilterChoice == null) {
+                    return NONE;
+                }
                 byte[] candidates = selection.candidates();
                 int byteScanSet = selection.byteScanSet();
                 boolean vectorScans = selection.vectorScans();
-                StartLiteralFilterChoice literalFilterChoice = selection.literalFilterChoice();
                 StartLiteralFilter literalFilter = literalFilterChoice == null ? null : literalFilterChoice.filter();
                 boolean literalFilterVectorOnly = literalFilterChoice != null && literalFilterChoice.vectorOnly();
                 byte[] nibbleTables = literalFilter == null && byteScanSet == 0 && vectorScans ? VectorByteSetScanner.buildNibbleTables(candidates) : null;

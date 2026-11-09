@@ -296,9 +296,9 @@ so the automata run only where a match can be.
   folded prefix. The scan starts the least lead past the search start and
   returns the run less the greatest lead, and the DFA, NFA, and BitState
   searches skip the scans that would find the same run again. A run that every
-  match starts with keeps the DFA's start bytes beside it, and a find loop
-  whose start bytes carry a start literal filter verifies their candidates
-  instead, without a reverse pass. RE2 scans nothing past such a fold. Rust,
+  match starts with keeps the start bytes only in a first-match DFA whose
+  start bytes carry a start literal filter, and a find loop verifies their
+  candidates without a reverse pass. RE2 scans nothing past such a fold. Rust,
   RE2, and Java `name-sherlock-casei` and Rust `name-sherlock-holmes-casei`
   take 0.17 to 0.20 of their earlier time on Graviton and 0.09 to 0.13 on
   Intel, and `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77

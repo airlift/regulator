@@ -459,8 +459,9 @@ final class Prog
     private int prefixMinimumLead;
     private int prefixMaximumLead;
     // Whether the folded run is one that every match starts with, configured because the program
-    // has no folded prefix. The DFA keeps its start-byte tables beside such a run, so a find loop
-    // can keep verifying candidates from them; see prefixAccelReplacesStartBytes.
+    // has no folded prefix. A first-match DFA whose start bytes carry a start literal filter keeps
+    // its start-byte tables beside such a run, so a find loop can keep verifying candidates from
+    // them; see prefixAccelReplacesStartBytes.
     private boolean prefixRunStartsEveryMatch;
     // Whether the folded run stands in for no prefix, configured because the program has no
     // folded prefix or an empty one, so without the run it would have no prefix scan; see
@@ -1699,8 +1700,9 @@ final class Prog
     }
 
     /// Returns whether the prefix scan searches for a folded run that every match starts with,
-    /// configured because the program has no folded prefix. The DFA keeps its start-byte tables
-    /// beside such a run.
+    /// configured because the program has no folded prefix. A first-match DFA whose start bytes
+    /// carry a start literal filter keeps its start-byte tables beside such a run, and every other
+    /// DFA keeps and charges none.
     boolean prefixRunStartsEveryMatch()
     {
         return prefixRunStartsEveryMatch;
@@ -1727,9 +1729,10 @@ final class Prog
     }
 
     /// Whether the prefix scan takes the place of the start-byte tables, so the DFA builds none.
-    /// Every prefix scan does except a folded run that every match starts with: the tables'
-    /// candidates are then match starts, which a find loop can verify without the reverse pass
-    /// that a match found from the run needs to find its start.
+    /// Every prefix scan does except a folded run that every match starts with, beside which a
+    /// first-match DFA whose start bytes carry a start literal filter keeps its start-byte tables:
+    /// the tables' candidates are then match starts, which a find loop can verify without the
+    /// reverse pass that a match found from the run needs to find its start.
     private boolean prefixAccelReplacesStartBytes()
     {
         return canPrefixAccel() && !prefixRunStartsEveryMatch;
