@@ -408,16 +408,24 @@ public class TestInnerLiteralSearch
                 // A rare class pair counts its two bytes.
                 "[a-z][?!.][\"']x",
                 // A common byte, a prefix the program accelerates, a folded run it accelerates
-                // behind the Kelvin sign's wider lead, and no literal.
+                // behind the Kelvin sign's wider lead, one of three bytes led by a rare letter, and
+                // no literal.
                 "[a-z] [a-z]",
                 "ab[0-9]shing",
                 "(?i)k-9 unit[0-9]",
+                "(?i)kwat[0-9]",
                 "[a-z]{4}")) {
             ParseResult parsed = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
-            int predicted = InnerLiteralSearch.predictMinimumLiteralLength(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), parsed.caseFolding());
+            int predicted = InnerLiteralSearch.predictMinimumLiteralLength(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), parsed.caseFolding(), ByteFrequencies.uniform());
             InnerLiteralSearch search = Re2.compile(utf8Slice(pattern)).innerLiteralSearchForDiagnostics();
             assertThat(predicted).as(pattern).isEqualTo(search == null ? 0 : search.minimumLiteralLength());
         }
+        // The prediction takes the pattern's distribution: English refuses the run gyz, led by g,
+        // and JSON, which rates g at 0.8%, keeps it.
+        ParseResult parsed = RegexpParser.parse(utf8Slice("(?i)kgyz[0-9]"), Regexp.LIKE_PERL);
+        int predicted = InnerLiteralSearch.predictMinimumLiteralLength(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), parsed.caseFolding(), ByteFrequencies.json());
+        InnerLiteralSearch search = Re2.compile(utf8Slice("(?i)kgyz[0-9]"), Re2.Options.defaults().setByteFrequencies(ByteFrequencies.json())).innerLiteralSearchForDiagnostics();
+        assertThat(predicted).isEqualTo(search == null ? 0 : search.minimumLiteralLength());
     }
 
     @Test

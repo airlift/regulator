@@ -358,8 +358,9 @@ so the automata run only where a match can be.
   Folded runs: case-insensitive patterns under Unicode case folding with no
   folded prefix, or whose folded prefix stops at a letter whose fold leaves
   ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
-  when the run's pair is rarer; a run that every match starts with only where
-  vectors hold fewer than 64 bytes
+  when the run's pair is rarer; a three-byte run only when an ASCII letter the
+  selected distribution rates rare leads it; a run that every match starts with
+  only where vectors hold fewer than 64 bytes
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned for two of its folded bytes a SWAR word or vector at a time. The
   pair is the prefix's first and last bytes unless two bytes at least two
@@ -379,9 +380,10 @@ so the automata run only where a match can be.
   loop would leave and re-enter on many vectors; that kernel fits C2's inline
   limit, so it inlines into the DFA scan. RE2 scans it with a ShiftDFA. Where
   a Unicode fold ends the prefix, the compiler finds the runs of four to nine
-  folded bytes that every match holds behind a lead of known least and
-  greatest width, and scans for the run with the rarest pair in place of the
-  folded prefix. The scan starts the least lead past the search start and
+  folded bytes, or of three led by a rare letter, that every match holds
+  behind a lead of known least and greatest width, and scans for the run
+  with the rarest pair in place of the folded prefix.
+  The scan starts the least lead past the search start and
   returns the run less the greatest lead, and the DFA, NFA, and BitState
   searches skip the scans that would find the same run again. A run that every
   match starts with keeps the start bytes only in a first-match DFA whose
@@ -395,7 +397,9 @@ so the automata run only where a match can be.
   rarer pair takes RE2's Latin-1 `(?i)Sherlock Holmes` to 0.71 on Graviton and
   0.53 on Intel, and `(?i)Twain` and CPython's `timeout` to 0.45 to 0.68, and
   the folded run takes `(?i)password` over CPython source to 0.43 to 0.46 in
-  RE2, Rust, and Java with Unicode case and 0.12 to 0.16 in Trino. With the
+  RE2, Rust, and Java with Unicode case and 0.12 to 0.16 in Trino, and the
+  three-byte runs `wat` and `wor`, led by a rare letter, take Trino's counts of
+  `(?i)watson` and `(?i)works` over English to 0.16 on Graviton. With the
   in-loop kernel, CPython's `error`, `(?i)secret` over a log, and Java's
   Unicode `(?i)Twain` run at 0.94 to 1.06 of the earlier per-vector scan's
   time on Intel, where the counted loop loses. The call-free comparison keeps

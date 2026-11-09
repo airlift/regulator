@@ -549,7 +549,7 @@ final class Compiler
     /// varying width, so a pattern whose folds stay in ASCII keeps its prefix.
     private static Regexp.FoldedRun foldedRunForAccel(Regexp regexp, Regexp.RequiredPrefixForAccelResult foldedPrefix, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        List<Regexp.FoldedRun> runs = regexp.foldedRunsForAccel(caseFolding);
+        List<Regexp.FoldedRun> runs = regexp.foldedRunsForAccel(caseFolding, byteFrequencies);
         if (runs.isEmpty()) {
             return null;
         }
@@ -581,8 +581,9 @@ final class Compiler
         // on one host, the same runs took 0.10x to 0.70x main's time, and 1.04x for (?i)this and
         // (?i)think, so narrower vectors keep the run; 32-byte vectors, as with AVX2 or 256-bit
         // SVE, were not measured. The (?i)this and (?i)class figures were measured before
-        // three-byte runs were left out; their runs thi and cla hold three, so they now get no
-        // run. "Folded Prefix Candidate Scan" in REGULATOR_DECISIONS.md records the measurements.
+        // a three-byte run needed to be led by a rare letter; their runs thi and cla are led by
+        // common letters, so they now get no run. "Folded Prefix Candidate Scan" in
+        // REGULATOR_DECISIONS.md records the measurements.
         // VectorSupport is checked first because preferredByteLanes loads the Vector API.
         if (best != null && prefix.length == 0 && best.maximumLead() == 0 &&
                 VectorSupport.isAvailable() && VectorSupport.preferredByteLanes() >= 64) {

@@ -3347,14 +3347,14 @@ against 0.93x to 0.94x. A pair that English rates rarer than a text holds it
 stays on the counted loop and pays for it on r8i: CPython's `self`, rated at
 5.7% of 64-byte vectors but found in 24%, takes 0.99x to 1.06x the earlier
 scan's time, Trino's `elf` of it, rated at 10% but found in 26%, took 1.13x,
-measured before three-byte runs were left out, `(?i)Holmes` over English, rated
-at 11.8% but found in 20%, takes 1.10x, and `(?i)file` over CPython, rated at
-10% but found in 16%, 1.06x to 1.11x. `(?i)slave` over a log takes 0.82x to
-0.98x. On r8i the in-loop kernel, whose loop has main's shape, takes 1.02x to
-1.07x for `(?i)error` and `(?i)info` over a log, a cost not yet separated from
-code layout, and 1.10x to 1.14x for `(?i)that` over English, which some JVMs run
-faster than main as the layout of the inlined vector kernel varies. On r9g each
-of these rows takes 0.79x to 0.96x.
+measured before a three-byte run needed to be led by a rare letter, `(?i)Holmes`
+over English, rated at 11.8% but found in 20%, takes 1.10x, and `(?i)file` over
+CPython, rated at 10% but found in 16%, 1.06x to 1.11x. `(?i)slave` over a log
+takes 0.82x to 0.98x. On r8i the in-loop kernel, whose loop has main's shape,
+takes 1.02x to 1.07x for `(?i)error` and `(?i)info` over a log, a cost not yet
+separated from code layout, and 1.10x to 1.14x for `(?i)that` over English,
+which some JVMs run faster than main as the layout of the inlined vector kernel
+varies. On r9g each of these rows takes 0.79x to 0.96x.
 
 The two probe bytes are the pair, at least two bytes apart, whose folded
 probabilities have the smallest product; an ASCII letter's folded probability
@@ -3386,9 +3386,10 @@ UTF-8, Java's Unicode case also matches `i` with the dotted and dotless i, and
 Trino's full case folding also matches characters such as `ß` for `ss` and the
 `ﬁ` ligature for `fi`, so no folded prefix reaches past them: upstream scans
 nothing for `(?i)Sherlock Holmes` in UTF-8. Regulator instead scans for a folded
-run of four to nine bytes that every match holds behind a lead whose width lies
-within a known range. A run's lead is every byte before it, earlier runs
-included. Besides run bytes, it is made of literal characters that match one
+run of four to nine bytes, or of three led by a rare letter, that every match
+holds behind a lead whose width lies within a known range. A run's lead is
+every byte before it, earlier runs included.
+Besides run bytes, it is made of literal characters that match one
 byte sequence, classes that hold exactly one fold orbit, which take their
 members' widths in the program's encoding, and, in a Trino literal, stretches of
 characters whose orbits leave ASCII or that a multi-character fold covers, which
@@ -3413,10 +3414,38 @@ against 9,438 for main's start literal filter, and took 6.93x and 9.89x main's
 time on r9g and r8i. On r9g, Trino's `(?i)user` over a log took 1.25x, RE2's
 Unicode `(?i)user` 1.51x, counting the spans of `(?i)self` 1.35x, and Trino's
 `(?i)this` 1.08x. The wins came from runs of four or more, such as ` holme`,
-`word`, `proce`, and `thin`, so shorter runs are left out. The scan starts the
-least lead past the search start and returns the first run it finds less the
-greatest lead, never before the search start; no match can start earlier, so the
-result is a skip like a prefix scan's. With no prefix, the run with the rarest
+`word`, `proce`, and `thin`, and from three-byte runs led by a rare letter.
+Two-byte runs are left out. Three-byte runs led by common letters lost, as with
+`thi` at 1.08x and `elf` at 1.35x, so a three-byte run is kept only when it is
+led by a rare letter, an ASCII letter rated, both cases together, under 1.5%,
+which gives up the `cla` and `pon` of Trino's `(?i)class` and `(?i)response`. It
+must be a letter because English rates code punctuation and digits rare, as with
+the `_id` of `(?i)task_id`. In English, `b`, `w`, `y` and every rarer letter
+pass; `f`, `g`, `p` and every more common letter do not. On r9g, before any
+three-byte run was left out, the runs `wat` and `wor` took Trino's counts of
+`(?i)watson` and `(?i)works` over English to 0.22x and 0.20x main's time, and
+`cla` and `pon` took `(?i)class` and `(?i)response` to 0.63x and 0.68x. With
+this rule, Trino's counts over English of `(?i)watson`, `(?i)works`, `(?i)back`,
+and `(?i)york` took 0.163x, 0.158x, 0.263x, and 0.125x main's time on r9g, and
+the refused words and the controls tied.
+The rule is accepted at a cost to `(?i)qsyou` over English, a constructed
+pattern with no published row. English text holds its `you` far more often than
+its letters predict: its scan stops 9.4 times per KiB, against 0.46 for the
+folded prefix `q` it replaces. RE2, Rust, and Java
+take 2.1x main's time on r9g and 2.7x on r8i. Trino, where the run replaces a
+start-byte cursor that scans `q` in 31 µs over 899 KB while the folded prefix
+scan takes 78 µs, takes 5.3x and 8.4x. Requiring a run to be four times rarer
+than the folded prefix it replaces, the margin a probe pair needs, returned RE2,
+Rust, and Java to main's time, but took `(?i)password` over CPython, whose run
+`word` is rarer than `pa` by a similar estimate, to 2.1x to 2.5x, and left
+Trino, with no prefix there, at 5.3x; a margin of two left `(?i)qsyou` where
+it was. No static rating separates the two words. A run-time demotion of a
+prefix scan whose stops turn out dense, or a start-byte scan of a one-byte
+folded prefix that a run is judged against, would catch the row.
+The scan starts the least lead past the
+search start and returns the first run it finds less the greatest lead, never
+before the search start; no match can start earlier, so the result is a skip
+like a prefix scan's. With no prefix, the run with the rarest
 pair under the rule above is chosen, earliest on ties. A folded prefix yields
 only to a run with a rarer pair behind a lead of varying width, which only
 Unicode folds produce, so every folded prefix of an ASCII-folding language
@@ -3458,10 +3487,10 @@ returned all of them to 0.99x to 1.01x, and gave up the run's wins for
 `(?i)works` (0.73x) and `(?i)watson` (0.95x), which return to main's time. On
 r9g's 16-byte vectors, measured on one host, the same runs took 0.10x to 0.70x
 main's time, and 1.04x for `(?i)this` and `(?i)think`, so there the run stays.
-These measurements predate the four-byte rule above, under which `(?i)this` and
-`(?i)class`, whose runs `thi` and `cla` hold three bytes, get no run. The choice
-follows the vector width, and 32-byte vectors, as with AVX2 or 256-bit SVE, were
-not measured.
+These measurements predate the rule above that a three-byte run be led by a rare
+letter, under which `(?i)this` and `(?i)class`, whose runs `thi` and `cla` are
+led by common letters, get no run. The choice follows the vector width, and
+32-byte vectors, as with AVX2 or 256-bit SVE, were not measured.
 
 This is a performance-only deviation. Upstream ShiftDFA carries eight serial
 table-dependent shifts through each unrolled block. The fused scan uses two
@@ -3815,7 +3844,8 @@ performance-only deviation.
 
 Case-folded prefixes, and the folded runs that stand in for them, instead pair
 two folded bytes ranked by the caller's distribution, or by `englishText()`
-under the default, which also ranks the runs, as
+under the default, which also ranks the runs and decides which three-byte runs
+are rare enough to scan, as
 [Folded Prefix Candidate Scan](#folded-prefix-candidate-scan) describes, so
 their choice is on by default where a case-sensitive probe is opt-in. The
 reason is that a folded prefix's first and last bytes are often among the

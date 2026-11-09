@@ -136,8 +136,9 @@ public sealed class Re2
         /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
         /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
         /// [ByteFrequencies#uniform()], keeps first-byte scanning. The distribution also ranks the
-        /// folded byte pairs and folded runs that case-insensitive prefix scans probe, with
-        /// [ByteFrequencies#englishText()] in place of the default.
+        /// folded byte pairs and folded runs that case-insensitive prefix scans probe, and decides
+        /// which three-byte runs are rare enough to scan, with [ByteFrequencies#englishText()] in
+        /// place of the default.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");

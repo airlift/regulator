@@ -115,12 +115,22 @@ final class Regexp
     /// that take from `minimumLead` through `maximumLead` bytes; see [#foldedRunsForAccel].
     record FoldedRun(byte[] bytes, int minimumLead, int maximumLead) {}
 
-    // A folded run holds at least four bytes: shorter runs, such as the le after the fi of
-    // Trino's (?i)file, are common enough in text that their scan stops far more often than the
-    // DFA's start bytes would. It holds at most the nine bytes of a folded prefix. Its lead may
-    // vary by at most eight bytes, which bounds how often a search finds the same run again while
-    // the engine steps through the lead.
+    // A folded run normally needs four bytes; a three-byte run qualifies only when a rare ASCII
+    // letter leads it. Shorter runs, such as the le after the fi of Trino's (?i)file, are common
+    // enough in text that their scan stops far more often than the DFA's start bytes would. A
+    // three-byte run is led by a rare letter when its first byte is an ASCII letter rated, both
+    // cases together, under 1.5%: in English b, w, y and every rarer letter pass; f, g, p and every
+    // more common letter do not, so the thi, elf, cla, and pon of Trino's (?i)this, (?i)self,
+    // (?i)class, and (?i)response get no run. The first byte must be a letter because English rates
+    // code punctuation and digits rare, so the _id of (?i)task_id gets no run. On r9g, the runs
+    // wat, wor, bac, and yor took Trino's counts of (?i)watson, (?i)works, (?i)back, and (?i)york
+    // over English to 0.163x, 0.158x, 0.263x, and 0.125x main's time. A run holds at most the nine
+    // bytes of a folded prefix. Its lead may vary by at most eight bytes, which bounds how often a
+    // search finds the same run again while the engine steps through the lead. "Folded Prefix
+    // Candidate Scan" in REGULATOR_DECISIONS.md records the measurements.
     private static final int MIN_FOLDED_RUN_BYTES = 4;
+    private static final int RARE_LETTER_FOLDED_RUN_BYTES = 3;
+    private static final double MAX_THREE_BYTE_RUN_FIRST_BYTE_PROBABILITY = 0.015;
     private static final int MAX_FOLDED_RUN_BYTES = Prog.MAX_FOLD_CASE_PREFIX_BYTES;
     private static final int MAX_FOLDED_RUN_LEAD_SLACK = 8;
 
@@ -238,11 +248,13 @@ final class Regexp
         return new RequiredPrefixForAccelResult(Slices.wrappedBuffer(prefixBytes), foldCase);
     }
 
-    /// Returns the folded runs of four or more bytes in the leading elements of every match, in
-    /// order, each with the range of bytes its lead can take. Under Unicode folding, `k` and `s`
-    /// also match the Kelvin sign and the long s, which are wider in UTF-8, so no folded prefix
-    /// reaches past them, but the ASCII letters between them still form runs at a known range of
-    /// distances from the match start.
+    /// Returns the folded runs in the leading elements of every match, in order, each with the
+    /// range of bytes its lead can take. Runs of four or more bytes qualify; a three-byte run
+    /// qualifies only when its first byte is an ASCII letter that
+    /// `byteFrequencies.forFoldedPairs()` rates, both cases together, under 1.5%. Under Unicode
+    /// folding, `k` and `s` also match the Kelvin sign and the long s, which are wider in UTF-8, so
+    /// no folded prefix reaches past them, but the ASCII letters between them still form runs at a
+    /// known range of distances from the match start.
     ///
     /// The walk sees through captures and concatenations. A run byte is an ASCII byte of a
     /// literal that is a case-folded ASCII letter, which matches its two cases, or a non-letter,
@@ -258,9 +270,9 @@ final class Regexp
     /// In a fully case-folded literal it also stops at the first character outside ASCII, read in
     /// the folded literal, where `ß` continues as `ss` and the Kelvin sign and the long s are `k`
     /// and `s`. Runs longer than nine bytes are split.
-    List<FoldedRun> foldedRunsForAccel(CaseFolding caseFolding)
+    List<FoldedRun> foldedRunsForAccel(CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        FoldedRunBuilder builder = new FoldedRunBuilder();
+        FoldedRunBuilder builder = new FoldedRunBuilder(byteFrequencies.forFoldedPairs());
         boolean latin1Program = (parseFlags & LATIN1) != 0;
         Deque<Regexp> stack = new ArrayDeque<>();
         stack.addLast(this);
@@ -411,6 +423,7 @@ final class Regexp
 
     private static final class FoldedRunBuilder
     {
+        private final ByteFrequencies pairFrequencies;
         private final List<FoldedRun> runs = new ArrayList<>();
         private final byte[] run = new byte[MAX_FOLDED_RUN_BYTES];
         private int runLength;
@@ -419,6 +432,11 @@ final class Regexp
         private int minimumLead;
         private int maximumLead;
         private boolean stopped;
+
+        FoldedRunBuilder(ByteFrequencies pairFrequencies)
+        {
+            this.pairFrequencies = requireNonNull(pairFrequencies, "pairFrequencies is null");
+        }
 
         boolean stopped()
         {
@@ -459,7 +477,9 @@ final class Regexp
 
         private void closeRun()
         {
-            if (runLength >= MIN_FOLDED_RUN_BYTES && runHoldsLetter) {
+            boolean keepsRun = runLength >= MIN_FOLDED_RUN_BYTES ||
+                    (runLength == RARE_LETTER_FOLDED_RUN_BYTES && isAsciiLetter(run[0]) && pairFrequencies.foldedProbability(run[0]) < MAX_THREE_BYTE_RUN_FIRST_BYTE_PROBABILITY);
+            if (keepsRun && runHoldsLetter) {
                 runs.add(new FoldedRun(Arrays.copyOf(run, runLength), minimumLead, maximumLead));
             }
             minimumLead += runLength;
