@@ -19,6 +19,9 @@ import java.io.BufferedWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -35,6 +38,11 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 /// of the published Slice API.
 public final class RebarRunner
 {
+    private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final long LOW_BITS = 0x0101010101010101L;
+    private static final long HIGH_BITS = 0x8080808080808080L;
+    private static final long NEWLINES = 0x0A0A0A0A0A0A0A0AL;
+
     private RebarRunner() {}
 
     public static void main(String[] arguments)
@@ -272,13 +280,41 @@ public final class RebarRunner
         return count;
     }
 
+    /// Returns the offset of the `\n` that ends the line starting at `lineStart`, or the haystack
+    /// length for a final line without one. The Rust runners split lines with bstr's `lines()`,
+    /// which finds each terminator with memchr, so a byte-at-a-time loop here would charge
+    /// Regulator's grep rows for a slower splitter than theirs. This searches two little-endian
+    /// words at a time, the technique of memchr's portable fallback, and keeps its own search
+    /// rather than the engine's so the runner's profile stays out of the engine's compiled code.
+    /// Words may run past the line into later lines, so only the haystack's last few bytes, up to
+    /// 15, are searched one at a time.
     private static int lineEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart)
     {
-        int lineEnd = lineStart;
-        while (lineEnd < haystack.length() && bytes[byteArrayOffset + lineEnd] != '\n') {
-            lineEnd++;
+        int searchEnd = byteArrayOffset + haystack.length();
+        int position = byteArrayOffset + lineStart;
+        for (; position <= searchEnd - 2 * Long.BYTES; position += 2 * Long.BYTES) {
+            long firstMatches = zeroByteMask(((long) LONG_HANDLE.get(bytes, position)) ^ NEWLINES);
+            long secondMatches = zeroByteMask(((long) LONG_HANDLE.get(bytes, position + Long.BYTES)) ^ NEWLINES);
+            if ((firstMatches | secondMatches) != 0) {
+                if (firstMatches != 0) {
+                    return position + (Long.numberOfTrailingZeros(firstMatches) >>> 3) - byteArrayOffset;
+                }
+                return position + Long.BYTES + (Long.numberOfTrailingZeros(secondMatches) >>> 3) - byteArrayOffset;
+            }
         }
-        return lineEnd;
+        for (; position < searchEnd; position++) {
+            if (bytes[position] == '\n') {
+                return position - byteArrayOffset;
+            }
+        }
+        return haystack.length();
+    }
+
+    /// Sets the high bit of each zero byte. The borrow can also mark a byte above a zero byte, so
+    /// only the lowest set bit is exact.
+    private static long zeroByteMask(long value)
+    {
+        return (value - LOW_BITS) & ~value & HIGH_BITS;
     }
 
     private static int contentEnd(byte[] bytes, int byteArrayOffset, int lineStart, int lineEnd)

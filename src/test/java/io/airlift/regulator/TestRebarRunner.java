@@ -89,6 +89,71 @@ class TestRebarRunner
     }
 
     @Test
+    void testGrepSplitsLinesAtEveryWordOffset()
+            throws Exception
+    {
+        // The runner searches for each terminator two eight-byte words at a time and the last
+        // bytes of the haystack one at a time. Lines of 0 to 40 bytes, each followed by a second
+        // line of 0x0B alone or 0x0B and sixteen 'b', put the terminator at every offset 0 to 15 of
+        // the two-word step and 0 to 13 of the byte-at-a-time tail, with a "\r\n" straddling each
+        // word boundary. The lines hold 0x8A and 0xFF, which share bits with '\n', and each
+        // terminator is followed by 0x0B, the byte a word search's borrow can falsely mark after a
+        // '\n'. None may end a line.
+        byte[] highBitBytes = {'a', (byte) 0x8A, (byte) 0xFF};
+        for (int length = 0; length <= 40; length++) {
+            ByteArrayOutputStream line = new ByteArrayOutputStream();
+            for (int index = 0; index < length; index++) {
+                line.write(highBitBytes[index % highBitBytes.length]);
+            }
+            for (String terminator : List.of("\n", "\r\n")) {
+                for (int fillerLength : new int[] {0, 16}) {
+                    ByteArrayOutputStream haystack = new ByteArrayOutputStream();
+                    haystack.writeBytes(line.toByteArray());
+                    haystack.writeBytes(bytes(terminator));
+                    haystack.write(0x0B);
+                    haystack.writeBytes(bytes("b".repeat(fillerLength)));
+                    byte[] input = haystack.toByteArray();
+
+                    // The empty pattern matches every line, so the count is the number of engine calls.
+                    assertCounts(run("grep", bytes(""), false, input), 2, 2);
+                    assertCounts(run("grep", bytes("^[a\\x8A\\xFF]{" + length + "}$"), false, input), 1, 1);
+                    assertCounts(run("grep", bytes("^\\x0Bb*$"), false, input), 1, 1);
+                    assertCounts(run("grep-captures", bytes("^[a\\x8A\\xFF]{" + length + "}$|^(\\x0Bb*)$"), false, input), 3, 3);
+                }
+            }
+        }
+    }
+
+    @Test
+    void testGrepCountsEveryLine()
+            throws Exception
+    {
+        assertCounts(run("grep", bytes(""), false, bytes("a")), 1, 1);
+        assertCounts(run("grep", bytes(""), false, bytes("a\nb")), 2, 2);
+        assertCounts(run("grep", bytes(""), false, bytes("\n\n\na\n\n")), 5, 5);
+        assertCounts(run("grep", bytes("^$"), false, bytes("\n\n\na\n\n")), 4, 4);
+        // Sixteen newlines put several in one two-word step, so the search must pick the earliest.
+        assertCounts(run("grep", bytes("^$"), false, bytes("\n".repeat(16))), 16, 16);
+        assertCounts(run("grep", bytes("^a\rb$"), false, bytes("a\rb\r\n")), 1, 1);
+        // Lines longer than a two-word step make later lines' searches enter the two-word loop from a nonzero start.
+        String longLines = "0123456789abcdefghij\r\n0123456789abcdefghijklmnopq\n0123456789\n";
+        assertCounts(run("grep", bytes(""), false, bytes(longLines.repeat(3))), 9, 9);
+        assertCounts(run("grep", bytes("^[0-9a-z]{27}$"), false, bytes(longLines.repeat(3))), 3, 3);
+    }
+
+    @Test
+    void testGrepStopsAtTheEndOfTheBackingArray()
+    {
+        // A haystack that fills its backing array has no byte after it to read. Lengths 1 and 17
+        // end in the byte-at-a-time tail, before and after a two-word step.
+        for (int length : new int[] {1, 17}) {
+            Slice haystack = Slices.wrappedBuffer(bytes("a".repeat(length)));
+            RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(a)")).matcher(haystack);
+            assertThat(RebarRunner.grepCapturesResult(matcher, haystack, haystack.byteArray(), haystack.byteArrayOffset())).isEqualTo(2L * length);
+        }
+    }
+
+    @Test
     void testLatin1Haystack()
             throws Exception
     {
