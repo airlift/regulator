@@ -739,10 +739,10 @@ abstract sealed class CompiledPattern
     /// its literal set and compiles no program, for a pattern whose program does not fit the
     /// budget, or `null` where the expression is no such set, the set does not fit the forward
     /// budget, or its plans route find elsewhere. A full match also reads the set's extending
-    /// literals, which hold the literals the automaton omits; they are charged first, so the
-    /// root's skip is built only where it fits beside them. The pattern keeps no reverse
-    /// expression and no required bytes, and its placeholder program has no DFA memory, so no DFA
-    /// or cursor of it ever runs; every call of it runs the set (see
+    /// literals, which hold the literals the automaton omits; they are charged first, so the dense
+    /// rows and then the root's skip are built only where they fit beside them. The pattern keeps
+    /// no reverse expression and no required bytes, and its placeholder program has no DFA memory,
+    /// so no DFA or cursor of it ever runs; every call of it runs the set (see
     /// [#matchInternalOnLiteralSet]).
     private static Analysis analyzeLiteralSetWithoutProgram(Slice pattern, ParseResult parsed, int flags, long maxMemory, Compiler.Dialect compilerDialect)
     {
@@ -1059,15 +1059,31 @@ abstract sealed class CompiledPattern
         LiteralSetSpanMatcher literalSet = !longestMatch ? LiteralSetSpanMatcher.analyze(entireRegexp, capturingGroupCount, semanticProgram.dfaMemory()) : null;
         // The root's skip only speeds up the set's search, so it yields to the forward DFAs: a
         // set whose skip would leave the first-match or longest-match DFA too little to
-        // initialize drops it and is admitted as it was before it. The rule applies whether or
-        // not the DFA would initialize beside the set without it, since the skip changes no
-        // result. Prog.leavesDfaMinimum is not enough here: its minimum leaves out the start-byte
-        // tables the constructor builds for a forward program, 272 bytes per DFA for a 256-entry
+        // initialize drops it and is admitted as it was before it, whether or not the DFA would
+        // initialize beside the set without it, since the skip changes no result. The check
+        // judges the set without its dense rows, which yield below.
+        // Prog.leavesDfaMinimum is not enough here: its minimum leaves out the start-byte tables
+        // the constructor builds for a forward program, 272 bytes per DFA for a 256-entry
         // candidate table, so a skip it admitted could still cost a DFA. A set without the skip
-        // has nothing to drop, so it skips the check, which builds those tables to measure them.
-        if (literalSet instanceof LiteralSetSpanMatcher.RootSkippingMatcher && !(semanticProgram.leavesDfaInitialization(literalSet.estimatedRetainedSize(), Dfa.DfaInstance.Kind.FIRST_MATCH) &&
-                semanticProgram.leavesDfaInitialization(literalSet.estimatedRetainedSize(), Dfa.DfaInstance.Kind.LONGEST_MATCH))) {
-            literalSet = literalSet.withoutRootSkipping();
+        // skips this check, which builds those tables to measure them.
+        if (literalSet instanceof LiteralSetSpanMatcher.RootSkippingMatcher) {
+            long sizeWithoutRows = literalSet.withoutDenseRows().estimatedRetainedSize();
+            if (!(semanticProgram.leavesDfaInitialization(sizeWithoutRows, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
+                    semanticProgram.leavesDfaInitialization(sizeWithoutRows, Dfa.DfaInstance.Kind.LONGEST_MATCH))) {
+                literalSet = literalSet.withoutRootSkipping();
+            }
+        }
+        // The set's dense rows only speed up its search too, but they yield to the forward DFAs
+        // only where they cost one (see costsDfaInitialization): a set whose rows would leave the
+        // first-match or longest-match DFA too little to initialize, where the set without them
+        // would leave it enough, drops them. Where a DFA cannot initialize beside the set either
+        // way, the set keeps them, as for a dictionary of tens of thousands of words under the
+        // default budget, whose matchers search the set.
+        if (literalSet != null) {
+            LiteralSetSpanMatcher withoutRows = literalSet.withoutDenseRows();
+            if (costsDfaInitialization(semanticProgram, literalSet.estimatedRetainedSize(), withoutRows.estimatedRetainedSize())) {
+                literalSet = withoutRows;
+            }
         }
         if (literalSet != null && literalSet.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSet.estimatedRetainedSize());
@@ -1517,12 +1533,20 @@ abstract sealed class CompiledPattern
     /// [Prog#leavesDfaMinimum] leaves out.
     private static boolean costsDfaInitialization(Prog program, long reservation)
     {
-        return costsDfaInitialization(program, reservation, Dfa.DfaInstance.Kind.FIRST_MATCH) || costsDfaInitialization(program, reservation, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+        return costsDfaInitialization(program, reservation, 0);
     }
 
-    private static boolean costsDfaInitialization(Prog program, long reservation, Dfa.DfaInstance.Kind kind)
+    /// Whether reserving `reservation` bytes from `program`'s DFA budget would leave its
+    /// first-match or longest-match DFA too little to initialize where that DFA initializes beside
+    /// the smaller `alternative` reservation instead.
+    private static boolean costsDfaInitialization(Prog program, long reservation, long alternative)
     {
-        return !program.leavesDfaInitialization(reservation, kind) && program.leavesDfaInitialization(0, kind);
+        return costsDfaInitialization(program, reservation, alternative, Dfa.DfaInstance.Kind.FIRST_MATCH) || costsDfaInitialization(program, reservation, alternative, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+    }
+
+    private static boolean costsDfaInitialization(Prog program, long reservation, long alternative, Dfa.DfaInstance.Kind kind)
+    {
+        return reservation > alternative && !program.leavesDfaInitialization(reservation, kind) && program.leavesDfaInitialization(alternative, kind);
     }
 
     /// Creates the matcher of an [ORDERED_LITERALS][BooleanPlanKind#ORDERED_LITERALS] find plan for

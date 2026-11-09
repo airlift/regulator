@@ -173,13 +173,16 @@ Within the budget, compilation and matching keep these limits:
   to initialize is remembered, so later searches do not try to build it again.
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
   bytes outside Trino, the dot-star literal and byte-gap ordered-literal
-  matchers, the root skip of a large literal set, OnePass tables needed only
-  for Java's or Trino's final-line end anchors, and required-byte checks are
-  not kept when their memory would stop the first-match or longest-match DFA
-  from initializing. The literal searched behind a leading assertion is kept
-  only when the first-match and longest-match DFAs both keep their minimum
-  memory beside it, a minimum that leaves out a forward DFA's start-byte
-  tables. Other plans keep their memory whenever it fits.
+  matchers, the root skip and dense rows of a large literal set, OnePass tables
+  needed only for Java's or Trino's final-line end anchors, and required-byte
+  checks are not kept when their memory would stop the first-match or
+  longest-match DFA from initializing. The literal searched behind a leading
+  assertion is kept only when the first-match and longest-match DFAs both keep
+  their minimum memory beside it, a minimum that leaves out a forward DFA's
+  start-byte tables. Other plans keep their memory whenever it fits.
+- A large literal set keeps dense transition rows for its states up to depth 3,
+  at a smaller depth where the rows' entries would pass 1 MiB or the set would
+  not fit its memory, and none where no depth fits.
 - Every program with at most 32,767 output lists can use BitState, where RE2
   allows only programs of at most 512 instructions, so the text limit, not
   program size, decides which spans BitState captures. An anchored BitState

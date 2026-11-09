@@ -47,6 +47,18 @@ import static java.util.Objects.requireNonNull;
 /// a state's edges are contiguous and edge `e` leads to state `e + 1`. The root keeps a dense
 /// 256-entry row whose missing bytes stay at the root.
 ///
+/// On typical text, most transitions of a search leave shallow states, which have the most
+/// edges, so as in the `aho-corasick` crate's noncontiguous NFA (`nfa/noncontiguous.rs`,
+/// `densify`), the states after the root up to a small depth also keep dense rows, over byte
+/// classes. Where the crate's row holds only the state's own edges, a row here holds the state's
+/// complete leftmost-first transition on each class: its edge, else its failure state's
+/// transition, so a failure path that reaches a state with a row ends there. Deeper states scan
+/// their sorted edges and follow failure links until they reach the root, a state with a dense
+/// row, or [#DEAD]. The bytes labeling no edge of any state with a row share one class, on which
+/// each such state leads to the root or to [#DEAD]. The rows are built at the deepest depth up to
+/// [#DENSE_DEPTH] whose rows fit [#MAXIMUM_DENSE_ROW_BYTES] and the build's memory budget, and at
+/// none where none fits.
+///
 /// At the root, a search skips the bytes that lead no literal with a vector scan for the root's
 /// leading bytes. Such a byte leaves the state at the root and records nothing, so the skip is
 /// exact. A search at the root has no match pending, since once one is recorded no state the
@@ -56,9 +68,10 @@ import static java.util.Objects.requireNonNull;
 /// It is not the DFA's start-byte skip, which prefers its start literal filter for up to 16
 /// common start bytes, covers a single start byte with its prefix scan, and vector-scans only
 /// with [Dfa#MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES] bytes left. A matcher with the skip is a
-/// [RootSkippingMatcher], so one without it retains only its trie arrays and the object holding
-/// them, and the skip costs nothing where it is not built. No method is overridden: the
-/// searches reach the skip's scan set by testing `this` against the subclass.
+/// [RootSkippingMatcher], so one without it retains only its trie arrays, any dense rows, and the
+/// object holding them, which carries the rows' fields whether or not it has rows; the skip
+/// costs nothing where it is not built. No method is overridden: the searches reach the skip's
+/// scan set by testing `this` against the subclass.
 sealed class LiteralSetSpanMatcher
         implements GroupZeroSpanSearch
         permits LiteralSetSpanMatcher.RootSkippingMatcher
@@ -70,8 +83,23 @@ sealed class LiteralSetSpanMatcher
     // root retain the byte of the edge leading to them.
     private static final int RETAINED_BYTES_PER_STATE = 3 * Integer.BYTES + 1;
     private static final int INITIAL_TRIE_CAPACITY = 1024;
+    // The deepest states with dense rows, which a smaller budget or the row limit reduces.
+    private static final int DENSE_DEPTH = 3;
+    private static final long MAXIMUM_DENSE_ROW_BYTES = 1L << 20;
 
     private final int[] rootStateByByte;
+    // The class of each byte in a dense row, or null without dense rows.
+    private final byte[] classByByte;
+    private final int classCount;
+    // The depth of the deepest states with dense rows, or zero for none.
+    private final int denseDepth;
+    // States below this count, the root and the shallowest states after it, have dense rows. A
+    // search at the root reads its 256-entry row; the root's dense row only seeds the rows of the
+    // states that fail to it.
+    private final int denseStateCount;
+    // The transition of each state with a dense row on each byte class, row after row from the
+    // root's, or null without dense rows.
+    private final int[] denseNext;
     // The first edge of each state, plus a final entry ending the last state's edges.
     private final int[] firstEdgeByState;
     private final byte[] edgeByte;
@@ -81,7 +109,27 @@ sealed class LiteralSetSpanMatcher
 
     private LiteralSetSpanMatcher(int[] rootStateByByte, int[] firstEdgeByState, byte[] edgeByte, int[] failureByState, int[] matchLengthByState)
     {
+        this(rootStateByByte, null, 0, 0, 1, null, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+    }
+
+    private LiteralSetSpanMatcher(
+            int[] rootStateByByte,
+            byte[] classByByte,
+            int classCount,
+            int denseDepth,
+            int denseStateCount,
+            int[] denseNext,
+            int[] firstEdgeByState,
+            byte[] edgeByte,
+            int[] failureByState,
+            int[] matchLengthByState)
+    {
         this.rootStateByByte = rootStateByByte;
+        this.classByByte = classByByte;
+        this.classCount = classCount;
+        this.denseDepth = denseDepth;
+        this.denseStateCount = denseStateCount;
+        this.denseNext = denseNext;
         this.firstEdgeByState = firstEdgeByState;
         this.edgeByte = edgeByte;
         this.failureByState = failureByState;
@@ -98,10 +146,17 @@ sealed class LiteralSetSpanMatcher
     /// literals keep the alternation's leftmost-first priority order. `maximumRetainedBytes`
     /// bounds the states the build adds, but not the root's row or the object overhead, so a
     /// caller admits the result by its [#estimatedRetainedSize()]. The literals' extraction may
-    /// build a multiple of it; past that, the build takes the literals one at a time. The root's
-    /// skip is built only where the matcher with it still retains at most `maximumRetainedBytes`,
-    /// so a matcher a caller admitted without it is admitted with it or built without it.
+    /// build a multiple of it; past that, the build takes the literals one at a time. The dense
+    /// rows, and then the root's skip, are built only where the matcher with them still retains at
+    /// most `maximumRetainedBytes`, the rows at a smaller depth where that is what fits, so a
+    /// matcher a caller admitted without them is admitted with them or built without them.
     static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes)
+    {
+        return analyze(expression, capturingGroupCount, maximumRetainedBytes, DENSE_DEPTH);
+    }
+
+    /// As [#analyze(Regexp,int,long)], with dense rows for the states up to `maximumDenseDepth`.
+    static LiteralSetSpanMatcher analyze(Regexp expression, int capturingGroupCount, long maximumRetainedBytes, int maximumDenseDepth)
     {
         requireNonNull(expression, "expression is null");
         if (capturingGroupCount != 0) {
@@ -113,7 +168,7 @@ sealed class LiteralSetSpanMatcher
             // Past the extraction's bound, the literals go into the trie one at a time as the
             // expansion spells them, so the set is admitted exactly when the finished set fits.
             Trie trie = LiteralAlternationSpanMatcher.spellLiteralSet(expression, maximumRetainedBytes);
-            return trie == null ? null : trie.build(maximumRetainedBytes);
+            return trie == null ? null : trie.build(maximumRetainedBytes, maximumDenseDepth);
         }
         if (extracted == null || extracted.literalCount() <= LiteralAlternationSpanMatcher.MAXIMUM_ALTERNATIVES) {
             return null;
@@ -131,7 +186,7 @@ sealed class LiteralSetSpanMatcher
                 return null;
             }
         }
-        return trie.build(maximumRetainedBytes);
+        return trie.build(maximumRetainedBytes, maximumDenseDepth);
     }
 
     /// Returns a lower bound on what the large set [#analyze] builds from the capture-free
@@ -147,8 +202,9 @@ sealed class LiteralSetSpanMatcher
         if (!attempt.spelled()) {
             return leastRetainedSizeBeyond(attempt.trie());
         }
-        // The root's skip is built only where it fits, so the least set has none.
-        return attempt.trie().build(0).estimatedRetainedSize();
+        // The dense rows and the root's skip are built only where they fit, so the least set has
+        // neither.
+        return attempt.trie().build(0, 0).estimatedRetainedSize();
     }
 
     /// Returns a lower bound on the memory the large set of the capture-free `expression` and its
@@ -354,21 +410,24 @@ sealed class LiteralSetSpanMatcher
             return new ExtendingLiterals(literalBytes.toByteArray(), Arrays.copyOf(literalEnds, literalCount));
         }
 
-        /// Builds the automaton of the literals added. `maximumRetainedBytes` decides only whether
-        /// the root's skip fits; whether to admit the automaton is the caller's decision.
-        private LiteralSetSpanMatcher build(long maximumRetainedBytes)
+        /// Builds the automaton of the literals added, with dense rows for the states up to
+        /// `maximumDenseDepth`. `maximumRetainedBytes` decides only the depth of the dense rows and
+        /// whether the root's skip fits; whether to admit the automaton is the caller's decision.
+        private LiteralSetSpanMatcher build(long maximumRetainedBytes, int maximumDenseDepth)
         {
             // Phase 2: number the states breadth-first and fill failure links in that order, so a
             // state's failure state, which is shallower, is final when the state is reached.
             int[] trieStateByOrder = new int[stateCount];
             int[] orderByTrieState = new int[stateCount];
             int[] failure = new int[stateCount];
+            int[] depthByOrder = new int[stateCount];
             int orderedCount = 1;
             for (int value = 0; value < 256; value++) {
                 int child = rootChildByByte[value];
                 if (child != ROOT) {
                     failure[child] = matchLength[child] != 0 ? DEAD : ROOT;
                     orderByTrieState[child] = orderedCount;
+                    depthByOrder[orderedCount] = 1;
                     trieStateByOrder[orderedCount++] = child;
                 }
             }
@@ -376,6 +435,7 @@ sealed class LiteralSetSpanMatcher
                 int state = trieStateByOrder[order];
                 for (int child = firstChild[state]; child != ROOT; child = nextSibling[child]) {
                     orderByTrieState[child] = orderedCount;
+                    depthByOrder[orderedCount] = depthByOrder[order] + 1;
                     trieStateByOrder[orderedCount++] = child;
                     if (matchLength[child] != 0) {
                         failure[child] = DEAD;
@@ -430,12 +490,102 @@ sealed class LiteralSetSpanMatcher
             firstEdgeByState[stateCount] = edgeCount;
             LiteralSetSpanMatcher matcher = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
 
-            // Phase 4: the root's skip, whose scan set and any nibble tables, with the larger
+            // Phase 4: dense rows for the shallowest states, at the deepest depth whose rows fit.
+            matcher = matcher.withDenseRows(depthByOrder, maximumDenseDepth, maximumRetainedBytes);
+
+            // Phase 5: the root's skip, whose scan set and any nibble tables, with the larger
             // object holding them, are a retained charge that never costs the matcher itself:
             // where they do not fit, the matcher searches without them.
             RootSkippingMatcher rootSkipping = VectorSupport.isAvailable() ? RootSkippingMatcher.build(matcher, rootChildByByte) : null;
             return rootSkipping != null && rootSkipping.estimatedRetainedSize() <= maximumRetainedBytes ? rootSkipping : matcher;
         }
+    }
+
+    /// Returns this matcher, which has no dense rows, with dense rows for the states up to the
+    /// deepest depth up to `maximumDenseDepth` whose rows fit [#MAXIMUM_DENSE_ROW_BYTES] and leave
+    /// the matcher retaining at most `maximumRetainedBytes`, or this matcher where none fits.
+    /// `depthByOrder` holds each state's depth, which grows with its breadth-first number.
+    private LiteralSetSpanMatcher withDenseRows(int[] depthByOrder, int maximumDenseDepth, long maximumRetainedBytes)
+    {
+        int stateCount = failureByState.length;
+        long retainedSize = estimatedRetainedSize();
+        for (int depth = Math.min(maximumDenseDepth, depthByOrder[stateCount - 1]); depth > 0; depth--) {
+            int denseStateCount = 1;
+            while (denseStateCount < stateCount && depthByOrder[denseStateCount] <= depth) {
+                denseStateCount++;
+            }
+            // The edges of the states with dense rows are the first ones, in state order.
+            byte[] classByByte = new byte[256];
+            int classCount = byteClasses(edgeByte, firstEdgeByState[denseStateCount], classByByte);
+            long rowBytes = (long) denseStateCount * classCount * Integer.BYTES;
+            if (rowBytes > MAXIMUM_DENSE_ROW_BYTES ||
+                    retainedSize + SizeOf.sizeOf(classByByte) + SizeOf.sizeOfIntArray(denseStateCount * classCount) > maximumRetainedBytes) {
+                continue;
+            }
+            int[] denseNext = denseRows(denseStateCount, classByByte, classCount);
+            return new LiteralSetSpanMatcher(
+                    rootStateByByte,
+                    classByByte,
+                    classCount,
+                    depth,
+                    denseStateCount,
+                    denseNext,
+                    firstEdgeByState,
+                    edgeByte,
+                    failureByState,
+                    matchLengthByState);
+        }
+        return this;
+    }
+
+    /// Fills `classByByte` with a class for each byte that labels one of the first `edgeCount`
+    /// edges and one class shared by every other byte, and returns the number of classes.
+    private static int byteClasses(byte[] edgeByte, int edgeCount, byte[] classByByte)
+    {
+        boolean[] labels = new boolean[256];
+        for (int edge = 0; edge < edgeCount; edge++) {
+            labels[edgeByte[edge] & 0xFF] = true;
+        }
+        int classCount = 0;
+        for (int value = 0; value < 256; value++) {
+            if (labels[value]) {
+                classByByte[value] = (byte) classCount++;
+            }
+        }
+        // With every byte labeling an edge, there are 256 classes and no shared one.
+        if (classCount < 256) {
+            for (int value = 0; value < 256; value++) {
+                if (!labels[value]) {
+                    classByByte[value] = (byte) classCount;
+                }
+            }
+            classCount++;
+        }
+        return classCount;
+    }
+
+    /// Returns the dense rows of the first `denseStateCount` states. Each failure state is
+    /// shallower, so its row is complete when a state copies it before adding its own edges. The
+    /// root's row, which its missing bytes leave at the root, starts the failure paths to it.
+    private int[] denseRows(int denseStateCount, byte[] classByByte, int classCount)
+    {
+        int[] denseNext = new int[denseStateCount * classCount];
+        for (int state = 0; state < denseStateCount; state++) {
+            int row = state * classCount;
+            if (state != ROOT) {
+                int failure = failureByState[state];
+                if (failure == DEAD) {
+                    Arrays.fill(denseNext, row, row + classCount, DEAD);
+                }
+                else {
+                    System.arraycopy(denseNext, failure * classCount, denseNext, row, classCount);
+                }
+            }
+            for (int edge = firstEdgeByState[state]; edge < firstEdgeByState[state + 1]; edge++) {
+                denseNext[row + (classByByte[edgeByte[edge] & 0xFF] & 0xFF)] = edge + 1;
+            }
+        }
+        return denseNext;
     }
 
     private static int findTrieChild(int child, byte value, int[] nextSibling, byte[] incomingByte)
@@ -472,6 +622,8 @@ sealed class LiteralSetSpanMatcher
     final long estimatedRetainedSize()
     {
         long trieSize = SizeOf.sizeOf(rootStateByByte) +
+                SizeOf.sizeOf(classByByte) +
+                SizeOf.sizeOf(denseNext) +
                 SizeOf.sizeOf(firstEdgeByState) +
                 SizeOf.sizeOf(edgeByte) +
                 SizeOf.sizeOf(failureByState) +
@@ -482,14 +634,46 @@ sealed class LiteralSetSpanMatcher
         return INSTANCE_SIZE + trieSize;
     }
 
-    /// Returns this matcher without the root's skip: one sharing its trie arrays, or this matcher
-    /// if it has none. It retains what the matcher built without the skip would.
+    /// Returns this matcher without the root's skip: one sharing its trie arrays and any dense
+    /// rows, or this matcher if it has none. It retains what the matcher built without the skip
+    /// would.
     final LiteralSetSpanMatcher withoutRootSkipping()
     {
         if (this instanceof RootSkippingMatcher) {
-            return new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+            return new LiteralSetSpanMatcher(
+                    rootStateByByte,
+                    classByByte,
+                    classCount,
+                    denseDepth,
+                    denseStateCount,
+                    denseNext,
+                    firstEdgeByState,
+                    edgeByte,
+                    failureByState,
+                    matchLengthByState);
         }
         return this;
+    }
+
+    /// Returns this matcher without its dense rows: one sharing its trie arrays and any root skip,
+    /// or this matcher if it has none. It keeps the root skip it has and does not reconsider one
+    /// the rows left no room for.
+    final LiteralSetSpanMatcher withoutDenseRows()
+    {
+        if (denseNext == null) {
+            return this;
+        }
+        LiteralSetSpanMatcher trie = new LiteralSetSpanMatcher(rootStateByByte, firstEdgeByState, edgeByte, failureByState, matchLengthByState);
+        if (this instanceof RootSkippingMatcher rootSkipping) {
+            return new RootSkippingMatcher(trie, rootSkipping.rootByteScanSet, rootSkipping.rootByteNibbleTables);
+        }
+        return trie;
+    }
+
+    /// Returns the depth of the deepest states with dense rows, or `0` without them.
+    final int denseDepthForDiagnostics()
+    {
+        return denseDepth;
     }
 
     /// Returns the scan set of the root's skip for [Dfa#findByteSet], or `0` without the skip.
@@ -592,7 +776,7 @@ sealed class LiteralSetSpanMatcher
 
     // The plain trie walk from the root at array index `position` to array index `inputEnd`,
     // with `match` recorded before `position`. It has no skip check and calls only the inlined
-    // child lookup, so C2 keeps the trie arrays and the state in registers across the loop.
+    // sparseTransition, so C2 keeps the trie arrays and the state in registers across the loop.
     private long walkTrie(Slice input, int position, int inputEnd, long match)
     {
         byte[] bytes = input.byteArray();
@@ -600,22 +784,15 @@ sealed class LiteralSetSpanMatcher
         int state = ROOT;
         for (; position < inputEnd; position++) {
             byte value = bytes[position];
-            int next;
-            while (true) {
-                if (state == ROOT) {
-                    next = rootStateByByte[value & 0xFF];
-                    break;
-                }
-                next = findChild(state, value);
-                if (next != ROOT) {
-                    break;
-                }
-                state = failureByState[state];
+            if (state == ROOT) {
+                state = rootStateByByte[value & 0xFF];
+            }
+            else {
+                state = state < denseStateCount ? denseNext[state * classCount + (classByByte[value & 0xFF] & 0xFF)] : sparseTransition(state, value);
                 if (state == DEAD) {
                     return match;
                 }
             }
-            state = next;
             int matchLength = matchLengthByState[state];
             if (matchLength != 0) {
                 int matchEnd = position + 1 - inputOffset;
@@ -640,24 +817,18 @@ sealed class LiteralSetSpanMatcher
         int shortSkipCount = 0;
         for (int position = inputOffset + start; position < inputEnd; position++) {
             byte value = bytes[position];
-            int next;
-            while (true) {
-                if (state == ROOT) {
-                    next = rootStateByByte[value & 0xFF];
-                    break;
-                }
-                next = findChild(state, value);
-                if (next != ROOT) {
-                    break;
-                }
-                state = failureByState[state];
+            if (state == ROOT) {
+                state = rootStateByByte[value & 0xFF];
+            }
+            else {
+                state = state < denseStateCount ? denseNext[state * classCount + (classByByte[value & 0xFF] & 0xFF)] : sparseTransition(state, value);
                 if (state == DEAD) {
                     return match;
                 }
             }
-            // Only the root's row leads back to the root, for a byte that leads no literal, so
-            // the state stays at the root.
-            if (next == ROOT) {
+            // Only the root's row, read directly or through a dense row that copies it, leads to
+            // the root, for a byte that leads no literal.
+            if (state == ROOT) {
                 // The skip starts only at a second root miss in a row: on dense text, where most
                 // bytes lead a literal, a vector call that lands a byte ahead costs more than the
                 // step it saves. Text whose misses come in short runs, such as the `. ` between
@@ -678,7 +849,6 @@ sealed class LiteralSetSpanMatcher
                 }
                 continue;
             }
-            state = next;
             int matchLength = matchLengthByState[state];
             if (matchLength != 0) {
                 int matchEnd = position + 1 - inputOffset;
@@ -686,6 +856,25 @@ sealed class LiteralSetSpanMatcher
             }
         }
         return match;
+    }
+
+    // The transition of a state without a dense row: its edge, else its failure state's
+    // transition, read from the root's row or a dense row once the failure path reaches one.
+    private int sparseTransition(int state, byte value)
+    {
+        while (true) {
+            int next = findChild(state, value);
+            if (next != ROOT) {
+                return next;
+            }
+            state = failureByState[state];
+            if (state == DEAD) {
+                return DEAD;
+            }
+            if (state < denseStateCount) {
+                return state == ROOT ? rootStateByByte[value & 0xFF] : denseNext[state * classCount + (classByByte[value & 0xFF] & 0xFF)];
+            }
+        }
     }
 
     // Edge e leads to state e + 1, and no edge leads to the root, so ROOT means no transition.
@@ -799,7 +988,16 @@ sealed class LiteralSetSpanMatcher
 
         private RootSkippingMatcher(LiteralSetSpanMatcher trie, int rootByteScanSet, byte[] rootByteNibbleTables)
         {
-            super(trie.rootStateByByte, trie.firstEdgeByState, trie.edgeByte, trie.failureByState, trie.matchLengthByState);
+            super(trie.rootStateByByte,
+                    trie.classByByte,
+                    trie.classCount,
+                    trie.denseDepth,
+                    trie.denseStateCount,
+                    trie.denseNext,
+                    trie.firstEdgeByState,
+                    trie.edgeByte,
+                    trie.failureByState,
+                    trie.matchLengthByState);
             this.rootByteScanSet = rootByteScanSet;
             this.rootByteNibbleTables = rootByteNibbleTables;
         }

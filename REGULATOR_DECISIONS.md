@@ -3725,9 +3725,10 @@ trie. RE2, Java, and Rust search the automaton for a group-zero
 anchored, and capture operations keep the program wherever it fits the budget,
 as described below. Full-Slice boolean `find` and count keep the forward DFA
 wherever it initializes beside the automaton: on text
-where most bytes lead a literal, the automaton's walk takes several steps per
-byte, its root lookup, edge scan, and failure steps, to the DFA's one, and
-measured 1.94x to 2.47x slower on r9g and 3.16x to 3.72x on r8i. Where the DFA
+where most bytes lead a literal, the automaton's walk took several steps per
+byte, its root lookup, edge scan, and failure steps, to the DFA's one, and,
+before the dense rows below, measured 1.94x to 2.47x slower on r9g and 3.16x
+to 3.72x on r8i. Where the DFA
 cannot initialize, the automaton answers in its place. A boolean `find` runs the
 longest-match DFA and a count the first-match DFA, which needs less memory, so
 `english-10` under the default budget finds on the automaton and counts on the
@@ -3740,7 +3741,7 @@ fits: the program's DFA budget is smaller than the forward budget Trino checked.
 
 RE2, Java, and Rust keep the program wherever it fits the budget, so
 `english-10` still retains about 25 MB under the default budget: the program and
-its reverse expression beside the 1.8 MB automaton. Only where the program does
+its reverse expression beside the 2.6 MB automaton. Only where the program does
 not fit does such a pattern compile without one. The compile that the budget
 rejected is discarded, and two checks against the forward share follow: the
 temporary trie of every literal that spells the full-match list below must fit
@@ -3789,12 +3790,31 @@ skip changes no result, so a set the DFA cannot hold searches without it. A set
 without a program has no forward DFA and builds the skip where it fits beside
 the full-match list.
 
-At a state past the root, the walk rejects a byte above the state's last edge
+At a state without a dense row, the walk rejects a byte above the state's last edge
 first, so its scan over the sorted edges needs no bound test. Against the
 bounded scan, `english-15` search took 0.62x to 0.66x the time on r9g and 0.85x
 to 0.86x on r8i. `english-10` is accepted at +4.6% on r9g and +3.6% on r8i, from
 the sentinel edge scan on its dense sets, on top of about 1.03x to 1.11x on r9g
 after the root skip, and the gd sparse Trino contains row at +1.5% on r9g.
+
+The states up to depth 3, which take most of a search's transitions on the
+measured dictionaries, also keep dense rows over byte classes, as the
+aho-corasick crate's noncontiguous NFA does for its shallowest states, but each
+row holds the state's complete transition with failure links resolved, so a
+search reads one entry where it would scan edges and follow failure links.
+`english-10` retains 2.64 MB with them against 1.84 MB without, 801 KB more, for
+searches in 0.41x to 0.49x the time on r9g and 0.46x to 0.47x on r8i, and
+`english-15` in 0.43x to 0.54x. The row entries take at most 1 MiB and are built
+at the deepest depth whose rows fit the memory the automaton may retain. Where
+the pattern keeps its program, the rows yield only where removing them lets a
+forward DFA initialize: unlike the root skip, a set that a DFA cannot initialize
+beside either way keeps them, as `english-10` does under the default budget,
+where the longest-match DFA initializes beside neither. Every large set also
+carries the rows' fields, 24 bytes with compressed pointers, whether or not it
+builds rows, which can move a budget edge by that much. Java's gd
+`set-dense-english` reusedContains row is accepted at 1.101x on r8i, a bimodal
+row, and Trino's synthetic gd `set-sparse-numeric` reusedContains row at 1.033x
+on r9g and 1.082x on r8i.
 
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at
