@@ -193,7 +193,8 @@ public sealed class TrinoRegexp
         LiteralAlternationSpanMatcher literalAlternationMatcher = LiteralAlternationSpanMatcher.analyze(
                 parsed.regexp(),
                 parsed.capturingGroupCount());
-        long forwardMemory = Math.max(1, options.maxMemory() - Math.max(1, options.maxMemory() / 3));
+        // CompiledPattern.withRequiredTrinoBudget must report what any route added here needs.
+        long forwardMemory = CompiledPattern.forwardMemory(options.maxMemory());
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(patternCopy, literalAlternationMatcher);
         }
@@ -201,7 +202,15 @@ public sealed class TrinoRegexp
         if (literalSetMatcher != null && literalSetMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralSetTrinoRegexp(patternCopy, literalSetMatcher);
         }
-        TrinoCompiledPattern compiledPattern = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode));
+        CompiledPattern.Analysis analysis;
+        try {
+            analysis = CompiledPattern.analyzeParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        }
+        catch (RegexpCompileMemoryLimitException e) {
+            // What each route needs is computed only after every route failed.
+            throw CompiledPattern.withRequiredTrinoBudget(e, parsed, PARSE_FLAGS, options.maxMemory(), literalAlternationMatcher);
+        }
+        TrinoCompiledPattern compiledPattern = TrinoCompiledPattern.create(analysis);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

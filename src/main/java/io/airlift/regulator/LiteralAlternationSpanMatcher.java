@@ -41,7 +41,7 @@ final class LiteralAlternationSpanMatcher
     // Bounds the bytes a large alternation's factored prefixes expand to, and also the number of
     // literals, since empty ones add no bytes; a dictionary of 43,029 English words holds about
     // 400 KB.
-    private static final int MAXIMUM_LITERAL_BYTES = 1 << 22;
+    static final int MAXIMUM_LITERAL_BYTES = 1 << 22;
     // Bounds the work of a whole extraction, the bytes its concatenations copy plus the entries
     // its alternations add, which a long concatenation or nested choices make quadratic in the
     // pattern even when each step stays under MAXIMUM_LITERAL_BYTES. A sorted dictionary of
@@ -318,10 +318,28 @@ final class LiteralAlternationSpanMatcher
 
     private static LiteralSetSpanMatcher.Trie spell(Regexp expression, long maximumRetainedBytes, boolean spellsEveryLiteral)
     {
-        boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
-        LiteralSpeller speller = new LiteralSpeller(new LiteralSetSpanMatcher.Trie(MAXIMUM_LITERAL_BYTES, maximumRetainedBytes), latin1Program, spellsEveryLiteral);
+        LiteralSpeller speller = speller(expression, maximumRetainedBytes, spellsEveryLiteral);
         return speller.spell(expression) ? speller.trie : null;
     }
+
+    /// Spells `expression` as [#spellEveryLiteral] does with `spellsEveryLiteral`, and otherwise
+    /// as [#spellLiteralSet] does, and returns the trie whether or not the spelling finished,
+    /// so a rejected compile can tell whether the budget stopped it.
+    static SpellAttempt attemptSpelling(Regexp expression, long maximumRetainedBytes, boolean spellsEveryLiteral)
+    {
+        LiteralSpeller speller = speller(expression, maximumRetainedBytes, spellsEveryLiteral);
+        boolean spelled = speller.spell(expression);
+        return new SpellAttempt(speller.trie, spelled);
+    }
+
+    private static LiteralSpeller speller(Regexp expression, long maximumRetainedBytes, boolean spellsEveryLiteral)
+    {
+        boolean latin1Program = (expression.parseFlags() & LATIN1) != 0;
+        return new LiteralSpeller(new LiteralSetSpanMatcher.Trie(MAXIMUM_LITERAL_BYTES, maximumRetainedBytes), latin1Program, spellsEveryLiteral);
+    }
+
+    /// The trie a spelling built, finished where `spelled`.
+    record SpellAttempt(LiteralSetSpanMatcher.Trie trie, boolean spelled) {}
 
     /// Expands `expression` into its literals in leftmost-first priority order: a concatenation
     /// lists each prefix choice's literals before the next prefix choice's. The trie takes literal

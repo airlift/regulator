@@ -1768,6 +1768,16 @@ final class Prog
         configurePrefixAccelBytes(bytes, foldCase, byteFrequencies);
     }
 
+    /// Returns the memory of the shift table [#configurePrefixAccel] keeps for `prefix`, which it
+    /// takes from what the program's flatten charge leaves.
+    static long prefixShiftsMemory(Slice prefix, boolean foldCase)
+    {
+        if (foldCase || prefix.length() <= 1) {
+            return 0;
+        }
+        return LiteralSearchKernel.prefixShiftsRetainedSize(LiteralSearchKernel.computePrefixShifts(prefix.getBytes()));
+    }
+
     /// Retains analysis-owned immutable bytes instead of copying a large literal again.
     void configurePrefixAccelShared(Slice prefix, boolean foldCase, ByteFrequencies byteFrequencies)
     {
@@ -3787,14 +3797,18 @@ final class Prog
 
     public void flatten()
     {
-        flatten(false, MAX_FLATTENED_INSTRUCTIONS, 0, false);
+        flatten(false, MAX_FLATTENED_INSTRUCTIONS, 0, false, false);
     }
 
     /// Flattens the program. Throws [RegexpCompileMemoryLimitException], reporting `maxMemory`,
-    /// when the flattened program would hold more than `maxInstructionCount` instructions.
-    void flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory)
+    /// when the flattened program would hold more than `maxInstructionCount` instructions. A
+    /// positive `maxMemory` must allow `maxInstructionCount` instructions; where
+    /// `measuresRejection`, the exception then measures, when asked, a lower bound on the budget
+    /// the flattened program needs. A caller that drops a program that does not fit passes
+    /// `false`, so its rejection holds nothing to measure.
+    void flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory, boolean measuresRejection)
     {
-        flatten(skipDominatorPass, maxInstructionCount, maxMemory, false);
+        flatten(skipDominatorPass, maxInstructionCount, maxMemory, measuresRejection, false);
     }
 
     FlattenStructure flattenForTesting()
@@ -3807,10 +3821,10 @@ final class Prog
         if (didFlatten) {
             throw new IllegalStateException("program is already flattened");
         }
-        return flatten(skipDominatorPass, MAX_FLATTENED_INSTRUCTIONS, 0, true);
+        return flatten(skipDominatorPass, MAX_FLATTENED_INSTRUCTIONS, 0, false, true);
     }
 
-    private FlattenStructure flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory, boolean recordStructure)
+    private FlattenStructure flatten(boolean skipDominatorPass, int maxInstructionCount, long maxMemory, boolean measuresRejection, boolean recordStructure)
     {
         if (didFlatten) {
             return null;
@@ -3849,12 +3863,18 @@ final class Prog
         // borrows the predecessor lists' first edges, which hold an int per instruction and so
         // one per root, because the dominator pass is done with them.
         int[] flattenedIndexesByRoot = predecessorLists.borrowFirstEdges();
-        InstList flattenedInstructions = new InstList(size(), maxInstructionCount, maxMemory);
+        InstList flattenedInstructions = new InstList(size(), maxInstructionCount);
         for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
             int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
             int rootId = rootIdsByInstruction.denseValueAt(rootIndex);
             flattenedIndexesByRoot[rootId] = flattenedInstructions.size();
-            emitList(rootInstructionId, rootIdsByInstruction, flattenedInstructions, reachable, stack);
+            if (!emitList(rootInstructionId, rootIdsByInstruction, flattenedInstructions, reachable, stack)) {
+                if (maxMemory <= 0 || !measuresRejection) {
+                    throw new RegexpCompileMemoryLimitException(maxMemory);
+                }
+                // The unflattened program is still intact, and only a rejected compile counts it.
+                throw new RegexpCompileMemoryLimitException(maxMemory, () -> flattenedSizeExceeded(rootIdsByInstruction, reachable, stack, maxInstructionCount, maxMemory));
+            }
             flattenedInstructions.getLast().setLast();
             computeHints(
                     flattenedInstructions,
@@ -4666,12 +4686,9 @@ final class Prog
         return predecessorEdges;
     }
 
-    private void emitList(
-            int rootInstructionId,
-            SparseIntArray rootIdsByInstruction,
-            InstList flattenedInstructions,
-            SparseSet reachable,
-            IntStack stack)
+    // Returns false when the list does not fit, leaving it partly emitted. countList mirrors
+    // this walk to count without emitting; change both together.
+    private boolean emitList(int rootInstructionId, SparseIntArray rootIdsByInstruction, InstList flattenedInstructions, SparseSet reachable, IntStack stack)
     {
         reachable.clear();
         stack.clear();
@@ -4689,7 +4706,9 @@ final class Prog
                     // instruction so that the Prog does not become quadratically larger.
                     Inst noOp = new Inst(InstOp.NOP);
                     noOp.setOut(rootIdsByInstruction.getExisting(id));
-                    flattenedInstructions.add(noOp);
+                    if (!flattenedInstructions.add(noOp)) {
+                        return false;
+                    }
                     break;
                 }
 
@@ -4697,7 +4716,9 @@ final class Prog
                 switch (instruction.opcode()) {
                     case ALT_MATCH -> {
                         Inst altMatch = new Inst(InstOp.ALT_MATCH);
-                        flattenedInstructions.add(altMatch);
+                        if (!flattenedInstructions.add(altMatch)) {
+                            return false;
+                        }
                         int next = flattenedInstructions.size();
                         altMatch.setOut(next);
                         altMatch.setOut1(next + 1);
@@ -4712,12 +4733,16 @@ final class Prog
                     case BYTE_RANGE, CAPTURE, EMPTY_WIDTH -> {
                         Inst copy = instruction.copy();
                         copy.setOut(rootIdsByInstruction.getExisting(instruction.out()));
-                        flattenedInstructions.add(copy);
+                        if (!flattenedInstructions.add(copy)) {
+                            return false;
+                        }
                         id = 0;
                     }
                     case NOP -> id = instruction.out();
                     case MATCH, FAIL -> {
-                        flattenedInstructions.add(instruction.copy());
+                        if (!flattenedInstructions.add(instruction.copy())) {
+                            return false;
+                        }
                         id = 0;
                     }
                 }
@@ -4726,6 +4751,69 @@ final class Prog
                 }
             }
         }
+        return true;
+    }
+
+    /// Returns the exception for a flattened program of more than `maxInstructionCount`
+    /// instructions, the limit of a positive `maxMemory`, counting the instructions the third pass
+    /// of flattening emits without emitting them. Counting stops at the first list that ends past
+    /// 16 times the limit, and the count is capped there, so the budget it reports is a lower
+    /// bound. A count past [#MAX_FLATTENED_INSTRUCTIONS] fits no budget.
+    private RegexpCompileMemoryLimitException flattenedSizeExceeded(SparseIntArray rootIdsByInstruction, SparseSet reachable, IntStack stack, int maxInstructionCount, long maxMemory)
+    {
+        long countLimit = Math.min(16L * maxInstructionCount, MAX_FLATTENED_INSTRUCTIONS + 1L);
+        long count = 0;
+        for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size() && count < countLimit; rootIndex++) {
+            count += countList(rootIdsByInstruction.denseIndexAt(rootIndex), rootIdsByInstruction, reachable, stack);
+        }
+        if (count > MAX_FLATTENED_INSTRUCTIONS) {
+            return RegexpCompileMemoryLimitException.fitsNoBudget(maxMemory);
+        }
+        return new RegexpCompileMemoryLimitException(maxMemory, Compiler.flattenedProgramMemory(Math.min(count, countLimit)));
+    }
+
+    // Counts the instructions emitList emits for the list, walking it as emitList does.
+    private int countList(int rootInstructionId, SparseIntArray rootIdsByInstruction, SparseSet reachable, IntStack stack)
+    {
+        int count = 0;
+        reachable.clear();
+        stack.clear();
+        stack.push(rootInstructionId);
+        while (!stack.isEmpty()) {
+            int id = stack.pop();
+            while (true) {
+                if (reachable.contains(id)) {
+                    break;
+                }
+                reachable.insertNew(id);
+                if (id != rootInstructionId && rootIdsByInstruction.hasIndex(id)) {
+                    // The NOP that leads to another list.
+                    count++;
+                    break;
+                }
+                Inst instruction = inst(id);
+                switch (instruction.opcode()) {
+                    case ALT_MATCH -> {
+                        count++;
+                        stack.push(instruction.out1());
+                        id = instruction.out();
+                    }
+                    case ALT -> {
+                        stack.push(instruction.out1());
+                        id = instruction.out();
+                    }
+                    case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, MATCH, FAIL -> {
+                        count++;
+                        id = 0;
+                    }
+                    case NOP -> id = instruction.out();
+                }
+                if (id == 0) {
+                    break;
+                }
+            }
+        }
+        return count;
     }
 
     private static void computeHints(
@@ -5094,23 +5182,22 @@ final class Prog
     private static final class InstList
     {
         private final int maxSize;
-        private final long maxMemory;
         private final int blockShift;
         private Inst[][] blocks = new Inst[16][];
         private int size;
 
-        InstList(int unflattenedSize, int maxSize, long maxMemory)
+        InstList(int unflattenedSize, int maxSize)
         {
             this.maxSize = maxSize;
-            this.maxMemory = maxMemory;
             // The largest power of two at most a sixteenth of the unflattened size, and at least 16.
             blockShift = Math.max(4, 27 - Integer.numberOfLeadingZeros(unflattenedSize));
         }
 
-        void add(Inst instruction)
+        // Returns false, adding nothing, when the list holds `maxSize` instructions.
+        boolean add(Inst instruction)
         {
             if (size == maxSize) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                return false;
             }
             int block = size >>> blockShift;
             if (size == block << blockShift) {
@@ -5121,6 +5208,7 @@ final class Prog
             }
             blocks[block][size - (block << blockShift)] = instruction;
             size++;
+            return true;
         }
 
         Inst get(int index)

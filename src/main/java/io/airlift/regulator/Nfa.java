@@ -540,14 +540,18 @@ final class Nfa
     /// `allowance` bytes, and stores the plan in `prog`. A search that fits keeps the ordinary
     /// single pass. A wider one runs bounded passes; see [#searchInBoundedPasses].
     /// `groupZeroProgram`, when not null, is the other program whose group-zero queues a
-    /// matcher's workspace may cache.
-    static void planCaptureSearches(Prog prog, long allowance, Prog groupZeroProgram, long maxMemory)
+    /// matcher's workspace may cache. Throws [RegexpCompileMemoryLimitException], reporting the
+    /// least allowance with a plan, when no plan fits.
+    static void planCaptureSearches(Prog prog, long allowance, Prog groupZeroProgram)
     {
         int slotCount = prog.captureSlotCount();
-        if (threadSlotBytes(prog, slotCount) + singlePassBytes(prog, groupZeroProgram, false) <= allowance) {
+        long threadSlots = threadSlotBytes(prog, slotCount);
+        long singlePass = threadSlots + singlePassBytes(prog, groupZeroProgram, false);
+        if (singlePass <= allowance) {
             return;
         }
-        if (threadSlotBytes(prog, slotCount) + boundedPassBytes(prog, false) <= allowance) {
+        long boundedPass = threadSlots + boundedPassBytes(prog, false);
+        if (boundedPass <= allowance) {
             prog.setCapturePlan(largestSlotCount(prog, singlePassBytes(prog, groupZeroProgram, false), allowance), slotCount);
             return;
         }
@@ -567,7 +571,10 @@ final class Nfa
             // 2,651 bytes a program of at most 11 instructions can in principle reach it, as its
             // pass can exceed 512 + 113P bytes by up to 231 bytes. None has in over 100,000
             // swept patterns; the tightest, which tracks only group zero, fit with 8 bytes to spare.
-            throw new RegexpCompileMemoryLimitException(maxMemory);
+            // The least allowance with a plan is the least of the three checks: a single pass, one
+            // bounded pass of every slot, or bounded passes of four slots.
+            long boundedPassesOfFour = threadSlotBytes(prog, 4) + boundedPassBytes(prog, true);
+            throw new RegexpCompileMemoryLimitException(allowance, Math.min(singlePass, Math.min(boundedPass, boundedPassesOfFour)));
         }
         prog.setCapturePlan(largestSlotCount(prog, singlePassBytes(prog, groupZeroProgram, true), allowance), boundedPassSlots);
     }

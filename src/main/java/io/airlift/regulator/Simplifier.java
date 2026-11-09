@@ -681,7 +681,7 @@ final class Simplifier
             visits += operators + nestedOptionals;
             instructions += operators;
             if (visits > maxVisits || instructions > maxInstructions) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw Compiler.instructionLimitExceeded(maxMemory, maxInstructions);
             }
         }
 
@@ -689,7 +689,7 @@ final class Simplifier
         {
             // Copies only fit if one does, and then the product stays far from overflowing.
             if (size > limit) {
-                throw new RegexpCompileMemoryLimitException(maxMemory);
+                throw Compiler.instructionLimitExceeded(maxMemory, maxInstructions);
             }
             return total + copies * size;
         }
