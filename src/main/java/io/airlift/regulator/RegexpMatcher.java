@@ -33,11 +33,11 @@ import static java.util.Objects.requireNonNull;
 public final class RegexpMatcher
         implements CompiledPattern.MatchWorkspaces
 {
-    // A scan for the required literal that finds it within NEAR_REQUIRED_LITERAL_BYTES of where
-    // the find starts saves nothing: the engine reads those bytes anyway, and the scan paid its
-    // setup. After NEAR_REQUIRED_LITERAL_SCAN_LIMIT such scans in a row, the matcher stops
-    // scanning until the next reset, since on a region that dense the check cannot pay. RE2's
-    // replaceAll applies the same rule to its loop; see
+    // A scan for the required literal or one-of bytes that finds them within
+    // NEAR_REQUIRED_LITERAL_BYTES of where the find starts saves nothing: the engine reads those
+    // bytes anyway, and the scan paid its setup. After NEAR_REQUIRED_LITERAL_SCAN_LIMIT such
+    // scans in a row, the matcher stops scanning until the next reset, since on a region that
+    // dense the check cannot pay. RE2's replaceAll applies the same rule to its loop; see
     // CompiledPattern.nearRequiredLiteralScansInLoop.
     static final int NEAR_REQUIRED_LITERAL_BYTES = 256;
     static final int NEAR_REQUIRED_LITERAL_SCAN_LIMIT = 8;
@@ -77,8 +77,8 @@ public final class RegexpMatcher
     // An upper bound on the bytes a region can have and still hold a match, so findGeneral fails
     // a find of a longer region before any engine runs. See CompiledPattern.maximumSpanLength.
     private final int maximumSpanLength;
-    // The pattern's required literal that findGeneral checks the rest of a long region for, or
-    // null. See CompiledPattern.longWindowRequiredLiteral.
+    // The pattern's required literal, or one-of bytes, that findGeneral checks the rest of a long
+    // region for, or null. See CompiledPattern.longWindowRequiredLiteral.
     private final RequiredBytes longWindowRequiredLiteral;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
@@ -115,13 +115,14 @@ public final class RegexpMatcher
     private boolean skipsForwardDfa;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
     // The region-relative start of the occurrence of the pattern's long-window required literal
-    // that the last scan of the rest of the region found, or -1 when no scan has run since the
-    // last reset or the last one found none. See restOfRegionLacksRequiredLiteral.
+    // or one-of bytes that the last scan of the rest of the region found, or -1 when no scan has
+    // run since the last reset or the last one found none. See restOfRegionLacksRequiredLiteral.
     private int requiredLiteralOccurrence;
-    // The scans in a row since the last reset that found the literal within
+    // The scans in a row since the last reset that found the literal or one-of bytes within
     // NEAR_REQUIRED_LITERAL_BYTES of their start.
     private int nearRequiredLiteralScans;
-    // The scans for the long-window required literal, across resets, for diagnostics.
+    // The scans for the long-window required literal or one-of bytes, across resets, for
+    // diagnostics.
     private long requiredLiteralScanCount;
 
     RegexpMatcher(CompiledPattern pattern, Slice input, SingleByteMatcher singleByteMatcher)
@@ -569,14 +570,14 @@ public final class RegexpMatcher
     }
 
     /// Whether the rest of the region, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
-    /// the literal every match consumes, for a pattern whose long windows are checked for it;
-    /// see [CompiledPattern#longWindowLacksRequiredLiteral]. A find that has not passed the
+    /// the literal every match consumes, or every one of the one-of bytes, for a pattern whose
+    /// long windows are checked for them; see [CompiledPattern#longWindowLacksRequiredLiteral]. A find that has not passed the
     /// occurrence the last scan found reuses it, so a find loop scans at most once per match:
     /// again only once a match has passed the occurrence. A reused occurrence only lets the
     /// engine run, so it stays right even if the input changes; a scan that found nothing is not
     /// reused, and every find reads the input, as the engine does. After
-    /// [#NEAR_REQUIRED_LITERAL_SCAN_LIMIT] scans in a row find the literal near their start, the
-    /// finds until the next reset skip the check.
+    /// [#NEAR_REQUIRED_LITERAL_SCAN_LIMIT] scans in a row find the literal or one-of bytes near
+    /// their start, the finds until the next reset skip the check.
     private boolean restOfRegionLacksRequiredLiteral()
     {
         RequiredBytes literal = longWindowRequiredLiteral;
