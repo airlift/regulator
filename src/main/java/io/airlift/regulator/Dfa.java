@@ -5872,6 +5872,9 @@ final class Dfa
                 return;
             }
             lastWasMark = true;
+            if (nextmark - n >= maxmark) {
+                throw new AssertionError("work queue needs more than its " + maxmark + " mark slots");
+            }
             set.insertNew(nextmark++);
         }
 
@@ -6464,7 +6467,7 @@ final class Dfa
             this.nextSize = prog.bytemapRange() + 1;
             this.stateIndexShift = Integer.numberOfTrailingZeros(nextSize);
             this.stateIndexMultiplier = stateIndexMultiplier(nextSize);
-            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            int nmark = markSlots(prog, kind);
             this.trinoLineFlag = prog.reversed()
                     ? prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_END_LINE
                     : prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_BEGIN_LINE;
@@ -6517,9 +6520,7 @@ final class Dfa
 
             // Upstream uses the largest possible state only for this initialization gate.
             // Actual cache growth, including backing-table growth, is charged separately.
-            // MANY_MATCH states can append one separator plus match IDs, but those IDs are
-            // instructions already counted by listCount. Include the separator so the gate
-            // retains ample headroom for reset recovery, which needs at most three states.
+            // Reset recovery needs at most three states; upstream reserves twenty for speed.
             long largestStateSize = largestStateSize(prog, kind, nmark);
             if (stateBudget / largestStateSize < MINIMUM_INITIAL_STATES) {
                 this.initFailed = true;
@@ -6576,7 +6577,7 @@ final class Dfa
         /// and is exact. A reversed program builds none, so for it this is exact too.
         static long minimumMemory(Prog prog, Kind kind)
         {
-            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            int nmark = markSlots(prog, kind);
             return fixedOverhead(prog, nmark) + MINIMUM_INITIAL_STATES * largestStateSize(prog, kind, nmark);
         }
 
@@ -6586,7 +6587,7 @@ final class Dfa
         /// program too.
         static long initializationMemory(Prog prog, Kind kind)
         {
-            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            int nmark = markSlots(prog, kind);
             return minimumMemory(prog, kind) + StartByteTables.build(prog, kind, new int[stackLength(prog, nmark)]).estimatedRetainedSize();
         }
 
@@ -6616,7 +6617,7 @@ final class Dfa
         /// group's positions could differ in at most `groupBits` bits, or null.
         static StartLiteralFilter selectStartLiteralFilter(Prog prog, Kind kind, int groupBits)
         {
-            int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            int nmark = markSlots(prog, kind);
             StartLiteralFilterChoice choice = StartLiteralFilterSelection.select(prog, kind, new int[stackLength(prog, nmark)], groupBits).literalFilterChoice();
             return choice == null ? null : choice.filter();
         }
@@ -6628,14 +6629,45 @@ final class Dfa
             overhead += CONSERVATIVE_REFERENCE_BYTES + Long.BYTES;
             overhead += CONSERVATIVE_REFERENCE_BYTES + Integer.BYTES;
             overhead += (prog.size() + (long) nmark) * 8L * 2;
-            overhead += Math.max(16L, (prog.size() * 3L) + 32 + nmark + 1) * Integer.BYTES;
+            overhead += (long) stackLength(prog, nmark) * Integer.BYTES;
             // The current cache root; the arrays it holds are charged as state memory.
             overhead += CACHE_TABLES_BYTES;
             return overhead;
         }
 
+        // The mark slots of each work queue. A longest-match queue marks only between priority
+        // groups, and every group but the unanchored start's split begins at its own list head,
+        // so a queue holds at most one mark per list and one more for that split: listCount + 1,
+        // never more than upstream's bound, the program size. The bound counts the lists of a
+        // flattened program. Other kinds use no marks.
+        private static int markSlots(Prog prog, Kind kind)
+        {
+            if (kind != Kind.LONGEST_MATCH) {
+                return 0;
+            }
+            if (!prog.didFlatten()) {
+                throw new IllegalStateException("expected flattened program");
+            }
+            return Math.min(prog.size(), prog.listCount() + 1);
+        }
+
+        // A forward program's stack also serves the start-byte walks, which need three entries per
+        // instruction. A reversed program builds no start-byte tables, so its stack serves only
+        // addToQueue, which visits each instruction at most once per call: upstream's bound
+        // (dfa.cc), one entry for each instruction that pushes a continuation, the start, and the
+        // marks. Regulator's addToQueue also pushes for a FAIL that is not last in its list, and
+        // twice for an ALT; flattened programs hold no ALT, but counting both keeps the bound
+        // independent of the program's form.
         private static int stackLength(Prog prog, int nmark)
         {
+            if (prog.reversed()) {
+                return prog.getInstCount(InstOp.CAPTURE) +
+                        prog.getInstCount(InstOp.EMPTY_WIDTH) +
+                        prog.getInstCount(InstOp.NOP) +
+                        prog.getInstCount(InstOp.FAIL) +
+                        2 * prog.getInstCount(InstOp.ALT) +
+                        nmark + 1;
+            }
             return Math.max(16, prog.size() * 3 + 32 + nmark + 1);
         }
 
@@ -6754,6 +6786,14 @@ final class Dfa
             }
         }
 
+        // The state size the initialization gate counts. A state holds list heads and the marks
+        // between them. A many-match state that matched also holds a separator and the match ID
+        // of each MATCH instruction in the queue it left, which are not list heads of its own
+        // queue, so its true bound is listCount + 1 + the MATCH count: patterns that match
+        // together and go on together fill both, and a set of one-byte patterns reaches about
+        // twice listCount. The gate counts the separator but not the IDs: each state is charged at
+        // its real size when it is allocated, and the twenty states the gate reserves are a floor
+        // for speed, not for correctness, so counting the IDs would only turn away sets that run.
         private static long largestStateSize(Prog prog, Kind kind, int nmark)
         {
             int manyMatchSeparator = kind == Kind.MANY_MATCH ? 1 : 0;

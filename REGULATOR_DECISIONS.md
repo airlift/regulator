@@ -710,9 +710,11 @@ text, so the pair scan rejects little that a first-byte scan would not.
   need more to keep their speed. Benchmarks run them at a budget of their own,
   for every engine with a memory limit, as
   [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
-  - `unicode/overlapping-words` english and russian need about 92 MiB for
-    their reverse longest-match DFA. Below 66.73 MiB their captures run on the
-    NFA, 130 to 1,700 times slower, and below 26.92 MiB they do not compile.
+  - `unicode/overlapping-words` english and russian run at full speed from
+    72 MiB, the lowest budget measured; their reverse longest-match DFA
+    initializes from about 65 MiB, as the setup gate below describes. Below
+    66.73 MiB their captures run on the NFA, 130 to 1,700 times slower, and
+    below 26.92 MiB they do not compile.
   - `curated/10-bounded-repeat/context` fills about 30 MB of DFA states. It
     slows at 72 MiB and below, 15 to 21 times at 32 MiB.
   - RE2, Java, and Rust `dictionary/search/english-10`: its program needs
@@ -802,6 +804,34 @@ text, so the pair scan rejects little that a first-byte scan would not.
   below its minimum is never built, and its searches use the NFA. The minimum
   leaves out a forward DFA's start-byte tables, so a DFA can still fail to
   initialize; its program remembers that allowance and does not build it again.
+- As upstream, a DFA initializes only when its allowance, less the DFA, its
+  two work queues and its stack, and, for a forward DFA, its start-byte
+  tables, holds 20 of its largest possible states. Twenty is a floor for
+  speed, not correctness: upstream notes that two states let a search limp
+  along, restarting frequently, and a reset needs at most three, the start and
+  current states it restores and the next transition, and a search the DFA
+  cannot finish falls back to the NFA, or for a set reports exhaustion.
+  Upstream sizes a longest-match DFA's queues and largest state with one mark
+  per instruction, which for a large program counts about twice the real
+  worst case. A longest-match queue marks only between priority groups, and
+  each group but the unanchored start's begins at a list head, so Regulator
+  gives it at most one mark per list and one more, never more than upstream's
+  count. A reversed program builds no start-byte tables, so its stack is sized
+  only for adding states to a queue, as upstream sizes it, plus one entry for
+  each FAIL and two for each ALT: Regulator's queue walk also pushes for a
+  FAIL that is not last in its list, and twice for an ALT. Flattened programs
+  hold no ALT, but counting both keeps the bound independent of the program's
+  form. The reverse longest-match DFA of the rebar `unicode/overlapping-words`
+  rows then initializes from a pattern budget (`maxMemory`) of about 65 MiB
+  instead of 92 MiB, so under a 72 MiB pattern budget their captures stay on
+  the DFAs.
+- A many-match state that matched also holds a separator and the ID of each
+  MATCH instruction in the queue it left, so its true bound is the lists, plus
+  one, plus the program's MATCH instructions. Its gate deliberately counts
+  only the lists and the separator: each state is charged its real size when
+  it is allocated, so nothing goes uncharged, and counting the IDs would only
+  turn away sets that run, such as 250,000 copies of `a` under a 96 MiB
+  budget.
 - A plan that yields to the forward DFAs is left out when its reservation would
   leave the forward program's first-match or longest-match DFA too little to
   initialize where that DFA initializes without it, start-byte tables included.

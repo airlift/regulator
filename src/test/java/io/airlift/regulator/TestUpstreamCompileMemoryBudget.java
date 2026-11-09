@@ -277,6 +277,26 @@ public class TestUpstreamCompileMemoryBudget
     }
 
     @Test
+    public void testLongestMatchDfaGateCountsRealWorstCase()
+    {
+        // A UTF-8 letter class compiles to about three instructions per list. A gate that gives a
+        // longest-match state one mark per instruction, and a reversed program the stack of the
+        // forward start-byte walks, needs about 600,000 bytes for either DFA, and the stack alone
+        // takes the reversed DFA past 330,000. Counting one mark per list and sizing the reversed
+        // stack as upstream sizes it admits both at these budgets. Each then finds its boundary of
+        // the three letters in `12 éàü 34`, the end forward and the start reversed, a forward
+        // longest-match DFA taking half its program's DFA memory.
+        Regexp letters = parse("\\pL{3}");
+        Prog forward = Compiler.compile(letters, false, 1 << 20);
+        forward.setDfaMemory(2 * 400_000);
+        Prog reversed = Compiler.compile(letters, true, 1 << 20);
+        reversed.setDfaMemory(330_000);
+        Slice text = Slices.utf8Slice("12 éàü 34");
+        assertThat(Dfa.search(forward, text, false, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(9);
+        assertThat(Dfa.search(reversed, text, 0, 9, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(3);
+    }
+
+    @Test
     public void testCaptureSearchPlan()
     {
         // A search whose capture threads fit the forward share keeps the ordinary single pass.
@@ -388,6 +408,9 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_854, 1),
                 new RejectedPattern(Language.SET, List.of("foo"), 4_854, 4_854, 2_000),
                 new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 2_312, 6_420, 1, 2_000),
+                // The many-match initialization gate omits match IDs; allocated states still charge
+                // them.
+                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 170_723, 170_723, 110_000),
                 new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 120_392, 184_326, 2_000, 50_000),
                 new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 64_470, 85_094, 20_000));
         for (RejectedPattern rejection : rejections) {

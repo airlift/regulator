@@ -2204,7 +2204,7 @@ change is described.
 | Byte classes; Regulator's builder skips small merged groups after 32 merges and renumbers active classes past 256 | [O-DFA-006], [O-PROG-003], [O-RE2-015] | `Prog.computeByteMap` |
 | Lock-free transition reads; publication changed in [Copy-on-reset readers](#copy-on-reset-readers) | [O-DFA-008] | `Dfa.DfaInstance.computeTransition` |
 | NFA fallback when the cache thrashes; the pointer-table give-back is in [Absolute-pointer table](#absolute-pointer-table), and a group-zero search of a pattern with bounded matches runs the [bit-parallel position automaton](#bit-parallel-position-automaton-for-bounded-repeats) instead | [O-DFA-013], [O-RE2-011] | `Dfa.searchForwardContinuation`, `Dfa.countMatches` |
-| Per-kind DFA budgets and a minimum state count | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory` |
+| Per-kind DFA budgets and a minimum state count; Regulator counts a longest-match state's marks and a reversed program's stack by the program's lists and instruction kinds, as [Memory Budgets And DFA Caching](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching) describes | [O-DFA-017] | `Dfa.DfaInstance.minimumMemory`, `Dfa.DfaInstance.markSlots`, `Dfa.DfaInstance.stackLength` |
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
 | Many-match DFA | [O-DFA-019] | `Dfa.searchMany` |
 | Reverse program compiled lazily with swapped assertions | [O-COMP-017] | `CompiledPattern.reverseProg` |
