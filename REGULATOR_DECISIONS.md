@@ -3266,10 +3266,30 @@ script, which most letters of a text share: `0xD0` is 30% of the bytes of
 rebar's Russian sherlock text, and `Шерлок Холмс` stopped at 10,385 candidates
 for its 724 matches with the lead byte and stops at 726 with the last byte of
 `Ш`. Each candidate is still compared with the complete prefix from its start,
-so the choice of byte never changes what matches. The contains search of
+so the choice of byte never changes what matches.
+
+A periodic prefix, whose smallest period is at most half its length, pairs
+instead the first two adjacent bytes that differ, starting from the byte the
+rule above would pair with the last byte. It does so in the same scans, and so
+also in the inner-literal search and the long-window required-literal check,
+which share the search for a literal behind a leading assertion. The first and
+last bytes of such a prefix are two bytes of its repeating unit at a distance
+the unit gives no meaning, so text can hold them about as often as it holds
+each byte, while the adjacent pair needs them together. `aeaeaeaeae` over rebar's
+`rust-src-tools` haystack, which never holds it, stopped at 13,509 candidates
+with `a` and the last `e` and stops at 181 with `ae`, the pair Hyperscan's
+Noodle scans. Other prefixes keep the far pair, which is often the rarer one:
+`Sherlock Holmes` over rebar's English subtitles stops at 611 candidates with
+`S` and `s` and would stop at 983 with `Sh`. With JDK 25 the adjacent pair took
+rebar's `folly/literal-never-match-frequent` to 0.69x to 0.71x its earlier time
+on r9g and 0.68x to 0.70x on r8i, in RE2 and Rust. The contains search of
 `LiteralSearchKernel` and the vector filter of the scan plan's required-literal
-check still pair the first and last bytes; the continuation byte has not been
-measured there.
+check still pair the first and last bytes; neither the continuation byte nor
+the adjacent pair has been measured there. The reverse scan for the last
+occurrence of a required suffix still pairs the suffix's first and last bytes,
+periodic or not: the adjacent pair is chosen only for the forward scans, and
+choosing it there too would change the reverse scan of a periodic required
+suffix, which has not been measured.
 
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
 and use the engine without resolving the incubating module. Every surviving
@@ -3487,8 +3507,14 @@ Under every distribution, fused pair strategies, paired candidate scans,
 case-folded literals other than prefixes, required-literal checks, and
 single-byte literals keep their default bytes: the first byte, or, for a pair
 scan of a prefix led by a multibyte UTF-8 character that ends before the
-prefix's last byte, that character's last byte. This is a performance-only
-deviation.
+prefix's last byte, that character's last byte. A periodic literal, whose
+smallest period is at most half its length, pairs instead its first two
+adjacent bytes that differ from that default byte on, offsets 2 and 3 for
+`aaabaaab` and 1 and 2 for `éé`, in the fused pair scans, the search for a
+literal behind a leading assertion, the inner-literal search, and the
+long-window required-literal check, as
+[Literal Prefix Vector Scan](#literal-prefix-vector-scan) describes. This is a
+performance-only deviation.
 
 Case-folded prefixes, and the folded runs that stand in for them, instead pair
 two folded bytes ranked by the caller's distribution, or by `englishText()`

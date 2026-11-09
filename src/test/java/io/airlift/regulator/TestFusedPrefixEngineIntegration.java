@@ -18,6 +18,8 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -86,6 +88,27 @@ public class TestFusedPrefixEngineIntegration
 
         assertThat(Dfa.countMatches(program, text, Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
         assertThat(Dfa.countMatches(program, text, Prog.MatchKind.LONGEST_MATCH)).isEqualTo(2);
+    }
+
+    @Test
+    public void testPeriodicLiteralPairsAdjacentBytesInEveryLanguage()
+    {
+        // rebar's folly/literal-never-match-frequent literal. Every language plans it as an exact
+        // literal on the prefix scan, which pairs its adjacent a and e. Each near miss holds four
+        // candidates, the first failing at the literal's ninth byte, and the occurrence followed by
+        // "aeae" overlaps two more.
+        Slice literal = Slices.utf8Slice("aeaeaeaeae");
+        Slice text = Slices.utf8Slice("aeaeaeaexe ".repeat(200) + "aeaeaeaeae" + " ae".repeat(50) + "aeaeaeaeaeaeae");
+        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
+                Map.entry("RE2", Re2.compile(literal)),
+                Map.entry("Java", JavaRegexp.compile(literal)),
+                Map.entry("Rust", RustRegexp.compile(literal)),
+                Map.entry("Rust bytes", RustRegexp.compile(literal, RustRegexp.Options.bytes())),
+                Map.entry("Trino", TrinoRegexp.compile(literal).re2()))) {
+            CompiledPattern pattern = compiled.getValue();
+            assertThat(pattern.forwardProgramForDiagnostics().fusedProbeOffsetsForDiagnostics()).as(compiled.getKey()).containsExactly(0, 1);
+            assertThat(pattern.count(text)).as(compiled.getKey()).isEqualTo(2);
+        }
     }
 
     private static SearchCase createSearchCase()
