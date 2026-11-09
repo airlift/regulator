@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -183,7 +184,8 @@ public class TestRequiredBytes
 
         // A pattern whose long windows are checked for its literal takes the bound in every
         // language, unless an assertion the DFA cannot run reads past the next byte: Java's and
-        // Trino's $ here. One whose literal another route searches takes neither.
+        // Trino's $ here. One beside another literal route, a prefix scan here, takes the check
+        // without the bound.
         compile(BOUNDED_STRINGS).forEach((language, pattern) -> {
             assertThat(pattern.requiredBytesForDiagnostics().boundsSearchEnd()).as(language).isTrue();
             assertThat(pattern.requiredBytesForDiagnostics().suffixForDiagnostics()).as(language).isEqualTo(",z".getBytes(UTF_8));
@@ -199,7 +201,10 @@ public class TestRequiredBytes
             assertThat(pattern.requiredBytesForDiagnostics().searchesLongWindows()).as(language).isTrue();
             assertThat(pattern.requiredBytesForDiagnostics().boundsSearchEnd()).as(language).isFalse();
         });
-        compile("x(.*?,){3}z").forEach((language, pattern) -> assertThat(pattern.longWindowRequiredLiteral()).as(language).isNull());
+        compile("x(.*?,){3}z").forEach((language, pattern) -> {
+            assertThat(pattern.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).as(language).isEqualTo(",z");
+            assertThat(pattern.longWindowRequiredLiteral().boundsSearchEnd()).as(language).isFalse();
+        });
 
         // A suffix longer than the required literal needs a separate scanner, and its larger
         // charge may not fit when the forward check does. From the smallest budget at which the
@@ -610,8 +615,15 @@ public class TestRequiredBytes
             assertNoForwardDfa(entry.getValue(), language + " short matcher");
         }
 
-        // A pattern with another literal route keeps no literal for such matches.
-        compile("x" + expression).forEach((language, pattern) -> assertThat(pattern.requiredBytesForDiagnostics()).as(language).isNull());
+        // Beside another literal route, a prefix scan for x, such a literal is checked on long
+        // windows too, but without the search-end bound.
+        compile("x" + expression).forEach((language, pattern) -> {
+            RequiredBytes literal = pattern.requiredBytesForDiagnostics();
+            assertThat(pattern.forwardProgramForDiagnostics().canPrefixAccel()).as(language).isTrue();
+            assertThat(literal.isLongWindowsOnly()).as(language).isTrue();
+            assertThat(literal.longWindowLiteralForDiagnostics()).as(language).isEqualTo(",z");
+            assertThat(literal.boundsSearchEnd()).as(language).isFalse();
+        });
     }
 
     @Test
@@ -657,23 +669,23 @@ public class TestRequiredBytes
             assertThat(matcher.requiredLiteralScanCountForDiagnostics() - scans).as(language).isEqualTo(1);
         }
 
-        // A pattern whose literal another route already searches for, an inner literal search, a
-        // prefix scan, or a start literal filter, or whose literal is case-insensitive, does not
-        // scan for it on long windows. Neither does one whose class pair only the class-run proof
-        // admits, `[?!.]["']` behind `\w+`, since without that proof the search is for the later
-        // `foobar`. The DFA builds a start literal filter only with the Vector API. A folded run
-        // that stands in for no prefix counts as the start literal filter the program would have
-        // without it: (?i)kernel scans for ernel behind the Kelvin sign's lead where its start
-        // bytes would carry a filter.
-        List<OtherRoute> otherRoutes = new ArrayList<>(List.of(
+        // A pattern does not scan long windows for a literal when its other route already
+        // searches for every exact literal it has: a prefix scan, a transparent start literal and
+        // an inner literal search, or a scan plan. Nor does one whose only literal is
+        // case-insensitive. Nor does a pattern whose inner literal search finds a literal inside
+        // every match: that search already scans the window, and where nearly every line holds
+        // the other literal near its end, a scan beside it would double the scan and never
+        // reject.
+        List<OtherRoute> otherRoutes = List.of(
+                new OtherRoute("xyz.*?q", "xyzq", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()),
+                new OtherRoute("\\bxyz\\b.*?q", "xyz q", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
+                new OtherRoute("[0-9]([0-9]*)zz", "1zz", CompiledPattern::usesScanPlanForDiagnostics),
+                new OtherRoute("(.*?,){3}# [Nn]oqa", ",,,# Noqa", pattern -> !pattern.requiredBytesForDiagnostics().isExactLiteral()),
                 new OtherRoute("\\w+,\\bz", "ab,z", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
+                // Neither does one whose class pair only the class-run proof admits, `[?!.]["']`
+                // behind `\w+`, since without that proof the search is for the later `foobar`.
                 new OtherRoute("\\w+[?!.][\"']foobar", "ab!'foobar", pattern -> pattern.innerLiteralSearchForDiagnostics() != null),
-                new OtherRoute("x(.*?,){3}z", "x,,,z", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()),
-                new OtherRoute("(.*?,){3}# [Nn]oqa", ",,,# Noqa", pattern -> !pattern.requiredBytesForDiagnostics().isExactLiteral())));
-        if (VectorSupport.isAvailable()) {
-            otherRoutes.add(new OtherRoute("(?:abc|def)(?:[a-q],){3}z", "abca,b,c,z", pattern -> Dfa.DfaInstance.searchesStartLiteralFilter(pattern.forwardProgramForDiagnostics(), Dfa.DfaInstance.Kind.FIRST_MATCH)));
-            otherRoutes.add(new OtherRoute("(?i)kernel.*?,#", "Kernel,#", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()));
-        }
+                new OtherRoute("(?:\\b|\\B)Holmes\\w*", "Holmes", pattern -> pattern.forwardProgramForDiagnostics().transparentStartLiteral() != null));
         for (OtherRoute otherRoute : otherRoutes) {
             Slice input = utf8Slice(LONG_FILLER + otherRoute.match());
             for (Map.Entry<String, CompiledPattern> entry : compile(otherRoute.expression()).entrySet()) {
@@ -689,24 +701,23 @@ public class TestRequiredBytes
             }
         }
 
-        // Otherwise a folded run that stands in for no prefix is no other route: Trino's
-        // (?i)Holmes, whose s also matches the long s, scans for its run and its literal. A run
-        // that replaces a prefix is one: RE2's (?i)password scans for word in place of pa. With
-        // 64-byte vectors (?i)Holmes has no run, and its rare start bytes take the two-literal
-        // start literal filter, another route, as on main.
+        // A folded run that stands in for no prefix is no other route: Trino's (?i)Holmes, whose
+        // s also matches the long s, scans for its run and checks its literal with the search-end
+        // bound. With 64-byte vectors (?i)Holmes has no run, and checks its literal beside the
+        // two-literal start literal filter its rare start bytes take, without the bound. A run
+        // that replaces a prefix is a route too: RE2's (?i)password scans for word in place of
+        // pa, and checks `,#` beside it.
         CompiledPattern holmes = TrinoRegexp.compile(utf8Slice("(?i)Holmes[^\\n]{0,40}\\(\\)")).re2();
-        if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
-            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isTrue();
-            assertThat(holmes.longWindowRequiredLiteral()).isNotNull();
-            RegexpMatcher holmesMatcher = holmes.matcher(utf8Slice(LONG_FILLER));
-            assertThat(holmesMatcher.find()).isFalse();
-            assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
-        }
-        else {
-            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
-            assertThat(holmes.longWindowRequiredLiteral()).isNull();
-        }
-        assertThat(Re2.compile(utf8Slice("(?i)password(?:.*?,){3}#")).longWindowRequiredLiteral()).isNull();
+        boolean holmesRun = !VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64;
+        assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isEqualTo(holmesRun);
+        assertThat(holmes.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).isEqualTo("()");
+        assertThat(holmes.longWindowRequiredLiteral().boundsSearchEnd()).isEqualTo(holmesRun);
+        RegexpMatcher holmesMatcher = holmes.matcher(utf8Slice(LONG_FILLER));
+        assertThat(holmesMatcher.find()).isFalse();
+        assertThat(holmesMatcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
+        RequiredBytes password = Re2.compile(utf8Slice("(?i)password(?:.*?,){3}#")).longWindowRequiredLiteral();
+        assertThat(password.longWindowLiteralForDiagnostics()).isEqualTo(",#");
+        assertThat(password.boundsSearchEnd()).isFalse();
 
         // An inner literal search that only the class-run proof admits is no other route: the
         // pattern scans for its literal on long windows as it would without that search.
@@ -738,8 +749,9 @@ public class TestRequiredBytes
     @Test
     public void testBitStateCaptureRejectsWindowWithoutInnerLiteral()
     {
-        // A pattern with an inner literal search that the class-run proof does not add keeps no
-        // long-window check, so the routes that skip that search scan for its literal instead. A
+        // A pattern whose inner literal search finds a literal inside every match, and that the
+        // class-run proof does not add, keeps no long-window check, so the routes that skip that
+        // search scan for its literal instead. A
         // find with groups of a window BitState can hold skips both DFAs and the search, and a
         // window without the literal is rejected before BitState starts.
         Slice letters = utf8Slice("a".repeat(8192));
@@ -887,6 +899,100 @@ public class TestRequiredBytes
                 assertThat(trino.replace(input, utf8Slice("[$1]"))).as(description).isEqualTo(trinoUnbounded.replace(input, utf8Slice("[$1]")));
             }
         }
+    }
+
+    @Test
+    public void testChecksLiteralBesideOtherRoute()
+    {
+        // A pattern with another literal route checks long windows for its rarest exact literal
+        // that the route does not search for, which every match consumes too. The route searches
+        // for a literal where a match starts, as a prefix scan, a transparent start literal, an
+        // inner literal search for a literal or set that begins every match, or a start literal
+        // filter does, or it is a scan plan. The short-window check keeps the required bytes.
+        // Without the long-window check, each search of the filler, which holds `the` on every
+        // line, would build and cache a forward DFA. A matcher whose candidate cursor builds the
+        // DFA when it is created rejects the filler with one scan. The DFA builds a start literal
+        // filter only with the Vector API.
+        Predicate<CompiledPattern> prefixScan = pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel();
+        List<BesideRoute> routes = new ArrayList<>(List.of(
+                new BesideRoute("the.*?,z", "the,z", "the", ",z", prefixScan),
+                new BesideRoute("x(.*?,){3}z", "x,,,z", ",z", ",z", prefixScan),
+                new BesideRoute("Holmes.*?Watson", "Holmes Watson", "Holmes", "Watson", prefixScan),
+                new BesideRoute("\\bthe\\b.*?,z", "the,z", "the", ",z", pattern -> pattern.forwardProgramForDiagnostics().transparentStartLiteral() != null),
+                new BesideRoute("\\b(?:the|and)\\b.*?,z", "and,z", ",z", ",z", pattern -> pattern.innerLiteralSearchForDiagnostics().literalBeginsEveryMatch()),
+                new BesideRoute("(?:\\b|\\B)Holmes.*?foobar", "Holmes foobar", "Holmes", "foobar", pattern -> pattern.forwardProgramForDiagnostics().transparentStartLiteral() != null),
+                // A route literal rules out only a literal its exact bytes hold: `foobar` holds no
+                // `FOO`, and the folded `bar` of `foo[Bb][Aa][Rr]` may be `BAR`.
+                new BesideRoute("\\Bfoobar.*?FOO", "x", "foobarFOO", "foobar", "FOO", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() == null),
+                new BesideRoute("\\Bfoo[Bb][Aa][Rr].*?BAR", "x", "fooBarBAR", "foobar", "BAR", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() != null),
+                new BesideRoute("\\Bfoo[Bb][Aa][Rr].*?bar", "x", "fooBARbar", "foobar", "bar", pattern -> pattern.innerLiteralSearchForDiagnostics().foldedMasks() != null),
+                new BesideRoute("\\d(\\d*)ab(\\d+)cde", "1ab2cde", "ab", "ab", CompiledPattern::usesScanPlanForDiagnostics)));
+        if (VectorSupport.isAvailable()) {
+            routes.add(new BesideRoute("(?:abc|def)(?:[a-q],){3}z", "abca,b,c,z", ",z", ",z", pattern -> Dfa.DfaInstance.searchesStartLiteralFilter(pattern.forwardProgramForDiagnostics(), Dfa.DfaInstance.Kind.FIRST_MATCH)));
+            // A folded run that stands in for no prefix counts as the start literal filter the
+            // program would have without it: (?i)kernel scans for ernel behind the Kelvin sign's
+            // lead where its start bytes would carry a filter.
+            routes.add(new BesideRoute("(?i)kernel.*?,#", "Kernel,#", ",#", ",#", pattern -> pattern.forwardProgramForDiagnostics().canPrefixAccel()));
+        }
+        Slice filler = utf8Slice(LONG_FILLER);
+        for (BesideRoute route : routes) {
+            for (Map.Entry<String, CompiledPattern> entry : compile(route.expression()).entrySet()) {
+                String description = entry.getKey() + " " + route.expression();
+                CompiledPattern pattern = entry.getValue();
+                assertThat(route.route().test(pattern)).as(description).isTrue();
+                assertThat(pattern.requiredBytesForDiagnostics()).as(description).hasToString(route.shortWindowBytes());
+                assertThat(pattern.longWindowRequiredLiteral()).as(description).isNotNull();
+                assertThat(pattern.longWindowRequiredLiteral().longWindowLiteralForDiagnostics()).as(description).isEqualTo(route.longWindowLiteral());
+                RegexpMatcher matcher = pattern.matcher(filler);
+                assertThat(matcher.find()).as(description).isFalse();
+                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(description).isEqualTo(1);
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(route.expression()).entrySet()) {
+                String description = entry.getKey() + " " + route.expression();
+                assertThat(entry.getValue().find(filler)).as(description).isFalse();
+                assertNoForwardDfa(entry.getValue(), description + " find");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(route.expression()).entrySet()) {
+                String description = entry.getKey() + " " + route.expression();
+                assertThat(entry.getValue().count(filler)).as(description).isZero();
+                assertNoForwardDfa(entry.getValue(), description + " count");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(route.expression()).entrySet()) {
+                String description = entry.getKey() + " " + route.expression();
+                CompiledPattern pattern = entry.getValue();
+                int[] groups = new int[2 * (pattern.capturingGroupCount() + 1)];
+                assertThat(pattern.findInto(filler, 0, filler.length(), groups)).as(description).isFalse();
+                assertNoForwardDfa(pattern, description + " findInto");
+            }
+
+            // A window that holds the literal runs the route and the engine.
+            Slice input = utf8Slice(LONG_FILLER + route.before() + route.match());
+            Span match = new Span(LONG_FILLER.length() + route.before().length(), input.length());
+            for (Map.Entry<String, CompiledPattern> entry : compile(route.expression()).entrySet()) {
+                String description = entry.getKey() + " " + route.expression();
+                CompiledPattern pattern = entry.getValue();
+                assertThat(spans(pattern.matcher(input))).as(description).containsExactly(match);
+                assertThat(pattern.find(input)).as(description).isTrue();
+                assertThat(pattern.count(input)).as(description).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLiteralBesideRoutesStaysLinear()
+    {
+        // Compared at each of the 20,000 start bytes, these 1,000 runs of 64 bytes, all but the
+        // last an `a`, would take about 1.3 * 10^9 byte comparisons. Compared with the first 64
+        // alone, they stay well inside the comparison budget.
+        String pattern = "a".repeat(20_000) + ("." + "a".repeat(63) + "b").repeat(1_000);
+        assertThat(literalBesideRoutes(pattern)).isEqualTo("a".repeat(63) + "b");
+
+        // These 30,000 runs pass the budget, so the pattern searches for no literal beside its
+        // routes. Compared with all 300,000 start bytes, they would take about 6 * 10^11
+        // comparisons. The comparisons allocate nothing, so only the timeout guards this case.
+        String longPattern = "a".repeat(300_000) + ("." + "a".repeat(63) + "b").repeat(30_000);
+        assertThat(literalBesideRoutes(longPattern)).isNull();
     }
 
     @Test
@@ -1122,6 +1228,13 @@ public class TestRequiredBytes
         return suffix == null ? null : new String(suffix, UTF_8);
     }
 
+    private static String literalBesideRoutes(String pattern)
+    {
+        Regexp parsed = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+        byte[] literal = RequiredBytes.literalBesideRoutes(Simplifier.simplify(parsed, CaseFolding.RE2), List.of());
+        return literal == null ? null : new String(literal, UTF_8);
+    }
+
     private static RequiredBytes requiredBytesAt(String pattern, long maxMemory)
     {
         return compileWithMaxMemory(pattern, maxMemory).requiredBytesForDiagnostics();
@@ -1324,6 +1437,17 @@ public class TestRequiredBytes
     // A pattern that takes another route than the long-window check, which `route` tells, and
     // the text of one of its matches.
     private record OtherRoute(String expression, String match, Predicate<CompiledPattern> route) {}
+
+    // A pattern whose `route` searches for a literal, with its short-window bytes and the literal
+    // it checks long windows for beside the route; `before` precedes the match in a window, for a
+    // match that cannot start after a newline.
+    private record BesideRoute(String expression, String before, String match, String shortWindowBytes, String longWindowLiteral, Predicate<CompiledPattern> route)
+    {
+        BesideRoute(String expression, String match, String shortWindowBytes, String longWindowLiteral, Predicate<CompiledPattern> route)
+        {
+            this(expression, "", match, shortWindowBytes, longWindowLiteral, route);
+        }
+    }
 
     // A matcher region of `text` and the spans it finds.
     private record RegionCase(String text, int start, int end, List<Span> spans) {}

@@ -91,16 +91,19 @@ answer, or reject the input before any engine runs.
   one-of form kept beside an inner literal search for windows below its
   minimum, the 4 KiB engine cutoff, the gated one-byte inner literal check,
   which full-Slice find runs first in place of a check of the same required
-  byte, the scan plan's one check after its first failed attempt, and a
-  matcher's reuse of the long-window literal it found ([#10], [#103], [#138],
-  [#147], [#154], [#188], [#193], [design][d-required-absence],
-  [design][d-required-suffix], [design][d-required-bytes],
-  [design][d-min-inner-window]).
+  byte, the scan plan's one check after its first failed attempt, a matcher's
+  reuse of the long-window literal it found, and the long-window check beside
+  another literal route ([#10], [#103], [#138], [#147], [#154], [#188],
+  [#193], [design][d-required-absence], [design][d-required-suffix],
+  [design][d-required-bytes], [design][d-min-inner-window]).
 - **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
   `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
   `RequiredBytes.containsByte`,
   `CompiledPattern.shortWindowLacksRequiredBytes`,
+  `CompiledPattern.mayCheckRequiredLiteralOnLongWindows`,
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
+  `InnerLiteralSearch.literalBeginsEveryMatch`,
+  `RequiredBytes.literalBesideRoutes`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`,
   `CompiledPattern.nearRequiredLiteralScansInLoop`, `RequiredBytes.indexIn`,
@@ -140,24 +143,33 @@ answer, or reject the input before any engine runs.
   whose matches all end with at least two exact ASCII bytes and no assertion
   after them; not for a program with assertions the DFA cannot run, such as
   Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
-  lowered boolean program. If the full charge does not fit beside the forward
-  DFAs, the search-end bound is removed and the charge retried. If that fails,
-  the pattern keeps only the short-window check when eligible and affordable,
-  and otherwise no check. A matcher reuses an occurrence until a find passes
-  it. A matcher, and `replaceAll` within one call, stop scanning after eight
-  scans in a row find the literal within 256 bytes of their start. Minimum
-  length: windows under 4 KiB, where longer ones skip the metadata load,
-  matcher finds that take the general route, and every count, generated or
-  not; a Trino count skips only the whole-pattern minimum, as its
-  start-anchored plans read a lone malformed byte as one character. Maximum
-  length: patterns of bounded length anchored at both ends, in count, matcher
-  finds, start-anchored scan plans, and anchored ordinary-engine searches.
-  First byte: start-anchored, non-nullable programs with no assertion before
-  the first byte. Inner literal: find windows under the 64-byte minimum of a
-  gated search for a one-byte exact literal, which full-Slice boolean find
-  runs first, before the ordinary engine, where the pattern qualifies. Scan
-  plans: unanchored plans not led by a literal, with a later case-sensitive
-  literal that every match passes
+  lowered boolean program. Beside a route: a pattern kept from the check only
+  by a route that starts where a match starts (a prefix scan, a transparent
+  start literal, an inner literal search for a literal that begins every
+  match, or a start literal filter) or by a scan plan checks long windows for
+  its rarest exact literal that the route does not already search for, without
+  the search-end bound. It does not check beside an inner literal search for a
+  literal inside the match. On 4 KiB lines that each end in `,z`, this costs
+  about 3% on Graviton for `\bthe\b.*?,z` and runs 1.10 to 1.12 times main's
+  time on Intel for `the.*?,z`; lines without `,z` reject in about 0.02 of
+  main's time. If the full charge does not fit beside the forward DFAs, the
+  search-end bound is removed and the charge retried. If that fails, the
+  pattern keeps only the short-window check when eligible and affordable, and
+  otherwise no check. A matcher reuses an occurrence until a find passes it. A
+  matcher, and `replaceAll` within one call, stop scanning after eight scans
+  in a row find the literal within 256 bytes of their start. Minimum length:
+  windows under 4 KiB, where longer ones skip the metadata load, matcher finds
+  that take the general route, and every count, generated or not; a Trino
+  count skips only the whole-pattern minimum, as its start-anchored plans read
+  a lone malformed byte as one character. Maximum length: patterns of bounded
+  length anchored at both ends, in count, matcher finds, start-anchored scan
+  plans, and anchored ordinary-engine searches. First byte: start-anchored,
+  non-nullable programs with no assertion before the first byte. Inner
+  literal: find windows under the 64-byte minimum of a gated search for a
+  one-byte exact literal, which full-Slice boolean find runs first, before the
+  ordinary engine, where the pattern qualifies. Scan plans: unanchored plans
+  not led by a literal, with a later case-sensitive literal that every match
+  passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which

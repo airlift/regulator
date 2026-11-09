@@ -2109,7 +2109,10 @@ shorter, and there the scan costs less than the find and engine setup it saves.
 A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
 setup. An exact literal of a pattern with no other literal route checks long
-windows too, with a literal search and the bounds described in
+windows too. A route that starts where a match starts, or a scan plan, keeps a
+pattern from that check, and such a pattern checks long windows instead for its
+rarest exact literal that the route does not already search for. Both checks
+are described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
@@ -2303,11 +2306,11 @@ only a literal set behind a class run has a
 the check away let a 16 KiB chunk without the literal enter the engine and run
 the search's scan, up to 1.19 times as long for `(\w+)foobar(\d)` on r8i, and
 adding it beside the search for the `,` of `\w+,\bz`, whose required literal is
-`,z`, scanned a chunk that ends in `,z` twice, 1.19 to 1.29 times as long. Where
-an inner literal search stands in for the check, the routes that skip it,
-BitState's capture of groups and a search that skips the DFA, scan the window
-for its literal when that is one exact literal. Neither its forward nor its
-lowered program has a prefix scan, a transparent start literal, or a
+`,z`, scanned a 16 KiB chunk that ends in `,z` twice, 1.19 to 1.29 times as
+long. Where an inner literal search stands in for the check, the routes that
+skip it, BitState's capture of groups and a search that skips the DFA, scan the
+window for its literal when that is one exact literal. Neither its forward nor
+its lowered program has a prefix scan, a transparent start literal, or a
 [start literal filter](#start-literal-filter) that its first-match DFA can run.
 A program whose assertions the DFA cannot run, or whose first-match DFA does not
 fit its budget, never scans for its filter, so the filter does not count there.
@@ -2318,6 +2321,54 @@ anchored at either end: a start-anchored search fails at the first byte that
 cannot continue, and an end-anchored one runs the reverse DFA from the end, so
 either can stop long before a scan of the whole window would. A pattern with a
 single-byte table keeps no required bytes at all.
+
+A pattern left out of the check only for a route that starts where a match
+starts (a prefix scan, a transparent start literal, an inner literal search for
+a literal that begins every match, or a start literal filter) or for a scan
+plan, and that meets every other condition, checks long windows beside that
+route instead, for the rarest exact literal every match consumes that the route
+does not already search for, and without the
+[search-end bound](#required-suffix-bound-on-long-windows). The route already
+searches for a literal inside the exact bytes every match starts with, which a
+prefix scan, a transparent start literal, or an inner literal search for a
+leading literal finds, or inside the scan plan's literal or the inner literal
+search's single literal. A route literal rules out a literal only where its
+exact bytes hold it byte for byte: a search for `foobar` does not rule out `FOO`
+in `\Bfoobar.*?FOO`, and a case-insensitive inner literal matches its folded
+letters in either case, so a search for `foo[Bb][Aa][Rr]` does not rule out
+`bar`. A start literal filter, or an inner literal search for a leading literal
+set, searches for alternatives, none of which every match holds, so it rules out
+no literal. So `the.*?,z`, whose prefix scan stops at every `the`, checks long
+windows for `,z`, and so does `\bthe\b.*?,z`, whose inner literal search finds
+the `the` every match begins with. The pattern keeps its required bytes for
+short windows either way.
+
+Compilation looks for the literal only where such a check is possible, and
+compares only the first 64 of the exact start bytes, all that a joined literal
+keeps: a later literal that repeats start bytes past them may be checked
+although the route makes the check redundant, which costs a scan but never
+rejects a window with a match. A pattern whose literals compare more than
+1,048,576 bytes in all with the start bytes and the route's literals checks for
+none, since the check is optional.
+
+The check beside a route costs a scan where every window holds its literal.
+On 4 KiB lines that each end in `,z`, `\bthe\b.*?,z` took about 3% longer on
+Graviton (1.00 to 1.04 times main's time by language), and `the.*?,z` took 1.10
+to 1.12 times main's time on x86. The x86 cause is inferred, not measured: the
+beside scan of each whole line runs before the DFA, so it leaves Vector API
+boxing garbage just ahead of the DFA's lazily built states, and the warm-up
+garbage collections then repack them. The cost is accepted because lines
+without `,z` are rejected in about 0.02 of main's time.
+
+An inner literal search for a literal inside the match, as for the `,` of
+`\w+,\bz`, still keeps a pattern from the check. The search already scans every
+window for its literal, so where nearly every line holds the other literal near
+its end, a check beside it doubles the scan and never rejects: on 1 KiB lines
+that each end in `,z`, unlike the 16 KiB chunks above, `\w+,\bz` took 1.33 to
+1.48 times as long on Graviton with the check. That gives up the same pattern on
+lines without `,z`, which the check took to 0.59x on Graviton and 0.35x on x86.
+A search for a literal that begins every match lands where a match would start,
+as a prefix scan does, and keeps the check.
 
 Compilation decides this once, and the literal's search takes its memory in the
 required bytes' charge, with the search-end bound's search where the pattern
@@ -2465,7 +2516,8 @@ language ran the forward DFA over all 16 MB. Hyperscan bounds such a scan by the
 last occurrence of the literal every match ends with. Regulator does the same
 with the search-end bound: a pattern that checks long windows for its own exact
 literal also bounds a long search's end by the last occurrence of its required
-suffix.
+suffix. A pattern that checks long windows beside another literal route takes
+no bound.
 
 The required suffix is exact ASCII bytes, at least two and at most the last 64,
 that every match ends with, with no zero-width op after its last byte at any

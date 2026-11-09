@@ -654,10 +654,18 @@ final class ScanPlan
     }
 
     /// Returns the literal whose absence ends an unanchored search after its first failed
+    /// attempt, or `null` when the plan has none. The caller must never change these bytes.
+    byte[] requiredLiteral()
+    {
+        return requiredLiteralOperation < 0 ? null : steps[requiredLiteralOperation].literal;
+    }
+
+    /// Returns the literal whose absence ends an unanchored search after its first failed
     /// attempt, or `null` when the plan has none.
     byte[] requiredLiteralForDiagnostics()
     {
-        return requiredLiteralOperation < 0 ? null : steps[requiredLiteralOperation].literal.clone();
+        byte[] literal = requiredLiteral();
+        return literal == null ? null : literal.clone();
     }
 
     /// Returns the offset of the leading literal byte that an unanchored candidate scan probes,

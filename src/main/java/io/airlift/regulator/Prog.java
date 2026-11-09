@@ -1747,9 +1747,10 @@ final class Prog
 
     /// Returns whether the prefix scan searches for a folded run that stands in for no prefix,
     /// configured because the program has no folded prefix or an empty one. The long-window
-    /// required-literal check, which leaves out a program with a prefix scan, decides for such a
-    /// program as for the program without the run: on a window without the literal, its one
-    /// literal scan returns where the run's scan and the DFA would read the window.
+    /// required-literal check, which a program with a prefix scan takes only for a literal beside
+    /// that scan, decides for such a program as for the program without the run: on a window
+    /// without the literal, its one literal scan returns where the run's scan and the DFA would
+    /// read the window.
     boolean prefixRunAddsPrefixScan()
     {
         return prefixRunAddsPrefixScan;
