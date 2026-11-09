@@ -959,11 +959,14 @@ public class TestInnerLiteralSearch
     @Test
     public void testFindsGatedOneByteLiteralFirst()
     {
-        // A gated one-byte search that checks short windows runs first in full-Slice find, ahead
-        // of the ordinary engine, and the pattern keeps no required bytes of its byte, which the
-        // search's scan checks: the date's `/` and the email's `@` in every language, and Trino's
-        // `=`. Elsewhere `[a-z]+=(?i:noqa)` searches for the folded `=noqa` from 96 bytes and
-        // keeps `=` as a single required byte, which checks every window shorter than 256 bytes.
+        // A gated one-byte search that checks short windows runs first in the ordinary engine's
+        // full-Slice find, and the pattern keeps no required bytes of its byte, which the search's
+        // scan checks: the date's `/` and the email's `@` in every language, and Trino's `=`. The
+        // email's full-Slice find reaches that route only where its literal-neighbor matcher
+        // leaves a hit undecided, or where the density sample finds its `@` dense. Elsewhere
+        // `[a-z]+=(?i:noqa)` searches for the folded `=noqa`
+        // from 96 bytes and keeps `=` as a single required byte, which checks every window shorter
+        // than 256 bytes.
         for (String regex : List.of(DATE, EMAIL, NOQA_ASSIGNMENT)) {
             for (Language language : Language.values()) {
                 String description = "%s %s".formatted(language, regex);
@@ -987,21 +990,20 @@ public class TestInnerLiteralSearch
             assertThat(pattern.matcher(line).find()).as(description).isFalse();
             assertThat(forwardStateCount(pattern)).as(description).isZero();
         }
-        // The search alone answers a line without a hit that passes the byte gates, and one whose
-        // first candidate lies past the near-start bytes, which it confirms on the reverse prefix
-        // DFA and the forward first-match DFA; neither starts the earliest-match DFA of the
-        // ordinary engine's find. A first candidate near the start falls back to that DFA before
-        // any reverse search, and the DFA answers, with a match or, after the `1/2/` before an
-        // `x`, without one. Where a word boundary decodes the text, that DFA quits on the é before
-        // the dates, and the submatch engines find the date that language's word boundary admits.
+        // The email's find reads the bytes beside each `@` instead; see
+        // TestPublicEngineAgreement.testLiteralNeighbors. For the date, the search alone answers a
+        // line without a hit that passes the byte gates, and one whose first candidate lies past
+        // the near-start bytes, which it confirms on the reverse prefix DFA and the forward
+        // first-match DFA; neither starts the earliest-match DFA of the ordinary engine's find. A
+        // first candidate near the start falls back to that DFA before any reverse search, and the
+        // DFA answers, with a match or, after the `1/2/` before an `x`, without one. Where a word
+        // boundary decodes the text, that DFA quits on the é before the dates, and the submatch
+        // engines find the date that language's word boundary admits.
         for (Language language : Language.values()) {
             assertFindsFirst(language, DATE, "and/or a/b 1/x", false, false);
             assertFindsFirst(language, DATE, FILLER + "12/25/2024", true, false);
             assertFindsFirst(language, DATE, "12/25/2024" + FILLER, true, true);
             assertFindsFirst(language, DATE, "1/2/x " + FILLER, false, true);
-            assertFindsFirst(language, EMAIL, "no address, a @ b", false, false);
-            assertFindsFirst(language, EMAIL, FILLER + " a@b", true, false);
-            assertFindsFirst(language, EMAIL, "a@b " + FILLER, true, true);
             assertThat(language.compiledPattern(WORD_DATE).forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language.name()).isEqualTo(language != Language.RE2 && language != Language.RUST_BYTES_ASCII);
             assertFindsFirst(language, WORD_DATE, "\u00E912/25/2024 12/25/2024 " + FILLER, true, true);
             // The fallback's edges: no match after a quit, a match at the first byte before a
@@ -1047,7 +1049,9 @@ public class TestInnerLiteralSearch
         // would match. A case-insensitive pattern runs its search first only where it searches for
         // `=` alone: in Trino for `noqa`, and where `s` and `k` fold to ſ and the Kelvin sign for
         // `skip` and `kilo`. Elsewhere it searches for the folded literal and keeps `=` as a single
-        // required byte, a control.
+        // required byte, a control. The email's full-Slice find runs its literal-neighbor matcher
+        // first, and the search-first route only where the matcher leaves a hit undecided, as
+        // beside malformed UTF-8, or where the density sample finds its `@` dense.
         Set<Language> unicodeFolding = EnumSet.complementOf(EnumSet.of(Language.JAVA, Language.RUST_BYTES_ASCII));
         Map<String, Set<Language>> searchesFirst = Map.of(
                 DATE, EnumSet.allOf(Language.class),

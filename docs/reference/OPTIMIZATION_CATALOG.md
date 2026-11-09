@@ -140,17 +140,21 @@ answer, or reject the input before any engine runs.
   one-byte patterns that take the
   [256-entry table](#group-zero-matcher-routes), nor, where the pattern
   qualifies, as the single required byte a gated one-byte inner literal search
-  scans every window for, which full-Slice find runs first instead; they yield
-  to the forward DFAs, as
+  scans every window for, which the ordinary engine's full-Slice find runs
+  first instead, a find that, for a pattern on the
+  [literal-neighbor plan](#literal-neighbors), runs only when that matcher
+  leaves the find undecided; they yield to the forward DFAs, as
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
   count, the one-shot range searches, and RE2's `replaceAll`, for unanchored
   patterns whose required bytes are an exact literal, or one of up to three
   bytes, and that have no other literal search. An inner literal search
-  counts as one unless only the class-run proof admits it. A pattern whose
-  every match spans at least 256 bytes keeps its literal for this check
-  alone. Search-end bound: count, the one-shot range and capture searches,
-  and `replaceAll` of such a pattern that has an exact required literal and
+  counts as one unless only the class-run proof admits it, and the
+  [literal-neighbor](#literal-neighbors) find plan does not count, since the
+  pattern's other operations keep the ordinary engine. A pattern whose every
+  match spans at least 256 bytes keeps its literal for this check alone.
+  Search-end bound: count, the one-shot range and capture searches, and
+  `replaceAll` of such a pattern that has an exact required literal and
   whose matches all end with at least two exact ASCII bytes and no assertion
   after them; not for a program with assertions the DFA cannot run, such as
   Java's final-terminator `$` and `\Z` and Trino's final line end, nor for a
@@ -182,10 +186,12 @@ answer, or reject the input before any engine runs.
   plans, and anchored ordinary-engine searches. First byte: start-anchored,
   non-nullable programs with no assertion before the first byte. Inner
   literal: find windows under the 64-byte minimum of a gated search for a
-  one-byte exact literal, which full-Slice boolean find runs first, before the
-  ordinary engine, where the pattern qualifies. Scan plans: unanchored plans
-  not led by a literal, with a later case-sensitive literal that every match
-  passes
+  one-byte exact literal, which the ordinary engine's full-Slice boolean find
+  runs first, where the pattern qualifies, a find that, for a pattern on the
+  [literal-neighbor plan](#literal-neighbors), runs only when that matcher
+  leaves the find undecided.
+  Scan plans: unanchored plans not led by a literal, with a later
+  case-sensitive literal that every match passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
@@ -1746,6 +1752,38 @@ ordinary engine would.
   general engine, which rejects malformed UTF-8 there. On synthetic rows, RE2
   Latin-1 and Rust bytes-API ordered-literal finds take 0.03 to 0.04 of their
   earlier time on 1 KB rows and 0.31 to 0.42 on short rows ([#127]).
+
+### Literal neighbors
+
+- **Origin:** Inspired by Hyperscan, which confirms a literal hit with byte
+  checks at fixed offsets from it ([rose_build_lookaround.cpp][hs-lookaround]),
+  and by a gap against it on lh3lh3 email. Regulator: deciding whether a
+  class-run, literal, class-run pattern has a match from the one byte on each
+  side of a hit.
+- **Where:** `LiteralNeighborMatcher.analyze`, `LiteralNeighborMatcher.find`,
+  `CompiledPattern.findOnLiteralNeighbors`
+- **Applies when:** Full-input boolean finds, in every language, of exactly a
+  class repeated by `+`, a literal of at most 64 one-byte characters, and
+  another such repeat, in the normalized expression, captures looked through,
+  with no fold flag left on the classes or the literal, except a find of at
+  least 256 bytes whose required literal full-Slice find
+  [hands to the inner literal search](#required-byte-and-match-length-rejects),
+  which keeps that handoff; the matcher yields to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes. On
+  an input of at least 4 KiB, a one-byte literal that the DFA's start-byte
+  density sample finds dense leaves the find to the general engine before any
+  scan, since restarting the scan at each of the spaces of digit-free prose
+  made `[a-z]+ [0-9]+` take about twice the engine's time
+- **What it does:** `([^ @]+)@([^ @]+)` has a match exactly where some `@` has
+  a member of each class beside it, so the matcher scans for the literal and
+  reads one byte on each side of every hit. A byte at or above 0x80 beside a
+  UTF-8 class with non-ASCII members, which can end or begin one of its
+  characters or be malformed, ends the scan and leaves the find to the general
+  engine only if no byte on the other side of the hit rejects it. On lh3lh3's
+  lines, no email find reaches a DFA, where 15,128 of 1,086,077 lines did.
+  lh3lh3 email finds take 0.96 of their earlier time on Graviton and
+  tie on Intel, and leipzig `[a-z]+e[a-z]+` finds take 0.49 on Graviton and
+  0.55 on Intel ([design][d-boolean]).
 
 ### Fixed-width byte span
 

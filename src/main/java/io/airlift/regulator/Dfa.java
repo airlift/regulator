@@ -75,7 +75,7 @@ final class Dfa
     static final int BYTE_SCAN_SAMPLE_SIZE = 64;
     private static final int BYTE_SCAN_SAMPLE_WINDOWS = 4;
     static final int BYTE_SCAN_SAMPLE_CANDIDATE_LIMIT = 8;
-    private static final int SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT = 4;
+    static final int SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT = 4;
     // A count of every match settles a borderline start sample, from 4 to 7 candidates in 64 bytes,
     // with 256 bytes in 16 windows at the same density.
     private static final int COUNT_START_BORDERLINE_CANDIDATE_LIMIT = 2 * SMALL_BYTE_SET_SCAN_SAMPLE_CANDIDATE_LIMIT;

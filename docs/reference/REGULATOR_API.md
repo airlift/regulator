@@ -173,23 +173,24 @@ Within the budget, compilation and matching keep these limits:
   not fit is dropped, and the pattern searches without one. A DFA that fails
   to initialize is remembered, so later searches do not try to build it again.
 - Optional plans give way to the forward DFAs. Literal searches of up to 64
-  bytes outside Trino, the dot-star literal and byte-gap ordered-literal
-  matchers, the root skip, dense rows, and skip table of a large literal set,
-  OnePass tables needed only for Java's or Trino's final-line end anchors, the
-  bit-parallel position automaton, which searches in place of the Pike NFA once
-  the forward DFA cannot initialize or abandons a search, and in place of the
-  DFA for a boolean search that skips one that thrashed across calls, for a
-  pattern whose matches are bounded, assertion-free and never empty, and
-  required-byte checks are not kept when their memory would stop the
+  bytes outside Trino, the dot-star literal, byte-gap ordered-literal, and
+  literal-neighbor matchers, the root skip, dense rows, and skip table of a
+  large literal set, OnePass tables needed only for Java's or Trino's final-line
+  end anchors, the bit-parallel position automaton, which searches in place of
+  the Pike NFA once the forward DFA cannot initialize or abandons a search, and
+  in place of the DFA for a boolean search that skips one that thrashed across
+  calls, for a pattern whose matches are bounded, assertion-free and never
+  empty, and required-byte checks are not kept when their memory would stop the
   first-match or longest-match DFA from initializing. The literal searched
-  behind a leading assertion is kept only when the first-match and
-  longest-match DFAs both keep their minimum memory beside it, and the folded
-  run a find can search for in that literal's place only when they keep it
-  beside both, a minimum that leaves out a forward DFA's start-byte tables. A prefix's literal set, which long vector prefix scans compare at
-  each candidate, is decided under a `maxMemory` after OnePass and every plan
-  and route, so it never takes memory they would use, and is kept only where
-  the first-match and longest-match DFAs then keep their minimum memory beside
-  it. Other plans keep their memory whenever it fits.
+  behind a leading assertion is kept only when the first-match and longest-match
+  DFAs both keep their minimum memory beside it, and the folded run a find can
+  search for in that literal's place only when they keep it beside both, a
+  minimum that leaves out a forward DFA's start-byte tables. A prefix's literal
+  set, which long vector prefix scans compare at each candidate, is decided
+  under a `maxMemory` after OnePass and every plan and route, so it never takes
+  memory they would use, and is kept only where the first-match and
+  longest-match DFAs then keep their minimum memory beside it. Other plans keep
+  their memory whenever it fits.
 - A large literal set keeps dense transition rows for its states up to depth 3,
   at a smaller depth where the rows' entries would pass 1 MiB or the set would
   not fit its memory, and none where no depth fits.
@@ -264,26 +265,28 @@ which scans for the first and last bytes of a literal of two or more bytes
 together when that search fits beside the forward DFAs and otherwise, as for a
 one-byte literal, uses `Slice.indexOf`, nor any language's dot-star literal
 spans, which share that search, nor ordered literals such as `a(?s:.*)b` in any
-language whose gaps there read any bytes, which use the same scan, nor the start
-literal filter of a pattern that begins with a few literals, the start class
-filter of one that begins with a few narrow classes, an inner literal search's
-set filter, its choice of a rare class pair, the choice and short-window scan of
-the bytes every match holds, or a fixed-width pattern's choice of the position
-whose first bytes it scans for, which always estimate with English text
-frequencies, nor the bytes probed by the scan for the literal behind a leading
-assertion, which scans for its first and last bytes, or, in vector scans of a
-literal led by a multibyte UTF-8 character that ends before the literal's last
-byte, that character's last byte and the literal's last byte, and in vector
-scans of a periodic literal, whose smallest period is more than one byte and at
-most half its length, the first two adjacent bytes that differ from that pair's
-first byte on; the distribution decides only whether a folded run replaces
-that literal. A fixed-width pattern with no position
-rare enough to scan for also estimates with English text frequencies whether to
-test every start of a 64-byte block at once. A distribution that does not match
-the data can make literal scans several times slower per byte than first-byte
-scanning, because it moves the scan onto bytes that are common in the searched
-text; it never changes what matches, and the cost stays linear in the input.
-The choices are:
+language whose gaps there read any bytes, which use the same scan, nor the
+literal-neighbor matcher's scan for the literal of a pattern such as
+`([^ @]+)@([^ @]+)`, which scans for a one-byte literal's byte and for the first
+and last bytes of a longer one, nor the start literal filter of a pattern that
+begins with a few literals, the start class filter of one that begins with a few
+narrow classes, an inner literal search's set filter, its choice of a rare class
+pair, the choice and short-window scan of the bytes every match holds, or a
+fixed-width pattern's choice of the position whose first bytes it scans for,
+which always estimate with English text frequencies, nor the bytes probed by the
+scan for the literal behind a leading assertion, which scans for its first and
+last bytes, or, in vector scans of a literal led by a multibyte UTF-8 character
+that ends before the literal's last byte, that character's last byte and the
+literal's last byte, and in vector scans of a periodic literal, whose smallest
+period is more than one byte and at most half its length, the first two adjacent
+bytes that differ from that pair's first byte on; the distribution decides only
+whether a folded run replaces that literal. A fixed-width pattern with no
+position rare enough to scan for also estimates with English text frequencies
+whether to test every start of a 64-byte block at once. A distribution that does
+not match the data can make literal scans several times slower per byte than
+first-byte scanning, because it moves the scan onto bytes that are common in the
+searched text; it never changes what matches, and the cost stays linear in the
+input. The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole
