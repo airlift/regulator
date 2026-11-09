@@ -58,14 +58,16 @@ final class VectorSupport
     static final boolean SVE_128 = sve128();
 
     // Whether the start literal filter's nibble scan takes each byte's high nibble with a 16-bit
-    // lane shift and an AND of 0x0F, rather than a byte lane shift. Only on x86, which has no
-    // byte lane shift: C2 widens, shifts, and narrows a byte shift, six more uops per shift on
-    // r8i, where rows the scan serves took 0.58x to 0.90x the byte shift's time in the 16-bit
-    // form. aarch64 shifts bytes in one instruction, so there the extra AND only costs: 1.09x to
-    // 1.16x on r9g. Other platforms were not measured and keep the byte shift. "Start Literal
-    // Filter" in REGULATOR_DECISIONS.md records the measurements. C2 folds this constant, so the
-    // scan compiles one form.
-    static final boolean SHIFT_NIBBLES_AS_SHORTS = isX86(System.getProperty("os.arch"));
+    // lane shift, rather than a byte lane shift; the bits the shift moves in from the next byte
+    // sit above the nibble, and the tables repeat their 16 entries across every lane, so the
+    // lookup reads the same entry whatever those bits hold. Only on x86, which
+    // has no byte lane shift: C2 widens, shifts, and narrows a byte shift, six more uops per shift
+    // on r8i, where rows the scan serves took 0.58x to 0.90x the byte shift's time in the 16-bit
+    // form. aarch64 shifts bytes in one instruction, and there the 16-bit form, measured with an
+    // AND of 0x0F after the shift, took 1.09x to 1.16x on r9g. Other platforms were not measured
+    // and keep the byte shift. "Start Literal Filter" in REGULATOR_DECISIONS.md records the
+    // measurements. C2 folds this constant, so the scan compiles one form.
+    static final boolean SHIFT_NIBBLES_AS_SHORTS = X86;
 
     private VectorSupport() {}
 

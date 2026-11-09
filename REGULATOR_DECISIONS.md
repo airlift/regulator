@@ -3657,16 +3657,29 @@ two literal groups directly and, for more, looking up one bit per group from the
 low and high nibbles of each of the three bytes; shorter searches use the same
 check one position at a time, except for the rare start sets below.
 
-The nibble lookup loads one vector per step, at the third position, as the Rust
-crate's Teddy does. It looks up all three positions' bits from that vector and
-shifts the first two positions' bits into place from the previous step's. The
-first step takes the previous step's bits from one load at the first position,
-moved into the lanes the previous step's load would give them. The scan calls
-no helper: with 64-byte vectors the slices' inlined code uses up C2's inlining
-budget, and a helper that C2 then leaves out of line boxes its vectors.
+The nibble lookup loads one vector per step at each of the three positions and
+looks up each position's bits from its own load. It replaced the sliding scan,
+which loaded only the third position, as the Rust crate's Teddy does, and
+shifted the first two positions' bits into place from the previous step's: in
+r9g's and r8i's assembly each shift was a lane permute and a blend (`tbl` and
+`sel`, `vpermb` and `vpblendmb`), four of about 23 instructions per vector. The
+lookup's index wrap, over tables that repeat their 16 entries across 64 bytes,
+keeps each byte's low nibble, so no AND of `0x0F` precedes a lookup. The scan
+calls no helper: a helper that C2 leaves out of line boxes its vectors. With
+JDK 25 the three-load form took 0.97x to 1.01x the sliding scan's time on r9g
+for `curated/02-literal-alternate` `sherlock-casei-en` and `sherlock-casei-ru`,
+`imported/leipzig/tom-sawyer-huckle-fin-insensitive`, and Hyperscan's
+`literal-casei-english`. On r8i it took 0.94x to 1.00x for three of them but
+1.078x for `tom-sawyer-huckle-fin-insensitive`. NEON, AVX2, and SVE wider than
+16 bytes run the three-load form unmeasured. AVX2 hosts run it as r8i does, with
+the 16-bit shift below and half the lanes, so r8i's 1.078x is the nearest
+evidence for them; their own cost was not measured.
 
-The figures in this section come from two A/B rounds against the three-load
-nibble scan of #135, on two r9g and two r8i hosts with JDK 25. A form whose
+The r9g and r8i figures above for the three-load form come from A/B rounds
+against the sliding scan on r9g and r8i hosts with JDK 25. The figures below are
+for the sliding scan and come from two A/B rounds against the three-load nibble
+scan of #135, on two r9g and two r8i hosts with JDK 25. That scan shifted bytes
+on x86, where the present three-load scan shifts 16-bit lanes. A form whose
 first step called helpers allocated 36 to 2,136 KB per operation on r8i, such as
 1,673 KB for `curated/02-literal-alternate` `sherlock-casei-ru` and 2,136 KB for
 `imported/leipzig/tom-sawyer-huckle-fin-insensitive`. With the first step
@@ -3674,8 +3687,8 @@ written out the scan allocates nothing, and it took 0.84x to 0.96x that form's
 time on the nibble-scanned rows on r8i in RE2, Java, Rust, and Trino (1.00x for
 Trino's `imported/sherlock/name-alt3-casei`), including 0.89x to 0.94x for
 `sherlock-casei-ru`, which the helper form had lost, and within 2% on r9g.
-Against the three-load scan, the one-load scan took 0.55x to 0.59x the time on
-r8i for `sherlock-en`, 0.44x to 0.47x for `sherlock-zh`, 0.44x to 0.45x for
+Against #135's three-load scan, the sliding scan took 0.55x to 0.59x the time
+on r8i for `sherlock-en`, 0.44x to 0.47x for `sherlock-zh`, 0.44x to 0.45x for
 `imported/leipzig/tom-sawyer-huckle-finn`, and 0.54x for Trino's
 `imported/sherlock/name-alt3`, where the helper form took 0.62x, 0.53x, 0.52x,
 and 0.63x. On r9g it took 0.95x to 0.98x on the nibble-scanned rows. With NEON
@@ -3684,16 +3697,17 @@ and 0.63x. On r9g it took 0.95x to 0.98x on the nibble-scanned rows. With NEON
 rounds, and was within 2% in Trino. These NEON figures stand for aarch64 hosts
 without SVE, such as Graviton 2; r9g runs the scan with SVE enabled.
 
-On x86 the high nibbles come from a 16-bit lane shift and an AND with `0x0F`.
+On x86 the high nibbles come from a 16-bit lane shift.
 x86 has no byte lane shift, so C2 widens, shifts, and narrows a byte shift, six
-more uops per shift in r8i's assembly. The 16-bit form took 0.59x the byte
+more uops per shift in r8i's assembly. Measured with an AND of `0x0F` after the
+shift, which the present scan leaves out, the 16-bit form took 0.59x the byte
 shift's time on r8i for `tom-sawyer-huckle-finn`, 0.58x to 0.61x for
 `sherlock-zh`, 0.66x to 0.68x for `sherlock-en`, 0.75x for `sherlock-ru`, 0.87x
 for `sherlock-casei-ru`, 0.90x for `sherlock-casei-en`, and 0.67x to 0.69x for
 Trino's `imported/sherlock/name-alt3`. Other platforms keep the byte shift.
-aarch64 shifts bytes in one instruction, so there the AND only adds work: the
-16-bit form took 1.09x to 1.16x for `tom-sawyer-huckle-finn` and `sherlock-en`
-on r9g. Platforms other than x86 and aarch64 were not measured.
+aarch64 shifts bytes in one instruction, and there the 16-bit form, measured
+with the same AND, took 1.09x to 1.16x for `tom-sawyer-huckle-finn` and
+`sherlock-en` on r9g. Platforms other than x86 and aarch64 were not measured.
 
 The filter is built only when the Vector API is available, and only for start
 sets of at most 16 bytes. Sets less than 5% probable in English text keep their

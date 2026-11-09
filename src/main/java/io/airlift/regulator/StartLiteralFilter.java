@@ -58,7 +58,8 @@ final class StartLiteralFilter
     private static final double LEAD_BYTE_PROBABILITY = 0.25;
     private static final double CONTINUATION_BYTE_PROBABILITY = 1.0 / 64;
     // Each nibble table's 16 entries are repeated to the widest vector's 64 bytes, so one load of
-    // the preferred species reads a table.
+    // the preferred species reads a table, and an index's bits above its low nibble pick another
+    // copy of the same entry.
     static final int NIBBLE_TABLE_BYTES = 64;
     /// The most [#estimatedRetainedSize] returns: the scanner width, which pads the values, is at
     /// most [#MAXIMUM_GROUPS].
