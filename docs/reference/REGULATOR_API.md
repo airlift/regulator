@@ -262,13 +262,15 @@ whose first bytes it scans for, which always estimate with English text
 frequencies, nor the literal behind a leading assertion, which scans for its
 first and last bytes, or, in vector scans of a literal led by a multibyte UTF-8
 character that ends before the literal's last byte, that character's last byte
-and the literal's last byte. A fixed-width pattern with no position rare enough
-to scan for also estimates with English text frequencies whether to test every
-start of a 64-byte block at once. A distribution that does not match the data
-can make literal scans several times slower per byte than first-byte scanning,
-because it moves the scan onto bytes that are common in the searched text; it
-never changes what matches, and the cost stays linear in the input. The choices
-are:
+and the literal's last byte, and in vector scans of a periodic literal, whose
+smallest period is at most half its length, the first two adjacent bytes that
+differ from that pair's first byte on. A fixed-width pattern with no position
+rare enough to scan for also estimates with English text frequencies whether to
+test every start of a 64-byte block at once. A distribution that does not match
+the data can make literal scans several times slower per byte than first-byte
+scanning, because it moves the scan onto bytes that are common in the searched
+text; it never changes what matches, and the cost stays linear in the input.
+The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole

@@ -249,21 +249,24 @@ so the automata run only where a match can be.
   by memchr for the pair loop and the short-row cutoff
   ([packedpair][memchr-packedpair], [memchr.rs][memchr-generic],
   [searcher.rs][memchr-short-haystack]); Inspired by memchr's rank table
-  ([default_rank.rs][memchr-rank]) and by a gap against the Rust regex crate
-  for the continuation-byte pair ([#141]). Regulator: the counted loop for
+  ([default_rank.rs][memchr-rank]), by a gap against the Rust regex crate for
+  the continuation-byte pair ([#141]), and by Hyperscan's Noodle, which pairs
+  adjacent bytes of every literal, for the adjacent pair of a periodic literal
+  ([noodle_engine_avx2.c][hs-noodle-double]). Regulator: the counted loop for
   HotSpot's C2 JIT compiler with verification after it exits, the fixed UTF-8
-  pair rule, and the 64-byte cutoff on Trino exact-literal spans ([#14],
-  [#87], [#140], [#141], [design][d-prefix-vector]).
+  pair rule, the periodic-literal rule, and the 64-byte cutoff on Trino
+  exact-literal spans ([#14], [#87], [#140], [#141], [design][d-prefix-vector]).
 - **Where:** `Prog.prefixAccel`, `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`,
   `Prog.prefixAccelStrategy`, `VectorPrefixScanner.find`,
   `VectorPrefixScanner.pairDifference`, `Prog.pairOffset`,
-  `CompiledPattern.findExactLiteralSpan`,
+  `Prog.adjacentPairOffset`, `CompiledPattern.findExactLiteralSpan`,
   `CompiledPattern.exactLiteralSpanUsesPrefixScan`, `LiteralMatchKernel.find`
 - **Applies when:** Case-sensitive prefixes of two or more bytes in unanchored
   searches, every regex language; the fused vector loop on windows of at least
   1 KiB with the Vector API and the probe at byte 0, otherwise SWAR or the
   first-byte scan; the continuation-byte pair for UTF-8 literals whose
-  non-ASCII first character ends before the literal's last byte; a Trino
+  non-ASCII first character ends before the literal's last byte; the adjacent
+  pair for literals whose smallest period is at most half their length; a Trino
   exact-literal span with fewer than 64 bytes left uses `Slice.indexOf`
   instead, unless the probe byte moved
 - **What it does:** A candidate must hold the prefix's first and last bytes
@@ -273,15 +276,19 @@ so the automata run only where a match can be.
   byte, the probe byte, and checks the other byte per candidate. The vector
   loop only tests whether any lane holds both bytes, so C2 compiles it as a
   counted loop, and candidates are rebuilt and verified after the loop exits;
-  the whole scan runs out of line from its callers. For a literal that starts
-  with a multibyte UTF-8 character, the pair probes that character's last byte
-  instead of its lead byte, which many characters in the same script share.
-  The counted form of the fused scan takes Graviton `aqj`, Sherlock, and
-  `the-upper` rows to 0.51 to 0.60 of their earlier time and Intel `aqj`,
-  `no-match-common`, and `line-boundary` rows to 0.78 to 0.80, and RE2's count
-  of `The` from 1.39 to 0.75 of native RE2's time ([#140]); the
-  continuation-byte pair takes Russian Sherlock rows to 0.28 on Intel and 0.84
-  on Graviton ([#141]).
+  the whole scan runs out of line from its callers. The counted form takes
+  Graviton `aqj`, Sherlock, and `the-upper` rows to 0.51 to 0.60 of their
+  earlier time and Intel `aqj`, `no-match-common`, and `line-boundary` rows to
+  0.78 to 0.80, and RE2's count of `The` from 1.39 to 0.75 of native RE2's time
+  ([#140]). For a literal that starts with a multibyte UTF-8 character, the
+  pair probes that character's last byte instead of its lead byte, which many
+  characters in the same script share; that takes Russian Sherlock rows to 0.28
+  on Intel and 0.84 on Graviton ([#141]). A periodic literal pairs instead its
+  first two adjacent bytes that differ, from that last byte when it leads with
+  a multibyte character: its first and last bytes are two bytes of its
+  repeating unit at an arbitrary distance, which text can hold about as often
+  as it holds each byte. That takes folly `literal-never-match-frequent` to
+  0.69 to 0.71 of its earlier time on Graviton and 0.68 to 0.70 on Intel.
 
 ### Folded prefix masks
 
@@ -2351,6 +2358,7 @@ change is described.
 [hs-mcclellan-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellancompile.cpp#L78-L82
 [hs-mcclellan-flags]: https://github.com/intel/hyperscan/blob/v4.0.0/src/nfa/mcclellan_internal.h#L39-L41
 [hs-noodle-caseless]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_engine_sse.c#L182-L200
+[hs-noodle-double]: https://github.com/intel/hyperscan/blob/bc3b191ab56055e8560c7cdc161c289c4d76e3d2/src/hwlm/noodle_engine_avx2.c#L204-L233
 [hs-noodle-mask]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_build.cpp#L88-L117
 [hs-rose-castle]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_castle.cpp#L56-L82
 [hs-rose-leftfix]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_lookaround.cpp#L809-L839

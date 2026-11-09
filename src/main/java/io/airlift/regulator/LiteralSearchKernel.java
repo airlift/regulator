@@ -632,6 +632,21 @@ final class LiteralSearchKernel
         return length;
     }
 
+    /// Returns the smallest period of this kernel's literal; see [#smallestPeriod(byte\[\],int\[\])].
+    int smallestPeriod()
+    {
+        return smallestPeriod(literal, prefixShifts);
+    }
+
+    /// Returns the smallest period of `literal`, the least `p > 0` for which every byte from
+    /// offset `p` on equals the byte `p` before it, taken from the shifts [#computePrefixShifts]
+    /// returns: the literal's length less its longest proper border. A literal with no border,
+    /// including every literal that shares the border-free table, has its length as its period.
+    static int smallestPeriod(byte[] literal, int[] prefixShifts)
+    {
+        return literal.length - prefixShifts[literal.length];
+    }
+
     static int[] computePrefixShifts(byte[] literal)
     {
         if (literal.length < BORDER_FREE_PREFIX_SHIFTS.length && !firstByteRecurs(literal)) {

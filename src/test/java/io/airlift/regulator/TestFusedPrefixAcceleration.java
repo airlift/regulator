@@ -19,6 +19,8 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -69,17 +71,71 @@ public class TestFusedPrefixAcceleration
     @Test
     public void testVectorLaneAndTailBoundaries()
     {
-        int vectorWidth = ByteVector.SPECIES_PREFERRED.length();
-        int length = 1_024 + (2 * vectorWidth) + PREFIX.length;
-        for (int position : new int[] {
-                vectorWidth - 1,
-                vectorWidth,
-                vectorWidth + 1,
-                (2 * vectorWidth) - 1,
-                2 * vectorWidth,
-                length - PREFIX.length,
-        }) {
-            assertMatchAt(configuredProgram(PREFIX, false), PREFIX, length, vectorWidth - 1, position);
+        // Occurrences at and straddling the edges of 16, 32, and 64-byte blocks, which cover every
+        // preferred vector width the scan uses, and at the end of the text, for a prefix that pairs
+        // a continuation byte, one that pairs adjacent bytes, and one that pairs its first and last.
+        for (byte[] prefix : List.of(PREFIX, utf8("aeaeaeaeae"), utf8("Sherlock Holmes"))) {
+            Prog program = configuredProgram(prefix, false);
+            int length = 1_024 + (2 * 64) + prefix.length;
+            for (int blockSize : new int[] {16, 32, 64}) {
+                for (int position : new int[] {
+                        blockSize - 1,
+                        blockSize,
+                        blockSize + 1,
+                        blockSize - (prefix.length / 2),
+                        (2 * blockSize) - 1,
+                        2 * blockSize,
+                        length - prefix.length,
+                }) {
+                    assertMatchAt(program, prefix, length, blockSize - 1, position);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testPeriodicPrefixPairsAdjacentBytes()
+    {
+        // A periodic prefix pairs the first two adjacent bytes that differ.
+        assertThat(configuredProgram(utf8("aeaeaeaeae"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(0, 1);
+        assertThat(configuredProgram(utf8("abab"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(0, 1);
+        assertThat(configuredProgram(utf8("aabaab"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(1, 2);
+        // A periodic prefix led by a multibyte character starts at that character's last byte.
+        assertThat(configuredProgram(utf8("éé"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(1, 2);
+        // Other prefixes keep the pair with the last byte: a period longer than half the prefix,
+        // no period, and one repeated byte, which has no adjacent bytes that differ.
+        assertThat(configuredProgram(utf8("abcab"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(0, 4);
+        assertThat(configuredProgram(utf8("Sherlock Holmes"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(0, 14);
+        assertThat(configuredProgram(utf8("aaaa"), false).fusedProbeOffsetsForDiagnostics()).containsExactly(0, 3);
+        assertThat(configuredProgram(PREFIX, false).fusedProbeOffsetsForDiagnostics()).containsExactly(1, PREFIX.length - 1);
+    }
+
+    @Test
+    public void testLongSearchesMatchReference()
+    {
+        // Text drawn from each prefix's own bytes holds dense candidates that fail at every
+        // length. The prefix scan and the literal search behind a leading assertion share the pair
+        // choice.
+        Random random = new Random(41);
+        for (String value : List.of("aeaeaeaeae", "aabaab", "abcab", "aaaa", "ab", "abc", "éé", "Sherlock Holmes", "Шерлок", "Шx")) {
+            byte[] prefix = utf8(value);
+            Prog program = configuredProgram(prefix, false);
+            LiteralSearchKernel literalSearch = new LiteralSearchKernel(Slices.wrappedBuffer(prefix));
+            byte[] alphabet = utf8(value + "x");
+            for (int iteration = 0; iteration < 200; iteration++) {
+                byte[] data = new byte[1_030 + random.nextInt(1_024)];
+                for (int index = 0; index < data.length; index++) {
+                    data[index] = alphabet[random.nextInt(alphabet.length)];
+                }
+                if (random.nextBoolean()) {
+                    System.arraycopy(prefix, 0, data, random.nextInt(data.length - prefix.length + 1), prefix.length);
+                }
+                int offset = random.nextInt(4);
+                int length = data.length - offset - random.nextInt(4);
+                int expected = referenceSearch(data, offset, length, prefix);
+                assertThat(program.prefixAccel(data, offset, length)).as("%s iteration %s at offset %s length %s", value, iteration, offset, length).isEqualTo(expected);
+                assertThat(Prog.findLiteral(data, offset, length, prefix, literalSearch)).as("%s iteration %s at offset %s length %s", value, iteration, offset, length).isEqualTo(expected);
+            }
         }
     }
 
@@ -236,6 +292,23 @@ public class TestFusedPrefixAcceleration
         Arrays.fill(data, (byte) 'x');
         System.arraycopy(prefix, 0, data, backingOffset + matchPosition, prefix.length);
         assertThat(program.prefixAccel(data, backingOffset, length)).isEqualTo(backingOffset + matchPosition);
+        assertThat(Prog.findLiteral(data, backingOffset, length, prefix, new LiteralSearchKernel(Slices.wrappedBuffer(prefix)))).isEqualTo(backingOffset + matchPosition);
+    }
+
+    private static int referenceSearch(byte[] data, int offset, int length, byte[] prefix)
+    {
+        int lastStart = offset + length - prefix.length;
+        for (int position = offset; position <= lastStart; position++) {
+            if (Arrays.equals(data, position, position + prefix.length, prefix, 0, prefix.length)) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static byte[] utf8(String value)
+    {
+        return value.getBytes(StandardCharsets.UTF_8);
     }
 
     private static void assertNoMatch(Prog program, int length, int backingOffset)
