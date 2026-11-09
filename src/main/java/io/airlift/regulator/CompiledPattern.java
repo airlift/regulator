@@ -3179,7 +3179,9 @@ abstract sealed class CompiledPattern
     /// instead of being made again for each match, and where it bails, this count bails. The
     /// ordinary counts share their start-byte selection and productivity checks, so one that
     /// starts within 64 KiB of an earlier sample does not repeat them. Every match holds the
-    /// literal, so none is empty and each step advances.
+    /// literal, so none is empty and each step advances. Only match ends are read, so where every
+    /// match provably ends at its literal's end, the search confirms a candidate without finding
+    /// its start or running the forward DFA.
     private long countInnerLiteralMatches(InnerLiteralSearch innerLiteralSearch, Slice text)
     {
         int length = text.length();
@@ -3190,7 +3192,7 @@ abstract sealed class CompiledPattern
         long count = 0;
         int position = 0;
         while (position < length) {
-            long span = innerLiteralSearch.search(text, 0, length, position, length);
+            long span = innerLiteralSearch.searchForCount(text, 0, length, position, length);
             if (span == Dfa.SEARCH_NO_MATCH) {
                 return count;
             }

@@ -261,6 +261,35 @@ final class Dfa
                 maximumBytes);
     }
 
+    /// As [#searchReverseCandidate], but in the earliest-match mode, which stops at the first
+    /// start the reverse DFA reaches: a non-negative result says only that some start in
+    /// `[start, end)` exists. An [InnerLiteralSearch] count whose matches end at the literal's end
+    /// needs no more.
+    static long searchReverseCandidateExists(
+            Prog prog,
+            Slice context,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int end,
+            int maximumBytes)
+    {
+        if (maximumBytes <= 0) {
+            throw new IllegalArgumentException("maximumBytes must be positive");
+        }
+        return search(
+                prog,
+                context,
+                contextStart,
+                contextEnd,
+                start,
+                end,
+                true,
+                Prog.MatchKind.LONGEST_MATCH,
+                false,
+                maximumBytes);
+    }
+
     /// Runs the leftmost-first DFA of the forward `prog` anchored at `start` and returns the Slice
     /// offset of the match end, [#SEARCH_FAILED], or, when no match starts at `start`, the value
     /// [#anchoredStopPosition(long)] decodes to the Slice offset where the DFA died or the window

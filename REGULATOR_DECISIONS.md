@@ -2279,6 +2279,77 @@ gate-passing hit. Measured 3 hosts a side, the gates take
 0.78x and 0.77x, `before-after-holmes` to 0.71x and 0.76x, and `mariomka/email`
 to 0.91x and 0.90x.
 
+## Inner Literal Counts To The Literal End
+
+A count needs each match's end, where the next search starts, but not its
+start. Where every match provably ends at its literal's end, the inner literal
+count confirms a hit with one earliest-match run of the reverse prefix DFA,
+which stops at the first start it reaches, and takes the literal's end as the
+match end. It skips the reverse search's run back to the leftmost start and the
+forward DFA. Find and the matcher keep both, since they report the start.
+
+Let the count search from `b`, the previous match end. Let `M` be the match the
+ordinary engine finds, leftmost-first from `b`, with start `s*` and literal at
+`x*`. Let `L` be a hit that passes the byte gates, from which the reverse
+search finds some start `s >= b`, and whose next byte settles a `\b` after it,
+where every earlier hit was rejected. The count takes `L`'s end as `M`'s end,
+which needs three things.
+
+- **Every match ends at its literal's end.** Every member has one length, and
+  the elements after the literal are none, ones that match only the empty
+  string without an assertion, or `\b`, after a literal whose last bytes are
+  all ASCII word bytes. A `\b` holds when the byte after the hit is an ASCII
+  byte outside `[0-9A-Za-z_]`, which every language reads as a character that
+  is not a word character, and the count checks that byte, taking the full
+  confirmation for any other byte or the window's end. So a prefix match `[s,
+  L)` makes `[s, end of L)` a match, and `s* <= s`.
+- **`x* >= L`.** `M`'s literal is a hit with a start at or after `b`, which
+  passes every gate, since the gates hold for every match. Each earlier hit
+  failed a gate or had no start at or after `b`, or its forward confirmation,
+  run when the byte after it did not settle the `\b`, found no match there.
+- **`x* <= L`.** `M`'s prefix spans `[s*, x*)` with `s* <= s <= L`, so with
+  `x* > L` it would cover the start of the hit at `L`. Each proof below rules
+  that out. The count then ends at `L`'s end, as the ordinary count does, so it
+  never counts two overlapping matches: in `a Holmes Holmes`, the second
+  `Holmes` has no word starting at or after the first match's end.
+
+Four proofs give `x* <= L`. Others admit a search, but not this.
+
+- A single literal the prefix cannot consume every byte of, the crate's first
+  proof: a prefix that covers the hit at `L` either holds the whole occurrence
+  or ends inside it at an overlapping occurrence, whose period then holds every
+  distinct byte of the literal. A case-insensitive literal's exact head is that
+  literal.
+- A prefix of fixed byte length `k`: `x* = s* + k <= s + k = L`.
+- A required class `C` at the prefix's end, disjoint from the rest of the
+  prefix and from the literal's bytes, when the byte before the hit is ASCII,
+  which the count checks. `C` cannot hold the hit's first byte, an ASCII byte
+  that every compiled class reads as a character of its own, so `M`'s run of
+  `C` would start after `L`, and the rest of `M`'s prefix would cover `L - 1`.
+  But every prefix match ending at `L` ends with a character of `C`, and the
+  ASCII byte at `L - 1` is that whole character, which the rest of the prefix
+  cannot match. The separator at the prefix's start, which the crate's third
+  proof also accepts, gives no such bound: from the start of
+  ` xHolmesHolmes`, `\s+\w+Holmes` matches the whole text, past the first hit.
+- The [class-pair proof](#inner-literal-class-pairs): with `s* <= s`, the
+  prefix's one-byte opener lies before the hit's last byte, which only that
+  opener could consume.
+- The [class-run proof](#inner-literal-class-run-prefix) for an exact single
+  literal followed by `\b`, when every ASCII byte of the run's class is a word
+  byte. `M`'s run covers `[L, x*)`, all ASCII word bytes as the hit's bytes,
+  and the byte after the hit is ASCII but not a word byte. With `x*` past the
+  hit's end the run covers that byte; at the hit's end the literal starts with
+  it, but the hit starts with a word byte; inside the hit, `M`'s literal holds
+  that byte at an offset the overlap's period maps into `[L, x*)`. Without the
+  `\b` the run proof gives no bound: from the start of `xababab`, `\w+ab`
+  matches the whole text, where the first hit with a start ends after `xab`.
+
+The earliest-match run is the reverse DFA's existing earliest mode, on the same
+cached longest-match DFA, so it adds no state. It keeps the search's bounds and
+fallbacks: it reads back no further than the previous candidate's literal end
+and falls back when still alive there, a DFA failure retries the two searches
+one at a time, and the near-start and reread rules run before it.
+
 ## Required Literal Absence On Long Windows
 
 rebar's `leipzig/bounded-strings-ending-z`, `(.*?,){13}z` over 16 MB of

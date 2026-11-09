@@ -92,7 +92,12 @@ public class TestInnerLiteralSearch
             "\\w+nn\\b\\s",
             "[a-z]+@\\b",
             "[a-z]+nn\\b[a-z]",
-            "[a-z]+#(?i:noqa)\\b");
+            "[a-z]+#(?i:noqa)\\b",
+            // Counts that end each match at its literal's end before a word boundary, behind a
+            // separator or a fixed-length prefix. A word run with no boundary after the literal,
+            // as in `[a-z]+ing`, does not: its matches may run past the first hit with a start.
+            "\\w+\\s+Holmes\\b",
+            "[a-z]{2}ab\\b");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -526,6 +531,36 @@ public class TestInnerLiteralSearch
                         assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
                     }
                     assertThat(matcher.find()).as(description).isFalse();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testCountsToLiteralEndWithReverseDfaAlone()
+    {
+        // Every match of these ends at its literal's end, the byte before each Holmes is ASCII,
+        // and the byte after each nn is ASCII but not a word byte, so a count confirms each hit
+        // with the reverse DFA alone and never starts the forward DFA. Counted in a Slice inside
+        // its backing array, matches at either end of the Slice, where the bytes past it are word
+        // bytes, agree with the ordinary engine.
+        String gap = ".".repeat(InnerLiteralSearch.MINIMUM_SKIPPED_BYTES);
+        String text = gap + "a Holmes" + gap + "Penn " + gap + "bb \t Holmes" + gap + "Finn," + gap;
+        byte[] backing = ("abcxa Holmes" + text + "x Holmes Penn" + "id").getBytes(UTF_8);
+        for (String regex : List.of("\\w+\\s+Holmes", "\\b\\w+nn\\b")) {
+            for (Language language : Language.values()) {
+                String description = "%s %s".formatted(language, regex);
+                CompiledPattern pattern = language.compiledPattern(regex);
+                assertThat(pattern.count(utf8Slice(text))).as(description).isEqualTo(2);
+                assertThat(stateCount(pattern.innerLiteralSearchForDiagnostics().forwardProgramForDiagnostics())).as(description).isZero();
+
+                Engine actual = language.compile(regex);
+                Engine expected = language.compile("(?:" + regex + ")|\\b\\B");
+                for (int offset : new int[] {0, 3, 5}) {
+                    for (int trimmed : new int[] {0, 2}) {
+                        Slice region = Slices.wrappedBuffer(backing, offset, backing.length - offset - trimmed);
+                        assertThat(actual.count(region)).as("%s [%s, -%s)", description, offset, trimmed).isEqualTo(expected.count(region));
+                    }
                 }
             }
         }
@@ -1012,7 +1047,12 @@ public class TestInnerLiteralSearch
                 // A combining mark after a word, which Java's boundaries read as part of it.
                 "Finn\u0301 Penn\u0301x inn\u0300 a\u0301 Holmes\u0301 Holmes",
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
-                "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
+                "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d",
+                // A count resumes at each match end: a word that ends exactly there, a word right
+                // after it, long whitespace runs before a literal, and matches that run past the
+                // first hit with a start.
+                "a Holmes Holmes a HolmesX Holmes\tHolmes" + " ".repeat(150) + "Holmes" + "\t".repeat(70) + "x Holmes",
+                "xababab abab zzab xab\u00e9 Pennab nnab singinging")) {
             texts.add(utf8Slice(text));
             // A search whose first hit is near its start falls back, and a text shorter than the
             // search's minimum never runs it, so filler long enough for a literal set's search
