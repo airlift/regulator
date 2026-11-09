@@ -1251,8 +1251,10 @@ final class InnerLiteralSearch
     }
 
     // Appends the element's bytes and masks after `length`, and returns the new length, or -1 when
-    // the element is not one the folded literal can hold or would not fit.
-    private static int appendFoldedElement(Regexp element, byte[] bytes, byte[] masks, int length)
+    // the element is not one the folded literal can hold or would not fit in them. Callers pass
+    // `bytes` and `masks` of equal length. LiteralAlternationSpanMatcher spells the folded
+    // literals of an alternation with it.
+    static int appendFoldedElement(Regexp element, byte[] bytes, byte[] masks, int length)
     {
         int flags = element.parseFlags();
         if ((flags & Regexp.FULL_CASE_FOLD) != 0) {
@@ -1269,7 +1271,7 @@ final class InnerLiteralSearch
             }
             default -> null;
         };
-        if (runes == null || runes.length == 0 || length + runes.length > MAXIMUM_LITERAL_LENGTH) {
+        if (runes == null || runes.length == 0 || length + runes.length > bytes.length) {
             return -1;
         }
         for (int rune : runes) {

@@ -20,11 +20,14 @@ package io.airlift.regulator;
 /// region, reads nothing outside the region, and never matches empty.
 ///
 /// The interface declares no search method. Each implementation has its own region search that
-/// nothing overrides, as a final class or, for [LiteralSetSpanMatcher], a sealed class whose one
-/// subclass overrides no method. [RegexpMatcher] tests the receiver against each class and calls
-/// that search directly, so each call site binds statically and can inline. One interface call site
-/// would see every class in a process whose patterns use them all, as a Trino server's do, and C2
-/// calls a megamorphic site through the interface table without inlining.
+/// nothing overrides, as a final class, as a sealed class whose one subclass overrides no method
+/// for [LiteralSetSpanMatcher], or as an abstract sealed class for
+/// [LiteralAlternationSpanMatcher], whose final search tests the receiver against its two final
+/// subclasses and calls that class's search. [RegexpMatcher] tests the receiver against each
+/// class and calls that search directly, so each call site binds statically and can inline. One
+/// interface call site would see every class in a process whose patterns use them all, as a
+/// Trino server's do, and C2 calls a megamorphic site through the interface table without
+/// inlining.
 sealed interface GroupZeroSpanSearch
         permits DotStarLiteralSpanMatcher,
                 FixedWidthByteSpanMatcher,

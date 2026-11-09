@@ -262,7 +262,7 @@ public final class RegexpMatcher
     /// outside the region, so every language's search, a Rust one over a partial region included,
     /// is the span search of the rest of the region.
     ///
-    /// The search is dispatched on its final class rather than through an interface method; see
+    /// The search is dispatched on its class rather than through an interface method; see
     /// [GroupZeroSpanSearch].
     private boolean findSpanSearch()
     {

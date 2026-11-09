@@ -13,7 +13,9 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.LiteralAlternationSpanMatcher.ExactMatcher;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.ExtractedLiterals;
+import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
@@ -23,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -904,7 +907,7 @@ public class TestLiteralAlternationSpanMatcher
         // API, adds its own tables.
         StartLiteralFilter filter = matcher.startLiteralFilterForDiagnostics();
         assertThat(filter != null).isEqualTo(VectorSupport.isAvailable());
-        long trieSize = instanceSize(LiteralAlternationSpanMatcher.class) +
+        long trieSize = instanceSize(ExactMatcher.class) +
                 sizeOfShortArray(256) +
                 2 * sizeOfShortArray(15) +
                 2 * sizeOfShortArray(14) +
@@ -913,6 +916,18 @@ public class TestLiteralAlternationSpanMatcher
         // filter: E, W and F lead one literal each.
         long stopLiteralsSize = filter == null ? 0 : sizeOfObjectArray(256) + 3 * sizeOfObjectArray(1) + 2 * sizeOfByteArray(5) + sizeOfByteArray(4);
         assertThat(matcher.estimatedRetainedSize()).isEqualTo(trieSize + stopLiteralsSize + (filter == null ? 0 : filter.estimatedRetainedSize()));
+        // A matcher of folded literals, built only with the Vector API, has no trie. Its literals
+        // and their case masks are each listed under both cases of their first letter, and each
+        // listing is counted.
+        LiteralAlternationSpanMatcher folded = TrinoRegexp.compile(utf8Slice("[Xx]ylophone|[Zz]ephyr|[Qq]uartz")).literalAlternationSpanMatcher();
+        assertThat(folded != null).isEqualTo(VectorSupport.isAvailable());
+        if (folded != null) {
+            long byLeadingByteSize = sizeOfObjectArray(256) + 6 * sizeOfObjectArray(1) + 2 * (sizeOfByteArray(9) + sizeOfByteArray(6) + sizeOfByteArray(6));
+            long foldedSize = instanceSize(FoldedMatcher.class) +
+                    2 * byLeadingByteSize +
+                    folded.startLiteralFilterForDiagnostics().estimatedRetainedSize();
+            assertThat(folded.estimatedRetainedSize()).isEqualTo(foldedSize);
+        }
 
         assertThat(TrinoRegexp.compile(utf8Slice("foo|(bar)")).literalAlternationSpanMatcher()).isNull();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:foo)|bar")).literalAlternationSpanMatcher()).isNull();
@@ -1064,6 +1079,143 @@ public class TestLiteralAlternationSpanMatcher
             LiteralAlternationSpanMatcher scanner = scanner(pattern);
             assertThat(scanner.usesStartLiteralFilter(63)).as(pattern).isFalse();
             assertThat(scanner.usesStartLiteralFilter(64)).as(pattern).isEqualTo(VectorSupport.isAvailable());
+        }
+    }
+
+    @Test
+    public void testFoldedLiteralRoutes()
+    {
+        // Rust's bytes mode without Unicode folds only ASCII letters, so the case-insensitive
+        // rebar names are folded literals, which the matcher compares at its filter stops, and
+        // the DFA is never built. Without the Vector API there is no filter, and the general
+        // engine keeps them.
+        Random random = new Random(7);
+        CompiledPattern.Shape folded = VectorSupport.isAvailable() ? CompiledPattern.Shape.LITERAL_ALTERNATION : CompiledPattern.Shape.ENGINE;
+        for (String names : List.of("Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty", "Tom|Sawyer|Huckleberry|Finn")) {
+            CompiledPattern pattern = RustRegexp.compile(utf8Slice(names), RustRegexp.Options.bytes().setUnicode(false).setCaseInsensitive(true));
+            assertThat(shape(pattern)).as(names).isEqualTo(folded);
+            // Folded and exact literals each take their own matcher class, so the exact trie walk
+            // compiles without the folded compares.
+            CompiledPattern exact = RustRegexp.compile(utf8Slice(names), RustRegexp.Options.bytes().setUnicode(false));
+            assertThat(exact.literalAlternationSpanMatcherForDiagnostics()).as(names).isInstanceOf(ExactMatcher.class);
+            if (!VectorSupport.isAvailable()) {
+                continue;
+            }
+            LiteralAlternationSpanMatcher matcher = pattern.literalAlternationSpanMatcherForDiagnostics();
+            assertThat(matcher).as(names).isInstanceOf(FoldedMatcher.class);
+            Slice input = wrappedBuffer(literalText(random, foldedVariants(names), Dfa.MIN_BYTE_SCAN_PRODUCTIVITY_CHECK_BYTES));
+            long count = pattern.count(input);
+            assertThat(matcher.filterStopCountForDiagnostics()).as(names).isPositive();
+            assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(names).isNull();
+            assertThat(count).as(names).isEqualTo(generalEngineCount(pattern, input));
+        }
+
+        // Each language folds the letters its rules give exactly two ASCII cases. Unicode folding
+        // adds non-ASCII cases for s and k in RE2 and Rust, and in Java with (?iu), so these
+        // expressions keep the general engine, as do non-ASCII literals and literals too short for
+        // a selective filter.
+        String rare = "Xylophone|Zephyr|Quartz";
+        String names = "Holmes|Watson|Lestrade";
+        String kelvin = "Kelvin|Kraken|Kayak";
+        String russian = "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти";
+        // A filter stop compares the literals that begin with its byte, so those under one leading
+        // byte may total 64 bytes; many long literals that begin with q keep the general engine.
+        // Their letters differ in the middle, so the parser's factoring leaves no class of them.
+        String atBound = "qzxj".repeat(8) + "|" + "qzxj".repeat(7) + "quiz";
+        String overBound = atBound + "z";
+        String longLiterals = IntStream.range(0, 49)
+                .mapToObj(index -> "qzxj".repeat(7) + (char) ('a' + index / 26) + (char) ('a' + index % 26) + "qzxj".repeat(7))
+                .collect(Collectors.joining("|"));
+        CompiledPattern.Shape engine = CompiledPattern.Shape.ENGINE;
+
+        record Route(String language, String expression, CompiledPattern.Shape shape) {}
+
+        List<Route> routes = List.of(
+                new Route("RE2", rare, folded),
+                new Route("RE2", names, engine),
+                new Route("RE2 Latin-1", names, folded),
+                new Route("Java", names, folded),
+                new Route("Java", kelvin, folded),
+                new Route("Java (?u)", rare, folded),
+                new Route("Java (?u)", kelvin, engine),
+                new Route("Rust", rare, folded),
+                new Route("Rust", names, engine),
+                new Route("Rust bytes (?-u)", names, folded),
+                new Route("Rust", russian, engine),
+                new Route("Rust bytes (?-u)", "ab|cd", engine),
+                new Route("Rust bytes (?-u)", atBound, folded),
+                new Route("Rust bytes (?-u)", overBound, engine),
+                new Route("Rust bytes (?-u)", longLiterals, engine));
+        for (Route route : routes) {
+            assertThat(shape(foldedPattern(route.language(), route.expression())))
+                    .as("%s (?i)%s", route.language(), route.expression())
+                    .isEqualTo(route.shape());
+        }
+        // Trino keeps no engine to hand a dense stretch back to, so the bound holds there too.
+        assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(atBound))).literalAlternationSpanMatcher() != null).isEqualTo(VectorSupport.isAvailable());
+        assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(overBound))).literalAlternationSpanMatcher()).isNull();
+        assertThat(TrinoRegexp.compile(utf8Slice(twoCaseClasses(longLiterals))).literalAlternationSpanMatcher()).isNull();
+    }
+
+    @Test
+    public void testFoldedLiteralAgreement()
+    {
+        // Patterns of folded literals, in every language, agree with the general engine on text of
+        // the literals in lower, upper, and alternating case, their prefixes, malformed UTF-8 next
+        // to them, the long s and Kelvin sign in place of s and k, and a literal at the end.
+        Random random = new Random(11);
+        List<String> expressions = List.of(
+                "Xylophone|Zephyr|Quartz",
+                // Of overlapping literals the earliest start wins, as zephyr does in zephyrax.
+                "Zephyr|Hyrax|Quartz|Artzy",
+                "Holmes|Watson|Kelvin|Holm",
+                // Exact and folded literals in one alternation, and a class of a letter's two cases.
+                "(?-i:JUMBO)|jump|(?-i:[Jj]unk)");
+        for (String expression : expressions) {
+            String[] variants = foldedVariants(expression.replace("(?-i:", "").replace(")", "").replace("[Jj]", "j"));
+            List<Slice> inputs = new ArrayList<>();
+            inputs.add(utf8Slice(""));
+            inputs.add(utf8Slice(String.join(" ", variants)));
+            inputs.add(utf8Slice("zephyrax QUARTZY hyRAX ArtZy holmeS"));
+            for (int trial = 0; trial < 3; trial++) {
+                inputs.add(wrappedBuffer(literalText(random, variants, 2_048 + random.nextInt(2_048))));
+            }
+            for (Map.Entry<String, CompiledPattern> entry : foldedPatterns(expression).entrySet()) {
+                String label = entry.getKey() + " (?i)" + expression;
+                CompiledPattern pattern = entry.getValue();
+                LiteralAlternationSpanMatcher matcher = pattern.literalAlternationSpanMatcherForDiagnostics();
+                // With Unicode, RE2 and Rust give s a third case, and Java's (?u) gives k one.
+                boolean thirdCase = expression.equals("Holmes|Watson|Kelvin|Holm") && Set.of("RE2", "Rust", "Java (?u)").contains(entry.getKey());
+                assertThat(matcher != null).as(label).isEqualTo(VectorSupport.isAvailable() && !thirdCase);
+                for (int inputIndex = 0; inputIndex < inputs.size(); inputIndex++) {
+                    Slice input = inputs.get(inputIndex);
+                    assertThat(pattern.count(input)).as("%s input %s", label, inputIndex).isEqualTo(generalEngineCount(pattern, input));
+                    if (matcher == null) {
+                        continue;
+                    }
+                    RegexpMatcher general = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                    RegexpMatcher regionGeneral = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                    for (int start = 0; start <= input.length(); start++) {
+                        long expected = general.find(start) ? ((long) general.start() << 32) | (general.end() & 0xFFFF_FFFFL) : Dfa.SEARCH_NO_MATCH;
+                        assertThat(matcher.findSpan(input, start)).as("%s input %s start %s", label, inputIndex, start).isEqualTo(expected);
+                        // A region that ends halfway to the input end cuts the matches that cross it.
+                        int end = start + (input.length() - start) / 2;
+                        expected = regionGeneral.reset(input, start, end).find() ? ((long) regionGeneral.start() << 32) | (regionGeneral.end() & 0xFFFF_FFFFL) : Dfa.SEARCH_NO_MATCH;
+                        assertThat(matcher.findSpan(input, start, end)).as("%s input %s region %s-%s", label, inputIndex, start, end).isEqualTo(expected);
+                    }
+                }
+            }
+        }
+
+        // Trino keeps no program for a literal alternation, so its classes of a letter's two cases
+        // are served by the folded literals alone.
+        String expression = "[Xx]ylophone|[Zz]ephyr|[Qq]uartz";
+        TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(expression));
+        assertThat(trino.literalAlternationSpanMatcher() != null).isEqualTo(VectorSupport.isAvailable());
+        Re2 reference = Re2.compile(utf8Slice(expression));
+        for (int trial = 0; trial < 3; trial++) {
+            Slice input = wrappedBuffer(literalText(random, foldedVariants("Xylophone|Zephyr|Quartz"), 2_048));
+            assertThat(trino.count(input)).as("trial %s", trial).isEqualTo(generalEngineCount(reference, input));
         }
     }
 
@@ -1283,6 +1435,24 @@ public class TestLiteralAlternationSpanMatcher
         assertThat(finds).isEqualTo(expectedCount);
         assertThat(findDiagnostics.sampledPositionCount()).isEqualTo(sampledPositions);
 
+        // Folded literals hold the filter and carry it in the cursor the same way. Without the
+        // Vector API there is no folded matcher.
+        if (VectorSupport.isAvailable()) {
+            LiteralAlternationSpanMatcher folded = Re2.compile(utf8Slice("(?i)ERROR|WARN|FATAL")).literalAlternationSpanMatcherForDiagnostics();
+            assertThat(folded).isInstanceOf(FoldedMatcher.class);
+            LiteralAlternationSpanMatcher.RouteDiagnostics foldedCountDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+            assertThat(folded.countForDiagnostics(logInput, foldedCountDiagnostics)).isEqualTo(expectedCount);
+            assertThat(foldedCountDiagnostics.sampledPositionCount()).isEqualTo(Dfa.BYTE_SCAN_SAMPLE_SIZE);
+            LiteralAlternationSpanMatcher.RouteDiagnostics foldedFindDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+            LiteralAlternationSpanMatcher.Cursor foldedCursor = new LiteralAlternationSpanMatcher.Cursor();
+            long foldedFinds = 0;
+            for (long span = folded.findSpanForDiagnostics(logInput, 0, foldedCursor, foldedFindDiagnostics); span >= 0; span = folded.findSpanForDiagnostics(logInput, (int) span, foldedCursor, foldedFindDiagnostics)) {
+                foldedFinds++;
+            }
+            assertThat(foldedFinds).isEqualTo(expectedCount);
+            assertThat(foldedFindDiagnostics.sampledPositionCount()).isEqualTo(Dfa.BYTE_SCAN_SAMPLE_SIZE);
+        }
+
         TrinoRegexp trinoPattern = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL"));
         assertThat(trinoPattern.literalAlternationSpanMatcher()).isNotNull();
         TrinoRegexpMatcher matcher = trinoPattern.matcher(logInput);
@@ -1312,6 +1482,16 @@ public class TestLiteralAlternationSpanMatcher
             assertThat(matcher.find()).isTrue();
             assertThat(List.of(matcher.start(), matcher.end())).containsExactly(RECHECK_BYTES - 2, RECHECK_BYTES + 2);
             assertThat(matcher.find()).isFalse();
+        }
+
+        // Folded literals keep their own copy of the route loop, whose filter reads past the route
+        // end the same way. Without the Vector API there is no folded matcher.
+        if (VectorSupport.isAvailable()) {
+            Slice input = utf8Slice(" ".repeat(RECHECK_BYTES - 2) + "warn" + " ".repeat(RECHECK_BYTES));
+            LiteralAlternationSpanMatcher folded = Re2.compile(utf8Slice("(?i)ERROR|WARN|FATAL")).literalAlternationSpanMatcherForDiagnostics();
+            assertThat(folded).isInstanceOf(FoldedMatcher.class);
+            assertSpan(folded, input, 0, RECHECK_BYTES - 2, RECHECK_BYTES + 2);
+            assertThat(folded.count(input)).isOne();
         }
     }
 
@@ -1384,6 +1564,37 @@ public class TestLiteralAlternationSpanMatcher
         Slice quiet = utf8Slice("INFO disk usage above threshold on node 7\n".repeat(logLines) + nearMissText(nearMissBytes));
         assertThat(pattern.find(quiet)).isFalse();
         assertThat(dfaScanCounters(pattern)).isEqualTo(dfaCounters);
+
+        // Folded literals keep their own copy of these routes. The folded filter checks offsets 0,
+        // 1 and 2, so it rejects ERxO before the literal compare. ERR#R passes the filter and fails
+        // the compare. Lower-case log lines exercise case folding. Without the Vector API there is
+        // no folded matcher.
+        if (VectorSupport.isAvailable()) {
+            String foldedExpression = "(?i)ERROR|WARN|FATAL";
+            LiteralAlternationSpanMatcher folded = Re2.compile(utf8Slice(foldedExpression)).literalAlternationSpanMatcherForDiagnostics();
+            assertThat(folded).isInstanceOf(FoldedMatcher.class);
+            Slice foldedNearMisses = utf8Slice(nearMissText("ERR#R ", 4 * RECHECK_BYTES));
+            LiteralAlternationSpanMatcher.RouteDiagnostics foldedDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+            assertThat(folded.countOrDeclineForDiagnostics(foldedNearMisses, foldedDiagnostics)).isEqualTo(LiteralAlternationSpanMatcher.DECLINED);
+            assertThat(folded.findSpanOrDeclineForDiagnostics(foldedNearMisses, foldedDiagnostics)).isEqualTo(LiteralAlternationSpanMatcher.DECLINED);
+            assertThat(foldedDiagnostics.rootTablePositionCount()).isZero();
+            // The public count and find decline too, each on a pattern of its own, and run the DFA.
+            Re2 foldedCountPattern = Re2.compile(utf8Slice(foldedExpression));
+            assertThat(foldedCountPattern.count(foldedNearMisses)).isZero();
+            assertThat(dfaScanCounters(foldedCountPattern)).isNotEmpty();
+            Re2 foldedFindPattern = Re2.compile(utf8Slice(foldedExpression));
+            assertThat(foldedFindPattern.find(foldedNearMisses)).isFalse();
+            assertThat(dfaScanCounters(foldedFindPattern)).isNotEmpty();
+            Slice foldedMixed = utf8Slice("warn disk usage above threshold on node 7\n".repeat(logLines) + nearMissText("ERR#R ", nearMissBytes));
+            LiteralAlternationSpanMatcher.RouteDiagnostics foldedMixedDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+            assertThat(folded.countOrDeclineForDiagnostics(foldedMixed, foldedMixedDiagnostics)).isEqualTo(logLines);
+            assertThat(foldedMixedDiagnostics.rootTablePositionCount()).isGreaterThanOrEqualTo(RECHECK_BYTES);
+            // A find without matches reads the root table at the later dense checks, as above.
+            Slice foldedQuiet = utf8Slice("info disk usage above threshold on node 7\n".repeat(logLines) + nearMissText("ERR#R ", nearMissBytes));
+            LiteralAlternationSpanMatcher.RouteDiagnostics foldedQuietDiagnostics = new LiteralAlternationSpanMatcher.RouteDiagnostics();
+            assertThat(folded.findSpanOrDeclineForDiagnostics(foldedQuiet, foldedQuietDiagnostics)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+            assertThat(foldedQuietDiagnostics.rootTablePositionCount()).isGreaterThanOrEqualTo(RECHECK_BYTES);
+        }
     }
 
     // Near misses of ERROR|WARN|FATAL that its start literal filter passes, one every five bytes.
@@ -1572,6 +1783,65 @@ public class TestLiteralAlternationSpanMatcher
                 "Java " + expression, JavaRegexp.compile(utf8Slice(expression)),
                 "Rust " + expression, RustRegexp.compile(utf8Slice(expression)),
                 "Rust bytes (?-u)" + expression, RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
+    }
+
+    // The case-insensitive (?i)`expression` in each language and mode that folds case.
+    private static Map<String, CompiledPattern> foldedPatterns(String expression)
+    {
+        Map<String, CompiledPattern> patterns = new LinkedHashMap<>();
+        for (String language : List.of("RE2", "RE2 Latin-1", "Java", "Java (?u)", "Rust", "Rust bytes (?-u)")) {
+            patterns.put(language, foldedPattern(language, expression));
+        }
+        return patterns;
+    }
+
+    private static CompiledPattern foldedPattern(String language, String expression)
+    {
+        Slice folded = utf8Slice("(?i)" + expression);
+        return switch (language) {
+            case "RE2" -> Re2.compile(folded);
+            case "RE2 Latin-1" -> Re2.compile(folded, Re2.Options.latin1());
+            case "Java" -> JavaRegexp.compile(folded);
+            case "Java (?u)" -> JavaRegexp.compile(utf8Slice("(?iu)" + expression));
+            case "Rust" -> RustRegexp.compile(folded);
+            case "Rust bytes (?-u)" -> RustRegexp.compile(utf8Slice("(?i-u)" + expression), RustRegexp.Options.bytes());
+            default -> throw new IllegalArgumentException(language);
+        };
+    }
+
+    // `expression` with each lower-case ASCII letter written as a class of its two cases.
+    private static String twoCaseClasses(String expression)
+    {
+        StringBuilder classes = new StringBuilder();
+        for (int index = 0; index < expression.length(); index++) {
+            char character = expression.charAt(index);
+            if (character >= 'a' && character <= 'z') {
+                classes.append('[').append(Character.toUpperCase(character)).append(character).append(']');
+            }
+            else {
+                classes.append(character);
+            }
+        }
+        return classes.toString();
+    }
+
+    // Each literal of `expression` in lower, upper, and alternating case, and with the long s and
+    // the Kelvin sign for its first s and k.
+    private static String[] foldedVariants(String expression)
+    {
+        List<String> variants = new ArrayList<>();
+        for (String literal : expression.split("\\|")) {
+            String lower = literal.toLowerCase(Locale.ROOT);
+            StringBuilder alternating = new StringBuilder();
+            for (int index = 0; index < lower.length(); index++) {
+                alternating.append(index % 2 == 0 ? Character.toUpperCase(lower.charAt(index)) : lower.charAt(index));
+            }
+            variants.add(lower);
+            variants.add(lower.toUpperCase(Locale.ROOT));
+            variants.add(alternating.toString());
+            variants.add(lower.replaceFirst("s", "\u017F").replaceFirst("k", "\u212A"));
+        }
+        return variants.toArray(String[]::new);
     }
 
     private static long generalEngineCount(CompiledPattern pattern, Slice input)
