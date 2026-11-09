@@ -1238,9 +1238,10 @@ the wider one, since dense text pays for every sampled byte, and a count that
 stops at a match end keeps the 64-byte decision, because it samples at every
 call.
 
-The inner-literal count hands each span whose next literal sits near the
-previous match end over to a fused count that stops at the first match end whose
-next literal is not near, so one text can take thousands of short fused counts.
+The inner-literal count hands each span whose next gate-passing hit sits near
+the previous match end over to a fused count that stops at the first match end
+whose next gate-passing hit is not near, so one text can take thousands of short
+fused counts.
 Each sample spreads its windows over the whole remaining text, so every one of
 those counts read the same far, cold bytes again. These counts therefore share
 their sampling outcomes: a vector selection holds for the rest of the
@@ -1979,7 +1980,7 @@ all fail the gates has no match without the forward DFA: 41,614 of lh3lh3's
 
 A find loop probes a window of at least the minimum, or any window for a gated
 one-byte search, before its cursors, reading at most 63 bytes plus the longest
-literal's length. A literal hit that passes the byte gates and starts within 64
+literal's length, plus one byte for the gate after a hit. A literal hit that passes the byte gates and starts within 64
 bytes of the window start keeps the cursors, as the ordinary engine falls back
 there: the search could skip no more than those bytes, which cannot repay its
 reverse search and anchored confirmation. Any other window takes the inner
@@ -2243,17 +2244,40 @@ r9g, and `sherlock/quotes` 0.71x and 0.98x.
 ## Inner Literal Byte Gates
 
 The inner literal search skips a hit before either DFA runs when a byte beside
-it cannot be one of a match. The byte before the hit must be one that can end
+it, or up to four before it, cannot be one of a match. The byte before the hit must be one that can end
 the prefix: one the reverse prefix program can consume first. Taking them from
-the program gates any prefix that cannot match the empty string and has no
-assertion at its end, such as the digits that end the day and month of
+the program gates any prefix that cannot match the empty string, such as the
+digits that end the day and month of
 `([0-9][0-9]?)/([0-9][0-9]?)/([0-9][0-9]([0-9][0-9])?)`, or Rust's Unicode
 `\w`, which ends a character of more than one byte with a continuation byte.
+The same walk of the program gives the bytes up to three further back, as
+Hyperscan's Rose lookaround checks several offsets around a literal: two bytes
+before the `Holmes` of `\w+\s+Holmes` is whitespace or a word byte. The walk is
+sound because it reads the byte program the reverse DFA runs, so encoding,
+malformed UTF-8, and case folding are already in its bytes, and because it only
+widens a set: it unions every thread's bytes at each offset, reads assertions,
+captures, and no-ops as matching the empty string, and stops before the first
+offset a thread can reach a match before, since a shorter match leaves that
+byte free. Each set it keeps is on a byte every match consumes, so a hit too
+near the window start for that byte is skipped too.
+
 The byte after a literal, or a set whose members share one length, must lie in
 the element after it when that element is a single ASCII byte class, alone or
 repeated at least once; elements that match only the empty string, such as
 `\b`, are looked past. The `\s` after `ing` in `\s[a-zA-Z]{0,12}ing\s` rules
 out the `ing` of `kingdom`, as the crate's prefilter does by searching `ing\s`.
+A `\b` or `\B` among the elements looked past, right after a literal whose last
+bytes are all word bytes or all not, says whether the next character is a word
+character. Every language's boundary reads an ASCII character as a word
+character exactly when it is `[0-9A-Za-z_]`, whatever its Unicode or Java
+options, so the gate narrows the class after it to those ASCII bytes, or, with
+no class there, is the gate itself. A byte past ASCII may begin, or continue, a
+character of either kind, so it passes, and so does the window's end, where
+the boundary reads the context; the class gate, on a byte the match consumes,
+still fails both. Rust's start, end, and half boundaries give no gate. For
+rebar's `leipzig/word-ending-nn`, `\b\w+nn\b`, whose gate before `nn` is
+dropped since it holds `n`, the gate after it rejects every hit followed by an
+ASCII word byte.
 
 A skipped hit is no candidate. It leaves the bound on how far back the next
 reverse search may read where it was, since no reverse search ran; raising it,
@@ -2269,8 +2293,13 @@ although no date could end there.
 A gate that holds the literal's own byte at that edge, of either case for a
 case-insensitive letter, is dropped. It borders runs of its own bytes, as
 `[a-z]` does before `shing` inside a word, so it passes nearly every hit and
-only adds its test. The gates are held as words in the search itself, so they
-take no memory beyond the instance size the search's budget already charges.
+only adds its test. The gates further back are not dropped this way, and are
+checked only once the byte before the hit passes. The gates on the bytes next
+to a hit are held as words in the search itself, within the instance size the
+search's budget charges, which the gates further back and the flag for a gate
+that word boundaries alone set grow from 120 to 128 bytes; those further back
+take one long array the search's retained size counts, left out when it would
+not fit.
 
 A pattern without a gate keeps the search loop without the check, and a gated
 pattern runs a copy of the loop with it. With the check in one shared loop,
@@ -2283,10 +2312,14 @@ search, entering the loop for each one made lh3lh3 email 3–7% slower on Gravit
 and 5–7% on Intel than with no gate; lines shorter than the
 [minimum](#minimum-inner-literal-search-window) now skip the search, except that
 a gated one-byte search, as email's `@` is, first rejects those without a
-gate-passing hit. Measured 3 hosts a side, the gates take
+gate-passing hit. Measured 3 hosts a side, the one-byte gates take
 `ing-suffix-limited-space` to 0.78x on r8i and 0.83x on r9g, `ing-whitespace` to
 0.78x and 0.77x, `before-after-holmes` to 0.71x and 0.76x, and `mariomka/email`
-to 0.91x and 0.90x.
+to 0.91x and 0.90x. Measured with rebar 2 hosts a side on each platform, the
+gates further back and the `\b` gates take `word-ending-nn` counts to 0.368x on
+r9g and 0.342x on r8i, `tom-sawyer-huckle-fin-prefix-long` to 0.546x and
+0.430x, and the Holmes rows, `before-holmes`, `before-after-holmes`,
+`reverse-suffix/holmes`, and `reverse-inner/holmes`, to 0.91x–0.96x.
 
 ## Required Literal Absence On Long Windows
 
