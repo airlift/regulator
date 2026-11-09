@@ -5406,6 +5406,147 @@ final class Dfa
         return result;
     }
 
+    /// As [#searchAnchoredWithStop(Prog,Slice,int,int,int,int)], but in the earliest-match mode,
+    /// which returns at the first accepting state: a non-negative result says that a match starts
+    /// at `start`, and is the Slice offset of the shortest match end from there, a real match end
+    /// but not the leftmost-first one. As in [#search] and upstream, the earliest-match mode runs
+    /// the longest-match DFA, whose states need no priority order. The stop on no match is the
+    /// same, so a caller that needs only whether a match starts there reads no further than the
+    /// first match end.
+    @SuppressWarnings("UnusedException")
+    static long searchAnchoredEarliestWithStop(Prog prog, Slice context, int contextStart, int contextEnd, int start, int end)
+    {
+        if (prog.reversed() || prog.start() == 0) {
+            throw new IllegalArgumentException("expected a forward program that can match");
+        }
+        DfaInstance dfa = prog.getCachedDfa(DfaInstance.Kind.LONGEST_MATCH);
+        if (dfa == null || !dfa.ok()) {
+            return SEARCH_FAILED;
+        }
+        int contextOffset = context.byteArrayOffset();
+        boolean requiresExclusiveSearch = false;
+        long observedCacheVersion = 0;
+        while (true) {
+            boolean exclusiveSearch = requiresExclusiveSearch;
+            if (!exclusiveSearch) {
+                observedCacheVersion = dfa.cacheVersion();
+            }
+            CacheTables tables = dfa.beginSearch(exclusiveSearch);
+            if (exclusiveSearch && dfa.cacheVersion() != observedCacheVersion) {
+                dfa.cancelExclusiveSearch();
+                requiresExclusiveSearch = false;
+                continue;
+            }
+            try {
+                long result = searchAnchoredEarliestWithStop(
+                        dfa,
+                        tables,
+                        context.byteArray(),
+                        contextOffset + contextStart,
+                        contextOffset + contextEnd,
+                        contextOffset + start,
+                        contextOffset + end);
+                if (result >= 0) {
+                    return result - contextOffset;
+                }
+                if (result == SEARCH_FAILED) {
+                    return result;
+                }
+                return anchoredStopResult(anchoredStopPosition(result) - contextOffset);
+            }
+            catch (StartStateAllocationException | QuitSearchException ignored) {
+                return SEARCH_FAILED;
+            }
+            catch (RetrySearchException ignored) {
+                if (exclusiveSearch) {
+                    throw new AssertionError("exclusive anchored DFA search requested a retry");
+                }
+                requiresExclusiveSearch = true;
+            }
+            finally {
+                dfa.endSearch(exclusiveSearch);
+            }
+        }
+    }
+
+    // The traversal of searchAnchoredWithStop, returning at the first match boundary. A matching
+    // self-loop is never entered, so it needs no scan of its own; the end-of-window step still
+    // reads the byte after the window, so a match ending at the window's end is seen as there.
+    private static long searchAnchoredEarliestWithStop(DfaInstance dfa, CacheTables tables, byte[] bytes, int contextBegin, int contextEnd, int textBegin, int textEnd)
+    {
+        StateData startData = dfa.analyzeStart(tables, bytes, contextBegin, contextEnd, textBegin, textEnd, true, true);
+        tables = dfa.tablesAfterWrite(tables);
+        if (startData.offset() == T_DEAD) {
+            return anchoredStopResult(textBegin);
+        }
+        if (startData.offset() == T_FULL_MATCH || (startData.flag() & FLAG_MATCH) != 0) {
+            return textBegin;
+        }
+
+        int stateOffset = startData.offset();
+        int[] transitions = tables.transitions;
+        byte[] byteMap = dfa.bytemap;
+        int nextSize = dfa.nextSize;
+        Object[] stateRefs = dfa.stateReferences(tables, stateOffset);
+
+        for (int position = textBegin; position < textEnd; position++) {
+            int byteClass = byteMap[bytes[position] & 0xFF] & 0xFF;
+            Object nextReference = getStateReference(stateRefs, byteClass);
+            if (nextReference != null) {
+                stateRefs = (Object[]) nextReference;
+                continue;
+            }
+
+            stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
+            int nextState = getTransition(transitions, stateOffset + byteClass);
+            if (nextState == T_UNCOMPUTED) {
+                nextState = dfa.computeTransition(tables, stateOffset, bytes[position] & 0xFF);
+                tables = dfa.tablesAfterWrite(tables);
+                transitions = tables.transitions;
+                if (nextState == Integer.MIN_VALUE) {
+                    return SEARCH_FAILED;
+                }
+            }
+            if (nextState == T_DEAD) {
+                return anchoredStopResult(position + 1);
+            }
+            if (nextState == T_FULL_MATCH || (nextState & T_MATCH_BIT) != 0) {
+                return position;
+            }
+            // A transition back into the current state keeps the current row.
+            if (nextState == stateOffset) {
+                continue;
+            }
+
+            stateOffset = nextState;
+            stateRefs = dfa.stateReferences(tables, stateOffset);
+        }
+
+        // Cached object transitions advance the row reference without updating the offset.
+        stateOffset = rowStateOffset(stateRefs, nextSize, transitions);
+        int lastByte = textEnd == contextEnd ? BYTE_END_TEXT : bytes[textEnd] & 0xFF;
+        int finalState = getTransition(transitions, stateOffset + dfa.byteMap(lastByte));
+        if (finalState == T_UNCOMPUTED) {
+            finalState = dfa.computeTransition(tables, stateOffset, lastByte);
+            if (finalState == Integer.MIN_VALUE) {
+                return SEARCH_FAILED;
+            }
+        }
+        if (finalState == T_FULL_MATCH || (finalState > 0 && (finalState & T_MATCH_BIT) != 0)) {
+            return textEnd;
+        }
+        return anchoredStopResult(textEnd);
+    }
+
+    /// Whether boolean searches of `prog` skip its DFA in [#searchJudgingSlowResets] now: the
+    /// program has a position automaton, and its DFA's skip window has searches left. It only
+    /// reads the window, taking no skip and starting or judging no search.
+    static boolean skipsBooleanSearchDfa(Prog prog)
+    {
+        DfaInstance dfa = prog.positionNfa() == null ? null : prog.cachedDfaIfPresent(DfaInstance.Kind.LONGEST_MATCH);
+        return dfa != null && dfa.booleanSearchSkipsRemaining() > 0;
+    }
+
     static final class RetrySearchException
             extends RuntimeException
     {
@@ -6876,6 +7017,16 @@ final class Dfa
         static boolean givesOneBitStartLiteralFilter(Prog prog, Kind kind)
         {
             return selectStartLiteralFilter(prog, kind, 1) != null;
+        }
+
+        /// Returns the scanner width of the start literal filter that a DFA of `kind` over `prog`
+        /// searches for, the one [#searchesStartLiteralFilter] finds: the slots its literals are
+        /// padded to, two for one or two literals, four for three or four, and eight for more.
+        /// Returns zero when the DFA searches for its start bytes instead.
+        static int startLiteralFilterScannerWidth(Prog prog, Kind kind)
+        {
+            StartLiteralFilter filter = selectStartLiteralFilter(prog, kind, StartLiteralFilter.GROUP_BITS);
+            return filter == null ? 0 : filter.values().length / 3;
         }
 
         /// Returns the start literal filter a DFA of `kind` over `prog` would search for if each

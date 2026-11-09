@@ -2925,6 +2925,106 @@ r8i, `quotes-bounded` to 0.901x and 0.885x, `shing` to 0.918x and 0.935x, and
 `word-ending-nn` to 0.958x and 0.978x. `count-spans` rows that take the route
 lose at most 1.7% on r9g and 2.8% on r8i, within noise.
 
+## Window Literal Search
+
+rebar's `imported/leipzig/tom-river`, `Tom.{10,25}river|river.{10,25}Tom`, has
+no literal prefix, and the inner literal search has no proof for an alternation,
+so every language ran the forward DFA over the whole text. Each alternative
+holds `river` after at most 103 bytes, 28 where a dot is one byte, so a search
+for `river` bounds where a match can start. The window literal search covers
+such patterns: alternations whose alternatives each hold one exact ASCII literal
+after a prefix of bounded width, and concatenations such as `(?:xy|z){0,2}xyz`
+whose bounded prefix the inner literal search cannot prove.
+
+The window is counted in bytes of the compiled program, not characters, so it
+holds for malformed UTF-8 too: a UTF-8 dot is four bytes, a class the UTF-8
+length of its largest rune, and the analysis leaves full case folding unbounded.
+The search takes every occurrence, overlapping ones included, and tries the
+untried starts in the window before each occurrence, earliest first, running the
+whole pattern on a forward DFA anchored there, unbounded by the occurrence. The
+first start that matches is the leftmost, and its match may end past the
+occurrence that found it. A find that reports a span runs each try on the
+first-match DFA to the end of its leftmost-first match, or to where the DFA
+dies; a boolean find runs it on the longest-match DFA, stops at the first
+accepting state, and is capped, as the guard below describes. Excess
+anchored work, a failed DFA, or a first occurrence near the search start fall
+back to the ordinary engine, as the inner literal search does; count reaches the
+search the same way, and a find window or count text shorter than 96 bytes skips
+it, as for an inner literal search of one literal. A case-insensitive literal
+would need a folded kernel and is left out, and a pattern whose matches all
+begin with a literal behind an assertion keeps the candidate cursor. While
+boolean searches skip a DFA that thrashed, under
+[Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails), a
+boolean find leaves the find to that skip without trying the window, and the
+resets of window tries do not feed the skip's judgement.
+
+The work guard counts each byte an anchored try reads and 16 bytes per try, and
+falls back once that passes half the bytes from the search start to the
+occurrence, plus 64. A first guard that let the tries read eight times the bytes
+passed never tripped on `synthetic/window-dense-fail`, lines of back-to-back
+`river` with no `Tom`, where, per text byte, the tries read 6.27 bytes and made
+0.395 tries, and the search took 8.4 times main's time on r9g and 10.9 times on
+r8i. With one DFA step per byte read, those figures put a try at about 5 bytes
+on r9g and 12 on r8i, so 16 covers both. In Rust bytes mode with Unicode off the
+counted work less the allowance peaks at 0.014 of the bytes passed for
+`imported/leipzig/tom-river` (2,449 tries reading 32,934 bytes over 16 MB) and
+0.087 for `imported/sherlock/holmes-cochar-watson`, and with Unicode on or in
+RE2 at 0.028 and 0.094, at least 5.3 times under the guard's half. Without the
+allowance, a near first occurrence's tries put `holmes-cochar-watson` at 0.29.
+On `window-dense-fail` the work peaks at about 1.3 per byte passed, and each of
+the 96 searches falls back about 30 bytes into the dense lines, after two or
+three occurrences; the DFA counts the rest. The 12.6 per byte passed measured
+there was the rate the eightfold guard allowed. On
+`synthetic/window-guard-trip`, whose 250-character tail makes each failed try
+read about 255 bytes, the search falls back once, 243 bytes past its search
+start, where the eightfold guard took 283, and the row, a count, takes 0.65x
+main's time on r9g.
+
+The guard keeps the work linear in the text. It is checked after each try, so
+a try of a search that reports a span reads its whole span before the guard
+sees it, as the inner literal search's confirmations do. A boolean find, which
+reports no captures, needs only whether a match exists, so its tries take the
+earliest-match mode of the ordinary engine's boolean DFA: each runs the
+longest-match DFA anchored at its start and stops at the first accepting state.
+Each also ends its text one byte past the work the guard still allows, with
+assertions still seeing the whole input, so a try that reaches that end without
+accepting trips the guard there. A consequence of that bound: a failing try
+trips the guard as it would have after reading on, and a try whose first accept
+lies past the end falls back where it would have returned the match. Either way
+the answer is the ordinary engine's, and the work is at most the guard's plus
+one ordinary pass from the search start. Without the stop and the bound, one
+try could read the rest of the input where the ordinary engine reads a few
+bytes: after a match the answer does not need, for `(?:x|zz){0,4}xyz.*QR|xyz`,
+or before failing, for the `Tom` start of
+`(?s)(?:Tom|Huck).{0,5}river.*XYZ|river.{0,5}(?:Tom|Huck)` on `Tom river Tom`
+and a long tail. A span find still reads such a span, as the ordinary engine's
+leftmost-first search does. `(?s)Tom.{10,25}river.*zq|river.{10,25}Tom.*zq`,
+built so that a failing boolean find's first try read the whole input, took
+2.0x main's time on r9g before the bound and takes 1.00x with it, at 64 KiB and
+at 1 MiB. The bound has a cost of its own on a shape built to trip it: the
+`Tom|Huck` pattern above, on 400 dashes, `Tom river Tom`, and a tail of `a`,
+takes 3.1x main's time on r9g, a fixed 580 ns more per find, the same at 64 KiB
+and at 1 MiB. Its `Tom` try stays alive through `.*`, reads to the guard's
+budget, about 250 bytes for the 404 bytes before the occurrence, and falls
+back, and the ordinary engine then reads the 417 bytes main reads. Before the
+bound that try read the rest of the input; now the extra work is at most the
+guard's budget and one ordinary pass, set by the bytes before the occurrence
+rather than by the input's length. The inner literal search's boolean finds
+still settle the whole span.
+
+The search is left out where the first-match DFA scans a start literal filter of
+one or two literals with 64-byte vectors, as on r8i, the capability the
+[start literal filter](#start-literal-filter) already uses to take such a filter
+for rare start bytes. There that scan stops only near a match, and the search
+took 1.18x to 1.22x main's time for `tom-river`, whose `{Tom, riv}` filter every
+vector width takes, and 1.29x to 1.38x for `holmes-cochar-watson`, whose rare
+start bytes take `{Hol, Wat}` only at 64 lanes. On r9g's 16-byte vectors it took
+0.68x for `tom-river`, which keeps the same filter there, and 0.87x to 0.88x for
+`holmes-cochar-watson`. 32-byte vectors were not measured and keep the search,
+and a filter of three or more literals keeps it at every width. The check counts
+the filter's scanner slots, which pad one literal to two, so a filter of one
+literal yields at 64 lanes too; that step-aside is unmeasured.
+
 ## Required Literal Absence On Long Windows
 
 rebar's `leipzig/bounded-strings-ending-z`, `(.*?,){13}z` over 16 MB of
@@ -2954,7 +3054,13 @@ decides as it would without that search, so the proof neither adds the check nor
 takes it away. Nor does the
 [literal-neighbor find plan](#boolean-partial-match-specializations) take the
 check away: it answers full-Slice boolean find alone, and the pattern's other
-operations keep the ordinary engine. Every other search runs on every window the
+operations keep the ordinary engine. Nor does the
+[window literal search](#window-literal-search): BitState's capture of groups
+and a find that skips the DFA never run it, and without the check
+`((?:xy|z){0,2})xyz` ran BitState over 8 KiB without `xyz` that the check
+rejects with one scan. On the window search's own route the check scans the
+stretch before the next occurrence once more, which costs no more than the check
+and the DFA without the search. Every other search runs on every window the
 check would cover: only a literal set behind a class run has a
 [minimum window](#minimum-inner-literal-search-window) over 256 bytes. Taking
 the check away let a 16 KiB chunk without the literal enter the engine and run

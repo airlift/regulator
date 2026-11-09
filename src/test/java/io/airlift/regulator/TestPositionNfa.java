@@ -500,6 +500,48 @@ public class TestPositionNfa
         }
     }
 
+    /// A full-Slice find of a pattern with a window literal search leaves the find to the skip of
+    /// a thrashing DFA once boolean searches skip it, and answers from the position automaton
+    /// instead of trying the window on that DFA.
+    @Test
+    public void testWindowLiteralLineSearchesSkipDfaAfterSlowResets()
+    {
+        // A tom-river shape over the bounded repeat. Each 200-byte line holds xyz 150 bytes in,
+        // past the 81-byte window and the bytes the search must skip, where the window's first
+        // try finds a match; the lines whose search falls back judge the DFA's resets.
+        ThrashingMode mode = THRASHING_MODES.getFirst();
+        String expression = "[a-q][^u-z]{20,80}xyz|xyz[^u-z]{20,80}[a-q]";
+        CompiledPattern pattern = mode.compile(expression);
+        CompiledPattern reference = mode.compile(expression);
+        WindowLiteralSearch windowLiteralSearch = pattern.windowLiteralSearchForDiagnostics();
+        assertThat(windowLiteralSearch).isNotNull();
+        assertThat(pattern.forwardProgramForDiagnostics().positionNfa()).isNotNull();
+        byte[] bytes = stateExplosionInput(1 << 20);
+        for (int index = 150; index + 3 <= bytes.length; index += 200) {
+            bytes[index] = 'x';
+            bytes[index + 1] = 'y';
+            bytes[index + 2] = 'z';
+        }
+        List<Slice> lines = lines(wrappedBuffer(bytes), 200);
+        int firstSkip = -1;
+        List<Slice> skippedLines = new ArrayList<>();
+        for (int index = 0; index < lines.size(); index++) {
+            if (search(pattern, reference, lines.get(index), "line " + index).skipped()) {
+                if (firstSkip < 0) {
+                    firstSkip = index;
+                }
+                skippedLines.add(lines.get(index));
+            }
+        }
+        // Once the window opens, every find takes a skip, the lines the window's tries answer
+        // included.
+        assertThat(firstSkip).isNotNegative();
+        assertThat(skippedLines).hasSize(lines.size() - firstSkip);
+        assertThat(skippedLines.stream()
+                .filter(line -> windowLiteralSearch.searchExists(line, 0, line.length(), 0, line.length()) >= 0))
+                .hasSizeGreaterThan(4000);
+    }
+
     /// Boolean searches and counts that run one DFA keep their own skip windows: neither path's
     /// judgements or skips move the other's window, in bytes and UTF-8 modes.
     @Test

@@ -151,8 +151,11 @@ answer, or reject the input before any engine runs.
   bytes, and that have no other literal search. An inner literal search
   counts as one unless only the class-run proof admits it, and the
   [literal-neighbor](#literal-neighbors) find plan does not count, since the
-  pattern's other operations keep the ordinary engine. A pattern whose every
-  match spans at least 256 bytes keeps its literal for this check alone.
+  pattern's other operations keep the ordinary engine. A
+  [window literal search](#window-literal-search) also keeps the long-window
+  check, because finds that use BitState for captures, or that skip the DFA,
+  never run the window search. A pattern whose every match spans at least 256
+  bytes keeps its literal for this check alone.
   Search-end bound: count, the one-shot range and capture searches, and
   `replaceAll` of such a pattern that has an exact required literal and
   whose matches all end with at least two exact ASCII bytes and no assertion
@@ -654,6 +657,68 @@ so the automata run only where a match can be.
   0.37, `tom-sawyer-huckle-fin-prefix-long` to 0.43 to 0.55, and the Holmes
   rows to 0.91 to 0.96 ([design][d-byte-gates]).
 
+### Window literal search
+
+- **Origin:** First described by Perl 5.005 (1998), which searches for a
+  floating substring that lies between a minimum and a maximum offset from
+  every match start and tries each untried start in that range in increasing
+  order ([regexec.c][perl-float-substr]); later in Oniguruma, and Joni, its
+  Java port, which search for an exact string a bounded distance from every
+  match start and try each start in that range once, earliest first
+  ([regexec.c][onig-dist-search], [regexec.c][onig-dist-try],
+  [Matcher.java][joni-dist-search]); in the aho-corasick crate, whose
+  rare-byte prefilter starts the automaton at most 255 bytes before a rare
+  byte's hit ([prefilter.rs][ac-rare-bytes]); and in Hyperscan's block mode,
+  whose Rose compiler runs a prefix narrower than 255 bytes as a transient
+  leftfix ([rose_build_compile.cpp][hs-rose-transient],
+  [rose_build_util.h][hs-rose-transient-width]), which the runtime starts only
+  that many bytes before a literal's hit
+  ([program_runtime.c][hs-rose-transient-run]). Inspired by a gap against
+  Hyperscan on `tom-river`, where it searches `river`. Regulator: the window
+  counted in compiled bytes for each language and encoding, malformed UTF-8
+  included, anchored forward-DFA tries, leftmost-first for a span and
+  earliest-exit and capped for a boolean find, skipping starts whose byte
+  cannot begin a match, a work guard that keeps the tries linear in the text,
+  and yielding to wide start filters of one or two literals
+  ([design][d-window-literal]).
+- **Where:** `WindowLiteralSearch.analyze`, `WindowLiteralSearch.search`,
+  `WindowLiteralSearch.searchExists`, `Dfa.searchAnchoredEarliestWithStop`,
+  `WindowLiteralSearch.fallsBackNearStart`,
+  `CompiledPattern.countWindowLiteralMatches`
+- **Applies when:** Unanchored, leftmost-first find and count in every regex
+  language, for patterns with no inner literal search and no transparent start
+  literal, whose every match holds one exact ASCII literal of 3 to 64 bytes
+  within 255 bytes of its start, such as an alternation whose alternatives
+  each hold it after a prefix of bounded width; find windows and counted texts
+  of at least 96 bytes; not where the first-match DFA scans a start literal
+  filter of one or two literals with 64-byte vectors. A first hit near the
+  search start, a failed DFA, or anchored work past half the bytes passed,
+  plus 64 bytes, hands the search back to the ordinary engine, and while
+  boolean searches [skip a thrashing DFA](#thrashing-dfa-skipped-across-calls)
+  a boolean find skips the search and leaves the find to that skip
+- **What it does:** `Tom.{10,25}river|river.{10,25}Tom` has no literal
+  prefix, but every match holds `river` within 103 bytes of its start, 28
+  where a dot is one byte. The search scans for the literal and, at each hit,
+  runs the whole pattern on a forward DFA anchored at each start in the window
+  before it, earliest first and never a start twice, so the first start that
+  matches is the leftmost. A find that reports a span runs each try on the
+  first-match DFA to the end of its leftmost-first match, or to where the DFA
+  dies. A boolean find, which reports no captures, needs only whether a match
+  exists, so each of its tries runs the longest-match DFA and stops at the
+  first accepting state, as the ordinary engine's boolean DFA does, and its
+  text ends one byte past what the work guard still allows, with assertions
+  still seeing the whole context, so no try reads a span the answer does not
+  need. A try still alive at that end falls back to the ordinary engine, so on
+  a shape built to trip the cap,
+  `(?s)(?:Tom|Huck).{0,5}river.*XYZ|river.{0,5}(?:Tom|Huck)` over text with
+  `Tom river Tom` 400 bytes in, a boolean find takes 3.1 times main's time on
+  Graviton, a fixed 580 ns more per find at 64 KiB and at 1 MiB. Before the
+  cap such a try read the rest of the input, and a failing find built so its
+  first try read the whole input took 2.0 times main's time; it now ties. On
+  Graviton, rebar's `tom-river` takes 0.68 of its earlier time and
+  `holmes-cochar-watson` 0.87 to 0.88; on Intel's 64-byte vectors both rows
+  keep their start literal filter.
+
 ## Start-byte and multi-literal filters
 
 A pattern without one leading literal often still admits only some first bytes.
@@ -915,12 +980,12 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
 - **Applies when:** Contains and dot-star literals in every language whose
   table fits the DFA budget; outside Trino, literals of up to 64 bytes also
   yield to the forward DFAs, as
-  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes; start
-  and inner literal searches take the fused vector pair scan instead from 1
-  KiB with the Vector API. Ordered literals in Trino and LIKE, and in RE2 and
-  Rust finds over byte gaps; one-byte literal searches and the probe-byte scan
-  of case-sensitive prefixes; literal boolean plans for patterns that
-  normalize to one literal sequence
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes;
+  start, inner, and window literal searches take the fused vector pair scan
+  instead from 1 KiB with the Vector API. Ordered literals in Trino and LIKE,
+  and in RE2 and Rust finds over byte gaps; one-byte literal searches and the
+  probe-byte scan of case-sensitive prefixes; literal boolean plans for
+  patterns that normalize to one literal sequence
 - **What it does:** The literal's first and last bytes are tested a word at a
   time in a loop that makes no calls. Candidates are verified out of line with
   8-byte word compares, two 4-byte reads, or single bytes. Every language's
@@ -2490,6 +2555,7 @@ change is described.
 [d-trino-adapter]: ../../REGULATOR_DECISIONS.md#trino-compatibility-adapter
 [d-trino-assertions]: ../../REGULATOR_DECISIONS.md#trino-text-dependent-assertions-and-full-case-folding
 [d-trino-literal]: ../../REGULATOR_DECISIONS.md#trino-regexp-literal-searches
+[d-window-literal]: ../../REGULATOR_DECISIONS.md#window-literal-search
 [d-word-run]: ../../REGULATOR_DECISIONS.md#word-run-plan
 [api-binding]: REGULATOR_API.md#binding-a-compiled-pattern
 [counting-section]: #counting
@@ -2562,6 +2628,7 @@ change is described.
 [ac-automaton]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/automaton.rs
 [ac-noncontiguous]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/nfa/noncontiguous.rs
 [ac-prefilter]: https://github.com/BurntSushi/aho-corasick/blob/7e231db4b4ac192ebc674078f2b03cd37b9ed5b9/src/prefilter.rs#L150-L265
+[ac-rare-bytes]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/util/prefilter.rs#L478-L497
 [ac-teddy-readme]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/README.md
 [ac-vector]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/vector.rs#L363-L370
 [bg-shift-and]: https://doi.org/10.1145/135239.135243
@@ -2621,6 +2688,9 @@ change is described.
 [hs-noodle-mask]: https://github.com/intel/hyperscan/blob/v5.4.2/src/hwlm/noodle_build.cpp#L88-L117
 [hs-rose-castle]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_castle.cpp#L56-L82
 [hs-rose-leftfix]: https://github.com/intel/hyperscan/blob/017268f8455fd6095b7045fd85f2efd26a3c5604/src/rose/rose_build_lookaround.cpp#L809-L839
+[hs-rose-transient]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_compile.cpp#L803-L856
+[hs-rose-transient-width]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_util.h#L40
+[hs-rose-transient-run]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L309-L320
 [hs-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L110-L118
 [hs-shufti-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufticompile.cpp#L54-L108
 [hs-shufti-double]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/shufti.c#L287-L362
@@ -2633,6 +2703,7 @@ change is described.
 [jdk-pattern]: https://github.com/openjdk/jdk/blob/jdk-25%2B36/src/java.base/share/classes/java/util/regex/Pattern.java
 [jdk8-pattern]: https://github.com/openjdk/jdk8u/blob/jdk8u442-b06/jdk/src/share/classes/java/util/regex/Pattern.java
 [jitrex-machine]: https://github.com/humio/jitrex/blob/0.1.15/src/main/java/com/humio/jitrex/jvm/RJavaClassMachine.java
+[joni-dist-search]: https://github.com/jruby/joni/blob/joni-2.2.1/src/org/joni/Matcher.java#L445-L458
 [kawa-regexps]: https://www.gnu.org/software/kawa/gnu.bytecode/compiling-regexps.html
 [kmp-1977]: https://doi.org/10.1137/0206024
 [knuth-taocp]: https://www-cs-faculty.stanford.edu/~knuth/taocp.html
@@ -2654,6 +2725,8 @@ change is described.
 [musl-memchr]: https://git.musl-libc.org/cgit/musl/tree/src/string/memchr.c?h=v1.2.5
 [nim-litopt]: https://nitely.github.io/2020/11/30/regex-literals-optimization.html
 [nr-glushkov]: https://users.dcc.uchile.cl/~gnavarro/ps/algor04.2.pdf
+[onig-dist-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5513-L5534
+[onig-dist-try]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5873-L5887
 [onig-map-search]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regexec.c#L5440-L5469
 [onig-map-select]: https://github.com/kkos/oniguruma/blob/f95747b462de672b6f8dbdeb478245ddf061ca53/src/regcomp.c#L6333-L6349
 [pcre-changelog]: https://www.pcre.org/original/changelog.txt
@@ -2664,6 +2737,7 @@ change is described.
 [pcre2-minlength]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.00/src/pcre2_match.c#L6794-L6804
 [pcre2-req-cu]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.00/src/pcre2_match.c#L6806-L6862
 [pcre2-start-bits]: https://github.com/PCRE2Project/pcre2/blob/pcre2-10.42/src/pcre2_match.c#L7136-L7146
+[perl-float-substr]: https://github.com/Perl/perl5/blob/v5.40.0/regexec.c#L4035-L4132
 [perl-regexec]: https://github.com/Perl/perl5/blob/v5.40.0/regexec.c
 [perl-trie]: https://github.com/Perl/perl5/blob/v5.40.0/regcomp_trie.c#L274-L320
 [postgres-like]: https://github.com/postgres/postgres/blob/REL_17_0/src/backend/utils/adt/like_match.c
