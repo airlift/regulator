@@ -1116,12 +1116,19 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   skipping to a member's start, by Hyperscan, whose shufti scan finds a sparse
   byte set with two nibble lookups ([shufti.c][hs-shufti]), and .NET, which
   finds the characters that can start a match with `IndexOfAny`
-  ([.NET 5 regex][dotnet5-blog]); Inspired by gaps against the Rust regex
+  ([.NET 5 regex][dotnet5-blog]), and, for finishing a long run, by
+  Hyperscan, whose bounded-repeat engines scan forward for the first byte
+  outside the repeated class with vermicelli, shufti, or truffle
+  ([lbr.c][hs-lbr-scan], [castle.c][hs-castle-scan]), and .NET, whose
+  compiled greedy set loops find their end with a vectorized `IndexOfAnyExcept`
+  ([.NET 7][dotnet7-blog]); Inspired by gaps against the Rust regex
   crate on class counts for the byte reads and branch-free updates ([#87],
-  [#144]) and on Unicode class extraction ([#91]). Regulator: splitting each
-  run by the repeat's bounds ([#1], [design][d-class-count]), a branch-free
-  run update ([#144]), and the member-start table, which also reads byte and
-  ASCII runs ([#91], [#112]).
+  [#144]), on Unicode class extraction ([#91]), and against Hyperscan on long
+  word runs ([#216]). Regulator: splitting each run by the repeat's bounds
+  ([#1], [design][d-class-count]), a branch-free run update ([#144]), the
+  member-start table, which also reads byte and ASCII runs ([#91], [#112]),
+  and the handoff of a long byte run to the
+  [self-loop exit-byte scan](#self-loop-exit-byte-scan) ([#216]).
 - **Where:** `BoundedCharacterClassCounter.analyzeRepeat`,
   `BoundedCharacterClassCounter.create`,
   `BoundedCharacterClassCounter.countBytes`,
@@ -1129,6 +1136,9 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   `BoundedCharacterClassCounter.findSpan`,
   `BoundedCharacterClassCounter.findMemberStart`,
   `BoundedCharacterClassCounter.byteRunEnd`,
+  `BoundedCharacterClassCounter.vectorRunEnd`,
+  `BoundedCharacterClassCounter.packMemberRanges`,
+  `VectorByteSetScanner.findOutsideRanges`,
   `RetainedCharacterClassCountDfa.supports`,
   `RetainedCharacterClassCountDfa.count`
 - **Applies when:** Non-nullable, unanchored greedy repeats of one class; span
@@ -1136,17 +1146,26 @@ match, as .NET's `Regex.Count` finds every match in one internal scan
   with a DFA budget of at least 128 KiB, a count of a small case-sensitive
   greedy class with a positive minimum runs on a DFA instead when class
   members are sparse; input of 1 MiB or more is sampled first, and shorter
-  input, or input whose sample holds many members, uses the counter
+  input, or input whose sample holds many members, uses the counter. The
+  run-end vector scan needs the Vector API, a byte or ASCII class whose
+  members fit in at most four ranges of at most 128 bytes each, and a repeat
+  whose maximum, if any, passes the handoff length
 - **What it does:** A count of a greedy repeat of one class scans the input
   once and splits each run by the repeat's bounds, updating the run with no
   branch on membership for bytes and for ASCII and two-byte UTF-8; other text
   decodes with a branch. UTF-8 text of ASCII and two-byte characters is
   checked 32 bytes at a time with SWAR masks. Span searches skip bytes that
   cannot begin a member, with a table or, for a sparse class, a vector nibble
-  scan; for byte and ASCII classes, the table also reads the whole run.
+  scan; for byte and ASCII classes, the table also reads the run. A byte run
+  still going after 128 bytes, or 64 with 64-byte vectors, is finished by
+  the self-loop exit-byte scan's range compares over whole vectors, with the
+  table reading the rest; a run that meets a nonmember before then returns
+  from the table loop.
   Letter-run counts take 0.55 to 0.62 of their earlier time on Graviton and
   0.47 to 0.49 on Intel ([#144]), and finding every `\pL` or `\p{Ll}` letter
-  0.16 to 0.29 ([#91]).
+  0.16 to 0.29 ([#91]). rebar's `i1095-word-repetition` ASCII search for
+  `[0-9A-Za-z_]{256}` takes 0.81 of its earlier time on Graviton and 0.55 on
+  Intel, and lines past 64 bytes cost Intel line-heavy text 5 to 10% ([#216]).
 
 ## Scan plans
 
@@ -1937,6 +1956,7 @@ change is described.
 [#201]: https://github.com/airlift/regulator/pull/201
 [#202]: https://github.com/airlift/regulator/pull/202
 [#208]: https://github.com/airlift/regulator/pull/208
+[#216]: https://github.com/airlift/regulator/pull/216
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2089,6 +2109,8 @@ change is described.
 [hs-accelcompile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/accelcompile.cpp
 [hs-boundary]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/ComponentBoundary.cpp#L134-L140
 [hs-buildstate]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/buildstate.cpp#L234-L282
+[hs-castle-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/castle.c#L523-L612
+[hs-lbr-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/lbr.c#L422-L516
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658
 [hs-mcclellan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellan.c
 [hs-mcclellan-compile]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellancompile.cpp#L78-L82
