@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 
@@ -73,6 +74,36 @@ final class Simplifier
         ExpansionBudget budget = new ExpansionBudget(coalesced, maxMemory, (regexp.parseFlags() & Regexp.LATIN1) != 0);
         return simplifyInternal(coalesced, dialect == Compiler.Dialect.JAVA ? Mode.JAVA_FULL : Mode.FULL, budget, caseFolding);
     }
+
+    /// Returns a lower bound on how many instructions a forward program compiled from `regexp`,
+    /// unsimplified, in `dialect` emits for it before flattening, not counting the instructions
+    /// a program holds beside its expression's (see [Compiler#PROGRAM_INSTRUCTIONS]). It follows
+    /// full simplification without building it: the rules that turn a node into an empty match
+    /// or a no-match, squash operators, cut a repetition's count, expand it, or keep it for the
+    /// Java compiler, and merge alternatives into a class. Each node then counts the fewest
+    /// instructions the compiler emits for what simplification makes of it. Where that count
+    /// depends on what the compiler cannot prove about a body, such as whether it can match
+    /// empty, the node takes the smaller count. Past `limit` it counts `limit + 1`.
+    ///
+    /// It runs only when a compile is rejected, to say how much memory the pattern needs. Its
+    /// summary pass walks each distinct node once without recursion, and it compiles each
+    /// distinct leaf class once, which bounds it by the expression's size rather than its
+    /// expansion's. An alternation adds the alternatives of the alternations nested in it to its
+    /// own, and merges its literals and classes with theirs, so deep nesting copies them, or
+    /// builds and compiles ever larger classes, again at every level; it is empty once that work
+    /// passes a fixed multiple of the nodes walked, which bounds the work and memory linearly.
+    static Optional<EstimatedInstructions> estimateInstructions(Regexp regexp, CaseFolding caseFolding, Compiler.Dialect dialect, long limit)
+    {
+        requireNonNull(regexp, "regexp is null");
+        requireNonNull(caseFolding, "caseFolding is null");
+        requireNonNull(dialect, "dialect is null");
+        Regexp coalesced = Coalescer.coalesce(regexp, caseFolding);
+        return new InstructionEstimate(coalesced, caseFolding, dialect, (regexp.parseFlags() & Regexp.LATIN1) != 0, limit).estimate(coalesced);
+    }
+
+    /// The instructions [#estimateInstructions] counts, and whether the expression holds a
+    /// beginning of text, which may anchor the program so that it compiles no leading loop.
+    record EstimatedInstructions(long count, boolean mayAnchorStart) {}
 
     /// Parse-time canonicalization that intentionally preserves counted repetitions (`{n,m}`),
     /// matching upstream RE2 parse.cc behavior (parse dumps still contain `rep{...}` nodes).
@@ -786,6 +817,474 @@ final class Simplifier
                 }
             }
         }
+    }
+
+    /// Estimates the instructions of a simplified expression from the unsimplified one; see
+    /// [#estimateInstructions]. Like [ExpansionBudget#size], it sizes each node after its
+    /// children, from an explicit stack, and once however many references share it, so a
+    /// repetition charges its copies without walking them. Each node's summary records what full
+    /// simplification makes of it, in the detail that the rules that drop, collapse, squash, or
+    /// merge nodes inspect, and the fewest instructions the compiler emits for that result.
+    private static final class InstructionEstimate
+    {
+        // The work the estimate may spend per node walked on data it built itself, past which
+        // it gives up. What can grow quadratically is building that data again at every level of
+        // a nested alternation: copying the alternatives an alternation below collected, and
+        // merging and compiling the classes an alternation below merged. A unit of work is an
+        // alternative copied, or a range of a merged class that a merge takes in, charged twice,
+        // as the class it merges into is compiled too. Classes written in the expression are not
+        // charged: each distinct one compiles once and merges once at its parent, which is linear
+        // in the input.
+        private static final int WORK_PER_NODE_WALKED = 8;
+
+        private static final Summary NO_MATCH = new Summary(Kind.NO_MATCH, 0, false, true, false, null, null, null, 0, null);
+        private static final Summary EMPTY = new Summary(Kind.EMPTY, 1, true, false, false, null, null, null, 0, null);
+
+        private final CaseFolding caseFolding;
+        private final Mode mode;
+        // Whether a loop over a body that can match empty ends on an iteration that consumes
+        // nothing, which the compiler builds from more instructions.
+        private final boolean progressLoops;
+        private final boolean latin1;
+        private final long saturated;
+        // Null when no node never matches, as in most patterns.
+        private final Set<Regexp> neverMatching;
+        private final Map<Regexp, Summary> summaries = new IdentityHashMap<>();
+        // The instructions of each distinct leaf the compiler emits classes for, so a class
+        // written many times compiles once.
+        private final Map<Leaf, Long> leafInstructions = new HashMap<>();
+        // Whether the expression holds a beginning of text, which may anchor the program.
+        private boolean beginsText;
+        // The classes merges built, the work done, and whether the work passed its cap.
+        private final Set<Regexp> mergedClasses = Collections.newSetFromMap(new IdentityHashMap<>());
+        private long work;
+        private boolean workExceeded;
+
+        private InstructionEstimate(Regexp regexp, CaseFolding caseFolding, Compiler.Dialect dialect, boolean latin1, long limit)
+        {
+            this.caseFolding = caseFolding;
+            mode = dialect == Compiler.Dialect.JAVA ? Mode.JAVA_FULL : Mode.FULL;
+            progressLoops = dialect == Compiler.Dialect.JAVA || dialect == Compiler.Dialect.TRINO;
+            this.latin1 = latin1;
+            saturated = limit + 1;
+            neverMatching = ExpansionBudget.findNeverMatching(regexp);
+        }
+
+        private Optional<EstimatedInstructions> estimate(Regexp root)
+        {
+            Deque<Regexp> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Regexp node = pending.peek();
+                // A child referenced more than once may be queued again after it was sized.
+                if (summaries.containsKey(node)) {
+                    pending.pop();
+                    continue;
+                }
+                // Simplification discards what never matches, and the child of x{0}, unwalked:
+                // the one becomes a no-match, and the other an empty match.
+                if (neverMatching != null && neverMatching.contains(node)) {
+                    pending.pop();
+                    summaries.put(node, NO_MATCH);
+                    continue;
+                }
+                if (discardsChild(mode, node)) {
+                    pending.pop();
+                    summaries.put(node, EMPTY);
+                    continue;
+                }
+                boolean childrenSized = true;
+                for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
+                    if (!summaries.containsKey(node.child(childIndex))) {
+                        pending.push(node.child(childIndex));
+                        childrenSized = false;
+                    }
+                }
+                if (childrenSized) {
+                    pending.pop();
+                    summaries.put(node, summarize(node));
+                    if (workExceeded) {
+                        return Optional.empty();
+                    }
+                }
+            }
+            return Optional.of(new EstimatedInstructions(summaries.get(root).instructions(), beginsText));
+        }
+
+        // What simplification makes of the node, from what it made of the node's children.
+        private Summary summarize(Regexp node)
+        {
+            int flags = node.parseFlags();
+            return switch (node.op()) {
+                case NO_MATCH -> NO_MATCH;
+                case EMPTY_MATCH -> EMPTY;
+                case BEGIN_TEXT -> {
+                    beginsText = true;
+                    yield leaf(node);
+                }
+                case LITERAL, ANY_CHAR, ANY_BYTE, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, END_TEXT, HAVE_MATCH -> leaf(node);
+                case LITERAL_STRING -> leaf(node.runes().length == 1 ? Regexp.literal(flags, node.runes()[0]) : node);
+                case CHAR_CLASS -> {
+                    Regexp simplified = simplifyCharClass(Mode.FULL, flags, node.charClass(), node);
+                    yield simplified.op() == RegexpOp.NO_MATCH ? NO_MATCH : leaf(simplified);
+                }
+                case CAPTURE -> {
+                    // A capture of what cannot match emits nothing of its own.
+                    Summary child = child(node, 0);
+                    yield other(add(child.instructions(), child.noMatch() ? 0 : 2), child.nullable(), child.noMatch());
+                }
+                case STAR -> simplifyUnary(RegexpOp.STAR, flags, child(node, 0));
+                case PLUS -> simplifyUnary(RegexpOp.PLUS, flags, child(node, 0));
+                case QUEST -> simplifyUnary(RegexpOp.QUEST, flags, child(node, 0));
+                case REPEAT -> simplifyRepeat(node, child(node, 0));
+                case CONCAT -> concatenate(node);
+                case ALTERNATE -> alternate(node);
+            };
+        }
+
+        private Summary child(Regexp node, int index)
+        {
+            return summaries.get(node.child(index));
+        }
+
+        // As simplifyUnary does.
+        private Summary simplifyUnary(RegexpOp operator, int flags, Summary child)
+        {
+            if (child.kind() == Kind.EMPTY) {
+                return EMPTY;
+            }
+            if (child.kind() == Kind.NO_MATCH) {
+                return operator == RegexpOp.PLUS ? NO_MATCH : EMPTY;
+            }
+            if (child.kind() == Kind.UNARY && child.operator() == operator && child.flags() == flags) {
+                return child;
+            }
+            return unary(operator, flags, child);
+        }
+
+        // As Regexp.star, plus and quest do, squashing an operator over one with the same flags.
+        private Summary squashedUnary(RegexpOp operator, int flags, Summary child)
+        {
+            if (child.kind() == Kind.UNARY && child.flags() == flags) {
+                if (child.operator() == operator || child.operator() == RegexpOp.STAR) {
+                    return child;
+                }
+                return unary(RegexpOp.STAR, flags, child.operand());
+            }
+            return unary(operator, flags, child);
+        }
+
+        // As simplifyRepeat does, after the repetition's child was simplified.
+        private Summary simplifyRepeat(Regexp node, Summary child)
+        {
+            int flags = node.parseFlags();
+            int min = node.min();
+            int max = node.max();
+            if (child.kind() == Kind.EMPTY) {
+                return child;
+            }
+            if (child.assertions()) {
+                min = Math.min(min, 1);
+                max = Math.min(max, 1);
+            }
+            if (mode == Mode.JAVA_FULL && (max == -1 ? min : max) >= 2) {
+                if (child.kind() == Kind.NO_MATCH) {
+                    // Whether simplification expands or keeps the repetition, copies of what
+                    // never matches may emit no instructions.
+                    return other(0, false, true);
+                }
+                // The match length of an expression and of its simplification agree.
+                MatchLength.Analysis javaBodyLength = MatchLength.analyze(node.child(0), caseFolding);
+                if (javaBodyLength.fixed() == 0) {
+                    min = Math.min(min, 1);
+                    max = Math.min(max, 1);
+                }
+                else if (javaBodyLength.minimum() == 0) {
+                    return javaRepeat(child, min, max);
+                }
+            }
+            if (max == -1) {
+                if (min == 0) {
+                    return squashedUnary(RegexpOp.STAR, flags, child);
+                }
+                Summary plus = squashedUnary(RegexpOp.PLUS, flags, child);
+                if (min == 1) {
+                    return plus;
+                }
+                // x{4,} is xxxx+.
+                return concatenation(add(multiply(min - 1, child.instructions()), plus.instructions()), child.nullable(), child.noMatch(), false);
+            }
+            if (min == 1 && max == 1) {
+                return child;
+            }
+            // x{2,5} is xx(x(x(x)?)?)?: the innermost optional copy may squash, and each one
+            // around it adds a question mark over the copy and the optional copies inside.
+            Summary prefix = null;
+            if (min == 1) {
+                prefix = child;
+            }
+            else if (min > 1) {
+                prefix = concatenation(multiply(min, child.instructions()), child.nullable(), child.noMatch(), child.kind() == Kind.LEAF && child.assertions());
+            }
+            Summary suffix = null;
+            if (max > min) {
+                suffix = squashedUnary(RegexpOp.QUEST, flags, child);
+                long layers = (long) max - min - 1;
+                if (layers > 0) {
+                    long instructions = add(suffix.instructions(), multiply(layers, add(child.instructions(), 1)));
+                    suffix = unary(RegexpOp.QUEST, flags, concatenation(instructions - 1, child.nullable(), child.noMatch(), false));
+                }
+            }
+            if (prefix == null) {
+                return suffix;
+            }
+            if (suffix == null) {
+                return prefix;
+            }
+            return concatenation(add(prefix.instructions(), suffix.instructions()), prefix.nullable(), prefix.noMatch(), false);
+        }
+
+        // A Java repetition of a body that can match empty compiles a copy of the body for each
+        // iteration, each entered through at least one instruction of its own, a shared exit, and
+        // a choice before each optional copy, unless the body never matches.
+        private Summary javaRepeat(Summary child, int min, int max)
+        {
+            long copies = max == -1 ? min : max;
+            long ownInstructions = child.noMatch() ? 0 : add(copies + 1, max == -1 ? 0 : copies - min);
+            return other(add(multiply(copies, child.instructions()), ownInstructions), !child.noMatch() || min == 0, min > 0 && child.noMatch());
+        }
+
+        // As ConcatBuilder does: an empty match adds nothing, a no-match makes the whole
+        // concatenation one, a concatenation adds its children in place, and a lone child is the
+        // result. Joining literals keeps their instructions.
+        private Summary concatenate(Regexp node)
+        {
+            long instructions = 0;
+            long items = 0;
+            boolean nullable = true;
+            boolean noMatch = false;
+            boolean assertions = true;
+            Summary lone = null;
+            for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
+                Summary child = child(node, childIndex);
+                switch (child.kind()) {
+                    case NO_MATCH -> {
+                        return NO_MATCH;
+                    }
+                    case EMPTY -> {
+                        continue;
+                    }
+                    case CONCAT -> {
+                        items += 2;
+                        assertions &= child.assertions();
+                    }
+                    default -> {
+                        items++;
+                        lone = child;
+                        assertions &= child.kind() == Kind.LEAF && child.assertions();
+                    }
+                }
+                instructions = add(instructions, child.instructions());
+                nullable &= child.nullable();
+                noMatch |= child.noMatch();
+            }
+            if (items == 0) {
+                return EMPTY;
+            }
+            if (items == 1) {
+                return lone;
+            }
+            return concatenation(instructions, nullable, noMatch, assertions);
+        }
+
+        // As simplifyAlternate does: a no-match is dropped, an alternation adds its alternatives
+        // in place, and runs of literals and classes merge into one class.
+        private Summary alternate(Regexp node)
+        {
+            int flags = node.parseFlags();
+            List<Summary> simplifiedAlternatives = new ArrayList<>();
+            for (int childIndex = 0; childIndex < node.childCount(); childIndex++) {
+                Summary child = child(node, childIndex);
+                if (child.kind() == Kind.ALTERNATE) {
+                    if (!charge(child.alternatives().size())) {
+                        return NO_MATCH;
+                    }
+                    simplifiedAlternatives.addAll(child.alternatives());
+                }
+                else if (child.kind() != Kind.NO_MATCH) {
+                    simplifiedAlternatives.add(child);
+                }
+            }
+            if (simplifiedAlternatives.isEmpty()) {
+                return NO_MATCH;
+            }
+            if (simplifiedAlternatives.size() == 1) {
+                return simplifiedAlternatives.getFirst();
+            }
+            int flagsWithoutFoldCase = flags & ~Regexp.FOLD_CASE;
+            List<Summary> merged = new ArrayList<>(simplifiedAlternatives.size());
+            int alternativeIndex = 0;
+            while (alternativeIndex < simplifiedAlternatives.size()) {
+                int scanIndex = alternativeIndex;
+                while (scanIndex < simplifiedAlternatives.size() && mergeable(simplifiedAlternatives.get(scanIndex), flags, flagsWithoutFoldCase)) {
+                    scanIndex++;
+                }
+                if (scanIndex - alternativeIndex < 2) {
+                    merged.add(simplifiedAlternatives.get(alternativeIndex));
+                    alternativeIndex++;
+                    continue;
+                }
+                List<Regexp> run = new ArrayList<>(scanIndex - alternativeIndex);
+                long mergedRanges = 0;
+                for (int runIndex = alternativeIndex; runIndex < scanIndex; runIndex++) {
+                    Regexp leaf = simplifiedAlternatives.get(runIndex).leaf();
+                    run.add(leaf);
+                    if (mergedClasses.contains(leaf)) {
+                        mergedRanges += leaf.charClass().rangeCount();
+                    }
+                }
+                if (!charge(2 * mergedRanges)) {
+                    return NO_MATCH;
+                }
+                Regexp mergedClass = mergeAlternateCharClassesWherePossible(caseFolding, flags, run).getFirst();
+                if (mergedClass.op() == RegexpOp.CHAR_CLASS) {
+                    mergedClasses.add(mergedClass);
+                }
+                merged.add(mergedClass.op() == RegexpOp.NO_MATCH ? NO_MATCH : leaf(mergedClass));
+                alternativeIndex = scanIndex;
+            }
+            if (merged.size() == 1) {
+                return merged.getFirst();
+            }
+            // An alternation of n branches that can match adds n - 1 splits.
+            long instructions = 0;
+            long matching = 0;
+            boolean nullable = false;
+            boolean noMatch = true;
+            boolean assertions = true;
+            for (Summary alternative : merged) {
+                instructions = add(instructions, alternative.instructions());
+                matching += alternative.noMatch() ? 0 : 1;
+                nullable |= alternative.nullable();
+                noMatch &= alternative.noMatch();
+                assertions &= alternative.kind() == Kind.LEAF && alternative.assertions();
+            }
+            return new Summary(Kind.ALTERNATE, add(instructions, Math.max(0, matching - 1)), nullable, noMatch, assertions, null, merged, null, flags, null);
+        }
+
+        private static boolean mergeable(Summary summary, int flags, int flagsWithoutFoldCase)
+        {
+            return summary.kind() == Kind.LEAF && mergeableAlternateSub(summary.leaf(), flags, flagsWithoutFoldCase);
+        }
+
+        private Summary leaf(Regexp leaf)
+        {
+            long instructions = isLiteralOrLiteralString(leaf) ? literalInstructions(leaf) : leafInstructions(leaf);
+            boolean assertion = isEmptyOp(leaf);
+            // A class with no member the program can match compiles to a no-match.
+            return new Summary(Kind.LEAF, instructions, assertion, instructions == 0, assertion, leaf, null, null, leaf.parseFlags(), null);
+        }
+
+        // The compiler compiles a star of a body that can match empty as an optional plus, or, in
+        // Java and Trino, as a loop that needs an exit, a copy of the body's start, and a choice;
+        // a plus of such a body is that loop too.
+        private Summary unary(RegexpOp operator, int flags, Summary operand)
+        {
+            long instructions = operand.instructions();
+            return switch (operator) {
+                case QUEST -> new Summary(Kind.UNARY, add(instructions, 1), true, false, false, null, null, operator, flags, operand);
+                case STAR -> new Summary(Kind.UNARY, add(instructions, operand.nullable() ? (progressLoops ? 3 : 2) : 1), true, false, false, null, null, operator, flags, operand);
+                case PLUS -> new Summary(Kind.UNARY, add(instructions, operand.nullable() && progressLoops ? 3 : 1), operand.nullable(), operand.noMatch(), false, null, null, operator, flags, operand);
+                default -> throw new IllegalArgumentException("not a unary operator: " + operator);
+            };
+        }
+
+        private static Summary concatenation(long instructions, boolean nullable, boolean noMatch, boolean assertions)
+        {
+            return new Summary(Kind.CONCAT, instructions, nullable, noMatch, assertions, null, null, null, 0, null);
+        }
+
+        private static Summary other(long instructions, boolean nullable, boolean noMatch)
+        {
+            return new Summary(Kind.OTHER, instructions, nullable, noMatch, false, null, null, null, 0, null);
+        }
+
+        // A literal compiles to a byte range for each byte it matches, or for each rune where it
+        // matches bytes or the rune is ASCII. One folded in full compiles to its runes' fold
+        // classes and to alternatives for the runes that fold to several characters, so it is
+        // counted by compiling it.
+        private long literalInstructions(Regexp node)
+        {
+            if ((node.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {
+                return Compiler.leafInstructions(node, caseFolding, latin1);
+            }
+            boolean matchesBytes = (node.parseFlags() & Regexp.LATIN1) != 0;
+            int[] runes = node.op() == RegexpOp.LITERAL ? new int[] {node.rune()} : node.runes();
+            long instructions = 0;
+            for (int rune : runes) {
+                instructions += matchesBytes || rune < 0x80 ? 1 : Utf8.encodedLength(rune);
+            }
+            return Math.min(instructions, saturated);
+        }
+
+        private long leafInstructions(Regexp node)
+        {
+            int flags = node.parseFlags() | (latin1 ? Regexp.LATIN1 : 0);
+            return leafInstructions.computeIfAbsent(
+                    new Leaf(node.op(), flags, node.op() == RegexpOp.CHAR_CLASS ? node.charClass() : null),
+                    _ -> Compiler.leafInstructions(node, caseFolding, latin1));
+        }
+
+        // Charges `units` of work, and returns whether it stays within the cap; past it the
+        // estimate stops once the node at hand is summarized.
+        private boolean charge(long units)
+        {
+            work += units;
+            workExceeded |= work > (long) WORK_PER_NODE_WALKED * summaries.size();
+            return !workExceeded;
+        }
+
+        private long add(long left, long right)
+        {
+            return Math.min(saturated, left + right);
+        }
+
+        private long multiply(long copies, long size)
+        {
+            return size != 0 && copies > saturated / size ? saturated : Math.min(saturated, copies * size);
+        }
+
+        private enum Kind
+        {
+            NO_MATCH,
+            EMPTY,
+            // One node without children, `leaf`.
+            LEAF,
+            CONCAT,
+            // An alternation of `alternatives`.
+            ALTERNATE,
+            // A star, plus or question mark `operator` with `flags` over `operand`.
+            UNARY,
+            OTHER,
+        }
+
+        // What simplification makes of a node: the fewest instructions the compiler emits for
+        // it, whether it surely matches empty, whether it may compile to a no-match, and whether
+        // it is an assertion or, as a concatenation or alternation, made of assertions only.
+        private record Summary(
+                Kind kind,
+                long instructions,
+                boolean nullable,
+                boolean noMatch,
+                boolean assertions,
+                Regexp leaf,
+                List<Summary> alternatives,
+                RegexpOp operator,
+                int flags,
+                Summary operand) {}
+
+        // A leaf the compiler emits the same instructions for wherever it appears.
+        private record Leaf(RegexpOp op, int flags, CharClass charClass) {}
     }
 
     private static Regexp simplifyConcat(int flags, Regexp regexp, List<Object> simplifiedChildren, CaseFolding caseFolding)
