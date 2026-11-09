@@ -1393,6 +1393,24 @@ final class Prog
         return literalSearch.findContains(data, offset, length);
     }
 
+    /// Returns the absolute index in `data` of the last occurrence of `literal`, of at least two
+    /// bytes, that lies wholly in the range, or `-1`, as [#findLiteral] finds the first: ranges of
+    /// at least the fused vector scan's minimum take the vector scan from the range end, finished
+    /// with the reverse KMP of `literalSearch` once its failed candidates pass the comparison
+    /// budget, and shorter ones take `literalSearch`'s call-free search from the end, which a
+    /// kernel from [LiteralSearchKernel#sharingWithLastOccurrence] provides.
+    static int findLastLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
+    {
+        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+            int found = VectorPrefixScanner.findLast(data, offset, length, literal, pairOffset(literal), literal.length - 1);
+            if (found < -1) {
+                return literalSearch.findLastKmp(data, offset, -2 - found);
+            }
+            return found;
+        }
+        return literalSearch.findLastContains(data, offset, length);
+    }
+
     /// Returns the offset of the byte that the fused pair scans test together with the last byte
     /// of `literal`, of at least two bytes: the last byte of a leading multibyte UTF-8 character
     /// that ends before the literal's last byte, or else 0.

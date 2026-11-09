@@ -156,15 +156,16 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps each literal search small enough for C2 to inline: `LiteralSearchKernel.findSingleByte`
-    /// into matchers such as InnerLiteralSearch, OrderedLiteralMatcher, and LiteralGapMatcher,
-    /// `skipToContainsCandidate` into `findContains`, the generated searches of a LIKE pattern into
-    /// its `matchesMiddle`, and the finish of each one-byte scan into the scan. Candidate
-    /// verification is outside this size check.
+    /// Keeps each literal search small enough for C2 to inline:
+    /// `LiteralSearchKernel.findSingleByte` into matchers such as InnerLiteralSearch,
+    /// OrderedLiteralMatcher, and LiteralGapMatcher, `skipToContainsCandidate` into
+    /// `findContains`, `skipToLastContainsCandidate` into `findLastContains`, the generated
+    /// searches of a LIKE pattern into its `matchesMiddle`, and the finish of each one-byte scan
+    /// into the scan. Candidate verification is outside this size check.
     @Test
     public void testLiteralSearchesFitInlineSize()
     {
-        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate")) {
+        for (String method : List.of("findSingleByte", "findSingleByteTail", "skipToContainsCandidate", "skipToLastContainsCandidate")) {
             assertThat(codeLength(LiteralSearchKernel.class, method))
                     .as("LiteralSearchKernel.%s bytecode bytes", method)
                     .isPositive()
@@ -303,7 +304,8 @@ public class TestHotMethodSize
     /// REGULATOR_DECISIONS.md records, and caps each at the size it was measured at: growing it
     /// further changes code that was measured only at this size. Keep every vector and mask inside
     /// the method or in helpers C2 inlines at each call site: one returned from a helper that C2
-    /// left out of line was boxed on every search.
+    /// left out of line was boxed on every search. The reverse scan that bounds a long search's
+    /// end stays out of line for the same reason, capped at the size it was written at.
     @Test
     public void testPrefixScanStaysOutOfLineAtMeasuredSize()
     {
@@ -321,6 +323,10 @@ public class TestHotMethodSize
                 .as("VectorPrefixScanner.findFoldCaseSve bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(419);
+        assertThat(codeLength(VectorPrefixScanner.class, "findLast"))
+                .as("VectorPrefixScanner.findLast bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(500);
     }
 
     /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the

@@ -138,6 +138,25 @@ public class TestCompilerAllocations
     }
 
     @Test
+    public void testRequiredSuffixStaysLinearInConcatenatedCaptures()
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        // Putting each capture's bytes before the bytes collected after it, by copying them all,
+        // allocated about 100 MB for these 10,000 captures, of which the suffix keeps only the
+        // last 64 bytes.
+        Regexp regexp = RegexpParser.parse(utf8Slice("(ab)".repeat(10_000)), Regexp.LIKE_PERL).regexp();
+        Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        byte[] suffix = RequiredBytes.requiredSuffix(normalized);
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(suffix).isEqualTo("ab".repeat(32).getBytes(UTF_8));
+        assertThat(allocatedBytes).isLessThan(1_000_000);
+    }
+
+    @Test
     public void testPrefilterBuildStaysLinear()
     {
         // Joining a literal's runes one at a time, or a concatenation's one-string children one at

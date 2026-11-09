@@ -80,18 +80,22 @@ answer, or reject the input before any engine runs.
   Rust regex crate ([regex.rs][ra-impossible]), for the word test by Muła
   (2016) ([simd-strfind][mula-strfind]), and for joined literals by the Rust
   regex crate ([literal.rs][rs-literal]); Adapted from RE2 for the scan plan's
-  vector check (front-and-back scan, [prog.cc][re2-prog]), and from PCRE2 for
-  long windows ([required code unit][pcre2-match]); Inspired by the Rust regex
-  crate for the short-window checks ([strategy.rs][ra-strategy]), and by
-  Hyperscan for long windows ([double vermicelli][hs-vermicelli]). Regulator:
-  the 256-byte window, the one-of-three-bytes form, the conditional last-byte
-  load, the one-of form kept beside an inner literal search for windows below
-  its minimum, the 4 KiB engine cutoff, the gated one-byte inner literal
-  check, which full-Slice find runs first in place of a check of the same
-  required byte, the scan plan's one check after its first failed attempt, and
-  a matcher's reuse of the long-window literal it found ([#10], [#103],
-  [#138], [#147], [#154], [#188], [#193], [design][d-required-absence],
-  [design][d-required-bytes], [design][d-min-inner-window]).
+  vector check (front-and-back scan, [prog.cc][re2-prog]), from PCRE2 for
+  long windows ([required code unit][pcre2-match]), and from Hyperscan for the
+  search-end bound, whose reverse double vermicelli scans back from the end
+  for the last occurrence of a pair every match ends with
+  ([vermicelli.h][hs-vermicelli]); Inspired by the Rust regex crate for the
+  short-window checks ([strategy.rs][ra-strategy]), and by Hyperscan for long
+  windows ([double vermicelli][hs-vermicelli]). Regulator: the 256-byte
+  window, the one-of-three-bytes form, the conditional last-byte load, the
+  one-of form kept beside an inner literal search for windows below its
+  minimum, the 4 KiB engine cutoff, the gated one-byte inner literal check,
+  which full-Slice find runs first in place of a check of the same required
+  byte, the scan plan's one check after its first failed attempt, and a
+  matcher's reuse of the long-window literal it found ([#10], [#103], [#138],
+  [#147], [#154], [#188], [#193], [design][d-required-absence],
+  [design][d-required-suffix], [design][d-required-bytes],
+  [design][d-min-inner-window]).
 - **Where:** `RequiredBytes.analyze`, `RequiredBytes.joinedLiteral`,
   `RequiredBytes.containsLiteral`, `RequiredBytes.containsOneOf`,
   `RequiredBytes.containsByte`,
@@ -99,6 +103,9 @@ answer, or reject the input before any engine runs.
   `CompiledPattern.checksRequiredLiteralOnLongWindows`,
   `CompiledPattern.longWindowLacksRequiredLiteral`,
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
+  `RequiredBytes.requiredSuffix`, `CompiledPattern.longWindowSearchEnd`,
+  `Prog.findLastLiteral`, `LiteralSearchKernel.findLastContains`,
+  `LiteralSearchKernel.findLastKmp`, `VectorPrefixScanner.findLast`,
   `InnerLiteralSearch.windowLacksLiteral`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
   `ExpressionAnalysis.maximumSpanLength`, `CompiledPattern.count`,
@@ -124,23 +131,30 @@ answer, or reject the input before any engine runs.
   [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes.
   Required literal on long windows: windows of 256 bytes or more in find,
   count, and the one-shot range searches, for unanchored patterns whose
-  required bytes are an exact literal and that have no other literal search,
-  where an inner literal search counts unless only the class-run proof admits
-  it; a pattern whose long-window search does not fit beside the forward DFAs
-  keeps the short-window check; a matcher reuses an occurrence until a find
-  passes it, and stops after eight scans in a row find it within 256 bytes of
-  their start. Minimum length: windows under 4 KiB, where longer ones skip the
-  metadata load, matcher finds that take the general route, and every count,
-  generated or not; a Trino count skips only the whole-pattern minimum, as its
-  start-anchored plans read a lone malformed byte as one character. Maximum
-  length: patterns of bounded length anchored at both ends, in count, matcher
-  finds, start-anchored scan plans, and anchored ordinary-engine searches.
-  First byte: start-anchored, non-nullable programs with no assertion before
-  the first byte. Inner literal: find windows under the 64-byte minimum of a
-  gated search for a one-byte exact literal, which full-Slice boolean find
-  runs first, before the ordinary engine, where the pattern qualifies. Scan
-  plans: unanchored plans not led by a literal, with a later case-sensitive
-  literal that every match passes
+  required bytes are an exact literal and that have no other literal search.
+  An inner literal search counts as one unless only the class-run proof admits
+  it. Search-end bound: count, the one-shot range and capture searches, and
+  RE2's `replaceAll` of such a pattern whose matches all end with at least two
+  exact ASCII bytes and no assertion after them; not for a program with
+  assertions the DFA cannot run, such as Java's final-terminator `$` and `\Z`
+  and Trino's final line end, nor for a lowered boolean program. If the full
+  charge does not fit beside the forward DFAs, the search-end bound is removed
+  and the charge retried. If that fails, the pattern keeps only the
+  short-window check when that smaller charge fits, and otherwise no check. A
+  matcher reuses an occurrence until a find passes it, and stops after eight
+  scans in a row find it within 256 bytes of their start. Minimum length:
+  windows under 4 KiB, where longer ones skip the metadata load, matcher finds
+  that take the general route, and every count, generated or not; a Trino
+  count skips only the whole-pattern minimum, as its start-anchored plans read
+  a lone malformed byte as one character. Maximum length: patterns of bounded
+  length anchored at both ends, in count, matcher finds, start-anchored scan
+  plans, and anchored ordinary-engine searches. First byte: start-anchored,
+  non-nullable programs with no assertion before the first byte. Inner
+  literal: find windows under the 64-byte minimum of a gated search for a
+  one-byte exact literal, which full-Slice boolean find runs first, before the
+  ordinary engine, where the pattern qualifies. Scan plans: unanchored plans
+  not led by a literal, with a later case-sensitive literal that every match
+  passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
@@ -152,27 +166,38 @@ answer, or reject the input before any engine runs.
   required literal instead, with the vector pair scan from 1 KiB; where an
   inner literal search for one exact literal stands in for that check, the
   routes that skip the search, BitState capture of groups and a skipped DFA,
-  scan the window for its literal instead. The same early answer comes from
-  three other facts. A window shorter than the pattern's minimum match length
-  fails before any engine setup, and so does a window longer than the longest
-  match of a pattern anchored at both ends (plus the final line terminator its
-  `$` or `\Z` also matches before: none in RE2 and Rust, a `\n` in Trino, and
-  up to three bytes in Java, such as U+2028). A start-anchored search rejects
-  a byte that cannot begin a match with one table load, before OnePass or
-  BitState setup. A gated one-byte inner literal search scans a find window
-  shorter than its minimum for a hit that passes the gates, so a short line
-  without one runs no DFA, and one with it falls back to the ordinary engine,
-  as for any first candidate near the window start; a full-Slice find that ran
-  the search first then runs the engine's forward DFA, and where that fails
-  its submatch engines, without running the search again. A scan plan, after
-  its first failed attempt, checks once that a required literal occurs in the
-  rest of the input, testing its first and last bytes in 16-byte blocks, and
-  ends the search if it does not. The required-byte reject takes ruff's `noqa`
-  rows to 0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to
-  0.34 to 0.47 ([design][d-required-bytes]), and the long-window check takes
-  the leipzig `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
-  0.48–0.57 ms, 0.021 to 0.039 of its earlier time, in all four languages on
-  Graviton and Intel ([#188]). The maximum-length reject takes rebar's
+  scan the window for its literal instead. With the search-end bound, a long
+  search scans back from the window's end for the last occurrence of the bytes
+  every match ends with, the forward scan mirrored: none means no match, and
+  otherwise the search ends at that occurrence's end, since every match ends
+  at the end of one. Where those bytes do not hold the literal, the window up
+  to that end is still checked for the literal. `replaceAll` bounds the whole
+  text once and ends each of its searches there. The same early answer comes
+  from three other facts. A window shorter than the pattern's minimum match
+  length fails before any engine setup, and so does a window longer than the
+  longest match of a pattern anchored at both ends (plus the final line
+  terminator its `$` or `\Z` also matches before: none in RE2 and Rust, a `\n`
+  in Trino, and up to three bytes in Java, such as U+2028). A start-anchored
+  search rejects a byte that cannot begin a match with one table load, before
+  OnePass or BitState setup. A gated one-byte inner literal search scans a
+  find window shorter than its minimum for a hit that passes the gates, so a
+  short line without one runs no DFA, and one with it falls back to the
+  ordinary engine, as for any first candidate near the window start; a
+  full-Slice find that ran the search first then runs the engine's forward
+  DFA, and where that fails its submatch engines, without running the search
+  again. A scan plan, after its first failed attempt, checks once that a
+  required literal occurs in the rest of the input, testing its first and last
+  bytes in 16-byte blocks, and ends the search if it does not. The
+  required-byte reject takes ruff's `noqa` rows to 0.41 to 0.68 of their
+  earlier time and lh3lh3's `uri-or-email` to 0.34 to 0.47
+  ([design][d-required-bytes]), and the long-window check takes the leipzig
+  `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to 0.48–0.57
+  ms, 0.021 to 0.039 of its earlier time, in all four languages on Graviton
+  and Intel ([#188]). With one `,z` placed in that text's first kilobyte,
+  where the forward check stops, the search-end bound takes its count to 0.014
+  to 0.026 of main's time on Intel and 0.040 on Graviton, on the first
+  megabyte and on the whole 16 MB, in all four languages
+  ([design][d-required-suffix]). The maximum-length reject takes rebar's
   `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to
   0.62 on Graviton and 0.72 to 0.75 on Intel.
 
@@ -349,17 +374,20 @@ so the automata run only where a match can be.
   Morris & Pratt (1977) ([paper][kmp-1977]). Regulator: an allowance of
   progress plus 64 bytes, kept as one biased position ([#18], [#99]).
 - **Where:** `LiteralSearchKernel.chargeFailedCandidate`,
-  `LiteralSearchKernel.findKmp`, `Prog.finishWithKmp`
-- **Applies when:** The contains search, and case-sensitive prefix scans of
-  two or more bytes; scan-plan leading literals keep their own scan
+  `LiteralSearchKernel.findKmp`, `LiteralSearchKernel.findLastKmp`,
+  `Prog.finishWithKmp`
+- **Applies when:** The contains search, case-sensitive prefix scans of two
+  or more bytes, and the reverse scan for the last occurrence of a required
+  suffix; scan-plan leading literals keep their own scan
 - **What it does:** The bytes that failed candidates compare are charged
   against the search's progress. The running total is kept as one position, so
   the check is a single compare. Once failed candidates have compared more
   than 64 bytes beyond what the search has advanced, the scan continues with
-  KMP, so search time stays linear. Rows dense with false candidates take 0.24
-  to 0.35 of their earlier time ([#18]), and a 1,001-byte literal over a 1 MiB
-  run of its first byte takes 2.1 million steps instead of 525 million
-  ([#99]).
+  KMP, so search time stays linear. The reverse scan for a required suffix's
+  last occurrence charges its candidates the same way and continues with a
+  reverse KMP. Rows dense with false candidates take 0.24 to 0.35 of their
+  earlier time ([#18]), and a 1,001-byte literal over a 1 MiB run of its first
+  byte takes 2.1 million steps instead of 525 million ([#99]).
 
 ### Transparent start literal
 
@@ -1916,6 +1944,7 @@ change is described.
 [d-prefix-vector]: ../../REGULATOR_DECISIONS.md#literal-prefix-vector-scan
 [d-required-absence]: ../../REGULATOR_DECISIONS.md#required-literal-absence-on-long-windows
 [d-required-bytes]: ../../REGULATOR_DECISIONS.md#short-window-required-bytes-reject
+[d-required-suffix]: ../../REGULATOR_DECISIONS.md#required-suffix-bound-on-long-windows
 [d-row-index]: ../../REGULATOR_DECISIONS.md#dfa-row-index-without-a-divide
 [d-self-loop-skips]: ../../REGULATOR_DECISIONS.md#self-loop-exit-byte-skips-outside-counting
 [d-short-like]: ../../REGULATOR_DECISIONS.md#short-like-literal-comparisons

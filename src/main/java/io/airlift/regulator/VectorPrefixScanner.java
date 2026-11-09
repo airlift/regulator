@@ -134,6 +134,89 @@ final class VectorPrefixScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // Returns the last occurrence of literal, -1, or -2 - resumeEnd when the failed candidates
+    // pass LiteralSearchKernel's comparison budget, counted down from the last candidate, and the
+    // search must continue with LiteralSearchKernel.findLastKmp over the range up to resumeEnd.
+    // It mirrors find: the vectors step down from the last candidate, and a vector's candidates
+    // are verified highest lane first.
+    static int findLast(byte[] data, int offset, int length, byte[] literal, int primaryOffset, int secondaryOffset)
+    {
+        int literalSize = literal.length;
+        int candidateCount = length - literalSize + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int candidateEnd = offset + candidateCount;
+        int vectorStart = candidateEnd - SPECIES.loopBound(candidateCount);
+        ByteVector primaryVector = ByteVector.broadcast(SPECIES, literal[primaryOffset]);
+        ByteVector secondaryVector = ByteVector.broadcast(SPECIES, literal[secondaryOffset]);
+        // Distances below the last candidate, so the candidates covered are those from it down.
+        int lastCandidate = candidateEnd - 1;
+        int comparisonEnd = LiteralSearchKernel.initialComparisonEnd(0);
+        int position = candidateEnd;
+
+        while (position > vectorStart) {
+            // As in find, the loop only tests each vector for a candidate, and the candidate test
+            // follows "Candidate Masks on SVE": keep every vector and mask in this method or in a
+            // helper C2 inlines at each call site.
+            int steps = (position - vectorStart) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position - (step + 1) * SPECIES.length();
+                if (VectorSupport.SVE_128
+                        ? lastPairDifference(data, stepPosition, primaryOffset, secondaryOffset, primaryVector, secondaryVector).compare(VectorOperators.EQ, (byte) 0).anyTrue()
+                        : ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector)
+                          .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).compare(VectorOperators.EQ, secondaryVector))
+                          .anyTrue()) {
+                    break;
+                }
+            }
+            position -= step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            // Rebuild this vector's candidates as bits, the XOR form in line as in find.
+            int vectorPosition = position - SPECIES.length();
+            ByteVector primary = ByteVector.fromArray(SPECIES, data, vectorPosition + primaryOffset);
+            ByteVector secondary = ByteVector.fromArray(SPECIES, data, vectorPosition + secondaryOffset);
+            long candidateBits = VectorSupport.SVE_128
+                    ? primary.lanewise(VectorOperators.XOR, primaryVector).lanewise(VectorOperators.OR, secondary.lanewise(VectorOperators.XOR, secondaryVector))
+                      .compare(VectorOperators.EQ, (byte) 0).toLong()
+                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
+            while (candidateBits != 0) {
+                int lane = 63 - Long.numberOfLeadingZeros(candidateBits);
+                int candidate = vectorPosition + lane;
+                // Keep sparse verification in this method, as in find.
+                int literalIndex = 0;
+                while (literalIndex < literal.length && data[candidate + literalIndex] == literal[literalIndex]) {
+                    literalIndex++;
+                }
+                if (literalIndex == literal.length) {
+                    return candidate;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, literalIndex);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, lastCandidate - candidate)) {
+                    return -2 - (candidate + literalSize - 1);
+                }
+                candidateBits ^= 1L << lane;
+            }
+            position = vectorPosition;
+        }
+        return findLastScalar(data, offset, position - offset, literal, primaryOffset, secondaryOffset, comparisonEnd, lastCandidate);
+    }
+
+    /// A copy of [#pairDifference] for `findLast`'s scan loop, so each helper has one call site.
+    /// A second call site of either can leave it out of line, and the vector it returns is then
+    /// boxed.
+    private static ByteVector lastPairDifference(byte[] data, int position, int primaryOffset, int secondaryOffset, ByteVector primaryVector, ByteVector secondaryVector)
+    {
+        return ByteVector.fromArray(SPECIES, data, position + primaryOffset).lanewise(VectorOperators.XOR, primaryVector)
+                .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, position + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector));
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Keep Vector API linkage isolated in this class.
     // Finds the first occurrence of the first prefixSize bytes of prefix under the folded
     // prefix rule: both sides map A-Z to a-z, and every other byte compares exactly. Candidates
     // need both probe bytes, at firstOffset and secondOffset within the prefix, before the whole
@@ -407,6 +490,26 @@ final class VectorPrefixScanner
                 comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
                 if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, position)) {
                     return -2 - (position + 1);
+                }
+            }
+        }
+        return -1;
+    }
+
+    // The candidates of findLast below its vectors, from the highest down, charged to its
+    // comparison end on their distance below its last candidate.
+    private static int findLastScalar(byte[] data, int offset, int candidateCount, byte[] literal, int primaryOffset, int secondaryOffset, int comparisonEnd, int lastCandidate)
+    {
+        for (int position = offset + candidateCount - 1; position >= offset; position--) {
+            if (data[position + primaryOffset] == literal[primaryOffset] &&
+                    data[position + secondaryOffset] == literal[secondaryOffset]) {
+                int matchedLength = matchingPrefixLength(data, position, literal);
+                if (matchedLength == literal.length) {
+                    return position;
+                }
+                comparisonEnd = LiteralSearchKernel.chargeFailedCandidate(comparisonEnd, matchedLength);
+                if (LiteralSearchKernel.comparisonBudgetSpent(comparisonEnd, lastCandidate - position)) {
+                    return -2 - (position + literal.length - 1);
                 }
             }
         }

@@ -43,6 +43,13 @@ public final class VectorPrefixScannerProbe
         }
         check(checksum == (data.length - prefix.length) * iterations, "prefix scan failed");
 
+        // The last-occurrence search takes the vector scan from the end, or without vectors the
+        // word scan, and finds the occurrence at the start past the bytes after it.
+        byte[] lastOccurrenceData = new byte[4_096 + prefix.length];
+        System.arraycopy(prefix, 0, lastOccurrenceData, 0, prefix.length);
+        LiteralSearchKernel lastOccurrenceSearch = LiteralSearchKernel.sharingWithLastOccurrence(Slices.wrappedBuffer(prefix));
+        check(Prog.findLastLiteral(lastOccurrenceData, 0, lastOccurrenceData.length, prefix, lastOccurrenceSearch) == 0, "last-occurrence scan failed");
+
         Prog foldCaseProgram = new Prog();
         foldCaseProgram.configurePrefixAccel(Slices.utf8Slice("sherlock"), true);
         byte[] foldCaseMatch = "SHERLOCK".getBytes(StandardCharsets.US_ASCII);

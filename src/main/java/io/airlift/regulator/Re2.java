@@ -436,10 +436,14 @@ public sealed class Re2
         int lastEnd = -1;
         int count = 0;
         DynamicSliceOutput out = new DynamicSliceOutput(text.length() + rewrite.length());
+        // Each search ends where a search of the whole text is bounded, before which every match
+        // lies. Searching to the text end instead, each search would bound itself again with a
+        // scan back from the end, once per match; from this end, that scan stops at once.
+        int searchEnd = longWindowSearchEnd(text, 0, text.length());
 
         while (position <= end) {
             int start = position - base;
-            if (!matchInto(text, start, text.length(), Anchor.UNANCHORED, groupOffsets)) {
+            if (searchEnd < start || !matchInto(text, start, searchEnd, Anchor.UNANCHORED, groupOffsets)) {
                 break;
             }
 
