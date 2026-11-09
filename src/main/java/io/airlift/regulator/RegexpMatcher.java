@@ -36,8 +36,10 @@ public final class RegexpMatcher
     // A scan for the required literal that finds it within NEAR_REQUIRED_LITERAL_BYTES of where
     // the find starts saves nothing: the engine reads those bytes anyway, and the scan paid its
     // setup. After NEAR_REQUIRED_LITERAL_SCAN_LIMIT such scans in a row, the matcher stops
-    // scanning until the next reset, since on a region that dense the check cannot pay.
-    private static final int NEAR_REQUIRED_LITERAL_BYTES = 256;
+    // scanning until the next reset, since on a region that dense the check cannot pay. RE2's
+    // replaceAll applies the same rule to its loop; see
+    // CompiledPattern.nearRequiredLiteralScansInLoop.
+    static final int NEAR_REQUIRED_LITERAL_BYTES = 256;
     static final int NEAR_REQUIRED_LITERAL_SCAN_LIMIT = 8;
 
     private final CompiledPattern pattern;

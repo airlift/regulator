@@ -425,6 +425,24 @@ public sealed class Re2
     /// @throws RegexpRewriteException if the rewrite is invalid for this pattern
     public ReplaceAllResult replaceAll(Slice text, Slice rewrite)
     {
+        return replaceAll(text, rewrite, null);
+    }
+
+    /// Runs [#replaceAll] and returns the loop's count, when it ended, of scans in a row that
+    /// found the long-window literal near their start, or -1 where a scan found no literal; see
+    /// `CompiledPattern.nearRequiredLiteralScansInLoop`. On text where every scan finds the literal
+    /// near its start, that count is every scan the call made, which the loop's back-off stops at
+    /// `RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT`. Only tests call it.
+    int replaceAllNearLiteralScansForDiagnostics(Slice text, Slice rewrite)
+    {
+        int[] nearScans = new int[1];
+        replaceAll(text, rewrite, nearScans);
+        return nearScans[0];
+    }
+
+    // A null `nearScansResult`, as every production call passes, records nothing.
+    private ReplaceAllResult replaceAll(Slice text, Slice rewrite, int[] nearScansResult)
+    {
         requireNonNull(text, "text is null");
         int captureSlotCount = validateRewrite(rewrite);
 
@@ -435,15 +453,21 @@ public sealed class Re2
         int position = base;
         int lastEnd = -1;
         int count = 0;
+        // How many scans in a row found the long-window literal near their start; see
+        // nearRequiredLiteralScansInLoop.
+        int nearScans = 0;
         DynamicSliceOutput out = new DynamicSliceOutput(text.length() + rewrite.length());
-        // Each search ends where a search of the whole text is bounded, before which every match
-        // lies. Searching to the text end instead, each search would bound itself again with a
-        // scan back from the end, once per match; from this end, that scan stops at once.
-        int searchEnd = longWindowSearchEnd(text, 0, text.length());
+        // The bound of the whole text, computed once, ends every search, so no search computes
+        // its own; see loopSearchEnd.
+        int searchEnd = loopSearchEnd(text);
 
         while (position <= end) {
             int start = position - base;
-            if (searchEnd < start || !matchInto(text, start, searchEnd, Anchor.UNANCHORED, groupOffsets)) {
+            if (searchEnd < start) {
+                break;
+            }
+            nearScans = nearRequiredLiteralScansInLoop(text, start, searchEnd, nearScans);
+            if (nearScans < 0 || !matchIntoAfterLoopCheck(text, start, searchEnd, groupOffsets)) {
                 break;
             }
 
@@ -469,6 +493,9 @@ public sealed class Re2
             count++;
         }
 
+        if (nearScansResult != null) {
+            nearScansResult[0] = nearScans;
+        }
         if (count == 0) {
             return new ReplaceAllResult(0, text);
         }
