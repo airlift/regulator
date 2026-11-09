@@ -182,7 +182,11 @@ Within the budget, compilation and matching keep these limits:
   DFA from initializing. The literal searched behind a leading assertion is
   kept only when the first-match and longest-match DFAs both keep their minimum
   memory beside it, a minimum that leaves out a forward DFA's start-byte
-  tables. Other plans keep their memory whenever it fits.
+  tables. A prefix's literal set, which long vector prefix scans compare at
+  each candidate, is decided under a `maxMemory` after OnePass and every plan
+  and route, so it never takes memory they would use, and is kept only where
+  the first-match and longest-match DFAs then keep their minimum memory beside
+  it. Other plans keep their memory whenever it fits.
 - A large literal set keeps dense transition rows for its states up to depth 3,
   at a smaller depth where the rows' entries would pass 1 MiB or the set would
   not fit its memory, and none where no depth fits.

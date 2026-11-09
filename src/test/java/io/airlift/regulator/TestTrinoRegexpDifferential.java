@@ -175,6 +175,32 @@ public class TestTrinoRegexpDifferential
     }
 
     @Test
+    public void testLiteralSetPrefixScanMatchesJoni()
+    {
+        // Alternatives that share only a short prefix take the prefix literal set scan on long text,
+        // which skips occurrences of the prefix that begin neither alternative. The filler holds
+        // such occurrences, some with the byte the scan pairs with the prefix's `f`, `_` for the
+        // first pattern and `s` for the second, and real matches of the second pattern's `fn as`.
+        String decoys = "fn new() fx is_ fn ais_ fn is fn as ".repeat(64);
+        for (String pattern : List.of("fn is_(\\w+)|fn as_(\\w+)", "fn (is)e|fn (as)")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
+            Prog.PrefixAccelStrategy strategy = regexp.re2().forwardProgramForDiagnostics().prefixAccelStrategy(decoys.length());
+            if (VectorSupport.isAvailable()) {
+                assertThat(strategy).as(pattern).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            else {
+                assertThat(strategy).as(pattern).isNotEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            List<Slice> sources = new ArrayList<>();
+            for (String end : List.of("", "fn is", "fn as", "fn ise", "fn as_", "fn is_x")) {
+                sources.add(utf8Slice("fn as_1 " + decoys + "fn is_ab fn ise fn as" + decoys + end));
+            }
+            Regex oracle = joniPattern(pattern);
+            verifyOperations(pattern, regexp, source -> joniMatches(oracle, source), sources);
+        }
+    }
+
+    @Test
     public void testFinalNewlineAnchorCapturesMatchJoni()
     {
         // The capture searches of these patterns, the last the Unicode character data line

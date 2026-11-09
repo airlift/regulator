@@ -251,6 +251,82 @@ public class TestFusedPrefixAcceleration
     }
 
     @Test
+    public void testLiteralSetScanForAlternativesPastSharedPrefix()
+    {
+        // The alternatives of rebar's rust-functions row share only "fn ", and Rust source holds
+        // it far more often than either alternative. Long searches pair 'f' with the '_' both
+        // alternatives hold and compare both literals at each candidate.
+        Prog program = compiledProgram("fn is_(\\w+)|fn as_(\\w+)");
+        assertThat(program.prefixAccelStrategy(1_023)).isEqualTo(Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(program.prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        // Eight literals keep the set, as many as it compares at each candidate.
+        assertThat(compiledProgram("fn is_|fn as_|fn os_|fn us_|fn es_|fn ys_|fn ws_|fn rs_").prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        // A single literal is its own prefix; alternatives that share no byte past the prefix, a
+        // folded byte past it, a prefix as long as the paths the set is read from, nine literals,
+        // and an alternative that ends at the prefix keep the prefix's pair scan.
+        for (String pattern : List.of(
+                "fn is_(\\w+)",
+                "fn is_\\w+|fn a\\w+",
+                "fn (?i:i)s_\\w+|fn (?i:a)s_\\w+",
+                "fn is_a\\w+|fn is_b\\w+",
+                "fn is_|fn as_|fn os_|fn us_|fn es_|fn ys_|fn ws_|fn rs_|fn ts_",
+                "fn is_|fn ")) {
+            assertThat(compiledProgram(pattern).prefixAccelStrategy(4_096))
+                    .as(pattern)
+                    .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        }
+    }
+
+    @Test
+    public void testLiteralSetScanSkipsPrefixOccurrences()
+    {
+        // Occurrences of the prefix followed by neither alternative, and pair candidates that fail
+        // the comparison, come before the match; each scan finds only the match. The prefix's
+        // scans stop at the first occurrence.
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        Prog program = compiledProgram("fn is_(\\w+)|fn as_(\\w+)");
+        String decoys = "fn new() fn xs_ fx is_ fn is fn i_s_ fn ais_ ";
+        String match = "fn as_x";
+        String text = decoys.repeat(4_096 / decoys.length()) + match;
+        byte[] data = ("..." + text + "fn is_").getBytes(StandardCharsets.US_ASCII);
+        int matchPosition = 3 + text.length() - match.length();
+        assertThat(program.prefixAccel(data, 3, text.length())).isEqualTo(matchPosition);
+        assertThat(program.prefixAccel(data, 3, text.length() - 2)).isEqualTo(-1);
+        // The match lies in the scalar tail of a 1 KiB search, after its whole vectors.
+        assertThat(program.prefixAccel(data, matchPosition - 1_024 + match.length(), 1_024)).isEqualTo(matchPosition);
+    }
+
+    @Test
+    public void testLiteralSetScanBoundaries()
+    {
+        // Literals of different lengths, "fn as" and "fn ise", share the 's' past the prefix. A
+        // candidate near the end is a match only when a literal ends by the end of the search.
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        Prog program = compiledProgram("fn ise|fn as");
+        assertThat(program.prefixAccelStrategy(1_024)).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+        byte[] longest = "fn ise".getBytes(StandardCharsets.US_ASCII);
+        int vectorWidth = ByteVector.SPECIES_PREFERRED.length();
+        int length = 1_024 + (2 * vectorWidth) + longest.length;
+        for (String literal : List.of("fn as", "fn ise")) {
+            byte[] bytes = literal.getBytes(StandardCharsets.US_ASCII);
+            for (int position : new int[] {0, vectorWidth - 1, vectorWidth, vectorWidth + 1, (2 * vectorWidth) - 1, 2 * vectorWidth, length - bytes.length}) {
+                assertMatchAt(program, bytes, length, vectorWidth - 1, position);
+            }
+        }
+        // "fn is" is a candidate for both scans but begins neither literal, so a search ending
+        // before the "e" that completes "fn ise" finds nothing, and one ending after it does.
+        byte[] data = new byte[length + 1];
+        Arrays.fill(data, (byte) 'x');
+        int start = length + 1 - longest.length;
+        System.arraycopy(longest, 0, data, start, longest.length);
+        assertThat(program.prefixAccel(data, 0, length)).isEqualTo(-1);
+        assertThat(program.prefixAccel(data, 0, length + 1)).isEqualTo(start);
+        assertNoMatch(program, length, 3);
+    }
+
+    @Test
     public void testIneligiblePrefixesStayOnExistingRoutes()
     {
         assertThat(configuredProgram(PREFIX, true).prefixAccelStrategy(4_096))
@@ -323,5 +399,10 @@ public class TestFusedPrefixAcceleration
         Prog program = new Prog();
         program.configurePrefixAccel(Slices.wrappedBuffer(prefix), foldCase);
         return program;
+    }
+
+    private static Prog compiledProgram(String pattern)
+    {
+        return Compiler.compile(RegexpParser.parse(Slices.utf8Slice(pattern), Regexp.LIKE_PERL).regexp(), false, 0);
     }
 }

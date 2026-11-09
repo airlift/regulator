@@ -1906,11 +1906,15 @@ fixed cost independent of input size, allocation-free, and within the
 protected-path gate on Intel and Graviton.
 
 Every case-sensitive `Prog.prefixAccel` scan of a prefix of two or more bytes
-(the fused vector and SWAR pair scans, the first-byte scan with its last-byte
-check, and the moved-probe scan) charges its failed candidates to the contains
-search's comparison budget and continues with KMP once they pass it. A prefix
-with long partial matches, such as `a`×500 `b` `a`×500 in a run of `a`, then
-costs time linear in the input instead of the input times the prefix. The KMP
+but one (the fused vector and SWAR pair scans, the first-byte scan with its
+last-byte check, and the moved-probe scan) charges its failed candidates to the
+contains search's comparison budget and continues with KMP once they pass it. A
+prefix with long partial matches, such as `a`×500 `b` `a`×500 in a run of `a`,
+then costs time linear in the input instead of the input times the prefix. The
+exception, the literal set scan of
+[Literal Prefix Vector Scan](#literal-prefix-vector-scan), compares each
+candidate with at most eight literals of at most six bytes and never continues
+with KMP. The KMP
 shifts are built when the prefix is configured and charged to the program's DFA
 allowance, and a compile whose shift table does not fit what remains fails; a
 prefix under 64 bytes whose first byte does not recur shares the contains
@@ -3291,10 +3295,43 @@ periodic or not: the adjacent pair is chosen only for the forward scans, and
 choosing it there too would change the reverse scan of a periodic required
 suffix, which has not been measured.
 
+When the literals every match begins with run past a prefix shorter than six
+bytes and share a byte at the same offset past it, the vector scan pairs the
+prefix's paired byte with the last byte those literals share and compares each
+candidate with every literal. Rebar's `rust-functions` row,
+`fn is_(\w+)|fn as_(\w+)`, factors to the prefix `fn `, which its Rust source
+holds 12,151 times against 482 occurrences of either alternative. The prefix's
+pair, `f` and the space, stopped at 18,686 candidates per search, failed 6,535
+of them, and returned each prefix occurrence to the forward DFA, which stepped
+past it and called the scan again, 12,147 times per search. Pairing `f` with
+the `_` both alternatives share stops at 3,735 candidates and fails 3,253 of
+them in the scan, and the DFA calls it 483 times. Against the prefix's scan
+with JDK 25, `opt/prefilter/rust-functions` took 0.545x to 0.570x its earlier
+time on r9g and 0.519x to 0.524x on r8i, in RE2 and Rust.
+
+The literals are the program's paths through its first six bytes, as the
+[start literal filter](#start-literal-filter) reads them for its six-byte
+filter, each cut at its first position that accepts more than one byte, so a
+folded letter or a class ends a literal, and literals that share no byte past
+the prefix keep the prefix's scan. A candidate is compared with at most eight literals of at most six bytes,
+so this scan keeps no comparison budget and never hands off to KMP. Shorter
+searches, searches without the Vector API, and prefixes of six or more bytes
+keep the prefix's scans.
+
+The literal set only saves work, so, as
+[Memory Budgets And DFA Caching](#memory-budgets-and-dfa-caching) requires of
+an optional plan, a compile with a `maxMemory` decides it after OnePass and
+every plan and route, and keeps it only where the rest of the allowance holds
+it and still leaves the forward DFAs their minimum; otherwise the prefix keeps
+its scan. The set never takes memory OnePass or a route would use, so a budget
+gives the same OnePass decision, routes, and DFA minimum with the Vector API as
+without the set.
+
 Vector linkage is isolated in `VectorPrefixScanner`, so applications can load
-and use the engine without resolving the incubating module. Every surviving
-candidate is compared with the complete prefix until failed candidates spend
-the contains search's comparison budget, after which KMP finishes the search.
+and use the engine without resolving the incubating module. Outside the literal
+set scan, every surviving candidate is compared with the complete prefix until
+failed candidates spend the contains search's comparison budget, after which
+KMP finishes the search.
 Pair byte selection keeps preprocessing bounded and the integrated scanner
 compact.
 

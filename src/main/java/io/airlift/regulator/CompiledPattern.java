@@ -396,6 +396,10 @@ abstract sealed class CompiledPattern
                     ", required prefix " + (requiredPrefix != null) +
                     ", anchored start " + partialProg.anchorStart());
         }
+        // selectRoutes decides every prefix literal set it was left.
+        if (partialProg.defersPrefixLiteralSet() || forwardProgram.defersPrefixLiteralSet()) {
+            throw new IllegalStateException("a forward program's prefix literal set was left undecided");
+        }
     }
 
     /// Copies every field of `pattern`, which the caller then discards, except the named
@@ -903,7 +907,8 @@ abstract sealed class CompiledPattern
         // The program is compiled before the expression is analyzed: the check counts each copy of
         // a class as one instruction, and the analysis reads every range of the class at each
         // copy, so only the compiler's limits keep that reading proportional to the budget.
-        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
+        // Its prefix literal set is decided in selectRoutes, after every plan and route.
+        Prog semanticProgram = Compiler.compileNormalizedDeferringPrefixLiteralSet(normalizedSuffixRegexp, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         // The entire expression adds only its leading anchors and the stripped literal prefix to a
         // suffix whose expansion passed that check, so simplifying it needs no budget of its own.
         Regexp normalizedRegexp = suffixRegexp == entireRegexp ? normalizedSuffixRegexp : Simplifier.simplify(entireRegexp, caseFolding, compilerDialect, 0);
@@ -1385,6 +1390,10 @@ abstract sealed class CompiledPattern
                 reservedRequiredBytes = reserveRequiredBytes(forwardBudgetProgram, preferred);
             }
         }
+        // The prefix literal sets come last, from the program that holds the forward DFA budget,
+        // so no plan or route above judges its memory with their bytes taken.
+        forwardBudgetProgram.decidePrefixLiteralSet(forwardBudgetProgram);
+        partialProg.decidePrefixLiteralSet(forwardBudgetProgram);
         boolean ordinaryShortMatch = false;
         boolean singleAttemptCount = false;
         boolean literalKernelFind = false;
@@ -1723,7 +1732,7 @@ abstract sealed class CompiledPattern
         Prog program;
         try {
             normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding, compilerDialect, forwardMemory);
-            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
+            program = Compiler.compileNormalizedDeferringPrefixLiteralSet(normalizedRegexp, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         }
         catch (RegexpCompileException ignored) {
             // An optional boolean optimization must not reject a valid semantic program.
@@ -1736,7 +1745,8 @@ abstract sealed class CompiledPattern
         if (forwardMemory > 0) {
             long semanticProgramMemory = Compiler.estimatedProgramMemory(semanticProgram);
             // Compilation has already charged the lowered program, any retained OnePass table,
-            // and its prefix's KMP shifts.
+            // and its prefix's KMP shifts. Both programs' prefix literal sets wait for
+            // selectRoutes.
             if (semanticProgramMemory > program.dfaMemory()) {
                 return null;
             }
@@ -2074,16 +2084,21 @@ abstract sealed class CompiledPattern
             return false;
         }
         // Without a lowered program, which the route also requires, the required bytes were
-        // reserved from partialProg.
+        // reserved from partialProg. Its prefix literal set hands its charge back too, and is
+        // decided again last, as in selectRoutes; deciding it on the same allowance after a
+        // refused route changes nothing.
+        partialProg.deferPrefixLiteralSet();
         long released = requiredBytes == null ? 0 : requiredBytes.estimatedRetainedSize();
         long dfaMemory = partialProg.dfaMemory() + released;
         if (retainedSize > dfaMemory) {
+            partialProg.decidePrefixLiteralSet(partialProg);
             return false;
         }
         partialProg.setDfaMemory(dfaMemory - retainedSize);
         if (requiredBytes != null) {
             requiredBytes = reserveRequiredBytes(partialProg, requiredBytes);
         }
+        partialProg.decidePrefixLiteralSet(partialProg);
         return true;
     }
 

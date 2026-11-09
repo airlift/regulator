@@ -250,25 +250,30 @@ so the automata run only where a match can be.
   ([packedpair][memchr-packedpair], [memchr.rs][memchr-generic],
   [searcher.rs][memchr-short-haystack]); Inspired by memchr's rank table
   ([default_rank.rs][memchr-rank]), by a gap against the Rust regex crate for
-  the continuation-byte pair ([#141]), and by Hyperscan's Noodle, which pairs
+  the continuation-byte pair ([#141]), by Hyperscan's Noodle, which pairs
   adjacent bytes of every literal, for the adjacent pair of a periodic literal
-  ([noodle_engine_avx2.c][hs-noodle-double]). Regulator: the counted loop for
-  HotSpot's C2 JIT compiler with verification after it exits, the fixed UTF-8
-  pair rule, the periodic-literal rule, and the 64-byte cutoff on Trino
-  exact-literal spans ([#14], [#87], [#140], [#141], [design][d-prefix-vector]).
+  ([noodle_engine_avx2.c][hs-noodle-double]), and by a gap against the crate's
+  Teddy prefilter on rebar's `rust-functions` row for the literal set form.
+  Regulator: the counted loop for HotSpot's C2 JIT compiler with verification
+  after it exits, the fixed UTF-8 pair rule, the periodic-literal rule, and the
+  64-byte cutoff on Trino exact-literal spans ([#14], [#87], [#140], [#141],
+  [design][d-prefix-vector]).
 - **Where:** `Prog.prefixAccel`, `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`,
   `Prog.prefixAccelStrategy`, `VectorPrefixScanner.find`,
   `VectorPrefixScanner.pairDifference`, `Prog.pairOffset`,
-  `Prog.adjacentPairOffset`, `CompiledPattern.findExactLiteralSpan`,
+  `Prog.adjacentPairOffset`, `Prog.buildPrefixLiteralSet`,
+  `VectorPrefixScanner.findLiteralSet`, `CompiledPattern.findExactLiteralSpan`,
   `CompiledPattern.exactLiteralSpanUsesPrefixScan`, `LiteralMatchKernel.find`
 - **Applies when:** Case-sensitive prefixes of two or more bytes in unanchored
   searches, every regex language; the fused vector loop on windows of at least
   1 KiB with the Vector API and the probe at byte 0, otherwise SWAR or the
   first-byte scan; the continuation-byte pair for UTF-8 literals whose
   non-ASCII first character ends before the literal's last byte; the adjacent
-  pair for literals whose smallest period is at most half their length; a Trino
-  exact-literal span with fewer than 64 bytes left uses `Slice.indexOf`
-  instead, unless the probe byte moved
+  pair for literals whose smallest period is at most half their length; the
+  literal set form on those vector windows when the literals every match
+  begins with run past a prefix shorter than six bytes and share a byte at the
+  same offset there; a Trino exact-literal span with fewer than 64 bytes left
+  uses `Slice.indexOf` instead, unless the probe byte moved
 - **What it does:** A candidate must hold the prefix's first and last bytes
   before the whole prefix is compared. RE2 tests them 32 bytes at a time with
   AVX2; Regulator tests them with the Vector API on long windows, with 8-byte
@@ -288,7 +293,14 @@ so the automata run only where a match can be.
   a multibyte character: its first and last bytes are two bytes of its
   repeating unit at an arbitrary distance, which text can hold about as often
   as it holds each byte. That takes folly `literal-never-match-frequent` to
-  0.69 to 0.71 of its earlier time on Graviton and 0.68 to 0.70 on Intel.
+  0.69 to 0.71 of its earlier time on Graviton and 0.68 to 0.70 on Intel. When
+  the alternatives after a short prefix share a later byte at the same offset,
+  as `_` in `fn is_\w+|fn as_\w+`, the vector pair tests that byte instead of
+  the prefix's last and compares each candidate with every alternative's
+  literal, so occurrences of the prefix that begin no alternative no longer
+  return to the DFA: on `rust-functions` the DFA calls the scan 483 times per
+  search instead of 12,147, and the row takes 0.55 to 0.57 of its earlier time
+  on Graviton and 0.52 on Intel.
 
 ### Folded prefix masks
 
@@ -399,7 +411,8 @@ so the automata run only where a match can be.
   `LiteralSearchKernel.findKmp`, `LiteralSearchKernel.findLastKmp`,
   `Prog.finishWithKmp`
 - **Applies when:** The contains search, case-sensitive prefix scans of two
-  or more bytes, and the reverse scan for the last occurrence of a required
+  or more bytes other than the literal set form, which bounds the comparisons
+  at each candidate, and the reverse scan for the last occurrence of a required
   suffix; scan-plan leading literals keep their own scan
 - **What it does:** The bytes that failed candidates compare are charged
   against the search's progress. The running total is kept as one position, so

@@ -197,6 +197,37 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testLiteralSetPrefixScanMatchesJdk()
+    {
+        // Alternatives that share only a short prefix take the prefix literal set scan on long text,
+        // which skips occurrences of the prefix that begin neither alternative. The filler holds
+        // such occurrences, some with the byte the scan pairs with the prefix's `f`, `_` for the
+        // first pattern and `s` for the second, and real matches of the second pattern's `fn as`.
+        String decoys = "fn new() fx is_ fn ais_ fn is fn as ".repeat(64);
+        for (String pattern : List.of("fn is_(\\w+)|fn as_(\\w+)", "fn (is)e|fn (as)")) {
+            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+            Prog.PrefixAccelStrategy strategy = regexp.forwardProgramForDiagnostics().prefixAccelStrategy(decoys.length());
+            if (VectorSupport.isAvailable()) {
+                assertThat(strategy).as(pattern).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            else {
+                assertThat(strategy).as(pattern).isNotEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            Pattern jdk = Pattern.compile(pattern);
+            for (String end : List.of("", "fn is", "fn as", "fn ise", "fn as_", "fn is_x")) {
+                String input = "fn as_1 " + decoys + "fn is_ab fn ise fn as" + decoys + end;
+                Matcher expected = jdk.matcher(input);
+                RegexpMatcher actual = regexp.matcher(utf8Slice(input));
+                String description = "%s ending %s".formatted(pattern, end);
+                while (expected.find()) {
+                    assertSameMatch(description, input, true, expected, actual.find() ? actual.toMatchResult() : null);
+                }
+                assertThat(actual.find()).as("extra match: %s", description).isFalse();
+            }
+        }
+    }
+
+    @Test
     public void testRegionsRangesAndFindStartMatchJdk()
     {
         // A matcher region reads as a JDK region with default bounds, so its assertions see only
