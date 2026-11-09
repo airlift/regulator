@@ -673,14 +673,16 @@ final class TrinoLikeKernelGenerator
         }
 
         /// A copy of `LiteralSearchKernel.findSingleByte`, two words at a time, which returns
-        /// `findTail` from where the word loop ends.
-        private static void emitFindSingleByte(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte target, MethodDefinition findTail)
+        /// `findTail` from where the word loop ends. The word loop reads LOW_BITS from
+        /// [#lowBitsField].
+        private void emitFindSingleByte(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte target, MethodDefinition findTail)
         {
             long broadcast = broadcast(target);
             Variable position = body.declare("position", start);
             Variable wordEnd = body.declare("wordEnd", start.add(end.subtract(start)
                     .divide(constantInt(2 * Long.BYTES))
                     .multiply(constantInt(2 * Long.BYTES))));
+            Variable lowBits = body.declare("lowBits", getStatic(lowBitsField()));
             Variable firstMatches = body.declare(long.class, "firstMatches");
             Variable secondMatches = body.declare(long.class, "secondMatches");
             Variable difference = body.declare(long.class, "difference");
@@ -690,9 +692,9 @@ final class TrinoLikeKernelGenerator
             body.mark(word);
             body.append(ifThenJump(position.greaterThanOrEqual(wordEnd), tail));
             body.append(difference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast))));
-            body.append(firstMatches.set(zeroByteMask(difference)));
+            body.append(firstMatches.set(zeroByteMask(difference, lowBits)));
             body.append(difference.set(readLong(bytes, position.add(constantInt(Long.BYTES))).bitwiseXor(constantLong(broadcast))));
-            body.append(secondMatches.set(zeroByteMask(difference)));
+            body.append(secondMatches.set(zeroByteMask(difference, lowBits)));
             body.append(IfStatement.builder()
                     .condition(firstMatches.bitwiseOr(secondMatches).notEqual(constantLong(0)))
                     .then(CodeBlock.block(
@@ -743,7 +745,7 @@ final class TrinoLikeKernelGenerator
                     .condition(end.subtract(position).greaterThan(constantInt(Long.BYTES)))
                     .then(CodeBlock.block(
                             difference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast))),
-                            matches.set(zeroByteMask(difference)),
+                            matches.set(zeroByteMask(difference, constantLong(LOW_BITS))),
                             IfStatement.builder()
                                     .condition(matches.notEqual(constantLong(0)))
                                     .then(position.add(firstByte(matches)).ret())
@@ -755,7 +757,7 @@ final class TrinoLikeKernelGenerator
                     .build());
             body.append(position.set(end.subtract(constantInt(Long.BYTES))));
             body.append(difference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast))));
-            body.append(matches.set(zeroByteMask(difference)));
+            body.append(matches.set(zeroByteMask(difference, constantLong(LOW_BITS))));
             body.append(IfStatement.builder()
                     .condition(matches.notEqual(constantLong(0)))
                     .then(position.add(firstByte(matches)).ret())
@@ -1096,16 +1098,17 @@ final class TrinoLikeKernelGenerator
     /// Emitted as `(value - LOW_BITS) & ~(value | ~HIGH_BITS)`, which has the same bits. The
     /// scans XOR a constant into `value`, and C2 folds `~(input ^ constant)` into a
     /// second XOR, which costs an extra instruction per word and loses the and-not; this form
-    /// keeps it.
-    private static BytecodeExpression zeroByteMask(Variable value)
+    /// keeps it. `lowBits` holds LOW_BITS: the word loop's local read from the field, or the
+    /// constant in the finish, which runs once per search.
+    private static BytecodeExpression zeroByteMask(Variable value, BytecodeExpression lowBits)
     {
-        return value.subtract(constantLong(LOW_BITS))
+        return value.subtract(lowBits)
                 .bitwiseAnd(value.bitwiseOr(constantLong(~HIGH_BITS)).bitwiseXor(constantLong(-1)));
     }
 
-    /// `zeroByteMask(first) & zeroByteMask(second)`, the bytes that are zero in both,
-    /// including the bits each sets above its lowest zero byte, in one expression with a single
-    /// and-not, for the same reason as [#zeroByteMask]. `lowBits` holds LOW_BITS.
+    /// `zeroByteMask(first, lowBits) & zeroByteMask(second, lowBits)`, the bytes that are zero in
+    /// both, including the bits each sets above its lowest zero byte, in one expression with a
+    /// single and-not, for the same reason as [#zeroByteMask]. `lowBits` holds LOW_BITS.
     private static BytecodeExpression bothZeroByteMask(Variable first, Variable second, Variable lowBits)
     {
         return first.subtract(lowBits)

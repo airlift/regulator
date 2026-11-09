@@ -244,7 +244,7 @@ public class TestBoundedCharacterClassCounter
             Re2 re2 = Re2.compileParsed(pattern, parsed, flags, maxMemory);
             assertThat(re2.forwardProgramForDiagnostics().dfaMemory()).as(source).isEqualTo(control.dfaMemory() - re2.classMatchCounter().estimatedRetainedSize());
         }
-        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_000);
+        assertThat(Re2.compile(utf8Slice("\\pL")).classMatchCounter().estimatedRetainedSize()).isEqualTo(33_008);
     }
 
     @Test
@@ -410,11 +410,11 @@ public class TestBoundedCharacterClassCounter
                 RustRegexp::compile);
         for (Function<Slice, CompiledPattern> compiler : compilers) {
             CompiledPattern belowLimit = compiler.apply(utf8Slice("[\\p{L}\\x{3FFFF}]"));
-            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_120);
+            assertThat(belowLimit.classMatchCounter().estimatedRetainedSize()).as(belowLimit.pattern().toStringUtf8()).isEqualTo(33_128);
             CompiledPattern atLimit = compiler.apply(utf8Slice("[\\p{L}\\x{40000}]"));
             assertThat(atLimit.classMatchCounter()).as(atLimit.pattern().toStringUtf8()).isNull();
             CompiledPattern allNonAscii = compiler.apply(utf8Slice("[^,]+"));
-            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(608);
+            assertThat(allNonAscii.classMatchCounter().estimatedRetainedSize()).as(allNonAscii.pattern().toStringUtf8()).isEqualTo(616);
             CompiledPattern beforeTailBelowLimit = compiler.apply(utf8Slice("[\\x{3FFFF}\\x{50000}-\\x{10FFFF}]+"));
             assertThat(beforeTailBelowLimit.classMatchCounter()).as(beforeTailBelowLimit.pattern().toStringUtf8()).isNotNull();
             CompiledPattern beforeTailAtLimit = compiler.apply(utf8Slice("[\\x{40000}\\x{50000}-\\x{10FFFF}]+"));
@@ -422,7 +422,7 @@ public class TestBoundedCharacterClassCounter
         }
         // A Rust bytes-mode class of every scalar value retains a bitset that ends at U+D7FF, below
         // the surrogates.
-        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_264);
+        assertThat(RustRegexp.compile(utf8Slice("(?s:.)+"), RustRegexp.Options.bytes()).classMatchCounter().estimatedRetainedSize()).isEqualTo(7_272);
         List<CompiledPattern> lastPlaneClasses = List.of(
                 Re2.compile(utf8Slice("\\p{Mn}")),
                 JavaRegexp.compile(utf8Slice("\\w"), JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true)),
@@ -660,6 +660,12 @@ public class TestBoundedCharacterClassCounter
 
     @Test
     public void testTwoByteTextMatchesGeneralMatcherAtEveryPosition()
+    {
+        assertTwoByteTextMatchesGeneralMatcherAtEveryPosition();
+    }
+
+    // Also run by BoundedCharacterClassCounterFormProbe, once for each form of `countUtf8`.
+    static void assertTwoByteTextMatchesGeneralMatcherAtEveryPosition()
     {
         // Cyrillic and ASCII text counts without decoding, a chunk at a time. Each nonempty insert,
         // at every position, puts another character or a malformed sequence in some chunk, or
