@@ -62,11 +62,10 @@ a technique adapted from `regex-automata`, the crate that implements the Rust
 literals use a
 [nibble-table filter](reference/OPTIMIZATION_CATALOG.md#start-literal-filter)
 adapted from Hyperscan's Teddy algorithm, by way of the `aho-corasick` crate's
-implementation. It checks up to eight literal groups at three byte positions;
-four- and eight-group filters need one new vector load per step, and two-group
-filters three. Large literal alternations use an Aho-Corasick automaton ported
-from the same crate. Patterns that can only start at a small set of bytes scan
-for that set.
+implementation. It checks up to eight literal groups at three byte positions,
+with one vector load per position each step. Large literal alternations use an
+Aho-Corasick automaton ported from the same crate. Patterns that can only start
+at a small set of bytes scan for that set.
 
 **Staying linear.** A fast scan stays fast only while false candidates are
 sparse. The scans watch for the opposite case. A literal search whose failed

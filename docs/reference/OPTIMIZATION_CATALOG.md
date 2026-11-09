@@ -697,10 +697,9 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
 ### Start literal filter
 
 - **Origin:** Adapted from Hyperscan's Teddy, by way of the aho-corasick crate
-  ([teddy][ac-teddy-readme]), for the nibble bucket lookup and the one-load
-  shift-in ([teddy/generic.rs][ac-teddy]), and from the Rust regex crate's
-  three-byte rule ([teddy.rs][ra-teddy]); First described by V8 irregexp for
-  merging literals that differ in a bit through a mask
+  ([teddy][ac-teddy-readme]), for the nibble bucket lookup, and from the Rust
+  regex crate's three-byte rule ([teddy.rs][ra-teddy]); First described by V8
+  irregexp for merging literals that differ in a bit through a mask
   ([jsregexp.cc][v8-quick-check]), by Muła (2016) for comparing a needle's
   bytes at two offsets and ANDing the masks ([simd-strfind][mula-strfind]),
   as memchr's packed pair does ([packedpair][memchr-packedpair]), by the
@@ -747,9 +746,9 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   checked with one compare, as in the
   [one-compare candidate masks](#one-compare-candidate-masks).
   With 3 to 8 groups, two nibble lookups per position give
-  every group's bit at once; each step loads one vector at the third position
-  and shifts in the first two positions' bits from the previous step, on x86
-  with a 16-bit lane shift and a mask instead of a byte shift. Rust, RE2, and
+  every group's bit at once; each step loads one vector at each of the three
+  positions, and on x86 takes high nibbles with a 16-bit lane shift instead of
+  a byte shift. Rust, RE2, and
   Java `name-alt4-casei` and `name-alt5-casei` and Rust and RE2 `sherlock-ru`
   take 0.13 to 0.24 of their earlier time on Graviton and 0.05 to 0.15 on
   Intel ([#89]).
@@ -2333,7 +2332,6 @@ change is described.
 [ac-automaton]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/automaton.rs
 [ac-noncontiguous]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/nfa/noncontiguous.rs
 [ac-prefilter]: https://github.com/BurntSushi/aho-corasick/blob/7e231db4b4ac192ebc674078f2b03cd37b9ed5b9/src/prefilter.rs#L150-L265
-[ac-teddy]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/generic.rs
 [ac-teddy-readme]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/teddy/README.md
 [ac-vector]: https://github.com/BurntSushi/aho-corasick/blob/1.1.5/src/packed/vector.rs#L363-L370
 [bg-shift-and]: https://doi.org/10.1145/135239.135243
