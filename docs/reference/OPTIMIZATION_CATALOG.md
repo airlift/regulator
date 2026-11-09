@@ -1685,11 +1685,13 @@ in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
   through views, remembering a failed POSIX `:]` search, nested sets passed up
   with a negation flag, the larger set edited by the smaller one's ranges, one
   clone table shared by every Trino greedy nullable loop, memoized NOP and
-  AltMatch chain walks, the dominator-pass check, and literal analysis
-  expanded once at the root ([#8], [#34], [#39], [#40], [#42], [#119]); base
-  RE2 [O-PROG-001], [O-PROG-002].
+  AltMatch chain walks, the dominator-pass check, literal analysis expanded
+  once at the root, and full-simplification alternations linked through
+  `x{1}` ([#8], [#34], [#39], [#40], [#42], [#119], [#208]); base RE2
+  [O-PROG-001], [O-PROG-002].
 - **Where:** `Simplifier.simplifyAlternateForParse`,
   `Simplifier.factorAlternationForParse`,
+  `Simplifier.simplifyAlternateForFull`,
   `RegexpParser.Parser.tryParsePosixCharClass`,
   `CharClassBuilder.addCharClass`, `CharClassBuilder.addPending`,
   `RuneRangeSet.union`, `RuneRangeSet.intersection`, `Prog.optimize`,
@@ -1701,11 +1703,13 @@ in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
   on programs of at least 1024 instructions
 - **What it does:** Concatenations buffer literal code points in an `int`
   array, factoring works through views and an explicit stack, and a failed
-  POSIX `:]` search is remembered. Ascending class ranges append; others
-  insert by binary search or wait in a batch that is sorted once and merged in
-  one pass. Nested bracket sets pass up with a negation flag, and a much
-  larger set is edited by the smaller one's ranges. One clone table, cleared
-  in constant time, serves every Trino greedy nullable loop in a compile. NOP
+  POSIX `:]` search is remembered. Full simplification links an alternation
+  nested through `x{1}` into its parent without copying it, and keeps a
+  growing merged class unbuilt. Ascending class ranges append; others insert
+  by binary search or wait in a batch that is sorted once and merged in one
+  pass. Nested bracket sets pass up with a negation flag, and a much larger
+  set is edited by the smaller one's ranges. One clone table, cleared in
+  constant time, serves every Trino greedy nullable loop in a compile. NOP
   elimination and AltMatch insertion cache each chain's answer, so shared
   chains are walked once, and a bounded structural check skips the dominator
   pass when it would change nothing, as for non-nullable alternations of
@@ -1713,6 +1717,9 @@ in [Limits and defaults](REGULATOR_API.md#limits-and-defaults).
   buffer, and concatenations refer to their children's elements, expanded
   once at the root. Nested alternation chains compile in 0.26 to 0.47 of
   their earlier time and Trino `(?i)` keyword chains in 0.10 to 0.75 ([#39]).
+  A chain of 16,000 alternations nested through `x{1}` that allocated 2.1 GB
+  to compile (23 GB when its levels alternate case folding) now allocates 94
+  to 624 bytes per pattern byte ([#208]).
 
 ## RE2 optimizations used as ported
 
@@ -1860,6 +1867,7 @@ change is described.
 [#195]: https://github.com/airlift/regulator/pull/195
 [#201]: https://github.com/airlift/regulator/pull/201
 [#202]: https://github.com/airlift/regulator/pull/202
+[#208]: https://github.com/airlift/regulator/pull/208
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
