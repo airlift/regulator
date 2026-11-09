@@ -46,14 +46,15 @@ import static java.util.Objects.requireNonNull;
 /// Only a case-sensitive literal of more than one byte can probe a single later byte. A
 /// case-insensitive literal prefix is scanned for a pair of its folded bytes, and so, under
 /// Unicode case folding, is a run of folded bytes that every match holds within a known range
-/// of offsets from its start. The chosen distribution picks the pair and the run, or
-/// [#englishText()] does in place of [#uniform()]: a uniform distribution rates each ASCII
-/// letter, both of its cases together, at twice any other byte, so no pair is ever more than
-/// {@value #PROBE_FACTOR} times rarer than the first and last bytes, and the rule would always
-/// keep them. Outside scan plans, Rust, RE2, and Java patterns move the single probe only when
-/// the literal's first byte is ASCII. Some Trino, RE2, Java, and Rust patterns that begin with
-/// a literal and capture what follows it run on a scan plan, which can also move the probe of
-/// a literal whose first byte is not ASCII.
+/// of offsets from its start. The chosen distribution picks the pair and the run and decides
+/// which three-byte runs are rare enough to scan, or [#englishText()] does in place of
+/// [#uniform()]: a uniform distribution rates each ASCII letter, both of its cases together, at
+/// twice any other byte, so no pair is ever more than {@value #PROBE_FACTOR} times rarer than
+/// the first and last bytes, and the rule would always keep them. Outside scan plans, Rust,
+/// RE2, and Java patterns move the single probe only when the literal's first byte is ASCII.
+/// Some Trino, RE2, Java, and Rust patterns that begin with a literal and capture what follows
+/// it run on a scan plan, which can also move the probe of a literal whose first byte is not
+/// ASCII.
 ///
 /// A distribution learned with [#builder()] from the caller's own data is the most reliable
 /// choice. [#fromCounts(long\[\])] builds one from byte counts. Either measures the data it was
@@ -241,15 +242,13 @@ public final class ByteFrequencies
     /// `secondOffset`; both 0 for a one-byte literal.
     record FoldedProbePair(int firstOffset, int secondOffset) {}
 
-    /// Returns the two offsets in the first `size` bytes of the case-folded `literal` that a
-    /// folded pair scan should probe. A candidate needs both bytes, so the pair is the one whose
-    /// folded probabilities have the smallest product, among offsets at least two apart, since
-    /// adjacent bytes of text are not independent: a common digram such as `th` occurs far more
-    /// often than its product predicts. Ties go to the wider pair, then the earlier one. The
-    /// pair leaves the first and last bytes only when its product is more than
+    /// Returns the two offsets in the first `size` bytes of the case-folded `literal` that a folded
+    /// pair scan should probe. A candidate needs both bytes, so the pair is the one whose
+    /// [folded probabilities][#foldedProbability(byte)] have the smallest product, among offsets at
+    /// least two apart, since adjacent bytes of text are not independent: a common digram such as
+    /// `th` occurs far more often than its product predicts. Ties go to the wider pair, then the
+    /// earlier one. The pair leaves the first and last bytes only when its product is more than
     /// {@value #PROBE_FACTOR} times smaller than theirs, the factor of [#probeOffset(byte\[\])].
-    /// An ASCII letter's folded probability is the sum of its two cases; any other byte keeps its
-    /// own.
     /// Literals of two or three bytes probe their first and last bytes.
     FoldedProbePair foldedProbePair(byte[] literal, int size)
     {
@@ -289,16 +288,18 @@ public final class ByteFrequencies
         return probability * foldedProbability(literal[pair.secondOffset()]);
     }
 
-    /// Returns the distribution that chooses folded pairs: this one, or [#englishText()] in place
-    /// of [#uniform()]. A uniform distribution rates each ASCII letter, counting both cases, at
-    /// twice any other byte, so no pair is ever more than {@value #PROBE_FACTOR} times rarer than
-    /// the first and last bytes, and the rule would always keep them.
+    /// Returns the distribution that chooses folded pairs and decides which three-byte runs are
+    /// rare enough to scan: this one, or [#englishText()] in place of [#uniform()]. A uniform
+    /// distribution rates each ASCII letter, counting both cases, at twice any other byte, so no
+    /// pair is ever more than {@value #PROBE_FACTOR} times rarer than the first and last bytes, and
+    /// the rule would always keep them.
     ByteFrequencies forFoldedPairs()
     {
         return this == UNIFORM ? ENGLISH_TEXT : this;
     }
 
-    private double foldedProbability(byte value)
+    /// Returns the probability of `value`, or of both cases together for an ASCII letter.
+    double foldedProbability(byte value)
     {
         int lowerCase = value | 0x20;
         if (lowerCase >= 'a' && lowerCase <= 'z') {

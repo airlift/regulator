@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import static io.airlift.regulator.TestingPatternShapes.shape;
@@ -106,17 +107,25 @@ public class TestPrefixProbeAcceleration
         // bytes in UTF-8, so no folded prefix reaches past them. The scan instead searches for
         // the run of folded bytes between them with the rarest pair, and steps back by the most
         // bytes its lead can take. In password, ss is s and s or, in Trino, also sharp s.
-        List<Function<String, CompiledPattern>> languages = List.of(
-                pattern -> Re2.compile(Slices.utf8Slice("(?i)" + pattern)),
-                pattern -> RustRegexp.compile(Slices.utf8Slice(pattern), RustRegexp.Options.defaults().setCaseInsensitive(true)),
-                pattern -> JavaRegexp.compile(Slices.utf8Slice(pattern), JavaRegexp.Options.defaults().setCaseInsensitive(true).setUnicodeCase(true)),
-                pattern -> TrinoRegexp.compile(Slices.utf8Slice("(?i)" + pattern)).re2());
-        for (Function<String, CompiledPattern> language : languages) {
+        List<BiFunction<String, ByteFrequencies, CompiledPattern>> compilers = List.of(
+                (pattern, frequencies) -> Re2.compile(Slices.utf8Slice("(?i)" + pattern), Re2.Options.defaults().setByteFrequencies(frequencies)),
+                (pattern, frequencies) -> RustRegexp.compile(Slices.utf8Slice(pattern), RustRegexp.Options.defaults().setCaseInsensitive(true).setByteFrequencies(frequencies)),
+                (pattern, frequencies) -> JavaRegexp.compile(Slices.utf8Slice(pattern), JavaRegexp.Options.defaults().setCaseInsensitive(true).setUnicodeCase(true).setByteFrequencies(frequencies)),
+                (pattern, frequencies) -> TrinoRegexp.compile(Slices.utf8Slice("(?i)" + pattern), TrinoRegexp.Options.defaults().setByteFrequencies(frequencies)).re2());
+        for (BiFunction<String, ByteFrequencies, CompiledPattern> compiler : compilers) {
+            Function<String, CompiledPattern> language = pattern -> compiler.apply(pattern, ByteFrequencies.uniform());
             assertFoldedRun(language.apply("Sherlock Holmes"), " holme", 8, 11, 1, 4);
             assertFoldedRun(language.apply("password"), "word", 4, 6, 0, 3);
-            // A run needs four bytes, so xyz is not scanned for. Leads that may differ by eight
-            // bytes still qualify; nine do not.
-            assertThat(language.apply("ssssssssxyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            // A run needs four bytes, or three led by a rare letter, so yez, led by y, is scanned
+            // for, and tyz, led by t, is not.
+            assertFoldedRun(language.apply("ssssssssyez"), "yez", 8, 16, 0, 2);
+            assertThat(language.apply("sssssssstyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            // The first byte must be rated under 1.5%: English rates y at 1.4% and g at 1.6%, and
+            // JSON rates g at 0.8%. It must also be a letter, since English rates _ rare.
+            assertThat(language.apply("ssssssssgyz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            assertFoldedRun(compiler.apply("ssssssssgyz", ByteFrequencies.json()), "gyz", 8, 16, 0, 2);
+            assertThat(language.apply("ssssssss_yz").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            // Leads that may differ by eight bytes still qualify; nine do not.
             assertFoldedRun(language.apply("ssssssssxyzw"), "xyzw", 8, 16, 0, 2);
             assertThat(language.apply("sssssssssxyzw").forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
             // A run longer than nine bytes is split, and the lead of its second part counts the
@@ -143,14 +152,26 @@ public class TestPrefixProbeAcceleration
             assertThat(Re2.compile(Slices.utf8Slice(pattern)).forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
         }
         // In Trino, the s of (?i)Holmes also matches the long s, so the literal has no folded
-        // prefix, and every match starts with its run holme. With 64-byte vectors the run is left
-        // out and the DFA keeps its start bytes.
+        // prefix, and every match starts with its run holme. A three-byte run led by a rare letter
+        // is scanned for too, as with the wat of (?i)watson and the wor of (?i)works. With 64-byte
+        // vectors these runs are left out and the DFA keeps its start bytes. A three-byte run led
+        // by a common letter is not scanned for, as with the thi of (?i)this, the elf of (?i)self,
+        // the cla of (?i)class, and the pon of (?i)response.
         CompiledPattern holmes = TrinoRegexp.compile(Slices.utf8Slice("(?i)Holmes")).re2();
+        CompiledPattern watson = TrinoRegexp.compile(Slices.utf8Slice("(?i)watson")).re2();
+        CompiledPattern works = TrinoRegexp.compile(Slices.utf8Slice("(?i)works")).re2();
         if (!VectorSupport.isAvailable() || VectorSupport.preferredByteLanes() < 64) {
             assertFoldedRun(holmes, "holme", 0, 0, 0, 3);
+            assertFoldedRun(watson, "wat", 0, 0, 0, 2);
+            assertFoldedRun(works, "wor", 0, 0, 0, 2);
         }
         else {
-            assertThat(holmes.forwardProgramForDiagnostics().canPrefixAccel()).isFalse();
+            for (CompiledPattern compiled : List.of(holmes, watson, works)) {
+                assertThat(compiled.forwardProgramForDiagnostics().canPrefixAccel()).as(compiled.pattern().toStringUtf8()).isFalse();
+            }
+        }
+        for (String pattern : List.of("(?i)this", "(?i)self", "(?i)class", "(?i)response")) {
+            assertThat(TrinoRegexp.compile(Slices.utf8Slice(pattern)).re2().forwardProgramForDiagnostics().canPrefixAccel()).as(pattern).isFalse();
         }
         // In Trino, ffi is also the ffi ligature, the ff ligature and i, or f and the fi ligature.
         // The first character outside ASCII ends the runs, read in the folded literal, where the

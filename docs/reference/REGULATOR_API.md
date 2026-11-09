@@ -249,8 +249,10 @@ byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 `Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
 `RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
 first-byte scanning. The distribution also ranks the folded byte pairs and
-folded runs that case-insensitive prefix scans probe, using English text
-frequencies under the default. A distribution that matches the searched data
+folded runs that case-insensitive prefix scans probe, and admits a
+three-byte run only when its first byte is an ASCII letter it rates rare,
+counting both cases, using English text frequencies under the default. A
+distribution that matches the searched data
 lets the search scan for a rarer byte of the literal instead. Outside scan
 plans, `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a
 multi-byte literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also

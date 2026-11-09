@@ -384,9 +384,9 @@ final class InnerLiteralSearch
     /// bytes, which this does not check. It cannot see what [#analyze] reads from the program
     /// alone: an anchored or DFA-unsupported assertion, which the caller's expression must not
     /// hold, and whether the reverse prefix DFA fits its memory.
-    static int predictMinimumLiteralLength(Regexp regexp, CaseFolding caseFolding)
+    static int predictMinimumLiteralLength(Regexp regexp, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        if (regexp.requiredPrefixForAccel(caseFolding) != null || !regexp.foldedRunsForAccel(caseFolding).isEmpty()) {
+        if (regexp.requiredPrefixForAccel(caseFolding) != null || !regexp.foldedRunsForAccel(caseFolding, byteFrequencies).isEmpty()) {
             return 0;
         }
         List<InnerLiteral> innerLiterals = innerLiterals(regexp, caseFolding, true);

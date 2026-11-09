@@ -510,7 +510,7 @@ abstract sealed class CompiledPattern
             // predicts, before any program compiles, whether find would try a multi-byte inner
             // literal search.
             if (fixedWidthMatcher.yieldsToEngineScans() ||
-                    innerLiteralPrecedesFixedWidth(InnerLiteralSearch.predictMinimumLiteralLength(normalizedRegexp, caseFolding))) {
+                    innerLiteralPrecedesFixedWidth(InnerLiteralSearch.predictMinimumLiteralLength(normalizedRegexp, caseFolding, byteFrequencies))) {
                 try {
                     Analysis analysis = buildWithProgram(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, ScanPlan.Language.TRINO, scanPlanMode);
                     // The pattern takes the route without a program where the program fits but

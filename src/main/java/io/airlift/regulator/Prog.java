@@ -2032,7 +2032,7 @@ final class Prog
         configurePrefixAccelBytes(prefix.byteArray(), foldCase, byteFrequencies);
     }
 
-    /// Scans for a folded run of four to nine bytes that every match holds after a lead of
+    /// Scans for a folded run of three to nine bytes that every match holds after a lead of
     /// `minimumLead` through `maximumLead` bytes, as [Regexp#foldedRunsForAccel] finds it. A
     /// match can start no earlier than `maximumLead` bytes before the first run at or after
     /// `minimumLead` bytes into the search, so [#prefixAccel] returns that position.
