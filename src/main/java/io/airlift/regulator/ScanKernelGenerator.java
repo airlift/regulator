@@ -466,7 +466,10 @@ final class ScanKernelGenerator
 
         /// Adds the attempt loop to `definition` as a public static method named for its
         /// attempt, with the signature of [Attempt#type()].
-        private MethodDefinition defineAttempt(ClassDefinition definition)
+        /// A start-anchored attempt first fails a context longer than `maximumSpanLength`, unless
+        /// that is [Integer#MAX_VALUE], as [CompiledPattern]'s start-anchored plan selector does.
+        /// That failure clears the groups, as every failed attempt does.
+        private MethodDefinition defineAttempt(ClassDefinition definition, int maximumSpanLength)
         {
             fullMatch = arg("fullMatch", boolean.class);
             groups = arg("groups", int[].class);
@@ -488,6 +491,12 @@ final class ScanKernelGenerator
                 method = definition.method(attempt.name, attempt.type().returnType(), input, contextStart, contextEnd, fullMatch, groups)
                         .access(PUBLIC, STATIC);
                 body = method.body();
+                if (maximumSpanLength != Integer.MAX_VALUE) {
+                    body.append(IfStatement.builder()
+                            .condition(contextEnd.subtract(contextStart).greaterThan(constantInt(maximumSpanLength)))
+                            .then(CodeBlock.block(fillIfNotNull(groups), constantFalse().ret()))
+                            .build());
+                }
                 emitAnchoredLocals(input, contextStart, contextEnd);
             }
             emitKernel();
@@ -948,7 +957,7 @@ final class ScanKernelGenerator
                     .body()
                     .invokeSuperConstructor(pattern)
                     .ret();
-            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
+            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition, patternRoutes.pattern().maximumSpanLength());
             if (!anchored) {
                 search = defineSearch();
                 regionSearch = defineRegionSearch();
@@ -984,7 +993,7 @@ final class ScanKernelGenerator
             definition.superClass(TrinoRegexp.CompiledScanTrinoRegexp.class);
             Parameter pattern = arg("pattern", TRINO_CONSTRUCTOR_TYPE.parameterType(0));
             definition.constructor(pattern).access(PUBLIC).body().invokeSuperConstructor(pattern).ret();
-            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
+            attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition, routes.pattern().maximumSpanLength());
             if (!anchored) {
                 search = defineSearch();
                 if (ordinaryHandoff) {
@@ -1267,7 +1276,29 @@ final class ScanKernelGenerator
             Parameter input = arg("input", Slice.class);
             CodeBlock.Builder body = definition.method("count", long.class, input).access(PUBLIC).body();
             body.append(nullCheck(input, "source is null"));
+            // A Trino count checks only the span maximum, as TrinoRegexp.count does; keep in step.
+            emitSpanLengthCheck(body, input, 0, routes.pattern().maximumSpanLength());
             emitCount(body, input, routes.count(), trinoPattern());
+        }
+
+        /// Emits code that returns a count of 0 for an input shorter than `minimum` or longer than
+        /// `maximum` bytes, with each bound a constant and left out where it rejects nothing.
+        private static void emitSpanLengthCheck(CodeBlock.Builder body, Parameter input, int minimum, int maximum)
+        {
+            BytecodeExpression outside = null;
+            if (minimum > 0) {
+                outside = length(input).lessThan(constantInt(minimum));
+            }
+            if (maximum != Integer.MAX_VALUE) {
+                BytecodeExpression tooLong = length(input).greaterThan(constantInt(maximum));
+                outside = outside == null ? tooLong : outside.or(tooLong);
+            }
+            if (outside != null) {
+                body.append(IfStatement.builder()
+                        .condition(outside)
+                        .then(constantLong(0).ret())
+                        .build());
+            }
         }
 
         // The loop of CompiledPattern.countUnanchoredScanMatches; keep in step.
@@ -1333,15 +1364,17 @@ final class ScanKernelGenerator
         }
 
         /// Full-Slice count of a pattern whose count reaches the plan, as
-        /// [CompiledPattern#count(Slice)] counts it. A start-anchored plan whose count the engine
-        /// declines gets no generated `count`; the inherited one counts with a matcher, which
-        /// reaches the plan once.
+        /// [CompiledPattern#count(Slice)] counts it, after its check of the span's length. A
+        /// start-anchored plan whose count the engine declines gets no generated `count`; the
+        /// inherited one counts with a matcher, which reaches the plan once.
         private void definePatternCount()
         {
             Parameter input = arg("input", Slice.class);
             MethodDefinition method = definition.method("count", long.class, input).access(PUBLIC);
             CodeBlock.Builder body = method.body();
             body.append(nullCheck(input, "text is null"));
+            CompiledPattern pattern = patternRoutes.pattern();
+            emitSpanLengthCheck(body, input, pattern.minimumSpanLength(), pattern.maximumSpanLength());
             emitCount(body, input, patternRoutes.count(), method.thisVariable());
         }
 

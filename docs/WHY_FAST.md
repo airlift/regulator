@@ -35,10 +35,11 @@ is one that runs no automaton at all.
 
 **Early rejection.**
 [Compilation records facts](reference/OPTIMIZATION_CATALOG.md#engine-selection-and-early-rejection)
-about every possible match: its minimum length, the bytes an anchored match
-can begin with, and, for short inputs, a literal or a few bytes every match
-must contain. A short input that fails one of these checks returns no match
-before any engine starts. In row-at-a-time workloads with short rows, such as
+about every possible match: its minimum length and, for a pattern anchored at
+both ends, its maximum length, the bytes an anchored match can begin with,
+and, for short inputs, a literal or a few bytes every match must contain. An
+input that fails one of these checks returns no match before any engine
+starts. In row-at-a-time workloads with short rows, such as
 a query filtering a column, rows that cannot match often end here.
 
 **Literal scans.** When a pattern starts with a literal, a scan looks for a

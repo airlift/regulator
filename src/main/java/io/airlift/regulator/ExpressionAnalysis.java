@@ -35,6 +35,13 @@ final class ExpressionAnalysis
     private static final int MAX_RECURSIVE_DEPTH = 256;
     private static final int UNBOUNDED = -1;
     private static final int IMPOSSIBLE = -2;
+    // The end-anchor slack, as Node defines it, of an expression whose end anchoring is not
+    // established.
+    private static final int NOT_END_ANCHORED = -1;
+    // The most bytes of a Java line terminator, which Java's $ and \Z may match before: of the
+    // terminators EmptyOp.isJavaLineTerminator accepts, U+2028 and U+2029 take three in UTF-8,
+    // and CR LF takes two.
+    private static final int JAVA_FINAL_TERMINATOR_BYTES = 3;
 
     enum Gap
     {
@@ -177,6 +184,7 @@ final class ExpressionAnalysis
 
     private final CaseFolding caseFolding;
     private final Length length;
+    private final int maximumSpanLength;
     private final boolean latin1;
     private final boolean hasCaptures;
     private final boolean hasFoldCaseLiteral;
@@ -189,6 +197,9 @@ final class ExpressionAnalysis
     {
         this.caseFolding = caseFolding;
         this.length = new Length(node.maximumLength, node.encodedLength);
+        this.maximumSpanLength = node.anchoredAtStart && node.endAnchorSlack != NOT_END_ANCHORED && node.maximumLength >= 0
+                ? saturatedAdd(node.maximumLength, node.endAnchorSlack)
+                : Integer.MAX_VALUE;
         this.latin1 = (regexp.parseFlags() & LATIN1) != 0;
         this.hasCaptures = node.hasCaptures;
         this.hasFoldCaseLiteral = node.hasFoldCaseLiteral;
@@ -244,6 +255,17 @@ final class ExpressionAnalysis
     boolean canMatchEmpty()
     {
         return length.canMatch() && length.minimum() == 0;
+    }
+
+    /// Returns an upper bound on the bytes a searched span can have and still hold a match, or
+    /// [Integer#MAX_VALUE] where no maximum is known. Only an expression of bounded length that
+    /// every path anchors at both the start and the end of its context has one: every match then
+    /// starts at the context start and ends at the context end, or for a `$` or Java `\Z` that
+    /// may match before a final line terminator, at most that terminator's bytes before it. A
+    /// span lies inside its context, so it is at most that much longer than the match.
+    int maximumSpanLength()
+    {
+        return maximumSpanLength;
     }
 
     boolean latin1()
@@ -508,6 +530,55 @@ final class ExpressionAnalysis
         };
     }
 
+    // Whether every path of the expression begins with a start-of-text anchor (\A, or ^ outside
+    // multiline mode), which matches only at the context start.
+    private static boolean anchoredAtStart(Regexp regexp, List<Node> children)
+    {
+        return switch (regexp.op()) {
+            case BEGIN_TEXT -> true;
+            case CAPTURE -> children.getFirst().anchoredAtStart;
+            case CONCAT -> !children.isEmpty() && children.getFirst().anchoredAtStart;
+            case ALTERNATE -> {
+                for (Node child : children) {
+                    if (!child.anchoredAtStart) {
+                        yield false;
+                    }
+                }
+                yield !children.isEmpty();
+            }
+            default -> false;
+        };
+    }
+
+    // The most bytes a match can end before the context end when every path of the expression
+    // ends with an end anchor: none for \z, and RE2's and Rust's $; one for an anchor that also
+    // matches before a final LF, Trino's $ and Java's $ and \Z under UNIX_LINES; and a Java line
+    // terminator's for Java's $ and \Z otherwise, which also match before a final terminator.
+    private static int endAnchorSlack(Regexp regexp, List<Node> children)
+    {
+        return switch (regexp.op()) {
+            case END_TEXT -> {
+                if ((regexp.parseFlags() & Regexp.JAVA_FINAL_END) != 0) {
+                    yield JAVA_FINAL_TERMINATOR_BYTES;
+                }
+                yield (regexp.parseFlags() & Regexp.FINAL_LINE_END) != 0 ? 1 : 0;
+            }
+            case CAPTURE -> children.getFirst().endAnchorSlack;
+            case CONCAT -> children.isEmpty() ? NOT_END_ANCHORED : children.getLast().endAnchorSlack;
+            case ALTERNATE -> {
+                int slack = NOT_END_ANCHORED;
+                for (Node child : children) {
+                    if (child.endAnchorSlack == NOT_END_ANCHORED) {
+                        yield NOT_END_ANCHORED;
+                    }
+                    slack = Math.max(slack, child.endAnchorSlack);
+                }
+                yield slack;
+            }
+            default -> NOT_END_ANCHORED;
+        };
+    }
+
     private static boolean canConsumeLineFeed(Regexp regexp, boolean childCanConsumeLineFeed)
     {
         return switch (regexp.op()) {
@@ -726,6 +797,8 @@ final class ExpressionAnalysis
             return new Node(
                     encodedLength,
                     maximumLength,
+                    anchoredAtStart(regexp, children),
+                    endAnchorSlack(regexp, children),
                     hasCaptures,
                     hasFoldCaseLiteral,
                     hasNonGreedyRepetition,
@@ -741,9 +814,14 @@ final class ExpressionAnalysis
         }
     }
 
+    /// @param anchoredAtStart whether every match starts at the context start
+    /// @param endAnchorSlack the most bytes a match can end before the context end, or
+    ///         [#NOT_END_ANCHORED]
     record Node(
             int encodedLength,
             int maximumLength,
+            boolean anchoredAtStart,
+            int endAnchorSlack,
             boolean hasCaptures,
             boolean hasFoldCaseLiteral,
             boolean hasNonGreedyRepetition,

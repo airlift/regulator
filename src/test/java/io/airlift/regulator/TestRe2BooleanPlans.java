@@ -55,8 +55,8 @@ public class TestRe2BooleanPlans
         // per-pattern ordinary-engine flags and its required bytes. The class-run shape adds its
         // retained count DFA flag, and the scan-plan shape its count, short-match, and literal
         // find facts, which fit in the padding the base pattern's flags leave.
-        assertThat(instanceSize(Re2.class)).isEqualTo(112);
-        assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(112);
+        assertThat(instanceSize(Re2.class)).isEqualTo(120);
+        assertThat(instanceSize(Re2.ScanPlanRe2.class)).isEqualTo(120);
     }
 
     @Test

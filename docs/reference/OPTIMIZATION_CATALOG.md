@@ -70,7 +70,7 @@ we want to give credit where credit is due.
 Compile-time facts route each search to the cheapest engine that gives the same
 answer, or reject the input before any engine runs.
 
-### Required-byte and minimum-length rejects
+### Required-byte and match-length rejects
 
 - **Origin:** First described by PCRE ([changelog][pcre-changelog] 4.0 and
   8.00; [pcre2_match.c][pcre2-req-cu], [minimum length][pcre2-minlength],
@@ -101,6 +101,12 @@ answer, or reject the input before any engine runs.
   `RegexpMatcher.restOfRegionLacksRequiredLiteral`, `RequiredBytes.indexIn`,
   `InnerLiteralSearch.windowLacksLiteral`,
   `CompiledPattern.matchOnOrdinaryEngine`, `RegexpMatcher.findGeneral`,
+  `ExpressionAnalysis.maximumSpanLength`, `CompiledPattern.count`,
+  `CompiledPattern.matchStartAnchoredScanPlan`,
+  `ScanKernelGenerator.KernelEmitter.defineAttempt`,
+  `ScanKernelGenerator.ScanEmitter.emitSpanLengthCheck`, `TrinoRegexp.count`,
+  `BoundedCharacterClassCounter.count`,
+  `BoundedCharacterClassCounter.contains`,
   `Prog.computeByteMap`, `CompiledPattern.matchAnchoredSubmatch`,
   `InnerLiteralSearch.search`, `InnerLiteralSearch.checksShortWindows`,
   `CompiledPattern.findOnInnerLiteralSearch`,
@@ -124,13 +130,17 @@ answer, or reject the input before any engine runs.
   keeps the short-window check; a matcher reuses an occurrence until a find
   passes it, and stops after eight scans in a row find it within 256 bytes of
   their start. Minimum length: windows under 4 KiB, where longer ones skip the
-  metadata load, and matcher finds that take the general route. First byte:
-  start-anchored, non-nullable programs with no assertion before the first
-  byte. Inner literal: find windows under the 64-byte minimum of a gated
-  search for a one-byte exact literal, which full-Slice boolean find runs
-  first, before the ordinary engine, where the pattern qualifies. Scan plans:
-  unanchored plans not led by a literal, with a later case-sensitive literal
-  that every match passes
+  metadata load, matcher finds that take the general route, and every count,
+  generated or not; a Trino count skips only the whole-pattern minimum, as its
+  start-anchored plans read a lone malformed byte as one character. Maximum
+  length: patterns of bounded length anchored at both ends, in count, matcher
+  finds, start-anchored scan plans, and anchored ordinary-engine searches.
+  First byte: start-anchored, non-nullable programs with no assertion before
+  the first byte. Inner literal: find windows under the 64-byte minimum of a
+  gated search for a one-byte exact literal, which full-Slice boolean find
+  runs first, before the ordinary engine, where the pattern qualifies. Scan
+  plans: unanchored plans not led by a literal, with a later case-sensitive
+  literal that every match passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which
@@ -143,23 +153,28 @@ answer, or reject the input before any engine runs.
   inner literal search for one exact literal stands in for that check, the
   routes that skip the search, BitState capture of groups and a skipped DFA,
   scan the window for its literal instead. The same early answer comes from
-  three other facts: a window shorter than the pattern's minimum match length
-  fails before any engine setup; a start-anchored search rejects a byte that
-  cannot begin a match with one table load, before OnePass or BitState setup;
-  and a gated one-byte inner literal search scans a find window shorter than
-  its minimum for a hit that passes the gates, so a short line without one
-  runs no DFA, and one with it falls back to the ordinary engine, as for any
-  first candidate near the window start; a full-Slice find that ran the search
-  first then runs the engine's forward DFA, and where that fails its submatch
-  engines, without running the search again. A scan plan, after its first
-  failed attempt, checks once that a required literal occurs in the rest of
-  the input, testing its first and last bytes in 16-byte blocks, and ends the
-  search if it does not. The required-byte reject takes ruff's `noqa` rows to
-  0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to 0.34 to
-  0.47 ([design][d-required-bytes]), and the long-window check takes the
-  leipzig `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
+  three other facts. A window shorter than the pattern's minimum match length
+  fails before any engine setup, and so does a window longer than the longest
+  match of a pattern anchored at both ends (plus the final line terminator its
+  `$` or `\Z` also matches before: none in RE2 and Rust, a `\n` in Trino, and
+  up to three bytes in Java, such as U+2028). A start-anchored search rejects
+  a byte that cannot begin a match with one table load, before OnePass or
+  BitState setup. A gated one-byte inner literal search scans a find window
+  shorter than its minimum for a hit that passes the gates, so a short line
+  without one runs no DFA, and one with it falls back to the ordinary engine,
+  as for any first candidate near the window start; a full-Slice find that ran
+  the search first then runs the engine's forward DFA, and where that fails
+  its submatch engines, without running the search again. A scan plan, after
+  its first failed attempt, checks once that a required literal occurs in the
+  rest of the input, testing its first and last bytes in 16-byte blocks, and
+  ends the search if it does not. The required-byte reject takes ruff's `noqa`
+  rows to 0.41 to 0.68 of their earlier time and lh3lh3's `uri-or-email` to
+  0.34 to 0.47 ([design][d-required-bytes]), and the long-window check takes
+  the leipzig `bounded-strings-ending-z` count-spans row from 14.7–25.6 ms to
   0.48–0.57 ms, 0.021 to 0.039 of its earlier time, in all four languages on
-  Graviton and Intel ([#188]).
+  Graviton and Intel ([#188]). The maximum-length reject takes rebar's
+  `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to
+  0.62 on Graviton and 0.72 to 0.75 on Intel.
 
 ### Match starts without a reverse DFA
 
@@ -2052,7 +2067,7 @@ change is described.
 [ra-hybrid]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/hybrid/dfa.rs
 [ra-hybrid-search]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/hybrid/search.rs
 [ra-id]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/hybrid/id.rs
-[ra-impossible]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs#L2047-L2055
+[ra-impossible]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/regex.rs#L2034-L2073
 [ra-limited]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/limited.rs
 [ra-literal-trie]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/literal_trie.rs
 [ra-onepass]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/dfa/onepass.rs

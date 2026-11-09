@@ -434,6 +434,13 @@ public sealed class TrinoRegexp
     public long count(Slice source)
     {
         requireNonNull(source, "source is null");
+        // Only the span maximum bounds a Trino count: a start-anchored scan plan reads a lone
+        // malformed byte as one character, so it can match a span shorter than the pattern's
+        // shortest valid match. ScanKernelGenerator.defineCount emits this check for a generated
+        // class; keep in step.
+        if (source.length() > re2.maximumSpanLength()) {
+            return 0;
+        }
         SingleByteMatcher byteMatcher = singleByteMatcher();
         if (byteMatcher != SingleByteMatcher.unsupported()) {
             return byteMatcher.count(source);

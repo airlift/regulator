@@ -241,6 +241,121 @@ public class TestPublicMatchCount
     }
 
     @Test
+    public void testSpanOutsideMatchLengthsFailsBeforeAnyEngine()
+    {
+        // A match of a pattern of bounded length anchored at both ends spans its whole input but
+        // for the final line terminator that the language's $ allows, so a longer input holds no
+        // match. RE2 and Rust $ matches only at the end, Trino $ also before a final \n as Joni's
+        // does, and Java $ also before a final line terminator as the JDK's does, or a final \n
+        // under UNIX_LINES. Every input below that holds no match is outside these lengths, so
+        // its search runs no engine: it builds no DFA or reverse program, and its matcher sets up
+        // no OnePass, BitState, or NFA workspace. The Trino rows check only the DFA and the
+        // reverse program, as Trino's matcher reports no workspaces. A start-anchored scan plan,
+        // interpreted or generated, leaves no such trace, so the rows of ^[ab]{2,3}$ prove only
+        // that its answers stay right.
+        String expression = "^((aaa)|(aa))$";
+        String planExpression = "^[ab]{2,3}$";
+        for (boolean generate : List.of(false, true)) {
+            Re2.Options re2Options = Re2.Options.defaults().setGenerateBytecode(generate);
+            RustRegexp.Options rustOptions = RustRegexp.Options.defaults().setGenerateBytecode(generate);
+            for (String text : List.of("aa", "aaa", "a", "aaaa", "aaa\n")) {
+                boolean expected = text.length() == 2 || text.equals("aaa");
+                for (String spanExpression : List.of(expression, planExpression)) {
+                    assertSpanSearch(Re2.compile(utf8Slice(spanExpression), re2Options), text, expected);
+                    assertSpanSearch(RustRegexp.compile(utf8Slice(spanExpression), rustOptions), text, expected);
+                }
+            }
+            // Trino's count checks only the span maximum, as its plans read a lone malformed byte
+            // as one character. Without captures, the matcher's find of ^(?:aaa|aa)$ takes the
+            // general route.
+            TrinoRegexp.Options trinoOptions = TrinoRegexp.Options.defaults().setGenerateBytecode(generate);
+            for (String trinoExpression : List.of(expression, "^(?:aaa|aa)$", planExpression)) {
+                for (String text : List.of("aaa\n", "aaaa\n", "aaa\r\n")) {
+                    TrinoRegexp trino = TrinoRegexp.compile(utf8Slice(trinoExpression), trinoOptions);
+                    Slice input = utf8Slice(text);
+                    boolean expected = text.equals("aaa\n");
+                    String label = "Trino " + trinoExpression + " " + escaped(text) + " generated " + generate;
+                    assertThat(trino.count(input)).as(label).isEqualTo(expected ? 1 : 0);
+                    assertThat(trino.contains(input)).as(label).isEqualTo(expected);
+                    assertThat(trino.matcher(input).find()).as(label).isEqualTo(expected);
+                    if (!expected) {
+                        assertNoProgramSearch(trino.re2(), label);
+                    }
+                }
+            }
+            JavaRegexp.Options javaOptions = JavaRegexp.Options.defaults().setGenerateBytecode(generate);
+            for (String javaExpression : List.of(expression, "(?d)" + expression, planExpression, "(?d)" + planExpression)) {
+                Pattern jdk = Pattern.compile(javaExpression);
+                for (String text : List.of("aaa\n", "aaa\r\n", "aa\u2028", "aaa\u2028", "a", "aaaa\u2028", "aaa\u2028\n")) {
+                    assertSpanSearch(JavaRegexp.compile(utf8Slice(javaExpression), javaOptions), text, jdk.matcher(text).find());
+                }
+            }
+        }
+        // The plan's rows reach the start-anchored plan, and the generated class with generation on.
+        assertThat(Re2.compile(utf8Slice(planExpression)).startAnchoredScanPlan()).isNotNull();
+        assertThat(RustRegexp.compile(utf8Slice(planExpression)).startAnchoredScanPlan()).isNotNull();
+        assertThat(JavaRegexp.compile(utf8Slice(planExpression)).startAnchoredScanPlan()).isNotNull();
+        assertThat(Re2.compile(utf8Slice(planExpression), Re2.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).isTrue();
+        assertThat(RustRegexp.compile(utf8Slice(planExpression), RustRegexp.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).isTrue();
+        assertThat(JavaRegexp.compile(utf8Slice(planExpression), JavaRegexp.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).isTrue();
+        assertThat(TrinoRegexp.compile(utf8Slice(planExpression), TrinoRegexp.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).isTrue();
+
+        // A required prefix counts toward the span.
+        assertSpanSearch(Re2.compile(utf8Slice("^abc((aaa)|(aa))$")), "abcaaa", true);
+        assertSpanSearch(Re2.compile(utf8Slice("^abc((aaa)|(aa))$")), "abcaaaa", false);
+
+        // A count of a span shorter than the shortest match runs no engine, anchored or not.
+        Re2 unanchored = Re2.compile(utf8Slice("\\w+@\\w+\\.\\w+"));
+        assertThat(unanchored.count(utf8Slice("a@b"))).isZero();
+        assertNoProgramSearch(unanchored, "unanchored count");
+        // A generated unanchored plan overrides the count and makes the same check. Its plan
+        // leaves no trace, so this row proves only that the answer stays right.
+        Re2 generatedUnanchored = Re2.compile(utf8Slice("x([^/]+)/"), Re2.Options.defaults().setGenerateBytecode(true));
+        assertThat(generatedUnanchored.usesGeneratedBytecode()).isTrue();
+        assertThat(generatedUnanchored.count(utf8Slice("x/"))).isZero();
+        assertNoProgramSearch(generatedUnanchored, "generated unanchored count");
+
+        // A Java region bounds the span as the JDK's anchoring bounds do. U+2028 takes three
+        // bytes, so the byte offsets 1 and 7 mark the JDK's char offsets 1 and 5.
+        Pattern jdk = Pattern.compile(expression);
+        String fits = "xaaa\u2028y";
+        assertThat(JavaRegexp.compile(utf8Slice(expression)).matcher(utf8Slice(fits)).reset(utf8Slice(fits), 1, 7).find())
+                .isEqualTo(jdk.matcher(fits).region(1, 5).find())
+                .isTrue();
+        String tooLong = "xaaaa\u2028y";
+        JavaRegexp java = JavaRegexp.compile(utf8Slice(expression));
+        RegexpMatcher tooLongMatcher = java.matcher(utf8Slice(tooLong)).reset(utf8Slice(tooLong), 1, 8);
+        assertThat(tooLongMatcher.find())
+                .isEqualTo(jdk.matcher(tooLong).region(1, 6).find())
+                .isFalse();
+        assertNoProgramSearch(java, "Java region");
+        assertThat(tooLongMatcher.onePassWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(tooLongMatcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(tooLongMatcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+    }
+
+    private static void assertSpanSearch(CompiledPattern pattern, String text, boolean expected)
+    {
+        Slice input = utf8Slice(text);
+        String label = pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8() + " " + escaped(text);
+        assertThat(pattern.count(input)).as(label).isEqualTo(expected ? 1 : 0);
+        assertThat(pattern.find(input)).as(label).isEqualTo(expected);
+        RegexpMatcher matcher = pattern.matcher(input);
+        assertThat(matcher.find()).as(label).isEqualTo(expected);
+        if (!expected) {
+            assertNoProgramSearch(pattern, label);
+            assertThat(matcher.onePassWorkspaceInitializedForDiagnostics()).as(label).isFalse();
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(label).isFalse();
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(label).isFalse();
+        }
+    }
+
+    private static String escaped(String text)
+    {
+        return text.replace("\r", "\\r").replace("\n", "\\n").replace("\u2028", "\\u2028");
+    }
+
+    @Test
     public void testMalformedBytesFollowMatcher()
     {
         var input = wrappedBuffer(new byte[] {'a', (byte) 0xFF, (byte) 0xC3, 'b'});
@@ -252,6 +367,20 @@ public class TestPublicMatchCount
                 expected++;
             }
             assertThat(re2.count(input)).isEqualTo(expected);
+        }
+
+        // Trino's start-anchored plans read a lone malformed byte as one character, generated or
+        // not, so its count can match a span shorter than the pattern's shortest valid encoding.
+        Slice malformed = wrappedBuffer(new byte[] {(byte) 0xFF});
+        for (boolean generate : List.of(false, true)) {
+            TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("^[^\\x00-\\x7f]$"), TrinoRegexp.Options.defaults().setGenerateBytecode(generate));
+            TrinoRegexpMatcher matcher = trino.matcher(malformed);
+            long expected = 0;
+            while (matcher.find()) {
+                expected++;
+            }
+            assertThat(expected).as("generated %s", generate).isEqualTo(1);
+            assertThat(trino.count(malformed)).as("generated %s", generate).isEqualTo(expected).isEqualTo(trino.contains(malformed) ? 1 : 0);
         }
     }
 }
