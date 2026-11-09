@@ -312,6 +312,32 @@ public class TestRequiredBytes
                 }
             }
         }
+
+        // The long-window search for the one-of bytes finds the first of them at every offset of
+        // windows under and over the vector scan minimum, past a byte just before the window's
+        // start, and before a later one. The window lies in a Slice that starts past its array's
+        // first byte, which holds one of the bytes, and ends before the Slice's last byte, which
+        // holds another.
+        RequiredBytes oneOfSearch = Re2.compile(utf8Slice(URI_OR_EMAIL)).longWindowRequiredLiteral();
+        List<Integer> lengths = new ArrayList<>();
+        for (int length = 1; length < 40; length++) {
+            lengths.add(length);
+        }
+        lengths.add(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES + 37);
+        for (int length : lengths) {
+            for (int offset = -1; offset < length; offset++) {
+                char[] window = ("@" + "x".repeat(length)).toCharArray();
+                if (offset >= 0) {
+                    window[1 + offset] = '/';
+                    if (offset + 2 < length) {
+                        window[offset + 3] = '@';
+                    }
+                }
+                byte[] padded = ("/" + new String(window) + "@").getBytes(UTF_8);
+                Slice input = Slices.wrappedBuffer(padded, 1, padded.length - 1);
+                assertThat(oneOfSearch.indexIn(input, 1, input.length() - 1)).as("%s at %s", length, offset).isEqualTo(offset < 0 ? -1 : 1 + offset);
+            }
+        }
     }
 
     @Test
@@ -422,42 +448,7 @@ public class TestRequiredBytes
                 new RegionCase(endsWithMatch, 0, endsWithMatch.length() - 1, List.of()),
                 new RegionCase(startsWithMatch, match.length() - 1, startsWithMatch.length(), List.of()));
         for (RegionCase window : windows) {
-            Slice input = utf8Slice(window.text());
-            int start = window.start();
-            int end = window.end();
-            String description = "[%s, %s) of %s bytes".formatted(start, end, input.length());
-            for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
-                String language = entry.getKey() + " " + description;
-                RegexpMatcher matcher = entry.getValue().matcher(input);
-                matcher.reset(input, start, end);
-                assertThat(matcher.find()).as(language).isFalse();
-                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
-                assertNoForwardDfa(entry.getValue(), language + " matcher");
-            }
-            for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
-                String language = entry.getKey() + " " + description;
-                assertThat(entry.getValue().find(input, start, end)).as(language).isFalse();
-                assertNoForwardDfa(entry.getValue(), language + " range find");
-            }
-            for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
-                String language = entry.getKey() + " " + description;
-                CompiledPattern pattern = entry.getValue();
-                int[] groups = new int[2 * (pattern.capturingGroupCount() + 1)];
-                Arrays.fill(groups, 7);
-                assertThat(pattern.findInto(input, start, end, groups)).as(language).isFalse();
-                assertThat(groups).as(language).containsOnly(-1);
-                assertNoForwardDfa(pattern, language + " range findInto");
-            }
-            if (start == 0 && end == input.length()) {
-                for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
-                    assertThat(entry.getValue().find(input)).as(entry.getKey()).isFalse();
-                    assertNoForwardDfa(entry.getValue(), entry.getKey() + " find");
-                }
-                for (Map.Entry<String, CompiledPattern> entry : compile(BOUNDED_STRINGS).entrySet()) {
-                    assertThat(entry.getValue().count(input)).as(entry.getKey()).isZero();
-                    assertNoForwardDfa(entry.getValue(), entry.getKey() + " count");
-                }
-            }
+            assertRejectsBeforeAnyEngine(BOUNDED_STRINGS, utf8Slice(window.text()), window.start(), window.end());
         }
 
         // A window that holds the literal runs the engine, over and under the vector scan
@@ -624,6 +615,79 @@ public class TestRequiredBytes
             assertThat(literal.longWindowLiteralForDiagnostics()).as(language).isEqualTo(",z");
             assertThat(literal.boundsSearchEnd()).as(language).isFalse();
         });
+    }
+
+    @Test
+    public void testRejectsLongWindowsWithoutOneOfBytes()
+    {
+        assertThat(SHORT_FILLER.length()).isBetween(RequiredBytes.SHORT_WINDOW_LIMIT, Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES - 1);
+        assertThat(LONG_FILLER.length()).isGreaterThanOrEqualTo(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES);
+        for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
+            assertThat(entry.getValue().longWindowRequiredLiteral()).as(entry.getKey()).hasToString("one of /@");
+        }
+
+        // The one-of bytes of a pattern with no other literal route check long windows too, under
+        // and over the vector scan minimum, before any engine runs: without the check, each
+        // search would build and cache a forward DFA.
+        for (String filler : List.of(SHORT_FILLER, LONG_FILLER)) {
+            Slice input = utf8Slice(filler);
+            assertRejectsBeforeAnyEngine(URI_OR_EMAIL, input, 0, input.length());
+
+            // A window with one of the bytes runs the engine, which finds the matches around
+            // them; a find loop scans once per match, and the last finds none.
+            Slice matches = utf8Slice("mail a@b \n" + filler + "see http://x.y/z \n" + filler);
+            for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
+                String language = entry.getKey() + " " + filler.length();
+                CompiledPattern pattern = entry.getValue();
+                RegexpMatcher matcher = pattern.matcher(matches);
+                assertThat(spans(matcher)).as(language).containsExactly(new Span(5, 8), new Span(14 + filler.length(), 26 + filler.length()));
+                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(3);
+                assertThat(pattern.find(matches)).as(language).isTrue();
+                assertThat(pattern.count(matches)).as(language).isEqualTo(2);
+            }
+        }
+
+        // A set of three distinct bytes searches a window over the vector scan minimum for each of
+        // them: the third holds the only match.
+        Slice thirdByte = utf8Slice(LONG_FILLER + " a#b ");
+        Span thirdByteMatch = new Span(LONG_FILLER.length() + 1, LONG_FILLER.length() + 4);
+        for (Map.Entry<String, CompiledPattern> entry : compile("[a-z]+://[^ ]+|[^ @]+@[^ @]+|[a-z]+#[a-z]+").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of /@#");
+            assertThat(spans(pattern.matcher(thirdByte))).as(language).containsExactly(thirdByteMatch);
+            assertThat(pattern.find(thirdByte)).as(language).isTrue();
+            assertThat(pattern.count(thirdByte)).as(language).isEqualTo(1);
+            int[] groups = new int[2 * (pattern.capturingGroupCount() + 1)];
+            assertThat(pattern.findInto(thirdByte, 0, thirdByte.length(), groups)).as(language).isTrue();
+            assertThat(new Span(groups[0], groups[1])).as(language).isEqualTo(thirdByteMatch);
+        }
+
+        // On a dense window, the scans stop after finding a byte near their start
+        // NEAR_REQUIRED_LITERAL_SCAN_LIMIT times in a row, as for a literal.
+        Slice dense = utf8Slice("a@b ".repeat(100));
+        for (Map.Entry<String, CompiledPattern> entry : compile(URI_OR_EMAIL).entrySet()) {
+            RegexpMatcher matcher = entry.getValue().matcher(dense);
+            assertThat(spans(matcher)).as(entry.getKey()).hasSize(100);
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(entry.getKey()).isEqualTo(RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT);
+        }
+
+        // An inner literal search that only the class-run proof admits is no other route, as for
+        // a literal: the pattern checks long windows for its one-of bytes as it would without it,
+        // over the search's minimum and under it, where the search does not run.
+        for (String filler : List.of(LONG_FILLER.substring(0, 512), LONG_FILLER)) {
+            for (Map.Entry<String, CompiledPattern> entry : compile(".{0,2}(ab@|cd#)").entrySet()) {
+                String language = entry.getKey() + " " + filler.length();
+                CompiledPattern pattern = entry.getValue();
+                assertThat(pattern.innerLiteralSearchForDiagnostics().addedByClassRunProof()).as(language).isTrue();
+                assertThat(pattern.innerLiteralSearchForDiagnostics().minimumSearchBytes()).as(language).isBetween(513, LONG_FILLER.length());
+                assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of @#");
+                RegexpMatcher matcher = pattern.matcher(utf8Slice(filler));
+                assertThat(matcher.find()).as(language).isFalse();
+                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+                assertNoForwardDfa(pattern, language + " class run");
+            }
+        }
     }
 
     @Test
@@ -1409,6 +1473,49 @@ public class TestRequiredBytes
         assertThat(bytes.occursIn(line, 0, line.length())).as(text).isEqualTo(expected);
         assertThat(bytes.occursIn(line, 0, offset + spelling.length() - 1)).as(text + " cut").isFalse();
         assertThat(bytes.occursIn(line, offset + 1, line.length())).as(text + " late").isFalse();
+    }
+
+    // Checks that every search of `[start, end)` of `input` for `pattern` finds no match before
+    // any engine runs, each on a newly compiled pattern: a matcher's find, which scans once, a
+    // range find, and a range findInto, which unsets the groups, and, where the window is the
+    // whole input, find and count.
+    private static void assertRejectsBeforeAnyEngine(String pattern, Slice input, int start, int end)
+    {
+        String description = "[%s, %s) of %s bytes".formatted(start, end, input.length());
+        for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
+            String language = entry.getKey() + " " + description;
+            RegexpMatcher matcher = entry.getValue().matcher(input);
+            matcher.reset(input, start, end);
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            assertNoForwardDfa(entry.getValue(), language + " matcher");
+        }
+        for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
+            String language = entry.getKey() + " " + description;
+            assertThat(entry.getValue().find(input, start, end)).as(language).isFalse();
+            assertNoForwardDfa(entry.getValue(), language + " range find");
+        }
+        for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
+            String language = entry.getKey() + " " + description;
+            CompiledPattern compiled = entry.getValue();
+            int[] groups = new int[2 * (compiled.capturingGroupCount() + 1)];
+            Arrays.fill(groups, 7);
+            assertThat(compiled.findInto(input, start, end, groups)).as(language).isFalse();
+            assertThat(groups).as(language).containsOnly(-1);
+            assertNoForwardDfa(compiled, language + " range findInto");
+        }
+        if (start == 0 && end == input.length()) {
+            for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
+                String language = entry.getKey() + " " + description;
+                assertThat(entry.getValue().find(input)).as(language).isFalse();
+                assertNoForwardDfa(entry.getValue(), language + " find");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(pattern).entrySet()) {
+                String language = entry.getKey() + " " + description;
+                assertThat(entry.getValue().count(input)).as(language).isZero();
+                assertNoForwardDfa(entry.getValue(), language + " count");
+            }
+        }
     }
 
     private static void assertNoForwardDfa(CompiledPattern pattern, String description)

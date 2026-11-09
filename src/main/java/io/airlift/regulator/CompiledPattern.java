@@ -306,9 +306,9 @@ abstract sealed class CompiledPattern
     private final SingleByteMatcher singleByteMatcher;
     // The bytes every match holds, checked on a short window before any engine runs, or null.
     // Where the compile chose a long-window search, a long window is checked too: for the exact
-    // literal itself, or for a literal beside another literal route. Not final only so that a
-    // frontend route can take back their memory before the frontend's pattern, whose final field
-    // publishes this one, is constructed.
+    // literal or the one-of bytes themselves, or for a literal beside another literal route. Not
+    // final only so that a frontend route can take back their memory before the frontend's
+    // pattern, whose final field publishes this one, is constructed.
     private RequiredBytes requiredBytes;
 
     private volatile Prog reverseProg;
@@ -1344,13 +1344,15 @@ abstract sealed class CompiledPattern
         // ordered-literal matcher, is charged ahead of the required bytes, and they are judged
         // again after it. A pattern with a single-byte table keeps none: its group-zero matchers
         // find on the table once fewer than MINIMUM_LONG_SEARCH_BYTES are left, and a check ahead
-        // of the table would scan such a window twice. An exact literal of a pattern with no other
-        // literal route takes its long-window search into the same charge, with the search-end
-        // bound's search where it has one. A literal searched beside another literal route takes
-        // its long-window search without the bound. If the full charge does not fit, the bound is
-        // removed and the charge retried. If that fails, the pattern keeps only the short-window
-        // check when eligible and affordable, and otherwise keeps no check. An inner literal search
-        // is such a route unless only the class-run proof admits it.
+        // of the table would scan such a window twice. An exact literal, or the one-of bytes, of a
+        // pattern with no other literal route takes its long-window search into the same charge,
+        // with the search-end bound's search where the literal has one. The one-of bytes' search
+        // keeps nothing beyond the bytes, so it does not raise the charge. A literal searched
+        // beside another literal route takes its long-window search without the bound. If the full
+        // charge does not fit, the bound is removed and the charge retried. If that fails, the
+        // pattern keeps only the short-window check when eligible and affordable, and otherwise
+        // keeps no check. An inner literal search is such a route unless only the class-run proof
+        // admits it.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
@@ -1362,7 +1364,7 @@ abstract sealed class CompiledPattern
         if (requiredBytes != null && singleByteMatcher == null) {
             RequiredBytes preferred = null;
             if (mayCheckRequiredLiteralOnLongWindows(booleanPlans, requiredPrefix, exactLiteralLength, partialProg, compactBoundedCharacterClass, matcherClass)) {
-                if (requiredBytes.isExactLiteral() && checksRequiredLiteralOnLongWindows(booleanPlans, partialProg)) {
+                if (requiredBytes.admitsLongWindowSearch() && checksRequiredLiteralOnLongWindows(booleanPlans, partialProg)) {
                     preferred = boundsSearchEnd(partialProg, booleanPlans.loweredProgram())
                             ? requiredBytes.withLongWindowSearchAndBound()
                             : requiredBytes.withLongWindowSearch();
@@ -1370,13 +1372,13 @@ abstract sealed class CompiledPattern
                 else {
                     // A pattern with another literal route searches long windows for its rarest
                     // exact literal that the route does not already search for, without the
-                    // search-end bound. Required bytes that are not an exact literal, of a
-                    // pattern with no such route, have no long-window search. The literal comes
-                    // first, so a pattern without one never builds the start-byte tables that
-                    // the route check may need. The short-window check keeps the required bytes
-                    // either way.
+                    // search-end bound. Required bytes that are neither an exact literal nor the
+                    // one-of bytes, of a pattern with no such route, have no long-window search.
+                    // The literal comes first, so a pattern without one never builds the
+                    // start-byte tables that the route check may need. The short-window check
+                    // keeps the required bytes either way.
                     byte[] literal = RequiredBytes.literalBesideRoutes(requiredBytesRegexp, routeLiterals(booleanPlans));
-                    if (literal != null && (requiredBytes.isExactLiteral() || !checksRequiredLiteralOnLongWindows(booleanPlans, partialProg))) {
+                    if (literal != null && (requiredBytes.admitsLongWindowSearch() || !checksRequiredLiteralOnLongWindows(booleanPlans, partialProg))) {
                         preferred = requiredBytes.withBesideRouteSearch(literal);
                     }
                 }
@@ -1474,13 +1476,13 @@ abstract sealed class CompiledPattern
     }
 
     /// Whether a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more may be checked for a
-    /// required literal before any engine runs, by the pattern's exact literal or by a literal
-    /// beside another literal route; [#checksRequiredLiteralOnLongWindows] tells which. A match
-    /// lies inside the window, so a window without the literal holds none, in every language and
-    /// search mode. The check is left to a pattern whose engine reads the whole of a window that
-    /// holds no match. So the pattern has no required prefix, and neither its forward nor its
-    /// lowered program is anchored at either end, where the engine can stop early. It also has
-    /// none of the shapes whose routes answer without the ordinary engine: an exact literal, a
+    /// required literal before any engine runs, by the pattern's exact literal or one-of bytes or
+    /// by a literal beside another literal route; [#checksRequiredLiteralOnLongWindows] tells
+    /// which. A match lies inside the window, so a window without them holds none, in every
+    /// language and search mode. The check is left to a pattern whose engine reads the whole of a
+    /// window that holds no match. So the pattern has no required prefix, and neither its forward
+    /// nor its lowered program is anchored at either end, where the engine can stop early. It also
+    /// has none of the shapes whose routes answer without the ordinary engine: an exact literal, a
     /// literal kernel or search, a class counter, a literal set or alternation, or a span,
     /// byte-run, word-run, disjoint suffix-repeat, or whole-input capture matcher.
     ///
@@ -1521,10 +1523,10 @@ abstract sealed class CompiledPattern
 
     /// Whether a pattern that [may check long windows][#mayCheckRequiredLiteralOnLongWindows]
     /// has no other literal route that starts where a match starts, so that it checks long
-    /// windows for its own exact required literal. Such a route is a scan plan, an inner literal
-    /// search that the class-run proof does not alone add, or, in the forward or lowered
-    /// program, a prefix scan, a transparent start literal, or a start literal filter that its
-    /// first-match DFA can run. A pattern with one of those checks long windows for a literal
+    /// windows for its own exact required literal or one-of bytes. Such a route is a scan plan,
+    /// an inner literal search that the class-run proof does not alone add, or, in the forward or
+    /// lowered program, a prefix scan, a transparent start literal, or a start literal filter that
+    /// its first-match DFA can run. A pattern with one of those checks long windows for a literal
     /// beside it instead; see [RequiredBytes#literalBesideRoutes]. The pattern decides as it
     /// would without a search that only the class-run proof adds, so that proof neither adds the
     /// check to a pattern nor takes it away.
@@ -2364,10 +2366,10 @@ abstract sealed class CompiledPattern
     }
 
     /// Whether `[start, end)` of `text`, at least [RequiredBytes#SHORT_WINDOW_LIMIT] bytes, lacks
-    /// the exact literal every match consumes, for a pattern whose long windows are checked for
-    /// it, so it holds no match. A window that holds the literal is scanned only up to its first
-    /// occurrence, which the engine reads too. Out of line, so the routes that call it stay
-    /// small.
+    /// the exact literal every match consumes, or every one of the one-of bytes, for a pattern
+    /// whose long windows are checked for them, so it holds no match. A window that holds them is
+    /// scanned only up to their first occurrence, which the engine reads too. Out of line, so the
+    /// routes that call it stay small.
     final boolean longWindowLacksRequiredLiteral(Slice text, int start, int end)
     {
         RequiredBytes literal = requiredBytes;
@@ -2380,9 +2382,9 @@ abstract sealed class CompiledPattern
     /// the last occurrence of the bytes every match ends with, and holds no match without one;
     /// see [RequiredBytes#lastIndexIn]. Where those bytes do not hold the literal, the window up
     /// to that end is also checked for the literal, and holds no match without it. For a pattern
-    /// that checks long windows for its literal alone, such a window holds no match without that
-    /// literal, as [#longWindowLacksRequiredLiteral] finds, and otherwise keeps its end. Out of
-    /// line, so the routes that call it stay small.
+    /// that checks long windows for its literal or one-of bytes alone, such a window holds no
+    /// match without them, as [#longWindowLacksRequiredLiteral] finds, and otherwise keeps its
+    /// end. Out of line, so the routes that call it stay small.
     final int longWindowSearchEnd(Slice text, int start, int end)
     {
         RequiredBytes literal = requiredBytes;
@@ -2400,8 +2402,8 @@ abstract sealed class CompiledPattern
         return literal.suffixHoldsLiteral() || literal.indexIn(text, start, boundEnd) >= 0 ? boundEnd : -1;
     }
 
-    /// The required literal that a matcher checks the rest of a long region for, or null; see
-    /// [#longWindowLacksRequiredLiteral].
+    /// The required literal, or one-of bytes, that a matcher checks the rest of a long region
+    /// for, or null; see [#longWindowLacksRequiredLiteral].
     final RequiredBytes longWindowRequiredLiteral()
     {
         RequiredBytes literal = requiredBytes;
@@ -3511,11 +3513,11 @@ abstract sealed class CompiledPattern
     /// Counts the matches of an unanchored pattern on the DFA, starting from the inner literal
     /// where one is required and the text is long enough, or on the short-search fixed-width
     /// matcher where the pattern has one and the text is too short for the inner literal search.
-    /// A long text that lacks the pattern's long-window literal counts none before any of them
-    /// runs, and the inner literal search or the DFA counts a long text only up to the end
-    /// [#longWindowSearchEnd] bounds it at; the text's length still picks the route. It is out of
-    /// line so that the count route methods stay small enough for C2 to inline into their
-    /// callers.
+    /// A long text that lacks the pattern's long-window literal or one-of bytes counts none
+    /// before any of them runs, and the inner literal search or the DFA counts a long text only
+    /// up to the end [#longWindowSearchEnd] bounds it at; the text's length still picks the
+    /// route. It is out of line so that the count route methods stay small enough for C2 to
+    /// inline into their callers.
     private long countDfaMatches(Slice text)
     {
         int end = longWindowSearchEnd(text, 0, text.length());
@@ -3822,13 +3824,13 @@ abstract sealed class CompiledPattern
 
     /// For a library loop that runs the one-shot unanchored search once per match, from the end of
     /// the last, as RE2's replaceAll does: checks `[start, end)` of `text` for the long-window
-    /// literal under a matcher's back-off, and returns the loop's count of scans in a row that
-    /// found the literal near their start after this one, or -1 when the window lacks the
-    /// literal and so holds no match. `nearScans` is that count before this search, 0 for the
-    /// loop's first. Once it reaches [RegexpMatcher#NEAR_REQUIRED_LITERAL_SCAN_LIMIT], the loop's
+    /// literal or one-of bytes under a matcher's back-off, and returns the loop's count of scans
+    /// in a row that found them near their start after this one, or -1 when the window lacks them
+    /// and so holds no match. `nearScans` is that count before this search, 0 for the loop's
+    /// first. Once it reaches [RegexpMatcher#NEAR_REQUIRED_LITERAL_SCAN_LIMIT], the loop's
     /// searches skip the check, as a matcher's finds do until a reset. Each match consumes the
-    /// literal, so the next search starts past the occurrence this one found, and no occurrence
-    /// is kept. A pattern with the search-end bound whose suffix holds the literal makes no check:
+    /// literal or one of the bytes, so the next search starts past the occurrence this one found,
+    /// and no occurrence is kept. A pattern with the search-end bound whose suffix holds the literal makes no check:
     /// the loop ends its searches at [#loopSearchEnd], as that bound stands in for the check of a
     /// one-shot search. The loop then searches with [#matchIntoAfterLoopCheck].
     final int nearRequiredLiteralScansInLoop(Slice text, int start, int end, int nearScans)

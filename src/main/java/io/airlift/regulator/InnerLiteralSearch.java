@@ -574,7 +574,8 @@ final class InnerLiteralSearch
 
     /// Whether only the class-run proof gives the pattern an inner literal search: without that
     /// proof, [#analyze] returns none. Such a pattern checks long windows for its required literal
-    /// just as it would without the search; see `CompiledPattern.checksRequiredLiteralOnLongWindows`.
+    /// or one-of bytes just as it would without the search; see
+    /// `CompiledPattern.checksRequiredLiteralOnLongWindows`.
     boolean addedByClassRunProof()
     {
         return addedByClassRunProof;

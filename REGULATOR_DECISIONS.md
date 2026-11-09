@@ -2033,7 +2033,10 @@ full-Slice boolean find first takes the
 the pattern keeps required bytes, which a ranged find and `findInto` do not;
 `.{0,2}(Tom|Sawyer|Huckleberry|Finn)` keeps none, and a count never checks them.
 The search owns each window from its minimum. A one-of set of two or three
-distinct bytes checks only the windows below both that minimum and 256 bytes. A
+distinct bytes checks only the windows below both that minimum and 256 bytes,
+except where only the class-run proof admits the search: an otherwise eligible
+pattern also checks windows of 256 bytes or more for the bytes, as
+[long windows](#required-literal-absence-on-long-windows) describes. A
 single required byte and a literal of two or more bytes keep their check of
 every window below 256 bytes, the byte with a scan as cheap as the search's
 single-byte scan: a check that changed with line length cost 4–6% on naturally
@@ -2272,23 +2275,26 @@ Windows of 256 bytes or more skip the check. Most lines of a line search are
 shorter, and there the scan costs less than the find and engine setup it saves.
 A window that holds the bytes is scanned twice, once by the check and once by
 the engine, and on a long window the second scan is no longer small beside the
-setup. An exact literal of a pattern with no other literal route checks long
-windows too. A route that starts where a match starts, or a scan plan, keeps a
-pattern from that check, and such a pattern checks long windows instead for its
-rarest exact literal that the route does not already search for. Both checks
-are described in
+setup. An exact literal, or one-of bytes, of a pattern with no other literal
+route checks long windows too. A route that starts where a match starts, or a
+scan plan, keeps a pattern from that check, and such a pattern checks long
+windows instead for its rarest exact literal that the route does not already
+search for. Both checks are described in
 [Required Literal Absence On Long Windows](#required-literal-absence-on-long-windows).
 A pattern whose every match spans at least 256 bytes, counting a required
 prefix, needs no fact for short windows, since none can hold such a match. Where
 the long-window check is chosen, the pattern keeps its literal for that check
 alone, with the [search-end bound](#required-suffix-bound-on-long-windows) where
 it has one, and otherwise it keeps no fact. Every short-window hook rejects a
-window shorter than a match on its length first. A one-of set of two or three
-distinct bytes beside an inner literal search checks only windows shorter than
-that search's [minimum](#minimum-inner-literal-search-window), where it is lower
-than 256 bytes: from there the search scans each window for its literal before
-any engine runs unless the find skips the DFA, and the one-of scan would repeat
-or replace that scan. A single required byte keeps every window below 256 bytes,
+window shorter than a match on its length first. For a one-of set of two or
+three distinct bytes beside an inner literal search, the short-window check
+covers only windows shorter than that search's
+[minimum](#minimum-inner-literal-search-window), where it is lower than 256
+bytes: from there the search scans each window for its literal before any engine
+runs unless the find skips the DFA, and the one-of scan would repeat or replace
+that scan. Where only the class-run proof admits that search, the set also takes
+the [long-window check](#required-literal-absence-on-long-windows).
+A single required byte keeps every window below 256 bytes,
 since its scan costs as little as the search's single-byte scan and a check that
 changed with line length cost more on naturally mixed line lengths, as that
 section records. Where the pattern qualifies, a gated one-byte search for the
@@ -2570,7 +2576,13 @@ whole text, while Hyperscan, whose reverse vermicelli scan proves the literal
 match consumes holds no match, so a pattern whose
 [required bytes](#short-window-required-bytes-reject) are an exact literal also
 checks a window of 256 bytes or more for it before any engine runs, and reports
-no match when it is absent.
+no match when it is absent. So does a pattern whose required bytes are one of up
+to three bytes, such as the `/` or `@` of `[a-z]+://\S+|[^ @]+@[^ @]+`: a window
+without any of them holds no match. Its search is the vector byte-set scan from
+1 KiB, and a word search for the first matching byte below that or without
+vectors. A one-of fact carries no exact suffix, so it never takes the
+[search-end bound](#required-suffix-bound-on-long-windows), and a check beside
+another route, below, searches only for an exact literal.
 
 The check is left to patterns where it can pay. The literal must be exact: the
 search compares exact bytes, so a case-insensitive literal is out. The pattern
@@ -2652,12 +2664,13 @@ A search for a literal that begins every match lands where a match would start,
 as a prefix scan does, and keeps the check.
 
 Compilation decides this once, and the literal's search takes its memory in the
-required bytes' charge, with the search-end bound's search where the pattern
-has one. That charge may not fit at compile time, or once a frontend route such
-as Trino's ordered-literal matcher is charged ahead of it. If the full charge
-does not fit, the bound is removed and the charge retried. If that fails, the
-pattern keeps only the short-window check, when its matches can fit a short
-window and that smaller charge fits, and otherwise keeps no check.
+required bytes' charge, with the search-end bound's search where the pattern has
+one; the one-of bytes' search keeps nothing beyond the bytes and adds nothing to
+it. That charge may not fit at compile time, or once a frontend route such as
+Trino's ordered-literal matcher is charged ahead of it. If the full charge does
+not fit, the bound is removed and the charge retried. If that fails, the pattern
+keeps only the short-window check, when its matches can fit a short window and
+that smaller charge fits, and otherwise keeps no check.
 
 Five hooks run the check before any engine setup:
 
@@ -2667,12 +2680,12 @@ Five hooks run the check before any engine setup:
   found occurrence is reused: it only lets the engine run, so it stays right
   even if the caller changes the input between finds, while a scan that found
   nothing is not kept, and a matcher rereads its input on every find, as the
-  engine does. After eight scans in a row find the literal within 256 bytes of
-  their start, the matcher stops scanning until the next reset: on a region
-  that dense, the engine reads those bytes anyway and each scan pays its vector
-  setup for nothing. That is its cost: once a dense stretch stops the scans, a
-  later stretch without the literal runs the engine rather than being rejected
-  by a scan.
+  engine does. After eight scans in a row find the literal or one-of bytes
+  within 256 bytes of their start, the matcher stops scanning until the next
+  reset: on a region that dense, the engine reads those bytes anyway and each
+  scan pays its vector setup for nothing. That is its cost: once a dense stretch
+  stops the scans, a later stretch without them runs the engine rather than
+  being rejected by a scan.
 - The engine shape's full-Slice `find`, in place of the short-window check.
 - Count, before the DFA count, which the class-counter and anchored counts do
   not reach.

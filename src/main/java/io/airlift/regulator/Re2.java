@@ -429,10 +429,10 @@ public sealed class Re2
     }
 
     /// Runs [#replaceAll] and returns the loop's count, when it ended, of scans in a row that
-    /// found the long-window literal near their start, or -1 where a scan found no literal; see
-    /// `CompiledPattern.nearRequiredLiteralScansInLoop`. On text where every scan finds the literal
-    /// near its start, that count is every scan the call made, which the loop's back-off stops at
-    /// `RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT`. Only tests call it.
+    /// found the long-window literal or one-of bytes near their start, or -1 where a scan found
+    /// none; see `CompiledPattern.nearRequiredLiteralScansInLoop`. On text where every scan finds
+    /// them near its start, that count is every scan the call made, which the loop's back-off
+    /// stops at `RegexpMatcher.NEAR_REQUIRED_LITERAL_SCAN_LIMIT`. Only tests call it.
     int replaceAllNearLiteralScansForDiagnostics(Slice text, Slice rewrite)
     {
         int[] nearScans = new int[1];
@@ -453,8 +453,8 @@ public sealed class Re2
         int position = base;
         int lastEnd = -1;
         int count = 0;
-        // How many scans in a row found the long-window literal near their start; see
-        // nearRequiredLiteralScansInLoop.
+        // How many scans in a row found the long-window literal or one-of bytes near their start;
+        // see nearRequiredLiteralScansInLoop.
         int nearScans = 0;
         DynamicSliceOutput out = new DynamicSliceOutput(text.length() + rewrite.length());
         // The bound of the whole text, computed once, ends every search, so no search computes
