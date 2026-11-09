@@ -653,6 +653,78 @@ public class TestDfaCountMatches
     }
 
     @Test
+    public void testSelfLoopExitScanRearmsAfterShortScans()
+    {
+        // Each field state of (.*?,){13}z loops on every byte but a newline, a comma, in Java a
+        // carriage return, and, in UTF-8, every high byte. Lines of long fields alternate with
+        // lines of one-byte or empty fields, whose short scans and stepped commas used to end the
+        // scan for the rest of the search, and lines with 13 fields and a z end the matches. The
+        // multibyte variant ends each field's words with the two-byte `é`.
+        String expression = "(.*?,){13}z";
+        for (String word : new String[] {"field", "the story of a caf\u00e9"}) {
+            String field = (word + " ").repeat(4);
+            StringBuilder text = new StringBuilder();
+            int matchingLines = 0;
+            for (int line = 0; line < 60; line++) {
+                if (line % 10 == 9) {
+                    text.append((field + ",").repeat(13)).append("z ").append(field);
+                    matchingLines++;
+                }
+                else if (line % 5 == 2) {
+                    text.append((line % 10 == 2 ? "a," : ",").repeat(20)).append('a');
+                }
+                else {
+                    text.append((field + ",").repeat(20)).append(field);
+                }
+                text.append('\n');
+            }
+            Slice input = utf8Slice(text.toString());
+            for (CompiledPattern pattern : List.of(
+                    Re2.compile(utf8Slice(expression)),
+                    RustRegexp.compile(utf8Slice(expression)),
+                    JavaRegexp.compile(utf8Slice(expression)),
+                    TrinoRegexp.compile(utf8Slice(expression)).re2())) {
+                String description = pattern.getClass().getSimpleName() + " " + word;
+                Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+                assertThat(pattern.count(input)).as(description).isEqualTo(matchingLines);
+                // Once the transitions are computed, the scan re-arms after each line of short fields
+                // and never hands off to the pointer loop.
+                int rearmCount = dfa.countSelfLoopRearmCount();
+                int handOffCount = dfa.countSelfLoopNoMatchPointerHandOffCount();
+                assertThat(pattern.count(input)).as(description).isEqualTo(matchingLines);
+                assertThat(dfa.countSelfLoopRearmCount() > rearmCount).as(description).isEqualTo(VectorSupport.isAvailable());
+                assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount()).as(description).isEqualTo(handOffCount);
+            }
+        }
+    }
+
+    @Test
+    public void testSelfLoopExitScanHandsOffDenseTailAfterSparseHead()
+    {
+        // A 64 KiB head without commas or newlines, which one scan skips, keeps the skipped share
+        // of the whole search at half or more through a dense tail as long. The tail's one-byte
+        // fields hand the search off once a stretch of 8 KiB is followed by scans that skip under
+        // half of the bytes covered since that re-arm, and a last line with 13 fields and a z ends
+        // one match.
+        String expression = "(.*?,){13}z";
+        Slice input = utf8Slice("lorem ipsum ".repeat(64 * 1024 / 12) + "a,\n".repeat(64 * 1024 / 3) + ",".repeat(13) + "z");
+        for (CompiledPattern pattern : List.of(
+                Re2.compile(utf8Slice(expression)),
+                RustRegexp.compile(utf8Slice(expression)),
+                JavaRegexp.compile(utf8Slice(expression)),
+                TrinoRegexp.compile(utf8Slice(expression)).re2())) {
+            String description = pattern.getClass().getSimpleName();
+            Dfa.DfaInstance dfa = pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(pattern.count(input)).as(description).isEqualTo(1);
+            // Once the transitions are computed and the pointer table requested, the search hands
+            // the dense tail off to the pointer loop.
+            int handOffCount = dfa.countSelfLoopNoMatchPointerHandOffCount();
+            assertThat(pattern.count(input)).as(description).isEqualTo(1);
+            assertThat(dfa.countSelfLoopNoMatchPointerHandOffCount() > handOffCount).as(description).isEqualTo(VectorSupport.isAvailable());
+        }
+    }
+
+    @Test
     public void testSelfLoopExitScanMinimumLength()
     {
         // The route needs 64 bytes remaining.
