@@ -3741,7 +3741,7 @@ fits: the program's DFA budget is smaller than the forward budget Trino checked.
 
 RE2, Java, and Rust keep the program wherever it fits the budget, so
 `english-10` still retains about 25 MB under the default budget: the program and
-its reverse expression beside the 2.6 MB automaton. Only where the program does
+its reverse expression beside the 2.7 MB automaton. Only where the program does
 not fit does such a pattern compile without one. The compile that the budget
 rejected is discarded, and two checks against the forward share follow: the
 temporary trie of every literal that spells the full-match list below must fit
@@ -3783,10 +3783,11 @@ DFA's count self-loop scan, stops for the rest of the search once 4 skips in a
 row each moved fewer than 16 bytes, as on prose, where a skip crosses only the
 punctuation and space between words. The skip, with its tables where it needs
 them, is built only where the automaton still fits the memory it may retain with
-it; otherwise the automaton walks every byte, so no pattern that compiled
-without the skip fails to compile. Where the pattern keeps its program, a skip
-that would cost either forward DFA its initialization is dropped too, since the
-skip changes no result, so a set the DFA cannot hold searches without it. A set
+it; otherwise the search reads the bytes the root skip would have crossed, or
+steps by windows in a set with a skip table, so no pattern that compiled without
+the skip fails to compile. Where the pattern keeps its program, a skip that
+would cost either forward DFA its initialization is dropped too, since the skip
+changes no result, so a set the DFA cannot hold searches without it. A set
 without a program has no forward DFA and builds the skip where it fits beside
 the full-match list.
 
@@ -3806,15 +3807,46 @@ search reads one entry where it would scan edges and follow failure links.
 searches in 0.41x to 0.49x the time on r9g and 0.46x to 0.47x on r8i, and
 `english-15` in 0.43x to 0.54x. The row entries take at most 1 MiB and are built
 at the deepest depth whose rows fit the memory the automaton may retain. Where
-the pattern keeps its program, the rows yield only where removing them lets a
-forward DFA initialize: unlike the root skip, a set that a DFA cannot initialize
-beside either way keeps them, as `english-10` does under the default budget,
-where the longest-match DFA initializes beside neither. Every large set also
-carries the rows' fields, 24 bytes with compressed pointers, whether or not it
-builds rows, which can move a budget edge by that much. Java's gd
-`set-dense-english` reusedContains row is accepted at 1.101x on r8i, a bimodal
-row, and Trino's synthetic gd `set-sparse-numeric` reusedContains row at 1.033x
-on r9g and 1.082x on r8i.
+the pattern keeps its program, the rows and any skip table yield only where
+removing them lets a forward DFA initialize: unlike the root skip, a set that a
+DFA cannot initialize beside either way keeps them, as `english-10` does under
+the default budget, where the longest-match DFA initializes beside neither.
+Every large set also carries the rows' fields, 24 bytes with compressed
+pointers, whether or not it builds rows, which can move a budget edge by that
+much. Java's gd `set-dense-english` reusedContains row is accepted at 1.101x on
+r8i, a bimodal row, and Trino's synthetic gd `set-sparse-numeric` reusedContains
+row at 1.033x on r9g and 1.082x on r8i.
+
+Where every literal has at least 4 bytes, a search of 64 bytes or more skips
+ahead as in Wu and Manber's multi-pattern search: a 1 KiB to 64 KiB table maps
+the hash of each window's last two or three bytes to the distance within which
+no literal starts, and a zero distance walks the trie from the window start. The
+windows are as long as the shortest literal, at most 16 bytes. The table is
+built only where it fits the memory the automaton may retain, and not where more
+than a quarter of its hashes have distance zero, which only a set of thousands
+of windows reaches. It takes that memory before the dense rows, since it retains
+at most 64 KiB against the rows' 1 MiB and saves more: `english-10` retains a
+64 KiB table, 2.71 MB in all, for searches in 0.21x to 0.22x the time without
+dense rows or a skip table, where the rows alone give 0.41x to 0.49x, and in
+0.30x the regex crate's time. The walk allowance is checked after each failed
+trie walk, against 4,096 trie edges plus two per byte passed, so one walk can
+take the total past it before the automaton takes the rest, and a run of near
+misses stays linear. Shorter searches run the automaton, which won on the
+benchmark's short rows. On text no literal starts in, such as digits searched
+for a word list, a window step crosses at most `window - block + 1` bytes, 5 for
+gd's 7-byte windows, where the root skip's one vector scan crosses the run: with
+windows alone, gd's Trino `set-sparse-numeric` took 18x to 31x the time without
+dense rows or a skip table, and 1 KB `LITERAL_SET` rows 7.5x to 10.7x. No
+compile-time test separates such text from prose, since gd's
+`set-dense-english`, which skipping ahead speeds up, uses the same set. So a set
+with the root skip scans to the next leading byte from a window start whose byte
+and the next lead no literal, and, until the root skip's short-scan limit ends
+its scans, leaves the last 64 bytes of the search to the automaton, where the
+root skip stops too. Once the limit ends them, the search steps windows to the
+last full window with a new walk allowance, so it can skip into those last
+bytes, and a later allowance handoff starts the automaton's short-scan count
+afresh. This is kept: by then the text is dense in leading bytes, where window
+steps win.
 
 The literal set is what the parsers' factoring leaves of a dictionary: literal
 strings, empty alternatives as in `absentmindedness(?:|'s)`, and classes of at

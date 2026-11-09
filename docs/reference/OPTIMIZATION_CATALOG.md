@@ -1470,10 +1470,11 @@ ordinary engine would.
   anchored at its start keeps the deepest literal on the goto walk and a full
   match also reads the sorted list of the literals that extend another; the
   root skip with a vector-scannable root set and 64 bytes or more left, which
-  steps byte by byte after four short scans in a row; dense rows for the
-  states up to depth 3, or the deepest depth whose rows fit 1 MiB and the
-  build's memory budget, and none where they alone would keep a forward DFA
-  from initializing
+  then steps byte by byte after four short scans in a row, or by windows in a
+  set with a skip table; dense rows for the states up to depth 3, or the
+  deepest depth whose rows fit 1 MiB and the build's memory budget, and none
+  where they and any skip table alone would keep a forward DFA from
+  initializing
 - **What it does:** A capture-free alternation of more than 64 literals
   searches a leftmost-first Aho-Corasick automaton ported from the
   aho-corasick crate's noncontiguous NFA. A sparse trie step rejects a byte above
@@ -1488,6 +1489,38 @@ ordinary engine would.
   of its time without them, 0.60 to 0.69 of the crate's, and `english-15`'s
   to 0.43 to 0.54 of its time without them, still 1.35 to 2.29 times the
   crate's, at 801 KB more retained memory for `english-10`.
+
+### Skip ahead in sets of long literals
+
+- **Origin:** Adapted from Wu and Manber (1994) ("A Fast Algorithm for
+  Multi-Pattern Searching", University of Arizona TR-94-17): their shift table
+  of hashed blocks over windows as long as the shortest literal, with a trie
+  walk at a zero shift in place of their hash and prefix lists. Regulator: the
+  walk allowance that hands a run of near misses to the automaton, and the
+  root's byte-set scan across text no literal starts in.
+- **Where:** `LiteralSetSpanMatcher.withSkipTable`,
+  `LiteralSetSpanMatcher.skipAhead`,
+  `LiteralSetSpanMatcher.skipAheadScanningRootBytes`,
+  `LiteralSetSpanMatcher.SkipTable`
+- **Applies when:** A large literal set whose literals all have at least 4
+  bytes, whose table has distance zero for at most a quarter of its hashes,
+  and that fits the build's memory budget, on searches of 64 bytes or more;
+  none where the set yields its tables to the forward DFAs
+- **What it does:** Each window, up to 16 bytes, hashes its last block of two
+  or three bytes to the distance within which no literal starts, and a zero
+  distance walks the trie from the window start. The walks may follow 4,096
+  trie edges plus two per byte passed, checked after each failed walk, so one
+  walk can take the total past that allowance before the automaton takes the
+  rest of the search, and near misses stay linear. A set with the root skip
+  scans to the next leading byte where a window starts on two bytes that lead
+  no literal, as the automaton does, since on digits searched for words a
+  window step crosses only a few bytes; until the short-scan limit ends its
+  scans, it leaves the last 64 bytes to the automaton. Once the limit ends
+  them, the search steps windows with a new walk allowance and can skip into
+  those bytes, and a later handoff to the automaton restarts the short-scan
+  count. `english-10` searches in 0.21 to 0.22 of the time without dense rows
+  or a skip table, and 0.30 of the regex crate's time, at a 64 KiB table;
+  `english-15` in 0.07 to 0.15 of the time without them.
 
 ### Word-run plan
 

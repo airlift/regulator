@@ -77,9 +77,9 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// engine. Its rows are Latin-1 bytes, with accented letters and a stray `0xFF` that are no UTF-8.
 /// Java and Trino have no byte mode, so setup rejects the target in them. LITERAL_SET alternates
 /// 100 words, over the limit of 64 literals of the literal-alternation span matcher: full-Slice
-/// `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers find it with the
-/// literal set's automaton, skipping the bytes that lead no word with a vector scan on LONG rows.
-/// SINGLE_BYTE is the one-byte exact literal `,`, which a matcher's `find` reads with the
+/// `find` and `count` run the forward DFA, and RE2, Java, and Rust matchers search the literal
+/// set, skipping ahead by windows and with the root's vector scan on LONG rows. SINGLE_BYTE is
+/// the one-byte exact literal `,`, which a matcher's `find` reads with the
 /// single-byte table on SHORT rows and with the group-zero forward cursor's vector scan on LONG
 /// rows. DOT_STAR_LITERAL is `.*timeout.*`, whose dots stop at a line feed, unlike CONTAINS's
 /// `(?s)`; RE2 and Rust search it as a contained literal and count and iterate its spans on the

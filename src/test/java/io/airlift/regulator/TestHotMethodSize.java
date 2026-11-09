@@ -104,12 +104,13 @@ public class TestHotMethodSize
         }
     }
 
-    /// Keeps the large literal set's walks and sparse transition small enough for C2 to inline into
-    /// the search that picks them and, for the transition, into each walk's loop.
+    /// Keeps the large literal set's trie walks, window searches, and sparse transition small
+    /// enough for C2 to inline into the search that picks them and, for the transition, into each
+    /// walk's loop.
     @Test
     public void testLiteralSetSearchFitsInlineSize()
     {
-        for (String method : List.of("walkTrie", "walkTrieSkippingRootBytes", "sparseTransition")) {
+        for (String method : List.of("walkTrie", "walkTrieSkippingRootBytes", "walkPrefix", "skipAhead", "skipAheadScanningRootBytes", "sparseTransition")) {
             assertThat(codeLength(LiteralSetSpanMatcher.class, method))
                     .as("LiteralSetSpanMatcher.%s bytecode bytes", method)
                     .isPositive()
