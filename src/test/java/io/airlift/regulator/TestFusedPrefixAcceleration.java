@@ -135,6 +135,42 @@ public class TestFusedPrefixAcceleration
                 int expected = referenceSearch(data, offset, length, prefix);
                 assertThat(program.prefixAccel(data, offset, length)).as("%s iteration %s at offset %s length %s", value, iteration, offset, length).isEqualTo(expected);
                 assertThat(Prog.findLiteral(data, offset, length, prefix, literalSearch)).as("%s iteration %s at offset %s length %s", value, iteration, offset, length).isEqualTo(expected);
+                if (VectorSupport.isAvailable()) {
+                    int[] pair = program.fusedProbeOffsetsForDiagnostics();
+                    assertPrefixScans(data, offset, length, prefix, pair[0], pair[1], literalSearch, expected);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testPrefixScanFormsAtEveryStart()
+    {
+        // Each form of the vector scan alone finds the prefix at every start in windows that fill
+        // arrays of PREFIX.length to PREFIX.length + 192 bytes, three 64-byte vectors past the
+        // prefix, so the match lands in every lane of a full vector and at each offset of the
+        // scalar tail, and a scan that reads past the window fails. Around it, every third byte is
+        // the primary pair byte and every third the secondary one, placed so that no start has
+        // both.
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        LiteralSearchKernel literalSearch = new LiteralSearchKernel(Slices.wrappedBuffer(PREFIX));
+        int pairOffset = Prog.pairOffset(PREFIX);
+        int backOffset = PREFIX.length - 1;
+        assertThat((backOffset - pairOffset) % 3).isZero();
+        for (int end = PREFIX.length; end <= (3 * 64) + PREFIX.length; end++) {
+            byte[] filler = new byte[end];
+            for (int index = 0; index < end; index++) {
+                filler[index] = switch (index % 3) {
+                    case 0 -> PREFIX[pairOffset];
+                    case 1 -> PREFIX[backOffset];
+                    default -> (byte) 'x';
+                };
+            }
+            assertPrefixScans(filler, 0, end, PREFIX, pairOffset, backOffset, literalSearch, -1);
+            for (int start = 0; start <= end - PREFIX.length; start++) {
+                byte[] data = filler.clone();
+                System.arraycopy(PREFIX, 0, data, start, PREFIX.length);
+                assertPrefixScans(data, 0, end, PREFIX, pairOffset, backOffset, literalSearch, start);
             }
         }
     }
@@ -345,11 +381,29 @@ public class TestFusedPrefixAcceleration
         String prefix = "a".repeat(halfLength) + "b" + "a".repeat(halfLength);
         int length = lead.length() + prefix.length();
         byte[] data = withA5(("x".repeat(backingOffset) + lead + prefix + "x".repeat(5)).getBytes(StandardCharsets.US_ASCII));
-        Prog program = configuredProgram(withA5(prefix.getBytes(StandardCharsets.US_ASCII)), false);
+        byte[] prefixBytes = withA5(prefix.getBytes(StandardCharsets.US_ASCII));
+        Prog program = configuredProgram(prefixBytes, false);
 
         assertThat(program.prefixAccelStrategy(length)).isEqualTo(strategy);
         assertThat(program.prefixAccelKmpHandoffForDiagnostics(data, backingOffset, length)).isEqualTo(backingOffset + kmpHandoff);
         assertThat(program.prefixAccel(data, backingOffset, length)).isEqualTo(backingOffset + lead.length());
+        if (strategy == Prog.PrefixAccelStrategy.FUSED_VECTOR) {
+            // Both forms of the vector scan hand off to KMP at the same position.
+            int[] pair = program.fusedProbeOffsetsForDiagnostics();
+            assertThat(VectorPrefixScanner.findPair(data, backingOffset, length, prefixBytes, pair[0], pair[1])).as("findPair").isEqualTo(-2 - (backingOffset + kmpHandoff));
+            assertThat(VectorPrefixScanner.findPairMasked(data, backingOffset, length, prefixBytes, pair[0], pair[1])).as("findPairMasked").isEqualTo(-2 - (backingOffset + kmpHandoff));
+        }
+    }
+
+    // Both forms of the vector prefix scan run on every platform, though find picks the masked
+    // form only on x86 with 64-byte vectors. They return the same result, KMP handoffs included,
+    // and the search they hand off finds the expected match.
+    private static void assertPrefixScans(byte[] data, int offset, int length, byte[] prefix, int primaryOffset, int secondaryOffset, LiteralSearchKernel literalSearch, int expected)
+    {
+        String description = "%s probing %s and %s at offset %s length %s".formatted(new String(prefix, StandardCharsets.UTF_8), primaryOffset, secondaryOffset, offset, length);
+        int found = VectorPrefixScanner.findPair(data, offset, length, prefix, primaryOffset, secondaryOffset);
+        assertThat(VectorPrefixScanner.findPairMasked(data, offset, length, prefix, primaryOffset, secondaryOffset)).as("masked " + description).isEqualTo(found);
+        assertThat(found < -1 ? literalSearch.findKmp(data, -2 - found, offset + length) : found).as(description).isEqualTo(expected);
     }
 
     private static byte[] withA5(byte[] bytes)

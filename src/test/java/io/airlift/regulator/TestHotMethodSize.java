@@ -360,10 +360,16 @@ public class TestHotMethodSize
     @Test
     public void testPrefixScanStaysOutOfLineAtMeasuredSize()
     {
-        assertThat(codeLength(VectorPrefixScanner.class, "find"))
-                .as("VectorPrefixScanner.find bytecode bytes")
+        // find only picks one of these, the masked form on x86 with 64-byte vectors, so each form
+        // runs out of line, capped at its own measured size.
+        assertThat(codeLength(VectorPrefixScanner.class, "findPair"))
+                .as("VectorPrefixScanner.findPair bytecode bytes")
                 .isGreaterThan(FREQ_INLINE_SIZE)
                 .isLessThanOrEqualTo(469);
+        assertThat(codeLength(VectorPrefixScanner.class, "findPairMasked"))
+                .as("VectorPrefixScanner.findPairMasked bytecode bytes")
+                .isGreaterThan(FREQ_INLINE_SIZE)
+                .isLessThanOrEqualTo(382);
         // The folded prefix scan has the same counted-loop shape and runs out of line the same way.
         assertThat(codeLength(VectorPrefixScanner.class, "findFoldCase"))
                 .as("VectorPrefixScanner.findFoldCase bytecode bytes")
