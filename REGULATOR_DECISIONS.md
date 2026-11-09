@@ -3675,9 +3675,44 @@ for `curated/02-literal-alternate` `sherlock-casei-en` and `sherlock-casei-ru`,
 the 16-bit shift below and half the lanes, so r8i's 1.078x is the nearest
 evidence for them; their own cost was not measured.
 
-The r9g and r8i figures above for the three-load form come from A/B rounds
-against the sliding scan on r9g and r8i hosts with JDK 25. The figures below are
-for the sliding scan and come from two A/B rounds against the three-load nibble
+On x86 with 64-byte vectors and AVX-512 VBMI, as on r8i (Granite Rapids), the
+scan takes the shape of Hyperscan's AVX-512 VBMI Teddy: each step loads one
+vector at the first position, looks up all three positions' bits from it, and
+moves the second and third positions' bits down by their distance from the first
+with one `vpermb` each. Lanes whose third byte lies past the vector are left out
+of the compare, so each step advances 64 bytes less the distance from the first
+position to the third, a distance of at most eleven bytes. It trades the two extra
+loads and two of the three nibble shifts for the two permutes. With JDK 25 on
+r8i it took 0.89x to 0.90x the sliding scan's time for `sherlock-casei-ru`,
+0.95x for `tom-sawyer-huckle-fin-insensitive`, where the three-load form took
+1.078x, 0.96x to 0.97x for `sherlock-casei-en`, and 0.99x to 1.00x for
+`literal-casei-english`.
+
+Without VBMI, C2 emulates each 64-lane byte permute in several instructions. On
+Cascade Lake (AWS r5, Xeon 8259CL, AVX-512BW without VBMI, 64-byte vectors) with
+JDK 25, the one-load form took 1.05x to 1.13x main's time for Trino
+`trino-operations/extract-delimiter` on three of four hosts and 1.01x to 1.06x
+for Rust `sherlock/name-alt2`, where the three-load form took 0.99x to 1.03x,
+and the three-load form beat it on the three case-insensitive literal rows
+measured there: 0.69x of main's time against 0.82x for `sherlock-casei-ru`,
+0.76x against 0.99x for `tom-sawyer-huckle-fin-insensitive`, and 0.80x against
+0.99x for `sherlock-casei-en`. So x86 without VBMI keeps a load at each
+position. HotSpot has no flag for VBMI, so on Linux x86 with 64-byte vectors the
+gate reads the first `flags` line of `/proc/cpuinfo` once and looks for the
+whole token `avx512vbmi`, the kernel's spelling, with no underscore; on any
+other OS, or when the file cannot be read or has no flags line, the scan keeps
+a load at each position. The r8i host (Xeon 6975P-C) lists `avx512vbmi` and
+`avx512_vbmi2`, VBMI and its VBMI2 lookalike. Unmeasured in the one-load form
+are x86 on other OSes, AVX2-only x86, NEON-only aarch64, 256-bit SVE, and SVE
+wider than that, 512-bit SVE's 64-byte vectors included. Ice Lake and AMD Zen 4
+and 5 have VBMI and take the one-load form unmeasured.
+
+The r9g and r8i figures above for the three-load form and the VBMI one-load
+form come from A/B rounds against the sliding scan on r9g and r8i hosts with
+JDK 25. The Cascade Lake figures come from A/B rounds against main on four r5
+hosts, of the scan changes this section and the prefix scan sections record,
+once with each nibble form. The figures below are for the sliding scan and come
+from two A/B rounds against the three-load nibble
 scan of #135, on two r9g and two r8i hosts with JDK 25. That scan shifted bytes
 on x86, where the present three-load scan shifts 16-bit lanes. A form whose
 first step called helpers allocated 36 to 2,136 KB per operation on r8i, such as

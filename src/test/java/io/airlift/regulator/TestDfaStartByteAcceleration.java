@@ -18,6 +18,9 @@ import io.airlift.slice.Slices;
 import jdk.incubator.vector.ByteVector;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.Reader;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -42,6 +45,28 @@ public class TestDfaStartByteAcceleration
 {
     // mariomka/ip, the IPv4 address row of the regex benchmarks, as rebar defines it.
     private static final String IP_ADDRESS = "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])";
+
+    // The first flags line of /proc/cpuinfo on AWS r8i (Xeon 6975P-C, Granite Rapids), which has VBMI.
+    private static final String R8I_FLAGS_LINE = "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx " +
+            "fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl " +
+            "xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pdcm " +
+            "pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor " +
+            "lahf_lm abm 3dnowprefetch cpuid_fault invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced " +
+            "fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap " +
+            "avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves " +
+            "avx_vnni avx512_bf16 wbnoinvd ida arat avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes " +
+            "vpclmulqdq avx512_vnni avx512_bitalg tme avx512_vpopcntdq rdpid bus_lock_detect cldemote " +
+            "movdiri movdir64b md_clear serialize amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d " +
+            "arch_capabilities";
+
+    // The first flags line of /proc/cpuinfo on AWS r5 (Xeon 8259CL, Cascade Lake), whose AVX-512 lacks VBMI.
+    private static final String R5_FLAGS_LINE = "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx " +
+            "fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology " +
+            "nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 " +
+            "x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm " +
+            "3dnowprefetch cpuid_fault invpcid_single pti fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms " +
+            "invpcid mpx avx512f avx512dq rdseed adx smap clflushopt clwb avx512cd avx512bw avx512vl " +
+            "xsaveopt xsavec xgetbv1 xsaves ida arat pku ospke";
 
     @Test
     public void testLeadingByteClassSelectsStartByteAcceleration()
@@ -806,6 +831,7 @@ public class TestDfaStartByteAcceleration
                         .as("pattern %s offset=%s length=%s", pattern, offset, length)
                         .isEqualTo(expected);
                 assertExactTwoLiteralScans(pattern, filter, text, offset, length, expected);
+                assertNibbleScans(pattern, filter, text, offset, length, expected);
             }
 
             // The first bytes of one literal sit at every position of zero-filled windows of up to
@@ -825,6 +851,7 @@ public class TestDfaStartByteAcceleration
                     assertExactTwoLiteralScans(pattern, filter, text, 0, end, start);
                     assertThat(VectorByteSetScanner.findLiteralSet(text, start, end - start, filter)).as("pattern %s from start=%s end=%s", pattern, start, end).isEqualTo(start);
                     assertThat(VectorByteSetScanner.findLiteralSet(text, start, span - 1, filter)).as("pattern %s short window start=%s end=%s", pattern, start, end).isEqualTo(-1);
+                    assertNibbleScans(pattern, filter, text, 0, end, start);
                 }
             }
         }
@@ -844,6 +871,83 @@ public class TestDfaStartByteAcceleration
             String description = "pattern %s offset=%s length=%s".formatted(pattern, offset, length);
             assertThat(VectorByteSetScanner.findTwoExactLiterals(text, offset, length, filter)).as(description).isEqualTo(expected);
             assertThat(VectorByteSetScanner.findTwoExactLiteralsXor(text, offset, length, filter)).as("XOR " + description).isEqualTo(expected);
+        }
+    }
+
+    // Both nibble scans run on every platform, though findLiteralSet picks the one-load form only
+    // on x86 with 64-byte vectors and AVX-512 VBMI.
+    private static void assertNibbleScans(String pattern, StartLiteralFilter filter, byte[] text, int offset, int length, int expected)
+    {
+        if (filter.values().length / 3 > 2) {
+            assertThat(VectorByteSetScanner.findLiteralNibbles(text, offset, length, filter))
+                    .as("pattern %s loads offset=%s length=%s", pattern, offset, length)
+                    .isEqualTo(expected);
+            assertThat(VectorByteSetScanner.findLiteralNibblesOneLoad(text, offset, length, filter))
+                    .as("pattern %s one load offset=%s length=%s", pattern, offset, length)
+                    .isEqualTo(expected);
+        }
+    }
+
+    @Test
+    public void testCpuInfoFlagsLineListsAvx512Vbmi()
+            throws IOException
+    {
+        // The Linux kernel spells VBMI avx512vbmi, without the underscore its later AVX-512 flags
+        // carry, and the first flags line must hold that whole token. r8i lists it and also lists
+        // avx512_vbmi2, which alone is another extension; avx512_vbmi is no kernel spelling, and
+        // avx512vbmi_x only begins with the token. Cascade Lake has avx512bw but no VBMI.
+        assertThat(cpuInfoListsAvx512Vbmi(R8I_FLAGS_LINE)).isTrue();
+        assertThat(cpuInfoListsAvx512Vbmi(R5_FLAGS_LINE)).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi("flags\t\t: fpu avx512f avx512bw avx512_vbmi2")).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi("flags\t\t: fpu avx512f avx512bw avx512_vbmi avx512_vbmi2")).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi("flags\t\t: fpu avx512f avx512bw avx512vbmi_x")).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi("flags\t\t:")).isFalse();
+
+        // Only the first flags line counts, so the first processor decides.
+        assertThat(cpuInfoListsAvx512Vbmi(
+                """
+                processor\t: 0
+                %s
+                vmx flags\t: vnmi
+
+                processor\t: 1
+                flags\t\t: fpu avx512f avx512bw
+                """.formatted(R8I_FLAGS_LINE))).isTrue();
+        assertThat(cpuInfoListsAvx512Vbmi(
+                """
+                processor\t: 0
+                model name\t: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+                %s
+                """.formatted(R5_FLAGS_LINE))).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi(
+                """
+                processor\t: 0
+                %s
+
+                processor\t: 1
+                %s
+                """.formatted(R5_FLAGS_LINE, R8I_FLAGS_LINE))).isFalse();
+
+        // A key that only ends in flags is another line.
+        assertThat(cpuInfoListsAvx512Vbmi(
+                """
+                processor\t: 0
+                vmx flags\t: avx512vbmi
+                """)).isFalse();
+        // aarch64's kernel names its line Features, so there is no flags line.
+        assertThat(cpuInfoListsAvx512Vbmi(
+                """
+                processor\t: 0
+                Features\t: fp asimd sve
+                """)).isFalse();
+        assertThat(cpuInfoListsAvx512Vbmi("")).isFalse();
+    }
+
+    private static boolean cpuInfoListsAvx512Vbmi(String cpuInfo)
+            throws IOException
+    {
+        try (BufferedReader reader = new BufferedReader(Reader.of(cpuInfo))) {
+            return VectorSupport.cpuInfoListsAvx512Vbmi(reader);
         }
     }
 
