@@ -853,6 +853,39 @@ checks, and folded-byte scans stay on a fixed 128-bit species.
   earlier time on Graviton, and the unchecked reads take the TPC-H `PROMO%`,
   `%BRASS`, and `MEDIUM POLISHED%` predicates to 0.57 to 0.79 ([#153]).
 
+### SWAR constants held in registers
+
+- **Origin:** First described by klauspost/compress, whose zstd encoder reads
+  its hash primes from a variable on arm64 only, since Go rebuilt them with
+  four instructions every iteration and holding them cost amd64 spills
+  ([compress#1230][kp-primes-arm64]), and by the Go compiler report that
+  followed ([golang/go#81755][go-arm64-remat]). Regulator: the field form
+  under C2, in every SWAR word loop and in generated LIKE classes ([#28],
+  [#193], [#226], [design][d-like], [design][d-gen-like],
+  [design][d-class-count]).
+- **Where:** `LiteralSearchKernel.skipToContainsCandidate`,
+  `LiteralSearchKernel.findSingleByte`, `RequiredBytes.containsOneOf`,
+  `BoundedCharacterClassCounter.countUtf8`, `Prog.indexOfSWAR`,
+  `Prog.indexOfEitherSWAR`, `Prog.findFoldCaseSwar`,
+  `Prog.prefixAccelNoFoldCaseFrontAndBackSwar`,
+  `Prog.prefixAccelFoldCaseFrontAndBackSWAR`,
+  `TrinoLikeKernelGenerator.LikeEmitter.lowBitsField`,
+  `TrinoLikeKernelGenerator.LikeEmitter.broadcastOperand`
+- **Applies when:** every SWAR word loop of the zero-byte test; the class-run
+  counter's on aarch64 only, as are generated LIKE's first- and last-byte
+  broadcasts
+- **What it does:** aarch64 cannot encode the subtraction of
+  `0x0101010101010101` as an immediate, and C2 rebuilt the constant with four
+  instructions on every word, even from a local holding the literal. Each loop
+  reads it from a final field once per call instead, which C2 keeps in a
+  register; generated classes read a non-final static field. This takes the
+  one-byte prefix scan on a literal miss across a 32 KiB final line to 0.79 of
+  its earlier time on Graviton and 0.94 on Intel, the required-bytes one-of
+  scan to 0.91 to 0.95 ([#193]), and the Russian and ASCII class-run counts to
+  0.99 on Graviton. Generated LIKE also reads its literal's front and back
+  broadcasts from such fields, which took Graviton `CONTAINS_LATE` from 1.46x
+  to 0.99x the time of verifying candidates in line.
+
 ## Lazy DFA
 
 The DFA is RE2's lazy DFA; its ported pieces are listed in
@@ -2060,6 +2093,7 @@ change is described.
 [#202]: https://github.com/airlift/regulator/pull/202
 [#208]: https://github.com/airlift/regulator/pull/208
 [#216]: https://github.com/airlift/regulator/pull/216
+[#226]: https://github.com/airlift/regulator/pull/226
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor
@@ -2072,6 +2106,7 @@ change is described.
 [d-fixed-width-rare]: ../../REGULATOR_DECISIONS.md#fixed-width-rare-class-candidates
 [d-folded-prefix]: ../../REGULATOR_DECISIONS.md#folded-prefix-candidate-scan
 [d-forward-cursor]: ../../REGULATOR_DECISIONS.md#reusable-group-zero-forward-cursor
+[d-gen-like]: ../../REGULATOR_DECISIONS.md#generated-trino-like-kernels
 [d-gen-re2]: ../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels
 [d-large-alternations]: ../../REGULATOR_DECISIONS.md#large-literal-alternations
 [d-like]: ../../REGULATOR_DECISIONS.md#trino-like-frontend
@@ -2205,6 +2240,7 @@ change is described.
 [glibc-memcmp]: https://github.com/bminor/glibc/blob/glibc-2.38/sysdeps/aarch64/memcmp.S#L109-L127
 [glibc-sve2-memchr]: https://github.com/bminor/glibc/blob/3edeb81021feff11a3d0e934d68446f6a67dd1a3/sysdeps/aarch64/multiarch/memchr_sve2.S#L99-L107
 [gm-exact-division]: https://doi.org/10.1145/178243.178249
+[go-arm64-remat]: https://github.com/golang/go/issues/81755
 [go-exec-minlen]: https://github.com/golang/go/blob/go1.20.14/src/regexp/exec.go#L527-L529
 [go-strings-index]: https://github.com/golang/go/blob/go1.20.14/src/strings/strings.go#L1178-L1256
 [go-syntax-parse]: https://github.com/golang/go/blob/go1.23.0/src/regexp/syntax/parse.go
@@ -2239,6 +2275,7 @@ change is described.
 [kawa-regexps]: https://www.gnu.org/software/kawa/gnu.bytecode/compiling-regexps.html
 [kmp-1977]: https://doi.org/10.1137/0206024
 [knuth-taocp]: https://www-cs-faculty.stanford.edu/~knuth/taocp.html
+[kp-primes-arm64]: https://github.com/klauspost/compress/pull/1230
 [lamport-swar]: https://doi.org/10.1145/360933.360994
 [linux-rcu]: https://www.kernel.org/doc/html/v6.6/RCU/whatisRCU.html
 [mckeeman-1965]: https://doi.org/10.1145/364995.365000

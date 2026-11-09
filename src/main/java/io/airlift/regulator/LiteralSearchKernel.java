@@ -51,8 +51,8 @@ final class LiteralSearchKernel
     private final int[] lastOccurrenceShifts;
     private final long frontBroadcast;
     private final long backBroadcast;
-    // LOW_BITS, read from a field so the word loops of the contains search hold it in a register:
-    // on aarch64 C2 cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four
+    // LOW_BITS, read from a field so the word loops of the searches hold it in a register: on
+    // aarch64 C2 cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four
     // instructions every word. The constructor assigns it, because an initializer would make it a
     // compile-time constant that javac inlines.
     private final long lowBits;
@@ -133,7 +133,8 @@ final class LiteralSearchKernel
     /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
     /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher, LiteralGapMatcher, and
     /// InnerLiteralSearch call it for such literals and [#findContains(Slice,int,int)] for longer
-    /// ones. It scans two words at a time and finishes the range with [#findSingleByteTail].
+    /// ones. It scans two words at a time, reading LOW_BITS from [#lowBits], and finishes the
+    /// range with [#findSingleByteTail].
     /// TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
     /// LIKE pattern, and RequiredBytes.containsByte holds a presence-only copy of its word
     /// mechanics; keep the copies in step.
@@ -149,12 +150,13 @@ final class LiteralSearchKernel
         int searchStart = inputOffset + offset;
         int searchEnd = searchStart + length;
         int wordEnd = searchStart + (length / (2 * Long.BYTES)) * (2 * Long.BYTES);
+        long lowBits = this.lowBits;
         int position = searchStart;
         for (; position < wordEnd; position += 2 * Long.BYTES) {
             long firstDifference = ((long) LONG_HANDLE.get(inputBytes, position)) ^ frontBroadcast;
             long secondDifference = ((long) LONG_HANDLE.get(inputBytes, position + Long.BYTES)) ^ frontBroadcast;
-            long firstMatches = zeroByteMask(firstDifference);
-            long secondMatches = zeroByteMask(secondDifference);
+            long firstMatches = zeroByteMask(firstDifference, lowBits);
+            long secondMatches = zeroByteMask(secondDifference, lowBits);
             if ((firstMatches | secondMatches) != 0) {
                 if (firstMatches != 0) {
                     return position + (Long.numberOfTrailingZeros(firstMatches) >>> 3) - inputOffset;
@@ -184,14 +186,14 @@ final class LiteralSearchKernel
             // no match, and the mask sets false bits only above a true match, so its lowest set bit
             // is the first match.
             if (searchEnd - position > Long.BYTES) {
-                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, position)) ^ frontBroadcast);
+                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, position)) ^ frontBroadcast, LOW_BITS);
                 if (matches != 0) {
                     return position + (Long.numberOfTrailingZeros(matches) >>> 3) - inputOffset;
                 }
             }
             if (position < searchEnd) {
                 int lastWord = searchEnd - Long.BYTES;
-                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, lastWord)) ^ frontBroadcast);
+                long matches = zeroByteMask(((long) LONG_HANDLE.get(inputBytes, lastWord)) ^ frontBroadcast, LOW_BITS);
                 if (matches != 0) {
                     return lastWord + (Long.numberOfTrailingZeros(matches) >>> 3) - inputOffset;
                 }
@@ -680,9 +682,10 @@ final class LiteralSearchKernel
     }
 
     // TrinoLikeKernelGenerator emits this mask in a deliberately different form with the same
-    // bits (see its zeroByteMask); keep the two in step.
-    private static long zeroByteMask(long value)
+    // bits (see its zeroByteMask); keep the two in step. `lowBits` holds LOW_BITS: a word loop
+    // passes [#lowBits], and a finish that runs once per search can pass the constant.
+    private static long zeroByteMask(long value, long lowBits)
     {
-        return (value - LOW_BITS) & ~value & HIGH_BITS;
+        return (value - lowBits) & ~value & HIGH_BITS;
     }
 }

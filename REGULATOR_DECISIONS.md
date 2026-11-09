@@ -3791,6 +3791,21 @@ but made Graviton word rows 3-4% slower, and Intel's 4-6%. Graviton is weighted
 over Intel, so the Intel line rows are accepted. 32-byte vectors keep the
 128-byte handoff unmeasured.
 
+`countUtf8`'s two-byte chunk check reads the SWAR constant `0x0101010101010101`
+from a field on aarch64, where C2 cannot encode its subtraction as an immediate
+and rebuilt it on every word; the specialized Russian and ASCII class-run counts
+take 0.99x the time on r9g (Graviton 4). On x86-64 the check keeps the constant.
+On r8i (Xeon 6975P-C) C2 spilled the field to the stack, and although the method
+ran 0.3% fewer instructions, its changed branch layout took about 1,200 more
+branch misses per call on rebar's `letters-ru`, whose letter runs are 1 to 35
+characters long, which made it 2.8% slower. Generated LIKE splits its literal
+broadcasts the same way, fields on aarch64 and constants on x86-64; see
+[Generated Trino LIKE Kernels](#generated-trino-like-kernels). The split follows
+[klauspost/compress#1230](https://github.com/klauspost/compress/pull/1230),
+which reads its hash primes from a variable on arm64 only because amd64 spilled
+them, and the Go compiler report that followed it,
+[golang/go#81755](https://github.com/golang/go/issues/81755).
+
 The matcher counter is built eagerly by design, even for a pattern used only for
 count or boolean find, such as Trino `regexp_like`. Setup work is never deferred
 to the first match: Trino pays compile cost up front so the match path stays

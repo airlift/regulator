@@ -479,6 +479,11 @@ final class Prog
     private int[] prefixShifts;
     // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
     private long prefixShiftsCharge;
+    // 0x0101010101010101, read from a field so the SWAR word loops of the prefix scans hold it in
+    // a register: on aarch64 C2 cannot encode its negation as an immediate, and rebuilt it with
+    // four instructions every word, even from a local holding the constant. The constructor
+    // assigns it, because an initializer would make it a compile-time constant that javac inlines.
+    private final long lowBits;
     static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
     // The predicted share of vectors holding a folded pair candidate at and above which the
     // folded vector scan verifies candidates inside its vector loop; see usesDenseFoldCaseScan.
@@ -522,6 +527,7 @@ final class Prog
 
     public Prog()
     {
+        lowBits = 0x0101010101010101L;
         // Instruction #0 is always the fail instruction in upstream.
         add(Inst.createFail());
     }
@@ -2236,7 +2242,7 @@ final class Prog
     // and benchmark evidence. The two loads dominate this loop.
     private int prefixAccelNoFoldCaseFrontAndBackSwar(byte[] data, int offset, int length)
     {
-        long lowBits = 0x0101010101010101L;
+        long lowBits = this.lowBits;
         long highBits = 0x8080808080808080L;
         int candidateCount = length - prefixSize + 1;
         int wordEnd = offset + (candidateCount / Long.BYTES) * Long.BYTES;
@@ -2338,6 +2344,7 @@ final class Prog
         long firstLowerBroadcast = prefixFoldCaseFirstLowerBroadcast;
         long secondCaseBroadcast = prefixFoldCaseSecondCaseBroadcast;
         long secondLowerBroadcast = prefixFoldCaseSecondLowerBroadcast;
+        long lowBits = this.lowBits;
         int position = offset;
         int candidateBase = offset;
         long candidates = 0;
@@ -2356,7 +2363,7 @@ final class Prog
             for (; position < wordEnd; position += Long.BYTES) {
                 long front = ((long) LONG_HANDLE.get(data, position) | firstCaseBroadcast) ^ firstLowerBroadcast;
                 long back = ((long) LONG_HANDLE.get(data, position + backOffset) | secondCaseBroadcast) ^ secondLowerBroadcast;
-                candidates = ((front - 0x0101010101010101L) & ~front) & ((back - 0x0101010101010101L) & ~back) & 0x8080808080808080L;
+                candidates = ((front - lowBits) & ~front) & ((back - lowBits) & ~back) & 0x8080808080808080L;
                 if (candidates != 0) {
                     break;
                 }
@@ -2396,6 +2403,7 @@ final class Prog
         int wordEnd = offset + ((candidateCount / Long.BYTES) * Long.BYTES);
         int end = offset + candidateCount;
         int lastOffset = prefixSize - 1;
+        long lowBits = this.lowBits;
         int position = offset;
         int candidateBase = offset;
         long candidates = 0;
@@ -2414,7 +2422,7 @@ final class Prog
             for (; position < wordEnd; position += Long.BYTES) {
                 long first = ((long) LONG_HANDLE.get(data, position + firstOffset) | firstCaseBroadcast) ^ firstLowerBroadcast;
                 long second = ((long) LONG_HANDLE.get(data, position + secondOffset) | secondCaseBroadcast) ^ secondLowerBroadcast;
-                candidates = ((first - 0x0101010101010101L) & ~first) & ((second - 0x0101010101010101L) & ~second) & 0x8080808080808080L;
+                candidates = ((first - lowBits) & ~first) & ((second - lowBits) & ~second) & 0x8080808080808080L;
                 if (candidates != 0) {
                     break;
                 }
@@ -2467,7 +2475,7 @@ final class Prog
 
     private int indexOfEitherSWAR(byte[] data, int offset, int length, byte first, byte second)
     {
-        long lowBits = 0x0101010101010101L;
+        long lowBits = this.lowBits;
         long highBits = 0x8080808080808080L;
         long firstBroadcast = (first & 0xFFL) * lowBits;
         long secondBroadcast = (second & 0xFFL) * lowBits;
@@ -2509,7 +2517,7 @@ final class Prog
     /// Throughput: ~33.7 GB/s on 16MB buffers (5.5x faster than byte-by-byte).
     private int indexOfSWAR(byte[] data, int offset, int length, long broadcastMask)
     {
-        long loMask = 0x0101010101010101L;
+        long loMask = this.lowBits;
         long hiMask = 0x8080808080808080L;
 
         int end = offset + length;

@@ -53,6 +53,8 @@ final class BoundedCharacterClassCounter
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
+    // Whether this JVM runs on aarch64. C2 folds this constant, so `countUtf8` compiles one form.
+    private static final boolean AARCH64 = "aarch64".equals(System.getProperty("os.arch"));
     // The bytes `twoByteLeads` checks at once for ASCII and two-byte characters. A block of
     // `countUtf8` is one such chunk, or two when the second passes too.
     private static final int TWO_BYTE_CHUNK_BYTES = 32;
@@ -115,6 +117,12 @@ final class BoundedCharacterClassCounter
     // members (see `Utf8.re2DecodeMalformed`). Any other class reads a malformed sequence as a
     // nonmember, and an encoded surrogate decodes as a surrogate, which the bitset or tail decides.
     private final boolean matchesAllNonAscii;
+    // LOW_BITS, which `countUtf8` reads from this field on aarch64, where C2 cannot encode
+    // -LOW_BITS as an immediate, so that it holds it in a register. REGULATOR_DECISIONS.md
+    // "Bounded Character-Class Counting" records why x86-64 keeps the constant. The constructors
+    // assign the field, because an initializer would make it a compile-time constant that javac
+    // inlines.
+    private final long lowBits;
 
     private BoundedCharacterClassCounter()
     {
@@ -132,6 +140,7 @@ final class BoundedCharacterClassCounter
         firstTailMember = NO_TAIL;
         hasTail = false;
         matchesAllNonAscii = false;
+        lowBits = LOW_BITS;
     }
 
     private BoundedCharacterClassCounter(RuneRange[] ranges, int minimum, int maximum, boolean latin1)
@@ -179,6 +188,7 @@ final class BoundedCharacterClassCounter
         this.firstTailMember = firstTailMember;
         this.hasTail = firstTailMember != NO_TAIL;
         this.matchesAllNonAscii = matchesAllNonAscii;
+        this.lowBits = LOW_BITS;
     }
 
     // Returns whether the class holds exactly the scalar values: every code point below the
@@ -520,16 +530,17 @@ final class BoundedCharacterClassCounter
         // No input reaches Integer.MAX_VALUE bytes, so a run of an unbounded repeat holds one match at most.
         int maximum = this.maximum == -1 ? Integer.MAX_VALUE : this.maximum;
         int minimum = this.minimum;
+        long lowBits = AARCH64 ? this.lowBits : LOW_BITS;
         int runLength = 0;
         long count = 0;
         int stretch = TWO_BYTE_CHUNK_BYTES;
         while (position < end) {
-            long leads = end - position >= TWO_BYTE_CHUNK_BYTES ? twoByteLeads(bytes, position, 0) : INVALID_CHUNK;
+            long leads = end - position >= TWO_BYTE_CHUNK_BYTES ? twoByteLeads(bytes, position, 0, lowBits) : INVALID_CHUNK;
             if (leads != INVALID_CHUNK) {
                 int blockBytes = TWO_BYTE_CHUNK_BYTES;
                 if (end - position >= 2 * TWO_BYTE_CHUNK_BYTES) {
                     // Bit 7 when the first chunk ends with a lead byte, whose continuation begins the second.
-                    long highLeads = twoByteLeads(bytes, position + TWO_BYTE_CHUNK_BYTES, (leads >>> 24) & 0x80);
+                    long highLeads = twoByteLeads(bytes, position + TWO_BYTE_CHUNK_BYTES, (leads >>> 24) & 0x80, lowBits);
                     if (highLeads != INVALID_CHUNK) {
                         leads |= highLeads << TWO_BYTE_CHUNK_BYTES;
                         blockBytes = 2 * TWO_BYTE_CHUNK_BYTES;
@@ -662,8 +673,9 @@ final class BoundedCharacterClassCounter
     // lead byte C2 through DF and one continuation byte. `carriedLead` is 0x80 when the byte
     // before `position` is a lead whose continuation begins them, and 0 when `position` begins a
     // character. The last byte can be a lead; the caller checks its continuation with the bytes
-    // that follow.
-    private static long twoByteLeads(byte[] bytes, int position, long carriedLead)
+    // that follow. `lowBits` holds LOW_BITS, read from [#lowBits] on aarch64 and passed as the
+    // constant elsewhere.
+    private static long twoByteLeads(byte[] bytes, int position, long carriedLead, long lowBits)
     {
         long invalid = 0;
         long leadBits = 0;
@@ -678,7 +690,7 @@ final class BoundedCharacterClassCounter
             // C0 and C1 begin only overlong encodings: a zero byte after clearing bit 0 and XOR
             // with C0.
             long overlong = (word & ~LOW_BITS) ^ 0xC0C0C0C0C0C0C0C0L;
-            invalid |= (overlong - LOW_BITS) & ~overlong & HIGH_BITS;
+            invalid |= (overlong - lowBits) & ~overlong & HIGH_BITS;
             // Every continuation byte, and only a continuation byte, follows a lead byte.
             invalid |= continuations ^ ((leads << 8) | carriedLead);
             carriedLead = leads >>> 56;
