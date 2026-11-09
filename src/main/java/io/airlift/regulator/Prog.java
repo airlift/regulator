@@ -1102,8 +1102,8 @@ final class Prog
     }
 
     /// Returns a 256-entry table that is nonzero for each byte that can begin a non-empty match
-    /// from [#start()], for a reversed program the bytes that can end one, or null when the
-    /// program can match the empty string, the walk reaches an assertion, or every byte can.
+    /// from [#start()], or null when the program can match the empty string, the walk reaches an
+    /// assertion, or every byte can.
     byte[] boundaryBytes()
     {
         if (canMatchEmpty || start() == 0) {
@@ -1112,6 +1112,95 @@ final class Prog
         byte[] candidates = new byte[256];
         int count = walkStartBytes(new int[3 * size() + 1], candidates, false, true);
         return count > 0 && count < 256 ? candidates : null;
+    }
+
+    /// Returns the bytes each match from [#start()] can have at each of its first positions, for a
+    /// reversed program the bytes before the position it starts from, nearest first, as a 256-bit
+    /// set of four longs per position, low bytes first, or null when there is no such set. Like
+    /// [#buildStartPositionByteSets], the walk takes every thread one byte at a time, but it
+    /// unions every thread's bytes at each position, and like [#buildTransparentStartLiteral] it
+    /// reads assertions, captures, and no-ops as matching the empty string. Both only widen a set,
+    /// so each holds every byte a match can have there. The sets end before the first position
+    /// where a thread can match first, since a shorter match has no byte there, before the first
+    /// that admits every byte or none, and after `maximumPositions`. So every match has at least
+    /// as many bytes as there are sets.
+    long[] boundaryPositionByteSets(int maximumPositions)
+    {
+        if (canMatchEmpty || start() == 0) {
+            return null;
+        }
+        long[] byteSets = new long[maximumPositions * 4];
+        int[] threads = new int[size()];
+        int threadCount = 0;
+        threads[threadCount++] = start();
+        int[] nextThreads = new int[size()];
+        boolean[] visited = new boolean[size()];
+        boolean[] nextVisited = new boolean[size()];
+        int[] stack = new int[3 * size() + 1];
+        int position = 0;
+        while (position < maximumPositions) {
+            Arrays.fill(visited, false);
+            Arrays.fill(nextVisited, false);
+            int nextThreadCount = 0;
+            boolean matches = false;
+            for (int threadIndex = 0; threadIndex < threadCount && !matches; threadIndex++) {
+                int stackPointer = 0;
+                stack[stackPointer++] = threads[threadIndex];
+                while (stackPointer > 0 && !matches) {
+                    int instructionId = stack[--stackPointer];
+                    if (instructionId <= 0 || instructionId >= size() || visited[instructionId]) {
+                        continue;
+                    }
+                    visited[instructionId] = true;
+
+                    Inst instruction = inst(instructionId);
+                    switch (instruction.opcode()) {
+                        case BYTE_RANGE -> {
+                            addStartPositionBytes(byteSets, position, instruction);
+                            int next = instruction.out();
+                            if (next > 0 && next < size() && !nextVisited[next]) {
+                                nextVisited[next] = true;
+                                nextThreads[nextThreadCount++] = next;
+                            }
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                        case CAPTURE, NOP, EMPTY_WIDTH -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case ALT, ALT_MATCH -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                            stack[stackPointer++] = instruction.out1();
+                            stack[stackPointer++] = instruction.out();
+                        }
+                        case MATCH -> matches = true;
+                        case FAIL -> {
+                            if (!instruction.last()) {
+                                stack[stackPointer++] = instructionId + 1;
+                            }
+                        }
+                    }
+                }
+            }
+            int word = position * 4;
+            long every = byteSets[word] & byteSets[word + 1] & byteSets[word + 2] & byteSets[word + 3];
+            long any = byteSets[word] | byteSets[word + 1] | byteSets[word + 2] | byteSets[word + 3];
+            if (matches || every == -1L || any == 0) {
+                break;
+            }
+            position++;
+            int[] swap = threads;
+            threads = nextThreads;
+            nextThreads = swap;
+            threadCount = nextThreadCount;
+        }
+        return position == 0 ? null : Arrays.copyOf(byteSets, position * 4);
     }
 
     /// Builds the byte sets at the first `positionCount` positions of every match path, for the
@@ -1216,7 +1305,13 @@ final class Prog
             byteSets = previousByteSets.clone();
             paths.add(new StartPositionPath(byteSets, instruction.out()));
         }
-        // Like addStartByteRange: a folding range reads an upper-case byte as its lower case.
+        addStartPositionBytes(byteSets, position, instruction);
+    }
+
+    // Adds the bytes of the byte range `instruction` to the set at `position`. Like
+    // addStartByteRange, a folding range reads an upper-case byte as its lower case.
+    private static void addStartPositionBytes(long[] byteSets, int position, Inst instruction)
+    {
         for (int value = instruction.lo(); value <= instruction.hi(); value++) {
             if (!instruction.foldCase() || value < 'A' || value > 'Z') {
                 addStartPositionByte(byteSets, position, value);

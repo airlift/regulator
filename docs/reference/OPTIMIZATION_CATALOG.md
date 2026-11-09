@@ -510,24 +510,34 @@ so the automata run only where a match can be.
 ### Inner literal byte gates
 
 - **Origin:** First described by Hyperscan
-  ([rose_build_lookaround.cpp][hs-lookaround]); Inspired by the Rust regex
-  crate ([#152]). Regulator: gates taken from the reverse prefix program, with
-  gated hits kept out of the fallbacks ([#152], [design][d-byte-gates]).
+  ([rose_build_lookaround.cpp][hs-lookaround]), whose Rose programs check the
+  byte classes at several offsets around a literal hit in one shufti test
+  ([program_runtime.c][hs-check-shufti] `CHECK_SHUFTI`); Inspired by the Rust
+  regex crate ([#152]). Regulator: gates taken from the reverse prefix program,
+  with gated hits kept out of the fallbacks ([#152], [design][d-byte-gates]).
 - **Where:** `InnerLiteralSearch.searchGated`,
   `InnerLiteralSearch.passesByteGates`, `InnerLiteralSearch.suffixGate`,
-  `Prog.boundaryBytes`
-- **Applies when:** Prefixes that cannot match empty and end without an
-  assertion, or literals followed by one ASCII class; the preceding gate is
-  dropped if it admits the literal's first byte, and the following gate if it
-  admits its last byte
+  `Prog.boundaryPositionByteSets`
+- **Applies when:** Prefixes that cannot match empty, or literals followed by
+  one ASCII class or a word boundary or non-boundary; the gate on the byte
+  before the literal is dropped if it admits the literal's first byte, and the
+  following gate if it admits its last byte
 - **What it does:** The reverse prefix program supplies the bytes that can end
-  the prefix. A hit is skipped before either DFA runs if its preceding byte is
-  outside that set or its following byte is outside the single ASCII class
-  after the literal, as `\s` after `ing`. Skipped hits never trigger the
-  near-start or reread fallbacks. Gated patterns run their own loop, which a
-  window without a hit never enters. The gates take leipzig `ing-whitespace`
-  to 0.77 to 0.78 of its earlier time and `before-after-holmes` to 0.71 to
-  0.76 ([design][d-byte-gates]).
+  the prefix, and those up to three bytes further back where it limits them,
+  walked with assertions read as empty. A hit is skipped before either DFA
+  runs if one of those bytes is outside its set or before the window, or its
+  following byte is outside the single ASCII class after the literal, as `\s`
+  after `ing`. A `\b` or `\B` right after a literal whose last bytes are all
+  word bytes, or all not, narrows that class to the ASCII bytes the boundary
+  allows, or alone skips a hit whose following ASCII byte it rules out, as a
+  letter after the `nn` of `\b\w+nn\b`; a byte past ASCII and the window's end
+  pass it. Skipped hits never trigger the near-start or reread fallbacks.
+  Gated patterns run their own loop, which a window without a hit never
+  enters. The one-byte gates take leipzig `ing-whitespace` to 0.77 to 0.78 of
+  its earlier time and `before-after-holmes` to 0.71 to 0.76, and the gates
+  further back and the `\b` gates take `word-ending-nn` counts to 0.34 to
+  0.37, `tom-sawyer-huckle-fin-prefix-long` to 0.43 to 0.55, and the Holmes
+  rows to 0.91 to 0.96 ([design][d-byte-gates]).
 
 ## Start-byte and multi-literal filters
 
@@ -2161,6 +2171,7 @@ change is described.
 [hs-boundary]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/ComponentBoundary.cpp#L134-L140
 [hs-buildstate]: https://github.com/intel/hyperscan/blob/v5.4.2/src/parser/buildstate.cpp#L234-L282
 [hs-castle-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/castle.c#L523-L612
+[hs-check-shufti]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/program_runtime.c#L991-L1021
 [hs-lbr-scan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/lbr.c#L422-L516
 [hs-lookaround]: https://github.com/intel/hyperscan/blob/v5.4.2/src/rose/rose_build_lookaround.cpp#L624-L658
 [hs-mcclellan]: https://github.com/intel/hyperscan/blob/v5.4.2/src/nfa/mcclellan.c

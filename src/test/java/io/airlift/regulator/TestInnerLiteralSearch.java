@@ -92,7 +92,21 @@ public class TestInnerLiteralSearch
             "(?:QHO)?(?i:ho)",
             "[a-z](?i: noqa)@x",
             // Outside RE2 the class is empty, so the program can never match.
-            "\\s\\*[a&&b]{1,2}");
+            "\\s\\*[a&&b]{1,2}",
+            // Gates up to four bytes before the literal, and behind an assertion at the prefix's
+            // end, which the walk reads as empty.
+            "\\s[a-z]+@",
+            "\\s[a-z]{3,}@x",
+            "\\b[a-z]{2}\\b@x",
+            // Gates after the literal that word boundaries set: alone, after a literal ending in a
+            // word byte, in a byte that is not one, or in a letter of either case; with the class
+            // after them; and none where they rule out every byte of that class.
+            "\\w+nn\\B",
+            "[a-z]+@\\b",
+            "[a-z]+#(?i:noqa)\\b",
+            "\\w+\\s+Holmes\\b",
+            "\\w+nn\\b\\s",
+            "[a-z]+nn\\b[a-z]");
 
     @Test
     public void testSelectsLiteralWithProof()
@@ -194,8 +208,37 @@ public class TestInnerLiteralSearch
                         "+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz",
                         "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz")),
                 Map.entry("[a-z]shing[a-z]", List.of("", "")),
+                Map.entry("\\w+\\s+Holmes", List.of("\t\n\f\r ", "")),
                 Map.entry(DATE, List.of("0123456789", "0123456789")))) {
             assertThat(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).as(entry.getKey()).isEqualTo(entry.getValue());
+        }
+        // The bytes further before the literal gate a hit too, as far as the reverse prefix
+        // program limits them, with assertions read as empty: two bytes before Holmes lies
+        // whitespace or a word byte, two to four bytes before the @ of `\s[a-z]{3,}@x` lie two
+        // letters and then whitespace or a letter, and two before the @ of `\b[a-z]{2}\b@x`, past
+        // the boundary, a letter.
+        String letters = "abcdefghijklmnopqrstuvwxyz";
+        for (Map.Entry<String, List<String>> entry : List.of(
+                Map.entry("\\w+\\s+Holmes", List.of("\t\n\f\r 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_" + letters)),
+                Map.entry("\\s[a-z]{3,}@x", List.of(letters, letters, "\t\n\f\r " + letters)),
+                Map.entry("\\b[a-z]{2}\\b@x", List.of(letters)),
+                Map.entry("\\b\\w+nn\\b", List.<String>of()))) {
+            assertThat(Re2.compile(utf8Slice(entry.getKey())).innerLiteralSearchForDiagnostics().deeperPrefixGatesForDiagnostics()).as(entry.getKey()).isEqualTo(entry.getValue());
+        }
+        // A word boundary after a literal that ends in a word byte gates the byte after it to
+        // the ASCII bytes that are not word bytes, and every byte past ASCII, which may begin or
+        // continue a word character; the window's end passes, and the context decides.
+        String notWordBytes = IntStream.range(0, 0x100)
+                .filter(value -> value >= 0x80 || !(Character.isLetterOrDigit(value) || value == '_'))
+                .mapToObj(value -> String.valueOf((char) value))
+                .collect(joining());
+        assertThat(Re2.compile(utf8Slice("\\b\\w+nn\\b")).innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).isEqualTo(List.of("", notWordBytes));
+        // Rust's start, end, and half boundaries judge one side alone, so they give no gate: a
+        // space after the @ of `[a-z]+@\b{end-half}` ends a match.
+        for (Language language : List.of(Language.RUST, Language.RUST_BYTES, Language.RUST_BYTES_ASCII)) {
+            CompiledPattern halfBoundary = language.compiledPattern("[a-z]+@\\b{end-half}");
+            assertThat(halfBoundary.innerLiteralSearchForDiagnostics().byteGatesForDiagnostics()).as(language.name()).isEqualTo(List.of(letters, ""));
+            assertThat(halfBoundary.count(utf8Slice(".".repeat(200) + "a@ x"))).as(language.name()).isEqualTo(1);
         }
         // The gate before the literal comes from the bytes that can end the prefix, so a prefix
         // that is not one ASCII class gates too: Rust's Unicode \w ends a character of more than
@@ -395,6 +438,22 @@ public class TestInnerLiteralSearch
                 assertThat(smallSearch.search(text, 0, text.length(), 0, text.length())).as(description).isEqualTo((100L << 32) | text.length());
             }
         }
+
+        // A budget with no room for the gates further before the literal keeps the search with
+        // the one-byte gates alone, which gives the same answers.
+        Re2.Options tight = Re2.Options.defaults().setMaxMemory(64L << 10);
+        Re2 holmes = Re2.compile(utf8Slice("\\w+\\s+Holmes"), tight);
+        InnerLiteralSearch holmesSearch = holmes.innerLiteralSearchForDiagnostics();
+        assertThat(holmesSearch.byteGatesForDiagnostics()).isEqualTo(List.of("\t\n\f\r ", ""));
+        assertThat(holmesSearch.deeperPrefixGatesForDiagnostics()).isEmpty();
+        Engine actual = regexpEngine(holmes);
+        Engine expected = regexpEngine(Re2.compile(utf8Slice("(?:\\w+\\s+Holmes)|\\b\\B"), tight));
+        for (Slice text : texts()) {
+            String description = text.toStringUtf8();
+            assertThat(actual.spans(text)).as(description).isEqualTo(expected.spans(text));
+            assertThat(actual.count(text)).as(description).isEqualTo(expected.count(text));
+            assertThat(actual.find(text)).as(description).isEqualTo(expected.find(text));
+        }
     }
 
     @Test
@@ -526,6 +585,40 @@ public class TestInnerLiteralSearch
                 assertThat(matcher.find()).as(description).isTrue();
                 assertThat(expectedMatcher.find()).as(description).isTrue();
                 assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+            }
+        }
+    }
+
+    @Test
+    public void testByteGatesAgreeWithOrdinaryEngineInWindows()
+    {
+        // The gates judge a hit against its window, not the Slice around it, in every language: a
+        // byte the prefix must consume two bytes before Holmes fails before the window start, and a
+        // word boundary after nn passes at the window end, where a ranged find's context, the
+        // whole Slice, sees the word byte past it, and a matcher region, its own context, does not.
+        String filler = "-".repeat(InnerLiteralSearch.MINIMUM_SINGLE_LITERAL_SEARCH_BYTES);
+        byte[] backing = ("abcxa Holmes " + filler + " Penn" + "id").getBytes(UTF_8);
+        Slice text = Slices.wrappedBuffer(backing, 3, backing.length - 3);
+        for (Language language : Language.values()) {
+            for (String regex : List.of("\\w+\\s+Holmes", "\\b\\w+nn\\b")) {
+                CompiledPattern pattern = language.compiledPattern(regex);
+                CompiledPattern ordinary = language.compiledPattern("(?:" + regex + ")|\\b\\B");
+                for (int start : new int[] {0, 1, 2, 3}) {
+                    for (int end : new int[] {text.length() - 2, text.length()}) {
+                        String description = "%s %s [%s, %s)".formatted(language, regex, start, end);
+                        int[] actual = new int[2];
+                        int[] expected = new int[2];
+                        assertThat(pattern.findInto(text, start, end, actual)).as(description).isEqualTo(ordinary.findInto(text, start, end, expected));
+                        assertThat(actual).as(description).isEqualTo(expected);
+                        RegexpMatcher matcher = pattern.matcher(text).reset(text, start, end);
+                        RegexpMatcher expectedMatcher = ordinary.matcher(text).reset(text, start, end);
+                        while (expectedMatcher.find()) {
+                            assertThat(matcher.find()).as(description).isTrue();
+                            assertThat(List.of(matcher.start(), matcher.end())).as(description).isEqualTo(List.of(expectedMatcher.start(), expectedMatcher.end()));
+                        }
+                        assertThat(matcher.find()).as(description).isFalse();
+                    }
+                }
             }
         }
     }
@@ -703,7 +796,7 @@ public class TestInnerLiteralSearch
                 "\\w+\\s+Holmes",
                 List.of(".".repeat(61) + "a Holmes" + filler),
                 List.of(".".repeat(62) + "a Holmes" + filler, ".".repeat(66) + "a Holmes" + filler));
-        // A set is near when any of its members starts fewer than the minimum bytes in.
+        // A set is near when its first gate-passing member starts fewer than the minimum bytes in.
         assertNearStart(
                 "([A-Za-z]awyer|[A-Za-z]inn)\\s",
                 List.of(".".repeat(62) + "xinn " + filler, ".".repeat(62) + "Sawyer " + filler),
@@ -723,15 +816,22 @@ public class TestInnerLiteralSearch
     @Test
     public void testGateSkippedHitRunsNeitherDfa()
     {
-        // The ing of kingdom, far from the start, is followed by a letter, not the whitespace
-        // every match needs there, so the search skips it before either DFA starts.
-        Re2 pattern = Re2.compile(utf8Slice("\\s[a-zA-Z]{0,12}ing\\s"));
-        InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
-        Slice text = utf8Slice(".".repeat(200) + " kingdom " + ".".repeat(200));
-
-        assertThat(search.search(text, 0, text.length(), 0, text.length())).isEqualTo(Dfa.SEARCH_NO_MATCH);
-        assertThat(stateCount(search.reversePrefixProgramForDiagnostics())).isZero();
-        assertThat(stateCount(pattern.forwardProgramForDiagnostics())).isZero();
+        // Each hit lies far from the start, and the search skips it before either DFA starts: the
+        // ing of kingdom is followed by a letter, not the whitespace every match needs there, the
+        // byte two before Holmes, a period, is neither whitespace nor a word byte, which only the
+        // gate further back rules out, and the nn of Pennsylvania is followed by a word byte,
+        // which only the word boundary after it rules out.
+        for (Map.Entry<String, String> entry : List.of(
+                Map.entry("\\s[a-zA-Z]{0,12}ing\\s", " kingdom "),
+                Map.entry("\\w+\\s+Holmes", " Holmes "),
+                Map.entry("\\b\\w+nn\\b", " Pennsylvania "))) {
+            Re2 pattern = Re2.compile(utf8Slice(entry.getKey()));
+            InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
+            Slice text = utf8Slice(".".repeat(200) + entry.getValue() + ".".repeat(200));
+            assertThat(search.search(text, 0, text.length(), 0, text.length())).as(entry.getKey()).isEqualTo(Dfa.SEARCH_NO_MATCH);
+            assertThat(stateCount(search.reversePrefixProgramForDiagnostics())).as(entry.getKey()).isZero();
+            assertThat(stateCount(pattern.forwardProgramForDiagnostics())).as(entry.getKey()).isZero();
+        }
 
         // A gated one-byte search still checks a window shorter than its minimum for a hit that
         // passes its gates. No date ends a day or month in a letter, so a short line whose every
@@ -1031,12 +1131,17 @@ public class TestInnerLiteralSearch
                 "Sherlock HOLMES holmez HoLmEs's xholmes\tholme SHERLOCK HOLMeS a b@ noqa@x NOQA@x\n" +
                         "ERROR: error; xError:y erro: 12 PassWord 3 passwor 4 PASSWORD QHOho QHO hO\tHo QhOHO Holmes",
                 "ännä übernn énn 東nn京 nnü ünn Ωnné ännbnn énn",
+                // A combining mark after a word, which Java's boundaries read as part of it.
+                "Finn\u0301 Penn\u0301x inn\u0300 a\u0301 Holmes\u0301 Holmes",
+                // Letters, combining marks, and no-break spaces right beside the literals, which
+                // Java's `(?U)` reads as word and space characters.
+                "\u00E9 Holmes \u00E9\u00A0Holmes Holmes\u00E9 x\u00A0\u00A0Holmes\u0301 Penn\u00E9 Penn\u00A0 \u00E9nn\u0301 nn\u00A0 a@\u00E9 b@\u0301 c@\u00A0 d@",
                 "x".repeat(70) + "nnxnnx nn " + "y".repeat(70) + "änn",
                 "x".repeat(70) + "Tom\n" + "é".repeat(3) + "Sawyer xzb@cbb@c xzb@cbb@d")) {
             texts.add(utf8Slice(text));
-            // A search whose first hit is near its start falls back, and a text shorter than the
-            // search's minimum never runs it, so filler long enough for a literal set's search
-            // keeps the search and its later candidates in play.
+            // A search whose first gate-passing hit is near its start falls back, and a text
+            // shorter than the search's minimum never runs it, so filler long enough for a literal
+            // set's search keeps the search and its later candidates in play.
             texts.add(utf8Slice("-".repeat(Dfa.MIN_SMALL_BYTE_SET_VECTOR_SEARCH_BYTES) + text));
         }
         // Windows just under and at each minimum the search needs: without a literal, with one at
@@ -1055,7 +1160,7 @@ public class TestInnerLiteralSearch
                 texts.add(utf8Slice(filler + literal));
             }
         }
-        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä"};
+        String[] tokens = {"# noqa", "# NoQA:", "# no", "# NOQB", "#  noqa", "# n", "E501", ",", "Holmes", " ", "  ", "\t", "\n", "a", "Z", "_", "9", "@", ".", "-", "+", ":", "//", "x", "y", "b", "c", "ing", "sh", "s", "é", "\u2028", "\uFFFF", "awyer", "inn", "foo", "barbaz", "aba", "bab", "ment", "1", "\"", "'", "?", "!", "/", "nn", "n", "Tom", "Finn", "ä", "\u0301"};
         Random random = new Random(20261031);
         for (int textIndex = 0; textIndex < 400; textIndex++) {
             DynamicSliceOutput output = new DynamicSliceOutput(256);
@@ -1124,7 +1229,9 @@ public class TestInnerLiteralSearch
 
     private enum Language
     {
-        RE2, JAVA, TRINO, RUST, RUST_BYTES, RUST_BYTES_ASCII;
+        // Java's `(?U)` reads `\w`, `\s`, and `\b` by Unicode properties, so a character past
+        // ASCII on either side of a gated byte may be a word or space character.
+        RE2, JAVA, JAVA_UNICODE, TRINO, RUST, RUST_BYTES, RUST_BYTES_ASCII;
 
         Engine compile(String pattern)
         {
@@ -1137,6 +1244,7 @@ public class TestInnerLiteralSearch
             return switch (this) {
                 case RE2 -> Re2.compile(slice);
                 case JAVA -> JavaRegexp.compile(slice);
+                case JAVA_UNICODE -> JavaRegexp.compile(slice, JavaRegexp.Options.defaults().setUnicodeCharacterClasses(true));
                 case TRINO -> TrinoRegexp.compile(slice).re2();
                 case RUST -> RustRegexp.compile(slice);
                 case RUST_BYTES -> RustRegexp.compile(slice, RUST_BYTES_OPTIONS);
