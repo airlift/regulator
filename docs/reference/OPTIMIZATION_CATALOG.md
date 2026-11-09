@@ -221,10 +221,11 @@ answer, or reject the input before any engine runs.
   ([design][d-required-suffix]). On the leipzig `bounded-strings-ending-z` rows
   with one `,z` in the first kilobyte, a reverse scan that steps down four
   vectors at a time, each loaded at a constant offset from the block's low end,
-  takes the count to 0.94 to 0.96 of the time with the reverse scan before it on
-  Graviton, and the first megabyte's count to 0.97 to 0.98 on Intel. The
-  maximum-length reject takes rebar's `opt/fixed-length` rows from 1.3 to 4.7
-  times the crate's time to 0.59 to 0.62 on Graviton and 0.72 to 0.75 on Intel.
+  takes the count to 0.79 to 0.82 of the time with the reverse scan before it on
+  Graviton, and the first megabyte's count to 0.94 to 0.97 on Intel, where the
+  16 MB count is unchanged. The maximum-length reject takes rebar's
+  `opt/fixed-length` rows from 1.3 to 4.7 times the crate's time to 0.59 to 0.62
+  on Graviton and 0.72 to 0.75 on Intel.
 
 ### Match starts without a reverse DFA
 
