@@ -43,6 +43,17 @@ public final class RebarRunner
     private static final long HIGH_BITS = 0x8080808080808080L;
     private static final long NEWLINES = 0x0A0A0A0A0A0A0A0AL;
 
+    // Whether the grep models find each line's end one byte at a time rather than with the word
+    // search. Only on aarch64: on r9g the word search took 1.04 to 1.10 times the byte loop's time
+    // on aws-keys quick and lh3lh3 uri-or-email, date and email, though 0.94 on lh3lh3 uri. On
+    // aws-keys quick it ran fewer instructions, but at lower IPC (4.6 against 5.2) and with more
+    // branch misses per line (1.6 against 1.3 to 1.4). On r8i the word search took 0.64 to 0.97 of
+    // the byte loop's time across all measured rows. These figures come from a standalone Rebar
+    // runner whose line split uses the same logic; this runner itself was not timed. Other
+    // architectures were not measured and take the word search. C2 folds this constant, so the grep
+    // loops compile one form.
+    private static final boolean BYTE_LINE_SPLIT = "aarch64".equals(System.getProperty("os.arch"));
+
     private RebarRunner() {}
 
     public static void main(String[] arguments)
@@ -281,14 +292,31 @@ public final class RebarRunner
     }
 
     /// Returns the offset of the `\n` that ends the line starting at `lineStart`, or the haystack
-    /// length for a final line without one. The Rust runners split lines with bstr's `lines()`,
-    /// which finds each terminator with memchr, so a byte-at-a-time loop here would charge
-    /// Regulator's grep rows for a slower splitter than theirs. This searches two little-endian
-    /// words at a time, the technique of memchr's portable fallback, and keeps its own search
-    /// rather than the engine's so the runner's profile stays out of the engine's compiled code.
+    /// length for a final line without one. [#BYTE_LINE_SPLIT] selects the form. The Rust runners
+    /// split lines with bstr's `lines()`, which finds each terminator with memchr, so rather than
+    /// charge Regulator's grep rows for a slower splitter than theirs, the runner picks its form
+    /// by platform from the measurements described at [#BYTE_LINE_SPLIT]. Both forms keep their
+    /// own search rather than the engine's so the runner's profile stays out of the engine's
+    /// compiled code.
+    private static int lineEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart)
+    {
+        return BYTE_LINE_SPLIT ? byteLineEnd(haystack, bytes, byteArrayOffset, lineStart) : wordLineEnd(haystack, bytes, byteArrayOffset, lineStart);
+    }
+
+    /// [#lineEnd] one byte at a time.
+    static int byteLineEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart)
+    {
+        int lineEnd = lineStart;
+        while (lineEnd < haystack.length() && bytes[byteArrayOffset + lineEnd] != '\n') {
+            lineEnd++;
+        }
+        return lineEnd;
+    }
+
+    /// [#lineEnd] two little-endian words at a time, the technique of memchr's portable fallback.
     /// Words may run past the line into later lines, so only the haystack's last few bytes, up to
     /// 15, are searched one at a time.
-    private static int lineEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart)
+    static int wordLineEnd(Slice haystack, byte[] bytes, int byteArrayOffset, int lineStart)
     {
         int searchEnd = byteArrayOffset + haystack.length();
         int position = byteArrayOffset + lineStart;
