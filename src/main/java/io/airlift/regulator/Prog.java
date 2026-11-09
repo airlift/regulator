@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
@@ -22,6 +23,7 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -57,6 +59,9 @@ final class Prog
         REPEATED_BYTE,
         FUSED_SWAR,
         FUSED_VECTOR,
+        // The vector pair scan of FUSED_VECTOR over the literals every match begins with, which
+        // run past the prefix; see buildPrefixLiteralSet.
+        FUSED_LITERAL_SET,
     }
 
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
@@ -479,8 +484,18 @@ final class Prog
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
-    // The part of the shift table's size charged to dfaMemory, returned when the prefix changes.
-    private long prefixShiftsCharge;
+    // The literals every match begins with, when they run past a non-folded prefix and hold one
+    // exact byte at the same offset past it, prefixLiteralSetBackOffset. The vector pair scan
+    // tests that byte with the one at prefixPairOffset, in place of the one at
+    // prefixPairSecondaryOffset; see buildPrefixLiteralSet. Sorted by length, shortest first.
+    // Null otherwise.
+    private byte[][] prefixLiteralSet;
+    private int prefixLiteralSetBackOffset;
+    // The part of the shift table's and literal set's size charged to dfaMemory, returned when the
+    // prefix changes.
+    private long prefixScanCharge;
+    // Whether the decision on the literal set, and its charge, wait for decidePrefixLiteralSet.
+    private boolean prefixLiteralSetDeferred;
     // 0x0101010101010101, read from a field so the SWAR word loops of the prefix scans hold it in
     // a register: on aarch64 C2 cannot encode its negation as an immediate, and rebuilt it with
     // four instructions every word, even from a local holding the constant. The constructor
@@ -490,6 +505,9 @@ final class Prog
     // The predicted share of vectors holding a folded pair candidate at and above which the
     // folded vector scan verifies candidates inside its vector loop; see usesDenseFoldCaseScan.
     static final double DENSE_FOLD_CASE_VECTOR_SHARE = 0.15;
+    // The most literals a prefix literal set compares at each candidate, the same limit as the
+    // start literal filter's eight groups.
+    private static final int MAXIMUM_PREFIX_LITERALS = 8;
 
     // The literal every match begins with behind a leading assertion, and its search; see
     // buildTransparentStartLiteral. Both are null unless pattern compilation configures them.
@@ -512,6 +530,12 @@ final class Prog
 
     // DFA caching with memory budgets (like upstream RE2).
     private long dfaMemory;  // Total DFA memory budget
+    // Whether dfaMemory is what a positive maxMemory left the DFAs, rather than an unbudgeted
+    // compile's default allowance; see configurePrefixAccelBytes. The prefix literal set is the
+    // one optional plan kept or dropped by it: an explicit maxMemory must leave the forward DFAs
+    // the memory they need to initialize, while an unbudgeted compile keeps the set under its
+    // default allowance.
+    private boolean dfaMemoryBudgeted;
     private final AtomicReference<Dfa.DfaInstance> dfaFirstMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaLongestMatch = new AtomicReference<>();
     private final AtomicReference<Dfa.DfaInstance> dfaManyMatch = new AtomicReference<>();
@@ -799,9 +823,24 @@ final class Prog
         return onePassStep;
     }
 
-    long prefixShiftsMemory()
+    /// The retained bytes of the prefix scan's tables: the KMP shifts and the literal set, which
+    /// counts only once it is decided; see [#deferPrefixLiteralSet()].
+    long prefixScanMemory()
     {
-        return prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
+        long shiftsMemory = prefixShifts == null ? 0 : LiteralSearchKernel.prefixShiftsRetainedSize(prefixShifts);
+        return prefixLiteralSetDeferred ? shiftsMemory : shiftsMemory + prefixLiteralSetMemory();
+    }
+
+    private long prefixLiteralSetMemory()
+    {
+        if (prefixLiteralSet == null) {
+            return 0;
+        }
+        long memory = SizeOf.sizeOfObjectArray(prefixLiteralSet.length);
+        for (byte[] literal : prefixLiteralSet) {
+            memory += SizeOf.sizeOf(literal);
+        }
+        return memory;
     }
 
     long onePassMemory()
@@ -1225,7 +1264,17 @@ final class Prog
     /// and past [#MAXIMUM_START_POSITION_PATHS] paths.
     long[][] buildStartPositionByteSets(int[] stack, int positionCount)
     {
-        if (reversed || anchorStart || canMatchEmpty || prefixAccelReplacesStartBytes() || start() == 0) {
+        if (prefixAccelReplacesStartBytes()) {
+            return null;
+        }
+        return walkStartPositionByteSets(stack, positionCount);
+    }
+
+    // The start-position walk that buildStartPositionByteSets and buildPrefixLiteralSet share. The
+    // literal set reads it even where prefix acceleration replaces the start bytes.
+    private long[][] walkStartPositionByteSets(int[] stack, int positionCount)
+    {
+        if (reversed || anchorStart || canMatchEmpty || start() == 0) {
             return null;
         }
 
@@ -1805,7 +1854,7 @@ final class Prog
             return PrefixAccelStrategy.REPEATED_BYTE;
         }
         if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
-            return PrefixAccelStrategy.FUSED_VECTOR;
+            return prefixLiteralSet != null ? PrefixAccelStrategy.FUSED_LITERAL_SET : PrefixAccelStrategy.FUSED_VECTOR;
         }
         // Short ASCII-led searches, and long ones without the Vector API, keep the repeated
         // first-byte scan, whose single load per word costs less than the fused SWAR pair's two.
@@ -2029,8 +2078,10 @@ final class Prog
         this.prefixRunAddsPrefixScan = false;
         this.prefixRunHidesStartLiteralFilter = false;
         this.prefixShifts = null;
-        this.dfaMemory += prefixShiftsCharge;
-        this.prefixShiftsCharge = 0;
+        this.prefixLiteralSet = null;
+        this.prefixLiteralSetBackOffset = 0;
+        this.dfaMemory += prefixScanCharge;
+        this.prefixScanCharge = 0;
         if (bytes == null || bytes.length == 0) {
             this.prefix = null;
             this.prefixSize = 0;
@@ -2083,10 +2134,16 @@ final class Prog
             this.prefixPairOffset = adjacentPairOffset >= 0 ? adjacentPairOffset : pairOffset(bytes);
             this.prefixPairSecondaryOffset = adjacentPairOffset >= 0 ? adjacentPairOffset + 1 : lastOffset;
             // Like the OnePass table, the retained shifts come out of the DFA allowance. A budgeted
-            // compile fails when they do not fit, so the clamp only keeps an unbudgeted program's
-            // default allowance from going negative.
-            this.prefixShiftsCharge = Math.min(dfaMemory, prefixShiftsMemory());
-            this.dfaMemory -= prefixShiftsCharge;
+            // compile fails when the shifts do not fit, so the clamp only keeps an unbudgeted
+            // program's default allowance from going negative.
+            this.prefixScanCharge = Math.min(dfaMemory, prefixScanMemory());
+            this.dfaMemory -= prefixScanCharge;
+            if (probeOffset == 0 && VectorSupport.isAvailable()) {
+                buildPrefixLiteralSet(bytes);
+                if (!prefixLiteralSetDeferred) {
+                    chargePrefixLiteralSet(this);
+                }
+            }
         }
         else {
             // For single-byte non-foldCase, use simple memchr-style search
@@ -2096,9 +2153,142 @@ final class Prog
         updateStartCandidateSkip();
     }
 
+    /// Returns a budgeted program's literal set charge to its DFA allowance and leaves the set
+    /// undecided until [#decidePrefixLiteralSet(Prog)], so that neither OnePass nor any plan or
+    /// route judges its memory with the set's bytes taken. The set is still built for any prefix
+    /// configured meanwhile, but not charged. An unbudgeted program keeps its charge.
+    void deferPrefixLiteralSet()
+    {
+        if (!dfaMemoryBudgeted || prefixLiteralSetDeferred) {
+            return;
+        }
+        this.prefixLiteralSetDeferred = true;
+        // A budgeted program keeps the set only where its whole size was charged.
+        long setMemory = prefixLiteralSetMemory();
+        this.prefixScanCharge -= setMemory;
+        this.dfaMemory += setMemory;
+    }
+
+    /// Decides the literal set [#deferPrefixLiteralSet()] left undecided against the DFA allowance
+    /// of `allowance`, this program or the one that holds its forward DFA budget, after every
+    /// other charge to that allowance.
+    void decidePrefixLiteralSet(Prog allowance)
+    {
+        if (!prefixLiteralSetDeferred) {
+            return;
+        }
+        this.prefixLiteralSetDeferred = false;
+        chargePrefixLiteralSet(allowance);
+    }
+
+    /// Whether the literal set waits for [#decidePrefixLiteralSet(Prog)].
+    boolean defersPrefixLiteralSet()
+    {
+        return prefixLiteralSetDeferred;
+    }
+
+    /// Charges the literal set to the DFA allowance of `allowance`. The set only saves work, so it
+    /// is decided after every other charge and a budgeted allowance keeps it only where the rest
+    /// still leaves the forward DFAs the memory they need to initialize: a budget that compiles
+    /// without the Vector API then gives the same OnePass decision, routes, and DFA minimum with it.
+    private void chargePrefixLiteralSet(Prog allowance)
+    {
+        long setMemory = prefixLiteralSetMemory();
+        if (setMemory == 0) {
+            return;
+        }
+        if (allowance.dfaMemoryBudgeted && !allowance.leavesDfaMinimum(setMemory)) {
+            this.prefixLiteralSet = null;
+            this.prefixLiteralSetBackOffset = 0;
+            return;
+        }
+        long charge = Math.min(allowance.dfaMemory, setMemory);
+        allowance.dfaMemory -= charge;
+        if (allowance == this) {
+            this.prefixScanCharge += charge;
+        }
+    }
+
+    /// Sets [#prefixLiteralSet] for `prefix`, a non-folded prefix of two or more bytes whose probe
+    /// stays at its first byte, so that its long searches take the fused pair scan, when the
+    /// literals every match begins with run past it and share an exact byte at the same offset
+    /// there. A short prefix such as `fn ` in `fn is_\w+|fn as_\w+` is common in text and is
+    /// mostly followed by neither alternative, so the pair scan stops at most of its occurrences
+    /// and the search resumes past each one. Testing the last byte the literals share, `_` here,
+    /// with the prefix's paired byte, and comparing the literals at each candidate, stops only
+    /// where an alternative can begin.
+    ///
+    /// The literals are read from [#walkStartPositionByteSets] over
+    /// [StartLiteralFilter#SHALLOW_PATH_POSITIONS] bytes: each path's bytes up to its first position
+    /// that accepts more than one byte, so every match begins with one of them. A folded letter
+    /// accepts two bytes and ends its path's literal there. The set is kept only when the walk
+    /// succeeds and its distinct literals number at most [#MAXIMUM_PREFIX_LITERALS], each starts
+    /// with the prefix and runs past it, and some position past the prefix and before the end
+    /// of the shortest literal holds one byte in all of them; the last such position is the back
+    /// offset. Each literal is no longer than the walk, so the comparisons at a candidate are
+    /// bounded, and the scan needs no comparison budget.
+    private void buildPrefixLiteralSet(byte[] prefix)
+    {
+        if (prefix.length >= StartLiteralFilter.SHALLOW_PATH_POSITIONS) {
+            return;
+        }
+        long[][] paths = walkStartPositionByteSets(new int[3 * size() + 1], StartLiteralFilter.SHALLOW_PATH_POSITIONS);
+        if (paths == null) {
+            return;
+        }
+        List<byte[]> literals = new ArrayList<>();
+        for (long[] path : paths) {
+            byte[] literal = pathLiteral(path);
+            if (literal.length <= prefix.length || !Arrays.equals(literal, 0, prefix.length, prefix, 0, prefix.length)) {
+                return;
+            }
+            if (literals.stream().noneMatch(existing -> Arrays.equals(existing, literal))) {
+                if (literals.size() == MAXIMUM_PREFIX_LITERALS) {
+                    return;
+                }
+                literals.add(literal);
+            }
+        }
+        literals.sort(Comparator.comparingInt(literal -> literal.length));
+        byte[] shortest = literals.getFirst();
+        for (int offset = shortest.length - 1; offset >= prefix.length; offset--) {
+            byte value = shortest[offset];
+            int position = offset;
+            if (literals.stream().allMatch(literal -> literal[position] == value)) {
+                this.prefixLiteralSet = literals.toArray(byte[][]::new);
+                this.prefixLiteralSetBackOffset = offset;
+                return;
+            }
+        }
+    }
+
+    // The bytes of a path from walkStartPositionByteSets before its first position that accepts
+    // other than exactly one byte.
+    private static byte[] pathLiteral(long[] path)
+    {
+        int positionCount = path.length / 4;
+        byte[] literal = new byte[positionCount];
+        int length = 0;
+        while (length < positionCount) {
+            int base = length * 4;
+            int count = Long.bitCount(path[base]) + Long.bitCount(path[base + 1]) + Long.bitCount(path[base + 2]) + Long.bitCount(path[base + 3]);
+            if (count != 1) {
+                break;
+            }
+            int index = 0;
+            while (path[base + index] == 0) {
+                index++;
+            }
+            literal[length++] = (byte) (index * 64 + Long.numberOfTrailingZeros(path[base + index]));
+        }
+        return Arrays.copyOf(literal, length);
+    }
+
     /// Returns an absolute index `p` in `data` such that no match starts in `[offset, p)`, or `-1`
     /// if no match starts at or after `offset`. For a prefix, `p` is the first place the prefix
-    /// matches. For a folded run behind a lead, it is the first run found less the widest lead,
+    /// matches, except under the literal set scan, where it is the first place one of the
+    /// literals every match begins with matches, past occurrences of the prefix that begin none
+    /// of them. For a folded run behind a lead, it is the first run found less the widest lead,
     /// never before `offset`, and can precede the match: `(?i)Sherlock Holmes` under Unicode
     /// folding scans for ` holme` 8 to 11 bytes in, so on `xxxxxxxxxxSherlock Holmes` it returns
     /// 7, while the match starts at 10. When `p` is past `offset`, a call from any position from
@@ -2117,8 +2307,13 @@ final class Prog
     /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
     ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
     /// - Simple byte search for single-byte prefix
+    /// - On long searches with the Vector API, when the literals every match begins with run
+    ///   past the prefix and share a byte at the same offset there, fused pair masks of the
+    ///   prefix's paired byte and the last shared byte, with each candidate compared with every
+    ///   literal; see [#buildPrefixLiteralSet]. Each returned position begins one of the
+    ///   literals, and so the prefix.
     ///
-    /// The non-folded multi-byte scans charge their failed candidates to
+    /// The other non-folded multi-byte scans charge their failed candidates to
     /// [LiteralSearchKernel]'s comparison budget and finish with KMP once they pass it, so
     /// candidates with long partial matches cannot make the search quadratic.
     public int prefixAccel(byte[] data, int offset, int length)
@@ -2147,7 +2342,10 @@ final class Prog
         int end = offset + length;
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
         if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
-            return finishWithKmp(data, end, VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixPairSecondaryOffset));
+            return prefixAccelFusedVector(data, offset, length);
+        }
+        if (strategy == PrefixAccelStrategy.FUSED_LITERAL_SET) {
+            return prefixAccelLiteralSet(data, offset, length);
         }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
             return finishWithKmp(data, end, prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length));
@@ -2191,11 +2389,25 @@ final class Prog
         return -1;
     }
 
+    // The vector routes are methods of their own, as the folded routes are, so prefixAccel holds
+    // only their dispatch and stays within C2's FreqInlineSize, as TestHotMethodSize checks. Each
+    // is below MaxInlineSize, so C2 inlines it into prefixAccel whether or not the call is hot.
+    private int prefixAccelFusedVector(byte[] data, int offset, int length)
+    {
+        return finishWithKmp(data, offset + length, VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixPairSecondaryOffset));
+    }
+
+    private int prefixAccelLiteralSet(byte[] data, int offset, int length)
+    {
+        return VectorPrefixScanner.findLiteralSet(data, offset, length, prefixLiteralSet, prefixPairOffset, prefixLiteralSetBackOffset);
+    }
+
     /// Returns the absolute index where [#prefixAccel] continues with KMP; only tests call it.
-    /// Returns -1 when the search ends, with or without a match, before it switches to KMP, and
-    /// for a folded or one-byte prefix. It runs the scans [#prefixAccel] runs, except that the
-    /// first-byte scan starts in [#continueFrontAndBack], whose handoff is the same because the
-    /// scan charges nothing before its first failed candidate.
+    /// Returns -1 when the search ends, with or without a match, before it switches to KMP, for a
+    /// folded or one-byte prefix, and for the literal set scan, which never switches. It runs the
+    /// scans [#prefixAccel] runs, except that the first-byte scan starts in
+    /// [#continueFrontAndBack], whose handoff is the same because the scan charges nothing before
+    /// its first failed candidate.
     int prefixAccelKmpHandoffForDiagnostics(byte[] data, int offset, int length)
     {
         if (prefixFoldCase || prefixSize <= 1 || length < prefixSize) {
@@ -2203,6 +2415,7 @@ final class Prog
         }
         int found = switch (prefixAccelStrategy(length)) {
             case FUSED_VECTOR -> VectorPrefixScanner.find(data, offset, length, prefix, prefixPairOffset, prefixPairSecondaryOffset);
+            case FUSED_LITERAL_SET -> -1;
             case FUSED_SWAR -> prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
             case REPEATED_BYTE -> prefixProbeOffset != 0 ? prefixAccelProbe(data, offset, length) : continueFrontAndBack(data, offset, offset, offset + length);
         };
@@ -2757,6 +2970,13 @@ final class Prog
     public void setDfaMemory(long dfaMemory)
     {
         this.dfaMemory = dfaMemory;
+    }
+
+    /// Marks the DFA memory budget as what a positive `maxMemory` left, which the optional prefix
+    /// literal set yields to.
+    void setDfaMemoryBudgeted()
+    {
+        this.dfaMemoryBudgeted = true;
     }
 
     /// Get the DFA memory budget.

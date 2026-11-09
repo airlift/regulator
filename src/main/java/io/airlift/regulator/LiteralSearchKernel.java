@@ -35,7 +35,8 @@ final class LiteralSearchKernel
     // compare at most one byte per byte covered, such as "bba" over repeated "aabx", never switch,
     // while closely spaced candidates with long partial matches switch within a few candidates.
     // The prefix scans in Prog and VectorPrefixScanner apply the same rule through the static
-    // methods below.
+    // methods below, except the literal set scan, whose literals bound the comparisons at each
+    // candidate.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
 
     // The prefix shifts of every literal shorter than this table's 64 entries whose first byte

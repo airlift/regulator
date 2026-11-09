@@ -23,8 +23,10 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.IntFunction;
+import java.util.function.LongFunction;
 
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -128,6 +130,10 @@ public class TestUpstreamCompileMemoryBudget
         assertRemainingMemoryAssignedToDfa("abcabd", sizeOf(new int[7]));
         // A short prefix whose first byte does not recur shares one table and is charged nothing.
         assertRemainingMemoryAssignedToDfa("abcdef", 0);
+        // With the Vector API, alternatives past such a prefix keep their literal set where the
+        // budget leaves the forward DFAs their minimum beside it, charged as the array of its two
+        // literals.
+        assertRemainingMemoryAssignedToDfa("fn is_|fn as_", 1 << 20, VectorSupport.isAvailable() ? sizeOfObjectArray(2) + 2 * sizeOf(new byte[6]) : 0);
 
         // Compiling an exact literal configures its prefix again, which returns the first shift
         // table's charge before charging the second. A third of the budget goes to the reverse
@@ -166,7 +172,7 @@ public class TestUpstreamCompileMemoryBudget
         long maxMemory = 421_049;
         Re2 compiled = Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
         Prog program = compiled.forwardProgramForDiagnostics();
-        assertThat(program.prefixShiftsMemory()).isPositive();
+        assertThat(program.prefixScanMemory()).isPositive();
         assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isLessThanOrEqualTo(maxMemory - (maxMemory / 3));
         // At its exact limit the program still compiles and keeps its BitState output lists,
         // which take the list heads' place inside the instruction charge.
@@ -177,6 +183,30 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(321);
         assertThat(compiled.find(Slices.utf8Slice("x" + literal.substring(1) + "b"))).isFalse();
+    }
+
+    @Test
+    public void testPrefixLiteralSetYieldsToForwardShare()
+    {
+        // The prefix scan's literal set, `abx_` and `aby_` paired on `a` and `_`, is built only
+        // with the Vector API and only saves work. At the least budget at which the lazy loops
+        // compile, the forward share has no room left for it, so the prefix keeps its pair scan
+        // and the least budget is the same with the Vector API as without it, as is the budget a
+        // rejection reports. A comfortable budget keeps the set.
+        String loops = "(?:(?:(?:(?:b?)*?){8})*?)+";
+        Slice pattern = Slices.utf8Slice("abx_" + loops + "|aby_" + loops);
+        assertPrefixLiteralSetYields(maxMemory -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory)), 54_329);
+        assertPrefixLiteralSetYields(maxMemory -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)), 20_768);
+
+        // The set is decided after OnePass and every route, so at the least budget at which the
+        // forward DFAs keep their minimum it takes none of their memory and is dropped. Charged
+        // first, it left the DFAs short at budgets that hold their minimum without it: beside
+        // OnePass in the first pattern, and beside the literal alternation route in the second.
+        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_(\\w+)|fn as_(\\w+)", false);
+        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_x|fn as_y", false);
+        // The bounded repeats' position automaton is such a route: at the least budget at which
+        // it is kept beside the forward DFAs' minimum, the set is dropped.
+        assertPrefixLiteralSetYieldsToDfaMinimum("fn is_\\w{1,8}|fn as_\\w{1,8}", true);
     }
 
     @Test
@@ -452,14 +482,18 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(CompiledPattern.budgetForForwardMemory(Long.MAX_VALUE)).isEqualTo(Compiler.NO_BUDGET);
     }
 
-    private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixShiftsMemory)
+    private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixScanMemory)
     {
-        int maxMemory = 4096;
+        assertRemainingMemoryAssignedToDfa(pattern, 4096, prefixScanMemory);
+    }
+
+    private static void assertRemainingMemoryAssignedToDfa(String pattern, int maxMemory, long prefixScanMemory)
+    {
         Prog program = Compiler.compile(parse(pattern), false, maxMemory);
 
         long programMemory = 512L + ((long) program.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
         assertThat(program.isOnePass()).isTrue();
-        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - program.onePassMemory() - prefixShiftsMemory);
+        assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - program.onePassMemory() - prefixScanMemory);
         assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isEqualTo(maxMemory);
     }
 
@@ -482,6 +516,55 @@ public class TestUpstreamCompileMemoryBudget
             }
         }
         return compiled;
+    }
+
+    private static void assertPrefixLiteralSetYields(LongFunction<CompiledPattern> compile, long leastMaxMemory)
+    {
+        assertThatThrownBy(() -> compile.apply(leastMaxMemory - 1))
+                .isInstanceOfSatisfying(RegexpCompileMemoryLimitException.class, exception -> assertThat(exception.requiredMaxMemoryBytes()).hasValue(leastMaxMemory));
+        assertThat(compile.apply(leastMaxMemory).forwardProgramForDiagnostics().prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(compile.apply(1 << 20).forwardProgramForDiagnostics().prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+    }
+
+    private static void assertPrefixLiteralSetYieldsToDfaMinimum(String pattern, boolean keepsPositionNfa)
+    {
+        LongFunction<Prog> forwardProgram = maxMemory -> Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory)).forwardProgramForDiagnostics();
+        long low = 1;
+        long high = 1 << 20;
+        while (low < high) {
+            long middle = (low + high) >>> 1;
+            if (leavesDfaMinimum(forwardProgram, middle)) {
+                high = middle;
+            }
+            else {
+                low = middle + 1;
+            }
+        }
+        Prog program = forwardProgram.apply(low);
+        for (long limit = low + (1 << 12); keepsPositionNfa && program.positionNfa() == null && low < limit; ) {
+            program = forwardProgram.apply(++low);
+        }
+        assertThat(program.leavesDfaMinimum(0)).isTrue();
+        if (keepsPositionNfa) {
+            assertThat(program.positionNfa()).isNotNull();
+        }
+        assertThat(program.isOnePass()).isTrue();
+        assertThat(program.prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_VECTOR : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+        assertThat(forwardProgram.apply(1 << 20).prefixAccelStrategy(1_024))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+    }
+
+    private static boolean leavesDfaMinimum(LongFunction<Prog> forwardProgram, long maxMemory)
+    {
+        try {
+            return forwardProgram.apply(maxMemory).leavesDfaMinimum(0);
+        }
+        catch (RegexpCompileMemoryLimitException e) {
+            return false;
+        }
     }
 
     private static void assertLargestGroupsPlanBoundedPasses(long maxMemory, int groups, IntFunction<String> pattern)

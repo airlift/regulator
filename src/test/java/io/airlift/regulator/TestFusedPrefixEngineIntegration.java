@@ -18,8 +18,13 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -108,6 +113,96 @@ public class TestFusedPrefixEngineIntegration
             CompiledPattern pattern = compiled.getValue();
             assertThat(pattern.forwardProgramForDiagnostics().fusedProbeOffsetsForDiagnostics()).as(compiled.getKey()).containsExactly(0, 1);
             assertThat(pattern.count(text)).as(compiled.getKey()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    public void testLiteralSetScanEnginesAndCaptures()
+    {
+        // The prefix "fn " is followed by neither alternative before the match. The DFA, the Pike
+        // VM, and BitState skip from it to the match, and the Pike VM and BitState capture the
+        // alternative's group.
+        String pattern = "fn is_(\\w+)|fn as_(\\w+)";
+        Prog program = compile(pattern);
+        String lead = "fn new() fx is_ fn ais_ ".repeat(50);
+        Slice text = Slices.utf8Slice(lead + "fn as_x1 fn is_y");
+        int matchStart = lead.length();
+        assertThat(program.prefixAccelStrategy(text.length()))
+                .isEqualTo(VectorSupport.isAvailable() ? Prog.PrefixAccelStrategy.FUSED_LITERAL_SET : Prog.PrefixAccelStrategy.REPEATED_BYTE);
+
+        assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(matchStart + 8);
+        assertThat(Dfa.search(program, text, false, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(matchStart + 8);
+        assertThat(Dfa.countMatches(program, text, Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
+        int[] expectedGroups = {matchStart, matchStart + 8, -1, -1, matchStart + 6, matchStart + 8};
+        int[] groups = new int[6];
+        assertThat(Nfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, groups)).isTrue();
+        assertThat(groups).containsExactly(expectedGroups);
+        groups = new int[6];
+        assertThat(BitState.search(program, text, false, Prog.MatchKind.FIRST_MATCH, groups)).isTrue();
+        assertThat(groups).containsExactly(expectedGroups);
+    }
+
+    @Test
+    public void testLiteralSetScanMatchesJdkInEveryLanguage()
+    {
+        // Text of the literals, their prefixes and pair-sharing decoys, and filler, in windows
+        // inside a larger array. Each language's matcher finds the JDK's matches and groups, and
+        // the DFA's count finds as many matches. The JDK is the oracle because an unanchored NFA
+        // search over these windows calls the same literal set scan.
+        List<String> fragments = List.of("fn is_", "fn as_", "fn is", "fn as", "fn ", "fx is_", "fn i_s_", "f", "_", "s_", "x", "1", " ", "\n");
+        Random random = new Random(11);
+        for (String pattern : List.of("fn is_(\\w+)|fn as_(\\w+)", "fn (is)e|fn (as)", "fn is_|fn as_|fn os_x\\d+")) {
+            Prog program = compile(pattern);
+            if (VectorSupport.isAvailable()) {
+                assertThat(program.prefixAccelStrategy(1_024)).as(pattern).isEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            else {
+                assertThat(program.prefixAccelStrategy(1_024)).as(pattern).isNotEqualTo(Prog.PrefixAccelStrategy.FUSED_LITERAL_SET);
+            }
+            Pattern oracle = Pattern.compile(pattern);
+            List<CompiledPattern> languages = List.of(
+                    Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults()),
+                    JavaRegexp.compile(Slices.utf8Slice(pattern)),
+                    RustRegexp.compile(Slices.utf8Slice(pattern)),
+                    TrinoRegexp.compile(Slices.utf8Slice(pattern)).re2());
+            for (int trial = 0; trial < 20; trial++) {
+                StringBuilder body = new StringBuilder();
+                int length = 1_024 + random.nextInt(4 * 1_024);
+                while (body.length() < length) {
+                    body.append(fragments.get(random.nextInt(fragments.size())));
+                }
+                byte[] bodyBytes = body.toString().getBytes(StandardCharsets.US_ASCII);
+                int backingOffset = random.nextInt(8);
+                byte[] backing = new byte[backingOffset + bodyBytes.length + 8];
+                Arrays.fill(backing, (byte) '_');
+                System.arraycopy(bodyBytes, 0, backing, backingOffset, bodyBytes.length);
+                Slice text = Slices.wrappedBuffer(backing, backingOffset, bodyBytes.length);
+
+                List<List<Integer>> expected = new ArrayList<>();
+                Matcher oracleMatcher = oracle.matcher(body);
+                while (oracleMatcher.find()) {
+                    List<Integer> spans = new ArrayList<>();
+                    for (int group = 0; group <= oracleMatcher.groupCount(); group++) {
+                        spans.add(oracleMatcher.start(group));
+                        spans.add(oracleMatcher.end(group));
+                    }
+                    expected.add(spans);
+                }
+                assertThat(Dfa.countMatches(program, text, Prog.MatchKind.FIRST_MATCH)).as(pattern).isEqualTo(expected.size());
+                for (CompiledPattern language : languages) {
+                    RegexpMatcher matcher = language.matcher(text);
+                    List<List<Integer>> actual = new ArrayList<>();
+                    while (matcher.find()) {
+                        List<Integer> spans = new ArrayList<>();
+                        for (int group = 0; group <= matcher.groupCount(); group++) {
+                            spans.add(matcher.start(group));
+                            spans.add(matcher.end(group));
+                        }
+                        actual.add(spans);
+                    }
+                    assertThat(actual).as("%s %s", language.getClass().getSimpleName(), pattern).isEqualTo(expected);
+                }
+            }
         }
     }
 

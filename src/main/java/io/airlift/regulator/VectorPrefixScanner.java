@@ -18,6 +18,8 @@ import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
+import java.util.Arrays;
+
 final class VectorPrefixScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_PREFERRED;
@@ -97,6 +99,79 @@ final class VectorPrefixScanner
             position += SPECIES.length();
         }
         return findScalar(data, position, offset + candidateCount - position, prefix, primaryOffset, secondaryOffset, comparisonEnd);
+    }
+
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // Returns the first position where one of `literals` occurs, ending by offset + length, or -1.
+    // The literals are sorted by length, shortest first, and all hold the shortest one's bytes at
+    // primaryOffset and secondaryOffset, which lie before its end. The scan is find's, testing
+    // that pair, and each candidate is compared with every literal that fits before the end. Prog
+    // builds at most eight literals of at most six bytes, so the comparisons at a candidate are
+    // bounded and the scan keeps no comparison budget.
+    static int findLiteralSet(byte[] data, int offset, int length, byte[][] literals, int primaryOffset, int secondaryOffset)
+    {
+        byte[] shortest = literals[0];
+        int candidateCount = length - shortest.length + 1;
+        if (candidateCount <= 0) {
+            return -1;
+        }
+
+        int end = offset + length;
+        int vectorEnd = offset + SPECIES.loopBound(candidateCount);
+        ByteVector primaryVector = ByteVector.broadcast(SPECIES, shortest[primaryOffset]);
+        ByteVector secondaryVector = ByteVector.broadcast(SPECIES, shortest[secondaryOffset]);
+        int position = offset;
+
+        while (position < vectorEnd) {
+            // As in find, a counted loop only tests each vector for a candidate, and candidates are
+            // verified after it breaks. The XOR form is written in line rather than through
+            // pairDifference, which keeps its one call site in find.
+            int steps = (vectorEnd - position) / SPECIES.length();
+            int step = 0;
+            for (; step < steps; step++) {
+                int stepPosition = position + step * SPECIES.length();
+                if (VectorSupport.SVE_128
+                        ? ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).lanewise(VectorOperators.XOR, primaryVector)
+                          .lanewise(VectorOperators.OR, ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).lanewise(VectorOperators.XOR, secondaryVector))
+                          .compare(VectorOperators.EQ, (byte) 0).anyTrue()
+                        : ByteVector.fromArray(SPECIES, data, stepPosition + primaryOffset).compare(VectorOperators.EQ, primaryVector)
+                          .and(ByteVector.fromArray(SPECIES, data, stepPosition + secondaryOffset).compare(VectorOperators.EQ, secondaryVector))
+                          .anyTrue()) {
+                    break;
+                }
+            }
+            position += step * SPECIES.length();
+            if (step == steps) {
+                break;
+            }
+            ByteVector primary = ByteVector.fromArray(SPECIES, data, position + primaryOffset);
+            ByteVector secondary = ByteVector.fromArray(SPECIES, data, position + secondaryOffset);
+            long candidateBits = VectorSupport.SVE_128
+                    ? primary.lanewise(VectorOperators.XOR, primaryVector).lanewise(VectorOperators.OR, secondary.lanewise(VectorOperators.XOR, secondaryVector))
+                      .compare(VectorOperators.EQ, (byte) 0).toLong()
+                    : primary.compare(VectorOperators.EQ, primaryVector).and(secondary.compare(VectorOperators.EQ, secondaryVector)).toLong();
+            while (candidateBits != 0) {
+                int candidate = position + Long.numberOfTrailingZeros(candidateBits);
+                // Keep sparse verification in this method, as in find.
+                literal:
+                for (byte[] literal : literals) {
+                    if (literal.length > end - candidate) {
+                        // The rest are no shorter.
+                        break;
+                    }
+                    for (int index = 0; index < literal.length; index++) {
+                        if (data[candidate + index] != literal[index]) {
+                            continue literal;
+                        }
+                    }
+                    return candidate;
+                }
+                candidateBits &= candidateBits - 1;
+            }
+            position += SPECIES.length();
+        }
+        return findLiteralSetScalar(data, position, offset + candidateCount, end, literals, primaryOffset, secondaryOffset);
     }
 
     /// Returns the XOR difference of the bytes at `position + primaryOffset` from the primary probe
@@ -514,6 +589,32 @@ final class VectorPrefixScanner
             }
         }
         return -1;
+    }
+
+    // The candidates of findLiteralSet in [offset, candidateEnd), one position at a time.
+    private static int findLiteralSetScalar(byte[] data, int offset, int candidateEnd, int end, byte[][] literals, int primaryOffset, int secondaryOffset)
+    {
+        byte primary = literals[0][primaryOffset];
+        byte secondary = literals[0][secondaryOffset];
+        for (int position = offset; position < candidateEnd; position++) {
+            if (data[position + primaryOffset] == primary && data[position + secondaryOffset] == secondary && literalSetMatchesAt(data, position, end, literals)) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean literalSetMatchesAt(byte[] data, int position, int end, byte[][] literals)
+    {
+        for (byte[] literal : literals) {
+            if (literal.length > end - position) {
+                return false;
+            }
+            if (Arrays.equals(data, position, position + literal.length, literal, 0, literal.length)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static int matchingPrefixLength(byte[] data, int position, byte[] prefix)
