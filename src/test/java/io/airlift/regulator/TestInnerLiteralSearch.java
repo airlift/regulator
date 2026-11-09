@@ -81,6 +81,7 @@ public class TestInnerLiteralSearch
             "\\B\\w+nn\\b",
             "(?m)^.{0,3}Finn",
             "(?:..@cbb|b)@(?:c|d)",
+            "(?i:k)ey = value",
             // Outside RE2 the class is empty, so the program can never match.
             "\\s\\*[a&&b]{1,2}");
 
@@ -127,6 +128,27 @@ public class TestInnerLiteralSearch
             assertThat(search).as(compiled.getKey()).isNotNull();
             assertThat(literal(search)).as(compiled.getKey()).isEqualTo("awyer|inn");
         }
+        // A folded ASCII letter consumes only its own two cases. Every language keeps the folded x
+        // and xy as folded literals, since the simplifier rebuilds [Xx] into one, so neither they
+        // nor the digit run can consume the space that starts the literal, and every language
+        // searches it.
+        Slice foldedTarget = utf8Slice("(?i:xy)?\\d+ = value");
+        for (Map.Entry<String, ? extends CompiledPattern> compiled : List.of(
+                Map.entry("RE2", Re2.compile(foldedTarget)),
+                Map.entry("Java", JavaRegexp.compile(foldedTarget)),
+                Map.entry("Trino", TrinoRegexp.compile(foldedTarget).re2()),
+                Map.entry("Rust", RustRegexp.compile(foldedTarget)),
+                Map.entry("Rust bytes", RustRegexp.compile(foldedTarget, RUST_BYTES_OPTIONS)))) {
+            InnerLiteralSearch search = compiled.getValue().innerLiteralSearchForDiagnostics();
+            assertThat(search).as(compiled.getKey()).isNotNull();
+            assertThat(literal(search)).as(compiled.getKey()).isEqualTo(" = value");
+        }
+        // The orbit of k holds the Kelvin sign, so RE2 and Rust build [Kk\u212A] where Trino keeps
+        // a folded k, and the prefix has no fixed length. Trino's folded k still consumes only k
+        // and K among ASCII bytes, so it cannot hold the literal.
+        InnerLiteralSearch kelvinSearch = TrinoRegexp.compile(utf8Slice("(?i:k)ey = value")).re2().innerLiteralSearchForDiagnostics();
+        assertThat(kelvinSearch).isNotNull();
+        assertThat(literal(kelvinSearch)).isEqualTo("ey = value");
         // Rust's Unicode \w has no fixed length in bytes, so the fixed-length proof needs RE2's.
         InnerLiteralSearch wordSearch = Re2.compile(utf8Slice("\\w(?:foo|barbaz)\\s")).innerLiteralSearchForDiagnostics();
         assertThat(wordSearch).isNotNull();
@@ -271,6 +293,15 @@ public class TestInnerLiteralSearch
                 // A class pair whose prefix neither opens with a single byte nor is a class run.
                 "(?:\\w|--)+[?!.][\"']")) {
             assertThat(innerLiteralSearch(pattern)).as(pattern).isNull();
+        }
+        // In Trino, a folded rune consumes the literal's bytes it folds to, so its repetition can
+        // hold the literal and an earlier match could span a later one: k consumes both cases of
+        // k, the Kelvin sign consumes k, and @ consumes itself.
+        for (String pattern : List.of(
+                "(?i:k)+Kk",
+                "(?i:\u212A)+kk",
+                "(?i:@)+@@")) {
+            assertThat(TrinoRegexp.compile(utf8Slice(pattern)).re2().innerLiteralSearchForDiagnostics()).as(pattern).isNull();
         }
     }
 
@@ -918,6 +949,7 @@ public class TestInnerLiteralSearch
                 "azxx zxx azx azxxx ".repeat(5),
                 "abcdxy aaaaxy uuuuxy axyzxy ".repeat(4),
                 "key: value\nother:\tx\n: none\nk:v\n".repeat(4),
+                "key = value Key = value \u212Aey = value kkey = value \u212A\u212Aey = value ey = value key=value\n".repeat(4),
                 "http://example.com/a ftp://x mailto:y https:// x://y".repeat(2),
                 "a@c@b@ a@c@b@ c@ a@b@ a@@b@".repeat(4),
                 "ac@d@ ac@d@ c@ ac@@d@",

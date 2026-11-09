@@ -2748,9 +2748,10 @@ inner literal search and the case-sensitive scans serve, and a run scan takes
 their place. Without these two rules, `(?i:k)ey = value` over CPython scanned
 for ` = ` behind the Kelvin sign's lead instead of searching for its inner
 literal, 5.7x and 10.4x main's time on r8i and r9g in RE2, Rust, and Java, and
-`[Éé]: \d+ ERROR` over a log scanned for `: `, 1.04x to 1.13x. Trino finds no
+`[Éé]: \d+ ERROR` over a log scanned for `: `, 1.04x to 1.13x. Trino found no
 inner literal in `(?i:k)ey = value`, so there the run had been faster than main;
-it now matches main. Runs of two and three bytes, such as the `le` after the
+it now searches that inner literal as the other languages do.
+Runs of two and three bytes, such as the `le` after the
 `fi` of Trino's `(?i)file`, the `elf` of `(?i)self`, and the `thi` of
 `(?i)this`, are common in real text, more common than the English pair model
 rates them, so their scan stopped far more often than the DFA's start bytes.
