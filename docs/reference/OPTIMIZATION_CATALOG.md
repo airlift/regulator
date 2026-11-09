@@ -133,28 +133,29 @@ answer, or reject the input before any engine runs.
   count, and the one-shot range searches, for unanchored patterns whose
   required bytes are an exact literal and that have no other literal search.
   An inner literal search counts as one unless only the class-run proof admits
-  it. Search-end bound: count, the one-shot range and capture searches, and
-  RE2's `replaceAll` of such a pattern whose matches all end with at least two
-  exact ASCII bytes and no assertion after them; not for a program with
-  assertions the DFA cannot run, such as Java's final-terminator `$` and `\Z`
-  and Trino's final line end, nor for a lowered boolean program. If the full
-  charge does not fit beside the forward DFAs, the search-end bound is removed
-  and the charge retried. If that fails, the pattern keeps only the
-  short-window check when that smaller charge fits, and otherwise no check. A
-  matcher reuses an occurrence until a find passes it, and stops after eight
-  scans in a row find it within 256 bytes of their start. Minimum length:
-  windows under 4 KiB, where longer ones skip the metadata load, matcher finds
-  that take the general route, and every count, generated or not; a Trino
-  count skips only the whole-pattern minimum, as its start-anchored plans read
-  a lone malformed byte as one character. Maximum length: patterns of bounded
-  length anchored at both ends, in count, matcher finds, start-anchored scan
-  plans, and anchored ordinary-engine searches. First byte: start-anchored,
-  non-nullable programs with no assertion before the first byte. Inner
-  literal: find windows under the 64-byte minimum of a gated search for a
-  one-byte exact literal, which full-Slice boolean find runs first, before the
-  ordinary engine, where the pattern qualifies. Scan plans: unanchored plans
-  not led by a literal, with a later case-sensitive literal that every match
-  passes
+  it. A pattern whose every match spans at least 256 bytes keeps its literal
+  for this check alone. Search-end bound: count, the one-shot range and
+  capture searches, and RE2's `replaceAll` of such a pattern whose matches all
+  end with at least two exact ASCII bytes and no assertion after them; not for
+  a program with assertions the DFA cannot run, such as Java's
+  final-terminator `$` and `\Z` and Trino's final line end, nor for a lowered
+  boolean program. If the full charge does not fit beside the forward DFAs,
+  the search-end bound is removed and the charge retried. If that fails, the
+  pattern keeps only the short-window check when eligible and affordable, and
+  otherwise no check. A matcher reuses an occurrence until a find passes it,
+  and stops after eight scans in a row find it within 256 bytes of their
+  start. Minimum length: windows under 4 KiB, where longer ones skip the
+  metadata load, matcher finds that take the general route, and every count,
+  generated or not; a Trino count skips only the whole-pattern minimum, as its
+  start-anchored plans read a lone malformed byte as one character. Maximum
+  length: patterns of bounded length anchored at both ends, in count, matcher
+  finds, start-anchored scan plans, and anchored ordinary-engine searches.
+  First byte: start-anchored, non-nullable programs with no assertion before
+  the first byte. Inner literal: find windows under the 64-byte minimum of a
+  gated search for a one-byte exact literal, which full-Slice boolean find
+  runs first, before the ordinary engine, where the pattern qualifies. Scan
+  plans: unanchored plans not led by a literal, with a later case-sensitive
+  literal that every match passes
 - **What it does:** A pattern may record bytes every match holds: an ASCII
   literal of two or more bytes, from one element or joined across adjacent
   ones, such as `,z` in `(.*?,){13}z`, or up to three ASCII bytes of which

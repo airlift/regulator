@@ -68,7 +68,9 @@ public class TestRequiredBytes
             new SuffixCase("(.*?,){3}(?:,z)+", "a,b,c,,z,z", ",z"),
             new SuffixCase("\\b(.*?,){3}z,", "ab,c,d,z,", ",z,"),
             // An inner literal search behind a class run, whose count the bound ends too.
-            new SuffixCase("([a-z]+)ing", "testing", "ing"));
+            new SuffixCase("([a-z]+)ing", "testing", "ing"),
+            // Matches of at least the short-window limit, whose literal serves long windows only.
+            new SuffixCase("(.*?,){300}z", ",".repeat(300) + "z", ",z"));
     // Append this always-matching assertion to disable suffix extraction without changing
     // matches.
     private static final String WITHOUT_SUFFIX = "(?:\\b|\\B)";
@@ -142,8 +144,9 @@ public class TestRequiredBytes
         assertThat(requiredBytes("\\d(?i:k)")).isNull();
         assertThat(RustRegexp.compile(utf8Slice("\\d(?i:k)")).find(utf8Slice("1\u212A"))).isTrue();
         // A pattern whose matches span at least 256 bytes, counting the two bytes of each é and a
-        // required prefix, keeps none: no short window can hold such a match, so such a pattern
-        // goes without the long-window check too.
+        // required prefix, keeps none unless the long-window check takes its exact literal: no
+        // short window can hold such a match. A prefix scan, or the anchor of a required prefix,
+        // leaves these without that check.
         assertThat(requiredBytes("abé{126}\\d")).isEqualTo("ab");
         assertThat(requiredBytes("abé{127}")).isNull();
         assertThat(requiredBytes("^" + "a".repeat(252) + "\\d+bc")).isEqualTo("bc");
@@ -511,6 +514,104 @@ public class TestRequiredBytes
             assertThat(pattern.count(names)).as(language).isZero();
             assertNoForwardDfa(pattern, language + " names");
         }
+    }
+
+    @Test
+    public void testChecksLongWindowsForLongMatches()
+    {
+        // A pattern whose every match spans at least the short-window limit keeps its exact
+        // literal for the long-window check alone: each short-window hook rejects a shorter
+        // window on its length first. The 300 copies of the counted capture flatten as 13 do,
+        // so every match ends with `,z`, which also bounds a long search's end.
+        String expression = "(.*?,){300}z";
+        String match = ",".repeat(300) + "z";
+        Map<String, CompiledPattern> patterns = compile(expression);
+        for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.minimumMatchLength()).as(language).isGreaterThanOrEqualTo(RequiredBytes.SHORT_WINDOW_LIMIT);
+            RequiredBytes literal = pattern.requiredBytesForDiagnostics();
+            assertThat(literal).as(language).hasToString(",z");
+            assertThat(literal.isLongWindowsOnly()).as(language).isTrue();
+            assertThat(literal.boundsSearchEnd()).as(language).isTrue();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).isSameAs(literal);
+        }
+
+        // A long window without the literal is rejected before any engine runs, under and over
+        // the vector scan minimum, by every hook.
+        for (String filler : List.of(SHORT_FILLER, LONG_FILLER)) {
+            Slice input = utf8Slice(filler + ",".repeat(300));
+            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+                String language = entry.getKey() + " " + input.length();
+                RegexpMatcher matcher = entry.getValue().matcher(input);
+                assertThat(matcher.find()).as(language).isFalse();
+                assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+                assertNoForwardDfa(entry.getValue(), language + " matcher");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+                String language = entry.getKey() + " " + input.length();
+                assertThat(entry.getValue().find(input)).as(language).isFalse();
+                assertNoForwardDfa(entry.getValue(), language + " find");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+                String language = entry.getKey() + " " + input.length();
+                assertThat(entry.getValue().count(input)).as(language).isZero();
+                assertNoForwardDfa(entry.getValue(), language + " count");
+            }
+            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+                String language = entry.getKey() + " " + input.length();
+                CompiledPattern pattern = entry.getValue();
+                int[] groups = new int[2 * (pattern.capturingGroupCount() + 1)];
+                Arrays.fill(groups, 7);
+                assertThat(pattern.findInto(input, 0, input.length(), groups)).as(language).isFalse();
+                assertThat(groups).as(language).containsOnly(-1);
+                assertNoForwardDfa(pattern, language + " range findInto");
+            }
+            // With the literal only at the window start, the search-end bound ends a range search
+            // there, before the engine has room for a match. A count reads only up to that
+            // occurrence, so its DFA builds the states that counting the literal alone builds.
+            // That baseline is padded with newlines to the pattern's minimum length, since a
+            // shorter count runs no engine, and the bound ends its count at `,z` before them.
+            Slice early = utf8Slice(",z\n" + input.toStringUtf8());
+            Map<String, CompiledPattern> countedAlone = compile(expression);
+            for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+                String language = entry.getKey() + " " + early.length();
+                CompiledPattern pattern = entry.getValue();
+                assertThat(pattern.find(early, 0, early.length())).as(language).isFalse();
+                assertNoForwardDfa(pattern, language + " bounded range find");
+                assertThat(pattern.count(early)).as(language).isZero();
+                CompiledPattern alone = countedAlone.get(entry.getKey());
+                assertThat(alone.count(utf8Slice(",z" + "\n".repeat(299)))).as(language).isZero();
+                assertThat(firstMatchStates(pattern)).as(language + " bounded count").isEqualTo(firstMatchStates(alone));
+            }
+        }
+
+        // A window that holds the literal runs the engine.
+        Slice input = utf8Slice(LONG_FILLER + match + "\n" + LONG_FILLER_WITH_LITERAL);
+        for (Map.Entry<String, CompiledPattern> entry : patterns.entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(spans(pattern.matcher(input))).as(language).containsExactly(new Span(LONG_FILLER.length(), LONG_FILLER.length() + match.length()));
+            assertThat(pattern.find(input)).as(language).isTrue();
+            assertThat(pattern.count(input)).as(language).isEqualTo(1);
+        }
+
+        // A short window, which cannot hold a match, is rejected on its length before any engine
+        // runs, although it holds the literal.
+        Slice shortInput = utf8Slice(",".repeat(RequiredBytes.SHORT_WINDOW_LIMIT - 2) + "z");
+        for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+            String language = entry.getKey();
+            assertThat(entry.getValue().find(shortInput)).as(language).isFalse();
+            assertNoForwardDfa(entry.getValue(), language + " short find");
+        }
+        for (Map.Entry<String, CompiledPattern> entry : compile(expression).entrySet()) {
+            String language = entry.getKey();
+            assertThat(entry.getValue().matcher(shortInput).find()).as(language).isFalse();
+            assertNoForwardDfa(entry.getValue(), language + " short matcher");
+        }
+
+        // A pattern with another literal route keeps no literal for such matches.
+        compile("x" + expression).forEach((language, pattern) -> assertThat(pattern.requiredBytesForDiagnostics()).as(language).isNull());
     }
 
     @Test
@@ -927,6 +1028,16 @@ public class TestRequiredBytes
         assertThat(compiled.requiredBytesForDiagnostics().searchesLongWindows()).isFalse();
         assertThat(compiled.find(utf8Slice("x,z q"))).isTrue();
         assertThat(compiled.find(utf8Slice("x, zq"))).isFalse();
+
+        // A literal that serves long windows only has no short-window check to fall back to. At
+        // the smallest budget at which the first-match DFA of a pattern whose matches span at
+        // least the short-window limit initializes, the literal's charge would stop it from
+        // initializing, so the pattern keeps no required bytes. One byte lower, the DFA cannot
+        // initialize either way, and the pattern keeps the literal.
+        String longMatches = "(?s)[ab]{256},z";
+        long longMatchesInitializes = smallestBudget(longMatches, TestRequiredBytes::firstMatchDfaInitializes);
+        assertThat(requiredBytesAt(longMatches, longMatchesInitializes - 1).isLongWindowsOnly()).isTrue();
+        assertThat(requiredBytesAt(longMatches, longMatchesInitializes)).isNull();
 
         // The same holds after compilation, where Trino's ordered-literal route is charged with
         // the required bytes' charge handed back, and they are judged again beside it, although
