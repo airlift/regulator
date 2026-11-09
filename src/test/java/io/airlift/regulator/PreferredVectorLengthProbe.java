@@ -34,13 +34,24 @@ public final class PreferredVectorLengthProbe
         System.out.println(LANES_PREFIX + ByteVector.SPECIES_PREFERRED.length());
     }
 
-    /// Forks a JVM with the Vector API module, inheriting this JVM's environment, such as
-    /// `JAVA_TOOL_OPTIONS`, and returns whether the vector scanners run there.
+    /// Returns whether the vector scanners run in a JVM forked as [#preferredByteLanes()] forks
+    /// one.
     static boolean expectVectorScans()
+            throws IOException, InterruptedException
+    {
+        int length = preferredByteLanes();
+        return length >= 16 && length <= 64;
+    }
+
+    /// Forks a JVM with the Vector API module at this JVM's vector width, inheriting this JVM's
+    /// environment, such as `JAVA_TOOL_OPTIONS`, and returns the lane count of its preferred byte
+    /// vector.
+    static int preferredByteLanes()
             throws IOException, InterruptedException
     {
         List<String> command = new ArrayList<>();
         command.add(System.getProperty("java.home") + "/bin/java");
+        command.addAll(TestingJvmArguments.vectorWidthOptions());
         command.add("--add-modules");
         command.add("jdk.incubator.vector");
         command.add("-cp");
@@ -55,11 +66,10 @@ public final class PreferredVectorLengthProbe
         assertThat(process.waitFor()).as(output).isZero();
         // Inherited JVM options can add lines of their own, such as picked-up options or logging,
         // so read the count from the probe's marked line.
-        int length = output.lines()
+        return output.lines()
                 .filter(line -> line.startsWith(LANES_PREFIX))
                 .mapToInt(line -> Integer.parseInt(line.substring(LANES_PREFIX.length()).strip()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no lane count in probe output: " + output));
-        return length >= 16 && length <= 64;
     }
 }

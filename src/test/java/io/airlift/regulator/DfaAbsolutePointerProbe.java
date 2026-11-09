@@ -451,9 +451,8 @@ public final class DfaAbsolutePointerProbe
     }
 
     // After the x, two of every three transitions of the two-byte character cycle carry the
-    // match bit, so the count self-loop scan stops with a match pending. The pending match must
-    // continue through the pointer table; requesting paired rows first would prevent the table
-    // from being allocated.
+    // match bit, so a count holds a pending match through the rest of the text, which must
+    // continue through the pointer table.
     private static void exerciseCountSelfLoopMatchHandOff()
     {
         byte[] prefix = "xaaaaaaaa".getBytes(StandardCharsets.UTF_8);
@@ -466,24 +465,37 @@ public final class DfaAbsolutePointerProbe
         Slice input = wrappedBuffer(bytes);
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
         Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        boolean vectors = VectorSupport.isAvailable();
         int handOffCount = dfa.countSelfLoopMatchHandOffCount();
-        for (int iteration = 0; iteration < 4; iteration++) {
-            check(pattern.count(input) == 1, "count self-loop match hand-off changed the count");
+        // The first count computes the states after the x and asks for the pointer table, which its
+        // exclusive search allocates when it ends. With vectors, the count self-loop scan stops
+        // with the match pending, and its hand-off asks for the table rather than for paired rows,
+        // which would prevent its allocation. Without vectors the scan does not run, and the
+        // ordinary search asks for the table.
+        check(pattern.count(input) == 1, "pending-match count miscounted");
+        long cacheVersion = dfa.cacheVersion();
+        for (int iteration = 0; iteration < 3; iteration++) {
+            check(pattern.count(input) == 1, "pending-match count miscounted");
         }
-        check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match");
-        check(dfa.absolutePointerTransitionsAvailable(), "count self-loop match hand-off did not allocate a pointer sidecar");
-        check(dfa.pairedTransitionMemory() == 0, "count self-loop match hand-off built paired transitions");
+        check(dfa.cacheVersion() == cacheVersion, "pending-match counts retried exclusively");
+        if (vectors) {
+            check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match");
+        }
+        check(dfa.absolutePointerTransitionsAvailable(), "pending-match counts did not allocate a pointer sidecar");
+        check(dfa.pairedTransitionMemory() == 0, "pending-match counts built paired transitions");
     }
 
     // Paired rows block pointer-table allocation, so once an ordinary search has built them, a
     // pending match continues through the paired after-match loop. Requesting the
     // pointer table instead would force an exclusive retry on every count and still fall back to
-    // the compact loop.
+    // the compact loop. Without vectors the count self-loop scan does not run, and each count
+    // searches the paired rows from the start.
     private static void exerciseCountSelfLoopMatchHandOffWithPairedRows()
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
         Prog program = pattern.re2().forwardProgramForDiagnostics();
         Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        boolean vectors = VectorSupport.isAvailable();
         Slice noMatch = utf8Slice("\u00e9a".repeat(200));
         for (int iteration = 0; iteration < 2; iteration++) {
             check(Dfa.search(program, noMatch, false, Prog.MatchKind.FIRST_MATCH, true) == Dfa.SEARCH_NO_MATCH, "count self-loop paired warm-up found a match");
@@ -493,7 +505,7 @@ public final class DfaAbsolutePointerProbe
         Slice input = utf8Slice("xaaaaaaaa" + "\u00e9a".repeat(2_000));
         // The first count computes the states after the x, and its exclusive search builds their
         // paired rows when it ends.
-        check(pattern.count(input) == 1, "count self-loop paired match hand-off changed the count");
+        check(pattern.count(input) == 1, "paired pending-match count miscounted");
         long cacheVersion = 0;
         for (int iteration = 0; iteration < 5; iteration++) {
             // The last three counts must run without an exclusive retry.
@@ -501,10 +513,13 @@ public final class DfaAbsolutePointerProbe
                 cacheVersion = dfa.cacheVersion();
             }
             int handOffCount = dfa.countSelfLoopMatchHandOffCount();
-            check(pattern.count(input) == 1, "count self-loop paired match hand-off changed the count");
-            check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match to paired transitions");
+            check(pattern.count(input) == 1, "paired pending-match count miscounted");
+            if (vectors) {
+                check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match to paired transitions");
+            }
         }
-        check(dfa.cacheVersion() == cacheVersion, "count self-loop paired match hand-off retried exclusively");
+        check(dfa.cacheVersion() == cacheVersion, "paired pending-match counts retried exclusively");
+        check(dfa.pairedTransitionMemory() > 0, "paired pending-match counts released the paired transitions");
     }
 
     // The sixteenth short paired search rejects paired transitions but keeps its result, so the

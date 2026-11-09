@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import jdk.incubator.vector.ByteVector;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestOptionalVectorScanner
 {
@@ -65,6 +67,16 @@ public class TestOptionalVectorScanner
                 .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:");
     }
 
+    /// A forked probe JVM runs at this JVM's vector width, such as that of CI's 8-byte and 16-byte
+    /// builds, rather than at the machine's.
+    @Test
+    public void testProbesRunAtThisJvmVectorWidth()
+            throws Exception
+    {
+        assumeTrue(ModuleLayer.boot().findModule("jdk.incubator.vector").isPresent(), "requires the Vector API module");
+        assertThat(PreferredVectorLengthProbe.preferredByteLanes()).isEqualTo(ByteVector.SPECIES_PREFERRED.length());
+    }
+
     private static ProbeResult runProbe(List<String> jvmArguments, boolean expectedVectorScans)
             throws IOException, InterruptedException
     {
@@ -73,6 +85,9 @@ public class TestOptionalVectorScanner
             List<String> command = new ArrayList<>();
             command.add(System.getProperty("java.home") + "/bin/java");
             command.add("-Xlog:class+load=info:file=" + classLoadLog);
+            // The probe runs at this JVM's vector width, such as that of CI's 8-byte build. Those
+            // options come first, so a test's own `-XX:MaxVectorSize=8` wins over them.
+            command.addAll(TestingJvmArguments.vectorWidthOptions());
             command.addAll(jvmArguments);
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));
