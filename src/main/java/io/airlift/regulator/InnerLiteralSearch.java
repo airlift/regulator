@@ -129,7 +129,8 @@ final class InnerLiteralSearch
     // recursion. Another proof, such as the fixed-length check, may still admit the search.
     private static final int MAX_RECURSIVE_DEPTH = 256;
     // Each overlapping hit of a longer literal re-reads the whole literal. LiteralNeighborMatcher,
-    // which restarts its scan one byte past each hit, takes the same limit.
+    // which restarts its scan one byte past each hit, and WindowLiteralSearch, which visits every
+    // overlapping occurrence, take the same limit.
     static final int MAXIMUM_LITERAL_LENGTH = 64;
     // The set filter tests three positions of every member and holds at most eight members. The
     // crate treats its Teddy prefilter as fast only when every literal has at least three bytes.

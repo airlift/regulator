@@ -97,8 +97,8 @@ with the pattern.
 Following upstream RE2:
 
 - the forward program receives two thirds of `Options.maxMemory`
-- the reverse program receives one third, less what an inner literal search
-  retains from it
+- the reverse program receives one third, less what an inner or window literal
+  search retains from it
 - a reverse longest-match DFA receives its program's complete remaining DFA
   allowance because a reverse program has only one DFA kind
 

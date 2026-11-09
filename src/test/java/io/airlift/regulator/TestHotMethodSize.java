@@ -393,6 +393,31 @@ public class TestHotMethodSize
                 .isLessThanOrEqualTo(517);
     }
 
+    /// Keeps the find loop's check of whether a search tries the inner or window literal first,
+    /// and the dispatch helpers it calls, BooleanPlans.hasLiteralSearch included, within
+    /// MaxInlineSize, so that C2 inlines them into `RegexpMatcher.findGeneral` however often a
+    /// find reaches them, and keeps the whole-text count's check the same way. The search methods
+    /// the helpers call, such as WindowLiteralSearch.fallsBackNearStart, are not held to it. Caps
+    /// the DFA count dispatch at 84 bytes, within which an out-of-line call to the literal counts
+    /// keeps it.
+    @Test
+    public void testLiteralSearchGatesFitMaxInlineSize()
+            throws ClassNotFoundException
+    {
+        for (String method : List.of("searchesInnerLiteral", "searchesInnerLiteralWindow", "literalSearchFallsBackNearStart", "windowLiteralSearchFallsBackNearStart", "searchesInnerLiteralCount")) {
+            assertThat(codeLength(CompiledPattern.class, method))
+                    .as("CompiledPattern.%s bytecode bytes", method)
+                    .isPositive()
+                    .isLessThanOrEqualTo(MAX_INLINE_SIZE);
+        }
+        Class<?> booleanPlans = Class.forName(CompiledPattern.class.getName() + "$BooleanPlans");
+        assertThat(codeLength(booleanPlans, "hasLiteralSearch"))
+                .as("CompiledPattern.BooleanPlans.hasLiteralSearch bytecode bytes")
+                .isPositive()
+                .isLessThanOrEqualTo(MAX_INLINE_SIZE);
+        assertThat(codeLength(CompiledPattern.class, "countDfaMatches")).as("CompiledPattern.countDfaMatches bytecode bytes").isPositive().isLessThanOrEqualTo(84);
+    }
+
     /// Caps the forward DFA's start scan dispatch, which picks the scan at every return to the
     /// start state, at the size it was measured at with the start class filter, and the literal
     /// filter's dispatch at the size it was measured at with its scalar start check and its choice

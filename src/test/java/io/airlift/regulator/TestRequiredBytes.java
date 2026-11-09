@@ -963,6 +963,54 @@ public class TestRequiredBytes
     }
 
     @Test
+    public void testWindowLiteralSearchKeepsLongWindowCheck()
+    {
+        // A window literal search does not stand in for the long-window check, since the routes
+        // that skip the window search never search for its literal. For a search range small
+        // enough for BitState, a find with capture groups uses BitState and skips both DFAs and the
+        // window literal search, and a range without xyz is rejected with one scan before BitState
+        // starts.
+        Slice letters = utf8Slice("a".repeat(8192));
+        for (Map.Entry<String, CompiledPattern> entry : compile("((?:xy|z){0,2})xyz").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.windowLiteralSearchForDiagnostics()).as(language).isNotNull();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("xyz");
+            assertThat(pattern.canUseDirectBitStateCapture(pattern.forwardProgramForDiagnostics(), letters.length(), 2)).as(language).isTrue();
+            RegexpMatcher matcher = pattern.matcher(letters);
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
+        }
+        // A Unicode \B makes the DFA quit on a byte outside ASCII after xyz, and after
+        // DFA_QUIT_STREAK_LIMIT finds in a row whose DFA quit, a matcher's finds skip the DFA and
+        // the window search with it. The windows up to the last match are longer than BitState
+        // holds and run the NFA, and the last, which holds no xyz, is rejected before BitState
+        // would search it. Java's \B is Unicode only with (?U).
+        String boundary = "(?:yz|x){0,1}xyz\\B";
+        Map<String, CompiledPattern> boundaries = Map.of(
+                "Java", JavaRegexp.compile(utf8Slice("(?U)" + boundary)),
+                "Trino", TrinoRegexp.compile(utf8Slice(boundary)).re2(),
+                "Rust", RustRegexp.compile(utf8Slice(boundary)));
+        for (Map.Entry<String, CompiledPattern> entry : boundaries.entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            assertThat(pattern.forwardProgramForDiagnostics().dfaQuitsOnNonAscii()).as(language).isTrue();
+            assertThat(pattern.windowLiteralSearchForDiagnostics()).as(language).isNotNull();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("xyz");
+            String last = "\u00E9 ";
+            int tail = pattern.forwardProgramForDiagnostics().unanchoredBitStateTextMaxSize() - last.getBytes(UTF_8).length;
+            int finds = CompiledPattern.DFA_QUIT_STREAK_LIMIT + 2;
+            Slice input = utf8Slice(("xyz" + last).repeat(finds) + "-".repeat(tail));
+            RegexpMatcher matcher = pattern.matcher(input);
+            assertThat(spans(matcher)).as(language).hasSize(finds);
+            assertThat(matcher.dfaQuitStreak()).as(language).isGreaterThanOrEqualTo(CompiledPattern.DFA_QUIT_STREAK_LIMIT);
+            assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).as(language).isTrue();
+            assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).as(language).isFalse();
+        }
+    }
+
+    @Test
     public void testBoundsLongCountsAndRangeSearchesByLastRequiredSuffix()
     {
         // With the bytes every match ends with only at the window start, a long range search

@@ -483,6 +483,32 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testRetainedWindowSearchUsesReverseBudget()
+    {
+        // The window literal search takes its memory from the reverse third, as the inner literal
+        // search does, so the forward DFA gives up only what the required bytes and the position
+        // automaton reserve, and the full reverse program takes what the search leaves.
+        Slice pattern = utf8Slice("(?:xy|z){0,2}xyz");
+        int flags = Re2.Options.defaults().parseFlags();
+        ParseResult parsed = RegexpParser.parse(pattern, flags);
+        long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
+        Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
+        Re2 compiled = Re2.compileParsed(pattern, parsed, flags, maxMemory);
+        WindowLiteralSearch search = compiled.windowLiteralSearchForDiagnostics();
+        assertThat(search).isNotNull();
+        Prog forward = compiled.forwardProgramForDiagnostics();
+        assertThat(forward.positionNfa()).isNotNull();
+        assertThat(forward.dfaMemory()).isEqualTo(control.dfaMemory() - compiled.requiredBytesRetainedSizeForDiagnostics() - forward.positionNfa().estimatedRetainedSize());
+        assertThat(compiled.reverseProgramSize()).isPositive();
+        Prog reverse = compiled.reverseProgramIfComputedForDiagnostics();
+        assertThat(search.estimatedRetainedSize() + Compiler.estimatedProgramMemory(reverse) + reverse.dfaMemory()).isLessThanOrEqualTo(maxMemory / 3);
+        // The search is kept only where its retained size fits the memory left for it.
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        assertThat(WindowLiteralSearch.analyze(regexp, forward, search.estimatedRetainedSize())).isNotNull();
+        assertThat(WindowLiteralSearch.analyze(regexp, forward, search.estimatedRetainedSize() - 1)).isNull();
+    }
+
+    @Test
     public void testAgreesWithOrdinaryEngine()
     {
         List<Slice> texts = texts();

@@ -45,7 +45,9 @@ import static java.util.Objects.requireNonNull;
 /// for the literal less a last byte that the search's gate admits alone after it, full-Slice find
 /// hands the literal's first occurrence in a long window to that search; see
 /// [#admitsInnerLiteralHandoff]. The literal-neighbor find plan is no such route, since the
-/// pattern's other operations keep the ordinary engine.
+/// pattern's other operations keep the ordinary engine. A window literal search also keeps the
+/// long-window check, because finds that use BitState for captures, or that skip the DFA, never
+/// run the window search.
 final class RequiredBytes
 {
     /// Windows at least this long skip the short-window check. Most lines of a line-by-line search
