@@ -161,16 +161,17 @@ public final class RegexpCompileMemoryLimitException
         return message + "; the pattern needs a larger memory budget, at least " + formatBudget(requiredMaxMemoryBytes);
     }
 
-    // Rounds down, so the figure stays a lower bound: to MiB, to KiB below 1 MiB, and in bytes
-    // below 1 KiB.
+    // Rounds up to the unit shown, so the figure is never below the bound: in bytes below 1 KiB,
+    // to KiB while that is below 1024 KiB, and to MiB from there.
     static String formatBudget(long bytes)
     {
         if (bytes < KIB) {
             return bytes + (bytes == 1 ? " byte" : " bytes");
         }
-        if (bytes < MIB) {
-            return (bytes / KIB) + " KiB";
+        long kib = Math.ceilDiv(bytes, KIB);
+        if (kib < 1024) {
+            return kib + " KiB";
         }
-        return (bytes / MIB) + " MiB";
+        return Math.ceilDiv(bytes, MIB) + " MiB";
     }
 }

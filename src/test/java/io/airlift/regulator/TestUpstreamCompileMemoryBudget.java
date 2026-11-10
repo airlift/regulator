@@ -452,16 +452,17 @@ public class TestUpstreamCompileMemoryBudget
     }
 
     @Test
-    public void testRequiredBudgetRoundsDown()
+    public void testRequiredBudgetRoundsUp()
     {
         assertThat(RegexpCompileMemoryLimitException.formatBudget(1)).isEqualTo("1 byte");
         assertThat(RegexpCompileMemoryLimitException.formatBudget(2)).isEqualTo("2 bytes");
         assertThat(RegexpCompileMemoryLimitException.formatBudget(1023)).isEqualTo("1023 bytes");
         assertThat(RegexpCompileMemoryLimitException.formatBudget(1024)).isEqualTo("1 KiB");
-        assertThat(RegexpCompileMemoryLimitException.formatBudget(2047)).isEqualTo("1 KiB");
-        assertThat(RegexpCompileMemoryLimitException.formatBudget((1 << 20) - 1)).isEqualTo("1023 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget(1025)).isEqualTo("2 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget((1 << 20) - 1024)).isEqualTo("1023 KiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget((1 << 20) - 1023)).isEqualTo("1 MiB");
         assertThat(RegexpCompileMemoryLimitException.formatBudget(1 << 20)).isEqualTo("1 MiB");
-        assertThat(RegexpCompileMemoryLimitException.formatBudget((2 << 20) - 1)).isEqualTo("1 MiB");
+        assertThat(RegexpCompileMemoryLimitException.formatBudget((1 << 20) + 1)).isEqualTo("2 MiB");
     }
 
     @Test
