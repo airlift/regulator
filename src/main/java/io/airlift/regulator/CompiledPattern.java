@@ -3248,8 +3248,10 @@ abstract sealed class CompiledPattern
         // Every match of a program with a transparent start literal starts at an occurrence of it,
         // so the cursor needs neither a variable length nor a program free of assertions. The DFA
         // must run the assertions; otherwise the group-zero NFA skips to the literal instead.
+        // Where matches have a longest length and the cursor searches the literal itself, not a
+        // folded start run, a matcher settles a candidate whose check quits.
         if (partialProg.transparentStartLiteral() != null) {
-            return partialProg.hasDfaUnsupportedAssertions() ? null : Dfa.createLiteralCandidateStartCursor(partialProg, foldedStartRun);
+            return partialProg.hasDfaUnsupportedAssertions() ? null : Dfa.createLiteralCandidateStartCursor(partialProg, foldedStartRun, maximumMatchLength() >= 0);
         }
         if (MatchLength.fixed(matchLength) >= 0 || partialProg.hasEmptyWidthAssertions()) {
             return null;
@@ -4222,6 +4224,33 @@ abstract sealed class CompiledPattern
         boolean matched = groups.length == 2
                 ? Nfa.searchGroupZero(partialProg, context, relativeStart, context.length(), anchored, matchKind, groups, workspace, true)
                 : Nfa.search(partialProg, context, relativeStart, context.length(), anchored, matchKind, groups, workspace, true);
+        if (matched) {
+            shiftGroupOffsets(groups, relativeStart);
+        }
+        return matched;
+    }
+
+    /// Returns the most bytes a match of the whole expression spans, or -1 when matches have no
+    /// longest length. Unlike [#minimumMatchLength()], which is the compiled suffix's, it reads
+    /// the whole expression. The candidate cursor, which exists only without a required prefix,
+    /// settles a candidate whose check quit over this many bytes; see [#matchQuitCandidateInto].
+    int maximumMatchLength()
+    {
+        ExpressionAnalysis.Length length = expressionAnalysis.length();
+        return length.canMatch() && !length.isUnbounded() ? length.maximum() : -1;
+    }
+
+    /// Finds group zero of the leftmost-first match that starts at `start`, for a matcher whose
+    /// candidate cursor's DFA quit checking the candidate there, with groups relative to
+    /// `contextStart`. The search skips the DFA, which would quit again, and runs on an engine
+    /// that decodes the text: OnePass, BitState, or the NFA, as [#runSubmatchEngine] picks it.
+    /// `end` is the nearer of the longest match's length from `start` and the context end, so no
+    /// match starting at `start` ends past it; the assertions still read the whole context.
+    boolean matchQuitCandidateInto(Slice text, int contextStart, int contextEnd, int start, int end, int[] groups, RegexpMatcher workspaceOwner)
+    {
+        Slice context = logicalContext(text, contextStart, contextEnd);
+        int relativeStart = start - contextStart;
+        boolean matched = runSubmatchEngine(partialProg, context, relativeStart, end - contextStart, true, Prog.MatchKind.FIRST_MATCH, groups, workspaceOwner);
         if (matched) {
             shiftGroupOffsets(groups, relativeStart);
         }
