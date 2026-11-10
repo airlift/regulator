@@ -423,10 +423,10 @@ public class TestCompilerAllocations
         assertThat(oversized.hasReverseProgramInputForDiagnostics()).isFalse();
         assertThat(oversized.reverseProgramSize()).isEqualTo(-1);
 
-        // At the default budget a 14 MB input and the reverse program compiled from it each fit
-        // the 32 MiB reverse share, though not together. The program replaces its input, so it
-        // needs the share only for itself.
-        Re2 admitted = Re2.compile(utf8Slice("a?".repeat(90_000)));
+        // At a 96 MiB budget a 14 MB input and the reverse program compiled from it each fit the
+        // 32 MiB reverse share, though not together. The program replaces its input, so it needs
+        // the share only for itself.
+        Re2 admitted = Re2.compile(utf8Slice("a?".repeat(90_000)), Re2.Options.defaults().setMaxMemory(96L << 20));
         assertThat(admitted.hasReverseProgramInputForDiagnostics()).isTrue();
         assertThat(admitted.reverseProgramSize()).isPositive();
         assertThat(admitted.hasReverseProgramInputForDiagnostics()).isFalse();

@@ -782,7 +782,7 @@ public class TestRe2Fuzz
             JsonObject json = replace.get(compileRow(pattern, options));
             if (!json.getBoolean("ok")) {
                 String error = json.getString("error");
-                // Upstream's default memory budget is 8 MiB, Regulator's 96 MiB
+                // Upstream's default memory budget is 8 MiB, Regulator's 32 MiB
                 // (REGULATOR_DECISIONS.md, Memory Budgets And DFA Caching).
                 if (error.startsWith("pattern too large")) {
                     throw new OracleSkipException("oracle pattern too large");

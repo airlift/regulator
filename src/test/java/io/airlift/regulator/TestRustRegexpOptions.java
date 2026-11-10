@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestRustRegexpOptions
@@ -86,7 +87,7 @@ public class TestRustRegexpOptions
     @Test
     public void testMemoryBudget()
     {
-        assertThat(RustRegexp.Options.defaults().maxMemory()).isEqualTo(96L << 20);
+        assertThat(RustRegexp.Options.defaults().maxMemory()).isEqualTo(32L << 20);
         assertThatThrownBy(() -> RustRegexp.Options.defaults().setMaxMemory(0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("greater than zero");
@@ -95,6 +96,13 @@ public class TestRustRegexpOptions
                 RustRegexp.Options.defaults().setMaxMemory(1)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class)
                 .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 2 KiB");
+        // This pattern is the crate-accepted example RUST_REGEXP.md cites. It needs between 32 and
+        // 33 MiB, the message names 33 MiB, and 33 MiB compiles it.
+        assertThatThrownBy(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){100}")))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class)
+                .hasMessage("regular expression compilation exceeded the 33554432 byte memory limit; the pattern needs a larger memory budget, at least 33 MiB");
+        assertThatCode(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){100}"), RustRegexp.Options.defaults().setMaxMemory(33L << 20)))
+                .doesNotThrowAnyException();
     }
 
     @Test

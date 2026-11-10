@@ -79,7 +79,7 @@ public class TestBitStateWorkspace
     public void testMatcherOwnsAndReusesWorkspace()
             throws ReflectiveOperationException
     {
-        Slice input = Slices.utf8Slice("650-253-" + "0".repeat(100_000));
+        Slice input = Slices.utf8Slice("650-253-" + "0".repeat(10_000));
         RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[0-9]+.(.*)")).matcher(input);
         Field workspaceField = RegexpMatcher.class.getDeclaredField("bitStateWorkspace");
         workspaceField.setAccessible(true);

@@ -45,7 +45,7 @@ public sealed class Re2
     /// affect an existing [Re2]. Options instances are not thread-safe.
     public static final class Options
     {
-        public static final int DEFAULT_MAX_MEMORY = 96 << 20;
+        public static final int DEFAULT_MAX_MEMORY = 32 << 20;
 
         public enum Encoding
         {

@@ -220,7 +220,7 @@ public class TestTrinoRegexpLanguage
         assertThat(pattern.booleanProgramForDiagnostics()).isNotNull();
         assertThat(pattern.booleanProgramForDiagnostics().hasTextDependentAssertions()).isFalse();
         assertThat(pattern.booleanProgramForDiagnostics().dfaMemory()).isPositive();
-        long forwardMemory = (Re2.Options.DEFAULT_MAX_MEMORY / 3L) * 2;
+        long forwardMemory = CompiledPattern.forwardMemory(Re2.Options.DEFAULT_MAX_MEMORY);
         assertThat(
                 Compiler.estimatedProgramMemory(pattern.forwardProgramForDiagnostics()) +
                         Compiler.estimatedProgramMemory(pattern.booleanProgramForDiagnostics()) +

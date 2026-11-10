@@ -2160,7 +2160,7 @@ change is described.
 | State kept across a cache reset | [O-DFA-018] | `Dfa.DfaInstance.resetAndRestore` |
 | Many-match DFA | [O-DFA-019] | `Dfa.searchMany` |
 | Reverse program compiled lazily with swapped assertions | [O-COMP-017] | `CompiledPattern.reverseProg` |
-| Options defaults: UTF-8 and leftmost-first; the default budget is 96 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
+| Options defaults: UTF-8 and leftmost-first; the default budget is 32 MiB, where RE2's is 8 MiB, as [Compiled patterns](REGULATOR_API.md#compiled-patterns) describes | [O-RE2-001] | `Re2.Options` |
 | Forward and reverse memory split | [O-RE2-002] | `CompiledPattern.build`, `CompiledPattern.reverseProgramMemory` |
 | Required literal prefix split | [O-RE2-003] | `CompiledPattern.build`, `CompiledPattern.matchesRequiredPrefix` |
 | Capture engine cascade and DFA result checks | [O-RE2-005], [O-RE2-006], [O-RE2-007], [O-RE2-010] | `CompiledPattern.runSubmatchEngine`, `CompiledPattern.matchOnOrdinaryEngine` |

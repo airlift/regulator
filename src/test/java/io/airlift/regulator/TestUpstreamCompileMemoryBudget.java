@@ -298,9 +298,9 @@ public class TestUpstreamCompileMemoryBudget
     {
         // Nested empty groups make every instruction but FAIL and MATCH a CAPTURE, the most capture
         // threads and the deepest capture stack a program of their size can have. The most of them
-        // a budget admits still plan bounded passes rather than fail to compile. At the default
-        // budget that is 559,234 instructions, of the 593,879 the flattened charge allows.
-        assertLargestGroupsPlanBoundedPasses(Re2.Options.DEFAULT_MAX_MEMORY, 279_616, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
+        // a budget admits still plan bounded passes rather than fail to compile. At a 96 MiB budget
+        // that is 559,234 instructions, of the 593,879 the flattened charge allows.
+        assertLargestGroupsPlanBoundedPasses(96L << 20, 279_616, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
         // The smallest budget that admits a CAPTURE, one group around a start anchor.
         assertLargestGroupsPlanBoundedPasses(1_667, 1, groups -> "(".repeat(groups) + "^" + ")".repeat(groups));
 

@@ -115,15 +115,16 @@ Re2 pattern = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=(?<value>[0-9]+)"));
 
 Compilation copies the pattern bytes and snapshots the mutable `Re2.Options`.
 The default options use UTF-8, Perl-like RE2 syntax, leftmost-first matching,
-and a 96 MiB compilation, DFA-cache and capture-search budget. A non-positive
+and a 32 MiB compilation, DFA-cache and capture-search budget. A non-positive
 public memory budget is rejected. Each capture search in progress also holds at
 most the forward program's two-thirds share of the budget in working memory at
 once, beside what the compiled pattern retains, plus a copy of at most 64
 capture slots when a caller buffer is longer than the pattern's groups. A
 `RegexpMatcher` keeps the workspace of each capture engine it has used, so one
 that has run both the backtracker and the NFA can retain up to about twice that
-share. The budget does not include caller-owned input, result objects, matcher
-capture buffers, replacement output, or collections returned by aggregate APIs.
+share. The budget does not include the compiled pattern's copy of its pattern
+bytes, caller-owned input, result objects, matcher capture buffers, replacement
+output, or collections returned by aggregate APIs.
 
 Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
@@ -142,15 +143,15 @@ dictionary of words, needs a budget sized by its literals rather than by its
 program. Trino keeps only the set for such a pattern, and compiles
 `english-10`, rebar's 43,029-word dictionary, from 2.63 MiB. RE2,
 Java, and Rust keep the program wherever it fits the budget, since its DFAs
-count and search faster, so `english-10` retains about 25 MB under the default
-budget. Under a budget the program does not fit, such as below about 40 MiB
-for `english-10`, they keep only the set instead of failing, and answer every
-operation from it. Such a pattern compiles where a temporary trie of all its
-literals fits the forward share, and then where the set and the list of
-literals that extend another fit it together. `english-10` compiles from
-3.11 MiB, a budget its temporary trie sets, and then retains about 2.8 MB.
-RE2's longest-match mode and most case-insensitive literals always need the
-program.
+search faster, so `english-10` retains about 25 MB under a 96 MiB budget.
+Under a budget the program does not fit, such as any below about 40 MiB for
+`english-10`, the default included, they keep only the set instead of
+failing, and answer every operation from it. Such a pattern compiles where a
+temporary trie of all its literals fits the forward share, and then where the
+set and the list of literals that extend another fit it together. `english-10`
+compiles from 3.11 MiB, a budget its temporary trie sets, and then retains
+about 2.8 MB. RE2's longest-match mode and most case-insensitive literals
+always need the program.
 
 Compiled patterns are immutable and safe to share across threads. They do not
 need to be closed. Lazily built DFA caches belong to the compiled pattern and

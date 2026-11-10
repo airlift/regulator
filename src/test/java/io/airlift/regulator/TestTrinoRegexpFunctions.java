@@ -46,7 +46,7 @@ public class TestTrinoRegexpFunctions
     @Test
     public void testMemoryBudget()
     {
-        assertThat(TrinoRegexp.Options.defaults().maxMemory()).isEqualTo(96L << 20);
+        assertThat(TrinoRegexp.Options.defaults().maxMemory()).isEqualTo(32L << 20);
         assertThatThrownBy(() -> TrinoRegexp.Options.defaults().setMaxMemory(0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("greater than zero");
@@ -317,7 +317,7 @@ public class TestTrinoRegexpFunctions
     {
         Slice pattern = utf8("first(?s:.*)second(?s:.*)third");
         ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
+        TrinoCompiledPattern baseline = TrinoCompiledPattern.create(CompiledPattern.analyzeParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), CompiledPattern.ScanPlanMode.DEFAULT));
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
         long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();

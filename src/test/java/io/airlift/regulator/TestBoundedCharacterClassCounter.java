@@ -254,7 +254,7 @@ public class TestBoundedCharacterClassCounter
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice("[a-z]{256}"))
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
-        assertThat(Re2.compile(utf8Slice("(\\p{L}{256})"))
+        assertThat(Re2.compile(utf8Slice("(\\p{L}{32})"))
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice("\\p{L}+?"))
                 .usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
