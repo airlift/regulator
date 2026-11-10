@@ -6342,6 +6342,12 @@ final class Dfa
         // Like upstream, a DFA initializes only when its state budget holds this many of its
         // largest possible states.
         private static final int MINIMUM_INITIAL_STATES = 20;
+        // The most states the tables of a new or reset DFA hold before they grow. A DFA starts
+        // with room for one state per instruction, at least 16 and at most what its budget holds,
+        // but never more than this; one that starts here doubles its tables as states arrive,
+        // each growth charged to the state budget, so a large program's DFA does not prepay
+        // tables it may never fill.
+        static final int MAXIMUM_INITIAL_STATE_CAPACITY = 256;
         // The most a forward DFA charges for its start-byte tables: the candidates, one entry per
         // byte value, and the nibble tables, the literal filter, or the class filter, which
         // exclude each other.
@@ -6448,6 +6454,10 @@ final class Dfa
         private volatile CacheTables tables;
         // The state capacity of the tables a reset publishes.
         private final int initialStateCapacity;
+        // One state per instruction, at least 16, at most what the budget's transitions hold. Growth
+        // from a smaller initial capacity stops here once before it doubles on, so the tables never
+        // exceed the size they would have had starting here.
+        private final int programStateCapacity;
         int nextFreeOffset;
         private long pairedTransitionMemory;
         private volatile boolean pairedTransitionsRequested;
@@ -6595,7 +6605,8 @@ final class Dfa
                 this.availableStateMemory = Long.MAX_VALUE;
                 this.initFailed = false;
                 this.maxTransitionsLength = MAX_TRANSITIONS_LENGTH;
-                this.initialStateCapacity = Math.max(prog.size(), 16);
+                this.programStateCapacity = programStateCapacity(prog, Integer.MAX_VALUE);
+                this.initialStateCapacity = Math.min(programStateCapacity, MAXIMUM_INITIAL_STATE_CAPACITY);
                 this.tables = newCacheTables(initialStateCapacity);
                 this.retainedStateMemory = stateBackingMemory();
                 this.nextFreeOffset = nextSize; // skip offset 0 (reserved)
@@ -6611,6 +6622,7 @@ final class Dfa
                 this.stateBudget = 0;
                 this.availableStateMemory = 0;
                 this.maxTransitionsLength = 0;
+                this.programStateCapacity = 0;
                 this.initialStateCapacity = 0;
                 this.tables = newCacheTables(0);
                 return;
@@ -6625,6 +6637,7 @@ final class Dfa
             if (stateBudget / largestStateSize < MINIMUM_INITIAL_STATES) {
                 this.initFailed = true;
                 this.maxTransitionsLength = 0;
+                this.programStateCapacity = 0;
                 this.initialStateCapacity = 0;
                 this.tables = newCacheTables(0);
                 return;
@@ -6634,12 +6647,45 @@ final class Dfa
             long maxStateCount = stateBudget / estimateStateSize(0);
             long maxTransitionStateCount = MAX_TRANSITIONS_LENGTH / nextSize;
             this.maxTransitionsLength = (int) (Math.min(maxStateCount + 1, maxTransitionStateCount) * nextSize);
-            this.initialStateCapacity = Math.max(Math.min(prog.size(), maxTransitionsLength / nextSize), 16);
+            this.programStateCapacity = programStateCapacity(prog, maxTransitionsLength / nextSize);
+            this.initialStateCapacity = Math.min(programStateCapacity, MAXIMUM_INITIAL_STATE_CAPACITY);
             this.tables = newCacheTables(initialStateCapacity);
             this.retainedStateMemory = stateBackingMemory();
             this.availableStateMemory = memoryBudget - retainedStateMemory;
             this.nextFreeOffset = nextSize;
             this.stateCount = 0;
+        }
+
+        private static int programStateCapacity(Prog prog, int stateLimit)
+        {
+            return Math.max(Math.min(prog.size(), stateLimit), 16);
+        }
+
+        // The table growth, not yet charged, from state tables of `stateCapacity` rows to
+        // `programStateCapacity` rows. Tables that start there prepay it, so pointer-table sizing
+        // reserves it: a pointer table is then no larger than such tables would leave room for.
+        private long unpaidStateTableMemory(int stateCapacity)
+        {
+            if (stateCapacity >= programStateCapacity) {
+                return 0;
+            }
+            return stateTableMemory(programStateCapacity) - stateTableMemory(stateCapacity);
+        }
+
+        // The most pointer rows, at most `rowLimit`, that fit in `memory` with the minimum Java
+        // state behind every row past `paidRowCount`.
+        private long compatiblePointerRowCount(long memory, long paidRowCount, long rowLimit)
+        {
+            long rowBytes = Math.multiplyExact((long) nextSize, Long.BYTES);
+            long minimumStateMemory = stateObjectMemory(0);
+            return Math.min(rowLimit, Math.addExact(memory, Math.multiplyExact(paidRowCount, minimumStateMemory)) / Math.addExact(rowBytes, minimumStateMemory));
+        }
+
+        // The charge for state tables of `stateCapacity` rows: transitions, state data, state
+        // references, and self-loop exit byte sets.
+        private long stateTableMemory(int stateCapacity)
+        {
+            return sizeOfIntArray(stateCapacity * nextSize) + 2 * sizeOfObjectArray(stateCapacity) + sizeOfLongArray(stateCapacity);
         }
 
         private CacheTables newCacheTables(int stateCapacity)
@@ -7512,16 +7558,18 @@ final class Dfa
             int[] transitions = tables.transitions;
             long stateMemory = stateObjectMemory(instructions.length);
             long newTransitionsLength = transitions.length;
+            int newStateCapacity = transitions.length / nextSize;
             if (nextFreeOffset + nextSize > transitions.length) {
                 newTransitionsLength = Math.min((long) transitions.length * 2, maxTransitionsLength);
+                long programTransitionsLength = (long) programStateCapacity * nextSize;
+                if (transitions.length < programTransitionsLength) {
+                    newTransitionsLength = Math.min(newTransitionsLength, programTransitionsLength);
+                }
                 if (newTransitionsLength <= transitions.length || newTransitionsLength < nextFreeOffset + nextSize) {
                     return null; // budget exhausted
                 }
-                int newStateCount = toIntExact(newTransitionsLength / nextSize);
-                stateMemory += sizeOfIntArray(toIntExact(newTransitionsLength)) - sizeOfIntArray(transitions.length);
-                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateData.length);
-                stateMemory += sizeOfObjectArray(newStateCount) - sizeOfObjectArray(tables.stateRefArrays.length);
-                stateMemory += sizeOfLongArray(newStateCount) - sizeOfLongArray(tables.selfLoopExitByteSets.length);
+                newStateCapacity = toIntExact(newTransitionsLength / nextSize);
+                stateMemory += stateTableMemory(newStateCapacity) - stateTableMemory(tables.stateData.length);
             }
 
             int newCacheTableCapacity = cache.capacityAfterInsert();
@@ -7530,7 +7578,7 @@ final class Dfa
             AbsolutePointerGrowthSize absolutePointerGrowthSize = null;
             AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers != null && nextFreeOffset + nextSize > existingPointers.entryCapacity()) {
-                absolutePointerGrowthSize = sizeAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory);
+                absolutePointerGrowthSize = sizeAbsolutePointerTransitionGrowth(nextFreeOffset + nextSize, stateMemory, newStateCapacity);
                 if (absolutePointerGrowthSize == null) {
                     return null;
                 }
@@ -7555,15 +7603,14 @@ final class Dfa
                 newTransitions = Arrays.copyOf(transitions, toIntExact(newTransitionsLength));
                 Arrays.fill(newTransitions, oldLength, newTransitions.length, T_UNCOMPUTED);
                 endTestingFailurePoint(TestingFailurePoint.TRANSITION_ARRAY_GROWTH);
-                int newStateCount = toIntExact(newTransitionsLength / nextSize);
                 beginTestingFailurePoint(TestingFailurePoint.STATE_DATA_ARRAY_GROWTH);
-                newStateData = Arrays.copyOf(tables.stateData, newStateCount);
+                newStateData = Arrays.copyOf(tables.stateData, newStateCapacity);
                 endTestingFailurePoint(TestingFailurePoint.STATE_DATA_ARRAY_GROWTH);
                 beginTestingFailurePoint(TestingFailurePoint.STATE_REFERENCE_ARRAY_GROWTH);
-                newStateRefArrays = Arrays.copyOf(tables.stateRefArrays, newStateCount);
+                newStateRefArrays = Arrays.copyOf(tables.stateRefArrays, newStateCapacity);
                 endTestingFailurePoint(TestingFailurePoint.STATE_REFERENCE_ARRAY_GROWTH);
                 beginTestingFailurePoint(TestingFailurePoint.SELF_LOOP_ARRAY_GROWTH);
-                newSelfLoopExitByteSets = Arrays.copyOf(tables.selfLoopExitByteSets, newStateCount);
+                newSelfLoopExitByteSets = Arrays.copyOf(tables.selfLoopExitByteSets, newStateCapacity);
                 endTestingFailurePoint(TestingFailurePoint.SELF_LOOP_ARRAY_GROWTH);
             }
 
@@ -8006,6 +8053,11 @@ final class Dfa
             return stateBudget;
         }
 
+        int programStateCapacity()
+        {
+            return programStateCapacity;
+        }
+
         private void rebuildPairedTransitions()
         {
             clearPairedTransitions();
@@ -8176,23 +8228,19 @@ final class Dfa
                 return;
             }
 
-            long rowBytes;
             long rowCapacity;
             long allocatedBytes;
+            long tableGrowthMemory = unpaidStateTableMemory(tables.stateData.length);
             try {
-                rowBytes = Math.multiplyExact((long) nextSize, Long.BYTES);
                 long currentRowCount = nextFreeOffset / nextSize;
-                long minimumStateMemory = stateObjectMemory(0);
-                // Reserve enough budget for the Java states addressable by the sidecar instead
-                // of eagerly consuming the complete DFA budget for a small graph. A heap table's
-                // array header is charged once, outside the per-row cost.
-                long compatibleRowCount = Math.addExact(
-                        availableStateMemory - absolutePointerTableBytes(0),
-                        Math.multiplyExact(currentRowCount, minimumStateMemory)) /
-                        Math.addExact(rowBytes, minimumStateMemory);
-                rowCapacity = Math.min(
-                        maxTransitionsLength / nextSize,
-                        Math.min(compatibleRowCount, Math.max(2, currentRowCount * 2)));
+                // Reserve enough budget for the Java states addressable by the sidecar, and for
+                // the state tables' growth to one row per instruction, instead of eagerly consuming
+                // the complete DFA budget for a small graph. A heap table's array header is charged
+                // once, outside the per-row cost.
+                rowCapacity = compatiblePointerRowCount(
+                        availableStateMemory - tableGrowthMemory - absolutePointerTableBytes(0),
+                        currentRowCount,
+                        Math.min(maxTransitionsLength / nextSize, Math.max(2, currentRowCount * 2)));
                 allocatedBytes = absolutePointerTableBytes(rowCapacity);
             }
             catch (ArithmeticException ignored) {
@@ -8203,7 +8251,7 @@ final class Dfa
             }
             if (rowCapacity < 2 ||
                     rowCapacity > Integer.MAX_VALUE ||
-                    allocatedBytes > availableStateMemory ||
+                    allocatedBytes > availableStateMemory - tableGrowthMemory ||
                     nextFreeOffset > rowCapacity * nextSize) {
                 if (!absolutePointerTransitionsWithheld) {
                     absolutePointerTransitionsUnavailable = true;
@@ -8245,36 +8293,31 @@ final class Dfa
 
         // Returns the growth's size and charge, so the budget check sees it before the Java
         // allocations; a zero-byte size withholds the table when superseded native segments fill
-        // their cap; null means the budget cannot hold the growth.
-        private AbsolutePointerGrowthSize sizeAbsolutePointerTransitionGrowth(int requiredEntryCapacity, long reservedStateMemory)
+        // their cap; null means the budget cannot hold the growth. `stateCapacity` is the state
+        // tables' capacity once the allocation that needs the growth has grown them.
+        private AbsolutePointerGrowthSize sizeAbsolutePointerTransitionGrowth(int requiredEntryCapacity, long reservedStateMemory, int stateCapacity)
         {
             AbsolutePointerTransitions existingPointers = tables.absolutePointerTransitions;
             if (existingPointers == null || requiredEntryCapacity <= existingPointers.entryCapacity()) {
                 throw new IllegalStateException("pointer table growth is not required");
             }
 
-            long rowBytes;
             long requiredRowCount;
             long rowCapacity;
             long allocatedBytes;
             try {
-                rowBytes = Math.multiplyExact((long) nextSize, Long.BYTES);
                 requiredRowCount = Math.addExact(requiredEntryCapacity, nextSize - 1L) / nextSize;
                 long currentRowCount = existingPointers.entryCapacity() / nextSize;
                 long maximumRowCount = maxTransitionsLength / nextSize;
-                long minimumStateMemory = stateObjectMemory(0);
-                long remainingMemory = Math.max(0, availableStateMemory - reservedStateMemory);
+                long remainingMemory = Math.max(0, availableStateMemory - reservedStateMemory - unpaidStateTableMemory(stateCapacity));
                 // Preserve enough budget for the minimum Java state behind every additional
-                // pointer row. A heap table's array header is charged once, outside the per-row
-                // cost. Failure means ordinary DFA budget exhaustion, not an object-row
-                // representation change.
-                long compatibleRowCount = Math.addExact(
-                        remainingMemory,
-                        Math.addExact(
-                                existingPointers.allocatedBytes() - absolutePointerTableBytes(0),
-                                Math.multiplyExact(requiredRowCount, minimumStateMemory))) /
-                        Math.addExact(rowBytes, minimumStateMemory);
-                rowCapacity = Math.min(maximumRowCount, Math.min(compatibleRowCount, currentRowCount * 2));
+                // pointer row, and for the state tables' growth to one row per instruction. A heap
+                // table's array header is charged once, outside the per-row cost. Failure means
+                // ordinary DFA budget exhaustion, not an object-row representation change.
+                rowCapacity = compatiblePointerRowCount(
+                        Math.addExact(remainingMemory, existingPointers.allocatedBytes() - absolutePointerTableBytes(0)),
+                        requiredRowCount,
+                        Math.min(maximumRowCount, currentRowCount * 2));
                 allocatedBytes = absolutePointerTableBytes(rowCapacity);
             }
             catch (ArithmeticException ignored) {

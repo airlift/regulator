@@ -1219,6 +1219,42 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   and on both, grep line searches of thrashing bounded repeats take 0.016 to
   0.17 of their earlier time (rebar, settle runner).
 
+### State tables that start small
+
+- **Origin:** First described by RE2, which allocates and charges each state
+  as it builds it and holds no table ahead of its states ([dfa.cc][re2-dfa]),
+  and by regex-automata, whose lazy DFA appends each new state's row to one
+  flat transition table that starts empty and is charged by its length
+  ([hybrid/dfa.rs][ra-hybrid]). Regulator: flat Java state tables that start
+  at up to 256 rows and double, each growth charged before it is allocated and
+  never larger, at the same state count, than tables that started at one row
+  per instruction, with pointer-table sizing that reserves the growth still to
+  come ([#229]); base RE2 [O-DFA-003].
+- **Where:** `Dfa.DfaInstance.programStateCapacity`,
+  `Dfa.DfaInstance.allocateCachedState`,
+  `Dfa.DfaInstance.unpaidStateTableMemory`,
+  `Dfa.DfaInstance.allocateAbsolutePointerTransitions`,
+  `Dfa.DfaInstance.sizeAbsolutePointerTransitionGrowth`
+- **Applies when:** Every DFA whose one-row-per-instruction capacity, at least
+  16 and at most what its budget's transitions hold, is above 256: a program
+  of more than 256 instructions under a budget that holds 256 states. Other
+  DFAs' tables start at that capacity. A growth that does not fit the state
+  budget resets the cache as a full cache does, and the pointer table reserves
+  the growth while the tables are smaller than one row per instruction
+- **What it does:** A DFA's state, transition, and self-loop exit tables start
+  with room for at most 256 states and double as states arrive, stopping once
+  at the one-row-per-instruction capacity before doubling on toward the
+  budget's limit, so at every state count they are no larger than tables that
+  started there, and a reset returns them to their starting size. Most large
+  programs' DFAs never fill a row per instruction: 120 of the 146
+  larger-program DFAs among the published benchmark rows never pass 256
+  states. The table change alone cut the memory retained by 192 large-program
+  benchmark rows at a 96 MiB budget from 1,035.5 to 822.9 MiB, and
+  with the setup gate's [worst-case state
+  sizing](../../REGULATOR_DECISIONS.md#memory-budgets-and-dfa-caching) to
+  788.9 MiB, with the same state counts and no resets; timings at that budget
+  stayed within noise ([#229]).
+
 ## DFA pointer table
 
 The DFA can also keep a flat pointer table whose entries lead straight to the
@@ -2339,6 +2375,7 @@ change is described.
 [#216]: https://github.com/airlift/regulator/pull/216
 [#224]: https://github.com/airlift/regulator/pull/224
 [#226]: https://github.com/airlift/regulator/pull/226
+[#229]: https://github.com/airlift/regulator/pull/229
 [#231]: https://github.com/airlift/regulator/pull/231
 [#232]: https://github.com/airlift/regulator/pull/232
 [#235]: https://github.com/airlift/regulator/pull/235
