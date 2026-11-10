@@ -2421,11 +2421,11 @@ program, and an end-anchored pattern without a start anchor searches only
 backward. The DFA and NFA skip ahead to a literal prefix. Captures run on
 OnePass, BitState, and the NFA in RE2's order. `Re2Set` runs its patterns as
 one many-match DFA, and `FilteredRe2` filters by prefilter atoms. Regulator
-also compiles a leftmost-first program over 512 instructions that is not
-one-pass and has the form `(a)|(b)|…`, one capture around each capture-free
-branch, the way `RE2::Set` does ([set.cc][re2-set]), with no request from the
-caller: its matches name their branch, as the Rust regex crate's pattern IDs
-do ([regex.rs][ra-pattern-ids]), and the winning branch's group is set from
+also compiles a leftmost-first program that is not one-pass and has the form
+`(a)|(b)|…`, one capture around each capture-free branch, the way `RE2::Set`
+does ([set.cc][re2-set]), with no request from the caller: its matches name
+their branch, as the Rust regex crate's pattern IDs do
+([regex.rs][ra-pattern-ids]), and the winning branch's group is set from
 group zero's span. The compiler keeps RE2's reductions, simplification, and
 instruction flattening. The [registry](OPTIMIZATION_REGISTRY.md) gives each
 mechanism's trigger, and the table below gives where it lives; where
