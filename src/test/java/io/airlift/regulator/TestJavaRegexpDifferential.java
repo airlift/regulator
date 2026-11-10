@@ -299,6 +299,28 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testMarkRunWordBoundariesMatchJdk()
+    {
+        // A nonspacing mark takes its base from the letter or digit before its run of marks. The
+        // region start ends the walk back to it, unless the bounds are transparent, and so does a
+        // supplementary character, which the JDK reads as a lone low surrogate; a supplementary
+        // mark after the boundary is read whole. Unicode character classes make every mark a word
+        // character. None of these patterns matches inside a surrogate pair, which a bare \B does in
+        // the JDK and Regulator cannot.
+        List<String> inputs = List.of(
+                "a\u0301\u0301 b",
+                "1\u0301\u0301\u0301",
+                " \u0301\u0301a",
+                "\u0301\u0301\u0301",
+                "\uD801\uDC00\u0301\u0301b",
+                "a\u0301\uD834\uDD67\u0301 ",
+                "a\uD834\uDD67\u0301\u0301");
+        for (String pattern : List.of("\\b", "\\b\u0301", "\\B\u0301", "\u0301\\b", "\u0301\\B", "(\u0301+)\\b", "(?U)\\b", "(?U)\\B\u0301")) {
+            assertEveryRegionMatchesJdk(pattern, inputs, true);
+        }
+    }
+
+    @Test
     public void testNullableLoopsMatchJdk()
     {
         // The JDK's Loop and LazyLoop nodes repeat a body that can match the empty string. They
@@ -336,9 +358,15 @@ public class TestJavaRegexpDifferential
         for (String input : inputs) {
             Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
             String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
-            // Every input character is in the BMP, so every UTF-16 offset is a code point boundary.
+            // A UTF-16 offset inside a surrogate pair has no UTF-8 offset, so the loops skip it.
             for (int start = 0; start <= input.length(); start++) {
+                if (splitsSurrogatePair(input, start)) {
+                    continue;
+                }
                 for (int end = start; end <= input.length(); end++) {
+                    if (splitsSurrogatePair(input, end)) {
+                        continue;
+                    }
                     String description = "%s on [%s] [%s, %s)".formatted(pattern, escaped, start, end);
                     int byteStart = utf8Offset(input, start);
                     int byteEnd = utf8Offset(input, end);
@@ -360,6 +388,9 @@ public class TestJavaRegexpDifferential
                         assertSameMatch(description + " find after matches", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
                     }
                     for (int findStart = 0; findStart <= input.length(); findStart++) {
+                        if (splitsSurrogatePair(input, findStart)) {
+                            continue;
+                        }
                         Matcher restarted = jdk.matcher(input).region(start, end);
                         actual.reset(source, byteStart, byteEnd);
                         boolean actualFound = actual.find(utf8Offset(input, findStart));
@@ -384,6 +415,11 @@ public class TestJavaRegexpDifferential
                 }
             }
         }
+    }
+
+    private static boolean splitsSurrogatePair(String input, int utf16Offset)
+    {
+        return utf16Offset < input.length() && Character.isLowSurrogate(input.charAt(utf16Offset));
     }
 
     private static void assertSameMatch(String description, String input, boolean expectedMatched, Matcher expected, MatchResult actual)

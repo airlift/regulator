@@ -172,8 +172,7 @@ final class EmptyOp
         if ((textDependentAssertions & (CODE_POINT_ASSERTIONS | RUST_ASSERTIONS)) != 0) {
             if ((textDependentAssertions & JAVA_WORD_BOUNDARIES) != 0) {
                 if (isCodePointBoundary(bytes, begin, end, position)) {
-                    boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, false) !=
-                            isJavaWord(bytes, begin, end, position, true, false);
+                    boolean javaBoundary = isJavaWordBoundary(bytes, begin, end, position, false, null);
                     flags |= javaBoundary ? EMPTY_JAVA_WORD_BOUNDARY : EMPTY_JAVA_NO_WORD_BOUNDARY;
                     if ((textDependentAssertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
                         flags |= javaUnicodeWordBoundaryFlags(bytes, begin, end, position);
@@ -193,8 +192,7 @@ final class EmptyOp
 
     private static int javaUnicodeWordBoundaryFlags(byte[] bytes, int begin, int end, int position)
     {
-        boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, true) !=
-                isJavaWord(bytes, begin, end, position, true, true);
+        boolean javaBoundary = isJavaWordBoundary(bytes, begin, end, position, true, null);
         return javaBoundary ? EMPTY_JAVA_UNICODE_WORD_BOUNDARY : EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
     }
 
@@ -332,37 +330,74 @@ final class EmptyOp
                 codePoint == 0x2029;
     }
 
-    private static boolean isJavaWord(
-            byte[] bytes,
-            int begin,
-            int end,
-            int position,
-            boolean right,
-            boolean unicodeCharacterClass)
+    /// Returns how many code points Java's `\b` reads before nonspacing marks to find their
+    /// bases, when evaluated at every code point boundary of `text`.
+    static int javaBoundaryBaseStepsForDiagnostics(Slice text)
     {
-        if (right ? position == end : position == begin) {
-            return false;
+        byte[] bytes = text.byteArray();
+        int begin = text.byteArrayOffset();
+        int end = begin + text.length();
+        int[] baseSteps = new int[1];
+        for (int position = begin; position <= end; position++) {
+            if (isCodePointBoundary(bytes, begin, end, position)) {
+                isJavaWordBoundary(bytes, begin, end, position, false, baseSteps);
+            }
         }
+        return baseSteps[0];
+    }
 
-        int codePointStart = right ? position : previousCodePointStart(bytes, begin, position);
-        int codePoint = nextCodePoint(bytes, end, codePointStart);
-        if (unicodeCharacterClass ? UnicodeGroups.isWord(codePoint) : isAsciiWord(codePoint)) {
-            return true;
-        }
+    private static boolean isJavaWordBoundary(byte[] bytes, int begin, int end, int position, boolean unicodeCharacterClass, int[] baseSteps)
+    {
         // Java ignores a nonspacing mark for boundary purposes unless a preceding letter or digit gives it a base.
         // The JDK reads a mark after the boundary whole, but starts its walk at the last UTF-16 unit of a mark
         // before it, which for a supplementary mark is a lone low surrogate that gives no base.
-        return UnicodeGroups.isNonspacingMark(codePoint) &&
-                (right || !Character.isSupplementaryCodePoint(codePoint)) &&
-                hasJavaBoundaryBaseCharacter(bytes, begin, end, codePointStart);
+        int previousStart = position;
+        boolean wordBefore = false;
+        boolean markBeforeNeedsBase = false;
+        if (position > begin) {
+            previousStart = previousCodePointStart(bytes, begin, position);
+            int previous = nextCodePoint(bytes, end, previousStart);
+            wordBefore = isJavaWordCharacter(previous, unicodeCharacterClass);
+            markBeforeNeedsBase = !wordBefore && UnicodeGroups.isNonspacingMark(previous) && !Character.isSupplementaryCodePoint(previous);
+        }
+        boolean wordAfter = false;
+        boolean markAfterNeedsBase = false;
+        if (position < end) {
+            int next = nextCodePoint(bytes, end, position);
+            wordAfter = isJavaWordCharacter(next, unicodeCharacterClass);
+            markAfterNeedsBase = !wordAfter && UnicodeGroups.isNonspacingMark(next);
+        }
+
+        if (markBeforeNeedsBase) {
+            // The walk for a mark after the position first reads the mark before it, and then goes on as that
+            // mark's own walk does, so the two sides agree. There is no boundary inside a run of marks, and only
+            // the run's last mark walks back over it.
+            if (markAfterNeedsBase) {
+                return false;
+            }
+            return hasJavaBoundaryBaseCharacter(bytes, begin, end, previousStart, baseSteps) != wordAfter;
+        }
+        if (markAfterNeedsBase) {
+            // The code point before is not a mark that needs a base, so the walk stops there.
+            wordAfter = hasJavaBoundaryBaseCharacter(bytes, begin, end, position, baseSteps);
+        }
+        return wordBefore != wordAfter;
     }
 
-    private static boolean hasJavaBoundaryBaseCharacter(byte[] bytes, int begin, int end, int markStart)
+    private static boolean isJavaWordCharacter(int codePoint, boolean unicodeCharacterClass)
+    {
+        return unicodeCharacterClass ? UnicodeGroups.isWord(codePoint) : isAsciiWord(codePoint);
+    }
+
+    private static boolean hasJavaBoundaryBaseCharacter(byte[] bytes, int begin, int end, int markStart, int[] baseSteps)
     {
         // The JDK walks back one UTF-16 unit at a time, so it reads any supplementary character it steps onto as a
         // lone low surrogate, which ends the walk with no base.
         int codePointStart = markStart;
         while (codePointStart > begin) {
+            if (baseSteps != null) {
+                baseSteps[0]++;
+            }
             codePointStart = previousCodePointStart(bytes, begin, codePointStart);
             int codePoint = nextCodePoint(bytes, end, codePointStart);
             if (Character.isSupplementaryCodePoint(codePoint)) {
