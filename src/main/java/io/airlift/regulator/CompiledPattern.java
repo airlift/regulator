@@ -702,11 +702,15 @@ abstract sealed class CompiledPattern
     }
 
     /// Returns the expression the compact route reads for the pattern `entireRegexp`, or `null`
-    /// where the pattern keeps its program: a pattern with a capture, or one that compiles for
-    /// longest match.
+    /// where the pattern keeps its program: the pattern itself where it has no captures, or the
+    /// run expression of an [alternation of class runs][ClassRunAlternationCaptures], the only
+    /// capture shape the route takes. A pattern that compiles for longest match keeps its program.
     private static Regexp compactRouteRegexp(Regexp entireRegexp, int capturingGroupCount, boolean longestMatch)
     {
-        return capturingGroupCount == 0 && !longestMatch ? entireRegexp : null;
+        if (longestMatch) {
+            return null;
+        }
+        return capturingGroupCount == 0 ? entireRegexp : ClassRunAlternationCaptures.runExpression(entireRegexp, capturingGroupCount);
     }
 
     /// Returns a lower bound on the least budget with which [#buildWithProgram] compiles the
@@ -884,6 +888,8 @@ abstract sealed class CompiledPattern
         BoundedCharacterClassCounter compactBoundedCharacterClass = compactRegexp == null ? null : BoundedCharacterClassCounter.analyzeCompactRoute(compactRegexp);
         // A budget too small for the counter compiles the program instead, as for any pattern.
         if (compactBoundedCharacterClass != null && compactRouteMemory(compactBoundedCharacterClass) <= forwardMemory) {
+            // An alternation of class runs compiles as its run expression.
+            entireRegexp = compactRegexp;
             long counterMemory = compactBoundedCharacterClass.estimatedRetainedSize();
             ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp, caseFolding);
             long availableMemory = forwardMemory - counterMemory;
@@ -918,8 +924,8 @@ abstract sealed class CompiledPattern
                     -1,
                     partialProgram,
                     booleanPlans,
-                    0,
-                    Map.of(),
+                    capturingGroupCount,
+                    parsed.capturingGroupNames(),
                     compactBoundedCharacterClass,
                     null,
                     null,
@@ -1393,10 +1399,12 @@ abstract sealed class CompiledPattern
                 case CONTAINS, EQUALS, STARTS_WITH, ENDS_WITH, EQUALS_FINAL_LINE, ENDS_WITH_FINAL_LINE, ORDERED_LITERALS, LITERAL_NEIGHBORS -> Shape.LITERAL_KERNEL;
             };
         }
-        // As on the compact route, a pattern with a capture keeps the engine. A pattern can retain
-        // the counter beside a fixed-width matcher that does not yield to it, such as [0-9]{4} or
-        // [jqxz]{3}, and both are charged: full-Slice find and count take the matcher, while the
-        // group-zero find of RegexpMatcher stays on the counter (see groupZeroSpanSearch).
+        // A pattern with a capture keeps the engine, as on the compact route, where only an
+        // [alternation of class runs][ClassRunAlternationCaptures] decides captures on the
+        // counter. A pattern can retain the counter beside a fixed-width matcher that does not
+        // yield to it, such as [0-9]{4} or [jqxz]{3}, and both are charged: full-Slice find and
+        // count take the matcher, while the group-zero find of RegexpMatcher stays on the counter
+        // (see groupZeroSpanSearch).
         BoundedCharacterClassCounter matcherClass = requiredPrefix == null && compactBoundedCharacterClass == null && capturingGroupCount == 0
                 ? BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch)
                 : null;
@@ -4334,7 +4342,8 @@ abstract sealed class CompiledPattern
         if (groups != null) {
             checkGroupsLength(groups);
             int patternSlotCount = 2 * (capturingGroupCount + 1);
-            int copySlotCount = Math.min(patternSlotCount, partialProg.captureSlotCount());
+            // A class run that decides its captures writes every group without a program.
+            int copySlotCount = capturesOnClassRun() ? patternSlotCount : Math.min(patternSlotCount, partialProg.captureSlotCount());
             if (groups.length > patternSlotCount && copySlotCount <= Long.SIZE) {
                 // OnePass picks its route by the buffer's length, so a buffer past the pattern's
                 // groups would turn it away: on small patterns that cost 584 to 1,120 bytes per
@@ -4451,8 +4460,29 @@ abstract sealed class CompiledPattern
         if (groups != null) {
             groups[0] = matchStart;
             groups[1] = matchEnd;
+            if (capturesOnClassRun()) {
+                writeClassRunCaptures(text, contextStart, groups);
+            }
         }
         return true;
+    }
+
+    /// Whether the class counter decides this pattern's captures, an
+    /// [alternation of class runs][ClassRunAlternationCaptures].
+    final boolean capturesOnClassRun()
+    {
+        return capturingGroupCount > 0 && usesCompactBoundedCharacterClassForDiagnostics();
+    }
+
+    /// Writes the captures of the class-run match in `groups[0..1]`, offsets from `contextStart`
+    /// in `text`, for a pattern whose [class counter decides them][#capturesOnClassRun].
+    final void writeClassRunCaptures(Slice text, int contextStart, int[] groups)
+    {
+        if (groups.length > 2) {
+            BoundedCharacterClassCounter counter = boundedCharacterClassCounter;
+            int members = counter.countMembers(text, contextStart + groups[0], contextStart + groups[1]);
+            ClassRunAlternationCaptures.materialize(counter.maximum(), members, groups[0], groups[1], groups);
+        }
     }
 
     /// Returns an immutable snapshot of the first match, or `null` when no match exists.
@@ -4553,8 +4583,8 @@ abstract sealed class CompiledPattern
     }
 
     /// The [#matchInternal] route of a pattern that the compact class counter answers: every
-    /// call of the forward program runs the counter, which reports group zero only, as a
-    /// pattern without captures needs.
+    /// call of the forward program runs the counter, whose match also decides the captures of an
+    /// [alternation of class runs][ClassRunAlternationCaptures].
     final boolean matchInternalOnClassRun(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
     {
         if (prog == partialProg) {

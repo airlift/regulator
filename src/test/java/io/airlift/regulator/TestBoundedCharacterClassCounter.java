@@ -459,7 +459,8 @@ public class TestBoundedCharacterClassCounter
             assertThat(RustRegexp.compile(utf8Slice(pattern)).classMatchCounter()).as(pattern).isNull();
         }
         // A lazy repeat, a repeat compiled for longest match, and a pattern with a capture build no
-        // counter and keep the engine, as on the compact route.
+        // counter and keep the engine, as on the compact route apart from an alternation of class
+        // runs (see TestClassRunAlternationCaptures).
         Slice words = utf8Slice("the quiet tea");
         for (Re2 re2 : List.of(Re2.compile(utf8Slice("\\w+?")), Re2.compile(utf8Slice("\\w+"), Re2.Options.defaults().setLongestMatch(true)), Re2.compile(utf8Slice("(\\w)+")), Re2.compile(utf8Slice("(?<w>\\w)+")))) {
             assertThat(re2.classMatchCounter()).as(re2.pattern().toStringUtf8()).isNull();
