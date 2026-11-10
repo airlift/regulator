@@ -1394,7 +1394,10 @@ abstract sealed class CompiledPattern
         // charge does not fit, the bound is removed and the charge retried. If that fails, the
         // pattern keeps only the short-window check when eligible and affordable, and otherwise
         // keeps no check. An inner literal search is such a route unless only the class-run proof
-        // admits it.
+        // admits it. An exact literal whose first hit full-Slice find hands to the inner literal
+        // search takes the handoff's search into the charge where the handoff has a search of its
+        // own. Each smaller step gives up the handoff, and the last, the short-window check alone,
+        // also gives up a handoff's search of its own.
         Prog forwardBudgetProgram = booleanPlans.loweredProgram() == null ? partialProg : booleanPlans.loweredProgram();
         if (finalLineEndOnePass != null && tryReserveBesideForwardDfas(forwardBudgetProgram, finalLineEndOnePass.retainedSize())) {
             partialProg.restoreOnePass(finalLineEndOnePass);
@@ -1429,6 +1432,9 @@ abstract sealed class CompiledPattern
             // only the long-window check, so a pattern without that check keeps none.
             if (preferred == null && !requiredBytes.isLongWindowsOnly()) {
                 preferred = requiredBytes.withoutLongWindowSearch();
+            }
+            if (preferred != null && handsOffRequiredLiteral(booleanPlans, requiredPrefix, partialProg, preferred)) {
+                preferred = preferred.withInnerLiteralHandoff();
             }
             if (preferred != null) {
                 reservedRequiredBytes = reserveRequiredBytes(forwardBudgetProgram, preferred);
@@ -1691,9 +1697,12 @@ abstract sealed class CompiledPattern
 
     /// Reserves the required bytes beside `program`'s forward DFAs and returns those kept:
     /// `preferred` where its charge fits, or else, for a literal with its search-end bound, the
-    /// same literal with its long-window search alone, or else, for a literal with its
-    /// long-window search that does not serve long windows only, the same literal without that
-    /// search, for the short-window check alone, where each smaller charge fits, or else null.
+    /// same literal with its long-window search alone, or else, for a literal with its long-window
+    /// search, or with a [handoff][RequiredBytes#withInnerLiteralHandoff] on a
+    /// [search of its own][RequiredBytes#hasOwnHandoffSearch], that does not serve long windows
+    /// only, the same literal without that search, for the short-window check alone, where each
+    /// smaller charge fits, or else null. The bytes of each smaller step drop the handoff, so a
+    /// handoff's search of its own is given up with the long-window search, in the last step.
     private static RequiredBytes reserveRequiredBytes(Prog program, RequiredBytes preferred)
     {
         if (tryReserveBesideForwardDfas(program, preferred.estimatedRetainedSize())) {
@@ -1705,7 +1714,7 @@ abstract sealed class CompiledPattern
                 return unbounded;
             }
         }
-        if (preferred.searchesLongWindows() && !preferred.isLongWindowsOnly()) {
+        if ((preferred.searchesLongWindows() || preferred.hasOwnHandoffSearch()) && !preferred.isLongWindowsOnly()) {
             RequiredBytes shortWindowOnly = preferred.withoutLongWindowSearch();
             if (tryReserveBesideForwardDfas(program, shortWindowOnly.estimatedRetainedSize())) {
                 return shortWindowOnly;
@@ -2499,7 +2508,9 @@ abstract sealed class CompiledPattern
     /// literal reject, the nullable-start shortcut, then an ordinary search of the lowered boolean
     /// program where there is one, or else of the forward program. A pattern that
     /// [runs its inner literal search first][#runsInnerLiteralSearchFirst] runs that search before
-    /// the engine instead, and keeps no required bytes to check.
+    /// the engine instead, and keeps no required bytes to check. A long window of a pattern whose
+    /// required literal [hands off][#findFromRequiredLiteral] to its inner literal search takes
+    /// that route in place of the long-window literal reject and the engine.
     private boolean findOnEngine(Slice input)
     {
         requireNonNull(input, "input is null");
@@ -2529,6 +2540,9 @@ abstract sealed class CompiledPattern
                 return false;
             }
         }
+        else if (bytes != null && bytes.handsOffToInnerLiteralSearch()) {
+            return findFromRequiredLiteral(input);
+        }
         else if (bytes != null && longWindowLacksRequiredLiteral(input, 0, length)) {
             return false;
         }
@@ -2536,6 +2550,48 @@ abstract sealed class CompiledPattern
             return true;
         }
         return matchOnOrdinaryEngine(program, input, 0, length, 0, length, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
+    }
+
+    /// The full-Slice find of a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more, for a
+    /// pattern whose required literal [hands off][#handsOffRequiredLiteral] to its inner literal
+    /// search: the literal check's scan finds the literal's first occurrence, or rejects the
+    /// window without one, and the inner literal search
+    /// [starts from that occurrence][InnerLiteralSearch#searchFromCheckedHit] rather than
+    /// scanning the window from its start again. Where the literal is the search's own, as for
+    /// `(\w+)foobar(\d)`, the long-window reject would have scanned to the same occurrence. Where
+    /// it is the search's literal and the one byte the search's gate admits after it, as for
+    /// `\w+,\bz`, the window was not checked before, and one without `,z` is now rejected without
+    /// the engine; the scan for `,z` starts at the search's first `,`, which a one-byte scan
+    /// finds; see [RequiredBytes#handoffIndexIn]. A method of its own, so the one test is all
+    /// that this route adds to [#findOnEngine].
+    ///
+    /// The answer is the engine's. Under [#handsOffRequiredLiteral], the engine's call
+    /// `matchOnOrdinaryEngine(partialProg, input, 0, length, 0, length, UNANCHORED, null,
+    /// NO_MATCH_WORKSPACES)` makes no deciding step before its length reject and the inner literal
+    /// search, which runs on every such window, since its minimum is at most the window limit. A
+    /// window without the literal holds no match, and the search would return no match on it too:
+    /// it has no hit of the search's literal, or none that passes the gate after it. Otherwise
+    /// the search from the occurrence returns what the engine's search returns, and after a
+    /// fallback [#findAfterInnerLiteralFallback] makes the engine's remaining steps.
+    private boolean findFromRequiredLiteral(Slice input)
+    {
+        int length = input.length();
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        int literalStart = requiredBytes.handoffIndexIn(input, 0, length, innerLiteralSearch);
+        if (literalStart < 0) {
+            return false;
+        }
+        if (length < MINIMUM_LENGTH_CHECK_LIMIT && length < minimumMatchLength()) {
+            return false;
+        }
+        long span = innerLiteralSearch.searchFromCheckedHit(input, 0, length, 0, length, literalStart);
+        if (span >= 0) {
+            return true;
+        }
+        if (span == Dfa.SEARCH_NO_MATCH) {
+            return false;
+        }
+        return findAfterInnerLiteralFallback(input);
     }
 
     /// The full-Slice find of a pattern that
@@ -2552,25 +2608,10 @@ abstract sealed class CompiledPattern
     /// search, which this makes in the same order, on the same text, context, and window. A
     /// no-match or a span is then what the engine returns, as a boolean find needs no captures.
     ///
-    /// The lines after a fallback are [#matchOnOrdinaryEngine]'s continuation after its inner
-    /// literal search falls back, inlined here because this route alone runs the search ahead of
-    /// the engine, and entering the engine would run the search a second time: that took 1.08 to
-    /// 1.11 times as long as the find without this route on email lines of 64 to 127 bytes with a
-    /// match near the start, where the search falls back. For that call the continuation is the
-    /// boolean-search skip of a thrashing DFA, which after a streak of slow resets returns the
-    /// answer of the program's position automaton, and otherwise the forward DFA over the window,
-    /// judged for those resets, and, only where that DFA fails, the unanchored submatch engines
-    /// over it. The call's arguments, with no captures and [#NO_MATCH_WORKSPACES], rule out the
-    /// engine's other steps after the search: the reverse DFA for a match start, the
-    /// tagged-alternation program, and the skip of the DFA after a matcher's DFA quit streak, a
-    /// quit of its candidate cursor, or a failed count. The conditions of
-    /// [#runsInnerLiteralSearchFirst] rule out the rest: an end anchor, which sends the engine to
-    /// the reverse DFA in place of the forward DFA, and an assertion the DFA cannot run, which
-    /// skips the DFA. A change to that continuation must change these lines too;
-    /// `TestInnerLiteralSearch.testFindsGatedOneByteLiteralFirst` checks this find against the
-    /// engine's own on lines whose search falls back, where the forward DFA answers and where it
-    /// quits, and `TestPositionNfa.testInnerLiteralFirstLineSearchesSkipDfaAfterSlowResets` checks
-    /// that its boolean searches skip a thrashing DFA.
+    /// After a fallback, [#findAfterInnerLiteralFallback] makes the engine's steps after its
+    /// search, rather than entering the engine, which would run the search a second time: that
+    /// took 1.08 to 1.11 times as long as the find without this route on email lines of 64 to 127
+    /// bytes with a match near the start, where the search falls back.
     private boolean findOnInnerLiteralSearch(Slice input)
     {
         int length = input.length();
@@ -2584,6 +2625,34 @@ abstract sealed class CompiledPattern
         if (span == Dfa.SEARCH_NO_MATCH) {
             return false;
         }
+        return findAfterInnerLiteralFallback(input);
+    }
+
+    /// The rest of a full-Slice boolean find whose own inner literal search, in
+    /// [#findOnInnerLiteralSearch] or [#findFromRequiredLiteral], fell back:
+    /// [#matchOnOrdinaryEngine]'s continuation after its inner literal search falls back, made
+    /// here because those routes run the search ahead of the engine, and entering the engine would
+    /// run the search a second time. For the engine's call `matchOnOrdinaryEngine(partialProg,
+    /// input, 0, length, 0, length, UNANCHORED, null, NO_MATCH_WORKSPACES)` the continuation is the
+    /// boolean-search skip of a thrashing DFA, which after a streak of slow resets returns the
+    /// answer of the program's position automaton, and otherwise the forward DFA over the window,
+    /// judged for those resets, and, only where that DFA fails, the unanchored submatch engines
+    /// over it. The call's arguments, with no captures and [#NO_MATCH_WORKSPACES], rule out the
+    /// engine's other steps after the search: the reverse DFA for a match start, the
+    /// tagged-alternation program, and the skip of the DFA after a matcher's DFA quit streak, a
+    /// quit of its candidate cursor, or a failed count. The conditions of
+    /// [#reachesInnerLiteralSearchFirst], which both routes require, rule out the rest: an end
+    /// anchor, which sends the engine to the reverse DFA in place of the forward DFA, and an
+    /// assertion the DFA cannot run, which skips the DFA. A change to that continuation must
+    /// change these lines too; `TestInnerLiteralSearch` checks each route against the engine's own
+    /// find on lines whose search falls back, where the forward DFA answers and where it quits, in
+    /// `testFindsGatedOneByteLiteralFirst` and
+    /// `testRequiredLiteralHandoffFindAgreesWithOrdinaryEngine`, and
+    /// `TestPositionNfa.testInnerLiteralFirstLineSearchesSkipDfaAfterSlowResets` checks that the
+    /// first route's boolean searches skip a thrashing DFA.
+    private boolean findAfterInnerLiteralFallback(Slice input)
+    {
+        int length = input.length();
         Prog.MatchKind matchKind = longestMatch ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH;
         long forward = Dfa.searchJudgingSlowResets(partialProg, input, 0, length, 0, length, matchKind);
         if (forward == Dfa.BOOLEAN_SEARCH_SKIPPED) {
@@ -2598,11 +2667,37 @@ abstract sealed class CompiledPattern
     /// Whether full-Slice boolean find [runs the inner literal search first][#findOnInnerLiteralSearch]:
     /// the pattern's search is a gated one-byte search that
     /// [checks short windows][InnerLiteralSearch#checksShortWindows], and the ordinary engine's
-    /// find of `partialProg` over a whole Slice, which [#findOnEngine] calls with
-    /// [#NO_MATCH_WORKSPACES], reaches that search after only its argument checks and length reject
-    /// on every input, and returns the search's no-match or span unchanged. The constructor also
-    /// requires that the pattern keep no required bytes, which that find would check first. The
-    /// conditions keep every step of the engine, and of [#findOnEngine], from deciding ahead of the
+    /// find of `partialProg` over a whole Slice
+    /// [reaches that search first][#reachesInnerLiteralSearchFirst] on every input. The
+    /// constructor also requires that the pattern keep no required bytes, which that find would
+    /// check first. The search runs at every window length, since it checks short windows, and the
+    /// length reject goes first in the engine and in [#findOnInnerLiteralSearch].
+    private static boolean runsInnerLiteralSearchFirst(BooleanPlans booleanPlans, byte[] requiredPrefix, Prog partialProg)
+    {
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        return innerLiteralSearch != null && innerLiteralSearch.checksShortWindows() && reachesInnerLiteralSearchFirst(booleanPlans, requiredPrefix, partialProg);
+    }
+
+    /// Whether full-Slice boolean find of a long window [hands the required literal's first
+    /// hit][#findFromRequiredLiteral] to the inner literal search: the ordinary engine's find of
+    /// `partialProg` over a whole Slice [reaches that search first][#reachesInnerLiteralSearchFirst],
+    /// the search runs on every window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more, and
+    /// `preferred`, the required bytes the pattern would keep,
+    /// [admit the handoff][RequiredBytes#admitsInnerLiteralHandoff] to that search.
+    private static boolean handsOffRequiredLiteral(BooleanPlans booleanPlans, byte[] requiredPrefix, Prog partialProg, RequiredBytes preferred)
+    {
+        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
+        return innerLiteralSearch != null &&
+                booleanPlans.innerLiteralSearchMinimum() <= RequiredBytes.SHORT_WINDOW_LIMIT &&
+                reachesInnerLiteralSearchFirst(booleanPlans, requiredPrefix, partialProg) &&
+                preferred.admitsInnerLiteralHandoff(innerLiteralSearch);
+    }
+
+    /// Whether the ordinary engine's find of `partialProg` over a whole Slice, which
+    /// [#findOnEngine] calls with [#NO_MATCH_WORKSPACES], reaches the pattern's inner literal search
+    /// after only its argument checks and length reject on every window the search runs on, and
+    /// returns the search's no-match or span unchanged. The conditions keep every step of the
+    /// engine, and of [#findOnEngine] after its required-bytes checks, from deciding ahead of the
     /// search:
     /// - no lowered boolean program, which findOnEngine would search in place of `partialProg`,
     ///   the program whose search is the inner literal search;
@@ -2611,22 +2706,19 @@ abstract sealed class CompiledPattern
     /// - no start anchor, with which the engine takes the anchored route, which never runs the
     ///   search;
     /// - no end anchor, which decides nothing ahead of the search, but after a fallback sends the
-    ///   engine to the reverse DFA, which [#findOnInnerLiteralSearch] does not run, and which the
-    ///   search's analysis never admits, so that this rule does not depend on that analysis;
+    ///   engine to the reverse DFA, which [#findAfterInnerLiteralFallback] does not run, and which
+    ///   the search's analysis never admits, so that this rule does not depend on that analysis;
     /// - no assertion the DFA cannot run, since a search that skips the DFA skips this one too;
     /// - no empty match, so the nullable-start shortcut findOnEngine takes first never answers.
     ///
-    /// The search runs at every window length, since it checks short windows, and the length
-    /// reject goes first in both routes. The engine skips the DFA, and the search with it, after a
-    /// streak of DFA quits or a quit of the candidate cursor, but only a matcher's workspaces hold
-    /// either, so a call with [#NO_MATCH_WORKSPACES] never skips it. The inner literal search's own
-    /// analysis already rejects most of these programs; each condition is tested here so that this
-    /// rule does not depend on it.
-    private static boolean runsInnerLiteralSearchFirst(BooleanPlans booleanPlans, byte[] requiredPrefix, Prog partialProg)
+    /// The engine skips the DFA, and the search with it, after a streak of DFA quits or a quit of
+    /// the candidate cursor, but only a matcher's workspaces hold either, so a call with
+    /// [#NO_MATCH_WORKSPACES] never skips it. The inner literal search's own analysis already
+    /// rejects most of these programs; each condition is tested here so that this rule does not
+    /// depend on it.
+    private static boolean reachesInnerLiteralSearchFirst(BooleanPlans booleanPlans, byte[] requiredPrefix, Prog partialProg)
     {
-        InnerLiteralSearch innerLiteralSearch = booleanPlans.innerLiteralSearch();
-        return innerLiteralSearch != null && innerLiteralSearch.checksShortWindows() &&
-                booleanPlans.loweredProgram() == null &&
+        return booleanPlans.loweredProgram() == null &&
                 !keepsPreEngineMatcher(booleanPlans) &&
                 requiredPrefix == null &&
                 !partialProg.anchorStart() &&
@@ -4576,9 +4668,10 @@ abstract sealed class CompiledPattern
             // for them before it gets here; a ranged find and findInto have not. That limit is 256
             // bytes for a literal and for a single required byte, and for a one-of set of two or
             // three distinct bytes this search's minimum where it is lower. A full-Slice boolean
-            // find that runs the search first, in findOnInnerLiteralSearch, never comes here: after
-            // a fallback it makes the steps below itself. The compile resolves the window decision
-            // to one minimum, so a window too short for the search costs one compare.
+            // find that runs the search itself, in findOnInnerLiteralSearch or, on a long window,
+            // findFromRequiredLiteral, never comes here: after a fallback,
+            // findAfterInnerLiteralFallback makes the steps below. The compile resolves the window
+            // decision to one minimum, so a window too short for the search costs one compare.
             InnerLiteralSearch innerLiteralSearch = prog == partialProg && searchLength >= booleanPlans.innerLiteralSearchMinimum() ? booleanPlans.innerLiteralSearch() : null;
             long innerLiteralSpan = innerLiteralSearch != null && !dfaSearchSkippedOrFailed
                     ? innerLiteralSearch.search(text, contextStart, contextEnd, start, end)
@@ -4644,8 +4737,8 @@ abstract sealed class CompiledPattern
                     // A boolean search judges the DFA's resets across boolean searches, and after
                     // a streak of slow resets skips it, answering from the position automaton,
                     // which reads no context, so it searches only [start, end).
-                    // findOnInnerLiteralSearch makes this step, and the submatch engines' after
-                    // it, once its search falls back; keep in step.
+                    // findAfterInnerLiteralFallback makes this step and the submatch engines' for a
+                    // full-Slice find whose own search falls back; keep in step.
                     long forward = captureCount == 0
                             ? Dfa.searchJudgingSlowResets(prog, text, contextStart, contextEnd, start, end, matchKind)
                             : Dfa.search(prog, text, contextStart, contextEnd, start, end, false, matchKind, true);

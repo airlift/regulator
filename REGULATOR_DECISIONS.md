@@ -1764,7 +1764,9 @@ boolean searches' own. Only unanchored boolean searches of a forward program
 with the [position
 automaton](#bit-parallel-position-automaton-after-dfa-failure) that bounded,
 assertion-free matches compile to take part, including a full-Slice `find` that
-runs its [inner literal search first](#minimum-inner-literal-search-window)
+runs its [inner literal search first](#minimum-inner-literal-search-window), or
+[hands it a long window's required literal
+hit](#required-literal-absence-on-long-windows),
 once that search falls back. A pattern without the automaton keeps upstream's
 rule, because its searches would fall back on BitState or the Pike NFA, which
 were not measured against a DFA that thrashes. Such a search reads the reset
@@ -2919,6 +2921,55 @@ that each end in `,z`, unlike the 16 KiB chunks above, `\w+,\bz` took 1.33 to
 lines without `,z`, which the check took to 0.59x on Graviton and 0.35x on x86.
 A search for a literal that begins every match lands where a match would start,
 as a prefix scan does, and keeps the check.
+
+Full-Slice `find` of a long window hands the check's first hit to the inner
+literal search, which starts there rather than at the window start, so the
+search does not scan again the text before the handed hit. Two forms of search
+qualify, each for one exact literal. The first searches for the checked literal
+itself, as for `(\w+)foobar(\d)`, so the check's scan has found the search's
+first hit. The second searches for the required literal less its last byte,
+where the search's gate after its literal admits that byte alone, as the `,` of
+`\w+,\bz` is followed only by `z`. A hit of that search then passes the gate
+exactly where `,z` starts, and none before the first `,z` does.
+
+That form finds the first `,z` with the search's own one-byte scan for `,`
+first, then the scan for `,z` from that `,`. Every occurrence of `,z` starts
+with an occurrence of `,`, so the first `,z` at or after the first `,` is the
+first `,z` in the window, and a window without `,` has no `,z`, where the gated
+search for `,` answers no match too. The one-byte scan goes first because, on
+text without `,`, the scan for `,z` costs more for each vector than the one-byte
+scan does. The window's length, not the length left after the `,`, chooses the
+scan for `,z`, so a window of at least 1 KiB keeps the vector pair scan however
+early its first `,` lies. On 1 KiB lines, scanning the rest after an early `,`
+with the call-free word scan, as the length left chose, made the handoff take
+2.1 times as long on Graviton and 2.5 times as long on x86 as a vector scan for
+`,z` from the line start. The vector scan takes a rest of any length, whole
+vectors of candidates and then the remainder one at a time, and its comparison
+budget counts from where it starts, as a scan of the rest alone would.
+
+The handoff is sound because the ordinary engine's `find` reaches the inner
+literal search after its length reject and before any other deciding step: the
+pattern has no lowered program, pre-engine matcher, required prefix, anchor at
+either end, assertion the DFA cannot run, or empty match, and the search's
+minimum window is at most 256 bytes. A hit before the handed one either does not
+exist or fails a gate, and a hit that fails a gate changes none of the search's
+state, so the search reaches the handed hit as it would have from the window
+start, falling back where it would. A window without the literal has no hit that
+passes, so the search would have answered no match there too.
+
+The second form gives `\w+,\bz` back the reject of lines without `,z` in `find`,
+with a scan of its own that serves the handoff alone. The required bytes' charge
+takes in that scan, as it would a long-window search. Each smaller step gives up
+the handoff, in either form, and the last, the short-window check alone, also
+gives up the second form's own scan. Matcher finds, count, the one-shot range
+searches, and `replaceAll` keep that pattern out of the check, as above, so
+lines that each end in `,z` cost them no second scan. In RE2 and Java, the
+handoff took `\w+,\bz` on 1 to 16 KiB chunks of text with commas to 0.24 to
+0.32 of main's time on Graviton and 0.08 to 0.15 on x86 without `,z`, and to
+0.31 to 0.46 and 0.09 to 0.26 with it; comma-dense CSV without `,z` to 0.035 and
+0.022; text without a comma to 0.97 and 0.93; and 256-byte windows to 0.70 to
+0.86 and 0.43 to 0.67. It took `(\w+)foobar(\d)` grep on 16 KiB chunks to 0.53
+and 0.58 to 0.61.
 
 Compilation decides this once, and the literal's search takes its memory in the
 required bytes' charge, with the search-end bound's search where the pattern has
