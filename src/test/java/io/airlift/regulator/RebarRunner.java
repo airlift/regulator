@@ -36,8 +36,19 @@ import static io.airlift.slice.Slices.wrappedBuffer;
 ///
 /// This lives with benchmark sources so the protocol adapter and its timing machinery are not part
 /// of the published Slice API.
+///
+/// Rebar's protocol warms up until max-warmup-iters or max-warmup-time, then measures until
+/// max-iters or max-time. This runner adds an untimed settle run after the warm-up and a
+/// minimum sample count when max-time cuts the measurement short. Only this runner and its copy
+/// in Rebar's `engines/regulator` do this; Rebar's JVM comparator, `java/hotspot`, uses Rebar's
+/// own runner, which we don't control.
 public final class RebarRunner
 {
+    /// A measurement that reaches max-time keeps measuring until it has this many samples or
+    /// reaches max-iters, so a measurement that passes max-time on its first sample reports no
+    /// fewer samples than one just under the limit.
+    private static final int MINIMUM_SAMPLES = 3;
+
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
@@ -170,7 +181,7 @@ public final class RebarRunner
             Re2 pattern = Re2.compile(benchmark.pattern(), options);
             long duration = System.nanoTime() - start;
             samples.add(duration, countMatches(pattern, benchmark.haystack()));
-            if (System.nanoTime() - runStart >= benchmark.maximumTimeNanos()) {
+            if (samples.size() >= MINIMUM_SAMPLES && System.nanoTime() - runStart >= benchmark.maximumTimeNanos()) {
                 break;
             }
         }
@@ -383,7 +394,8 @@ public final class RebarRunner
         return '"' + value.replace("\"", "\"\"") + '"';
     }
 
-    private static Samples benchmarkOperation(Benchmark benchmark, Operation operation)
+    /// Measures until max-iters, or until max-time once there are [#MINIMUM_SAMPLES] samples.
+    static Samples benchmarkOperation(Benchmark benchmark, Operation operation)
     {
         warmup(benchmark, operation);
         Samples samples = new Samples();
@@ -393,13 +405,17 @@ public final class RebarRunner
             long count = operation.run();
             long duration = System.nanoTime() - start;
             samples.add(duration, count);
-            if (System.nanoTime() - runStart >= benchmark.maximumTimeNanos()) {
+            if (samples.size() >= MINIMUM_SAMPLES && System.nanoTime() - runStart >= benchmark.maximumTimeNanos()) {
                 break;
             }
         }
         return samples;
     }
 
+    /// Runs the operation until max-warmup-iters or max-warmup-time, then once more untimed. Under
+    /// Rebar's default warm-up time, an operation of a few seconds gets a single warm-up run, and
+    /// the JIT later deoptimizes code compiled during that run on paths the run had not reached.
+    /// The settle run pays for that deoptimization and recompile instead of the first sample.
     private static void warmup(Benchmark benchmark, Operation operation)
     {
         long warmupStart = System.nanoTime();
@@ -409,6 +425,7 @@ public final class RebarRunner
                 break;
             }
         }
+        operation.run();
     }
 
     enum MatchMeasurement
@@ -431,7 +448,7 @@ public final class RebarRunner
     }
 
     @FunctionalInterface
-    private interface Operation
+    interface Operation
     {
         long run();
     }
@@ -668,7 +685,7 @@ public final class RebarRunner
         }
     }
 
-    private static final class Samples
+    static final class Samples
     {
         private long[] durations = new long[16];
         private long[] counts = new long[16];
