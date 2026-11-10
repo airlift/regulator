@@ -56,7 +56,7 @@ public class TestRe2Options
     {
         assertThatThrownBy(() -> Re2.compile(utf8("abc"), Re2.Options.defaults().setMaxMemory(1)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class)
-                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 2 KiB");
+                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 5 KiB");
     }
 
     @Test

@@ -325,41 +325,41 @@ public class TestTrinoRegexpFunctions
         assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(retainedSize);
 
-        // The smallest budget that compiles fits the program before flattening at 120 bytes per
-        // instruction, and the flattened program is charged 113. When flattening does not grow the
-        // program, its DFA keeps at least 7 bytes per unflattened instruction, more when flattening
+        // The smallest budget that compiles fits the program before flattening at 72 bytes per
+        // instruction, and the flattened program is charged 49. When flattening does not grow the
+        // program, its DFA keeps at least 23 bytes per unflattened instruction, more when flattening
         // removes instructions, so this short pattern keeps the matcher at that budget.
         TrinoRegexp smallest = compileAtSmallestBudget(pattern);
         assertThat(smallest.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
         assertThat(smallest.contains(utf8("xxfirst-second-thirdyy"))).isTrue();
 
-        // The required bytes give way to the matcher: at its smallest budget, a 128-byte leading
+        // The required bytes give way to the matcher: at its smallest budget, a 256-byte leading
         // literal leaves too little allowance after their charge for the matcher, which takes
         // their memory instead.
-        TrinoRegexp shorter = compileAtSmallestBudget(utf8("a".repeat(128) + "(?s:.*)b"));
+        TrinoRegexp shorter = compileAtSmallestBudget(utf8("a".repeat(256) + "(?s:.*)b"));
         assertThat(shorter.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
         assertThat(shorter.re2().requiredBytesForDiagnostics()).isNull();
-        assertThat(shorter.contains(utf8("x" + "a".repeat(128) + "yyb"))).isTrue();
+        assertThat(shorter.contains(utf8("x" + "a".repeat(256) + "yyb"))).isTrue();
 
         // A long leading literal whose first byte recurs keeps a prefix shift table, charged after
-        // flattening, which can take enough of the remaining allowance to leave the matcher out.
-        // It keeps no required bytes, since its prefix scan leaves no literal to check beside it:
-        // the `a` run is its start bytes, and `b` is one byte.
+        // flattening, and at its smallest budget still keeps the matcher. It keeps no required
+        // bytes, since its prefix scan leaves no literal to check beside it: the `a` run is its
+        // start bytes, and `b` is one byte.
         String literal = "a".repeat(320);
-        TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
-        assertThat(fallback.usesOrderedLiteralMatcherForDiagnostics()).isFalse();
-        assertThat(fallback.re2().requiredBytesForDiagnostics()).isNull();
+        TrinoRegexp longPrefix = compileAtSmallestBudget(utf8(literal + "(?s:.*)b"));
+        assertThat(longPrefix.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
+        assertThat(longPrefix.re2().requiredBytesForDiagnostics()).isNull();
         Slice source = utf8("x" + literal + "yyb\nb");
-        assertThat(fallback.contains(source)).isTrue();
-        assertThat(fallback.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
-        assertThat(fallback.count(source)).isEqualTo(1);
-        assertThat(fallback.extract(source)).isEqualTo(utf8(literal + "yyb\nb"));
+        assertThat(longPrefix.contains(source)).isTrue();
+        assertThat(longPrefix.contains(utf8("x" + literal.substring(1) + " ab"))).isFalse();
+        assertThat(longPrefix.count(source)).isEqualTo(1);
+        assertThat(longPrefix.extract(source)).isEqualTo(utf8(literal + "yyb\nb"));
 
         // No Trino pattern takes the ordered-literal find plan of the other languages, whose gaps
         // must read any bytes, so the subtype's reservation is its only ordered-literal
         // reservation. Each pattern takes the subtype from the smallest budget that compiles, and
         // neither it nor the patterns above has the plan.
-        List<TrinoRegexp> compiledPatterns = new ArrayList<>(List.of(smallest, fallback));
+        List<TrinoRegexp> compiledPatterns = new ArrayList<>(List.of(smallest, longPrefix));
         for (String expression : List.of("a(?s:.*)b(?s:.*)c", "(?s)a.*b.*c")) {
             TrinoRegexp orderedLiterals = compileAtSmallestBudget(utf8(expression));
             assertThat(orderedLiterals.usesOrderedLiteralMatcherForDiagnostics()).as(expression).isTrue();
@@ -446,18 +446,26 @@ public class TestTrinoRegexpFunctions
         assertThat(smallest.count(source)).isEqualTo(2);
         assertThat(smallest.extract(source)).isEqualTo(utf8("xxliteralyy"));
 
-        // A long leading literal's prefix shift table can take enough of the allowance to leave
-        // the search out.
-        String literal = "a".repeat(320);
-        TrinoRegexp fallback = compileAtSmallestBudget(utf8(literal + ".*"));
-        assertThat(fallback.re2().literalSearchForDiagnostics()).isNull();
-        assertThat(shape(fallback.re2())).isEqualTo(CompiledPattern.Shape.LITERAL_KERNEL);
+        // A capture's leading-literal scan plan reserves its memory before the search, and from
+        // the budget at which the plan fits until the search fits beside it, it leaves the search
+        // out. The plan then answers alone.
+        Slice captured = utf8("(aa).*");
+        long maxMemory = smallestBudget(captured);
+        TrinoRegexp fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+        while (!fallback.re2().usesScanPlanForDiagnostics()) {
+            assertThat(maxMemory).isLessThan(1 << 20);
+            maxMemory++;
+            fallback = TrinoRegexp.compile(captured, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+        }
+        assertThat(fallback.re2().literalSearchForDiagnostics()).as("search at %s", maxMemory).isNull();
+        assertThat(TrinoRegexp.compile(captured).re2().literalSearchForDiagnostics()).isNotNull();
         assertThat(fallback.re2().findPlanForDiagnostics()).isEqualTo(CompiledPattern.BooleanPlanKind.CONTAINS);
-        Slice longSource = utf8("x" + literal + "yy\n" + literal);
-        assertThat(fallback.contains(longSource)).isTrue();
-        assertThat(fallback.contains(utf8("x" + literal.substring(1) + " a"))).isFalse();
-        assertThat(fallback.count(longSource)).isEqualTo(2);
-        assertThat(fallback.extract(longSource)).isEqualTo(utf8(literal + "yy"));
+        Slice capturedSource = utf8("xa aayy\naa");
+        assertThat(fallback.contains(capturedSource)).isTrue();
+        assertThat(fallback.contains(utf8("xa ayy"))).isFalse();
+        assertThat(fallback.count(capturedSource)).isEqualTo(2);
+        assertThat(fallback.extract(capturedSource, 1)).isEqualTo(utf8("aa"));
+        assertThat(fallback.extract(capturedSource)).isEqualTo(utf8("aayy"));
     }
 
     private static TrinoRegexp compileAtSmallestBudget(Slice pattern)
@@ -496,8 +504,8 @@ public class TestTrinoRegexpFunctions
         Slice text = utf8("x".repeat(100) + "ab");
         long reservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
         List<Boolean> outcomes = new ArrayList<>();
-        // Both patterns build a lowered program from 5,312 bytes.
-        for (long maxMemory = 5312; maxMemory <= 32 * 1024; maxMemory += 64) {
+        // Both patterns build a lowered program from 9,680 bytes.
+        for (long maxMemory = 9680; maxMemory <= 32 * 1024; maxMemory += 64) {
             TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
             TrinoCompiledPattern baselinePattern = TrinoRegexp.compile(utf8("^ab|ac$"), options).re2();
             long allowance = baselinePattern.booleanProgramForDiagnostics().dfaMemory() + baselinePattern.requiredBytesRetainedSizeForDiagnostics();

@@ -558,19 +558,18 @@ final class Nfa
         int boundedPassSlots = largestSlotCount(prog, boundedPassBytes(prog, true), allowance);
         if (boundedPassSlots < 4) {
             // The compiler admits a flattened program of P instructions only when the forward
-            // share, which is the allowance, holds 512 + 113P bytes. Instruction 0 is FAIL, so
+            // share, which is the allowance, holds 2,688 + 49P bytes. Instruction 0 is FAIL, so
             // the thread bound is at most P and the stack at most max(8, 2P - 1) slots, and an
             // int[n] takes at most 20 + 4n bytes. A pass of four slots then takes at most
             // max(96P + 720, 80P + 784) bytes: 32P + 32 of slots, 448 of objects, 24P + 120 of
             // queues, max(96, 16P + 32) of stacks, 16P + 72 of thread tables, and 8P + 16 of
-            // rewritten words. That fits the share for P >= 13, and the exact sizes fit at P = 12.
-            // Below that a pass takes at most 1,768 bytes, which the share holds from a maxMemory
-            // of 2,651 bytes, so nothing the compiler admits there reaches this rejection. A
-            // program of two slots needs one pass of them without rewritten words, which is
-            // smaller still, so it reaches this rejection only when that pass does not fit. Below
-            // 2,651 bytes a program of at most 11 instructions can in principle reach it, as its
-            // pass can exceed 512 + 113P bytes by up to 231 bytes. None has in over 100,000
-            // swept patterns; the tightest, which tracks only group zero, fit with 8 bytes to spare.
+            // rewritten words. That fits the share for P <= 41, so no program the compiler admits
+            // of at most 41 instructions reaches this rejection. A program of two slots needs one
+            // pass of them without rewritten words, which is smaller still, so it reaches this
+            // rejection only when that pass does not fit. A larger program's pass can outgrow the
+            // share, as the slots, queues and stacks take more per instruction than the flatten
+            // charge, and this rejection then keeps its capture tables within the share; it sets
+            // the least budget of such a pattern, as for 40 copies of (a).
             // The least allowance with a plan is the least of the three checks: a single pass, one
             // bounded pass of every slot, or bounded passes of four slots.
             long boundedPassesOfFour = threadSlotBytes(prog, 4) + boundedPassBytes(prog, true);

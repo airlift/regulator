@@ -145,25 +145,25 @@ public class TestRe2Allocations
         assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
-        // At 3,072 bytes the forward DFA gets less than its minimum. At the first budget that
+        // At 5,120 bytes the forward DFA gets less than its minimum. At the first budget that
         // reaches the minimum, which depends on the VM's layout, it gets its minimum but not its
         // start-byte tables, so the DFA fails to initialize. Either way counting runs on the NFA.
         // Building a DFA that could never be cached allocated its work queues on every search,
         // thousands of bytes per match.
         Slice pattern = Slices.utf8Slice("(a|b)+c");
-        long windowMaxMemory = 3072;
+        long windowMaxMemory = 5120;
         while (!reachesFirstMatchMinimum(Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(windowMaxMemory)).forwardProgramForDiagnostics())) {
             windowMaxMemory += 8;
             assertThat(windowMaxMemory).as("maxMemory reaching the DFA minimum").isLessThan(65_536);
         }
         Slice source = Slices.utf8Slice("abc ".repeat(1_000));
-        for (long maxMemory : List.of(3072L, windowMaxMemory)) {
+        for (long maxMemory : List.of(5120L, windowMaxMemory)) {
             Re2 re2 = Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
             TrinoRegexp trino = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
             for (Prog program : List.of(re2.forwardProgramForDiagnostics(), trino.re2().forwardProgramForDiagnostics())) {
                 assertThat(reachesFirstMatchMinimum(program)).isEqualTo(maxMemory == windowMaxMemory);
                 assertThat(new Dfa.DfaInstance(program, Dfa.DfaInstance.Kind.FIRST_MATCH, program.dfaMemory() / 2).ok()).isFalse();
-                if (maxMemory == 3072) {
+                if (maxMemory == 5120) {
                     // Below its minimum, the first lookup rejects the DFA before it builds the
                     // work queues a failed DFA would rebuild on every search.
                     long threadId = Thread.currentThread().threadId();
@@ -804,10 +804,10 @@ public class TestRe2Allocations
         assertThat(wideGroups).containsOnly(-1);
 
         // A removed group below a surviving one keeps its slots, so the copy for 4,000 removed
-        // groups before (a) took 8,004 slots, 32,032 bytes per call against a 1,768-byte forward
+        // groups before (a) took 8,004 slots, 32,032 bytes per call against a 3,192-byte forward
         // share.
-        long tightForwardMemory = 2_651 - (2_651 / 3);
-        Re2 belowSurviving = Re2.compile(Slices.utf8Slice("(q){0}".repeat(4_000) + "(a)"), Re2.Options.defaults().setMaxMemory(2_651));
+        long tightForwardMemory = 4_787 - (4_787 / 3);
+        Re2 belowSurviving = Re2.compile(Slices.utf8Slice("(q){0}".repeat(4_000) + "(a)"), Re2.Options.defaults().setMaxMemory(4_787));
         int[] belowSurvivingGroups = new int[8_006];
         Arrays.fill(belowSurvivingGroups, sentinel);
         long threadId = Thread.currentThread().threadId();
@@ -842,9 +842,9 @@ public class TestRe2Allocations
         assertThat(belowSurvivingGroups).containsExactly(belowSurvivingExpected);
 
         // The copy held every declared group's slots, so 4,000 groups the simplifier removed took
-        // an 8,002-slot array per call against a 1,768-byte forward share, although the program
+        // an 8,002-slot array per call against a 3,192-byte forward share, although the program
         // tracks only group zero.
-        Re2 removedGroups = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(2_651));
+        Re2 removedGroups = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(4_787));
         int[] removedGroupsOffsets = new int[8_004];
         allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         boolean removedGroupsFound = removedGroups.findInto(Slices.EMPTY_SLICE, removedGroupsOffsets);
@@ -983,11 +983,11 @@ public class TestRe2Allocations
         assertThat(removedGroupsMatcher.group(1)).isEqualTo(Slices.utf8Slice("a"));
         assertThat(removedGroupsMatcher.group(2_001)).isNull();
 
-        // The same check for a two-slot program at 2,651 bytes, the smallest budget the plan is
-        // proven at: a buffer that holds exactly the declared groups, all removed, took an
-        // 8,002-slot array against a 1,768-byte share.
-        long tightForwardMemory = 2_651 - (2_651 / 3);
-        Re2 allRemoved = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(2_651));
+        // The same check for a two-slot program at 4,355 bytes, the smallest budget that compiles
+        // it: a buffer that holds exactly the declared groups, all removed, took an 8,002-slot
+        // array against a 2,904-byte share.
+        long tightForwardMemory = 4_355 - (4_355 / 3);
+        Re2 allRemoved = Re2.compile(Slices.utf8Slice("(a){0}".repeat(4_000) + "^"), Re2.Options.defaults().setMaxMemory(4_355));
         assertThat(allRemoved.forwardProgramForDiagnostics().captureSlotCount()).isEqualTo(2);
         int[] allRemovedGroups = new int[8_002];
         allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);

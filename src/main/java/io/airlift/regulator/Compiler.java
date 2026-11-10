@@ -57,41 +57,51 @@ final class Compiler
     // The instructions a forward program holds beside its expression's: FAIL, MATCH, and the
     // leading loop of an unanchored search.
     static final int PROGRAM_INSTRUCTIONS = 4;
-    private static final int CPP_PROG_OVERHEAD_BYTES = 512;
+    // The heap a program holds whatever its size, measured with JOL at the program's largest
+    // without compressed references, which hold the most: the program object and its atomic
+    // fields, the 256-entry bytemap, the word array's least capacity of 16 words, and, while
+    // flattening, the 256 hint colors, the first block of emitted words and the block directory,
+    // and the scratch objects and their array headers. A program of three instructions peaks at
+    // 2,864 bytes while flattening, 2,648 past the per-instruction charge below, against 2,416
+    // with compressed references. A compiled program keeps less, as the scratch, the hint colors
+    // and the blocks go once it is flattened.
+    static final int PROGRAM_OVERHEAD_BYTES = 2688;
     private static final int DEFAULT_DFA_MEMORY = 1 << 20;
-    // The heap a program holds per instruction until it is flattened, with references counted at
-    // eight bytes so the bound also holds for heaps without compressed references:
-    // - 56: the instruction object, a 12-byte header, the opcode reference and eight int fields
-    //   and a boolean, aligned to eight bytes. A compressed opcode reference leaves it at 56.
-    //   The 12-byte header assumes compressed class pointers. A heap of 32 GB or more turns off
-    //   only compressed references, so the instruction stays at 56; JDK 27's compact headers
-    //   make it 48 with compressed references. Turning class pointers off as well, which JDK 25
-    //   and 26 deprecate and JDK 27 makes obsolete, makes it 64, and the charges then undercount
-    //   by 1 to 3 percent.
-    // - 16: the instruction array slot, doubled because the array grows by doubling.
+    // The heap a program holds per instruction until it is flattened. The compiler writes each
+    // instruction as one packed word and keeps no instruction object, so references do not count:
+    // - 24: the instruction's word. The word array grows by doubling, and while it grows the old
+    //   array and the new one, twice its size, are both held: 24 bytes for each instruction then
+    //   in the program.
     // - 48: the flattening pass's scratch, which lives beside the program: the reachable set's
     //   two ints, the work stack's int, the root map's three ints, the predecessor lists' first
     //   edge, which the root index map borrows once the lists are done, and, for up to two edges
     //   per instruction, an id and a next link in arrays sized to the edge count. The last 4
-    //   bytes cover the unused part of the last flattened instruction block and, on a program of
-    //   a thousand instructions or more, fixed arrays such as the hint colors.
+    //   bytes cover the unused part of the last flattened instruction block.
     //   Before flattening, the same bytes hold the Trino and Java nullable-loop workspace, which
-    //   compilation drops before flattening: the clone table's three ints and the walk set's
-    //   two ints for each of two states, at most 42 bytes as both grow by half.
-    static final int UNFLATTENED_INSTRUCTION_BYTES = 56 + 16 + (8 + 4 + 12 + 4 + 16 + 4);
+    //   lives beside a growth of the word array and which compilation drops before flattening:
+    //   the clone table's three ints and the walk set's two ints for each of two states, at most
+    //   42 bytes as both grow by half.
+    // While flattening emits its lists, the word array holds at most 16 bytes per instruction, so
+    // the charge leaves 8 beside the scratch for the blocks that hold each emitted word. A program
+    // that flattens to more instructions than it compiles to is charged the 49 bytes below for
+    // each. Emitting holds 64 bytes per unflattened instruction, its word and the scratch, and 8
+    // per emitted word in the blocks, so the 49 bytes cover it once the program flattens to at
+    // least 64/41 (about 1.56) times as many. Between the two, constructed grow-on-flatten shapes
+    // peaked at up to 0.959 of the share.
+    // Flattening drops the unflattened words and the scratch before it builds what the program
+    // keeps; see Prog.flatten.
+    static final int UNFLATTENED_INSTRUCTION_BYTES = 24 + (8 + 4 + 12 + 4 + 16 + 4);
     // The heap a flattened program retains per instruction, plus the block slot flattening emits
-    // it into, with references counted at eight bytes as above:
-    // - 56: the instruction object, as above.
-    // - 16: the instruction array slot, which flattening sizes exactly, and the slot of the block
-    //   that held the instruction while flattening emitted it. The blocks' headers and the copies
-    //   of their directory add about 2 bytes per instruction, which compressed references leave
-    //   room for in the slots. Without compressed references they add about 3 bytes, which the 39
-    //   bytes of tables and words below cover, as flattening finishes before those are built.
+    // it into:
+    // - 16: the instruction's word in the program's array, which flattening sizes exactly, and in
+    //   the block that held it while flattening emitted it. The blocks' headers and their
+    //   directory add well under a byte per instruction, which the 33 bytes of tables below
+    //   cover, as flattening finishes before those are built. The root map, an int per
+    //   unflattened instruction, is held beside them until then, which either charge covers.
     // - 2: the instruction's output list id, which BitState indexes its visited set by.
     // - 31: the no-submatch NFA tables, which the first no-submatch NFA search builds and the
     //   program keeps: one byte, seven ints and two booleans.
-    // - 8: the packed capture instruction word, which compilation builds and the program keeps.
-    static final int FLATTENED_INSTRUCTION_BYTES = 56 + 16 + 2 + 31 + 8;
+    static final int FLATTENED_INSTRUCTION_BYTES = 16 + 2 + 31;
     private static final int DOMINATOR_ELISION_MINIMUM_INSTRUCTIONS = 1024;
     private static final int DOMINATOR_ELISION_MAXIMUM_VISITS = 1_000_000;
     // Bounds a nullable loop's walk of its body after the first byte, which nested loops repeat
@@ -188,14 +198,14 @@ final class Compiler
     /// before flattening.
     static long unflattenedProgramMemory(long instructionCount)
     {
-        return CPP_PROG_OVERHEAD_BYTES + (instructionCount * UNFLATTENED_INSTRUCTION_BYTES);
+        return PROGRAM_OVERHEAD_BYTES + (instructionCount * UNFLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Returns the least budget whose flatten charge holds `instructionCount` flattened
     /// instructions.
     static long flattenedProgramMemory(long instructionCount)
     {
-        return CPP_PROG_OVERHEAD_BYTES + (instructionCount * FLATTENED_INSTRUCTION_BYTES);
+        return PROGRAM_OVERHEAD_BYTES + (instructionCount * FLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Throws [RegexpCompileMemoryLimitException] when the program's charged memory exceeds a
@@ -329,7 +339,7 @@ final class Compiler
     /// [#unflattenedProgramMemory(long)] is the least budget that allows it.
     static long maxUnflattenedInstructions(long maxMemory)
     {
-        return Math.min(MAX_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES);
+        return Math.min(MAX_INSTRUCTIONS, (maxMemory - PROGRAM_OVERHEAD_BYTES) / UNFLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Returns how many instructions a program compiled with `maxMemory` may hold once it is
@@ -339,7 +349,7 @@ final class Compiler
         if (maxMemory <= 0) {
             return Prog.MAX_FLATTENED_INSTRUCTIONS;
         }
-        return (int) Math.min(Prog.MAX_FLATTENED_INSTRUCTIONS, (maxMemory - CPP_PROG_OVERHEAD_BYTES) / FLATTENED_INSTRUCTION_BYTES);
+        return (int) Math.min(Prog.MAX_FLATTENED_INSTRUCTIONS, (maxMemory - PROGRAM_OVERHEAD_BYTES) / FLATTENED_INSTRUCTION_BYTES);
     }
 
     /// Returns where the rune cache puts `keys`, rune-suffix keys inserted in order.
@@ -949,7 +959,7 @@ final class Compiler
                 maxInstructions = 100_000;  // more than enough
                 return;
             }
-            if (maxMemory <= CPP_PROG_OVERHEAD_BYTES) {
+            if (maxMemory <= PROGRAM_OVERHEAD_BYTES) {
                 throw instructionLimitExceeded(maxMemory, 0);
             }
 

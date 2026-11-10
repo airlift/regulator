@@ -157,9 +157,9 @@ It accepts such a pattern unless compiling it exceeds `maxMemory`, which throws
 `RegexpCompileMemoryLimitException` rather than a parse error. A pattern the
 crate refuses as too large has no crate result to differ from. Regulator can
 also reject a pattern the crate accepts: at the default `maxMemory`, it
-rejects `\w{n}x` for n from 99, which needs just over 32 MiB, to 209, the
-longest the crate accepts, which needs about 68 MiB, and `(?:\w+\s){100}`,
-which needs about 33 MiB.
+rejects `\w{n}x` for n from 165, which needs just over 32 MiB, to 209, the
+longest the crate accepts, which needs about 41 MiB, and `(?:\w+\s){163}`,
+which also needs just over 32 MiB.
 
 Repetition counts above 1,000 are accepted, as in the crate, and so are nested
 counts whose product exceeds 1,000. As in every language, the budget counts a

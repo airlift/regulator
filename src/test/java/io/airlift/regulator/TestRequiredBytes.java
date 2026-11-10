@@ -1341,11 +1341,13 @@ public class TestRequiredBytes
     public void testFallsBackWithoutMemoryForRequiredBytes()
     {
         // At the smallest budget that keeps the required bytes, they take all of the forward DFA
-        // allowance; one byte less, the pattern compiles without them, with the same results.
+        // allowance; one byte less, the pattern compiles without them, with the same results. Nested
+        // lazy loops of optional members flatten to many more instructions than they compile to, so the
+        // smallest budget that compiles leaves the allowance too small for the bytes.
         Map<String, Map<String, Boolean>> cases = Map.of(
-                "# noqa\\d+", Map.of("x = 1  # noqa12", true, "# noqa1", true, "x = 1  # noq12", false, "x = 1  # NOQA1", false),
+                "# noqa(?:(?:(?:\\d?)*?){64})*?\\d+", Map.of("x = 1  # noqa12", true, "# noqa1", true, "x = 1  # noq12", false, "x = 1  # NOQA1", false),
                 // A one-of fact.
-                "[a-z]+@[a-z]+", Map.of("mail me at a@b", true, "a@b", true, "nothing to see here", false, "@ alone", false));
+                "[a-z]+@(?:(?:(?:[a-z]?)*?){64})*?[a-z]+", Map.of("mail me at a@b", true, "a@b", true, "nothing to see here", false, "@ alone", false));
         for (Map.Entry<String, Map<String, Boolean>> testCase : cases.entrySet()) {
             String pattern = testCase.getKey();
             long budget = smallestBudgetKeepingRequiredBytes(pattern);

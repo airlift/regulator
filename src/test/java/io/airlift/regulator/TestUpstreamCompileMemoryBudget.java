@@ -52,16 +52,16 @@ public class TestUpstreamCompileMemoryBudget
     public void testBudgetWithNoRoomForInstructionsIsMemoryLimit()
     {
         // Budgets above the fixed overhead but below one instruction leave zero instructions.
-        long oneInstruction = 512 + Compiler.UNFLATTENED_INSTRUCTION_BYTES;
-        for (long maxMemory = 513; maxMemory < oneInstruction; maxMemory++) {
+        long oneInstruction = Compiler.PROGRAM_OVERHEAD_BYTES + Compiler.UNFLATTENED_INSTRUCTION_BYTES;
+        for (long maxMemory = Compiler.PROGRAM_OVERHEAD_BYTES + 1; maxMemory < oneInstruction; maxMemory++) {
             long budget = maxMemory;
             assertThatThrownBy(() -> Compiler.compile(parse("a"), false, budget))
                     .as("budget %s", budget)
                     .isInstanceOf(RegexpCompileMemoryLimitException.class);
         }
-        // The public option keeps two thirds of the budget for the forward program, so 768 reaches
-        // the overhead-only window and 769 through 946 the zero-instruction window.
-        for (long maxMemory = 768; maxMemory - (maxMemory / 3) < oneInstruction; maxMemory++) {
+        // The public option keeps two thirds of the budget for the forward program, so 4,032 reaches
+        // the overhead-only window and 4,033 through 4,138 the zero-instruction window.
+        for (long maxMemory = 4032; maxMemory - (maxMemory / 3) < oneInstruction; maxMemory++) {
             long budget = maxMemory;
             assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice("a"), Re2.Options.defaults().setMaxMemory(budget)))
                     .as("public budget %s", budget)
@@ -89,8 +89,8 @@ public class TestUpstreamCompileMemoryBudget
         // A budget for one instruction leaves a visit limit of two nodes, which four nested
         // captures exceed before emitting anything. A budget for three instructions reaches the
         // instruction limit instead, so the walk limit is checked first. Both are budget failures.
-        long oneInstruction = 512 + Compiler.UNFLATTENED_INSTRUCTION_BYTES;
-        long threeInstructions = 512 + 3 * Compiler.UNFLATTENED_INSTRUCTION_BYTES;
+        long oneInstruction = Compiler.PROGRAM_OVERHEAD_BYTES + Compiler.UNFLATTENED_INSTRUCTION_BYTES;
+        long threeInstructions = Compiler.PROGRAM_OVERHEAD_BYTES + 3 * Compiler.UNFLATTENED_INSTRUCTION_BYTES;
         assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, oneInstruction))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
         assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, threeInstructions))
@@ -118,7 +118,7 @@ public class TestUpstreamCompileMemoryBudget
         String pattern = "^(?P<name1>[^\\s]+)\\s+(?P<name2>[^\\s]+)\\s+(?P<name3>.+)$";
         ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
 
-        assertThatThrownBy(() -> Compiler.compile(parsed.regexp(), false, 512 + 42 * Compiler.UNFLATTENED_INSTRUCTION_BYTES))
+        assertThatThrownBy(() -> Compiler.compile(parsed.regexp(), false, Compiler.PROGRAM_OVERHEAD_BYTES + 42 * Compiler.UNFLATTENED_INSTRUCTION_BYTES))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
     }
 
@@ -139,7 +139,7 @@ public class TestUpstreamCompileMemoryBudget
         // table's charge before charging the second. A third of the budget goes to the reverse
         // program, and the position automaton and the short-window required bytes take theirs
         // from the forward DFA's.
-        long forwardMemory = 4096;
+        long forwardMemory = 8192;
         Re2 literal = Re2.compile(Slices.utf8Slice("abcabd"), Re2.Options.defaults().setMaxMemory(forwardMemory * 3 / 2));
         Prog forwardProgram = literal.forwardProgramForDiagnostics();
         assertThat(forwardProgram.positionNfa()).isNotNull();
@@ -155,21 +155,21 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(large.size()).isGreaterThan(512);
         assertThat(large.canBitState()).isTrue();
         assertThat(large.isOnePass()).isFalse();
-        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - 512L - ((long) large.size() * Compiler.FLATTENED_INSTRUCTION_BYTES));
+        assertThat(large.dfaMemory()).isEqualTo(largeMaxMemory - Compiler.PROGRAM_OVERHEAD_BYTES - ((long) large.size() * Compiler.FLATTENED_INSTRUCTION_BYTES));
     }
 
     @Test
     public void testPrefixShiftsStayWithinForwardShare()
     {
         // A long leading literal whose first byte recurs keeps a shift table, configured after
-        // flattening from what the flatten charge left. At 419,093 bytes the flattened program
+        // flattening from what the flatten charge left. At 187,384 bytes the flattened program
         // fits its share but leaves too little for the table, so the compile fails rather than
-        // retain more than the share. At 421,049 bytes the share holds both.
+        // retain more than the share. At 187,385 bytes the share holds both.
         String literal = "a".repeat(320);
         Slice pattern = Slices.utf8Slice(literal + "(?:(?:(?:(?:b?)*?){32})*?)+");
-        assertThatThrownBy(() -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(419_093)))
+        assertThatThrownBy(() -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(187_384)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
-        long maxMemory = 421_049;
+        long maxMemory = 187_385;
         Re2 compiled = Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
         Prog program = compiled.forwardProgramForDiagnostics();
         assertThat(program.prefixScanMemory()).isPositive();
@@ -195,8 +195,8 @@ public class TestUpstreamCompileMemoryBudget
         // rejection reports. A comfortable budget keeps the set.
         String loops = "(?:(?:(?:(?:b?)*?){8})*?)+";
         Slice pattern = Slices.utf8Slice("abx_" + loops + "|aby_" + loops);
-        assertPrefixLiteralSetYields(maxMemory -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory)), 54_329);
-        assertPrefixLiteralSetYields(maxMemory -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)), 20_768);
+        assertPrefixLiteralSetYields(maxMemory -> Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory)), 27_257);
+        assertPrefixLiteralSetYields(maxMemory -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory)), 12_779);
 
         // The set is decided after OnePass and every route, so at the least budget at which the
         // forward DFAs keep their minimum it takes none of their memory and is dropped. Charged
@@ -213,12 +213,12 @@ public class TestUpstreamCompileMemoryBudget
     public void testReverseProgramOverFlattenedShareIsDropped()
     {
         // The reverse program is compiled from a third of the budget on the first search that needs
-        // it. These lazy loops fit that third before flattening but not after, while the forward
-        // program and its DFA fit their two thirds. After the forward DFA finds the match end, the
-        // search drops the reverse program instead of failing, and finds the match start and the
-        // groups without it.
-        String pattern = "(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)";
-        long maxMemory = 180_000;
+        // it. A match that must end with the text needs it first, as the search runs the reverse
+        // DFA back from the end. These lazy loops fit that third before flattening but not after,
+        // while the forward program fits its two thirds. The search drops the reverse program
+        // instead of failing, and finds the match and the groups without it.
+        String pattern = "(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)$";
+        long maxMemory = 60_000;
         Re2 compiled = Re2.compile(Slices.utf8Slice(pattern), Re2.Options.defaults().setMaxMemory(maxMemory));
         RegexpMatcher matcher = compiled.matcher(Slices.utf8Slice("xaab"));
         assertThat(matcher.find()).isTrue();
@@ -246,7 +246,7 @@ public class TestUpstreamCompileMemoryBudget
         ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer("a".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
         Prog reference = Compiler.compile(parsed.regexp(), false, 4096);
 
-        long programMemory = 512L + ((long) reference.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
+        long programMemory = Compiler.PROGRAM_OVERHEAD_BYTES + ((long) reference.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
         // Upstream bounds the states by two plus the byte-range instruction count, including the
         // unanchored prefix's instructions.
         int maximumOnePassStates = 2 + reference.getInstCount(InstOp.BYTE_RANGE);
@@ -318,33 +318,27 @@ public class TestUpstreamCompileMemoryBudget
     {
         // Nested empty groups make every instruction but FAIL and MATCH a CAPTURE, the most capture
         // threads and the deepest capture stack a program of their size can have. The most of them
-        // a budget admits still plan bounded passes rather than fail to compile. At a 96 MiB budget
-        // that is 559,234 instructions, of the 593,879 the flattened charge allows.
-        assertLargestGroupsPlanBoundedPasses(96L << 20, 279_616, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
-        // The smallest budget that admits a CAPTURE, one group around a start anchor.
-        assertLargestGroupsPlanBoundedPasses(1_667, 1, groups -> "(".repeat(groups) + "^" + ")".repeat(groups));
+        // a budget admits plan bounded passes, and one more is rejected at compile time. At a
+        // 96 MiB budget that is 699,042 instructions, of the 1,369,513 the flattened charge allows:
+        // the capture passes' tables, not the instruction limit, bound these programs.
+        assertLargestGroupsPlanBoundedPasses(96L << 20, 349_520, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
+        // At the least budget that admits them, sixteen groups plan bounded passes, and seventeen
+        // are rejected.
+        assertLargestGroupsPlanBoundedPasses(7_919, 16, groups -> "^" + "(".repeat(groups) + ")".repeat(groups));
 
-        // The smallest budget that admits any pattern with groups leaves no CAPTURE in the program.
-        // Its searches track only group zero, but even those two slots do not fit a single pass
-        // beside its doubling thread tables and group-zero queues, so they run one bounded pass. It
-        // fits the share with 8 bytes to spare, the tightest fit in a sweep of over 100,000
-        // patterns.
-        assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(1_306)))
+        // The smallest budget that admits any pattern with groups leaves no CAPTURE in the program,
+        // and the program's fixed charge holds a single pass of group zero's two slots.
+        assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(4_354)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
-        Prog empty = Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(1_307)).forwardProgramForDiagnostics();
+        Prog empty = Re2.compile(Slices.utf8Slice("(()){0}^"), Re2.Options.defaults().setMaxMemory(4_355)).forwardProgramForDiagnostics();
         assertThat(empty.captureSlotCount()).isEqualTo(2);
-        assertThat(empty.singlePassCaptureSlots()).isEqualTo(0);
-        assertThat(empty.boundedPassCaptureSlots()).isEqualTo(2);
+        assertThat(empty.singlePassCaptureSlots()).isEqualTo(Integer.MAX_VALUE);
 
-        // Below 2,651 bytes the passes are not proven to fit what the flattened charge admits.
-        // Of the programs in that sweep that track more than group zero, this one's pass fits its
-        // share with the least to spare, 40 bytes. Its removed first group leaves the second group
-        // in slots 4 and 5, and those six slots, too many for a single pass, run in one bounded
-        // pass.
-        Prog tightest = Re2.compile(Slices.utf8Slice("(b){0}(^)"), Re2.Options.defaults().setMaxMemory(1_667)).forwardProgramForDiagnostics();
+        // At the least budget that compiles it, this program's removed first group leaves the
+        // second group in slots 4 and 5, and the single pass tracks all six slots.
+        Prog tightest = Re2.compile(Slices.utf8Slice("(b){0}(^)"), Re2.Options.defaults().setMaxMemory(4_571)).forwardProgramForDiagnostics();
         assertThat(tightest.captureSlotCount()).isEqualTo(6);
-        assertThat(tightest.singlePassCaptureSlots()).isEqualTo(0);
-        assertThat(tightest.boundedPassCaptureSlots()).isEqualTo(6);
+        assertThat(tightest.singlePassCaptureSlots()).isEqualTo(Integer.MAX_VALUE);
     }
 
     @Test
@@ -366,60 +360,61 @@ public class TestUpstreamCompileMemoryBudget
                 // The instruction limit, estimated from the program the pattern compiles to: past
                 // a required prefix and the anchor that drops the search loop, through branches
                 // that collapse to nothing, and through repetitions the simplifier squashes.
-                new RejectedPattern("anchored prefix", Language.RE2, anchoredPrefix, 2_747, 2_971, 1, 2_000),
-                new RejectedPattern("anchored prefix", Language.JAVA, anchoredPrefix, 2_927, 3_287, 1, 2_000),
-                new RejectedPattern("anchored prefix", Language.TRINO, anchoredPrefix, 2_927, 3_287, 1, 2_000),
-                new RejectedPattern("empty repetitions", Language.RE2, "(?:" + "a{0}b{0}".repeat(9000) + "){1000}", 1_667, 1_667, 1, 1_600),
-                new RejectedPattern(Language.JAVA, "(?:a{0}){1000}", 1_667, 1_667, 1, 1_000),
-                new RejectedPattern(Language.JAVA, "(?:a|)*", 2_567, 2_567, 1, 2_000),
-                new RejectedPattern(Language.JAVA, "^(?:a|)*$", 2_567, 2_567, 1, 2_000),
-                new RejectedPattern(Language.RE2, "(?:ab[ab]+)?", 2_387, 2_462, 1, 2_000),
-                new RejectedPattern(Language.RUST, "(?:a+){2,4}", 3_107, 3_479, 1, 2_000),
-                new RejectedPattern(Language.RE2, "(?:abc){1000}", 541_487, 541_487, 1, 65_536),
-                new RejectedPattern(Language.RE2, "((((a))))|(b)(c)", 4_367, 4_367, 1, 2_000),
+                new RejectedPattern("anchored prefix", Language.RE2, anchoredPrefix, 5_219, 5_219, 1, 1_500),
+                new RejectedPattern("anchored prefix", Language.JAVA, anchoredPrefix, 5_327, 5_543, 1, 1_500),
+                new RejectedPattern("anchored prefix", Language.TRINO, anchoredPrefix, 5_327, 5_543, 1, 1_500),
+                new RejectedPattern("empty repetitions", Language.RE2, "(?:" + "a{0}b{0}".repeat(9000) + "){1000}", 4_571, 4_571, 1, 1_200, 4_000),
+                new RejectedPattern(Language.JAVA, "(?:a{0}){1000}", 4_571, 4_571, 1, 1_000),
+                new RejectedPattern(Language.JAVA, "(?:a|)*", 5_111, 5_111, 1, 1_500),
+                new RejectedPattern(Language.JAVA, "^(?:a|)*$", 5_111, 5_111, 1, 1_500),
+                new RejectedPattern(Language.RE2, "(?:ab[ab]+)?", 5_003, 5_003, 1, 1_600),
+                new RejectedPattern(Language.RUST, "(?:a+){2,4}", 5_435, 5_435, 1, 2_000),
+                new RejectedPattern(Language.RE2, "(?:abc){1000}", 328_463, 328_463, 1, 65_536),
+                new RejectedPattern(Language.RE2, "((((a))))|(b)(c)", 6_191, 6_191, 1, 2_000),
                 // Java compiles a repetition of a body that can match empty with more than its
                 // copies.
-                new RejectedPattern(Language.JAVA, "(?:(?:a?){10}b){100}", 577_487, 577_487, 2_000, 65_536),
+                new RejectedPattern(Language.JAVA, "(?:(?:a?){10}b){100}", 350_063, 350_063, 2_000, 65_536),
                 // A larger budget gets further and learns more: the instruction limit, then the
                 // flattened program, which measures exactly what it needs.
-                new RejectedPattern(Language.RE2, nestedOptional, 48_107, 1_422_533, 2_000),
-                new RejectedPattern(Language.RE2, nestedOptional, 787_247, 1_422_533, 50_000),
-                new RejectedPattern(Language.RE2, nestedOptional, 1_422_533, 1_422_533, 800_000),
+                new RejectedPattern(Language.RE2, nestedOptional, 32_435, 620_549, 2_000),
+                new RejectedPattern(Language.RE2, nestedOptional, 467_375, 620_549, 33_000),
+                new RejectedPattern(Language.RE2, nestedOptional, 620_549, 620_549, 100_000),
                 // The flattened program fits but leaves too little for a long prefix's shift table.
-                new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 421_049, 421_049, 100_000, 419_093),
+                new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 187_385, 187_385, 185_429, 187_384),
                 // A compact counter in place of a program measures exactly what it needs. A
                 // budget too small for the counter compiles the program, so a sparse class whose
                 // counter's bitset reaches U+100000 reports what its smaller program needs.
-                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 50_999, 50_999, 1, 8_000),
-                new RejectedPattern("sparse high class", Language.RE2, sparseHighClass, 16_067, 16_067, 1, 2_000),
-                new RejectedPattern("sparse high class", Language.JAVA, sparseHighClass, 16_067, 16_067, 1, 2_000),
-                new RejectedPattern("sparse high class", Language.RUST, sparseHighClass, 16_067, 16_067, 1, 2_000),
-                new RejectedPattern("sparse high class", Language.TRINO, sparseHighClass, 16_067, 16_067, 1, 2_000),
+                new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 53_975, 53_975, 1, 8_000),
+                new RejectedPattern("sparse high class", Language.RE2, sparseHighClass, 13_211, 13_211, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.JAVA, sparseHighClass, 13_211, 13_211, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.RUST, sparseHighClass, 13_211, 13_211, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.TRINO, sparseHighClass, 13_211, 13_211, 1, 2_000),
                 // The figure covers every route: the literal set that compiles without a program,
                 // and Trino's literal alternation, literal set and fixed-width matcher.
-                new RejectedPattern(Language.RE2, fruits, 8_147, 8_147, 1, 2_000),
-                new RejectedPattern("65 words", Language.RE2, words, 10_249, 10_249, 1, 2_000),
-                new RejectedPattern("65 words", Language.JAVA, words, 10_249, 10_249, 1, 2_000),
-                new RejectedPattern("65 words", Language.RUST, words, 10_249, 10_249, 1, 2_000),
-                new RejectedPattern("3,000 words", Language.RUST, dictionary, 271_981, 271_981, 1_000, 200_000),
+                new RejectedPattern(Language.RE2, fruits, 8_459, 8_459, 1, 2_000),
+                new RejectedPattern("65 words", Language.RE2, words, 13_417, 13_417, 1, 2_000),
+                new RejectedPattern("65 words", Language.JAVA, words, 13_417, 13_417, 1, 2_000),
+                new RejectedPattern("65 words", Language.RUST, words, 13_417, 13_417, 1, 2_000),
+                new RejectedPattern("3,000 words", Language.RUST, dictionary, 275_149, 275_149, 1_000, 200_000),
                 // Trino's literal alternation builds its start filter only with vector support.
                 new RejectedPattern(Language.TRINO, fruits, VectorSupport.isAvailable() ? 4_151 : 1_487, VectorSupport.isAvailable() ? 4_151 : 1_487, 1, 1_000),
                 new RejectedPattern("65 words", Language.TRINO, words, 9_227, 9_227, 1, 2_000),
                 new RejectedPattern("3,000 words", Language.TRINO, dictionary, 269_843, 269_843, 1_000, 200_000),
-                new RejectedPattern(Language.TRINO, fixedWidth, 9_625, 9_625, 1, 2_000),
-                new RejectedPattern(Language.RE2, fixedWidth, 161_867, 161_867, 1, 2_000),
+                new RejectedPattern(Language.TRINO, fixedWidth, 12_793, 12_793, 1, 2_000),
+                new RejectedPattern(Language.RE2, fixedWidth, 100_691, 100_691, 1, 2_000),
                 // 255 copies of a class of supplementary code points need more instructions than
                 // any program holds, but Trino's fixed-width matcher compiles them.
-                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 793_537, 793_537, 2_000),
+                new RejectedPattern("supplementary class run", Language.TRINO, supplementaryClassRun(), 796_705, 796_705, 2_000),
                 // A set reports its many-match DFA's start only after its program compiled.
-                new RejectedPattern(Language.SET, List.of("foo"), 1_352, 4_854, 1),
-                new RejectedPattern(Language.SET, List.of("foo"), 4_854, 4_854, 2_000),
-                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 2_312, 6_420, 1, 2_000),
+                new RejectedPattern(Language.SET, List.of("foo"), 3_192, 6_646, 1),
+                new RejectedPattern(Language.SET, List.of("foo"), 6_646, 6_646, 4_000),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 3_768, 7_828, 1),
+                new RejectedPattern(Language.SET, List.of("foo", "ba[rz]+"), 7_828, 7_828, 5_000),
                 // The many-match initialization gate omits match IDs; allocated states still charge
                 // them.
-                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 170_723, 170_723, 110_000),
-                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 120_392, 184_326, 2_000, 50_000),
-                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 64_470, 85_094, 20_000));
+                new RejectedPattern("100 words", Language.SET, List.of(randomWords(100, 7).split("\\|")), 123_299, 123_299, 110_000),
+                new RejectedPattern(Language.SET, List.of("[a-z]{5,500}"), 74_616, 122_630, 2_000, 50_000),
+                new RejectedPattern(Language.SET, List.of("(a?)(?:(?:(?:(?:a?)*?){16})*?)+(b)"), 30_422, 51_046, 20_000));
         for (RejectedPattern rejection : rejections) {
             for (long maxMemory : rejection.maxMemories()) {
                 assertThatThrownBy(() -> rejection.compile(maxMemory))
@@ -482,6 +477,34 @@ public class TestUpstreamCompileMemoryBudget
     }
 
     @Test
+    public void testSmallBudgetsCompileOrRejectForMemory()
+    {
+        // A capture beside a literal and a dot-star takes reservations from the forward DFA
+        // allowance, such as a leading-literal scan plan or a literal search, that at small budgets
+        // do not all fit. Each that does not fit is left out, so every budget either compiles or
+        // rejects for memory, and every budget from the least that compiles compiles.
+        List<String> patterns = List.of("(aa).*", "aa(.*)", "(error).*", "(foo)(.*)", "(?s)(abc).*", "(abcdefghijabcdefghij).*", "(abcdefghij)(klmnopqrst).*");
+        for (Language language : List.of(Language.RE2, Language.JAVA, Language.RUST, Language.TRINO)) {
+            for (String pattern : patterns) {
+                RejectedPattern compiled = new RejectedPattern(language, pattern, 0, 0);
+                long least = 0;
+                for (long maxMemory = 1; maxMemory <= 12 * 1024; maxMemory++) {
+                    try {
+                        compiled.compile(maxMemory);
+                        if (least == 0) {
+                            least = maxMemory;
+                        }
+                    }
+                    catch (RegexpCompileMemoryLimitException rejected) {
+                        assertThat(least).as("%s rejected at %s after compiling at %s", compiled, maxMemory, least).isZero();
+                    }
+                }
+                assertThat(least).as("%s", compiled).isPositive();
+            }
+        }
+    }
+
+    @Test
     public void testRequiredBudgetRoundsUp()
     {
         assertThat(RegexpCompileMemoryLimitException.formatBudget(1)).isEqualTo("1 byte");
@@ -515,14 +538,14 @@ public class TestUpstreamCompileMemoryBudget
 
     private static void assertRemainingMemoryAssignedToDfa(String pattern, long prefixScanMemory)
     {
-        assertRemainingMemoryAssignedToDfa(pattern, 4096, prefixScanMemory);
+        assertRemainingMemoryAssignedToDfa(pattern, 8192, prefixScanMemory);
     }
 
     private static void assertRemainingMemoryAssignedToDfa(String pattern, int maxMemory, long prefixScanMemory)
     {
         Prog program = Compiler.compile(parse(pattern), false, maxMemory);
 
-        long programMemory = 512L + ((long) program.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
+        long programMemory = Compiler.PROGRAM_OVERHEAD_BYTES + ((long) program.size() * Compiler.FLATTENED_INSTRUCTION_BYTES);
         assertThat(program.isOnePass()).isTrue();
         assertThat(program.dfaMemory()).isEqualTo(maxMemory - programMemory - program.onePassMemory() - prefixScanMemory);
         assertThat(Compiler.estimatedProgramMemory(program) + program.dfaMemory()).isEqualTo(maxMemory);
@@ -604,8 +627,8 @@ public class TestUpstreamCompileMemoryBudget
         assertThat(program.getInstCount(InstOp.CAPTURE)).isEqualTo(program.size() - 2);
         assertThat(program.singlePassCaptureSlots()).isLessThan(2 * groups + 2);
         assertThat(program.boundedPassCaptureSlots()).isGreaterThanOrEqualTo(4);
-        // One more group is past what the forward share admits.
-        assertThatThrownBy(() -> Compiler.compile(parse(pattern.apply(groups + 1)), false, maxMemory - (maxMemory / 3)))
+        // One more group is past what the budget admits.
+        assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice(pattern.apply(groups + 1)), Re2.Options.defaults().setMaxMemory(maxMemory)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
     }
 

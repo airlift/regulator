@@ -600,7 +600,7 @@ public final class DfaAbsolutePointerProbe
             exerciseFlatPairedTableKeptThroughSearch("(?s).*x", 16 * 1024, 40 * 1024, anyByteInput);
         }
         else {
-            exercisePairedRowReleaseSweep("(?s).*x", 17 * 1024, 24 * 1024, anyByteInput);
+            exercisePairedRowReleaseSweep("(?s).*x", 19 * 1024, 24 * 1024, anyByteInput);
         }
         exercisePairedRowReleaseSweep(
                 "^(x*a[b-z]*(\\x01c|\\x02d|\\x03e|\\x04f|\\x05g|\\x06h|\\x07i|\\x08j)?|x*a)",

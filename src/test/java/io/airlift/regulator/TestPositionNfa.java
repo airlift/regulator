@@ -743,7 +743,7 @@ public class TestPositionNfa
                 long initializedBudget = -1;
                 int keptBesideDfa = 0;
                 // The range spans both expressions' least DFA budgets of both kinds.
-                for (long maxMemory = 10_000; maxMemory <= 16_000; maxMemory += 8) {
+                for (long maxMemory = 14_000; maxMemory <= 20_000; maxMemory += 8) {
                     Prog program = compiler.apply(maxMemory).forwardProgramForDiagnostics();
                     boolean initialized = program.getCachedDfa(kind) != null;
                     if (initializedBudget >= 0) {
@@ -756,7 +756,7 @@ public class TestPositionNfa
                         keptBesideDfa++;
                     }
                 }
-                assertThat(initializedBudget).as(label).isGreaterThan(10_000);
+                assertThat(initializedBudget).as(label).isGreaterThan(14_000);
                 assertThat(keptBesideDfa).as(label).isPositive();
             }
         }
