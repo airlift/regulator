@@ -3604,8 +3604,10 @@ preferred Vector API species when the application resolves
 probe byte is an ASCII letter, each input byte is ORed with `0x20` before it
 is compared with the lowercase letter; other probe bytes compare exactly.
 Shorter searches, and longer ones without vector scanning, use eight-byte SWAR
-words, so short scans pay no vector setup. A single folded byte keeps its SWAR
-byte search. Vector linkage stays in `VectorPrefixScanner`.
+words, so short scans pay no vector setup. A single folded byte takes the
+vector byte-set search from the same 1 KiB cutoff as the DFA's unfolded
+one-byte prefix scan, and SWAR below it. The pair scans' vector linkage stays
+in `VectorPrefixScanner`.
 
 The SWAR scans test each word and compare each candidate inside the scan, with
 no call: each data byte is ORed with the prefix byte's case bit, `0x20` for a

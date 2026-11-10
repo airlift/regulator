@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -64,8 +65,26 @@ public class TestFusedPrefixAcceleration
         assertThat(program.usesVectorForFoldCasePrefix(1_023)).isFalse();
         assertThat(program.usesVectorForFoldCasePrefix(1_024)).isEqualTo(VectorSupport.isAvailable());
         assertThat(program.usesVectorForFoldCasePrefix(1_025)).isEqualTo(VectorSupport.isAvailable());
-        // A single folded byte keeps its SWAR byte search.
+        // A single folded byte takes the single-byte search, not the pair scans: SWAR below the
+        // cutoff and the vector byte-set search from it. Each case of a letter, and a non-letter,
+        // is found at position 70 and at the search's last byte, which in 1,087 bytes lies in the
+        // scalar tail at every vector width. A NUL, and a non-letter's other case bit, planted
+        // before each must not match.
         assertThat(configuredProgram(new byte[] {'s'}, true).usesVectorForFoldCasePrefix(4_096)).isFalse();
+        for (String prefix : List.of("q", "@")) {
+            Prog oneByte = configuredProgram(utf8(prefix), true);
+            String otherCase = prefix.toUpperCase(Locale.ROOT);
+            boolean letter = !otherCase.equals(prefix);
+            List<String> values = letter ? List.of(prefix, otherCase) : List.of(prefix);
+            byte[] decoys = letter ? new byte[] {0} : new byte[] {0, (byte) (prefix.charAt(0) ^ 0x20)};
+            for (int length : new int[] {1_023, 1_024, 1_087}) {
+                for (String value : values) {
+                    assertMatchAt(oneByte, utf8(value), decoys, length, 7, 70);
+                    assertMatchAt(oneByte, utf8(value), decoys, length, 7, length - 1);
+                }
+                assertNoMatch(oneByte, decoys, length, 7, 70, length - 1);
+            }
+        }
     }
 
     @Test
@@ -418,8 +437,15 @@ public class TestFusedPrefixAcceleration
 
     private static void assertMatchAt(Prog program, byte[] prefix, int length, int backingOffset, int matchPosition)
     {
+        assertMatchAt(program, prefix, new byte[0], length, backingOffset, matchPosition);
+    }
+
+    /// Asserts the match with `decoys` planted just before it.
+    private static void assertMatchAt(Prog program, byte[] prefix, byte[] decoys, int length, int backingOffset, int matchPosition)
+    {
         byte[] data = new byte[backingOffset + length + 5];
         Arrays.fill(data, (byte) 'x');
+        System.arraycopy(decoys, 0, data, backingOffset + matchPosition - decoys.length, decoys.length);
         System.arraycopy(prefix, 0, data, backingOffset + matchPosition, prefix.length);
         assertThat(program.prefixAccel(data, backingOffset, length)).isEqualTo(backingOffset + matchPosition);
         assertThat(Prog.findLiteral(data, backingOffset, length, prefix, new LiteralSearchKernel(Slices.wrappedBuffer(prefix)))).isEqualTo(backingOffset + matchPosition);
@@ -443,8 +469,17 @@ public class TestFusedPrefixAcceleration
 
     private static void assertNoMatch(Prog program, int length, int backingOffset)
     {
+        assertNoMatch(program, new byte[0], length, backingOffset);
+    }
+
+    /// Asserts no match with `decoys` planted just before each of `matchPositions`.
+    private static void assertNoMatch(Prog program, byte[] decoys, int length, int backingOffset, int... matchPositions)
+    {
         byte[] data = new byte[backingOffset + length + 5];
         Arrays.fill(data, (byte) 'x');
+        for (int matchPosition : matchPositions) {
+            System.arraycopy(decoys, 0, data, backingOffset + matchPosition - decoys.length, decoys.length);
+        }
         assertThat(program.prefixAccel(data, backingOffset, length)).isEqualTo(-1);
     }
 

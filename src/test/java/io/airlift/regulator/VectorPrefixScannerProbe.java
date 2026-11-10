@@ -17,6 +17,8 @@ import io.airlift.slice.Slices;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 
 public final class VectorPrefixScannerProbe
 {
@@ -58,6 +60,18 @@ public final class VectorPrefixScannerProbe
         System.arraycopy(foldCaseMatch, 0, foldCaseData, foldCaseData.length - foldCaseMatch.length, foldCaseMatch.length);
         check(foldCaseProgram.usesVectorForFoldCasePrefix(foldCaseData.length) == expectedVectorScans, "unexpected folded prefix strategy");
         check(foldCaseProgram.prefixAccel(foldCaseData, 0, foldCaseData.length) == foldCaseData.length - foldCaseMatch.length, "folded prefix scan failed");
+
+        // A single folded byte, a letter or not, takes the byte-set search with vectors and SWAR
+        // without them.
+        for (String oneBytePrefix : List.of("q", "@")) {
+            Prog oneByteProgram = new Prog();
+            oneByteProgram.configurePrefixAccel(Slices.utf8Slice(oneBytePrefix), true);
+            byte[] oneByteData = new byte[4_096];
+            Arrays.fill(oneByteData, (byte) 'x');
+            oneByteData[oneByteData.length - 1] = (byte) oneBytePrefix.toUpperCase(Locale.ROOT).charAt(0);
+            check(oneByteProgram.usesVectorForSingleBytePrefix(oneByteData.length) == expectedVectorScans, "unexpected folded one-byte prefix strategy");
+            check(oneByteProgram.prefixAccel(oneByteData, 0, oneByteData.length) == oneByteData.length - 1, "folded one-byte prefix scan failed");
+        }
 
         // Trino's (?i)Holmes has no folded prefix, only a folded run that every match starts with,
         // whose scan the compiler weighs against the preferred vector width.

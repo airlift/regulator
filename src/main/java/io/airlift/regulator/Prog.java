@@ -2832,7 +2832,6 @@ final class Prog
             return -1;
         }
 
-        // Case-insensitive is complex for vectorization, fall back to byte-by-byte
         if (foldCase) {
             return indexOfFoldCase(data, offset, length, b);
         }
@@ -2843,17 +2842,25 @@ final class Prog
         return indexOfSWAR(data, offset, length, broadcastMask);
     }
 
-    /// Case-insensitive byte search using the SWAR path.
+    /// Finds `b`, or either case of it when it is an ASCII letter: the vector byte-set search where
+    /// [#usesVectorForSingleBytePrefix] holds, as [#prefixAccelSingleByteNoFoldCase] does, and SWAR
+    /// elsewhere.
     private int indexOfFoldCase(byte[] data, int offset, int length, byte b)
     {
         int lowerCaseByte = asciiLower(b & 0xFF);
         if (lowerCaseByte < 'a' || lowerCaseByte > 'z') {
+            if (usesVectorForSingleBytePrefix(length)) {
+                return VectorByteSetScanner.find(data, offset, length, (byte) lowerCaseByte, (byte) 0, (byte) 0, 1);
+            }
             long broadcastMask = (lowerCaseByte & 0xFFL) * 0x0101010101010101L;
             return indexOfSWAR(data, offset, length, broadcastMask);
         }
 
         byte lowerCase = (byte) lowerCaseByte;
         byte upperCase = (byte) (lowerCaseByte - ('a' - 'A'));
+        if (usesVectorForSingleBytePrefix(length)) {
+            return VectorByteSetScanner.find(data, offset, length, lowerCase, upperCase, (byte) 0, 2);
+        }
         return indexOfEitherSWAR(data, offset, length, lowerCase, upperCase);
     }
 
