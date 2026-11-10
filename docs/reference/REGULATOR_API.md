@@ -177,13 +177,14 @@ Within the budget, compilation and matching keep these limits:
   matchers, the root skip, dense rows, and skip table of a large literal set,
   OnePass tables needed only for Java's or Trino's final-line end anchors, the
   bit-parallel position automaton, which searches in place of the Pike NFA once
-  the forward DFA cannot initialize or abandons a search, for a pattern whose
-  matches are bounded, assertion-free and never empty, and required-byte checks
-  are not kept when their memory would stop the first-match or longest-match
-  DFA from initializing. The literal searched behind a leading assertion is
-  kept only when the first-match and longest-match DFAs both keep their minimum
-  memory beside it, a minimum that leaves out a forward DFA's start-byte
-  tables. A prefix's literal set, which long vector prefix scans compare at
+  the forward DFA cannot initialize or abandons a search, and in place of the
+  DFA for a boolean search that skips one that thrashed across calls, for a
+  pattern whose matches are bounded, assertion-free and never empty, and
+  required-byte checks are not kept when their memory would stop the
+  first-match or longest-match DFA from initializing. The literal searched
+  behind a leading assertion is kept only when the first-match and
+  longest-match DFAs both keep their minimum memory beside it, a minimum that
+  leaves out a forward DFA's start-byte tables. A prefix's literal set, which long vector prefix scans compare at
   each candidate, is decided under a `maxMemory` after OnePass and every plan
   and route, so it never takes memory they would use, and is kept only where
   the first-match and longest-match DFAs then keep their minimum memory beside

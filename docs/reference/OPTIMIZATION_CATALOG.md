@@ -206,8 +206,10 @@ answer, or reject the input before any engine runs.
   ordinary engine, as for any first candidate near the window start; a
   full-Slice find that ran the search first then runs the engine's forward
   DFA, and where that fails its submatch engines, without running the search
-  again. A scan plan, after its first failed attempt, checks once that a
-  required literal occurs in the rest of the input, testing its first and last
+  again, or answers from the position automaton without the DFA while boolean
+  searches [skip a thrashing DFA](#thrashing-dfa-skipped-across-calls). A scan
+  plan, after its first failed attempt, checks once that a required literal
+  occurs in the rest of the input, testing its first and last
   bytes in 16-byte blocks, and ends the search if it does not. The
   required-byte reject takes ruff's `noqa` rows to 0.41 to 0.68 of their
   earlier time and lh3lh3's `uri-or-email` to 0.34 to 0.47
@@ -1146,6 +1148,46 @@ loops, so HotSpot's C2 JIT compiler can drop the safepoint poll on each step.
   faster ([#64]), and Java and Trino Sherlock `word-ending-n` run in 0.044 to
   0.056 of their earlier time ([#76]).
 
+### Thrashing DFA skipped across calls
+
+- **Origin:** Adapted from RE2, whose search gives up on its DFA when it
+  resets the cache twice, reading fewer than ten bytes for each state between
+  the resets ([dfa.cc][re2-dfa] `InlinedSearchLoop`, [O-DFA-013]); First
+  described by regex-automata, whose lazy DFA cache keeps its clear count and
+  the bytes searched since its last clear across searches, and gives up a
+  search at a clear once the cache has been cleared three times and searched
+  fewer than ten bytes a state ([hybrid/dfa.rs][ra-hybrid] `try_clear_cache`,
+  [meta/wrappers.rs][ra-wrappers]). Regulator: skipping the DFA for whole
+  calls once it thrashed, by a pattern's streak of bailed counts and its
+  16-count window ([#203]), and by RE2's slow-reset test applied across a
+  pattern's boolean searches, which have their own streak and 65,536-search
+  window ([design][d-count-fallback]).
+- **Where:** `Dfa.DfaInstance.recordCountBail`,
+  `Dfa.DfaInstance.takeCountSkip`, `Dfa.DfaInstance.isSlowReset`,
+  `Dfa.searchJudgingSlowResets`, `CompiledPattern.matchOnOrdinaryEngine`
+- **Applies when:** A DFA count, after two DFA counts of the pattern in a row
+  gave up; on a pattern with the
+  [position automaton](#bit-parallel-position-automaton-for-bounded-repeats),
+  an unanchored boolean search, after boolean searches saw two slow resets of
+  the forward DFA in a row
+- **What it does:** A pattern's next 16 DFA counts skip the DFA and fall back
+  at once, and the one after them tries it again. A reset during a boolean
+  search is slow when the progress the boolean searches were charged since the
+  one before (the match end each returned, the whole window when it found none,
+  and nothing when the DFA failed) comes to fewer than ten bytes for each state
+  the cache held at that one. After two in a row the pattern's next 65,536
+  boolean searches run on the automaton before one tries the DFA again. A reset
+  is judged by the search whose starting reset count still owns the allowance,
+  so searches in flight together delay or withhold the skip, and a race can
+  also open it at a healthy reset. Each search keeps upstream's rule too; a
+  short line seldom resets twice, so without this its DFA built a state for
+  most bytes it read. A matcher's finds are not judged across finds, since the
+  judgement would run after every find ([design][d-count-fallback]). Short rows
+  counted after a thrashing count take 0.049 of the time of skipping the DFA
+  for every count after the first bail on Graviton and 0.064 on Intel ([#203]),
+  and on both, grep line searches of thrashing bounded repeats take 0.016 to
+  0.17 of their earlier time (rebar, settle runner).
+
 ## DFA pointer table
 
 The DFA can also keep a flat pointer table whose entries lead straight to the
@@ -1314,12 +1356,13 @@ capture work skipped for boolean and group-zero calls is in
   `CompiledPattern.searchOnPositionNfa`, `CompiledPattern.selectRoutes`
 - **Applies when:** A group-zero search, boolean search, or count once the
   forward DFA cannot initialize or abandons a search, and OnePass and BitState
-  decline the range, on a pattern whose matches are bounded, assertion-free,
-  and never empty, with at most 512 byte positions and at most 32 fan-in word
-  tests a byte. UTF-8 admits `[a-q][^u-z]{10,30}[x\xE0-\xFF]` but not
-  `{20,80}`, which needs more than 512 positions. Its memory yields to the
-  forward DFAs, as [Limits and defaults](REGULATOR_API.md#limits-and-defaults)
-  describes
+  decline the range, or a boolean search at once when it
+  [skips a thrashing DFA](#thrashing-dfa-skipped-across-calls), on a pattern
+  whose matches are bounded, assertion-free, and never empty, with at most 512
+  byte positions and at most 32 fan-in word tests a byte. UTF-8 admits
+  `[a-q][^u-z]{10,30}[x\xE0-\xFF]` but not `{20,80}`, which needs more than
+  512 positions. Its memory yields to the forward DFAs, as
+  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes
 - **What it does:** Each byte position of the flattened program is one bit of
   state. A step shifts the state for edges to the next position, tests it once
   against each fan-in group (the predecessors shared by targets, such as the
@@ -2126,11 +2169,10 @@ after-non-ASCII start contexts added ([#6], [#64]). With RE2's and .NET's
 match-every-byte shortcut ([prog.cc][re2-altmatch], [dfa.cc][re2-dfa],
 [RegexCompiler.cs][dotnet-any-star], [O-RE2-016]), a full match of a pattern
 that accepts every byte string, such as `\C*` in UTF-8, returns at once,
-decided at compile time ([design][d-match-every-byte]). A count gives up on
-the DFA its own way: a count whose DFA search gives up as too slow counts its
-text with finds that skip the forward DFA and its cursors, and after two such
-counts in a row the pattern's next 16 counts skip the DFA at once before one
-tries it again ([design][d-count-fallback]). A search runs
+decided at compile time ([design][d-match-every-byte]). A count whose DFA
+search gives up as too slow counts its text with finds that skip the forward
+DFA and its cursors, and a DFA that thrashes across calls is
+[skipped for later calls](#thrashing-dfa-skipped-across-calls). A search runs
 forward to a match end and back to its start on a lazily compiled reverse
 program, and an end-anchored pattern without a start anchor searches only
 backward. The DFA and NFA skip ahead to a literal prefix. Captures run on
@@ -2261,6 +2303,7 @@ change is described.
 [#195]: https://github.com/airlift/regulator/pull/195
 [#201]: https://github.com/airlift/regulator/pull/201
 [#202]: https://github.com/airlift/regulator/pull/202
+[#203]: https://github.com/airlift/regulator/pull/203
 [#208]: https://github.com/airlift/regulator/pull/208
 [#216]: https://github.com/airlift/regulator/pull/216
 [#224]: https://github.com/airlift/regulator/pull/224
@@ -2502,6 +2545,7 @@ change is described.
 [ra-strategy]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/strategy.rs
 [ra-teddy]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/util/prefilter/teddy.rs#L134-L163
 [ra-utf8-compiler]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/nfa/thompson/compiler.rs
+[ra-wrappers]: https://github.com/rust-lang/regex/blob/regex-automata-0.4.18/regex-automata/src/meta/wrappers.rs#L586-L587
 [rcu-history]: https://github.com/torvalds/linux/blob/v6.6/Documentation/RCU/RTFP.txt#L91-L95
 [re2-altmatch]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/prog.cc#L259-L291
 [re2-compile]: https://github.com/google/re2/blob/972a15cedd008d846f1a39b2e88ce48d7f166cbd/re2/compile.cc

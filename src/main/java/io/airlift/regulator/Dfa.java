@@ -171,6 +171,9 @@ final class Dfa
 
     public static final long SEARCH_FAILED = Long.MIN_VALUE;
     public static final long SEARCH_NO_MATCH = -1;
+    // What searchJudgingSlowResets returns for a boolean search that skips the DFA, a value no
+    // search returns.
+    static final long BOOLEAN_SEARCH_SKIPPED = Long.MIN_VALUE + 3;
     static final long COUNT_UNSUPPORTED = -1;
     // A DFA count whose forward search returned SEARCH_FAILED or that reset too often, or one that
     // skipped the DFA after a streak of such counts. Its caller counts the text without the DFA,
@@ -5195,6 +5198,36 @@ final class Dfa
         };
     }
 
+    /// Runs the unanchored boolean search of [#search] with `wantMatchBoundary` false. Only a
+    /// program with a position automaton, a cheap linear engine for a skipped search, takes
+    /// part in the skip: its search judges the resets of the forward DFA across boolean
+    /// searches, and after two slow resets in a row the next 65,536 boolean searches of the
+    /// program return [#BOOLEAN_SEARCH_SKIPPED] without running the DFA, then one tries it
+    /// again. The caller answers a skipped search from that automaton. "Count Fallback After
+    /// Repeated Bails" in REGULATOR_DECISIONS.md gives the rule.
+    static long searchJudgingSlowResets(Prog prog, Slice context, int contextStart, int contextEnd, int start, int end, Prog.MatchKind matchKind)
+    {
+        // This method sits after the search loops on purpose: javac numbers the constant pool in
+        // method order, and placed before them, its new entries would push about a hundred of the
+        // loops' constants past the one-byte `ldc` range and grow their bytecode.
+
+        // An earliest-match search runs the longest-match DFA for every match kind a boolean
+        // search passes, as search chooses it.
+        DfaInstance dfa = prog.positionNfa() == null ? null : prog.cachedDfaIfPresent(DfaInstance.Kind.LONGEST_MATCH);
+        if (dfa == null) {
+            // A DFA this search builds starts from no resets, and the next search seeds the
+            // allowance of a reset this one causes.
+            return search(prog, context, contextStart, contextEnd, start, end, false, matchKind, false);
+        }
+        if (dfa.takeBooleanSearchSkip()) {
+            return BOOLEAN_SEARCH_SKIPPED;
+        }
+        int resetsBefore = dfa.startBooleanSearch();
+        long result = search(prog, context, contextStart, contextEnd, start, end, false, matchKind, false);
+        dfa.judgeBooleanSearch(resetsBefore, result, end - start);
+        return result;
+    }
+
     static final class RetrySearchException
             extends RuntimeException
     {
@@ -6208,14 +6241,23 @@ final class Dfa
         // COUNT_BAIL_SKIPPED_COUNTS DFA counts skip the DFA.
         private static final int COUNT_BAIL_STREAK_LIMIT = 2;
         private static final int COUNT_BAIL_SKIPPED_COUNTS = 16;
+        // The slow resets in a row, judged across boolean searches by isSlowReset, after which
+        // boolean searches skip the DFA.
+        private static final int SLOW_RESET_STREAK_LIMIT = 2;
+        // The boolean searches that skip the DFA after a streak of slow resets they judged. On
+        // the motivating Leipzig grep workload, one boolean search read one line, and a DFA that
+        // thrashed reset about every 7,000 lines, so the window holds about ten times that many.
+        private static final int BOOLEAN_SEARCH_SKIPPED_SEARCHES = 1 << 16;
 
         private static final VarHandle TABLES;
         private static final VarHandle COUNT_BAIL_SKIPS_REMAINING;
+        private static final VarHandle BOOLEAN_SEARCH_SKIPS_REMAINING;
 
         static {
             try {
                 TABLES = MethodHandles.lookup().findVarHandle(DfaInstance.class, "tables", CacheTables.class);
                 COUNT_BAIL_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "countBailSkipsRemaining", int.class);
+                BOOLEAN_SEARCH_SKIPS_REMAINING = MethodHandles.lookup().findVarHandle(DfaInstance.class, "booleanSearchSkipsRemaining", int.class);
             }
             catch (ReflectiveOperationException e) {
                 throw new ExceptionInInitializerError(e);
@@ -6356,6 +6398,25 @@ final class Dfa
         // Accessed only through COUNT_BAIL_SKIPS_REMAINING, with opaque access or a compare-and-set.
         @SuppressWarnings("UnusedVariable")
         private int countBailSkipsRemaining;
+        // The consecutive slow resets boolean searches judged, saturating at
+        // SLOW_RESET_STREAK_LIMIT, and the boolean searches left in their skip window. They are
+        // apart from the counts', so neither path's judgements move the other's window, and they
+        // race as the counts' do.
+        private int booleanSearchSlowResetStreak;
+        // Accessed only through BOOLEAN_SEARCH_SKIPS_REMAINING, with opaque access or a
+        // compare-and-set.
+        @SuppressWarnings("UnusedVariable")
+        private int booleanSearchSkipsRemaining;
+        // For boolean searches, the last reset count they saw, and the bytes their DFA work must
+        // still read before the next reset for it to be judged not slow. Plain fields that
+        // boolean searches race on, as on their streak.
+        private int booleanSearchResetCount;
+        private int booleanSearchBytesUntilResetNotSlow;
+
+        // The states the cache held when it last reset, written by the reset under the cache
+        // mutation lock and read without it by the boolean searches that judge slow resets
+        // across calls; see slowResetAllowance.
+        private int statesAtLastReset;
 
         // Observability
         private volatile int resetCount;
@@ -6814,6 +6875,26 @@ final class Dfa
             return resetCount;
         }
 
+        // The bytes the work after the last reset must read before the next reset for that reset
+        // to be judged not slow: ten for each state the cache held at the last reset, as upstream
+        // RE2's search gives up on its DFA at a reset after fewer than ten bytes a state. Upstream
+        // counts the states at the reset it judges, which a boolean search judging across calls
+        // cannot read before it, so the allowance is the previous reset's: a cache that held far
+        // fewer or far more states at the judged reset is judged against the wrong size. "Count
+        // Fallback After Repeated Bails" in REGULATOR_DECISIONS.md describes their judgement.
+        int slowResetAllowance()
+        {
+            return (int) Math.min(10L * statesAtLastReset, Integer.MAX_VALUE);
+        }
+
+        // Whether a reset whose interval had `allowance` bytes left of its slow-reset allowance
+        // before the judging boolean search's `bytesRead` is slow. A test that turns off upstream's
+        // slow-reset rule turns off this one too.
+        private static boolean isSlowReset(int allowance, int bytesRead)
+        {
+            return dfaShouldBailWhenSlow && allowance > bytesRead;
+        }
+
         // Takes one DFA count of the skip window, if one is left, and returns whether it did. A
         // DFA count that loses the compare-and-set to another runs the DFA instead.
         private boolean takeCountSkip()
@@ -6844,6 +6925,109 @@ final class Dfa
             if (countBailStreak != 0) {
                 countBailStreak = 0;
             }
+        }
+
+        // Returns the reset count a boolean search that runs the DFA judges against afterward. A
+        // reset since the last one boolean searches saw came before this search started, from
+        // another call: it seeds the allowance of the next reset, and is not judged.
+        private int startBooleanSearch()
+        {
+            int resets = resetCount;
+            if (resets != booleanSearchResetCount) {
+                booleanSearchResetCount = resets;
+                booleanSearchBytesUntilResetNotSlow = slowResetAllowance();
+            }
+            return resets;
+        }
+
+        // Judges the DFA work of a boolean search of `searchLength` bytes that started at
+        // `resetsBefore` resets and returned `result`, by upstream's per-search rule applied
+        // across boolean searches. The search is charged its returned progress: the match end,
+        // relative to the search start; the whole window when it found no match; and nothing when
+        // it failed, which a search that resets too often, a start state it could not allocate,
+        // and a quit on a byte all return, so a failure is not itself a slow reset. A reset during
+        // the search is taken as its own, and is slow when the charge leaves the allowance
+        // positive. A slow reset extends the streak, and any other reset ends it; either way, the
+        // reset seeds the next reset's allowance. Several resets during one search give at most
+        // one judgement. Without a reset, the charge spends the allowance, and spending all of it
+        // ends the streak. The search writes only at a reset or while the allowance is positive.
+        // A reset is judged by the search whose starting reset count still owns the allowance: a
+        // search whose reset count another search judged past, or a later search seeded past,
+        // returns without charging. Under concurrent use, another thread's reset during the
+        // search is taken as its own, a reset may go unjudged when searches start across it, and
+        // an unjudged reset neither extends nor ends the streak, which delays or withholds the
+        // window. The checks are plain reads, so two judges can pass one together, and a lost
+        // charge can make a healthy reset look slow; "Count Fallback After Repeated Bails" in
+        // REGULATOR_DECISIONS.md describes the race.
+        private void judgeBooleanSearch(int resetsBefore, long result, int searchLength)
+        {
+            int bytesRead = result >= 0 ? (int) result : result == SEARCH_NO_MATCH ? searchLength : 0;
+            int resets = resetCount;
+            int bytesLeft = booleanSearchBytesUntilResetNotSlow;
+            if (resets != resetsBefore) {
+                if (booleanSearchResetCount != resetsBefore) {
+                    return;
+                }
+                booleanSearchResetCount = resets;
+                if (isSlowReset(bytesLeft, bytesRead)) {
+                    recordBooleanSearchSlowReset();
+                }
+                else {
+                    recordBooleanSearchStreakEnded();
+                }
+                booleanSearchBytesUntilResetNotSlow = slowResetAllowance();
+            }
+            else if (bytesLeft > 0 && bytesRead > 0) {
+                bytesLeft -= bytesRead;
+                booleanSearchBytesUntilResetNotSlow = bytesLeft;
+                if (bytesLeft <= 0) {
+                    recordBooleanSearchStreakEnded();
+                }
+            }
+        }
+
+        // Takes one boolean search of the skip window, if one is left, and returns whether it did.
+        // A boolean search that loses the compare-and-set to another runs the DFA instead.
+        private boolean takeBooleanSearchSkip()
+        {
+            int skips = (int) BOOLEAN_SEARCH_SKIPS_REMAINING.getOpaque(this);
+            return skips > 0 && BOOLEAN_SEARCH_SKIPS_REMAINING.compareAndSet(this, skips, skips - 1);
+        }
+
+        // The streak stays at the limit, so a slow reset after the skipped searches opens the next
+        // window at once.
+        private void recordBooleanSearchSlowReset()
+        {
+            int streak = booleanSearchSlowResetStreak;
+            if (streak < SLOW_RESET_STREAK_LIMIT) {
+                streak++;
+                booleanSearchSlowResetStreak = streak;
+            }
+            if (streak >= SLOW_RESET_STREAK_LIMIT) {
+                BOOLEAN_SEARCH_SKIPS_REMAINING.setOpaque(this, BOOLEAN_SEARCH_SKIPPED_SEARCHES);
+            }
+        }
+
+        // A reset that is not slow, or a boolean search that searched past the slow-reset
+        // allowance, ends the streak. It leaves an open window, which keeps its skips. The guard
+        // skips writing a shared field that is already zero.
+        private void recordBooleanSearchStreakEnded()
+        {
+            if (booleanSearchSlowResetStreak != 0) {
+                booleanSearchSlowResetStreak = 0;
+            }
+        }
+
+        // The boolean searches left in their skip window.
+        int booleanSearchSkipsRemaining()
+        {
+            return (int) BOOLEAN_SEARCH_SKIPS_REMAINING.getOpaque(this);
+        }
+
+        // The slow resets in a row boolean searches judged.
+        int booleanSearchSlowResetStreak()
+        {
+            return booleanSearchSlowResetStreak;
         }
 
         int smallByteSetScanCount()
@@ -9015,6 +9199,7 @@ final class Dfa
             tables = resetTables;
             absolutePointerTransitionCount = 0;
             nextFreeOffset = nextSize;
+            statesAtLastReset = stateCount;
             stateCount = 0;
             cacheContentVersion++;
             retainedStateMemory = stateBackingMemory();
@@ -9233,6 +9418,21 @@ final class Dfa
                 }
             }
             return ismatch;
+        }
+
+        // Starts a boolean search's judgement as a search does, for tests that replay searches in
+        // flight together with judgeBooleanSearchForTesting. Production calls the private method,
+        // which the JIT compiler binds statically. These two come last in the class, so their
+        // constant pool entries follow every other method's.
+        int startBooleanSearchForTesting()
+        {
+            return startBooleanSearch();
+        }
+
+        // Judges a boolean search started by startBooleanSearchForTesting, as a search does.
+        void judgeBooleanSearchForTesting(int resetsBefore, long result, int searchLength)
+        {
+            judgeBooleanSearch(resetsBefore, result, searchLength);
         }
     }
 }
