@@ -131,7 +131,11 @@ public class TestPublicEngineAgreement
         // matcher takes no span search: in RE2 and Java, its finds reach the dot-star literal
         // matcher through the program hook, with offsets relative to the region's start, and its
         // one-shot searches reach it as every row's do. Rust drops the group.
-        List<Slice> inputs = Stream.of("!!xERRORy\nzERRORβ ERR ERROR\u2028tail ERRO#ERRORz é?")
+        // The second input has short lines, a carriage return and multibyte characters on the
+        // literal's line, a literal at a line's start, and the malformed byte between a line feed
+        // and the literal. In it, a region that starts inside a line has a line feed before its
+        // start.
+        List<Slice> inputs = Stream.of("!!xERRORy\nzERRORβ ERR ERROR\u2028tail ERRO#ERRORz é?", "!!a\nb\nc\r\nd\ré€💰ERRORf\nERROR\ng#hERROR é?")
                 .map(text -> {
                     byte[] bytes = utf8Slice(text).getBytes();
                     bytes[utf8Slice(text.substring(0, text.indexOf('#'))).length()] = (byte) 0xFF;

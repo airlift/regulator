@@ -1795,12 +1795,19 @@ ordinary engine would.
   describes
 - **What it does:** `.*lit.*` finds the literal's first occurrence with the
   pattern's contains search, then widens over the characters the dots match on
-  each side. A count scans only the trailing dots and resumes at their end.
+  each side. The walk that fixes the match start begins at the region start
+  and, once it meets the first line feed, jumps to after the last one before
+  the literal, found by a backward scan: no character the dots read holds a
+  line feed, so the walk would restart at each one, and only a malformed byte
+  after the last can move the start further. A count scans only the trailing
+  dots and resumes at their end.
   ASCII bytes step inline, and after 16 ASCII bytes a run with at least 64
   bytes left switches to the vector scan the DFA count uses to leave a `[^\n]`
   loop. Everyday `.*lit.*` counts in RE2 and Rust run in 0.26 to 0.32 of
   their earlier time, and rebar's cloud-flare `simplified` rows in 0.007 to
-  0.12 ([#126]).
+  0.12 ([#126]). Everyday one-shot `findInto` searches of `.*lit.*` in RE2,
+  Java, and Rust run in 0.19 to 0.20 of their earlier time on short
+  single-line values and in 0.07 on a file of short subtitle lines ([#245]).
 
 ### Ordered literals
 

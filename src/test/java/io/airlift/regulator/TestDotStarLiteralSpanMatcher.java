@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.function.LongFunction;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
@@ -49,6 +50,12 @@ public class TestDotStarLiteralSpanMatcher
         assertSpan(matcher, utf8Slice("skip\nxxcoolfunctionnameyy\nafter"), 2, 5, 25);
         assertSpan(matcher, utf8Slice("é💰coolfunctionnameж終"), 0, 0, 27);
         assertThat(matcher.findSpan(utf8Slice("ordinaryFunction"), 0)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+
+        // The match starts after the last line feed before the literal, past a byte after it that
+        // leads no character, and at a start after that line feed.
+        assertSpan(matcher, utf8Slice("a\nbb\nc\nd\nxxcoolfunctionnameyy\nz"), 0, 9, 29);
+        assertSpan(matcher(".*literal.*"), bytes("61 0A 62 FF 63 6C69746572616C"), 0, 4, 12);
+        assertSpan(matcher, utf8Slice("skip\nxxcoolfunctionnameyy"), 6, 6, 25);
     }
 
     @Test
@@ -82,10 +89,10 @@ public class TestDotStarLiteralSpanMatcher
 
         // In every language, the spans and counts are the general engine's, run on the pattern
         // with its dots inside a capture, on each malformed sequence before, after, and on both
-        // sides of the literal, and at the input's ends. A run of 100 ASCII bytes before the
-        // literal or between it and a malformed sequence or a line feed takes the vector scan
-        // from some starts and is walked byte by byte from the rest, by the rule the scan counts
-        // below pin.
+        // sides of the literal, at the input's ends, and between the last of several line feeds
+        // and the literal. A run of 100 ASCII bytes before the literal or between it and a
+        // malformed sequence or a line feed takes the vector scan from some starts and is walked
+        // byte by byte from the rest, by the rule the scan counts below pin.
         String longAscii = "78".repeat(100);
         List<String> malformedSequences = List.of(
                 // Bare continuation bytes.
@@ -122,7 +129,9 @@ public class TestDotStarLiteralSpanMatcher
                     "%s 6C69746572616C",
                     "61 %s 62 6C69746572616C 63 %s 6C69746572616C %s 64",
                     "%s L 6C69746572616C L %s",
-                    "61 %s L 6C69746572616C L 0A L 6C69746572616C L %s")) {
+                    "61 %s L 6C69746572616C L 0A L 6C69746572616C L %s",
+                    "61 0A 62 0A %s 63 6C69746572616C 7A",
+                    "61 0A L %s L 6C69746572616C")) {
                 inputs.add(bytes(input.replace("%s", malformed).replace("L", longAscii)));
             }
         }
@@ -163,6 +172,59 @@ public class TestDotStarLiteralSpanMatcher
             assertThat(spanMatcher.countForDiagnostics(runsAroundLiteral, countDiagnostics)).as(label(pattern)).isEqualTo(1);
             assertThat(findDiagnostics.vectorScanCount()).as(label(pattern)).isEqualTo(VectorSupport.isAvailable() ? 2 : 0);
             assertThat(countDiagnostics.vectorScanCount()).as(label(pattern)).isEqualTo(VectorSupport.isAvailable() ? 1 : 0);
+        }
+    }
+
+    @Test
+    public void testLineFeedsBeforeLiteral()
+    {
+        // In every language, the spans and counts are the general engine's, run on the pattern
+        // with its dots inside a capture, after one long line, with and without a multibyte
+        // character or a malformed byte, many short lines, multibyte characters and malformed
+        // bytes before the first line feed and after the last, and carriage returns before the
+        // literal, and with the literal at a line's start. If the walk meets a line feed before the
+        // literal, it jumps past the last one, scanning a range of MINIMUM_LONG_SEARCH_BYTES or
+        // more with the vector scan when the Vector API is available, and a shorter one byte by
+        // byte, and never at a line feed before the region.
+        String longAscii = "78".repeat(100);
+        String malformedPrefix = "FF ".repeat(256) + "6C69746572616C";
+        String malformedAfterLines = "L 0A 61 0A L FF 62 FF 6C69746572616C";
+        List<Slice> inputs = Stream.of(
+                        malformedPrefix,
+                        malformedAfterLines,
+                        "L L 6C69746572616C 7A",
+                        "L C3A9 L 6C69746572616C 7A",
+                        "L FF L 6C69746572616C 7A",
+                        "0A" + "61 62 0A".repeat(40) + "63 6C69746572616C 64 0A 65 6C69746572616C",
+                        "C3A9 FF 61 0A" + "61 62 0A".repeat(40) + "FF C3A9 6C69746572616C",
+                        "61 0A L 6C69746572616C 0A L 0A",
+                        "61 0A C3A9 E282AC F09F92B0 6C69746572616C 0A C3A9 L E282AC F09F92B0 6C69746572616C",
+                        "61 0A 0D 62 0D 6C69746572616C 0D 0A 0D L 0D 6C69746572616C",
+                        "61 0A 6C69746572616C 0A 6C69746572616C 6C69746572616C 0A")
+                .map(input -> bytes(input.replace("L", longAscii)))
+                .toList();
+        for (Row row : everyLanguage()) {
+            CompiledPattern pattern = row.pattern();
+            assertGeneralEngineAgreement(row, inputs);
+
+            // The walk scans the long line before the first line feed and the one after the last,
+            // and jumps over the line between, which a walk stepping past each line feed would
+            // scan too.
+            DotStarLiteralSpanMatcher spanMatcher = pattern.createDotStarLiteralSpanMatcher();
+            Slice lines = bytes("L 0A L 0A L 6C69746572616C".replace("L", longAscii));
+            DotStarLiteralSpanMatcher.ScanDiagnostics diagnostics = new DotStarLiteralSpanMatcher.ScanDiagnostics();
+            assertThat(spanMatcher.findSpanForDiagnostics(lines, 0, lines.length(), diagnostics)).as(label(pattern)).isEqualTo((202L << 32) | lines.length());
+            assertThat(diagnostics.vectorScanCount()).as(label(pattern)).isEqualTo(VectorSupport.isAvailable() ? 2 : 0);
+
+            // Only the first line feed starts a backward scan, whether or not malformed bytes
+            // follow the last one; a malformed byte moves the match start without one, so a
+            // line of 256 of them takes none. Latin-1 reads every byte as a character, so FF is
+            // malformed only in UTF-8.
+            assertThat(diagnostics.backwardScanCount()).as(label(pattern)).isEqualTo(1);
+            assertBackwardScans(spanMatcher, bytes(malformedAfterLines.replace("L", longAscii)), 1, label(pattern));
+            if ((pattern.flags() & Regexp.LATIN1) == 0) {
+                assertBackwardScans(spanMatcher, bytes(malformedPrefix), 0, label(pattern));
+            }
         }
     }
 
@@ -255,6 +317,20 @@ public class TestDotStarLiteralSpanMatcher
         assertThat(optionalMatcher("(?i:.*literal.*)")).isNull();
         assertThat(optionalMatcher(".*?literal.*")).isNull();
         assertThat(optionalMatcher(".*literal.*?")).isNull();
+
+        // Only a dot of exactly `[^\n]` takes the matcher, so only a line feed and, in UTF-8, a
+        // byte that leads no character end its run of dots: a dot that matches every character,
+        // or one that also stops at a carriage return, as Rust's CRLF mode does, keeps the
+        // engine.
+        for (CompiledPattern pattern : List.of(
+                Re2.compile(utf8Slice("(?s).*literal.*"), Re2.Options.latin1()),
+                JavaRegexp.compile(utf8Slice("(?ds).*literal.*")),
+                RustRegexp.compile(utf8Slice("(?s).*literal.*")),
+                RustRegexp.compile(utf8Slice("(?R).*literal.*")),
+                RustRegexp.compile(utf8Slice("(?R-u).*literal.*"), RustRegexp.Options.bytes()),
+                RustRegexp.compile(utf8Slice("(?s-u).*literal.*"), RustRegexp.Options.bytes()))) {
+            assertThat(pattern.createDotStarLiteralSpanMatcher()).as(label(pattern)).isNull();
+        }
     }
 
     @Test
@@ -434,5 +510,12 @@ public class TestDotStarLiteralSpanMatcher
     private static String label(CompiledPattern pattern)
     {
         return pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8() + ((pattern.flags() & Regexp.LATIN1) != 0 ? " Latin-1" : " UTF-8");
+    }
+
+    private static void assertBackwardScans(DotStarLiteralSpanMatcher matcher, Slice input, long expected, String label)
+    {
+        DotStarLiteralSpanMatcher.ScanDiagnostics diagnostics = new DotStarLiteralSpanMatcher.ScanDiagnostics();
+        assertThat(matcher.findSpanForDiagnostics(input, 0, input.length(), diagnostics)).as(label).isEqualTo(matcher.findSpan(input, 0, input.length()));
+        assertThat(diagnostics.backwardScanCount()).as(label).isEqualTo(expected);
     }
 }

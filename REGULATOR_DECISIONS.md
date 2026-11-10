@@ -2050,10 +2050,14 @@ depth. A caller that inlines the public entry spends part of it above the
 entry, and past the limit the search's word reads ran out of line, at 3.6 times
 the instructions per word.
 
-A count needs only each match's end, so it walks only the dots after each
-literal, and resumes there. Both walks step over ASCII other than a line feed
-without the width table, and a run with at least 64 bytes left with the vector
-scan the DFA count uses to leave a `[^\n]` loop.
+The walk that fixes the match start begins at the region start and, once it
+meets the first line feed, jumps to after the last one before the literal, found
+by a backward scan: no character the dots read holds a line feed, so the walk
+would restart at each one, and only a malformed byte after the last can move the
+start further. A count needs only each match's end, so it walks only the dots
+after each literal, and resumes there. Both walks step over ASCII other than a
+line feed without the width table, and a run with at least 64 bytes left with
+the vector scan the DFA count uses to leave a `[^\n]` loop.
 
 The dots read characters as the compiled byte ranges of `[^\n]` do, which
 depend only on the pattern's encoding, so compilation picks a table of
