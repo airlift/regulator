@@ -91,6 +91,98 @@ final class Prog
     // foldedPairScan.
     record FoldedPairScan(int firstOffset, int secondOffset, boolean dense) {}
 
+    /// A folded run of three to nine bytes that every match holds after a lead of `minimumLead`
+    /// through `maximumLead` bytes, as [Regexp#foldedRunsBehindStartLiteral] finds it behind a
+    /// transparent start literal. The run scans with `runProgram`, a program that
+    /// [#configurePrefixAccel] configures with the run as its folded prefix, so its SWAR scan is
+    /// that program's [#findFoldCaseSwar]. The record keeps the run program's probe pair offsets
+    /// and whether the vector scan verifies in its loop, for the vector scan, and its probe
+    /// broadcasts, which [#findFoldCaseSwar] takes as arguments. The pattern keeps the record and
+    /// leaves its own program untouched; [CompiledPattern]'s build, where the run is reserved,
+    /// says why.
+    record FoldedStartRun(
+            Prog runProgram,
+            byte[] run,
+            int minimumLead,
+            int maximumLead,
+            int firstOffset,
+            int secondOffset,
+            boolean dense,
+            long firstLowerBroadcast,
+            long firstCaseBroadcast,
+            long secondLowerBroadcast,
+            long secondCaseBroadcast)
+    {
+        private static final long INSTANCE_SIZE = SizeOf.instanceSize(FoldedStartRun.class);
+        private static final long PROGRAM_INSTANCE_SIZE = SizeOf.instanceSize(Prog.class);
+        private static final long INST_INSTANCE_SIZE = SizeOf.instanceSize(Inst.class);
+        private static final long ATOMIC_REFERENCE_INSTANCE_SIZE = SizeOf.instanceSize(AtomicReference.class);
+        private static final long ATOMIC_LONG_ARRAY_INSTANCE_SIZE = SizeOf.instanceSize(AtomicLongArray.class);
+
+        /// Builds the run's scan on a program configured with the run as its folded prefix,
+        /// probing the pair `byteFrequencies` chooses as it does for any folded prefix.
+        static FoldedStartRun create(byte[] run, int minimumLead, int maximumLead, ByteFrequencies byteFrequencies)
+        {
+            if (run.length < 3 || run.length > MAX_FOLD_CASE_PREFIX_BYTES || minimumLead < 0 || maximumLead < minimumLead) {
+                throw new IllegalArgumentException("folded start run must hold 3 to " + MAX_FOLD_CASE_PREFIX_BYTES + " bytes behind a lead of 0 <= minimum <= maximum: " +
+                        run.length + " bytes, lead [" + minimumLead + "," + maximumLead + "]");
+            }
+            Prog runProgram = new Prog();
+            runProgram.configurePrefixAccel(Slices.wrappedBuffer(run), true, byteFrequencies);
+            return new FoldedStartRun(
+                    runProgram,
+                    runProgram.prefix,
+                    minimumLead,
+                    maximumLead,
+                    runProgram.prefixFoldCaseFirstOffset,
+                    runProgram.prefixFoldCaseSecondOffset,
+                    runProgram.prefixFoldCaseDense,
+                    runProgram.prefixFoldCaseFirstLowerBroadcast,
+                    runProgram.prefixFoldCaseFirstCaseBroadcast,
+                    runProgram.prefixFoldCaseSecondLowerBroadcast,
+                    runProgram.prefixFoldCaseSecondCaseBroadcast);
+        }
+
+        /// Returns the absolute index in `data` of the first occurrence of the run in the range,
+        /// or `-1`. From [#FUSED_PREFIX_VECTOR_MINIMUM_BYTES] bytes with the Vector API, the run
+        /// scans with [VectorPrefixScanner#findFoldCaseDensePair] when the run program chose the
+        /// dense kernel and otherwise with [VectorPrefixScanner#findFoldCasePair], each of which
+        /// picks the platform's candidate-mask form. Below that, or without the Vector API, it
+        /// scans with the run program's generic pair SWAR kernel, [#findFoldCaseSwar], for every
+        /// pair, including a first-and-last pair, which [#prefixAccelFoldCase] scans with
+        /// [#prefixAccelFoldCaseFrontAndBackSWAR] instead.
+        int find(byte[] data, int offset, int length)
+        {
+            if (length < run.length) {
+                return -1;
+            }
+            if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+                if (dense) {
+                    return VectorPrefixScanner.findFoldCaseDensePair(data, offset, length, run, run.length, firstOffset, secondOffset);
+                }
+                return VectorPrefixScanner.findFoldCasePair(data, offset, length, run, run.length, firstOffset, secondOffset);
+            }
+            return runProgram.findFoldCaseSwar(data, offset, length, firstOffset, secondOffset, firstLowerBroadcast, firstCaseBroadcast, secondLowerBroadcast, secondCaseBroadcast);
+        }
+
+        /// The record and its run program, which holds the run as its prefix, its fail
+        /// instruction in its instruction array, its per-opcode counts and bytemap, and its empty
+        /// DFA and NFA references and failed DFA budgets.
+        long estimatedRetainedSize()
+        {
+            return INSTANCE_SIZE +
+                    PROGRAM_INSTANCE_SIZE +
+                    SizeOf.sizeOf(run) +
+                    SizeOf.sizeOf(runProgram.insts) +
+                    INST_INSTANCE_SIZE +
+                    SizeOf.sizeOf(runProgram.instCount) +
+                    SizeOf.sizeOf(runProgram.bytemap) +
+                    4 * ATOMIC_REFERENCE_INSTANCE_SIZE +
+                    ATOMIC_LONG_ARRAY_INSTANCE_SIZE +
+                    SizeOf.sizeOfLongArray(runProgram.failedDfaBudgets.length());
+        }
+    }
+
     // Single instruction in regexp program.
     public static final class Inst
     {
@@ -1619,7 +1711,7 @@ final class Prog
     /// adjacent pair that differs and returns at once; for any other periodic literal the walk
     /// stops within one period of [#pairOffset], since a period of equal bytes would make the
     /// period 1.
-    private static int adjacentPairOffset(byte[] literal, int period)
+    static int adjacentPairOffset(byte[] literal, int period)
     {
         if (period == 1 || period > literal.length / 2) {
             return -1;

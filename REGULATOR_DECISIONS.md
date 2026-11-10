@@ -3397,11 +3397,13 @@ take the widths their folds take. In a Trino literal, the first character
 outside ASCII ends the runs, read in the folded literal, where `ß` continues as
 `ss` and the Kelvin sign and the long s are `k` and `s`. A lead whose widths
 differ by more than eight bytes also ends them. A case-sensitive ASCII letter
-also ends the runs, and a run must hold an ASCII letter: exact bytes are what
-inner literal search and the case-sensitive scans serve, and a run scan takes
-their place. Without these two rules, `(?i:k)ey = value` over CPython scanned
-for ` = ` behind the Kelvin sign's lead instead of searching for its inner
-literal, 5.7x and 10.4x main's time on r8i and r9g in RE2, Rust, and Java, and
+also ends this prefix walk's runs, though not the walk
+[behind a start literal](#folded-run-behind-a-start-literal), and a run must
+hold an ASCII letter: exact bytes are what inner literal search and the
+case-sensitive scans serve, and a run scan takes their place. Without these two
+rules, `(?i:k)ey = value` over CPython scanned for ` = ` behind the Kelvin
+sign's lead instead of searching for its inner literal, 5.7x and 10.4x main's
+time on r8i and r9g in RE2, Rust, and Java, and
 `[Éé]: \d+ ERROR` over a log scanned for `: `, 1.04x to 1.13x. Trino found no
 inner literal in `(?i:k)ey = value`, so there the run had been faster than main;
 it now searches that inner literal as the other languages do.
@@ -3497,6 +3499,54 @@ table-dependent shifts through each unrolled block. The fused scan uses two
 independent loads and parallel masks, which fits HotSpot code generation better
 on the supported Intel and Graviton hosts. Randomized equivalence tests compare
 the accelerated result with a scalar folded-prefix search.
+
+### Folded Run Behind A Start Literal
+
+A pattern such as `\bthe (?i)Sherlock Holmes` begins with a word boundary and a
+transparent start literal, so a find's candidate cursor scanned for `the `,
+which is common in English prose, and verified each occurrence. The far rarer
+folded run ` holme` behind it was never considered, because the folded run walk
+stopped at the word boundary and at the case-sensitive letters of the literal.
+
+Behind a transparent start literal, the walk now continues past zero-width
+assertions, which take no bytes, and past case-sensitive ASCII letters, each a
+lead of one byte. A run behind a start literal is kept by the same rule as any
+folded run, four or more bytes or three led by a rare letter, because both walks
+share it. When the rarest such run's probe pair is more than four times rarer
+than the pair of bytes the literal's long-window search probes, the cursor
+scans for the run in the literal's place and verifies, leftmost first, each
+start its lead allows that holds the literal, from the byte before that start,
+so the program judges each assertion. A start that does not hold the literal is
+ruled out unverified: verified, a start right after non-ASCII text would quit a
+DFA whose word boundary quits outside ASCII, and the quit would count toward the
+matcher's quit streak. The literal stays configured, so every other route
+decides as before. The factor is the margin a folded pair needs to
+leave a literal's first and last bytes, because the rating is an estimate from
+English frequencies, which misjudges common words: `you`, rated 3.5 times rarer
+than the `g` and `t` of `got` in `\bgot(?i)syou`, made the cursor verify about
+29 times as many starts as the literal's occurrences in English prose.
+
+The run stays out of the pattern's program. The first build stored the run in
+the program and made the program's folded SWAR scan a shared static method. On
+r8i that moved the compiled layout of the DFA's scan loop, with the loop counter
+in xmm6 and the loop head shifted by one 32-byte fetch window, so English `that`
+counts took 1.25x to 1.28x main's time on every engine, on rows that never take
+the run. The pattern now keeps the run, which scans with a second program
+configured with the run as its folded prefix. It shares the program's SWAR scan
+instead of a copy, and the pattern's program keeps main's bytecode and layout.
+Measured against a copy of the scan, it tied: rows that take the run ran at
+0.987x to 1.010x the copy's time, r8i `that` counts at 0.992x to 1.009x main's,
+with the same loop layout and the same inlining. The second program retains
+about 990 bytes per run, estimated, against about 100 for the copy, and that
+memory is reserved from the DFA's budget at compile time.
+
+With JDK 25, against main 30011944a in RE2 and Rust, counting the spans of
+`\bthe (?i)Sherlock Holmes` over English takes 0.65x to 0.67x main's time on
+r9g and 0.50x to 0.51x on r8i, and over English with curly quotes 0.34x in
+Rust, where main's literal cursor quit once and left the rest of the text to the
+NFA. RE2's `\ban(?i)swer` takes 0.90x on r9g and 0.87x on r8i, a host where
+that row varies by about 10%. The rows whose run the margin rejects, `\bgot(?i)syou`,
+`\bwent(?i)syou `, and `\bbeat(?i)syour`, tie main at 0.99x to 1.01x.
 
 ## Literal Prefix Vector Scan
 
@@ -4599,7 +4649,9 @@ upstream does.
 Eligible reusable matchers use a private candidate-start cursor for repeated
 group-zero searches. The cursor scans the forward DFA's start-byte candidates,
 its start literal filter's candidates, or the occurrences of a literal behind a
-leading assertion, and verifies each candidate with an anchored first-match traversal. This avoids
+leading assertion or of a rarer
+[folded run behind that literal](#folded-run-behind-a-start-literal), and
+verifies each candidate with an anchored first-match traversal. This avoids
 the ordinary forward match followed by reverse boundary recovery for dense,
 variable-length matches such as the Date Rebar workload. A search the inner
 literal search takes skips the cursor: a window of at least the search's
@@ -4639,9 +4691,11 @@ crate does with its prefilter. A program whose assertions the DFA runs, with an
 assertion before its first byte and a case-sensitive literal of 2 to 64 bytes
 that every path consumes first, qualifies whatever its length. Assertions take
 no width, so every match starts at an occurrence of that transparent start
-literal. The cursor verifies each occurrence with the same anchored traversal,
-whose start state comes from the byte before the occurrence, so a leading line
-or word assertion is judged as a search that read every byte would judge it.
+literal. The cursor verifies each occurrence, or, when it scans for a folded
+run behind the literal, each start the run allows that holds the literal, with
+the same anchored traversal, whose start state comes from the byte before the
+start, so a leading line or word assertion is judged as a search that read
+every byte would judge it.
 This route skips the start-scan productivity check, leaves windows shorter than
 64 bytes to the matcher's other routes, and shares the general route's limits
 and fallbacks. It follows the matcher's DFA quit streak for

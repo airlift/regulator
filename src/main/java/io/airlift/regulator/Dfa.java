@@ -1234,8 +1234,11 @@ final class Dfa
     /// Returns a candidate cursor whose candidates are the occurrences of the program's
     /// transparent start literal (see [Prog#buildTransparentStartLiteral]), or `null` when the
     /// program has none or its DFA is unavailable. Unlike [#createCandidateStartCursor], it needs
-    /// no start byte set, which a leading assertion leaves the program without.
-    static CandidateStartCursor createLiteralCandidateStartCursor(Prog prog)
+    /// no start byte set, which a leading assertion leaves the program without. With a
+    /// `foldedStartRun` behind the literal, which the pattern keeps, the cursor scans for the run
+    /// instead, and its candidates are the starts each occurrence of the run allows that hold the
+    /// literal.
+    static CandidateStartCursor createLiteralCandidateStartCursor(Prog prog, Prog.FoldedStartRun foldedStartRun)
     {
         requireNonNull(prog, "prog is null");
         byte[] literal = prog.transparentStartLiteral();
@@ -1246,7 +1249,7 @@ final class Dfa
         if (dfa == null || !dfa.ok()) {
             return null;
         }
-        return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch());
+        return new CandidateStartCursor(dfa, literal, prog.transparentStartLiteralSearch(), foldedStartRun);
     }
 
     // PERFORMANCE-SENSITIVE HOT LOOP: this cursor amortizes per-search setup and
@@ -1299,9 +1302,16 @@ final class Dfa
                 continue;
             }
             try {
-                long result = searchesLiteral
-                        ? searchLiteralCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin)
-                        : searchCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                long result;
+                if (!searchesLiteral) {
+                    result = searchCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                }
+                else if (cursor.foldedStartRun == null) {
+                    result = searchLiteralCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                }
+                else {
+                    result = searchFoldedRunCandidateBoundary(cursor, tables, bytes, contextBegin, contextLimit, searchBegin);
+                }
                 if (result == CANDIDATE_SEARCH_FALLBACK) {
                     cursor.disabled = true;
                     cursor.fallbackCount++;
@@ -1418,6 +1428,75 @@ final class Dfa
                 return ((long) relativeStart << 32) | (relativeEnd & 0xFFFF_FFFFL);
             }
             scanBegin = candidate + 1;
+        }
+        return SEARCH_NO_MATCH;
+    }
+
+    // The sibling of the literal loop above for a cursor fed by a folded run behind the literal.
+    // A match that starts at s holds the run at some h from s + minimumLead through
+    // s + maximumLead, so the scan from searchBegin + minimumLead finds the run of every match
+    // that starts at or after searchBegin, and a run found at h can belong only to a match that
+    // starts from h - maximumLead through h - minimumLead. Every match also begins with the
+    // literal, so a start that does not hold it is ruled out unverified: an anchored verification
+    // there could only fail, and in a DFA that quits on a byte outside ASCII, one after such a byte
+    // would quit and count toward the matcher's quit streak. The starts that hold the literal are
+    // verified in ascending order, each at most once, so the first that verifies is the leftmost
+    // match. As above, each verification computes its start state from the byte before its start.
+    // Work is charged as above, one unit per verified start beyond the bytes scanned, and the
+    // anchored verification charges its own transitions. The compares with the literal, of at most
+    // 64 bytes, go uncharged: a lead's slack of at most eight bytes allows at most nine starts per
+    // occurrence of the run.
+    private static long searchFoldedRunCandidateBoundary(
+            CandidateStartCursor cursor,
+            CacheTables tables,
+            byte[] bytes,
+            int contextBegin,
+            int contextEnd,
+            int searchBegin)
+    {
+        cursor.foldedRunSearchCount++;
+        Prog.FoldedStartRun run = cursor.foldedStartRun;
+        int minimumLead = run.minimumLead();
+        int maximumLead = run.maximumLead();
+        byte[] literal = cursor.literal;
+        // The first start neither verified nor ruled out.
+        int nextStart = searchBegin;
+        int scanBegin = searchBegin + minimumLead;
+        while (scanBegin < contextEnd) {
+            int scanLength = cursor.workBoundedScanLength(contextEnd - scanBegin);
+            if (scanLength == 0) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            int found = run.find(bytes, scanBegin, scanLength);
+            int scanEnd = found < 0 ? scanBegin + scanLength : found + 1;
+            if (!cursor.consumeWork(scanEnd - scanBegin)) {
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            if (found < 0) {
+                return scanEnd == contextEnd ? SEARCH_NO_MATCH : CANDIDATE_SEARCH_FALLBACK;
+            }
+
+            int lastStart = found - minimumLead;
+            for (int candidate = Math.max(nextStart, found - maximumLead); candidate <= lastStart; candidate++) {
+                if (candidate > contextEnd - literal.length || !Arrays.equals(bytes, candidate, candidate + literal.length, literal, 0, literal.length)) {
+                    continue;
+                }
+                if (!cursor.consumeWork()) {
+                    return CANDIDATE_SEARCH_FALLBACK;
+                }
+                int matchEnd = searchAnchoredCandidate(cursor, tables, bytes, contextBegin, contextEnd, candidate);
+                tables = cursor.dfa.tablesAfterWrite(tables);
+                if (matchEnd == CANDIDATE_FALLBACK) {
+                    return CANDIDATE_SEARCH_FALLBACK;
+                }
+                if (matchEnd >= 0) {
+                    int relativeStart = candidate - contextBegin;
+                    int relativeEnd = matchEnd - contextBegin;
+                    return ((long) relativeStart << 32) | (relativeEnd & 0xFFFF_FFFFL);
+                }
+            }
+            nextStart = Math.max(nextStart, lastStart + 1);
+            scanBegin = found + 1;
         }
         return SEARCH_NO_MATCH;
     }
@@ -6127,10 +6206,15 @@ final class Dfa
     static final class CandidateStartCursor
     {
         private final DfaInstance dfa;
-        // Set for a cursor whose candidates are occurrences of the program's transparent start
-        // literal; null for one that scans the DFA's start byte set.
+        // Set for a cursor whose candidates are starts that hold the program's transparent start
+        // literal, found by scanning for the literal or for the folded run behind it; null for one
+        // that scans the DFA's start byte set.
         private final byte[] literal;
         private final LiteralSearchKernel literalSearch;
+        // Set beside the literal for a cursor that scans for a folded run behind it, whose
+        // candidates are the starts each occurrence of the run allows that hold the literal; null
+        // otherwise.
+        private final Prog.FoldedStartRun foldedStartRun;
 
         private long remainingWork;
         private boolean disabled;
@@ -6138,19 +6222,22 @@ final class Dfa
         private long routeCount;
         private long fallbackCount;
         private long productivityRejectionCount;
+        private long foldedRunSearchCount;
 
         private CandidateStartCursor(DfaInstance dfa)
         {
             this.dfa = dfa;
             this.literal = null;
             this.literalSearch = null;
+            this.foldedStartRun = null;
         }
 
-        private CandidateStartCursor(DfaInstance dfa, byte[] literal, LiteralSearchKernel literalSearch)
+        private CandidateStartCursor(DfaInstance dfa, byte[] literal, LiteralSearchKernel literalSearch, Prog.FoldedStartRun foldedStartRun)
         {
             this.dfa = requireNonNull(dfa, "dfa is null");
             this.literal = requireNonNull(literal, "literal is null");
             this.literalSearch = requireNonNull(literalSearch, "literalSearch is null");
+            this.foldedStartRun = foldedStartRun;
         }
 
         void reset(int inputLength)
@@ -6165,9 +6252,16 @@ final class Dfa
             return !disabled;
         }
 
+        /// Whether the cursor's candidates hold the program's transparent start literal, whether
+        /// it scans for the literal or for a folded run behind it.
         boolean searchesLiteral()
         {
             return literal != null;
+        }
+
+        boolean searchesFoldedStartRun()
+        {
+            return foldedStartRun != null;
         }
 
         /// Whether the cursor's DFA can quit on a byte outside ASCII, so its quits count toward a
@@ -6190,6 +6284,12 @@ final class Dfa
         long productivityRejectionCount()
         {
             return productivityRejectionCount;
+        }
+
+        /// The entries into the folded-run loop, a search's retries included.
+        long foldedRunSearchCount()
+        {
+            return foldedRunSearchCount;
         }
 
         private boolean isProductive(byte[] bytes, int position, int textEnd)
