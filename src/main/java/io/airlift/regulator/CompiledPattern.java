@@ -1535,10 +1535,14 @@ abstract sealed class CompiledPattern
     /// windows for its own exact required literal or one-of bytes. Such a route is a scan plan,
     /// an inner literal search that the class-run proof does not alone add, or, in the forward or
     /// lowered program, a prefix scan, a transparent start literal, or a start literal filter that
-    /// its first-match DFA can run. A pattern with one of those checks long windows for a literal
-    /// beside it instead; see [RequiredBytes#literalBesideRoutes]. The pattern decides as it
-    /// would without a search that only the class-run proof adds, so that proof neither adds the
-    /// check to a pattern nor takes it away.
+    /// its first-match DFA can run and that groups of one bit also give. A pattern with one of
+    /// those checks long windows for a literal beside it instead; see
+    /// [RequiredBytes#literalBesideRoutes]. The pattern decides as it would without a search that
+    /// only the class-run proof adds, so that proof neither adds the check to a pattern nor takes
+    /// it away. A filter that only wider groups give, such as that of the a to g of
+    /// `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, does not count, for the reason the fixed-width matcher's
+    /// yield does not count it: the check was measured against filters of one-bit groups. The
+    /// check runs first, and the DFA keeps the wider filter inside the windows that pass.
     ///
     /// A program whose folded run stands in for no prefix is judged as without the run: the run
     /// is no prefix scan, and the start literal filter is the one its start bytes would carry;
@@ -1558,8 +1562,8 @@ abstract sealed class CompiledPattern
                 !scansForStartLiteral(partialProg) &&
                 (loweredProgram == null || !scansForStartLiteral(loweredProgram)) &&
                 // Last, since it builds the start-byte tables.
-                !searchesStartLiteralFilter(partialProg) &&
-                (loweredProgram == null || !searchesStartLiteralFilter(loweredProgram));
+                !searchesOneBitStartLiteralFilter(partialProg) &&
+                (loweredProgram == null || !searchesOneBitStartLiteralFilter(loweredProgram));
     }
 
     // The literals that a pattern's route searches for, which the long-window check beside it
@@ -1587,24 +1591,26 @@ abstract sealed class CompiledPattern
         return literals;
     }
 
-    // Whether `program` has a start literal filter that its first-match DFA can run. A program
-    // whose assertions the DFA cannot run never scans for the filter, and neither does one whose
-    // first-match DFA does not initialize in its budget, since the longest-match DFA needs more. A
-    // search that skips the DFA anyway, such as a longest-match search whose DFA alone does not fit
-    // or a find after a count gave up on the DFA, reads the window as before. The required bytes
-    // are reserved later, and only where they leave every DFA that initializes now able to, so the
-    // budget is judged without them. The DFA kind decides the start bytes only for a program that
-    // can match empty, which has no start literal filter, so one kind answers for every search,
-    // except that a program whose folded run starts every match keeps them only in its
-    // first-match DFA, the kind asked here. For a folded run that stands in for no prefix, the
-    // filter is the one the program's start bytes would carry without the run.
-    private static boolean searchesStartLiteralFilter(Prog program)
+    // Whether `program` has a start literal filter that its first-match DFA can run and that groups
+    // of one bit also give; a filter that only wider groups give leaves the long-window check
+    // armed, as checksRequiredLiteralOnLongWindows explains. A program whose assertions the DFA
+    // cannot run never scans for the filter, and neither does one whose first-match DFA does not
+    // initialize in its budget, since the longest-match DFA needs more. A search that skips the DFA
+    // anyway, such as a longest-match search whose DFA alone does not fit or a find after a count
+    // gave up on the DFA, reads the window as before. The required bytes are reserved later, and
+    // only where they leave every DFA that initializes now able to, so the budget is judged without
+    // them. The DFA kind decides the start bytes only for a program that can match empty, which has
+    // no start literal filter, so one kind answers for every search, except that a program whose
+    // folded run starts every match keeps them only in its first-match DFA, the kind asked here.
+    // For a folded run that stands in for no prefix, the filter is the one the program's start
+    // bytes would carry without the run.
+    private static boolean searchesOneBitStartLiteralFilter(Prog program)
     {
         return !program.hasDfaUnsupportedAssertions() &&
                 program.leavesDfaInitialization(0, Dfa.DfaInstance.Kind.FIRST_MATCH) &&
                 (program.prefixRunAddsPrefixScan()
-                        ? program.prefixRunHidesStartLiteralFilter()
-                        : Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
+                        ? program.prefixRunHidesOneBitStartLiteralFilter()
+                        : Dfa.DfaInstance.givesOneBitStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
     }
 
     /// Whether a pattern that checks long windows for its exact required literal may also bound a
@@ -2161,27 +2167,28 @@ abstract sealed class CompiledPattern
     // The order between the fixed-width matcher and the routes the ordinary engine has for a
     // pattern. An ASCII singleton pattern keeps the matcher. A pattern that scans a rare
     // candidate or searches blocks keeps the engine wherever the forward program skips to a literal
-    // prefix or a forward DFA searches for its start literal filter. For (?i)Шерлок Холмс, the
-    // filter's three bytes of Шер stop far less often than the lead byte of every Cyrillic letter,
-    // which the matcher scans for; a count on the matcher measured 89x the engine's time on r9g and
-    // 234x on r8i. Such a pattern also keeps the engine where the class-run counter counts it and
-    // the matcher's candidate holds a byte above ASCII, whose density English text does not show.
-    // [а-я]{5} and [一-龥]{3}, whose lead bytes are dense in Russian and Chinese text, took 2.9-3.1x
-    // and 1.32-1.34x the counter's time on the matcher. [0-9]{4}, whose digits English text rates
-    // as it holds them, ran 9.4-10.9x faster on the matcher than on the counter, and 3.8-4.6x on
-    // short rows. Neither a plain start-byte scan nor a start class filter counts: every pattern
-    // the matcher takes has the scan, and the matcher's rare candidate or block search replaces
-    // either.
+    // prefix or a forward DFA searches for a start literal filter that groups of one bit also give.
+    // For (?i)Шерлок Холмс, the filter's three bytes of Шер stop far less often than the lead byte
+    // of every Cyrillic letter, which the matcher scans for; a count on the matcher measured 89x
+    // the engine's time on r9g and 234x on r8i. Such a pattern also keeps the engine where the
+    // class-run counter counts it and the matcher's candidate holds a byte above ASCII, whose
+    // density English text does not show. [а-я]{5} and [一-龥]{3}, whose lead bytes are dense in
+    // Russian and Chinese text, took 2.9-3.1x and 1.32-1.34x the counter's time on the matcher.
+    // [0-9]{4}, whose digits English text rates as it holds them, ran 9.4-10.9x faster on the
+    // matcher than on the counter, and 3.8-4.6x on short rows. Neither a plain start-byte scan nor
+    // a start class filter counts: every pattern the matcher takes has the scan, and the matcher's
+    // rare candidate or block search replaces either.
     private static boolean yieldsToEngineRoute(FixedWidthByteSpanMatcher matcher, Regexp suffixRegexp, boolean longestMatch, Prog program)
     {
         // The DFA kind decides the start bytes only for a program that can match empty, and a
         // fixed-width pattern never matches empty, so one kind answers for every search, except
         // that a program whose folded run starts every match keeps them only in its first-match
-        // DFA, the kind asked here.
+        // DFA, the kind asked here. The yield rule was measured on filters whose groups differ in
+        // one bit, so the matcher keeps a pattern, such as [éê]x, whose filter needs wider groups.
         return matcher.yieldsToEngineScans() &&
                 (program.canSkipToStartCandidate() ||
                         (matcher.bailsOnDenseCandidates() && BoundedCharacterClassCounter.analyzeMatcherRoute(suffixRegexp, longestMatch) != null) ||
-                        Dfa.DfaInstance.searchesStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
+                        Dfa.DfaInstance.givesOneBitStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH));
     }
 
     private static boolean searchesMultiByteInnerLiteral(BooleanPlans booleanPlans)

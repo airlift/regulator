@@ -2190,15 +2190,15 @@ rows go from 0.66-0.69 of the Rust regex crate's time to 0.17-0.22.
 
 A pattern the matcher takes, its short-search matcher included, yields to the
 engine where the engine has its own scan: when the program skips to a literal
-prefix, when a forward DFA would search a start literal filter, or, for a
-candidate with bytes above ASCII, when the class-run counter takes the pattern.
-Without the first two, `(?i)Шерлок Холмс` on Russian text took 89-234x the
-engine's time, since its filter's three bytes stop far less often than every
-Cyrillic lead byte; without the third, `[а-я]{5}` on Russian took 2.9-3.1x and
-`[一-龥]{3}` on Chinese 1.32-1.34x the counter's time. Trino compiles its program
-to decide the order, as every language does, and keeps none only on its
-fixed-width subtype, for a pattern whose search never bails; every operation of
-a pattern that keeps none runs the matcher.
+prefix, when a forward DFA would search a start literal filter that groups of
+one bit also give, or, for a candidate with bytes above ASCII, when the
+class-run counter takes the pattern. Without the first two, `(?i)Шерлок Холмс`
+on Russian text took 89-234x the engine's time, since its filter's three bytes
+stop far less often than every Cyrillic lead byte; without the third, `[а-я]{5}`
+on Russian took 2.9-3.1x and `[一-龥]{3}` on Chinese 1.32-1.34x the counter's
+time. Trino compiles its program to decide the order, as every language does,
+and keeps none only on its fixed-width subtype, for a pattern whose search never
+bails; every operation of a pattern that keeps none runs the matcher.
 
 A candidate with bytes above ASCII can be dense in text of another script, so a
 search, one find or one whole count, that has failed on at least 64 candidates
@@ -2807,12 +2807,17 @@ long. Where an inner literal search stands in for the check, the routes that
 skip it, BitState's capture of groups and a search that skips the DFA, scan the
 window for its literal when that is one exact literal. Neither its forward nor
 its lowered program has a prefix scan, a transparent start literal, or a
-[start literal filter](#start-literal-filter) that its first-match DFA can run.
-A program whose assertions the DFA cannot run, or whose first-match DFA does not
-fit its budget, never scans for its filter, so the filter does not count there.
-A search that skips the DFA in a pattern whose filter counts, such as a
-longest-match search whose DFA alone does not fit or a find after a count has
-given up on the DFA, reads the window as it did before. Neither program is
+[start literal filter](#start-literal-filter) that its first-match DFA can run
+and that groups of one bit also give. As with the [fixed-width yield
+rule](#fixed-width-rare-class-candidates), the check was measured against
+filters of one-bit groups, so a filter that only wider groups give, such as
+that of the `a` to `g` of `[a-g]{3}://\S+|[a-g]{3}@[^ @]+`, leaves the check
+in place: it runs first, and the DFA keeps the wider filter inside the windows
+that pass. A program whose assertions the DFA cannot run, or whose first-match
+DFA does not fit its budget, never scans for its filter, so the filter does not
+count there. A search that skips the DFA in a pattern whose filter counts, such
+as a longest-match search whose DFA alone does not fit or a find after a count
+has given up on the DFA, reads the window as it did before. Neither program is
 anchored at either end: a start-anchored search fails at the first byte that
 cannot continue, and an end-anchored one runs the reverse DFA from the end, so
 either can stop long before a scan of the whole window would. A pattern with a
@@ -3860,15 +3865,17 @@ When a forward DFA's start bytes are common in text, such as the few lead bytes
 shared by many Cyrillic or Chinese characters or the cases of an English letter,
 scanning for them stops often. If every match begins with one of at most eight
 literals of at least three bytes, read twelve bytes deep with case pairs that
-differ in one bit kept as one literal, the DFA instead checks three byte
-positions of those literals together. It picks the three positions with the
-lowest estimated acceptance, from English ASCII frequencies and fixed estimates
-for UTF-8 lead and continuation bytes. Positions past the first bytes let it
-skip letters that many words begin with: the case-insensitive Sherlock names
-take their first, fourth, and eighth bytes, which stop 0.73x as often as the
-first, second, and fourth on `sherlock-casei-en`'s text. The deeper reach also
-lets the filter test the rare final byte of short fixed-width patterns, such as
-the `[.,]` of `[а-я]{3}[.,]`, which then keep the engine under the [fixed-width
+differ in one bit kept as one literal and a position's bytes kept together when
+they vary in at most three bit positions, such as the `a` and `b` of `[ab]`, the
+DFA instead checks three byte positions of those literals together. The DFA
+picks the three positions with the lowest estimated acceptance, from English
+ASCII frequencies and fixed estimates for UTF-8 lead and continuation bytes.
+Positions past the first bytes let it skip letters that many words begin with:
+the case-insensitive Sherlock names take their first, fourth, and eighth bytes,
+which stop 0.73x as often as the first, second, and fourth on
+`sherlock-casei-en`'s text. The deeper reach also lets the filter test the rare
+final byte of short fixed-width patterns, such as the `[.,]` of `[а-я]{3}[.,]`,
+which then keep the engine under the [fixed-width
 yield rule](#fixed-width-rare-class-candidates). Literals that stay distinct
 past the sixth byte can need more groups than a filter holds, which merge within
 the first six bytes, so a filter from the first six bytes is also built. It is
@@ -3880,6 +3887,26 @@ positions at a time on searches of at least 1 KiB, comparing the bytes of up to
 two literal groups directly and, for more, looking up one bit per group from the
 low and high nibbles of each of the three bytes; shorter searches use the same
 check one position at a time, except for the rare start sets below.
+
+Literals merge only by the one-bit rule, so they merge into the same groups at
+every width, and wider groups only add positions to choose from. A trial that
+tested a position's narrowness by three bits but kept the one-bit check on the
+merged position left literals that share a wider set, such as the space and tab
+of `[ \t]`, apart: they overflowed the filter's groups, and `(?i)да[ \t]+дом`
+stopped 19,992 times on 70,756 bytes of Russian text where it stops 196 times.
+The literal-alternation matcher and the inner literal search build their filters
+with groups of one bit, as they were measured.
+
+Where a [start class filter](#start-class-filter) is admitted, the filter is
+built from groups of one bit, and the class filter is taken when they give
+none. A filter that only wider groups give would check three offsets of the
+same small classes: `[ab]*a[ab]{12}c` took 1.20-1.40x its class filter's time
+on the wider groups' filter, in every language on r9g and r8i, though the two
+stop about equally often on its text. Where groups of one bit give a filter,
+wider groups' filters were not measured against the class filter, so the
+one-bit filter is kept. `[a-g]{3}[0-9]+`, whose three ranges together are too
+common for a class filter, takes the wider groups' filter and counts in
+0.28-0.42x the start scan's time on r9g and r8i.
 
 The nibble lookup loads one vector per step at each of the three positions and
 looks up each position's bits from its own load. It replaced the sliding scan,
@@ -3999,6 +4026,10 @@ XOR arithmetic written inline in the loop rather than in helpers, likewise took
 scanners. 32-byte vectors, as with AVX2 or 256-bit SVE, were not measured and
 keep theirs too. A rare small set or range whose filter would hold more
 literals, and so need the nibble lookup, keeps its scanner on every platform.
+With 64-byte vectors, where groups of more than one bit would choose positions
+that split such a set's literals into more than two groups, the set retries
+groups of one bit and takes their filter only if it still holds two literals and
+stops at least four times less often than the start bytes.
 
 A two-literal filter without masks, whose literals have zero masks at the three
 chosen positions, as for `Tom.{10,25}river|river.{10,25}Tom`, compares the
@@ -4211,9 +4242,10 @@ search. Shorter searches check each byte against the start byte table, as a
 start literal filter taken for rare start bytes does. On long inputs the
 start-scan productivity check samples the filter's own stops.
 
-A start literal filter takes precedence outright, and fixed-distance byte
-candidates still run first on the searches long enough for them, except where
-an unsampled search yields to a filter, as
+A start literal filter of one-bit groups takes precedence, and one that only
+wider groups give yields to the class filter. Fixed-distance byte candidates
+still run first on the searches long enough for them, except where an unsampled
+search yields to a filter, as
 [Once-Per-Count Start-Byte Scan Selection](#once-per-count-start-byte-scan-selection)
 describes; the class filter replaces only the start set's own scan. A
 fixed-width pattern does not yield to it: unlike the start literal filter, it

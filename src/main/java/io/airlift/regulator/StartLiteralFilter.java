@@ -21,14 +21,15 @@ import java.util.List;
 
 /// Three byte positions of every literal a match can begin with, checked together to find the
 /// positions where a match can start. Each literal is a group: at each of the three positions its
-/// literal has one byte, or two bytes that differ in one bit, such as the two cases of an ASCII
-/// letter or of a Cyrillic letter's UTF-8 bytes. The scalar and two-group scans OR every group's
-/// differing bits into the input byte before comparing, so one OR per position serves every
-/// group, and a group may accept up to four bytes there; the two-group vector scan of a filter
-/// with no masks, whose literals are exact, compares the loaded bytes as they are. A filter of
-/// more than two groups also holds nibble tables of one bit per group, looked up by a byte's low
-/// and high nibbles; a group's bit is set in both entries exactly when the group accepts the
-/// byte.
+/// literal has one byte, or a few bytes that vary only in the same at most `groupBits` bit
+/// positions, the width the filter is built with, such as the two cases of an ASCII letter or of a
+/// Cyrillic letter's UTF-8 bytes, or the a and b of `[ab]`. The scalar and two-group scans OR every
+/// group's differing bits into the input byte before comparing, so one OR per position serves every
+/// group, and a group accepts every byte that differs from its value only in that mask; the
+/// two-group vector scan of a filter with no masks, whose literals are exact, compares the loaded
+/// bytes as they are. A filter of more than two groups also holds nibble tables of one bit per
+/// group, looked up by a byte's low and high nibbles; a group's bit is set in both entries exactly
+/// when the group accepts the byte.
 ///
 /// The filter is a superset of the match starts: a group's position may accept more bytes than
 /// its literal, but never fewer. Matches that begin with up to eight such groups, each at least
@@ -49,6 +50,9 @@ final class StartLiteralFilter
     // positions, and the lower estimate wins.
     static final int SHALLOW_PATH_POSITIONS = 6;
     private static final int MAXIMUM_GROUPS = 8;
+    /// The most bits in which the bytes of a group's position may differ: three bits accept up to
+    /// eight bytes. The forward DFA's filter takes this width; the other callers pass one bit.
+    static final int GROUP_BITS = 3;
     private static final int FILTER_POSITIONS = 3;
     // Bounds the groups merged from the paths; the three chosen positions can still fold them
     // into at most MAXIMUM_GROUPS distinct groups.
@@ -99,16 +103,18 @@ final class StartLiteralFilter
 
     /// Builds a filter from the byte sets [Prog#buildStartPositionByteSets] returns, at the three
     /// positions with the lowest estimated density, from all the paths' positions or from their
-    /// first [#SHALLOW_PATH_POSITIONS]. Returns null when, at each depth it tries, the paths merge
-    /// into more than [#MAXIMUM_PATH_GROUPS] groups, no three positions are narrow in every group,
-    /// or every choice needs more than two mask bits at a position or more than
-    /// [#MAXIMUM_GROUPS] distinct groups.
-    static StartLiteralFilter build(long[][] paths, ByteFrequencies byteFrequencies)
+    /// first [#SHALLOW_PATH_POSITIONS], with groups whose positions differ in at most `groupBits`
+    /// bits. The paths merge into the same groups at every width, so a wider width only adds
+    /// positions to choose from, and its filter is never denser than a narrower one's. Returns
+    /// null when, at each depth it tries, the paths merge into more than [#MAXIMUM_PATH_GROUPS]
+    /// groups, no three positions are narrow in every group, or every choice needs too many mask
+    /// bits at a position or more than [#MAXIMUM_GROUPS] distinct groups.
+    static StartLiteralFilter build(long[][] paths, ByteFrequencies byteFrequencies, int groupBits)
     {
         int positionCount = paths[0].length / 4;
-        StartLiteralFilter filter = build(paths, positionCount, byteFrequencies);
+        StartLiteralFilter filter = build(paths, positionCount, byteFrequencies, groupBits);
         if (positionCount > SHALLOW_PATH_POSITIONS) {
-            StartLiteralFilter shallowFilter = build(paths, SHALLOW_PATH_POSITIONS, byteFrequencies);
+            StartLiteralFilter shallowFilter = build(paths, SHALLOW_PATH_POSITIONS, byteFrequencies, groupBits);
             if (filter == null || (shallowFilter != null && shallowFilter.density < filter.density)) {
                 return shallowFilter;
             }
@@ -116,7 +122,7 @@ final class StartLiteralFilter
         return filter;
     }
 
-    private static StartLiteralFilter build(long[][] paths, int positionCount, ByteFrequencies byteFrequencies)
+    private static StartLiteralFilter build(long[][] paths, int positionCount, ByteFrequencies byteFrequencies, int groupBits)
     {
         // Each group holds the first positionCount positions, which bound the merge and the
         // candidate positions.
@@ -140,8 +146,11 @@ final class StartLiteralFilter
             }
         }
 
-        // A candidate position is narrow in every group, and its mask has at most two bits: more
-        // would accept more than four bytes for each group's byte.
+        // A candidate position is narrow in every group. The shared mask ORs every group's
+        // differing bits; it allows max(2, groupBits) bits, so one-bit groups that differ in
+        // different bits can share a position, and more would accept too many bytes for each
+        // group's byte.
+        int maximumMaskBits = Math.max(2, groupBits);
         int[] positions = new int[positionCount];
         byte[] candidateMasks = new byte[positionCount];
         int candidateCount = 0;
@@ -149,12 +158,12 @@ final class StartLiteralFilter
         for (int position = 0; position < positionCount; position++) {
             int mask = 0;
             for (long[] group : groups) {
-                if (!isNarrow(group, position)) {
+                if (!isNarrow(group, position, groupBits)) {
                     continue position;
                 }
                 mask |= differingBits(group, position);
             }
-            if (Integer.bitCount(mask) <= 2) {
+            if (Integer.bitCount(mask) <= maximumMaskBits) {
                 positions[candidateCount] = position;
                 candidateMasks[candidateCount] = (byte) mask;
                 candidateCount++;
@@ -280,14 +289,15 @@ final class StartLiteralFilter
         return groupCount <= 4 ? 4 : MAXIMUM_GROUPS;
     }
 
-    // A path joins a group when both are narrow at the same positions and each merged position
-    // stays narrow, so the two cases of a letter that the program reaches on separate paths
-    // join into one group.
+    // A path joins a group when both are narrow in one bit at the same positions and each merged
+    // position stays within one bit, so the two cases of a letter that the program reaches on
+    // separate paths join into one group. The rule is one bit at every group width, so the paths
+    // merge into the same groups at every width, and wider groups only add positions.
     private static boolean canMerge(long[] group, long[] path)
     {
         for (int position = 0; position < group.length / 4; position++) {
-            boolean groupNarrow = isNarrow(group, position);
-            if (groupNarrow != isNarrow(path, position)) {
+            boolean groupNarrow = isNarrow(group, position, 1);
+            if (groupNarrow != isNarrow(path, position, 1)) {
                 return false;
             }
             if (groupNarrow) {
@@ -302,21 +312,22 @@ final class StartLiteralFilter
         return true;
     }
 
-    // One byte, or two bytes that differ in one bit.
-    private static boolean isNarrow(long[] byteSets, int position)
+    // One byte, or up to 2^groupBits bytes that vary only in the same at most groupBits bit
+    // positions.
+    private static boolean isNarrow(long[] byteSets, int position, int groupBits)
     {
         int count = 0;
         for (int index = 0; index < 4; index++) {
             count += Long.bitCount(byteSets[position * 4 + index]);
         }
-        return count == 1 || (count == 2 && Integer.bitCount(differingBits(byteSets, position)) == 1);
+        return count == 1 || (count >= 2 && count <= 1 << groupBits && Integer.bitCount(differingBits(byteSets, position)) <= groupBits);
     }
 
     private static int differingBits(long[] byteSets, int position)
     {
         int first = firstByte(byteSets, position);
         int bits = 0;
-        // Visit only the members: a narrow set has one or two.
+        // Visit only the members: a narrow set has at most 2^GROUP_BITS.
         for (int index = 0; index < 4; index++) {
             for (long members = byteSets[position * 4 + index]; members != 0; members &= members - 1) {
                 bits |= (index * 64 + Long.numberOfTrailingZeros(members)) ^ first;
