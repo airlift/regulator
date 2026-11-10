@@ -28,8 +28,9 @@ import java.util.Map;
 /// earliest end of any match in one pass over the text. The word operations of a step grow with
 /// the words of state, the fan-in groups, and the live exception sources described below, while
 /// the Pike NFA steps every live thread. A group-zero search takes it in place of the Pike NFA
-/// over the whole text once the forward DFA fails; see `CompiledPattern.searchOnPositionNfa`,
-/// which turns the earliest end into a short window for BitState or the Pike NFA.
+/// over the whole text once the forward DFA fails, and a boolean search once it skips a DFA that
+/// thrashed across calls; see `CompiledPattern.searchOnPositionNfa`, which turns the earliest end
+/// into a short window for BitState or the Pike NFA.
 ///
 /// A position is a set of byte ranges of one instruction list that step to the same list, so in a
 /// byte program a class such as `[^u-z]`, whose ranges the list holds side by side, is one

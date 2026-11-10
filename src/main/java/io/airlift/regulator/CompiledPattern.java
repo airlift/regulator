@@ -2502,7 +2502,9 @@ abstract sealed class CompiledPattern
     /// the engine, and entering the engine would run the search a second time: that took 1.08 to
     /// 1.11 times as long as the find without this route on email lines of 64 to 127 bytes with a
     /// match near the start, where the search falls back. For that call the continuation is the
-    /// forward DFA over the window and, only where that DFA fails, the unanchored submatch engines
+    /// boolean-search skip of a thrashing DFA, which after a streak of slow resets returns the
+    /// answer of the program's position automaton, and otherwise the forward DFA over the window,
+    /// judged for those resets, and, only where that DFA fails, the unanchored submatch engines
     /// over it. The call's arguments, with no captures and [#NO_MATCH_WORKSPACES], rule out the
     /// engine's other steps after the search: the reverse DFA for a match start, the
     /// tagged-alternation program, and the skip of the DFA after a matcher's DFA quit streak, a
@@ -2512,7 +2514,8 @@ abstract sealed class CompiledPattern
     /// skips the DFA. A change to that continuation must change these lines too;
     /// `TestInnerLiteralSearch.testFindsGatedOneByteLiteralFirst` checks this find against the
     /// engine's own on lines whose search falls back, where the forward DFA answers and where it
-    /// quits.
+    /// quits, and `TestPositionNfa.testInnerLiteralFirstLineSearchesSkipDfaAfterSlowResets` checks
+    /// that its boolean searches skip a thrashing DFA.
     private boolean findOnInnerLiteralSearch(Slice input)
     {
         int length = input.length();
@@ -2527,7 +2530,10 @@ abstract sealed class CompiledPattern
             return false;
         }
         Prog.MatchKind matchKind = longestMatch ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH;
-        long forward = Dfa.search(partialProg, input, 0, length, 0, length, false, matchKind, false);
+        long forward = Dfa.searchJudgingSlowResets(partialProg, input, 0, length, 0, length, matchKind);
+        if (forward == Dfa.BOOLEAN_SEARCH_SKIPPED) {
+            return searchOnPositionNfa(partialProg, input, 0, length, false, matchKind, null, NO_MATCH_WORKSPACES);
+        }
         if (forward != Dfa.SEARCH_FAILED) {
             return forward != Dfa.SEARCH_NO_MATCH;
         }
@@ -4529,9 +4535,17 @@ abstract sealed class CompiledPattern
                     }
                 }
                 else {
-                    // findOnInnerLiteralSearch makes this step and the submatch engines' after its
-                    // search falls back; keep in step.
-                    long forward = Dfa.search(prog, text, contextStart, contextEnd, start, end, false, matchKind, captureCount > 0);
+                    // A boolean search judges the DFA's resets across boolean searches, and after
+                    // a streak of slow resets skips it, answering from the position automaton,
+                    // which reads no context, so it searches only [start, end).
+                    // findOnInnerLiteralSearch makes this step, and the submatch engines' after
+                    // it, once its search falls back; keep in step.
+                    long forward = captureCount == 0
+                            ? Dfa.searchJudgingSlowResets(prog, text, contextStart, contextEnd, start, end, matchKind)
+                            : Dfa.search(prog, text, contextStart, contextEnd, start, end, false, matchKind, true);
+                    if (forward == Dfa.BOOLEAN_SEARCH_SKIPPED) {
+                        return searchOnPositionNfa(prog, text, start, end, false, matchKind, null, workspaces);
+                    }
 
                     if (forward == Dfa.SEARCH_FAILED) {
                         dfaSearchSkippedOrFailed = true;

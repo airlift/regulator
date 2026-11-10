@@ -13,18 +13,29 @@
  */
 package io.airlift.regulator;
 
+import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.LongFunction;
+import java.util.function.Predicate;
 
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
 import static io.airlift.slice.Slices.utf8Slice;
@@ -37,6 +48,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestPositionNfa
 {
     private static final String BOUNDED_REPEAT = "[a-q][^u-z]{20,80}[x\\xE0-\\xFF]";
+    // A repeat whose UTF-8 program the automaton admits.
+    private static final String UTF_8_BOUNDED_REPEAT = "[a-q][^u-z]{10,30}[x\\xE0-\\xFF]";
     private static final int EXPRESSIONS = 80;
 
     // The languages and modes whose group-zero searches the differential tests compare with
@@ -52,6 +65,12 @@ public class TestPositionNfa
             new Language("Rust", UTF_8, true, expression -> RustRegexp.compile(utf8Slice(expression))),
             new Language("Java", UTF_8, false, expression -> JavaRegexp.compile(utf8Slice(expression))),
             new Language("Trino", UTF_8, false, expression -> TrinoRegexp.compile(utf8Slice(expression)).re2()));
+    // The modes whose boolean searches judge the resets of the DFA they share, each compiling at a
+    // 3 MiB budget, at which the DFA of its bounded repeat thrashes over short words.
+    private static final List<ThrashingMode> THRASHING_MODES = List.of(
+            new ThrashingMode("Rust bytes", BOUNDED_REPEAT, expression -> RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.bytes().setUnicode(false).setMaxMemory(3L << 20))),
+            new ThrashingMode("Rust", UTF_8_BOUNDED_REPEAT, expression -> RustRegexp.compile(utf8Slice(expression), RustRegexp.Options.defaults().setMaxMemory(3L << 20))),
+            new ThrashingMode("RE2 Latin-1 longest match", BOUNDED_REPEAT, expression -> Re2.compile(utf8Slice(expression), Re2.Options.latin1().setLongestMatch(true).setMaxMemory(3L << 20))));
     // A stray continuation byte and a truncated three-byte sequence.
     private static final List<byte[]> MALFORMED_UTF_8 = List.of(new byte[] {(byte) 0x80}, new byte[] {(byte) 0xE6, (byte) 0x97});
     // Each text sits this far into its backing array, past any longest match, so a window left in
@@ -135,6 +154,465 @@ public class TestPositionNfa
         assertThat(spans).hasSize(1020).isEqualTo(spans(rustBytes("(" + expression + ")").matcher(text), 1));
     }
 
+    /// Boolean searches of short lines judge the resets of the DFA they share across searches:
+    /// after two slow resets in a row, the next searches skip the DFA and answer from the position
+    /// automaton directly, without trying BitState.
+    @Test
+    public void testLineSearchesSkipDfaAfterSlowResets()
+    {
+        // Each boolean search of a 200-byte line reads far less text than the 3 MiB cache holds
+        // states, so none resets the cache twice, but the DFA they share builds a state for most
+        // bytes and resets long before it has read ten bytes for each state.
+        ThrashingMode mode = THRASHING_MODES.getFirst();
+        CompiledPattern pattern = mode.compile(mode.expression());
+        CompiledPattern reference = mode.compile(mode.expression());
+        List<Slice> lines = lines(wrappedBuffer(stateExplosionInput(1 << 20)), 200);
+        List<Slice> skippedLines = new ArrayList<>();
+        int skippedMatches = 0;
+        int resetsAtFirstSkip = -1;
+        for (int index = 0; index < lines.size(); index++) {
+            Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+            int resetsBefore = dfa == null ? 0 : dfa.resetCount();
+            BooleanSearch search = search(pattern, reference, lines.get(index), "line " + index);
+            if (search.skipped()) {
+                // A skipped search leaves the DFA alone.
+                assertThat(dfa.resetCount()).as("line %s", index).isEqualTo(resetsBefore);
+                if (resetsAtFirstSkip < 0) {
+                    resetsAtFirstSkip = resetsBefore;
+                }
+                skippedLines.add(lines.get(index));
+                if (search.found()) {
+                    skippedMatches++;
+                }
+            }
+        }
+        // The first reset has no allowance to judge, so the window opens at the third, and the
+        // searches after it, which find almost every match, take the automaton.
+        assertThat(resetsAtFirstSkip).isEqualTo(3);
+        assertThat(skippedLines).hasSizeGreaterThan(5000);
+        assertThat(skippedMatches).isGreaterThan(900);
+        assertSkippedSearchesAllocateNothing(pattern, reference, skippedLines);
+    }
+
+    /// At most 65,536 boolean searches skip the DFA after their window opens, whichever threads
+    /// take them, and the next public search runs the DFA again.
+    @Test
+    public void testLineSearchWindowBoundsConcurrentSkips()
+            throws Exception
+    {
+        ThrashingMode mode = THRASHING_MODES.getFirst();
+        CompiledPattern pattern = mode.compile(mode.expression());
+        CompiledPattern reference = mode.compile(mode.expression());
+        List<Slice> lines = lines(wrappedBuffer(stateExplosionInput(1 << 20)), 200);
+        int next = searchLinesUntil(pattern, reference, lines, 0, dfa -> dfa.booleanSearchSkipsRemaining() > 0);
+        Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+        assertThat(dfa.booleanSearchSkipsRemaining()).isEqualTo(1 << 16);
+
+        // At most 65,536 searches skip per window, whichever threads take them. Each searches a
+        // line of u, which holds no byte that starts a match, so a search that loses a skip to
+        // another thread runs the DFA, which resets nothing and opens no other window.
+        Prog program = pattern.forwardProgramForDiagnostics();
+        Slice quiet = utf8Slice("u".repeat(200));
+        int skips = 0;
+        try (ExecutorService executor = Executors.newFixedThreadPool(8)) {
+            CountDownLatch startGate = new CountDownLatch(1);
+            List<Future<Integer>> threadSkips = new ArrayList<>();
+            for (int thread = 0; thread < 8; thread++) {
+                threadSkips.add(executor.submit(() -> {
+                    startGate.await();
+                    int skipped = 0;
+                    for (int search = 0; search < 9000; search++) {
+                        long result = Dfa.searchJudgingSlowResets(program, quiet, 0, quiet.length(), 0, quiet.length(), Prog.MatchKind.FIRST_MATCH);
+                        assertThat(result).isIn(Dfa.BOOLEAN_SEARCH_SKIPPED, Dfa.SEARCH_NO_MATCH);
+                        if (result == Dfa.BOOLEAN_SEARCH_SKIPPED) {
+                            skipped++;
+                        }
+                    }
+                    return skipped;
+                }));
+            }
+            startGate.countDown();
+            for (Future<Integer> skipped : threadSkips) {
+                skips += skipped.get(30, TimeUnit.SECONDS);
+            }
+        }
+
+        // The searches that follow on one thread take what the window has left, then run the
+        // DFA, and so does the next public search of a line of words, which builds states for
+        // it, or resets.
+        long result = Dfa.searchJudgingSlowResets(program, quiet, 0, quiet.length(), 0, quiet.length(), Prog.MatchKind.FIRST_MATCH);
+        while (result == Dfa.BOOLEAN_SEARCH_SKIPPED && skips <= 1 << 16) {
+            skips++;
+            result = Dfa.searchJudgingSlowResets(program, quiet, 0, quiet.length(), 0, quiet.length(), Prog.MatchKind.FIRST_MATCH);
+        }
+        assertThat(skips).isEqualTo(1 << 16);
+        assertThat(result).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        int states = dfa.stateCount;
+        int resets = dfa.resetCount();
+        assertThat(search(pattern, reference, lines.get(next), "line " + next).skipped()).isFalse();
+        assertThat(dfa.stateCount != states || dfa.resetCount() != resets).as("the next search ran the DFA").isTrue();
+    }
+
+    /// A reset is judged by the boolean search whose starting reset count still owns the
+    /// allowance, so in searches replayed in flight together, without racing on that check,
+    /// searches across one reset that is not slow open no window, an older search that judges
+    /// after a newer one started past its reset count does not end the streak, and two slow
+    /// resets, each judged by one search, open the window.
+    @Test
+    public void testLineSearchesJudgeEachResetOnce()
+    {
+        // Each schedule replays boolean searches in flight together with the DFA's own start and
+        // judgement. Before each reset, public searches of word lines build the states that seed
+        // the next allowance, and their own judgements charge the interval they search in. A
+        // replayed judgement charges either one 200-byte line without a match, or a row past any
+        // allowance.
+        List<ReplayedSchedule> schedules = List.of(
+                new ReplayedSchedule(
+                        "three judges at one reset that is not slow",
+                        "reset, start first, judge first past, streak 0, start a, start b, start c, reset, judge a line, judge b line, judge c line",
+                        0,
+                        false),
+                new ReplayedSchedule(
+                        "older search judging after a newer one started",
+                        "reset, start slow, reset, judge slow line, streak 1, start older, reset, start newer, reset, judge older past, judge newer line",
+                        2,
+                        true),
+                new ReplayedSchedule(
+                        "two slow resets",
+                        "reset, start first, reset, judge first line, start second, reset, judge second line",
+                        2,
+                        true));
+        ThrashingMode mode = THRASHING_MODES.getFirst();
+        // Four lines build about 200 states each, far fewer than the cache holds.
+        List<Slice> lines = lines(wrappedBuffer(stateExplosionInput(5 * 200)), 200);
+        List<Slice> buildLines = lines.subList(0, 4);
+        int buildBytes = 4 * 200;
+        int lineCharge = 200;
+        int pastCharge = 1 << 20;
+        List<ReplayedSchedule> outcomes = new ArrayList<>();
+        for (ReplayedSchedule schedule : schedules) {
+            String label = schedule.name();
+            CompiledPattern pattern = mode.compile(mode.expression());
+            CompiledPattern reference = mode.compile(mode.expression());
+            buildLines.forEach(pattern::find);
+            Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+            assertThat(dfa).as(label).isNotNull();
+            assertThat(dfa.resetCount()).as(label).isZero();
+            assertThat(dfa.booleanSearchSlowResetStreak()).as(label).isZero();
+            assertThat(dfa.booleanSearchSkipsRemaining()).as(label).isZero();
+            Map<String, Integer> resetsBefore = new HashMap<>();
+            int resets = 0;
+            for (String step : schedule.steps().split(", ")) {
+                String[] words = step.split(" ");
+                switch (words[0]) {
+                    case "reset" -> {
+                        buildLines.forEach(pattern::find);
+                        assertThat(dfa.resetCount()).as("%s: %s", label, step).isEqualTo(resets);
+                        dfa.resetCacheExternal();
+                        resets++;
+                        assertThat(dfa.resetCount()).as("%s: %s", label, step).isEqualTo(resets);
+                        // The allowance outlasts an interval's public searches and a line, so a
+                        // reset after them is slow, and a row past any allowance is not.
+                        assertThat(dfa.slowResetAllowance()).as("%s: %s", label, step).isGreaterThan(4 * (buildBytes + lineCharge)).isLessThan(pastCharge);
+                    }
+                    case "start" -> resetsBefore.put(words[1], dfa.startBooleanSearchForTesting());
+                    case "judge" -> dfa.judgeBooleanSearchForTesting(resetsBefore.remove(words[1]), Dfa.SEARCH_NO_MATCH, words[2].equals("past") ? pastCharge : lineCharge);
+                    case "streak" -> {
+                        assertThat(dfa.booleanSearchSlowResetStreak()).as("%s: %s", label, step).isEqualTo(Integer.parseInt(words[1]));
+                        assertThat(dfa.booleanSearchSkipsRemaining()).as("%s: %s", label, step).isZero();
+                    }
+                    default -> throw new IllegalArgumentException(step);
+                }
+            }
+            assertThat(dfa.resetCount()).as(label).isEqualTo(resets);
+            boolean windowOpen = dfa.booleanSearchSkipsRemaining() > 0;
+            outcomes.add(new ReplayedSchedule(label, schedule.steps(), dfa.booleanSearchSlowResetStreak(), windowOpen));
+            // The next public search skips the DFA exactly when the window is open.
+            assertThat(search(pattern, reference, lines.getLast(), label).skipped()).as(label).isEqualTo(windowOpen);
+        }
+        assertThat(outcomes).isEqualTo(schedules);
+    }
+
+    /// Progress past the allowance ends the boolean searches' streak of slow resets, whether the
+    /// search that makes it resets the cache or not, so one slow reset on either side of it opens
+    /// no window.
+    @Test
+    public void testProductiveLineSearchEndsStreak()
+    {
+        List<Slice> lines = lines(wrappedBuffer(stateExplosionInput(1 << 20)), 200);
+        byte[] unmatched = stateExplosionInput(64 << 10);
+        for (int index = 0; index < unmatched.length; index++) {
+            if (unmatched[index] == 'x') {
+                unmatched[index] = 'a';
+            }
+        }
+        for (ThrashingMode mode : THRASHING_MODES) {
+            for (boolean resets : List.of(false, true)) {
+                String label = mode.name() + (resets ? " resetting" : " without a reset");
+                CompiledPattern pattern = mode.compile(mode.expression());
+                CompiledPattern reference = mode.compile(mode.expression());
+                int next = searchLinesUntil(pattern, reference, lines, 0, dfa -> dfa.booleanSearchSlowResetStreak() == 1);
+                Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+
+                // A row of ! twice the allowance long, which the DFA reads in one state, and, to
+                // reset the cache in the same search, words without the x that ends a match, half
+                // again as many as the cache held states.
+                int allowance = dfa.slowResetAllowance();
+                byte[] run = new byte[2 * allowance];
+                Arrays.fill(run, (byte) '!');
+                Slice row = wrappedBuffer(resets ? concat(run, Arrays.copyOf(unmatched, 3 * allowance / 20)) : run);
+                int resetsBefore = dfa.resetCount();
+                assertThat(search(pattern, reference, row, label).skipped()).as(label).isFalse();
+                assertThat(dfa.resetCount() - resetsBefore).as(label).isEqualTo(resets ? 1 : 0);
+                assertThat(dfa.booleanSearchSlowResetStreak()).as(label).isZero();
+
+                // The next slow reset starts a new streak, which opens no window.
+                searchLinesUntil(pattern, reference, lines, next, booleanDfa -> booleanDfa.booleanSearchSlowResetStreak() == 1);
+                assertThat(dfa.booleanSearchSkipsRemaining()).as(label).isZero();
+            }
+        }
+    }
+
+    /// A boolean search is charged the progress it returns, not the window it was given: rows of
+    /// megabytes, each of whose searches resets the cache after reading far more than ten bytes
+    /// for each state, keep the DFA, and searches of long windows that match within a kilobyte,
+    /// over a DFA that thrashes, skip it, in each of [#THRASHING_MODES].
+    @Test
+    public void testLineSearchesChargeTheProgressTheyReturn()
+    {
+        byte[] words = stateExplosionInput(2 << 20);
+        List<Slice> productiveRows = new ArrayList<>();
+        for (int row = 0; row < 8; row++) {
+            // A megabyte of ! the DFA reads in one state, then words without the x that ends a
+            // match, which fill the cache.
+            byte[] bytes = new byte[(1 << 20) + 2048];
+            Arrays.fill(bytes, 0, 1 << 20, (byte) '!');
+            System.arraycopy(words, row * 2048, bytes, 1 << 20, 2048);
+            for (int index = 1 << 20; index < bytes.length; index++) {
+                if (bytes[index] == 'x') {
+                    bytes[index] = 'a';
+                }
+            }
+            productiveRows.add(wrappedBuffer(bytes));
+        }
+        Slice text = wrappedBuffer(words);
+        List<Slice> earlyMatchingRows = new ArrayList<>();
+        for (int offset = 0; offset < 1 << 20; offset += 997) {
+            earlyMatchingRows.add(text.slice(offset, text.length() - offset));
+        }
+        for (ThrashingMode mode : THRASHING_MODES) {
+            assertThat(lineSearchesSkipDfa(mode, productiveRows)).as("%s productive rows", mode.name()).isFalse();
+            assertThat(lineSearchesSkipDfa(mode, earlyMatchingRows)).as("%s early matches", mode.name()).isTrue();
+        }
+    }
+
+    /// Runs the boolean searches of `mode`'s pattern over `rows`, checks them against a separate
+    /// pattern's group-zero findInto, and returns whether one skipped the DFA. The searches judge
+    /// at least three resets.
+    private static boolean lineSearchesSkipDfa(ThrashingMode mode, List<Slice> rows)
+    {
+        CompiledPattern pattern = mode.compile(mode.expression());
+        CompiledPattern reference = mode.compile(mode.expression());
+        for (int index = 0; index < rows.size(); index++) {
+            Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+            int resetsBefore = dfa == null ? 0 : dfa.resetCount();
+            if (search(pattern, reference, rows.get(index), mode.name() + " row " + index).skipped()) {
+                assertThat(resetsBefore).as("%s resets before the first skip", mode.name()).isGreaterThanOrEqualTo(3);
+                return true;
+            }
+        }
+        assertThat(booleanSearchDfa(pattern).resetCount()).as("%s resets", mode.name()).isGreaterThanOrEqualTo(3);
+        return false;
+    }
+
+    /// Boolean searches judge only the resets their own DFA work causes: one after another, the
+    /// resets that counts and a matcher's finds cause before a boolean search never move its
+    /// streak, in bytes and UTF-8 modes.
+    @Test
+    public void testLineSearchesNeverJudgeEarlierResets()
+    {
+        Slice thrashing = wrappedBuffer(stateExplosionInput(256 << 10));
+        Slice quiet = utf8Slice("u".repeat(200));
+        for (Re2 pattern : List.of(
+                Re2.compile(utf8Slice(BOUNDED_REPEAT), Re2.Options.latin1().setLongestMatch(true).setMaxMemory(3L << 20)),
+                Re2.compile(utf8Slice(UTF_8_BOUNDED_REPEAT), Re2.Options.defaults().setLongestMatch(true).setMaxMemory(3L << 20)))) {
+            // With the longest-match option, counts and finds run the DFA that boolean searches
+            // run.
+            Dfa.DfaInstance dfa = null;
+            int initialResets = 0;
+            for (int round = 0; round < 8; round++) {
+                if (round % 2 == 0) {
+                    pattern.countMatches(thrashing);
+                }
+                else {
+                    RegexpMatcher matcher = pattern.matcher(thrashing, 0);
+                    while (matcher.find()) {
+                        // The loop drains the matcher to drive resets of the shared DFA.
+                    }
+                }
+                dfa = booleanSearchDfa(pattern);
+                int resets = dfa.resetCount();
+                if (round == 0) {
+                    initialResets = resets;
+                }
+                // The line, all u, holds no byte that starts a match, so its search resets nothing.
+                assertThat(pattern.find(quiet)).isFalse();
+                assertThat(dfa.resetCount()).isEqualTo(resets);
+                assertThat(dfa.booleanSearchSlowResetStreak()).isZero();
+                assertThat(dfa.booleanSearchSkipsRemaining()).isZero();
+            }
+            assertThat(dfa.resetCount() - initialResets).isGreaterThanOrEqualTo(4);
+        }
+    }
+
+    /// A full-Slice find that runs its inner literal search first makes the ordinary engine's skip
+    /// of a thrashing DFA after the search falls back, in bytes and UTF-8 modes. The bytes mode
+    /// also shows that a skipped search answers from the position automaton directly.
+    @Test
+    public void testInnerLiteralFirstLineSearchesSkipDfaAfterSlowResets()
+    {
+        // An @ every 97 bytes passes the search's gates, so most lines fall back to a DFA that
+        // builds a state for most bytes, as in testLineSearchesSkipDfaAfterSlowResets. The lines
+        // are short enough for BitState, which a skipped search does not try.
+        byte[] bytes = stateExplosionInput(1 << 20);
+        for (int index = 96; index < bytes.length; index += 97) {
+            bytes[index] = '@';
+        }
+        List<Slice> lines = lines(wrappedBuffer(bytes), 160);
+        for (ThrashingMode mode : THRASHING_MODES.subList(0, 2)) {
+            String expression = mode.expression().replace("[^u-z]", "[^u-z@]").replace("[x\\xE0-\\xFF]", "@[a-q]");
+            CompiledPattern pattern = mode.compile(expression);
+            CompiledPattern reference = mode.compile(expression);
+            assertThat(pattern.findsInnerLiteralFirstForDiagnostics()).as(mode.name()).isTrue();
+            assertThat(pattern.forwardProgramForDiagnostics().positionNfa()).as(mode.name()).isNotNull();
+            List<Slice> skippedLines = new ArrayList<>();
+            for (int index = 0; index < lines.size(); index++) {
+                if (search(pattern, reference, lines.get(index), "%s line %s".formatted(mode.name(), index)).skipped()) {
+                    skippedLines.add(lines.get(index));
+                }
+            }
+            assertThat(skippedLines).as(mode.name()).hasSizeGreaterThan(1000);
+            // The automaton of the UTF-8 program needs a workspace, which each boolean search
+            // allocates, so only the bytes program's searches show the route by allocating nothing.
+            if (!pattern.forwardProgramForDiagnostics().positionNfa().usesWorkspace()) {
+                assertSkippedSearchesAllocateNothing(pattern, reference, skippedLines);
+            }
+        }
+    }
+
+    /// Boolean searches and counts that run one DFA keep their own skip windows: neither path's
+    /// judgements or skips move the other's window, in bytes and UTF-8 modes.
+    @Test
+    public void testLineSearchesAndCountsKeepTheirOwnSkipWindows()
+    {
+        Slice text = wrappedBuffer(stateExplosionInput(1 << 20));
+        // The first 997 bytes of the text hold one match, which a DFA count counts without a bail.
+        Slice row = text.slice(0, 997);
+        for (Re2 pattern : List.of(
+                Re2.compile(utf8Slice(BOUNDED_REPEAT), Re2.Options.latin1().setLongestMatch(true).setMaxMemory(3L << 20)),
+                Re2.compile(utf8Slice(UTF_8_BOUNDED_REPEAT), Re2.Options.defaults().setLongestMatch(true).setMaxMemory(3L << 20)))) {
+            String label = pattern.pattern().toStringUtf8();
+            // With the longest-match option, counts run the DFA that boolean searches run. Two
+            // bailing counts open the counts' window, and boolean searches leave it whole: the
+            // next 16 counts skip the DFA, and the one after counts on it.
+            assertThat(pattern.countMatches(text.slice(0, 256 << 10))).as(label).isEqualTo(Dfa.COUNT_BAILED);
+            assertThat(pattern.countMatches(text.slice(0, 256 << 10))).as(label).isEqualTo(Dfa.COUNT_BAILED);
+            Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+            for (int line = 0; line < 16; line++) {
+                pattern.find(text.slice(line * 200, 200));
+            }
+            assertThat(dfa.booleanSearchSkipsRemaining()).as(label).isZero();
+            for (int skipped = 0; skipped < 16; skipped++) {
+                assertThat(pattern.countMatches(row)).as("%s skipped count %s", label, skipped).isEqualTo(Dfa.COUNT_BAILED);
+            }
+            assertThat(pattern.countMatches(row)).as(label).isEqualTo(1);
+
+            // Boolean searches open their own window, and a count still runs the DFA and leaves
+            // it whole.
+            for (int offset = 0; offset < text.length() && dfa.booleanSearchSkipsRemaining() == 0; offset += 200) {
+                pattern.find(text.slice(offset, Math.min(200, text.length() - offset)));
+            }
+            int searchSkips = dfa.booleanSearchSkipsRemaining();
+            assertThat(searchSkips).as(label).isPositive();
+            assertThat(pattern.countMatches(row)).as(label).isEqualTo(1);
+            assertThat(dfa.booleanSearchSkipsRemaining()).as(label).isEqualTo(searchSkips);
+        }
+    }
+
+    /// The DFA a boolean search of `pattern` runs, its forward program's longest-match DFA, or
+    /// null before one is built.
+    private static Dfa.DfaInstance booleanSearchDfa(CompiledPattern pattern)
+    {
+        return pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH);
+    }
+
+    /// Runs one boolean search of `line`, checks its answer against `reference`'s group-zero
+    /// findInto, and returns the answer and whether the search took a skip of the boolean
+    /// searches' window.
+    private static BooleanSearch search(CompiledPattern pattern, CompiledPattern reference, Slice line, String label)
+    {
+        Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+        int skipsBefore = dfa == null ? 0 : dfa.booleanSearchSkipsRemaining();
+        boolean found = pattern.find(line);
+        assertThat(found).as(label).isEqualTo(reference.findInto(line, new int[2]));
+        return new BooleanSearch(found, skipsBefore > 0 && dfa.booleanSearchSkipsRemaining() == skipsBefore - 1);
+    }
+
+    /// Runs the boolean searches of `lines` from `start`, as [#search] does, until `stop` holds
+    /// for their DFA, and returns the index of the next line.
+    private static int searchLinesUntil(CompiledPattern pattern, CompiledPattern reference, List<Slice> lines, int start, Predicate<Dfa.DfaInstance> stop)
+    {
+        for (int index = start; index < lines.size(); index++) {
+            search(pattern, reference, lines.get(index), "line " + index);
+            Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+            if (dfa != null && stop.test(dfa)) {
+                return index + 1;
+            }
+        }
+        throw new AssertionError("the lines ran out");
+    }
+
+    /// Runs the boolean searches of `lines`, each of which skipped the DFA before and skips it
+    /// again while the window lasts, checks their answers, and checks that they allocated almost
+    /// nothing on this thread. A position automaton of at most two words of state keeps its state
+    /// in locals, but the submatch engines try BitState first on a line as short as these, and
+    /// BitState allocates its visited bitmap, thousands of bytes, on each search without a
+    /// workspace.
+    private static void assertSkippedSearchesAllocateNothing(CompiledPattern pattern, CompiledPattern reference, List<Slice> lines)
+    {
+        Prog program = pattern.forwardProgramForDiagnostics();
+        assertThat(program.positionNfa().usesWorkspace()).isFalse();
+        assertThat(program.canBitState()).isTrue();
+        assertThat(lines).allSatisfy(line -> assertThat(line.length()).isLessThanOrEqualTo(program.unanchoredBitStateTextMaxSize()));
+        Dfa.DfaInstance dfa = booleanSearchDfa(pattern);
+        int skipsBefore = dfa.booleanSearchSkipsRemaining();
+        boolean[] found = new boolean[lines.size()];
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        for (int index = 0; index < found.length; index++) {
+            found[index] = pattern.find(lines.get(index));
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        assertThat(dfa.booleanSearchSkipsRemaining()).isEqualTo(skipsBefore - found.length);
+        assertThat(allocatedBytes).isLessThan(16L * lines.size());
+        for (int index = 0; index < found.length; index++) {
+            assertThat(found[index]).as("line %s", index).isEqualTo(reference.findInto(lines.get(index), new int[2]));
+        }
+    }
+
+    /// The lines of `text` of `length` bytes, the last one shorter.
+    private static List<Slice> lines(Slice text, int length)
+    {
+        List<Slice> lines = new ArrayList<>();
+        for (int offset = 0; offset < text.length(); offset += length) {
+            lines.add(text.slice(offset, Math.min(length, text.length() - offset)));
+        }
+        return lines;
+    }
+
     @Test
     public void testAdmission()
     {
@@ -142,7 +620,7 @@ public class TestPositionNfa
         // position per class, 82. In UTF-8, [^u-z] is seven positions: its sequences take one for
         // each byte, and share the positions of their common continuation bytes.
         assertPositions(rustBytes(BOUNDED_REPEAT), 82, 82);
-        assertPositions(Re2.compile(utf8Slice("[a-q][^u-z]{10,30}[x\\xE0-\\xFF]")), 214, 123);
+        assertPositions(Re2.compile(utf8Slice(UTF_8_BOUNDED_REPEAT)), 214, 123);
         assertPositions(Re2.compile(utf8Slice("[a-q][a-z ]{20,80}x")), 82, 82);
         // One, two, three and eight words of state.
         assertPositions(rustBytes("a[b-r]{61,62}x"), 64, 64);
@@ -249,11 +727,10 @@ public class TestPositionNfa
     @Test
     public void testFanInTestsPerByteAreBounded()
     {
-        String repeat = "[a-q][^u-z]{10,30}[x\\xE0-\\xFF]";
         for (CompiledPattern pattern : List.of(
-                rustBytes(repeat),
-                Re2.compile(utf8Slice(repeat)),
-                RustRegexp.compile(utf8Slice(repeat), RustRegexp.Options.bytes().setUnicode(true)))) {
+                rustBytes(UTF_8_BOUNDED_REPEAT),
+                Re2.compile(utf8Slice(UTF_8_BOUNDED_REPEAT)),
+                RustRegexp.compile(utf8Slice(UTF_8_BOUNDED_REPEAT), RustRegexp.Options.bytes().setUnicode(true)))) {
             assertThat(pattern.forwardProgramForDiagnostics().positionNfa().fanInGroupCountForDiagnostics()).as(pattern.pattern().toStringUtf8()).isEqualTo(1);
         }
 
@@ -296,7 +773,7 @@ public class TestPositionNfa
         bytes.addAll(List.of(
                 new Case(BOUNDED_REPEAT, "a" + "b".repeat(20) + "x"),
                 new Case("[a-q][^u-z]{1,80}[x\\xE0-\\xFF]", "abà"),
-                new Case("[a-q][^u-z]{10,30}[x\\xE0-\\xFF]", "a" + "c".repeat(10) + "ÿ"),
+                new Case(UTF_8_BOUNDED_REPEAT, "a" + "c".repeat(10) + "ÿ"),
                 new Case("[a-q][^u-z]{20,160}[x\\xE0-\\xFF]", "q" + "a".repeat(160) + "x"),
                 new Case("[a-q].{20,80}x", "a" + " ".repeat(20) + "x")));
 
@@ -477,6 +954,21 @@ public class TestPositionNfa
     private record Case(String expression, String match) {}
 
     private record Language(String name, Charset charset, boolean allowsMalformed, Function<String, CompiledPattern> compiler) {}
+
+    private record BooleanSearch(boolean found, boolean skipped) {}
+
+    /// A schedule of `steps`, separated by commas, that replays boolean searches in flight
+    /// together, and the streak of slow resets and whether the skip window is open after it.
+    private record ReplayedSchedule(String name, String steps, int streak, boolean windowOpen) {}
+
+    /// A mode that compiles `expression`, a bounded repeat, with `compiler`.
+    private record ThrashingMode(String name, String expression, Function<String, CompiledPattern> compiler)
+    {
+        CompiledPattern compile(String expression)
+        {
+            return compiler.apply(expression);
+        }
+    }
 
     private static void assertAgrees(String label, CompiledPattern pattern, CompiledPattern captured, Slice input)
     {

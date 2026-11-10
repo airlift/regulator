@@ -828,9 +828,10 @@ through one volatile field:
 - a reader search loads the root once when it starts and reads only through it;
   it takes no lock and never waits for a writer; its only stores are racy
   performance hints that need no ordering, such as the counters and flags that
-  select paired rows or the pointer table. The count skip window is the
-  exception: a skip takes one unit of it with a compare-and-set, so that racing
-  counts cannot skip more counts than a window holds, as
+  select paired rows or the pointer table. The skip windows of DFA counts and
+  of boolean searches are the exception: a skip takes one unit of its window
+  with a compare-and-set, so that racing calls cannot skip more calls than a
+  window holds, as
   [Count Fallback After Repeated Bails](#count-fallback-after-repeated-bails)
   describes
 - writers hold the DFA's cache mutation lock: an exclusive search fills empty
@@ -1644,6 +1645,13 @@ forward cursor, so its fallback adds no resets. The retained-class counter
 falls back to its compact counter instead. Either way, the answer is the
 fallback's, so a count that gives up or skips the DFA is exact.
 
+Each upstream RE2 search judges its own DFA work, and gives up on a thrashing
+DFA when that search alone resets the cache twice, reading fewer than ten bytes
+for each state the cache held between the two resets. Regulator also judges the
+DFA across calls, in two forms that each change only which engine runs: a
+pattern's DFA counts and its boolean searches, as the next paragraphs describe.
+A matcher's finds do not, for the cost given below.
+
 Upstream RE2 tries the DFA again on every search. Regulator's DFA counts do so
 until two DFA counts of a pattern in a row give up. The pattern's next 16 DFA
 counts, from any matcher or thread, then skip the DFA and fall back at once,
@@ -1654,11 +1662,83 @@ the DFA cannot finish, such as a count that quits on a byte outside ASCII. A
 count through the inner-literal search makes a DFA count for each dense run,
 and one that completes ends the streak, so rows whose earlier runs count on the
 DFA before a later one gives up pay a DFA attempt on each row. One row's count
-changes the engine of another row's only in this bounded form, and a find
-outside a count never skips the DFA for it. The streak is an engine policy for
-the count path, not a language rule: matches and counts stay exactly as RE2
+changes the engine of another row's only in this bounded form, and the streak
+never makes a find outside a count skip the DFA. The streak is an engine policy
+for the count path, not a language rule: matches and counts stay exactly as RE2
 and every other language define them, and only the engine that produces a
 count changes.
+
+A boolean search, such as a grep's `find` of each line, has no matcher to hold
+a judgement, so the pattern's DFA holds it, in a streak and skip window of the
+boolean searches' own. Only unanchored boolean searches of a forward program
+with the [position
+automaton](#bit-parallel-position-automaton-after-dfa-failure) that bounded,
+assertion-free matches compile to take part, including a full-Slice `find` that
+runs its [inner literal search first](#minimum-inner-literal-search-window)
+once that search falls back. A pattern without the automaton keeps upstream's
+rule, because its searches would fall back on BitState or the Pike NFA, which
+were not measured against a DFA that thrashes. Such a search reads the reset
+count of the DFA it runs on before the DFA runs and again after it, and takes a
+reset in between as its own; several resets during one search give one
+judgement. It is charged the progress the search returned: the earliest match
+end the DFA returned, relative to the search start, where an earliest-match
+search stops; the whole window when it found no match; and nothing when the DFA
+failed, because a start state it could not allocate and a quit on a byte fail
+it too, so a failure is no proof that upstream's slow-reset rule fired. The
+search that sees its own reset is charged first, and the reset is then slow
+when the progress boolean searches were charged since the reset before it comes
+to fewer than ten bytes for each state the cache held at that earlier reset.
+Upstream counts the states at the reset it judges, which a judge across calls
+cannot read before it, so this allowance approximates upstream's test, and a
+cache that held far fewer or far more states at the judged reset is judged
+against the wrong size. A slow reset extends the streak, and any other reset
+ends it, as does progress past the allowance without a reset. A reset before
+the search started, by a count, a find, an anchored match, or another boolean
+search, seeds the allowance of the next reset without a judgement, so one call
+after another, a boolean search never judges a reset that another call caused
+before it started. After two slow resets in a row the pattern's next 65,536
+boolean searches go straight to the position automaton, without trying OnePass
+or BitState, and the search after them tries the DFA again, with the allowance
+it had left, so a DFA that still thrashes opens the next window at its next
+reset. One line is a much smaller call than a count: on the motivating Leipzig
+grep workload, a DFA that thrashed reset about every 7,000 lines, so the window
+holds about ten times that many. On the 16 MB Leipzig text, the per-line
+searches of the bytes-mode `[a-q][^u-z]{20,80}[x\xE0-\xFF]` reset the cache 44
+times without the skip, each after about 340 KB against an allowance of about
+910 KB. Over that text repeated eight times and split into campaign-made 16 MiB
+lines, the bytes-mode `[a-z]{2}[a-z ]{8,25}\xFF` resets the cache about every
+2.6 MB without a failed search, and keeps the DFA.
+
+Boolean searches run the forward DFA's longest-match instance, which is also
+the one anchored matches run, and the one counts and finds of a longest-match
+or end-anchored program run, but the boolean searches keep their own streak and
+window. Neither path's judgements or skips move the other's streak or window,
+and each window has its own length, 16 counts or 65,536 searches, so a count
+never skips the DFA because of boolean searches. The resets are shared: one
+call after another, a boolean search judges only the resets its own DFA work
+causes, so counts and finds that thrash the DFA leave the boolean searches'
+streak as it was, but under threads they can move it, as the paragraph on races
+below describes. Like the count's streak, this one is an engine policy, not a
+language rule: every search returns the answer the DFA would.
+
+A matcher's finds do not judge the DFA across finds, so a find loop over a DFA
+that thrashes still rebuilds states as upstream's does. On the 16 MB rebar
+Leipzig text, each find of `[a-q][^u-z]{20,80}[x\xE0-\xFF]` in bytes mode
+searched only to the next sparse match, far fewer bytes than it takes to fill
+the cache twice, so no find gave up, and the finds built 5.8 million states
+over 54 resets. Judging a matcher's finds by the boolean searches' rule, and
+skipping the DFA after two slow resets until the matcher's reset, took the find
+loop of a narrower repeat of that shape, the campaign's bytes-mode
+`[a-q][^u-z]{10,30}[x\xE0-\xFF]`, to 0.083–0.088 of its time on r9g and r8i
+(rebar, settle runner). But the judgement runs after every find: its cheapest
+measured form, a flag, the cached DFA, an opaque read of the reset count and a
+compare with the count last seen, cost about 15 instructions per find, and
+rebar's `the-casei`, a dense find loop of about 960 instructions per find that
+never resets, took 1.027–1.033 times its time without the judgement on r9g
+(rebar, settle runner). A judgement made by the DFA at the reset itself would
+cost nothing on a find that never resets, but plumbs the matcher into the DFA's
+reset path. It can follow when a find-loop workload that thrashes outweighs
+that cost.
 
 In `BenchmarkDfaCache` on r9g and r8i, the baseline skipped the DFA for every
 count after the first that gave up, as Regulator did before. On the rows where
@@ -1671,17 +1751,49 @@ r8i, across runs of 5 and 30 measured iterations. The short rows after one
 count that gave up (`countShortRowAfterThrashingCount`) took 0.049x the
 baseline's time on r9g and 0.064x on r8i, because they count on the DFA again.
 
-The streak and the skip window are fields on the DFA instance, which every
-matcher and thread of the pattern shares, so DFA counts on several threads race
-on them. The skip window is read with opaque access and written only with
-opaque writes or a compare-and-set, so its writes fall in one order. A skip
-takes one unit of the latest window with a compare-and-set, and a DFA count
-that loses the compare-and-set runs the DFA, so at most 16 DFA counts skip
-after each window opens, and a window opens only after a DFA count that gave
-up. A DFA count on another thread that completes while a window is open ends
-the streak but leaves the window, so a short row cannot cut short the window a
-thrashing row opened. The streak is a plain `int` that stops counting at two,
-and a lost update to it can open a window one bail early or one bail late.
+The counts' streak and skip window, and the boolean searches' own pair, are
+fields on the DFA instance, which every matcher and thread of the pattern
+shares, so DFA counts on several threads race on the first pair, and boolean
+searches on the second. Each skip window is read with opaque access and written
+only with opaque writes or a compare-and-set, so its writes fall in one order.
+A skip takes one unit of the latest window with a compare-and-set, and a DFA
+count that loses the compare-and-set runs the DFA, so at most 16 DFA counts
+skip after each window opens, and a window opens only after a DFA count that
+gave up. A DFA count on another thread that completes while a window is open
+ends the streak but leaves the window, so a short row cannot cut short the
+window a thrashing row opened. Boolean searches hold their pair to the same
+rules: a search that loses the compare-and-set runs the DFA, at most 65,536
+searches skip after each of their windows opens, and a streak end leaves an
+open window. Each streak is a plain `int` that stops counting at two, and a
+lost update to it can open a window one bail or slow reset early or late. The
+boolean searches' last seen reset count and allowance are plain fields too,
+written only at a reset or while the allowance is positive, and the states the
+cache held at its reset are written under its lock. A boolean search cannot
+tell its own reset from one another thread causes while it runs, so a reset is
+judged only by the search whose starting reset count still owns the allowance,
+the one the last seeded interval belongs to. A search that began before an
+interval that another search already judged, or that a later search seeded when
+it started, returns without charging or judging, so several searches in flight
+across one reset judge it once, save for the races below, and an older search
+cannot judge an interval a newer one began. Under concurrent starts a reset can
+therefore go unjudged, so the window opens later, or, while searches keep
+starting across every reset, not at all, and the searches run the DFA as
+upstream's do. The ownership check, the allowance and the streak are plain
+fields, so a lost charge or streak update, or two judges that pass the check
+together, can still misjudge a reset now and then, even one no boolean search
+caused. Each opening of the window allows at most 65,536 skips, but a slow
+judgement racing with the skips, from a search that began before the window
+opened, can open it again. This is the race model the counts' window accepts,
+and every field changes only which engine runs: every engine returns the same
+answer.
+
+Two alternatives were rejected. A DFA search could report whether that call
+reset the cache, proving which resets are a boolean search's own, but that
+plumbs a flag out of the hot DFA loops: more code and review, and a possible
+cost on every search. It can follow if a concurrent thrashing grep shows the
+window failing to open. Opening the window only on searches that fail under
+upstream's own per-search rule is exact, but gives up the grep wins of 6 to 60
+times, because those searches never fail.
 
 ## Bit-Parallel Position Automaton After DFA Failure
 
@@ -1691,6 +1803,9 @@ cannot initialize or abandons a search, and whose range OnePass and BitState
 decline, runs a bit-parallel Glushkov position automaton instead when the
 program's matches are bounded, assertion-free, and never empty
 ([catalog](docs/reference/OPTIMIZATION_CATALOG.md#bit-parallel-position-automaton-for-bounded-repeats)).
+A boolean search that skips a DFA that [thrashed across
+calls](#count-fallback-after-repeated-bails) runs the automaton directly,
+without trying OnePass or BitState.
 Matches and spans stay exactly upstream's; only the engine changes. Searches
 for groups beyond group zero and many-match searches keep upstream's engines.
 
@@ -2100,9 +2215,11 @@ where a later hit lies in text a confirmation read; where its bounded reverse
 search would read back past the previous candidate; and where a DFA fails, as on
 a byte it cannot decode or past its memory. A fallback runs the ordinary
 engine's forward DFA and, where that DFA fails, its submatch engines, without
-searching again. Entering the ordinary engine there instead, which ran the
-search a second time, took 1.08–1.11x the time without the search first on
-lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
+searching again, or, while boolean searches skip a DFA that
+[thrashed](#count-fallback-after-repeated-bails), answers from the position
+automaton without the DFA. Entering the ordinary engine there instead, which
+ran the search a second time, took 1.08–1.11x the time without the search first
+on lh3lh3's email lines of 64 to 127 bytes, whose first gate-passing hit mostly
 lies near the start; running those steps directly takes 0.97–0.99x.
 
 A matcher's find of such a pattern enters the ordinary engine with no

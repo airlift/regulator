@@ -520,7 +520,8 @@ final class Prog
     // with the prefix acceleration.
     private boolean skipsToStartCandidate;
     // The bit-parallel automaton a group-zero search runs in place of the Pike NFA once the
-    // forward DFA fails, or null; see configurePositionNfa.
+    // forward DFA fails, and a boolean search once it skips a DFA that thrashed across calls, or
+    // null; see configurePositionNfa.
     private PositionNfa positionNfa;
 
     // Required prefix for instant rejection (extracted via requiredPrefix()).
