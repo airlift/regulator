@@ -4940,6 +4940,20 @@ list count, not the instruction count, and the job stack with the instructions
 that push jobs, so these bounds alone limit the span, as the crate bounds its
 backtracker.
 
+The tagged alternation program, whose many-match DFA picks the winning branch of
+an alternation whose every branch is one capture group (see [Reusable Group-Zero
+Forward Cursor](#reusable-group-zero-forward-cursor)), also serves programs of
+at most 512 flattened instructions, which upstream sends to BitState. Upstream's
+cutoff, in `prog.cc:644-652`, only keeps its list-head table, two bytes per
+instruction, within 1 KiB; capture semantics do not depend on it. The tagged
+program is charged to the forward share's remainder, and its many-match cache
+takes a third of the DFA memory left, so it stays within the budget, and a
+search that exhausts the cache resets it and retries the byte once before it
+declines. A program that does not fit or whose DFA cannot initialize is omitted,
+and a declined pick falls back to BitState and the other capture engines. On
+rebar's `unicode/overlapping-words/ascii`, a 119-instruction program, captures
+took 0.42x to 0.43x BitState's time on r9g and 0.32x to 0.33x on r8i.
+
 ## Matcher-Owned Capture Workspaces
 
 `RegexpMatcher` owns reusable OnePass, BitState, NFA, and position-automaton

@@ -43,7 +43,6 @@ final class Prog
     // The most instructions a flattened program may hold: a packed capture instruction word keeps
     // an output in 28 bits, as upstream's `Prog::Inst` does.
     static final int MAX_FLATTENED_INSTRUCTIONS = (1 << 28) - 1;
-    private static final int UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS = 512;
     static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
     public enum MatchKind
@@ -1023,14 +1022,6 @@ final class Prog
     public boolean canBitState()
     {
         return outputLists != null;
-    }
-
-    /// Returns whether upstream RE2 would give this program list heads, which it charges to the
-    /// compile memory budget. It reads the final instruction count, so it is only valid after
-    /// [#flatten()] has been called.
-    boolean hasUpstreamListHeads()
-    {
-        return instructionCount <= UPSTREAM_LIST_HEAD_MAXIMUM_INSTRUCTIONS;
     }
 
     public int listCount()

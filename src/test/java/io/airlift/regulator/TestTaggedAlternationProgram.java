@@ -70,6 +70,20 @@ public class TestTaggedAlternationProgram
         assertThat(matcher.find()).isTrue();
         assertMatch(matcher, 1, 2, 3);
         assertThat(matcher.find()).isFalse();
+
+        // A program within upstream's 512-instruction BitState cutoff takes the tagged route too.
+        Re2 smallPattern = Re2.compile(utf8Slice("(a)|(ab)|(.)"));
+        assertThat(smallPattern.forwardProgramForDiagnostics().size()).isLessThanOrEqualTo(512);
+        assertThat(smallPattern.taggedAlternationProgramForDiagnostics()).isNotNull();
+        assertThat(smallPattern.usesTaggedAlternationForDiagnostics()).isTrue();
+        RegexpMatcher smallMatcher = smallPattern.matcher(utf8Slice("ab"));
+        assertThat(smallMatcher.find()).isTrue();
+        assertMatch(smallMatcher, 0, 1, 1);
+        assertThat(smallMatcher.find()).isTrue();
+        assertMatch(smallMatcher, 1, 2, 3);
+        assertThat(smallMatcher.find()).isFalse();
+        assertThat(smallMatcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(smallMatcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
     }
 
     @Test
@@ -146,10 +160,9 @@ public class TestTaggedAlternationProgram
     @Test
     public void testMatcherRegionBoundsAreAssertionContext()
     {
-        // A matcher region reads as a Slice view of its bytes. \p{L} makes this three-branch
-        // alternation large enough for a tagged program. In the region [0, 1) of "ab", the first
-        // branch's word boundary sees the end of the region, as it does on the Slice view, not
-        // the b after it.
+        // A matcher region reads as a Slice view of its bytes. In the region [0, 1) of "ab", the
+        // first branch's word boundary sees the end of the region, as it does on the Slice view,
+        // not the b after it.
         Re2 shortPattern = Re2.compile(utf8Slice("(.\\b)|(\\w)|(\\p{L})"));
         assertThat(shortPattern.usesTaggedAlternationForDiagnostics()).isTrue();
         Slice shortInput = utf8Slice("ab");
