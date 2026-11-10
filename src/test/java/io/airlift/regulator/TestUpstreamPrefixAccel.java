@@ -126,6 +126,9 @@ public class TestUpstreamPrefixAccel
             assertThat(program.canPrefixAccel()).as(prefix).isTrue();
             int acceleratedPrefixLength = Math.min(literal.length, 9);
             boolean endPair = program.prefixAccelFoldCaseFirstOffset() == 0 && program.prefixAccelFoldCaseSecondOffset() == acceleratedPrefixLength - 1;
+            // Compare the same bytes with a folded-start-run scanner when the run has at least
+            // three bytes.
+            Prog.FoldedStartRun run = acceleratedPrefixLength < 3 ? null : Prog.FoldedStartRun.create(Arrays.copyOf(literal, acceleratedPrefixLength), 0, 0, ByteFrequencies.uniform());
             endPairs |= endPair;
             innerPairs |= !endPair;
 
@@ -153,6 +156,11 @@ public class TestUpstreamPrefixAccel
                 assertThat(program.prefixAccel(data, offset, length))
                         .as("%s at offset %s length %s", prefix, offset, length)
                         .isEqualTo(expected);
+                if (run != null) {
+                    assertThat(run.find(data, offset, length))
+                            .as("folded start run %s at offset %s length %s", prefix, offset, length)
+                            .isEqualTo(expected);
+                }
 
                 // Every pair scan finds the same start whichever two prefix bytes it probes.
                 int firstOffset = random.nextInt(acceleratedPrefixLength - 1);

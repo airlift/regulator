@@ -206,6 +206,9 @@ abstract sealed class CompiledPattern
     ///         pattern's full match reads beside the literal set where the pattern compiled no
     ///         program, since its program did not fit the budget, so that every call of its
     ///         placeholder forward program runs the set; otherwise `null`
+    /// @param foldedStartRun the folded run behind the partial program's transparent start
+    ///         literal that its candidate cursor searches for instead, whose memory is reserved, or
+    ///         `null`
     record Analysis(
             int flags,
             long maxMemory,
@@ -234,7 +237,8 @@ abstract sealed class CompiledPattern
             boolean literalSetCount,
             boolean fixedWidthWithoutProgram,
             LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals,
-            RequiredBytes requiredBytes)
+            RequiredBytes requiredBytes,
+            Prog.FoldedStartRun foldedStartRun)
     {
         Analysis
         {
@@ -247,6 +251,9 @@ abstract sealed class CompiledPattern
     private final Slice pattern;
     private final ExpressionAnalysis expressionAnalysis;
     private final Prog partialProg;
+    // A folded run behind the program's transparent start literal that the candidate cursor
+    // searches for in the literal's place, or null; see Dfa.createLiteralCandidateStartCursor.
+    private final Prog.FoldedStartRun foldedStartRun;
     private final boolean longestMatch;
     private final int capturingGroupCount;
     private final Map<Integer, String> capturingGroupNames;
@@ -333,6 +340,7 @@ abstract sealed class CompiledPattern
         this.singleCharacterMatch = requiredPrefix == null && matchesOneUtf8Character(suffixRegexp);
         this.exactLiteralLength = analysis.exactLiteralLength();
         this.partialProg = requireNonNull(analysis.partialProg(), "partialProg is null");
+        this.foldedStartRun = analysis.foldedStartRun();
         this.booleanPlans = requireNonNull(analysis.booleanPlans(), "booleanPlans is null");
         this.hasPreEngineMatcher = keepsPreEngineMatcher(booleanPlans);
         this.clearsGroupsBeforeMatch = !isOrdinaryEngineClass(getClass());
@@ -420,6 +428,7 @@ abstract sealed class CompiledPattern
         this.pattern = pattern.pattern;
         this.expressionAnalysis = pattern.expressionAnalysis;
         this.partialProg = pattern.partialProg;
+        this.foldedStartRun = pattern.foldedStartRun;
         this.longestMatch = pattern.longestMatch;
         this.capturingGroupCount = pattern.capturingGroupCount;
         this.capturingGroupNames = pattern.capturingGroupNames;
@@ -602,6 +611,7 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 true,
+                null,
                 null);
     }
 
@@ -819,7 +829,8 @@ abstract sealed class CompiledPattern
                 null,
                 null,
                 false,
-                extendingLiterals);
+                extendingLiterals,
+                null);
         // Every operation runs on the set only where the set is the shape's route for find and
         // count; a pattern whose plans route find elsewhere needs its program.
         return analysis.shape() == Shape.LITERAL_ALTERNATION && analysis.literalSetCount() ? analysis : null;
@@ -895,6 +906,7 @@ abstract sealed class CompiledPattern
                     null,
                     null,
                     false,
+                    null,
                     null);
         }
 
@@ -1060,12 +1072,14 @@ abstract sealed class CompiledPattern
             booleanPlans = booleanPlans.withDotStarLiteralMatcher(dotStarLiteralMatcher);
         }
         // The literal every match begins with behind a leading assertion. The candidate cursor
-        // searches for it before verifying each occurrence, and when the DFA cannot run the
-        // assertions, the group-zero NFA skips to it instead. Its search is built here, never on
-        // first match, and reserves its memory from the program that holds the forward DFA
-        // budget: the lowered program, when there is one. A pattern neither can serve keeps no
-        // literal, and its DFA keeps the memory. A pattern whose reservation would leave that
-        // program's DFAs too little to initialize also keeps no literal.
+        // scans for it, or for a folded run behind it, and verifies, leftmost first, each start
+        // that holds it, and when the DFA cannot run the assertions, the group-zero NFA skips to
+        // it instead. Its search is built here, never on first match, and reserves its memory
+        // from the program that holds the forward DFA budget: the lowered program, when there is
+        // one. A pattern neither can serve keeps no literal, and its DFA keeps the memory. A
+        // pattern whose reservation would leave that program's DFAs too little to initialize also
+        // keeps no literal.
+        Prog.FoldedStartRun foldedStartRun = null;
         byte[] transparentStartLiteral = searchesTransparentStartLiteral(booleanPlans, longestMatch, requiredPrefix, semanticProgram)
                 ? semanticProgram.buildTransparentStartLiteral()
                 : null;
@@ -1076,6 +1090,23 @@ abstract sealed class CompiledPattern
             if (budgetProgram.leavesDfaMinimum(transparentStartLiteralSize)) {
                 budgetProgram.setDfaMemory(budgetProgram.dfaMemory() - transparentStartLiteralSize);
                 semanticProgram.configureTransparentStartLiteral(transparentStartLiteral, transparentStartLiteralSearch);
+                // A folded run behind the literal whose pair is more than four times rarer than
+                // the literal's (see rarerFoldedStartRun) feeds the candidate cursor in its place,
+                // when the DFA runs the program's assertions, so the cursor can serve it. Its scan
+                // reserves its memory as the literal's did. The literal stays configured, so every
+                // other route decides as before. The pattern, not the program, keeps the run: the
+                // program's fields and folded prefix scan are compiled into the DFA's scan loop,
+                // and a change to them moved that loop's layout.
+                Prog.FoldedStartRun rarerRun = semanticProgram.hasDfaUnsupportedAssertions()
+                        ? null
+                        : rarerFoldedStartRun(normalizedSuffixRegexp, transparentStartLiteral, transparentStartLiteralSearch, caseFolding, byteFrequencies);
+                if (rarerRun != null) {
+                    long rarerRunSize = rarerRun.estimatedRetainedSize();
+                    if (budgetProgram.leavesDfaMinimum(rarerRunSize)) {
+                        budgetProgram.setDfaMemory(budgetProgram.dfaMemory() - rarerRunSize);
+                        foldedStartRun = rarerRun;
+                    }
+                }
             }
         }
         // The regex crate's Aho-Corasick route for large literal alternations, which the forward
@@ -1240,7 +1271,8 @@ abstract sealed class CompiledPattern
                 finalLineEndOnePass,
                 positionNfa,
                 false,
-                null);
+                null,
+                foldedStartRun);
     }
 
     /// Returns the bytes of `prefix`, sharing the literal sequence's first literal when it holds
@@ -1285,7 +1317,8 @@ abstract sealed class CompiledPattern
             Prog.OnePassTables finalLineEndOnePass,
             PositionNfa positionNfa,
             boolean fixedWidthWithoutProgram,
-            LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals)
+            LiteralSetSpanMatcher.ExtendingLiterals literalSetExtendingLiterals,
+            Prog.FoldedStartRun foldedStartRun)
     {
         // The shape full-Slice find takes, in the order each route was added. A pattern whose find
         // runs the ordinary engine on the forward program alone is general, and only a general
@@ -1481,7 +1514,8 @@ abstract sealed class CompiledPattern
                 literalSetCount,
                 fixedWidthWithoutProgram,
                 literalSetExtendingLiterals,
-                reservedRequiredBytes);
+                reservedRequiredBytes,
+                foldedStartRun);
     }
 
     /// Whether a window of [RequiredBytes#SHORT_WINDOW_LIMIT] bytes or more may be checked for a
@@ -2278,6 +2312,11 @@ abstract sealed class CompiledPattern
     RequiredBytes requiredBytesForDiagnostics()
     {
         return requiredBytes;
+    }
+
+    Prog.FoldedStartRun foldedStartRunForDiagnostics()
+    {
+        return foldedStartRun;
     }
 
     long requiredBytesRetainedSizeForDiagnostics()
@@ -3118,7 +3157,7 @@ abstract sealed class CompiledPattern
         // so the cursor needs neither a variable length nor a program free of assertions. The DFA
         // must run the assertions; otherwise the group-zero NFA skips to the literal instead.
         if (partialProg.transparentStartLiteral() != null) {
-            return partialProg.hasDfaUnsupportedAssertions() ? null : Dfa.createLiteralCandidateStartCursor(partialProg);
+            return partialProg.hasDfaUnsupportedAssertions() ? null : Dfa.createLiteralCandidateStartCursor(partialProg, foldedStartRun);
         }
         if (MatchLength.fixed(matchLength) >= 0 || partialProg.hasEmptyWidthAssertions()) {
             return null;
@@ -3147,6 +3186,41 @@ abstract sealed class CompiledPattern
                 program.anchorStart() ||
                 program.anchorEnd() ||
                 program.canMatchEmpty();
+    }
+
+    /// Returns the scan of the folded run behind the transparent start literal `literal` that the
+    /// candidate cursor searches for in the literal's place. Returns `null` when no run qualifies.
+    ///
+    /// A run qualifies when its probe pair, as [ByteFrequencies#foldedProbePair] chooses it, is
+    /// rarer than the literal's pair by the margin of [ByteFrequencies#isRarerByProbeMargin], and
+    /// the rarest qualifying run is chosen, the earliest on ties. The literal's pair is the one
+    /// that `literalSearch`, the literal's search, probes on long windows with vectors, as
+    /// [Prog#findLiteral] pairs them: the adjacent pair of [Prog#adjacentPairOffset] when it finds
+    /// one in a periodic literal, and otherwise, as for a literal of one repeated byte, whose
+    /// period is 1, the byte at [Prog#pairOffset(byte\[\])] and the last byte. Shorter windows,
+    /// and searches without vectors, probe the literal's first and last bytes instead; those
+    /// differ only for a periodic literal or one that begins with a multibyte character. Both
+    /// pairs are rated under the distribution that chooses folded pairs, an ASCII letter of the
+    /// run counting both its cases and a byte of the literal counting only itself. See
+    /// REGULATOR_DECISIONS.md, Folded Run Behind A Start Literal, for why the margin is needed.
+    private static Prog.FoldedStartRun rarerFoldedStartRun(Regexp regexp, byte[] literal, LiteralSearchKernel literalSearch, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    {
+        ByteFrequencies pairFrequencies = byteFrequencies.forFoldedPairs();
+        int adjacentPairOffset = Prog.adjacentPairOffset(literal, literalSearch.smallestPeriod());
+        int firstOffset = adjacentPairOffset >= 0 ? adjacentPairOffset : Prog.pairOffset(literal);
+        int secondOffset = adjacentPairOffset >= 0 ? adjacentPairOffset + 1 : literal.length - 1;
+        double literalProbability = pairFrequencies.probability(literal[firstOffset]) * pairFrequencies.probability(literal[secondOffset]);
+        Regexp.FoldedRun best = null;
+        double bestProbability = 0;
+        for (Regexp.FoldedRun run : regexp.foldedRunsBehindStartLiteral(caseFolding, byteFrequencies)) {
+            byte[] runBytes = run.bytes();
+            double probability = pairFrequencies.foldedProbePairProbability(runBytes, pairFrequencies.foldedProbePair(runBytes, runBytes.length));
+            if (ByteFrequencies.isRarerByProbeMargin(probability, literalProbability) && (best == null || probability < bestProbability)) {
+                best = run;
+                bestProbability = probability;
+            }
+        }
+        return best == null ? null : Prog.FoldedStartRun.create(best.bytes(), best.minimumLead(), best.maximumLead(), byteFrequencies);
     }
 
     /// Whether a search can use the program's transparent start literal: the candidate cursor,

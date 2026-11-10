@@ -183,8 +183,9 @@ Within the budget, compilation and matching keep these limits:
   required-byte checks are not kept when their memory would stop the
   first-match or longest-match DFA from initializing. The literal searched
   behind a leading assertion is kept only when the first-match and
-  longest-match DFAs both keep their minimum memory beside it, a minimum that
-  leaves out a forward DFA's start-byte tables. A prefix's literal set, which long vector prefix scans compare at
+  longest-match DFAs both keep their minimum memory beside it, and the folded
+  run a find can search for in that literal's place only when they keep it
+  beside both, a minimum that leaves out a forward DFA's start-byte tables. A prefix's literal set, which long vector prefix scans compare at
   each candidate, is decided under a `maxMemory` after OnePass and every plan
   and route, so it never takes memory they would use, and is kept only where
   the first-match and longest-match DFAs then keep their minimum memory beside
@@ -249,11 +250,12 @@ byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 `Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
 `RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
 first-byte scanning. The distribution also ranks the folded byte pairs and
-folded runs that case-insensitive prefix scans probe, and admits a
-three-byte run only when its first byte is an ASCII letter it rates rare,
-counting both cases, using English text frequencies under the default. A
-distribution that matches the searched data
-lets the search scan for a rarer byte of the literal instead. Outside scan
+folded runs that case-insensitive prefix scans probe, decides whether a find
+scans for a folded run behind the literal of a leading assertion in place of
+that literal, under any case folding, and admits a three-byte run only when its
+first byte is an ASCII letter it rates rare, counting both cases, using English
+text frequencies under the default. A distribution that matches the searched
+data lets the search scan for a rarer byte of the literal instead. Outside scan
 plans, `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a
 multi-byte literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
 move it for a plan's leading literal led by a non-ASCII byte. Byte frequencies
@@ -268,12 +270,14 @@ filter of one that begins with a few narrow classes, an inner literal search's
 set filter, its choice of a rare class pair, the choice and short-window scan of
 the bytes every match holds, or a fixed-width pattern's choice of the position
 whose first bytes it scans for, which always estimate with English text
-frequencies, nor the literal behind a leading assertion, which scans for its
-first and last bytes, or, in vector scans of a literal led by a multibyte UTF-8
-character that ends before the literal's last byte, that character's last byte
-and the literal's last byte, and in vector scans of a periodic literal, whose
-smallest period is at most half its length, the first two adjacent bytes that
-differ from that pair's first byte on. A fixed-width pattern with no position
+frequencies, nor the bytes probed by the scan for the literal behind a leading
+assertion, which scans for its first and last bytes, or, in vector scans of a
+literal led by a multibyte UTF-8 character that ends before the literal's last
+byte, that character's last byte and the literal's last byte, and in vector
+scans of a periodic literal, whose smallest period is more than one byte and at
+most half its length, the first two adjacent bytes that differ from that pair's
+first byte on; the distribution decides only whether a folded run replaces
+that literal. A fixed-width pattern with no position
 rare enough to scan for also estimates with English text frequencies whether to
 test every start of a 64-byte block at once. A distribution that does not match
 the data can make literal scans several times slower per byte than first-byte

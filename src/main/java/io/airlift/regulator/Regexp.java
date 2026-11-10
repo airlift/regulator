@@ -272,6 +272,25 @@ final class Regexp
     /// and `s`. Runs longer than nine bytes are split.
     List<FoldedRun> foldedRunsForAccel(CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
+        return foldedRuns(caseFolding, byteFrequencies, false);
+    }
+
+    /// Returns the folded runs [#foldedRunsForAccel] returns, with the walk continuing past two
+    /// elements that stop it there and that a transparent start literal (see
+    /// [Prog#buildTransparentStartLiteral]) holds: zero-width assertions, which take no bytes, and
+    /// case-sensitive ASCII letters, each a lead of one byte. Either closes the current run, so no
+    /// run joins bytes across one, while the walk continues past it. In
+    /// `\bthe (?i)Sherlock Holmes`, the runs `herloc` and ` holme` follow the literal `the `,
+    /// behind the leads `s` and `k` that may be the long s and the Kelvin sign. A run found this
+    /// way feeds only a search that verifies every possible start that holds the literal with the
+    /// program, which judges each assertion where it applies.
+    List<FoldedRun> foldedRunsBehindStartLiteral(CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    {
+        return foldedRuns(caseFolding, byteFrequencies, true);
+    }
+
+    private List<FoldedRun> foldedRuns(CaseFolding caseFolding, ByteFrequencies byteFrequencies, boolean behindStartLiteral)
+    {
         FoldedRunBuilder builder = new FoldedRunBuilder(byteFrequencies.forFoldedPairs());
         boolean latin1Program = (parseFlags & LATIN1) != 0;
         Deque<Regexp> stack = new ArrayDeque<>();
@@ -287,10 +306,18 @@ final class Regexp
                         addFullCaseFoldRuns(builder, literalRunes, caseFolding);
                     }
                     else {
-                        addLiteralRuns(builder, literalRunes, (regexp.parseFlags & FOLD_CASE) != 0, (regexp.parseFlags & LATIN1) != 0);
+                        addLiteralRuns(builder, literalRunes, (regexp.parseFlags & FOLD_CASE) != 0, (regexp.parseFlags & LATIN1) != 0, behindStartLiteral);
                     }
                 }
                 case CHAR_CLASS -> addFoldOrbitLead(builder, regexp.charClass, caseFolding, latin1Program || (regexp.parseFlags & LATIN1) != 0);
+                case BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT -> {
+                    if (behindStartLiteral) {
+                        builder.lead(0, 0);
+                    }
+                    else {
+                        builder.stop();
+                    }
+                }
                 default -> builder.stop();
             }
         }
@@ -300,9 +327,9 @@ final class Regexp
     // As the compiler matches a literal without full case folding: an ASCII letter in both cases
     // when the literal folds case, any other ASCII byte as itself, and any other character as its
     // one byte in Latin-1 or its UTF-8 sequence. Folded ASCII letters and ASCII non-letters are
-    // run bytes, a case-sensitive ASCII letter stops the walk, and any other character is a lead
-    // of its width.
-    private static void addLiteralRuns(FoldedRunBuilder builder, int[] literalRunes, boolean foldCase, boolean latin1)
+    // run bytes, a case-sensitive ASCII letter stops the walk, or behind a start literal is a
+    // lead of one byte, and any other character is a lead of its width.
+    private static void addLiteralRuns(FoldedRunBuilder builder, int[] literalRunes, boolean foldCase, boolean latin1, boolean behindStartLiteral)
     {
         for (int literalRune : literalRunes) {
             if (literalRune >= 0x80) {
@@ -310,8 +337,11 @@ final class Regexp
                 builder.lead(width, width);
             }
             else if (!foldCase && isAsciiLetter(literalRune)) {
-                builder.stop();
-                return;
+                if (!behindStartLiteral) {
+                    builder.stop();
+                    return;
+                }
+                builder.lead(1, 1);
             }
             else {
                 builder.runByte(literalRune);

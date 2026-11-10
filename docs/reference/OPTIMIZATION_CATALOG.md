@@ -338,7 +338,9 @@ so the automata run only where a match can be.
   default, the vector form's counted loop and its in-loop kernel for dense
   pairs, the SWAR forms' call-free comparison, and a run behind a lead whose
   width lies within a range, under Unicode and full case folding, with the
-  skip bound the engines share ([#195]); base RE2 [O-PROG-006].
+  skip bound the engines share ([#195]), and a run behind a transparent start
+  literal that the literal's candidate cursor scans for in its place ([#235]);
+  base RE2 [O-PROG-006].
 - **Where:** `Prog.prefixAccelFoldCase`,
   `Prog.prefixAccelFoldCaseFrontAndBackSWAR`, `Prog.findFoldCaseSwar`,
   `ByteFrequencies.foldedProbePair`, `VectorPrefixScanner.findFoldCase`,
@@ -348,6 +350,8 @@ so the automata run only where a match can be.
   `VectorPrefixScanner.findFoldCaseSve`,
   `VectorPrefixScanner.findFoldCaseDenseSve`,
   `Regexp.foldedRunsForAccel`, `Compiler.foldedRunForAccel`,
+  `Regexp.foldedRunsBehindStartLiteral`, `Prog.FoldedStartRun`,
+  `Dfa.searchFoldedRunCandidateBoundary`,
   `Prog.configureFoldCasePrefixRun`, `Prog.prefixAccelFoldCaseBehindLead`,
   `InnerLiteralSearch.findFoldedLiteralVector`
 - **Applies when:** `(?i)` ASCII prefixes, and the vector form for a
@@ -358,9 +362,12 @@ so the automata run only where a match can be.
   Folded runs: case-insensitive patterns under Unicode case folding with no
   folded prefix, or whose folded prefix stops at a letter whose fold leaves
   ASCII, such as `k` or `s`, which also match the Kelvin sign and the long s,
-  when the run's pair is rarer; a three-byte run only when an ASCII letter the
-  selected distribution rates rare leads it; a run that every match starts with
-  only where vectors hold fewer than 64 bytes
+  when the run's pair is rarer, and a prefix run that every match starts with
+  only where vectors hold fewer than 64 bytes. A run behind a [transparent
+  start literal](#transparent-start-literal), under any case folding, for that
+  literal's candidate cursor, when its pair is more than four times rarer than
+  the pair the literal's search probes. Either run of three bytes only when an
+  ASCII letter the selected distribution rates rare leads it
 - **What it does:** A case-insensitive prefix keeps RE2's 9-byte cap, but is
   scanned for two of its folded bytes a SWAR word or vector at a time. The
   pair is the prefix's first and last bytes unless two bytes at least two
@@ -383,14 +390,21 @@ so the automata run only where a match can be.
   folded bytes, or of three led by a rare letter, that every match holds
   behind a lead of known least and greatest width, and scans for the run
   with the rarest pair in place of the folded prefix.
-  The scan starts the least lead past the search start and
-  returns the run less the greatest lead, and the DFA, NFA, and BitState
+  Prefix acceleration starts that scan the least lead past the search start
+  and returns the run less the greatest lead, and the DFA, NFA, and BitState
   searches skip the scans that would find the same run again. A run that every
   match starts with keeps the start bytes only in a first-match DFA whose
   start bytes carry a start literal filter, and a find loop verifies their
-  candidates without a reverse pass. RE2 scans nothing past such a fold. Rust,
-  RE2, and Java `name-sherlock-casei` and Rust `name-sherlock-holmes-casei`
-  take 0.17 to 0.20 of their earlier time on Graviton and 0.09 to 0.13 on
+  candidates without a reverse pass. RE2 scans nothing past such a fold.
+  Behind a transparent start literal, the walk continues past assertions and
+  case-sensitive letters, and the literal's candidate cursor scans for a rarer
+  run in the literal's place and verifies, leftmost first, each start the
+  run's lead allows that holds the literal, as for ` holme` behind `the ` in
+  `\bthe (?i)Sherlock Holmes`. That run scans with a second program
+  configured with it as its folded prefix, with the vector pair kernels from
+  1 KiB with the Vector API and the generic pair SWAR kernel otherwise, so the
+  pattern's program keeps its compiled layout. Rust, RE2, and Java
+  `name-sherlock-casei` and Rust `name-sherlock-holmes-casei` take 0.17 to 0.20 of their earlier time on Graviton and 0.09 to 0.13 on
   Intel, and `the-casei`, with a candidate about every 60 bytes, 0.73 to 0.77
   and 0.62 to 0.64 ([#85]). The counted loop takes `(?i)Sherlock Holmes` in
   Rust and Java to 0.75 to 0.83 of its earlier time on Graviton and Intel, the
@@ -399,7 +413,11 @@ so the automata run only where a match can be.
   the folded run takes `(?i)password` over CPython source to 0.43 to 0.46 in
   RE2, Rust, and Java with Unicode case and 0.12 to 0.16 in Trino, and the
   three-byte runs `wat` and `wor`, led by a rare letter, take Trino's counts of
-  `(?i)watson` and `(?i)works` over English to 0.16 on Graviton. With the
+  `(?i)watson` and `(?i)works` over English to 0.16 on Graviton, and the run
+  ` holme` behind `the ` takes RE2 and Rust counts of
+  `\bthe (?i)Sherlock Holmes` over English to 0.65 to 0.67 on Graviton and
+  0.50 to 0.51 on Intel, and Rust's over curly-quoted English to 0.34, while
+  rows whose run the margin rejects, such as `\bgot(?i)syou`, tie. With the
   in-loop kernel, CPython's `error`, `(?i)secret` over a log, and Java's
   Unicode `(?i)Twain` run at 0.94 to 1.06 of the earlier per-vector scan's
   time on Intel, where the counted loop loses. The call-free comparison keeps
@@ -456,13 +474,16 @@ so the automata run only where a match can be.
   [start.rs][ra-start]). Regulator: the DFA candidate cursor and the NFA skip
   ([#96]).
 - **Where:** `Prog.buildTransparentStartLiteral`, `Prog.skipToStartCandidate`,
-  `Dfa.createLiteralCandidateStartCursor`
+  `Dfa.createLiteralCandidateStartCursor`,
+  `Dfa.searchFoldedRunCandidateBoundary`
 - **Applies when:** Shapes such as `(?m)^lit` and `\blit`, literals of 2 to 64
   bytes
 - **What it does:** When a pattern begins with line or word assertions and
   then a literal, the scan finds the literal and the engine checks the
   assertion from the byte before each hit. The NFA skips to the literal when
-  no thread is live, and a DFA cursor scans for it. On rebar's
+  no thread is live, and a DFA cursor scans for it, or for a rarer folded run
+  behind it, as [Folded prefix masks](#folded-prefix-masks) describes, and
+  verifies each start that holds the literal. On rebar's
   `line-boundary-sherlock-holmes`, searches take 0.03 to 0.09 of their earlier
   time, and Rust goes from 20 to 28 times the crate's time to 1.07 to 1.37
   ([#96]).
@@ -2320,6 +2341,7 @@ change is described.
 [#226]: https://github.com/airlift/regulator/pull/226
 [#231]: https://github.com/airlift/regulator/pull/231
 [#232]: https://github.com/airlift/regulator/pull/232
+[#235]: https://github.com/airlift/regulator/pull/235
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor

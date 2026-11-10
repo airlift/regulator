@@ -20,6 +20,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -150,6 +151,20 @@ public class TestDfaCandidateStartCursor
                 assertLiteralCandidateAgrees(expression, text);
             }
         }
+
+        // A folded-run cursor's boundaries are relative to a region of a view that starts inside
+        // its backing array.
+        String runExpression = "\\bthe (?i)Sherlock Holmes";
+        String viewText = "ignored the Sherlock Holmes " + FILLER;
+        Slice view = utf8("padding" + viewText + "trailer").slice("padding".length(), viewText.length());
+        int runRegionStart = "ignored ".length();
+        RegexpMatcher runCandidate = compile(runExpression).groupZeroMatcher(view, null).reset(view, runRegionStart, view.length());
+        assertThat(runCandidate.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).isTrue();
+        assertThat(boundaries(runCandidate))
+                .containsExactly(new Boundary(8, 27))
+                .isEqualTo(shifted(ordinaryBoundaries(runExpression, view.slice(runRegionStart, view.length() - runRegionStart)), runRegionStart));
+        assertThat(runCandidate.candidateStartRouteCountForDiagnostics()).isEqualTo(1);
+        assertThat(runCandidate.candidateStartFoldedRunSearchCountForDiagnostics()).isPositive();
 
         Slice multibyteStart = utf8("x💰a");
         Re2 insideCodePoint = compile("(a+|💰+)");
@@ -348,6 +363,121 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
+    public void testFoldedStartRunCursorSearchesRarestRunRarerThanLiteral()
+    {
+        // `the ` is common in English and the folded run ` holme` behind it far rarer, so the
+        // cursor searches for the run, 12 to 15 bytes in, past the `s` and `k` that may be the
+        // long s and the Kelvin sign. The earlier `herloc` is also rare enough, but ` holme` is
+        // rarer. Java's ASCII folding makes ` sherlock` one run 3 bytes in. A caller distribution
+        // under which `c` never occurs makes `herloc` the rarest.
+        String expression = "\\bthe (?i)Sherlock Holmes";
+        for (String language : List.of("RE2", "Rust", "Java (?u)", "Trino")) {
+            assertFoldedStartRun(language + " " + expression, compilePattern(language, expression), " holme", 12, 15, 1, 4);
+        }
+        assertFoldedStartRun("Java " + expression, compilePattern("Java", expression), " sherlock", 3, 3, 5, 8);
+        long[] counts = new long[256];
+        Arrays.fill(counts, 1_000);
+        counts['c'] = 0;
+        counts['C'] = 0;
+        Re2 withoutC = Re2.compile(utf8(expression), Re2.Options.defaults().setByteFrequencies(ByteFrequencies.fromCounts(counts)));
+        assertFoldedStartRun("RE2 " + expression + " without c", withoutC, "herloc", 5, 6, 0, 5);
+
+        // A run must be more than four times rarer than the literal, so `ab` keeps the literal
+        // cursor against `ernel` and Java's `kernel`, `got` against the `you` of `\bgot(?i)syou`
+        // and Java's `syou`, and `the` against Java's `this`; the `thi` of `\bthe(?i)this` is
+        // led by the common `t`, so no other language finds a run.
+        for (String rejected : List.of("\\bab(?i)kernel", "\\bthe(?i)this", "\\bgot(?i)syou")) {
+            for (String language : List.of("RE2", "Java", "Rust", "Trino")) {
+                String description = language + " " + rejected;
+                RegexpMatcher matcher = compilePattern(language, rejected).groupZeroMatcher(utf8(FILLER), null);
+                assertThat(matcher.candidateStartCursorSearchesLiteralForDiagnostics()).as(description).isTrue();
+                assertThat(matcher.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isFalse();
+            }
+        }
+    }
+
+    @Test
+    public void testFoldedStartRunCursorVerifiesEveryStartTheRunAllows()
+    {
+        // Each start a run allows is verified from the byte before it, so `\b` and `\B` are judged
+        // at the text start, after a space, and after a word byte, as in `bathe`, for matches in
+        // mixed case and with the wider folds, back to back, and in windows on both sides of the
+        // cursor's minimum and of the vector scan's. The space of `the ` is a run byte, so a
+        // three-byte run behind a start literal needs the folded word to follow the literal
+        // directly, as the `wat` of `\bthe(?i)watson`, led by the rare `w`, does.
+        for (FoldedRunCase runCase : List.of(
+                new FoldedRunCase("\\bthe (?i)Sherlock Holmes", List.of("the Sherlock Holmes", "the SHERLOCK holmes", "the \u017Fherloc\u212A Holmes"), "bathe sherlock holmes"),
+                new FoldedRunCase("\\Bhe (?i)Sherlock Holmes", List.of("bathe sHeRlOcK HoLmEs", "athe \u017FHERLOC\u212A HOLMES"), "a he sherlock holmes"),
+                new FoldedRunCase("\\bthe(?i)watson", List.of("thewatson", "theWATSON", "thewat\u017Fon"), "bathewatson"))) {
+            List<String> texts = TestPrefixProbeAcceleration.foldedRunTexts(runCase.spellings(), runCase.nearMiss());
+            for (String language : List.of("RE2", "Java", "Rust", "Trino")) {
+                String description = language + " " + runCase.expression();
+                CompiledPattern pattern = compilePattern(language, runCase.expression());
+                CompiledPattern control = compilePattern(language, "(" + runCase.expression() + ")");
+                long routes = 0;
+                for (String text : texts) {
+                    routes += assertFoldedRunCandidateAgrees(description, pattern, control, utf8(text)).candidateStartRouteCountForDiagnostics();
+                }
+                assertThat(routes).as(description).isPositive();
+            }
+        }
+    }
+
+    @Test
+    public void testFoldedStartRunCursorVerifiesOnlyStartsThatHoldTheLiteral()
+    {
+        // Behind an opening curly quote, whose bytes lie outside ASCII, the run ` holme` of
+        // `abcMr. Sherlock Holmes` allows a start at the `a`, which holds no `the `. Rust, Java
+        // with Unicode case, and Trino judge `\b` with a DFA that quits on a start after a byte
+        // outside ASCII, and four quits in a row turn the cursor and the DFA off until the next
+        // reset. The cursor rules such a start out unverified, so every find routes through it, as
+        // with the literal cursor. A start that holds the literal right after the quote still
+        // quits and falls back, as with the literal cursor.
+        String expression = "\\bthe (?i)Sherlock Holmes";
+        String tail = " ".repeat(Dfa.MINIMUM_LITERAL_CANDIDATE_SEARCH_BYTES);
+        for (String language : List.of("Rust", "Java (?u)", "Trino")) {
+            CompiledPattern pattern = compilePattern(language, expression);
+            CompiledPattern control = compilePattern(language, "(" + expression + ")");
+            for (RunCursorCase runCase : List.of(
+                    new RunCursorCase("\u201CabcMr. Sherlock Holmes. the Sherlock Holmes. ".repeat(4) + tail, 4, 0),
+                    new RunCursorCase("\u201Cthe Sherlock Holmes. the Sherlock Holmes. ".repeat(4) + tail, 4, 4))) {
+                String description = language + " " + expression + " on " + runCase.text();
+                RegexpMatcher candidate = assertFoldedRunCandidateAgrees(language + " " + expression, pattern, control, utf8(runCase.text()));
+                assertThat(candidate.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(runCase.routes());
+                assertThat(candidate.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(runCase.fallbacks());
+            }
+        }
+    }
+
+    @Test
+    public void testFoldedStartRunCursorFindsLeftmostMatch()
+    {
+        // A match longer than an anchored verification's transition limit falls back to the
+        // matcher's other routes. A find from inside a match, whose run lies behind a lead wider
+        // than the find's offset, verifies no start before the find's. The run of the match at 1
+        // starts at 4 and overlaps the run found at 3, so the scan resumes right after each run it
+        // finds, not past its end.
+        String filler = FILLER_UNIT.repeat(8);
+        for (RunFindCase runCase : List.of(
+                new RunFindCase("Rust", "\\bthe (?i)Sherlock Holmes[a-z ]*", "the Sherlock Holmes " + "and so on ".repeat(20) + ". the " + filler, 0, new Boundary(0, 220), 0, 1),
+                new RunFindCase("RE2", "\\bthe (?i)Sherlock Holmes", "the \u017Fherlock Holmes the " + filler, 1, null, 0, 0),
+                new RunFindCase("RE2", "\\Bthz(?i)zzzz", "zthzzzzz the thz " + filler, 0, new Boundary(1, 8), 1, 0),
+                new RunFindCase("Trino", "\\Bthz(?i)zzzz", "zthzzzzz the thz " + filler, 0, new Boundary(1, 8), 1, 0))) {
+            String description = runCase.language() + " " + runCase.expression() + " from " + runCase.from() + " on " + runCase.text();
+            RegexpMatcher candidate = compilePattern(runCase.language(), runCase.expression()).groupZeroMatcher(utf8(runCase.text()), null);
+            assertThat(candidate.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isTrue();
+            boolean found = candidate.find(runCase.from());
+            assertThat(found ? new Boundary(candidate.start(), candidate.end()) : null).as(description).isEqualTo(runCase.expected());
+            assertThat(candidate.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(runCase.routes());
+            assertThat(candidate.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(runCase.fallbacks());
+            // A search that proves there is no match counts neither a route nor a fallback.
+            if (runCase.expected() == null) {
+                assertThat(candidate.candidateStartFoldedRunSearchCountForDiagnostics()).as(description).isPositive();
+            }
+        }
+    }
+
+    @Test
     public void testLiteralCandidateCursorKeepsProseAndFallsBackOnDenseCandidates()
     {
         // A mid-line candidate of a line start fails in its start state, so prose such as this
@@ -443,6 +573,48 @@ public class TestDfaCandidateStartCursor
         assertThat(requiredBytesOutcomes).contains(false, true);
     }
 
+    @Test
+    public void testFoldedStartRunMemoryIsReservedFromForwardDfa()
+    {
+        // The run is reserved after the literal, from the allowance the literal's charge leaves,
+        // and is kept only where both charges leave both forward DFAs their minimum, so the sweep
+        // passes budgets that keep the literal and the run and budgets that keep only the
+        // literal. The required bytes are reserved after both, as in the literal's sweep above.
+        Slice expression = utf8("\\bthe (?i)Sherlock Holmes");
+        Re2 pattern = Re2.compile(expression);
+        Prog program = pattern.forwardProgramForDiagnostics();
+        long literalReservation = program.transparentStartLiteralSearch().estimatedRetainedSize() + SizeOf.sizeOf(program.transparentStartLiteral());
+        long runReservation = pattern.foldedStartRunForDiagnostics().estimatedRetainedSize();
+        List<Boolean> outcomes = new ArrayList<>();
+        for (long maxMemory = 4 * 1024; maxMemory <= 512 * 1024; maxMemory += 512) {
+            Re2 longestPattern;
+            Re2 firstMatchPattern;
+            try {
+                longestPattern = Re2.compile(expression, Re2.Options.defaults().setLongestMatch(true).setMaxMemory(maxMemory));
+                firstMatchPattern = Re2.compile(expression, Re2.Options.defaults().setMaxMemory(maxMemory));
+            }
+            catch (RegexpCompileMemoryLimitException ignored) {
+                // A budget the program does not fit reserves nothing.
+                continue;
+            }
+            Prog longest = longestPattern.forwardProgramForDiagnostics();
+            Prog firstMatch = firstMatchPattern.forwardProgramForDiagnostics();
+            long allowance = longest.dfaMemory() + longestPattern.requiredBytesRetainedSizeForDiagnostics();
+            long minimum = Dfa.DfaInstance.minimumMemory(longest, Dfa.DfaInstance.Kind.LONGEST_MATCH);
+            boolean keepsLiteral = (allowance - literalReservation) / 2 >= minimum;
+            boolean keepsRun = keepsLiteral && (allowance - literalReservation - runReservation) / 2 >= minimum;
+            assertThat(firstMatch.transparentStartLiteral() != null).as("keeps literal at %s", maxMemory).isEqualTo(keepsLiteral);
+            assertThat(firstMatchPattern.foldedStartRunForDiagnostics() != null).as("keeps run at %s", maxMemory).isEqualTo(keepsRun);
+            assertThat(allowance - firstMatch.dfaMemory() - firstMatchPattern.requiredBytesRetainedSizeForDiagnostics())
+                    .as("reservation at %s", maxMemory)
+                    .isEqualTo((keepsLiteral ? literalReservation : 0) + (keepsRun ? runReservation : 0));
+            if (keepsLiteral) {
+                outcomes.add(keepsRun);
+            }
+        }
+        assertThat(outcomes).contains(false, true);
+    }
+
     // Asserts that the pattern keeps its required bytes exactly where reserving
     // `requiredBytesSize` from the allowance it had before their charge leaves each forward DFA
     // that initialized able to, and that each such DFA initializes with what every charge leaves.
@@ -479,6 +651,43 @@ public class TestDfaCandidateStartCursor
             assertThat(matcher.candidateStartRouteCountForDiagnostics()).as(description).isEqualTo(fallsBack ? 0 : 1);
             assertThat(matcher.candidateStartFallbackCountForDiagnostics()).as(description).isEqualTo(fallsBack ? 1 : 0);
         }
+    }
+
+    private static RegexpMatcher assertFoldedRunCandidateAgrees(String patternDescription, CompiledPattern pattern, CompiledPattern control, Slice input)
+    {
+        RegexpMatcher candidate = pattern.groupZeroMatcher(input, null);
+        RegexpMatcher controlMatcher = control.matcher(input);
+        List<Boundary> expected = boundaries(controlMatcher);
+
+        String description = patternDescription + " on " + input.toStringUtf8();
+        assertThat(controlMatcher.candidateStartCursorEnabledForDiagnostics()).as(description).isFalse();
+        assertThat(candidate.candidateStartCursorSearchesFoldedStartRunForDiagnostics()).as(description).isTrue();
+        assertThat(boundaries(candidate)).as(description).isEqualTo(expected);
+        return candidate;
+    }
+
+    private static void assertFoldedStartRun(String description, CompiledPattern pattern, String run, int minimumLead, int maximumLead, int firstOffset, int secondOffset)
+    {
+        Prog.FoldedStartRun foldedStartRun = pattern.foldedStartRunForDiagnostics();
+        assertThat(foldedStartRun).as(description).isNotNull();
+        assertThat(foldedStartRun.run()).as(description).isEqualTo(run.getBytes(UTF_8));
+        assertThat(foldedStartRun.minimumLead()).as(description).isEqualTo(minimumLead);
+        assertThat(foldedStartRun.maximumLead()).as(description).isEqualTo(maximumLead);
+        assertThat(foldedStartRun.firstOffset()).as(description).isEqualTo(firstOffset);
+        assertThat(foldedStartRun.secondOffset()).as(description).isEqualTo(secondOffset);
+    }
+
+    private static CompiledPattern compilePattern(String language, String expression)
+    {
+        Slice source = utf8(expression);
+        return switch (language) {
+            case "RE2" -> Re2.compile(source);
+            case "Java" -> JavaRegexp.compile(source);
+            case "Java (?u)" -> JavaRegexp.compile(utf8("(?u)" + expression));
+            case "Rust" -> RustRegexp.compile(source);
+            case "Trino" -> TrinoRegexp.compile(source).re2();
+            default -> throw new IllegalArgumentException(language);
+        };
     }
 
     private static Re2 assertLiteralCandidateAgrees(String expression, Slice input)
@@ -556,4 +765,10 @@ public class TestDfaCandidateStartCursor
     private record Boundary(int start, int end) {}
 
     private record LiteralCase(String expression, String literal) {}
+
+    private record FoldedRunCase(String expression, List<String> spellings, String nearMiss) {}
+
+    private record RunCursorCase(String text, int routes, int fallbacks) {}
+
+    private record RunFindCase(String language, String expression, String text, int from, Boundary expected, int routes, int fallbacks) {}
 }
