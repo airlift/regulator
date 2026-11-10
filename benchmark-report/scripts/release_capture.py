@@ -218,7 +218,8 @@ def build(plan_path):
     collectors = {}
     combined = {'hosts': [], 'observations': [], 'comparisons': []}
     manifests, exports = [], []
-    plans = {Path(item['plan']): fleet.validate(Path(item['plan'])) for item in plan['language']}
+    # Each plan's capture ran at the memory budgets its manifest recorded.
+    plans = {Path(item['plan']): fleet.validate(Path(item['plan']), recorded_budgets=True) for item in plan['language']}
     for item, receipts in zip(plan['language'], language_receipts(plan['language'], plans)):
         directory = Path(item['plan'])
         frozen = plans[directory]
@@ -260,6 +261,7 @@ def build(plan_path):
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',
                               'Ordinary R-family workers have 2 vCPUs and 16 GiB RAM. Measured JVMs retain an 8 GiB heap; JMH launchers use at most 256 MiB.',
                               'JVM language timings use five forks and ten one-second warmup and measurement iterations. Native RE2 uses five repetitions.',
+                              'A few rows run at a memory budget of their own, set in the budget list: a pill means the row\'s whole setup runs at that budget, for every engine with a memory limit. Rows without a pill run each engine at its own default.',
                               'Observed host ranges are not confidence intervals. Incompatibility, reproduced timeouts, and timing variability remain explicit.'],
               'provenance': {'collectors': collectors,
                              'languageExportSha256': exports, 'logicalLanguageJobs': len(combined['hosts']),

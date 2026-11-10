@@ -1,8 +1,10 @@
 import unittest
 from pathlib import Path
 import tempfile
+from unittest import mock
 
 import bulk
+import collection
 import mappings
 import rebar_inventory
 import unicode_ranges
@@ -72,6 +74,44 @@ class TestMappings(unittest.TestCase):
                 self.assertIsNone(mappings.translate(identity, "rust", pattern)[0])
                 with self.assertRaisesRegex(ValueError, "source pattern changed"):
                     mappings.translate(identity, "rust", b"different")
+
+    def test_memory_budgets_name_frozen_rows_and_languages(self):
+        manifests = Path(__file__).resolve().parents[1] / "manifests"
+        rows = {line.split("\t")[0] for line in (manifests / "rebar-extended-workloads.tsv").read_text().splitlines()[1:]}
+        rows |= {line.split(",")[0] for line in (manifests / "rebar-workloads.csv").read_text().splitlines()[1:]}
+        for identity, (_, languages) in mappings.MEMORY_BUDGETS_MIB.items():
+            self.assertIn(identity, rows)
+            self.assertLessEqual(set(languages), set(collection.ENGINES))
+        self.assertEqual(mappings.memory_budget("dictionary/search/english-10", "rust"),
+                         mappings.MEMORY_BUDGETS_MIB["dictionary/search/english-10"][0] << 20)
+        self.assertIsNone(mappings.memory_budget("dictionary/search/english-10", "trino"))
+        self.assertIsNone(mappings.memory_budget("unicode/overlapping-words/ascii", "re2"))
+
+    def test_memory_budget_list_parses_strictly(self):
+        # The shipped list loads under these rules, and each budgeted row's compile sibling is listed with it.
+        budgets = mappings.load_memory_budgets()
+        self.assertEqual(budgets["dictionary/compile/english-10"], budgets["dictionary/search/english-10"])
+        self.assertEqual(budgets["curated/10-bounded-repeat/compile-context"], budgets["curated/10-bounded-repeat/context"])
+        header = "# A comment\nrow_id\tlanguages\tbudget_mib\n"
+        self.assertEqual(mappings.parse_memory_budgets(header + "a\tre2,rust\t72\n# Another\nb\tjava\t8796093022207\n"),
+                         {"a": (72, ("re2", "rust")), "b": (8796093022207, ("java",))})
+        # The same cases as RebarRunner's loader test.
+        for rows in ("a\tre2\t96\n\nb\tre2\t96\n", "a\tre2\t96\na\tjava\t96\n", "a\tgo\t96\n", "a\tre2,re2\t96\n",
+                     "a\t\t96\n", "a\tre2\n", "a\tre2\t9_6\n", "a\tre2\t 96\n", "a\tre2\t96 \n", "a\tre2\t0\n",
+                     "a\tre2\t096\n", "a\tre2\t17592186044416\n", "a\tre2\t8796093022208\n", "a\tre2\t96\r\n"):
+            with self.subTest(rows=rows), self.assertRaisesRegex(ValueError, "^memory budget list line "):
+                mappings.parse_memory_budgets(header + rows)
+        with self.assertRaisesRegex(ValueError, "expected the header row"):
+            mappings.parse_memory_budgets("# A comment\na\tre2\t96\n")
+        # The shipped file is read with its line endings intact, so a CRLF copy fails as it does in RebarRunner.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "budgets.tsv"
+            path.write_bytes(mappings.MEMORY_BUDGETS_FILE.read_bytes().replace(b"\n", b"\r\n"))
+            with mock.patch.object(mappings, "MEMORY_BUDGETS_FILE", path):
+                with self.assertRaisesRegex(ValueError, "expected the header row"):
+                    mappings.load_memory_budgets()
+        with self.assertRaisesRegex(ValueError, "no header row"):
+            mappings.parse_memory_budgets("# A comment\n")
 
     def test_unicode_range_generator_rejects_missing_or_overlapping_ranges(self):
         with tempfile.TemporaryDirectory() as directory:

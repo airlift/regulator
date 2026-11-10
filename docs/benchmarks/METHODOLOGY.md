@@ -130,6 +130,49 @@ replacement, or full SQL integration. Preserve the raw measurements regardless
 of the outcome. For timing variability, show the status and measured times
 directly rather than a footnote symbol or an unsupported winner.
 
+### Memory budgets
+
+Each engine runs at its own default memory limit, except on a few language bulk
+rows that run at a budget of their own, set in the budget list. Every engine
+with a memory limit runs such a row at its budget, and the report shows the
+budget as a pill beside the row's name. A listed row's compile sibling, the row
+that compiles the same pattern, is listed at the same budget and languages, so
+a pill means the row's whole setup runs at that budget.
+
+| Engine | Setting at the row's budget |
+|---|---|
+| Regulator (RE2, Java, Trino, Rust) | `setMaxMemory` |
+| Native RE2 | `RE2::Options::set_max_mem` |
+| Rust `regex` crate | `RegexBuilder::size_limit` and `dfa_size_limit`, each the full budget |
+| JDK `Pattern`, Joni | No memory limit |
+
+RE2's `max_mem` covers its programs and DFAs together, while the crate limits
+its compiled program and each lazy DFA cache separately, so at a given budget
+the crate may hold more than the budget in all. The budget list,
+[`benchmark-memory-budgets.tsv`](../../src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv),
+names the budgeted rows, their languages and their budgets, with the compile
+sibling rule as its header comment. The [language
+collector](../../tools/re2-benchmark/language/README.md) and the Regulator
+Rebar runner both read it.
+
+In Rebar's own runs, Rebar's `engines/regulator` runner, from runner version
+`budgets-1`, bundles a copy of the budget list and gives Regulator's two
+engines the same budgets, keyed by the Rebar benchmark name: `regulator/re2` a
+row's RE2 budget and `regulator/rust` its Rust budget. A pattern the list does
+not name that Regulator's default rejects compiles at that runner's 384 MiB
+fallback. Rebar's input has no budget key, so its comparators run at Rebar's
+own settings, which we don't change. Its `re2` engine leaves RE2's `max_mem` at
+the 8 MiB default. Its `rust/regex` engine builds the crate's meta regex with a
+100 MiB NFA size limit and the crate's defaults otherwise: a 2 MiB lazy DFA
+cache, a 1 MiB one-pass DFA, and a 40 KiB full DFA tried only for an NFA of at
+most 30 states.
+
+Reports from campaigns before row budgets ran native RE2 at its 8 MiB `max_mem`
+default and the crate at its 10 MiB `size_limit` and 2 MiB `dfa_size_limit`
+on every row. On a budgeted row the comparator's time can therefore differ
+from an earlier report because of the budget, not an engine change: native
+RE2 runs `unicode/overlapping-words` on its DFAs instead of its NFA.
+
 ## Java benchmarks
 
 Representative JMH classes include:

@@ -16,9 +16,11 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 
 import java.io.BufferedWriter;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
@@ -26,8 +28,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -53,6 +58,20 @@ public final class RebarRunner
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
     private static final long NEWLINES = 0x0A0A0A0A0A0A0A0AL;
+
+    /// The memory budget list: the benchmarks that run at a budget of their own, each with its
+    /// budget and languages. The language bulk harness reads the same list, so a Rebar benchmark and
+    /// its bulk row run at one budget.
+    private static final String MEMORY_BUDGETS_RESOURCE = "/io/airlift/regulator/benchmark-memory-budgets.tsv";
+    private static final String MEMORY_BUDGETS_HEADER = "row_id\tlanguages\tbudget_mib";
+    private static final Set<String> MEMORY_BUDGET_LANGUAGES = Set.of("re2", "java", "trino", "rust");
+    private static final Map<String, Map<String, Long>> MEMORY_BUDGETS = loadMemoryBudgets();
+
+    /// Rebar's `engines/regulator` runner is a separate runner that shares the budget list: it
+    /// bundles a copy, which its runner version names. `TestRebarRunner` fails when the list's
+    /// SHA-256 differs from this pin, so a budget change also updates Rebar's copy and version.
+    static final String REBAR_RUNNER_VERSION = "budgets-1";
+    static final String MEMORY_BUDGETS_SHA256 = "63abab2efd99338c3b20dd42c5531af20d776bbdd7d4c2319143bb372066c821";
 
     private RebarRunner() {}
 
@@ -81,10 +100,94 @@ public final class RebarRunner
         run(System.in, System.out);
     }
 
+    /// Returns the budget in bytes the budget list gives a benchmark in one language, such as
+    /// `re2`, or 0 when it runs at Regulator's default.
+    static long memoryBudget(String name, String language)
+    {
+        return MEMORY_BUDGETS.getOrDefault(name, Map.of()).getOrDefault(language, 0L);
+    }
+
+    private static Map<String, Map<String, Long>> loadMemoryBudgets()
+    {
+        InputStream input = RebarRunner.class.getResourceAsStream(MEMORY_BUDGETS_RESOURCE);
+        if (input == null) {
+            throw new IllegalStateException("memory budget list not found: " + MEMORY_BUDGETS_RESOURCE);
+        }
+        try (input) {
+            return parseMemoryBudgets(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the memory budget list: " + MEMORY_BUDGETS_RESOURCE, e);
+        }
+    }
+
+    /// Parses the budget list: `#` comment lines, the header row, then one row per benchmark with
+    /// its languages and its budget in MiB. Blank lines, duplicate benchmarks, unknown languages,
+    /// and a budget that is not a canonical positive integer whose byte count fits a `long` are
+    /// errors. `mappings.py` reads the list by the same rules.
+    static Map<String, Map<String, Long>> parseMemoryBudgets(String text)
+    {
+        List<String> lines = new ArrayList<>(Arrays.asList(text.split("\n", -1)));
+        if (lines.getLast().isEmpty()) {
+            lines.removeLast();
+        }
+        Map<String, Map<String, Long>> budgets = new HashMap<>();
+        boolean header = false;
+        for (int index = 0; index < lines.size(); index++) {
+            String line = lines.get(index);
+            String location = "memory budget list line " + (index + 1) + ": ";
+            if (line.startsWith("#")) {
+                continue;
+            }
+            if (line.isEmpty()) {
+                throw new IllegalArgumentException(location + "blank line");
+            }
+            if (!header) {
+                if (!line.equals(MEMORY_BUDGETS_HEADER)) {
+                    throw new IllegalArgumentException(location + "expected the header row: " + line);
+                }
+                header = true;
+                continue;
+            }
+            String[] fields = line.split("\t", -1);
+            if (fields.length != 3) {
+                throw new IllegalArgumentException(location + "expected 3 columns, found " + fields.length);
+            }
+            if (fields[0].isEmpty() || budgets.containsKey(fields[0])) {
+                throw new IllegalArgumentException(location + "empty or duplicate benchmark: " + fields[0]);
+            }
+            long budget = parseBudgetBytes(fields[2], location);
+            Map<String, Long> languages = new HashMap<>();
+            for (String language : fields[1].split(",", -1)) {
+                if (!MEMORY_BUDGET_LANGUAGES.contains(language) || languages.put(language, budget) != null) {
+                    throw new IllegalArgumentException(location + "unknown or duplicate language: " + language);
+                }
+            }
+            budgets.put(fields[0], Map.copyOf(languages));
+        }
+        if (!header) {
+            throw new IllegalArgumentException("memory budget list has no header row");
+        }
+        return Map.copyOf(budgets);
+    }
+
+    private static long parseBudgetBytes(String mebibytes, String location)
+    {
+        if (!mebibytes.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException(location + "budget is not a positive integer: " + mebibytes);
+        }
+        try {
+            return Math.multiplyExact(Long.parseLong(mebibytes), 1L << 20);
+        }
+        catch (ArithmeticException | NumberFormatException e) {
+            throw new IllegalArgumentException(location + "budget overflows a long in bytes: " + mebibytes, e);
+        }
+    }
+
     static void calibrate(InputStream input, OutputStream output)
             throws Exception
     {
-        Benchmark benchmark = Benchmark.read(input.readAllBytes());
+        Benchmark benchmark = Benchmark.readRebar(input.readAllBytes());
         Re2 pattern = benchmark.compile();
         long deadline = System.nanoTime() + 5_000_000_000L;
         long iterations = 0;
@@ -105,7 +208,7 @@ public final class RebarRunner
     static void writeManifest(InputStream input, OutputStream output)
             throws Exception
     {
-        Benchmark benchmark = Benchmark.read(input.readAllBytes());
+        Benchmark benchmark = Benchmark.readRebar(input.readAllBytes());
         Re2 pattern = benchmark.compile();
         long expectedResult = executeOnce(benchmark, pattern);
         RouteDiagnostics routes = RouteDiagnostics.capture(pattern);
@@ -148,7 +251,7 @@ public final class RebarRunner
     static void run(InputStream input, OutputStream output)
             throws Exception
     {
-        Benchmark benchmark = Benchmark.read(input.readAllBytes());
+        Benchmark benchmark = Benchmark.readRebar(input.readAllBytes());
         Samples samples = switch (benchmark.model()) {
             case "compile" -> benchmarkCompile(benchmark);
             case "count" -> benchmarkCount(benchmark);
@@ -464,9 +567,23 @@ public final class RebarRunner
             long maximumWarmupIterations,
             long maximumTimeNanos,
             long maximumWarmupTimeNanos,
-            ByteFrequencies byteFrequencies)
+            ByteFrequencies byteFrequencies,
+            long maxMemory)
     {
+        /// Reads a language-bulk workload, which names its row's budget, if any, in bytes.
         static Benchmark read(byte[] input)
+        {
+            return read(input, false);
+        }
+
+        /// Reads Rebar's input, which names no budget, so a benchmark the budget list names runs at
+        /// its RE2 budget.
+        static Benchmark readRebar(byte[] input)
+        {
+            return read(input, true);
+        }
+
+        private static Benchmark read(byte[] input, boolean rebar)
         {
             String name = null;
             String model = null;
@@ -481,6 +598,10 @@ public final class RebarRunner
             // Rebar definitions never set a distribution. Language-bulk probe workloads name a
             // preset or carry the sample a distribution is learned from, so it is built in setup.
             ByteFrequencies byteFrequencies = null;
+            // Rebar definitions never set a budget either, so a Rebar run looks its benchmark up by
+            // name in the budget list. A language-bulk workload names its row's budget from the same
+            // list in bytes, for every engine with a memory limit; 0 keeps Regulator's default.
+            long maxMemory = 0;
 
             int position = 0;
             while (position < input.length) {
@@ -505,6 +626,12 @@ public final class RebarRunner
                                 ? preset(item.asAscii())
                                 : ByteFrequencies.builder().add(item.value()).build();
                     }
+                    case "max-memory" -> {
+                        maxMemory = item.asLong();
+                        if (maxMemory <= 0) {
+                            throw new IllegalArgumentException("Rebar max-memory must be positive: " + maxMemory);
+                        }
+                    }
                     default -> throw new IllegalArgumentException("unrecognized KLV key: " + item.key());
                 }
             }
@@ -521,6 +648,9 @@ public final class RebarRunner
             if (haystack == null) {
                 throw new IllegalArgumentException("missing Rebar haystack");
             }
+            if (rebar && maxMemory == 0) {
+                maxMemory = memoryBudget(name, "re2");
+            }
             return new Benchmark(
                     name,
                     model,
@@ -532,7 +662,8 @@ public final class RebarRunner
                     maximumWarmupIterations,
                     maximumTimeNanos,
                     maximumWarmupTimeNanos,
-                    byteFrequencies == null ? ByteFrequencies.uniform() : byteFrequencies);
+                    byteFrequencies == null ? ByteFrequencies.uniform() : byteFrequencies,
+                    maxMemory);
         }
 
         private static ByteFrequencies preset(String name)
@@ -552,9 +683,10 @@ public final class RebarRunner
 
         Re2.Options options()
         {
-            return (unicode ? Re2.Options.defaults() : Re2.Options.latin1())
+            Re2.Options options = (unicode ? Re2.Options.defaults() : Re2.Options.latin1())
                     .setCaseSensitive(!caseInsensitive)
                     .setByteFrequencies(byteFrequencies);
+            return maxMemory == 0 ? options : options.setMaxMemory(maxMemory);
         }
     }
 

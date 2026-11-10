@@ -44,6 +44,59 @@ RUST_LIFECYCLE_CASES = {
     "everyday/trinoPhone": rb"\d{3}/\d{3}/\d{4}",
     "everyday/whitespace": rb"\s+",
 }
+# The memory budget list: rows that run at a budget of their own, each with its languages. A listed row's input
+# carries the budget for its comparators too. Trino takes the same literal-set route for english-10 at 32 and
+# 96 MiB, so it needs no budget there. The Regulator Rebar runner reads the same list by Rebar benchmark name.
+MEMORY_BUDGETS_FILE = collection.ROOT / "src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv"
+MEMORY_BUDGETS_HEADER = "row_id\tlanguages\tbudget_mib"
+
+
+def parse_memory_budgets(text):
+    """Return each budgeted row's budget in MiB and its languages from the budget list: `#` comment lines, the header
+    row, then one row per benchmark. Blank lines, duplicate rows, unknown languages, and a budget that is not a
+    canonical positive integer whose byte count fits a signed 64-bit integer are errors, as in RebarRunner."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    budgets = {}
+    header = False
+    for number, line in enumerate(lines, 1):
+        location = f"memory budget list line {number}: "
+        if line.startswith("#"):
+            continue
+        if not line:
+            raise ValueError(location + "blank line")
+        if not header:
+            if line != MEMORY_BUDGETS_HEADER:
+                raise ValueError(location + f"expected the header row: {line}")
+            header = True
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3:
+            raise ValueError(location + f"expected 3 columns, found {len(fields)}")
+        identity, languages, budget = fields
+        if not identity or identity in budgets:
+            raise ValueError(location + f"empty or duplicate benchmark: {identity}")
+        if not re.fullmatch(r"[1-9][0-9]*", budget):
+            raise ValueError(location + f"budget is not a positive integer: {budget}")
+        if int(budget) << 20 > 2 ** 63 - 1:
+            raise ValueError(location + f"budget overflows a long in bytes: {budget}")
+        languages = tuple(languages.split(","))
+        for language in languages:
+            if language not in collection.ENGINES or languages.count(language) != 1:
+                raise ValueError(location + f"unknown or duplicate language: {language}")
+        budgets[identity] = (int(budget), languages)
+    if not header:
+        raise ValueError("memory budget list has no header row")
+    return budgets
+
+
+def load_memory_budgets():
+    """Return each budgeted row's budget in MiB and its languages from the shipped budget list."""
+    return parse_memory_budgets(MEMORY_BUDGETS_FILE.read_bytes().decode("utf-8"))
+
+
+MEMORY_BUDGETS_MIB = load_memory_budgets()
 
 
 def unicode_class(name):
@@ -60,6 +113,13 @@ def unicode_class(name):
 def ascii_classes(pattern):
     """Replace each \\d and \\s escape; an escaped backslash before a d or s stays literal."""
     return re.sub(rb"\\.", lambda escape: ASCII_CLASSES.get(escape.group(), escape.group()), pattern)
+
+
+def memory_budget(identity, language):
+    """Return the memory budget in bytes the budget list gives a bulk row in one language, or None for every
+    engine's own default."""
+    budget = MEMORY_BUDGETS_MIB.get(identity)
+    return budget[0] << 20 if budget and language in budget[1] else None
 
 
 def translate_lifecycle(identity, language, pattern):

@@ -169,6 +169,41 @@ class TestBulkEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "translation"):
             bulk.validate_manifest(self.manifest, self.directory)
 
+    def test_budgeted_row_carries_its_budget_to_every_listed_language(self):
+        # The search row and its compile sibling run at one budget.
+        for identity, model in (("dictionary/compile/english-10", "compile"), ("dictionary/search/english-10", "count")):
+            directory = self.root / model
+            manifest = prepare_manifest(identity, b"a", directory, models=(model,))
+            bulk.validate_manifest(manifest, directory)
+            bulk.validate_manifest(manifest, directory, recorded_budgets=True)
+            budgets = {}
+            for language, mapping in manifest["cases"][0]["mappings"].items():
+                fields = bulk.rebar_inventory.decode_klv((directory / mapping["input_file"]).read_bytes())
+                budgets[language] = (mapping["status"], mapping.get("max_memory_bytes"), fields.get("max-memory"))
+            budget = bulk.mappings.MEMORY_BUDGETS_MIB[identity][0] << 20
+            self.assertEqual(budgets, {"re2": ("identical", budget, [str(budget).encode()]),
+                                       "java": ("identical", budget, [str(budget).encode()]),
+                                       "trino": ("identical", None, None),
+                                       "rust": ("identical", budget, [str(budget).encode()])})
+        mapping = manifest["cases"][0]["mappings"]["java"]
+        mapping["max_memory_bytes"] = 72 << 20
+        with self.assertRaisesRegex(ValueError, "memory budget"):
+            bulk.validate_manifest(manifest, directory)
+        # Saved evidence keeps the budget its mapping recorded, which its input must carry.
+        with self.assertRaisesRegex(ValueError, "declared translation"):
+            bulk.validate_manifest(manifest, directory, recorded_budgets=True)
+        # A row without a budget runs from its source bytes.
+        self.assertNotIn("max_memory_bytes", self.manifest["cases"][0]["mappings"]["java"])
+        # Only the budget list sets a budget, so a source input that names one is rejected.
+        case = self.manifest["cases"][0]
+        fields = bulk.rebar_inventory.decode_klv((self.directory / case["source_file"]).read_bytes())
+        fields["max-memory"] = [str(budget).encode()]
+        payload = bulk.encode_klv(fields)
+        (self.directory / case["source_file"]).write_bytes(payload)
+        case["source_sha256"] = collection.digest(payload)
+        with self.assertRaisesRegex(ValueError, "names its own memory budget"):
+            bulk.validate_manifest(self.manifest, self.directory)
+
     def test_only_rust_marks_a_malformed_haystack_compatible(self):
         manifest = prepare_manifest("example", b"a", self.root / "malformed", haystack=b"a\xffa")
         self.assertEqual({language: mapping["status"] for language, mapping in manifest["cases"][0]["mappings"].items()},
@@ -260,6 +295,12 @@ class TestBulkEvidence(unittest.TestCase):
     def test_bulk_verification_and_export_keep_operation_specific_rows(self):
         results = self.root / "verified"
         runners = {"fixture": "runners"}
+        # A capture taken before the budget list ran a row the list now names at each engine's default, and exports
+        # at those defaults.
+        self.directory = self.root / "before-budgets"
+        budgets = patch.dict(mappings.MEMORY_BUDGETS_MIB, clear=True)
+        with budgets:
+            self.manifest = prepare_manifest("dictionary/search/english-10", b"a", self.directory)
 
         def verified(command, prefix, engine, mode, *, hash_trace=False):
             output = b"2:61,61\n" if hash_trace else b"2\n"
@@ -269,7 +310,7 @@ class TestBulkEvidence(unittest.TestCase):
             return {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
                     "command": command}
 
-        with patch.object(collection, "runner_identity", return_value=runners), \
+        with budgets, patch.object(collection, "runner_identity", return_value=runners), \
                 patch.object(collection, "verify_command", side_effect=verified):
             evidence = collection.verify(self.directory, results, "java", "classes", {"native-re2": "native", "native-rust": "native-rust"})
         bulk.validate_evidence(self.manifest, evidence, results)
@@ -303,6 +344,9 @@ class TestBulkEvidence(unittest.TestCase):
             self.assertEqual(row["operation"], "execute")
             self.assertEqual(row["input_bytes_per_operation"], 3)
             self.assertIsNone(row["matches_per_count_operation"])
+        # Preparing or running it now checks it against the list, which it predates.
+        with self.assertRaisesRegex(ValueError, "declared translation"):
+            bulk.validate_manifest(self.manifest, self.directory)
         first = next(iter(observations))
         del observations[first]
         collection.save(results / "observations.json", observations)

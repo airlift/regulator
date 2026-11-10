@@ -100,6 +100,10 @@ assert.doesNotMatch(gapHtml, /instruction|instr\/|class="measurement gap"/i);
 assert.match(gapHtml, /class="comparison-row tie"/);
 assert.ok(gapHtml.includes(`title="Tie: host ratio range 0.997–1.600× includes 1.0; gap ${tiedGap} ns/byte is under ${tieGap.byte} ns/byte. Regulator`));
 assert.ok(gapHtml.includes(`gap 0.099 ns/byte is under ${tieGap.byte} ns/byte.`));
+// A row at its own memory budget shows it beside its name; other rows show none.
+const budgetHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [{ ...nearTie, memoryBudgetBytes: 96 * 2 ** 20 }] } }));
+assert.match(budgetHtml, /near-tie <span class="budget-pill" title="Every engine with a memory limit runs this row at a 96 MiB budget">96 MiB budget<\/span>/);
+assert.doesNotMatch(gapHtml, /budget-pill/);
 
 const releaseData = { ...data, platforms: { r9g: "R9g", r8g: "R8g", r8i: "R8i" },
   rows: data.rows.map(row => ({ ...row, platform: "r9g" })) };
@@ -186,6 +190,14 @@ assert.ok(downloadData(data).rows.some(entry => entry.operation === 'compile'));
 assert.doesNotMatch(html, /row-evidence-body/);
 assert.match(detailsHtml(row, reused), /Compile the pattern, then test one input/);
 assert.match(detailsHtml(row, reused), /reusing a warmed pattern/);
+// A row at its own memory budget names it, and the compact page keeps it.
+const budgeted = { ...reused, memoryBudgetBytes: 96 * 2 ** 20 };
+assert.match(detailsHtml(budgeted), /runs at a memory budget of its own, 96 MiB, set in the budget list: its whole setup runs at that budget/);
+assert.doesNotMatch(detailsHtml(reused), /Memory budget/);
+assert.equal(compactReport({ ...data, rows: [budgeted] }, exports).rows[0].memoryBudgetBytes, 96 * 2 ** 20);
+// A compile sibling is a diagnostic row, off the page; the download keeps its budget.
+assert.equal(downloadData({ ...data, rows: [{ ...budgeted, operation: "compile" }] }).rows[0].memoryBudgetBytes, 96 * 2 ** 20);
+assert.equal(exports.budgetLabel(72 * 2 ** 20), "72 MiB");
 assert.doesNotMatch(html, /Single-use measurements|Multi-use measurements/);
 assert.match(html, /type="checkbox"/);
 assert.match(html, /Pure Java/);

@@ -53,6 +53,8 @@ export type Row = {
   hardware?: { instanceType: string; allocatedVcpus: number };
   measurementWarnings?: string[];
   workContract?: string;
+  // The memory budget every engine with a memory limit runs this row at, in place of its default.
+  memoryBudgetBytes?: number;
   workload?: { pattern?: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }>; columnRows?: number };
   // Warnings for this specialized-pattern variant's gain over each earlier variant, keyed by that variant's row id.
   variantGainWarnings?: Record<string, string[]>;
@@ -477,11 +479,20 @@ function operationDescription(row: Row): string {
 // Variants are labelled rows measured beside the summary row, such as each specialized-pattern variant.
 type EvidenceProps = { row: Row; reused?: Row; variants?: Array<{ label: string; row: Row }>; comparator: string; hideOperation?: boolean; missingSingle?: boolean };
 
+export function budgetLabel(bytes: number): string {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(bytes / 2 ** 20)} MiB`;
+}
+
+// The leading space separates the pill from the row name in copied text and for screen readers.
+function BudgetPill({ bytes }: { bytes: number }) {
+  return <>{" "}<span className="budget-pill" title={`Every engine with a memory limit runs this row at a ${budgetLabel(bytes)} budget`}>{budgetLabel(bytes)} budget</span></>;
+}
+
 function Name(props: EvidenceProps) {
   const [open, setOpen] = useState(false);
   const { row, hideOperation = false } = props;
   return <details className="row-evidence" onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>{row.name.replace(/^everyday\//, "")}{!hideOperation && <small>{row.operation === "execute" ? row.model : operationName(row.operation)}</small>}</summary>
+    <summary>{row.name.replace(/^everyday\//, "")}{row.memoryBudgetBytes != null && <BudgetPill bytes={row.memoryBudgetBytes} />}{!hideOperation && <small>{row.operation === "execute" ? row.model : operationName(row.operation)}</small>}</summary>
     {open && <RowEvidence {...props} />}
   </details>;
 }
@@ -505,6 +516,7 @@ export function RowEvidence({ row, reused, variants, comparator, missingSingle =
         {row.patternSummary.sourceUrl && <> See the <a href={row.patternSummary.sourceUrl}>benchmark definition and pattern source</a>.</>}
         {row.patternSummary.fullPatternAvailable && <> The full pattern is also included in the full results download.</>}</p>}
       {row.workload?.flags?.length ? <p>Flags: {row.workload.flags.join(", ")}</p> : null}
+      {row.memoryBudgetBytes != null && <><h4>Memory budget</h4><p>This row runs at a memory budget of its own, {budgetLabel(row.memoryBudgetBytes)}, set in the budget list: its whole setup runs at that budget rather than at each engine’s default. Every engine with a memory limit uses it: Regulator, native RE2 as its max_mem, and the Rust crate as both its compiled-size and its lazy DFA cache limits. JDK Pattern and Joni have no memory limit. Rows without a pill run each engine at its own default.</p></>}
       <p>{operationDescription(row)}{reused && ` ${operationDescription(reused)}`}</p>
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
       {row.workload?.inputDescription && <p>{row.workload.inputDescription}</p>}

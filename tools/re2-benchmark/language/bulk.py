@@ -39,9 +39,12 @@ def prepare(inventory_directory, destination):
             translated, explanation = mappings.translate(original["id"], language, pattern)
             if translated is None:
                 reason = reason or explanation
+            budget = None if reason else mappings.memory_budget(original["id"], language)
             mapped_payload = payload
-            if not reason and translated != pattern:
+            if not reason and (translated != pattern or budget):
                 fields["pattern"] = [translated]
+                if budget:
+                    fields["max-memory"] = [str(budget).encode()]
                 mapped_payload = encode_klv(fields)
             mapped_hash = collection.digest(mapped_payload)
             mapped_path = f"inputs/{mapped_hash}.klv"
@@ -51,6 +54,8 @@ def prepare(inventory_directory, destination):
                 "reason": reason or explanation, "verifier": "bulk-result-boundaries-and-bytes-v2",
                 "pattern_hex": (translated if not reason else pattern).hex(),
                 "input_file": mapped_path, "input_file_sha256": mapped_hash}
+            if budget:
+                language_mappings[language]["max_memory_bytes"] = budget
         cases.append({"id": original["id"], "model": original["model"], "population": original["population"],
                       "family": original["family"], "source_file": path, "source_sha256": original["klv_sha256"],
                       "source_pattern_sha256": original["patterns"][0]["sha256"],
@@ -78,7 +83,10 @@ def encode_klv(fields):
                     for key, values in fields.items() for value in values)
 
 
-def validate_manifest(manifest, directory, archived=False):
+def validate_manifest(manifest, directory, archived=False, recorded_budgets=False):
+    """Check a bulk manifest against its inputs. Preparing and running a manifest check each mapping's memory budget
+    against the budget list; with recorded_budgets, as an export of past evidence does, each mapping's own recorded
+    budget is the one its input must carry, so a capture keeps the budgets it ran at after the list changes."""
     if (manifest["schema_version"] != 3 or manifest["suite"] != "language-bulk" or
             not collection.protocol_for(manifest) or
             manifest.get("operations") != ["compile", "execute"] or
@@ -113,6 +121,9 @@ def validate_manifest(manifest, directory, archived=False):
             raise ValueError("bulk source metadata changed")
         if collection.digest(source_fields["pattern"][0]) != case["source_pattern_sha256"]:
             raise ValueError("bulk source pattern changed")
+        # A row's budget comes only from the budget list; prepare writes it into each language's input.
+        if "max-memory" in source_fields:
+            raise ValueError("bulk source names its own memory budget")
         for language, mapping in case["mappings"].items():
             if mapping["status"] not in {"pending", "identical", "translated", "not-compatible"} or not mapping["reason"]:
                 raise ValueError("unclassified bulk mapping")
@@ -125,15 +136,24 @@ def validate_manifest(manifest, directory, archived=False):
             fields = rebar_inventory.decode_klv(payload)
             translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0], archived=archived)
             expected_fields = dict(source_fields)
+            budget = None
             if mapping["status"] != "not-compatible":
                 if translated is None:
                     raise ValueError("incompatible bulk translation marked comparable")
                 expected_fields["pattern"] = [translated]
+                budget = (mapping.get("max_memory_bytes") if recorded_budgets else
+                          mappings.memory_budget(case["id"], language))
+                if budget is not None and (type(budget) is not int or not 0 < budget < 2 ** 63):
+                    raise ValueError("bulk mapping records an invalid memory budget")
+                if budget:
+                    expected_fields["max-memory"] = [str(budget).encode()]
                 expected_status = "identical" if translated == source_fields["pattern"][0] else "translated"
                 if mapping["status"] not in {"pending", expected_status}:
                     raise ValueError("bulk translation status changed")
             if fields != expected_fields:
                 raise ValueError("bulk mapping differs from its declared translation or flags")
+            if mapping.get("max_memory_bytes") != budget:
+                raise ValueError("bulk mapping does not record its row's memory budget")
             if fields["name"] != [case["id"].encode()] or fields["model"] != [case["model"].encode()]:
                 raise ValueError("bulk input identifies a different operation")
             if mapping.get("pattern_hex") != fields["pattern"][0].hex():
@@ -143,7 +163,7 @@ def validate_manifest(manifest, directory, archived=False):
             if (len(fields["haystack"][0]) != case["input_bytes_per_operation"] or
                     collection.digest(fields["haystack"][0]) != case["source_haystack_sha256"]):
                 raise ValueError("bulk mapping changed the input")
-            if mapping["status"] in {"pending", "identical"} and mapping["input_file_sha256"] != case["source_sha256"]:
+            if mapping["status"] in {"pending", "identical"} and not budget and mapping["input_file_sha256"] != case["source_sha256"]:
                 raise ValueError("unrecorded bulk translation")
 
 

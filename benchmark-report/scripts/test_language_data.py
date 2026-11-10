@@ -125,6 +125,23 @@ class TestLanguageData(unittest.TestCase):
                 sizes = {row['language']: row['mapping']['patternBytes'] for row in language_rows(data, [manifest])}
                 self.assertEqual(sizes, {'re2': 1, 'java': 7000})
 
+    def test_row_memory_budget_is_its_mapping_budget(self):
+        # A row that runs at its own budget carries it; the others run every engine at its default.
+        data, manifest = bulk_capture({
+            're2': {'pattern': 'a', 'status': 'identical', 'reason': 'same bytes', 'max_memory_bytes': 96 << 20},
+            'trino': {'pattern': 'a', 'status': 'identical', 'reason': 'same bytes'}})
+        rows = language_rows(data, [manifest])
+        self.assertEqual({row['language']: row.get('memoryBudgetBytes') for row in rows}, {'re2': 96 << 20, 'trino': None})
+        # A compile row, such as a budgeted row's compile sibling, carries its budget too.
+        report = report_fixture()
+        self.assertEqual(report['rows'][0]['operation'], 'compile')
+        report['rows'][0]['memoryBudgetBytes'] = 96 << 20
+        validate_language_report(report)
+        for budget in (0, 1.5, '96'):
+            report['rows'][0]['memoryBudgetBytes'] = budget
+            with self.assertRaisesRegex(ValueError, 'invalid row memory budget'):
+                validate_language_report(report)
+
     def test_standalone_build_keeps_data_inline_and_escapes_html(self):
         scripts = Path(__file__).resolve().parent
         data = report_fixture()

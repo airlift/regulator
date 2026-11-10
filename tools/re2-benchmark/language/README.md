@@ -502,6 +502,32 @@ python3 tools/re2-benchmark/language/unicode_ranges.py \
 Omit `--check` to regenerate after an intentional upstream update. Review the
 source checksum, membership changes, and mapping results before accepting it.
 
+A few rows run at a memory budget of their own, set in the budget list,
+[`benchmark-memory-budgets.tsv`](../../../src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv):
+each row with its languages and its budget in MiB, after `#` comment lines that
+state the rule. A listed row's compile sibling is listed at the same budget, so
+a pill in the report means the row's whole setup runs at that budget.
+`mappings.py` reads the list, and so does the Regulator Rebar runner, by Rebar
+benchmark name; both reject blank lines, duplicate rows, unknown languages, and
+a budget that is not a positive integer. For those languages the input carries
+a `max-memory` key, the budget in bytes, and the mapping records it as
+`max_memory_bytes`. Every engine with a memory limit reads it from the same
+input, through the settings in the
+[methodology](../../../docs/benchmarks/METHODOLOGY.md#memory-budgets). Every
+other row runs each engine at its own default. Preparing, verifying and
+measuring a manifest check each budget against the list; exporting checks each
+mapping's input against the budget the mapping recorded, so a past capture
+keeps the budgets it ran at, and one from before the list exports at the
+defaults. Either way a source input that names its own budget is rejected. A
+candidate commit from before budgets cannot run a manifest prepared with them,
+because its Java adapter rejects the `max-memory` key.
+
+A budget change is one line in the list plus Rebar's copy, and it reaches only
+manifests prepared after it. Rebar's `engines/regulator` runner bundles the
+list, so copy the file there and bump that runner's version, now `budgets-1`.
+Then update the list's SHA-256 and the runner version pinned in `RebarRunner`;
+`TestRebarRunner` fails until the pin matches the list.
+
 Run `collection.py verify` with the bulk manifest, `--native-runner` set to
 `language_bulk_benchmark`, and `--native-rust-runner` set to
 `language_rust_bulk_benchmark` to produce qualification-format correctness

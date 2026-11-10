@@ -107,6 +107,12 @@ public layout. The all-page checks compare every page with the publication data,
 render every fold-down, and verify that public measurement evidence is
 unchanged; for 1.0 they also compare its frozen workload order and details.
 
+A row that runs at its own memory budget, rather than each engine's default,
+shows the budget as a pill beside its name, from its mapping's
+`max_memory_bytes`; its details name the engines that budget applies to. The
+[methodology](../docs/benchmarks/METHODOLOGY.md#memory-budgets) gives the rule
+and each comparator's setting. Captures without budgets show no pills.
+
 Patterns larger than 4,096 UTF-8 bytes have a 240-codepoint preview in the UI,
 their full byte size, and a pinned benchmark-source link where available.
 Mapping-only captures retain their existing preview and declared byte size.

@@ -5,9 +5,11 @@ import tempfile
 import unittest
 
 
-def run_bulk(runner, action, model, pattern, source, unicode=True, case_insensitive=False):
+def run_bulk(runner, action, model, pattern, source, unicode=True, case_insensitive=False, max_memory=None):
     fields = {"name": "test", "model": model, "pattern": pattern, "haystack": source,
               "unicode": str(unicode).lower(), "case-insensitive": str(case_insensitive).lower()}
+    if max_memory is not None:
+        fields["max-memory"] = max_memory
     payload = b""
     for key, value in fields.items():
         value = value.encode() if isinstance(value, str) else value
@@ -54,6 +56,22 @@ class NativeBulkChecks:
         self.check("count", "a", "aA", 1, "source\n0:1:61;\n")
         self.check("count", "a", "aA", 2, "source\n0:1:61;\n1:2:41;\n", case_insensitive=True)
 
+    def test_memory_budget(self):
+        # A pattern that compiles at the comparator's own limits fails to compile within a tiny row budget.
+        pattern = r"\pL{20}"
+        self.check("count", pattern, "a" * 20, 1, "source\n0:20:" + "61" * 20 + ";\n")
+        result = run_bulk(os.environ[self.RUNNER], "execute", "count", pattern, "a" * 20, max_memory="65536")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("phase=compile", result.stderr)
+        # The largest byte count a signed 64-bit budget holds is accepted, and anything past it rejected.
+        result = run_bulk(os.environ[self.RUNNER], "execute", "count", "a", "a", max_memory="9223372036854775807")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for value in ("0", "-1", "", "64k", "9223372036854775808", "1" * 20):
+            with self.subTest(max_memory=value):
+                result = run_bulk(os.environ[self.RUNNER], "execute", "count", "a", "a", max_memory=value)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("invalid KLV max-memory", result.stderr)
+
     def test_byte_mode_without_unicode_or_for_malformed_input(self):
         # Without Unicode, RE2 matches Latin-1 and Rust uses the crate's bytes API: a dot matches each of these bytes.
         self.check("count", ".", b"\xff\xfe", 2, "source\n0:1:ff;\n1:2:fe;\n", unicode=False)
@@ -87,6 +105,14 @@ class TestNativeRustBulk(NativeBulkChecks, unittest.TestCase):
     def test_capture_counting_in_byte_mode(self):
         # Without Unicode, the bytes API skips the empty match where "a" ended and leaves the unmatched group unset.
         self.check("count-captures", "(a)|b*", b"a\xffb", 3, "source\n0:1:61;0:1:61;\n2:3:62;-;\n", unicode=False)
+
+    def test_memory_budget_in_byte_mode(self):
+        # A Unicode source over a malformed haystack takes the bytes API, whose builder takes the row budget too.
+        pattern, haystack = r"\pL{20}", b"\xff" + b"a" * 20
+        self.check("count", pattern, haystack, 1, "source\n1:21:" + "61" * 20 + ";\n")
+        result = run_bulk(os.environ[self.RUNNER], "execute", "count", pattern, haystack, max_memory="65536")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("phase=compile", result.stderr)
 
     def test_str_api_only_for_unicode_text(self):
         # Over a malformed haystack the bytes API accepts a byte-matching pattern; a Unicode source over

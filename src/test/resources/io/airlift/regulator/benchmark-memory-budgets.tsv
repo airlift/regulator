@@ -1,0 +1,11 @@
+# The memory budget list: benchmark rows that run at a memory budget of their own, in MiB, in the
+# languages listed. Every engine with a memory limit runs a listed row at its budget. A row's compile
+# sibling, which compiles the same pattern, is listed at the same budget and languages, so a pill in
+# the report means the row's whole setup runs at that budget.
+row_id	languages	budget_mib
+unicode/overlapping-words/english	re2,java,trino,rust	96
+unicode/overlapping-words/russian	re2,java,trino,rust	96
+curated/10-bounded-repeat/context	re2,java,trino,rust	96
+curated/10-bounded-repeat/compile-context	re2,java,trino,rust	96
+dictionary/search/english-10	re2,java,rust	96
+dictionary/compile/english-10	re2,java,rust	96

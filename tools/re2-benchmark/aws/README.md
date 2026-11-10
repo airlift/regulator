@@ -562,7 +562,9 @@ refusing an archive, provenance, or `candidates.tsv` row that differs.
 
 Hosts run the candidate archive's copy of the benchmark tooling while the
 controller checks their results with its own, so the candidate's
-`tools/re2-benchmark` tree must be the controller's committed one. Freezing
+`tools/re2-benchmark` tree and its memory budget list,
+`src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv`, must be
+the controller's committed ones. Freezing
 does not build or test the candidate: the build phase compiles it, every route
 runs its semantic verifiers, and CI runs the full suite.
 
