@@ -31,11 +31,11 @@ public class TestBenchmarkRe2SearchExtra
 
             boolean successHasShortcut = false;
             for (int instruction = 0; instruction < state.progSuccess.size(); instruction++) {
-                successHasShortcut |= state.progSuccess.inst(instruction).opcode() == InstOp.ALT_MATCH;
+                successHasShortcut |= Prog.instOpcode(state.progSuccess.word(instruction)) == InstOp.ALT_MATCH;
             }
             boolean alternateHasShortcut = false;
             for (int instruction = 0; instruction < state.progAltMatch.size(); instruction++) {
-                alternateHasShortcut |= state.progAltMatch.inst(instruction).opcode() == InstOp.ALT_MATCH;
+                alternateHasShortcut |= Prog.instOpcode(state.progAltMatch.word(instruction)) == InstOp.ALT_MATCH;
             }
             assertThat(successHasShortcut).isFalse();
             assertThat(alternateHasShortcut).isTrue();

@@ -50,11 +50,11 @@ final class BitState
     {
         int jobsPerPosition = 0;
         for (int id = 0; id < prog.size(); id++) {
-            Prog.Inst instruction = prog.inst(id);
-            switch (instruction.opcode()) {
-                case BYTE_RANGE -> jobsPerPosition += instruction.hint() != 0 ? 1 : 0;
-                case CAPTURE -> jobsPerPosition += instruction.last() ? 1 : 2;
-                case EMPTY_WIDTH, NOP -> jobsPerPosition += instruction.last() ? 0 : 1;
+            long instruction = prog.word(id);
+            switch (Prog.instOpcode(instruction)) {
+                case BYTE_RANGE -> jobsPerPosition += Prog.instHint(instruction) != 0 ? 1 : 0;
+                case CAPTURE -> jobsPerPosition += Prog.instLast(instruction) ? 1 : 2;
+                case EMPTY_WIDTH, NOP -> jobsPerPosition += Prog.instLast(instruction) ? 0 : 1;
                 default -> {}
             }
         }

@@ -1635,9 +1635,10 @@ public class TestTrinoRegexpLanguage
 
     private static List<Integer> emptyWidthAssertions(Prog program)
     {
-        return program.insts().stream()
-                .filter(instruction -> instruction.opcode() == InstOp.EMPTY_WIDTH)
-                .map(Prog.Inst::empty)
+        return IntStream.range(0, program.size())
+                .mapToLong(program::word)
+                .filter(instruction -> Prog.instOpcode(instruction) == InstOp.EMPTY_WIDTH)
+                .mapToObj(Prog::instEmpty)
                 .toList();
     }
 

@@ -609,19 +609,19 @@ final class InnerLiteralSearch
                 continue;
             }
             visited[instructionId] = true;
-            Prog.Inst instruction = program.inst(instructionId);
-            if (instruction.opcode() == InstOp.BYTE_RANGE) {
+            long instruction = program.word(instructionId);
+            if (Prog.instOpcode(instruction) == InstOp.BYTE_RANGE) {
                 return false;
             }
-            if (!instruction.last()) {
+            if (!Prog.instLast(instruction)) {
                 stack[stackPointer++] = instructionId + 1;
             }
-            switch (instruction.opcode()) {
+            switch (Prog.instOpcode(instruction)) {
                 case ALT, ALT_MATCH -> {
-                    stack[stackPointer++] = instruction.out1();
-                    stack[stackPointer++] = instruction.out();
+                    stack[stackPointer++] = Prog.instOut1(instruction);
+                    stack[stackPointer++] = Prog.instOut(instruction);
                 }
-                case CAPTURE, EMPTY_WIDTH, NOP -> stack[stackPointer++] = instruction.out();
+                case CAPTURE, EMPTY_WIDTH, NOP -> stack[stackPointer++] = Prog.instOut(instruction);
                 default -> {}
             }
         }

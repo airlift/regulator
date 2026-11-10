@@ -115,7 +115,6 @@ final class Prog
     {
         private static final long INSTANCE_SIZE = SizeOf.instanceSize(FoldedStartRun.class);
         private static final long PROGRAM_INSTANCE_SIZE = SizeOf.instanceSize(Prog.class);
-        private static final long INST_INSTANCE_SIZE = SizeOf.instanceSize(Inst.class);
         private static final long ATOMIC_REFERENCE_INSTANCE_SIZE = SizeOf.instanceSize(AtomicReference.class);
         private static final long ATOMIC_LONG_ARRAY_INSTANCE_SIZE = SizeOf.instanceSize(AtomicLongArray.class);
 
@@ -166,15 +165,14 @@ final class Prog
         }
 
         /// The record and its run program, which holds the run as its prefix, its fail
-        /// instruction in its instruction array, its per-opcode counts and bytemap, and its empty
-        /// DFA and NFA references and failed DFA budgets.
+        /// instruction's word in its instruction word array, its per-opcode counts and bytemap,
+        /// and its empty DFA and NFA references and failed DFA budgets.
         long estimatedRetainedSize()
         {
             return INSTANCE_SIZE +
                     PROGRAM_INSTANCE_SIZE +
                     SizeOf.sizeOf(run) +
-                    SizeOf.sizeOf(runProgram.insts) +
-                    INST_INSTANCE_SIZE +
+                    SizeOf.sizeOf(runProgram.words) +
                     SizeOf.sizeOf(runProgram.instCount) +
                     SizeOf.sizeOf(runProgram.bytemap) +
                     4 * ATOMIC_REFERENCE_INSTANCE_SIZE +
@@ -183,251 +181,232 @@ final class Prog
         }
     }
 
-    // Single instruction in regexp program.
-    public static final class Inst
+    // An instruction is one packed word, the form upstream's `Prog::Inst` takes:
+    // [0..2] opcode, [3] last, [4..31] output, [32..63] opcode-specific payload. ALT and ALT_MATCH
+    // keep their second output in the payload's low 28 bits, and ALT_MATCH sets payload bit 31
+    // when it is greedy, which getOrCreateCaptureInstructionWords marks once the program is
+    // flattened. BYTE_RANGE keeps lo in payload bits 0..7, hi in 8..15, the hint in 16..30 and
+    // fold-case in 31. CAPTURE, EMPTY_WIDTH and MATCH keep their int in the whole payload.
+    // Nfa's capture search (NfaImpl.search, step and addToThreadq, and remapCaptureSlots) and
+    // BitState.trySearch decode these fields by hand, so a layout change must update them too.
+    private static final InstOp[] INSTRUCTION_OPCODES = InstOp.values();
+    private static final long INSTRUCTION_OPCODE_MASK = 0b111;
+    private static final long INSTRUCTION_LAST_BIT = 1L << 3;
+    private static final int INSTRUCTION_OUTPUT_SHIFT = 4;
+    private static final int INSTRUCTION_PAYLOAD_SHIFT = 32;
+    private static final long INSTRUCTION_OUTPUT_BITS = (long) MAX_FLATTENED_INSTRUCTIONS << INSTRUCTION_OUTPUT_SHIFT;
+    private static final long INSTRUCTION_SECOND_OUTPUT_BITS = (long) MAX_FLATTENED_INSTRUCTIONS << INSTRUCTION_PAYLOAD_SHIFT;
+    private static final long INSTRUCTION_PAYLOAD_BITS = 0xFFFF_FFFFL << INSTRUCTION_PAYLOAD_SHIFT;
+    private static final long INSTRUCTION_HINT_BITS = 0x7FFFL << 48;
+    private static final long INSTRUCTION_HIGH_BIT = 1L << 63;
+    private static final int MAXIMUM_HINT = 0x7FFF;
+
+    static InstOp instOpcode(long word)
     {
-        private InstOp opcode;
+        return INSTRUCTION_OPCODES[(int) (word & INSTRUCTION_OPCODE_MASK)];
+    }
 
-        private int out;
-        private int out1;
+    static boolean instLast(long word)
+    {
+        return (word & INSTRUCTION_LAST_BIT) != 0;
+    }
 
-        private int lo;
-        private int hi;
-        private int hintFoldCase;
+    static int instOut(long word)
+    {
+        return (int) ((word >>> INSTRUCTION_OUTPUT_SHIFT) & MAX_FLATTENED_INSTRUCTIONS);
+    }
 
-        private int cap;
-        private int empty;
-        private int matchId;
+    static int instOut1(long word)
+    {
+        return (int) ((word >>> INSTRUCTION_PAYLOAD_SHIFT) & MAX_FLATTENED_INSTRUCTIONS);
+    }
 
-        private boolean last;
+    static int instLo(long word)
+    {
+        return (int) (word >>> INSTRUCTION_PAYLOAD_SHIFT) & 0xFF;
+    }
 
-        private Inst(InstOp opcode)
-        {
-            this.opcode = requireNonNull(opcode, "opcode is null");
+    static int instHi(long word)
+    {
+        return (int) (word >>> 40) & 0xFF;
+    }
+
+    static int instHint(long word)
+    {
+        return (int) (word >>> 48) & MAXIMUM_HINT;
+    }
+
+    static boolean instFoldCase(long word)
+    {
+        return (word & INSTRUCTION_HIGH_BIT) != 0;
+    }
+
+    static int instCap(long word)
+    {
+        return (int) (word >>> INSTRUCTION_PAYLOAD_SHIFT);
+    }
+
+    static int instEmpty(long word)
+    {
+        return (int) (word >>> INSTRUCTION_PAYLOAD_SHIFT);
+    }
+
+    static int instMatchId(long word)
+    {
+        return (int) (word >>> INSTRUCTION_PAYLOAD_SHIFT);
+    }
+
+    /// Whether the byte range `word` matches `c`.
+    static boolean instMatches(long word, int c)
+    {
+        // Upstream Inst::Matches() expects an int byte value. The DFA uses a sentinel
+        // "end text" byte (256) and NFA-style engines use -1 for "no byte".
+        // Both must never match a byte range.
+        if (c < 0 || c > 0xFF) {
+            return false;
         }
-
-        public static Inst createAlt(int out, int out1)
-        {
-            Inst inst = new Inst(InstOp.ALT);
-            inst.out = out;
-            inst.out1 = out1;
-            return inst;
+        int b = c;
+        if (instFoldCase(word) && 'A' <= b && b <= 'Z') {
+            b += 'a' - 'A';
         }
+        return instLo(word) <= b && b <= instHi(word);
+    }
 
-        public static Inst createAltMatch(int out, int out1)
-        {
-            Inst inst = new Inst(InstOp.ALT_MATCH);
-            inst.out = out;
-            inst.out1 = out1;
-            return inst;
-        }
+    private static long instWord(InstOp opcode, int out, long payload)
+    {
+        checkPackedInstructionOutput(out);
+        return opcode.ordinal() | (long) out << INSTRUCTION_OUTPUT_SHIFT | payload << INSTRUCTION_PAYLOAD_SHIFT;
+    }
 
-        public static Inst createByteRange(int lo, int hi, boolean foldCase, int out)
-        {
-            Inst inst = new Inst(InstOp.BYTE_RANGE);
-            inst.lo = lo & 0xFF;
-            inst.hi = hi & 0xFF;
-            inst.hintFoldCase = foldCase ? 1 : 0;
-            inst.out = out;
-            return inst;
-        }
+    static long withInstOut(long word, int out)
+    {
+        checkPackedInstructionOutput(out);
+        return (word & ~INSTRUCTION_OUTPUT_BITS) | (long) out << INSTRUCTION_OUTPUT_SHIFT;
+    }
 
-        public static Inst createCapture(int cap, int out)
-        {
-            Inst inst = new Inst(InstOp.CAPTURE);
-            inst.cap = cap;
-            inst.out = out;
-            return inst;
-        }
+    static long withInstOut1(long word, int out1)
+    {
+        checkPackedInstructionOutput(out1);
+        return (word & ~INSTRUCTION_SECOND_OUTPUT_BITS) | (long) out1 << INSTRUCTION_PAYLOAD_SHIFT;
+    }
 
-        public static Inst createEmptyWidth(int empty, int out)
-        {
-            Inst inst = new Inst(InstOp.EMPTY_WIDTH);
-            inst.empty = empty;
-            inst.out = out;
-            return inst;
-        }
+    static long withInstLast(long word)
+    {
+        return word | INSTRUCTION_LAST_BIT;
+    }
 
-        public static Inst createMatch(int matchId)
-        {
-            Inst inst = new Inst(InstOp.MATCH);
-            inst.matchId = matchId;
-            return inst;
-        }
+    private static long withInstOpcode(long word, InstOp opcode)
+    {
+        return (word & ~INSTRUCTION_OPCODE_MASK) | opcode.ordinal();
+    }
 
-        public static Inst createNop(int out)
-        {
-            Inst inst = new Inst(InstOp.NOP);
-            inst.out = out;
-            return inst;
-        }
+    private static long withInstPayload(long word, int payload)
+    {
+        return (word & ~INSTRUCTION_PAYLOAD_BITS) | Integer.toUnsignedLong(payload) << INSTRUCTION_PAYLOAD_SHIFT;
+    }
 
-        public static Inst createFail()
-        {
-            return new Inst(InstOp.FAIL);
-        }
+    // Hints saturate at the largest encodable distance.
+    private static long withInstHint(long word, int distance)
+    {
+        return (word & ~INSTRUCTION_HINT_BITS) | (long) Math.min(distance, MAXIMUM_HINT) << 48;
+    }
 
-        public InstOp opcode()
-        {
-            return opcode;
-        }
-
-        public int out()
-        {
-            return out;
-        }
-
-        public void setOut(int out)
-        {
-            this.out = out;
-        }
-
-        public int out1()
-        {
-            return out1;
-        }
-
-        public void setOut1(int out1)
-        {
-            this.out1 = out1;
-        }
-
-        public void setOpcode(InstOp opcode)
-        {
-            this.opcode = requireNonNull(opcode, "opcode is null");
-        }
-
-        public void setEmpty(int empty)
-        {
-            this.empty = empty;
-        }
-
-        Inst copy()
-        {
-            Inst inst = new Inst(opcode);
-            inst.out = out;
-            inst.out1 = out1;
-            inst.lo = lo;
-            inst.hi = hi;
-            inst.hintFoldCase = hintFoldCase;
-            inst.cap = cap;
-            inst.empty = empty;
-            inst.matchId = matchId;
-            inst.last = last;
-            return inst;
-        }
-
-        public int lo()
-        {
-            return lo;
-        }
-
-        public int hi()
-        {
-            return hi;
-        }
-
-        public boolean foldCase()
-        {
-            return (hintFoldCase & 1) != 0;
-        }
-
-        public int hint()
-        {
-            return hintFoldCase >>> 1;
-        }
-
-        public int cap()
-        {
-            return cap;
-        }
-
-        public int empty()
-        {
-            return empty;
-        }
-
-        public int matchId()
-        {
-            return matchId;
-        }
-
-        public boolean last()
-        {
-            return last;
-        }
-
-        public void setLast()
-        {
-            this.last = true;
-        }
-
-        public boolean matches(int c)
-        {
-            if (opcode != InstOp.BYTE_RANGE) {
-                throw new IllegalStateException("not a byte range inst: " + opcode);
-            }
-            // Upstream Inst::Matches() expects an int byte value. The DFA uses a sentinel
-            // "end text" byte (256) and NFA-style engines use -1 for "no byte".
-            // Both must never match a byte range.
-            if (c < 0 || c > 0xFF) {
-                return false;
-            }
-            int b = c;
-            if (foldCase() && 'A' <= b && b <= 'Z') {
-                b += 'a' - 'A';
-            }
-            return lo <= b && b <= hi;
-        }
-
-        public boolean greedy(Prog p)
-        {
-            requireNonNull(p, "p is null");
-            if (opcode != InstOp.ALT_MATCH) {
-                throw new IllegalStateException("not an altmatch inst: " + opcode);
-            }
-
-            Inst outInst = p.inst(out());
-            if (outInst.opcode() == InstOp.BYTE_RANGE) {
-                return true;
-            }
-            return outInst.opcode() == InstOp.NOP &&
-                    p.inst(outInst.out()).opcode() == InstOp.BYTE_RANGE;
-        }
-
-        public String dump()
-        {
-            return switch (opcode) {
-                case ALT -> "alt -> " + out + " | " + out1;
-                case ALT_MATCH -> "altmatch -> " + out + " | " + out1;
-                case BYTE_RANGE -> "byte" +
-                        (foldCase() ? "/i" : "") +
-                        " [" + hex2(lo) + "-" + hex2(hi) + "] " +
-                        hint() + " -> " + out;
-                case CAPTURE -> "capture " + cap + " -> " + out;
-                case EMPTY_WIDTH -> "emptywidth " + hashHex(empty) + " -> " + out;
-                case MATCH -> "match! " + matchId;
-                case NOP -> "nop -> " + out;
-                case FAIL -> "fail";
-            };
-        }
-
-        private static String hex2(int v)
-        {
-            return String.format(Locale.ROOT, "%02x", v & 0xFF);
-        }
-
-        private static String hashHex(int v)
-        {
-            // C's "%#x" formatting: 0 => "0", otherwise "0x..." (lowercase).
-            if (v == 0) {
-                return "0";
-            }
-            return "0x" + Integer.toHexString(v);
+    private static void checkPackedInstructionOutput(int output)
+    {
+        if (output < 0 || output > MAX_FLATTENED_INSTRUCTIONS) {
+            throw new IllegalStateException("output exceeds packed instruction limit: " + output);
         }
     }
 
-    private Inst[] insts = new Inst[16];
+    static long altWord(int out, int out1)
+    {
+        checkPackedInstructionOutput(out1);
+        return instWord(InstOp.ALT, out, out1);
+    }
+
+    static long altMatchWord(int out, int out1)
+    {
+        checkPackedInstructionOutput(out1);
+        return instWord(InstOp.ALT_MATCH, out, out1);
+    }
+
+    static long byteRangeWord(int lo, int hi, boolean foldCase, int out)
+    {
+        return instWord(InstOp.BYTE_RANGE, out, (lo & 0xFF) | (long) (hi & 0xFF) << 8 | (foldCase ? 1L << 31 : 0));
+    }
+
+    static long captureWord(int cap, int out)
+    {
+        return instWord(InstOp.CAPTURE, out, Integer.toUnsignedLong(cap));
+    }
+
+    static long emptyWidthWord(int empty, int out)
+    {
+        return instWord(InstOp.EMPTY_WIDTH, out, Integer.toUnsignedLong(empty));
+    }
+
+    static long matchWord(int matchId)
+    {
+        return instWord(InstOp.MATCH, 0, Integer.toUnsignedLong(matchId));
+    }
+
+    static long nopWord(int out)
+    {
+        return instWord(InstOp.NOP, out, 0);
+    }
+
+    static long failWord()
+    {
+        return instWord(InstOp.FAIL, 0, 0);
+    }
+
+    // Whether the ALT_MATCH `word` is greedy: its first output reads a byte, directly or past one
+    // no-op.
+    boolean greedyAltMatch(long word)
+    {
+        long outWord = words[instOut(word)];
+        if (instOpcode(outWord) == InstOp.BYTE_RANGE) {
+            return true;
+        }
+        return instOpcode(outWord) == InstOp.NOP &&
+                instOpcode(words[instOut(outWord)]) == InstOp.BYTE_RANGE;
+    }
+
+    static String dumpInst(long word)
+    {
+        int out = instOut(word);
+        return switch (instOpcode(word)) {
+            case ALT -> "alt -> " + out + " | " + instOut1(word);
+            case ALT_MATCH -> "altmatch -> " + out + " | " + instOut1(word);
+            case BYTE_RANGE -> "byte" +
+                    (instFoldCase(word) ? "/i" : "") +
+                    " [" + hex2(instLo(word)) + "-" + hex2(instHi(word)) + "] " +
+                    instHint(word) + " -> " + out;
+            case CAPTURE -> "capture " + instCap(word) + " -> " + out;
+            case EMPTY_WIDTH -> "emptywidth " + hashHex(instEmpty(word)) + " -> " + out;
+            case MATCH -> "match! " + instMatchId(word);
+            case NOP -> "nop -> " + out;
+            case FAIL -> "fail";
+        };
+    }
+
+    private static String hex2(int v)
+    {
+        return String.format(Locale.ROOT, "%02x", v & 0xFF);
+    }
+
+    private static String hashHex(int v)
+    {
+        // C's "%#x" formatting: 0 => "0", otherwise "0x..." (lowercase).
+        if (v == 0) {
+            return "0";
+        }
+        return "0x" + Integer.toHexString(v);
+    }
+
+    // The packed instruction words; see instOpcode. Before flattening the array grows by doubling;
+    // flattening leaves it exactly the instruction count.
+    private long[] words = new long[16];
     private int instructionCount;
 
     private boolean didFlatten;
@@ -640,9 +619,9 @@ final class Prog
     private final AtomicLongArray failedDfaBudgets = new AtomicLongArray(Dfa.DfaInstance.Kind.values().length);
     // Immutable flattened instruction tables for NFA no-submatch fast path.
     private final AtomicReference<NoSubmatchTables> noSubmatchNfaTables = new AtomicReference<>();
-    // Compact immutable instructions shared by capture engines. Compilation builds them after
-    // flattening; the getter builds them for programs flattened elsewhere, as tests do.
-    private volatile long[] captureInstructionWords;
+    // Whether the greedy ALT_MATCH words carry their greedy bit, after which the capture engines
+    // read the words; see getOrCreateCaptureInstructionWords.
+    private volatile boolean instructionWordsFinished;
     // The capture NFA's plan, set once by pattern compilation before the program is published. A
     // program it never plans keeps these defaults and runs every capture search in one pass.
     private int singlePassCaptureSlots = Integer.MAX_VALUE;
@@ -652,7 +631,7 @@ final class Prog
     {
         lowBits = 0x0101010101010101L;
         // Instruction #0 is always the fail instruction in upstream.
-        add(Inst.createFail());
+        add(failWord());
     }
 
     public int size()
@@ -680,31 +659,31 @@ final class Prog
             reachable.insert(id);
             for (int reachableIndex = 0; reachableIndex < reachable.size(); reachableIndex++) {
                 int instructionId = reachable.denseAt(reachableIndex);
-                Inst instruction = inst(instructionId);
-                switch (instruction.opcode()) {
+                long instruction = words[instructionId];
+                switch (instOpcode(instruction)) {
                     case ALT -> throw new IllegalStateException("unhandled ALT in Prog.fanout");
                     case BYTE_RANGE -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             reachable.insert(instructionId + 1);
                         }
                         count++;
-                        if (!fanout.hasIndex(instruction.out())) {
-                            fanout.setNew(instruction.out(), 0);
+                        if (!fanout.hasIndex(instOut(instruction))) {
+                            fanout.setNew(instOut(instruction), 0);
                         }
                     }
                     case ALT_MATCH -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             reachable.insert(instructionId + 1);
                         }
                     }
                     case CAPTURE, EMPTY_WIDTH, NOP -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             reachable.insert(instructionId + 1);
                         }
-                        reachable.insert(instruction.out());
+                        reachable.insert(instOut(instruction));
                     }
                     case MATCH -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             reachable.insert(instructionId + 1);
                         }
                     }
@@ -726,7 +705,7 @@ final class Prog
         if (expectedId != last) {
             throw new IllegalArgumentException("expected last id " + last + " but got " + expectedId);
         }
-        insts[last] = null;
+        words[last] = 0;
         instructionCount = last;
     }
 
@@ -1198,19 +1177,19 @@ final class Prog
             }
             visited[instructionId] = true;
 
-            Inst instruction = inst(instructionId);
-            switch (instruction.opcode()) {
+            long instruction = words[instructionId];
+            switch (instOpcode(instruction)) {
                 case BYTE_RANGE -> {
                     candidateCount += addStartByteRange(candidates, instruction);
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case CAPTURE, NOP -> {
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack[stackPointer++] = instructionId + 1;
                     }
-                    stack[stackPointer++] = instruction.out();
+                    stack[stackPointer++] = instOut(instruction);
                 }
                 case EMPTY_WIDTH -> {
                     // Skipping input would lose the previous-byte context needed by the assertion.
@@ -1219,11 +1198,11 @@ final class Prog
                     return -1;
                 }
                 case ALT, ALT_MATCH -> {
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack[stackPointer++] = instructionId + 1;
                     }
-                    stack[stackPointer++] = instruction.out1();
-                    stack[stackPointer++] = instruction.out();
+                    stack[stackPointer++] = instOut1(instruction);
+                    stack[stackPointer++] = instOut(instruction);
                 }
                 case MATCH -> {
                     if (!nullable) {
@@ -1231,12 +1210,12 @@ final class Prog
                     }
                     // Leftmost-first prefers this match to the threads after it in the list;
                     // longest-match and many-match searches go on to them.
-                    if (!firstMatch && !instruction.last()) {
+                    if (!firstMatch && !instLast(instruction)) {
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case FAIL -> {
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
@@ -1297,35 +1276,35 @@ final class Prog
                     }
                     visited[instructionId] = true;
 
-                    Inst instruction = inst(instructionId);
-                    switch (instruction.opcode()) {
+                    long instruction = words[instructionId];
+                    switch (instOpcode(instruction)) {
                         case BYTE_RANGE -> {
                             addStartPositionBytes(byteSets, position, instruction);
-                            int next = instruction.out();
+                            int next = instOut(instruction);
                             if (next > 0 && next < size() && !nextVisited[next]) {
                                 nextVisited[next] = true;
                                 nextThreads[nextThreadCount++] = next;
                             }
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
                         case CAPTURE, NOP, EMPTY_WIDTH -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case ALT, ALT_MATCH -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out1();
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut1(instruction);
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case MATCH -> matches = true;
                         case FAIL -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
@@ -1387,19 +1366,19 @@ final class Prog
                     }
                     visited[instructionId] = true;
 
-                    Inst instruction = inst(instructionId);
-                    switch (instruction.opcode()) {
+                    long instruction = words[instructionId];
+                    switch (instOpcode(instruction)) {
                         case BYTE_RANGE -> {
                             addStartPositionRange(nextPaths, path.byteSets(), position, instruction);
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
                         case CAPTURE, NOP -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case EMPTY_WIDTH -> {
                             // The walk does not evaluate assertions, so it keeps no filter rather
@@ -1407,11 +1386,11 @@ final class Prog
                             return null;
                         }
                         case ALT, ALT_MATCH -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out1();
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut1(instruction);
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case MATCH -> {
                             if (position == 0) {
@@ -1420,12 +1399,12 @@ final class Prog
                             long[] byteSets = path.byteSets().clone();
                             Arrays.fill(byteSets, position * 4, byteSets.length, -1L);
                             completedPaths.add(byteSets);
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
                         case FAIL -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
@@ -1445,11 +1424,11 @@ final class Prog
 
     // Paths that share their earlier sets and continue at the same instruction accept the same
     // suffixes, so their sets at this position merge without widening the filter.
-    private static void addStartPositionRange(List<StartPositionPath> paths, long[] previousByteSets, int position, Inst instruction)
+    private static void addStartPositionRange(List<StartPositionPath> paths, long[] previousByteSets, int position, long instruction)
     {
         long[] byteSets = null;
         for (StartPositionPath path : paths) {
-            if (path.instructionId() == instruction.out() &&
+            if (path.instructionId() == instOut(instruction) &&
                     Arrays.equals(path.byteSets(), 0, position * 4, previousByteSets, 0, position * 4)) {
                 byteSets = path.byteSets();
                 break;
@@ -1457,20 +1436,20 @@ final class Prog
         }
         if (byteSets == null) {
             byteSets = previousByteSets.clone();
-            paths.add(new StartPositionPath(byteSets, instruction.out()));
+            paths.add(new StartPositionPath(byteSets, instOut(instruction)));
         }
         addStartPositionBytes(byteSets, position, instruction);
     }
 
     // Adds the bytes of the byte range `instruction` to the set at `position`. Like
     // addStartByteRange, a folding range reads an upper-case byte as its lower case.
-    private static void addStartPositionBytes(long[] byteSets, int position, Inst instruction)
+    private static void addStartPositionBytes(long[] byteSets, int position, long instruction)
     {
-        for (int value = instruction.lo(); value <= instruction.hi(); value++) {
-            if (!instruction.foldCase() || value < 'A' || value > 'Z') {
+        for (int value = instLo(instruction); value <= instHi(instruction); value++) {
+            if (!instFoldCase(instruction) || value < 'A' || value > 'Z') {
                 addStartPositionByte(byteSets, position, value);
             }
-            if (instruction.foldCase() && 'a' <= value && value <= 'z') {
+            if (instFoldCase(instruction) && 'a' <= value && value <= 'z') {
                 addStartPositionByte(byteSets, position, value - ('a' - 'A'));
             }
         }
@@ -1526,44 +1505,44 @@ final class Prog
                     }
                     visited[instructionId] = true;
 
-                    Inst instruction = inst(instructionId);
-                    switch (instruction.opcode()) {
+                    long instruction = words[instructionId];
+                    switch (instOpcode(instruction)) {
                         case BYTE_RANGE -> {
                             // A folded range matches the upper case of a lower-case letter too.
-                            boolean singleByte = instruction.lo() == instruction.hi() && (!instruction.foldCase() || instruction.lo() < 'a' || instruction.lo() > 'z');
-                            if (!singleByte || (literalByte >= 0 && literalByte != instruction.lo())) {
+                            boolean singleByte = instLo(instruction) == instHi(instruction) && (!instFoldCase(instruction) || instLo(instruction) < 'a' || instLo(instruction) > 'z');
+                            if (!singleByte || (literalByte >= 0 && literalByte != instLo(instruction))) {
                                 pathsEnd = true;
                                 break;
                             }
-                            literalByte = instruction.lo();
-                            nextInstructions[nextInstructionCount++] = instruction.out();
-                            if (!instruction.last()) {
+                            literalByte = instLo(instruction);
+                            nextInstructions[nextInstructionCount++] = instOut(instruction);
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
                         case EMPTY_WIDTH -> {
                             assertionBeforeByte = true;
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case CAPTURE, NOP -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case ALT, ALT_MATCH -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
-                            stack[stackPointer++] = instruction.out1();
-                            stack[stackPointer++] = instruction.out();
+                            stack[stackPointer++] = instOut1(instruction);
+                            stack[stackPointer++] = instOut(instruction);
                         }
                         case MATCH -> pathsEnd = true;
                         case FAIL -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 stack[stackPointer++] = instructionId + 1;
                             }
                         }
@@ -1845,39 +1824,39 @@ final class Prog
                 }
                 visited[instructionId] = true;
 
-                Inst instruction = inst(instructionId);
-                switch (instruction.opcode()) {
+                long instruction = words[instructionId];
+                switch (instOpcode(instruction)) {
                     case BYTE_RANGE -> {
                         addStartByteRange(candidates, instruction);
                         byteInstructions[byteInstructionCount++] = instructionId;
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             stack[stackPointer++] = instructionId + 1;
                         }
                     }
                     case CAPTURE, NOP -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             stack[stackPointer++] = instructionId + 1;
                         }
-                        stack[stackPointer++] = instruction.out();
+                        stack[stackPointer++] = instOut(instruction);
                     }
                     case EMPTY_WIDTH -> {
                         return BYTE_OFFSET_ASSERTION;
                     }
                     case ALT, ALT_MATCH -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             stack[stackPointer++] = instructionId + 1;
                         }
-                        stack[stackPointer++] = instruction.out1();
-                        stack[stackPointer++] = instruction.out();
+                        stack[stackPointer++] = instOut1(instruction);
+                        stack[stackPointer++] = instOut(instruction);
                     }
                     case MATCH -> {
                         canMatchAtCurrentOffset = true;
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             stack[stackPointer++] = instructionId + 1;
                         }
                     }
                     case FAIL -> {
-                        if (!instruction.last()) {
+                        if (!instLast(instruction)) {
                             stack[stackPointer++] = instructionId + 1;
                         }
                     }
@@ -1889,7 +1868,7 @@ final class Prog
             return BYTE_OFFSET_MATCH;
         }
         for (int index = 0; index < byteInstructionCount; index++) {
-            currentInstructions[index] = inst(byteInstructions[index]).out();
+            currentInstructions[index] = instOut(words[byteInstructions[index]]);
         }
         return byteInstructionCount;
     }
@@ -1908,19 +1887,19 @@ final class Prog
         return count;
     }
 
-    private static int addStartByteRange(byte[] candidates, Inst instruction)
+    private static int addStartByteRange(byte[] candidates, long instruction)
     {
         int added = 0;
-        for (int value = instruction.lo(); value <= instruction.hi(); value++) {
-            if ((!instruction.foldCase() || value < 'A' || value > 'Z') && candidates[value] == 0) {
+        for (int value = instLo(instruction); value <= instHi(instruction); value++) {
+            if ((!instFoldCase(instruction) || value < 'A' || value > 'Z') && candidates[value] == 0) {
                 candidates[value] = 1;
                 added++;
             }
         }
-        if (instruction.foldCase()) {
+        if (instFoldCase(instruction)) {
             for (int value = 'A'; value <= 'Z'; value++) {
                 int foldedValue = value + ('a' - 'A');
-                if (instruction.lo() <= foldedValue && foldedValue <= instruction.hi() && candidates[value] == 0) {
+                if (instLo(instruction) <= foldedValue && foldedValue <= instHi(instruction) && candidates[value] == 0) {
                     candidates[value] = 1;
                     added++;
                 }
@@ -3231,70 +3210,38 @@ final class Prog
         return noSubmatchNfaTables.get();
     }
 
+    /// Returns the program's instruction words, which the capture engines read, once each greedy
+    /// ALT_MATCH word carries its greedy bit; see [#instOpcode]. Compilation marks them after
+    /// flattening; this marks them for programs flattened elsewhere, as tests do.
     long[] getOrCreateCaptureInstructionWords()
     {
-        long[] cached = captureInstructionWords;
-        if (cached != null) {
-            return cached;
+        if (instructionWordsFinished) {
+            return words;
         }
-        return createCaptureInstructionWords();
+        return finishInstructionWords();
     }
 
-    private synchronized long[] createCaptureInstructionWords()
+    private synchronized long[] finishInstructionWords()
     {
-        if (captureInstructionWords != null) {
-            return captureInstructionWords;
+        if (instructionWordsFinished) {
+            return words;
         }
 
         if (!didFlatten) {
-            throw new IllegalStateException("program must be flattened before packing capture instructions");
+            throw new IllegalStateException("program must be flattened before finalizing instruction words");
         }
 
-        captureInstructionWords = buildCaptureInstructionWords();
-        return captureInstructionWords;
-    }
-
-    private long[] buildCaptureInstructionWords()
-    {
-        // [0..2] opcode, [3] last, [4..31] output, [32..63] opcode-specific payload.
-        // ALT_MATCH uses payload bit 31 for greedy and BYTE_RANGE uses it for fold-case.
-        long[] words = new long[size()];
-        int outputMask = MAX_FLATTENED_INSTRUCTIONS;
-        for (int instructionId = 0; instructionId < words.length; instructionId++) {
-            Inst instruction = inst(instructionId);
-            checkPackedInstructionOutput(instruction.out(), outputMask);
-            long payload = switch (instruction.opcode()) {
-                case ALT -> {
-                    checkPackedInstructionOutput(instruction.out1(), outputMask);
-                    yield instruction.out1();
-                }
-                case ALT_MATCH -> {
-                    checkPackedInstructionOutput(instruction.out1(), outputMask);
-                    yield instruction.out1() |
-                            (instruction.greedy(this) ? 1L << 31 : 0);
-                }
-                case BYTE_RANGE -> instruction.lo() |
-                        (long) instruction.hi() << 8 |
-                        (long) instruction.hint() << 16 |
-                        (instruction.foldCase() ? 1L << 31 : 0);
-                case CAPTURE -> Integer.toUnsignedLong(instruction.cap());
-                case EMPTY_WIDTH -> Integer.toUnsignedLong(instruction.empty());
-                case MATCH -> Integer.toUnsignedLong(instruction.matchId());
-                case NOP, FAIL -> 0;
-            };
-            words[instructionId] = instruction.opcode().ordinal() |
-                    (instruction.last() ? 1L << 3 : 0) |
-                    (long) instruction.out() << 4 |
-                    payload << 32;
+        if (words.length != instructionCount) {
+            words = Arrays.copyOf(words, instructionCount);
         }
+        for (int instructionId = 0; instructionId < instructionCount; instructionId++) {
+            long word = words[instructionId];
+            if (instOpcode(word) == InstOp.ALT_MATCH && greedyAltMatch(word)) {
+                words[instructionId] = word | INSTRUCTION_HIGH_BIT;
+            }
+        }
+        instructionWordsFinished = true;
         return words;
-    }
-
-    private static void checkPackedInstructionOutput(int output, int outputMask)
-    {
-        if (output < 0 || output > outputMask) {
-            throw new IllegalStateException("output exceeds packed instruction limit: " + output);
-        }
     }
 
     static final class NoSubmatchTables
@@ -3356,18 +3303,18 @@ final class Prog
 
             int captures = 0;
             for (int id = 0; id < progSize; id++) {
-                Inst inst = prog.inst(id);
-                InstOp opcode = inst.opcode();
+                long inst = prog.word(id);
+                InstOp opcode = instOpcode(inst);
                 op[id] = (byte) opcode.ordinal();
-                int outValue = inst.out();
+                int outValue = instOut(inst);
                 out[id] = outValue;
-                out1[id] = inst.out1();
-                hint[id] = inst.hint();
-                lo[id] = inst.lo();
-                hi[id] = inst.hi();
-                empty[id] = inst.empty();
-                outLast[id] = (outValue << 1) | (inst.last() ? 1 : 0);
-                foldCase[id] = inst.foldCase();
+                out1[id] = instOut1(inst);
+                hint[id] = instHint(inst);
+                lo[id] = instLo(inst);
+                hi[id] = instHi(inst);
+                empty[id] = instEmpty(inst);
+                outLast[id] = (outValue << 1) | (instLast(inst) ? 1 : 0);
+                foldCase[id] = instFoldCase(inst);
 
                 if (opcode == InstOp.CAPTURE) {
                     captures++;
@@ -3507,27 +3454,36 @@ final class Prog
         return bytemap;
     }
 
-    public int add(Inst instruction)
+    /// Appends the packed instruction `word` and returns its id.
+    public int add(long word)
     {
-        requireNonNull(instruction, "instruction is null");
-        if (instructionCount == insts.length) {
-            insts = Arrays.copyOf(insts, insts.length * 2);
+        if (instructionCount == words.length) {
+            words = Arrays.copyOf(words, words.length * 2);
         }
-        insts[instructionCount] = instruction;
+        words[instructionCount] = word;
         return instructionCount++;
     }
 
-    public Inst inst(int instructionId)
+    void setInstOut(int instructionId, int out)
     {
-        if (instructionId < 0 || instructionId >= instructionCount) {
-            throw new IllegalArgumentException("instructionId out of range: " + instructionId);
-        }
-        return insts[instructionId];
+        words[instructionId] = withInstOut(words[instructionId], out);
     }
 
-    public List<Inst> insts()
+    void setInstOut1(int instructionId, int out1)
     {
-        return List.of(Arrays.copyOf(insts, instructionCount));
+        words[instructionId] = withInstOut1(words[instructionId], out1);
+    }
+
+    /// Returns the packed word of instruction `instructionId`; see [#instOpcode].
+    long word(int instructionId)
+    {
+        return words[instructionId];
+    }
+
+    /// Replaces the packed word of instruction `instructionId`.
+    void setWord(int instructionId, long word)
+    {
+        words[instructionId] = word;
     }
 
     public String dump()
@@ -3580,12 +3536,12 @@ final class Prog
         boolean markedNonAscii = false;
 
         for (int id = 0; id < size(); id++) {
-            Inst instruction = inst(id);
-            if (instruction.opcode() == InstOp.BYTE_RANGE) {
-                int lo = instruction.lo();
-                int hi = instruction.hi();
+            long instruction = words[id];
+            if (instOpcode(instruction) == InstOp.BYTE_RANGE) {
+                int lo = instLo(instruction);
+                int hi = instHi(instruction);
                 builder.mark(lo, hi);
-                if (instruction.foldCase() && lo <= 'z' && hi >= 'a') {
+                if (instFoldCase(instruction) && lo <= 'z' && hi >= 'a') {
                     int foldlo = lo;
                     int foldhi = hi;
                     if (foldlo < 'a') {
@@ -3603,17 +3559,17 @@ final class Prog
 
                 // If this Inst is not the last Inst in its list AND the next Inst is
                 // also a ByteRange AND the Insts have the same out, defer the merge.
-                if (!instruction.last() &&
+                if (!instLast(instruction) &&
                         id + 1 < size() &&
-                        inst(id + 1).opcode() == InstOp.BYTE_RANGE &&
-                        instruction.out() == inst(id + 1).out()) {
+                        instOpcode(words[id + 1]) == InstOp.BYTE_RANGE &&
+                        instOut(instruction) == instOut(words[id + 1])) {
                     continue;
                 }
                 builder.merge();
             }
-            else if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
+            else if (instOpcode(instruction) == InstOp.EMPTY_WIDTH) {
                 hasEmptyWidthAssertions = true;
-                int empty = instruction.empty();
+                int empty = instEmpty(instruction);
                 if ((empty & EmptyOp.TEXT_DEPENDENT) != 0) {
                     textDependentAssertions |= empty & EmptyOp.TEXT_DEPENDENT;
                 }
@@ -3793,9 +3749,9 @@ final class Prog
         int[] nextInstructionIds = new int[closure.byteRangeInstructionIds.length];
         int nextInstructionCount = 0;
         for (int instructionId : closure.byteRangeInstructionIds) {
-            Inst instruction = inst(instructionId);
-            if (instruction.matches(byteValue)) {
-                nextInstructionIds[nextInstructionCount++] = instruction.out();
+            long instruction = words[instructionId];
+            if (instMatches(instruction, byteValue)) {
+                nextInstructionIds[nextInstructionCount++] = instOut(instruction);
             }
         }
         if (nextInstructionCount == 0) {
@@ -3839,31 +3795,31 @@ final class Prog
             }
             visited[instructionId] = true;
 
-            Inst instruction = inst(instructionId);
-            switch (instruction.opcode()) {
+            long instruction = words[instructionId];
+            switch (instOpcode(instruction)) {
                 case ALT, ALT_MATCH -> {
                     stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instruction.out();
-                    stack[stackPointer++] = instruction.out1();
-                    if (!instruction.last()) {
+                    stack[stackPointer++] = instOut(instruction);
+                    stack[stackPointer++] = instOut1(instruction);
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case NOP, CAPTURE -> {
                     stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instruction.out();
-                    if (!instruction.last()) {
+                    stack[stackPointer++] = instOut(instruction);
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case EMPTY_WIDTH -> {
-                    if ((instruction.empty() & emptyFlags) == instruction.empty()) {
+                    if ((instEmpty(instruction) & emptyFlags) == instEmpty(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instruction.out();
+                        stack[stackPointer++] = instOut(instruction);
                     }
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
@@ -3875,20 +3831,20 @@ final class Prog
                         byteRangeInstructionIds = expandedInstructionIds;
                     }
                     byteRangeInstructionIds[byteRangeCount++] = instructionId;
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case MATCH -> {
                     match = true;
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case FAIL -> {
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
@@ -4056,29 +4012,29 @@ final class Prog
             }
             visited[instructionId] = true;
 
-            Inst instruction = inst(instructionId);
-            if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
+            long instruction = words[instructionId];
+            if (instOpcode(instruction) == InstOp.EMPTY_WIDTH) {
                 return true;
             }
 
             // Follow epsilon transitions irrespective of whether EMPTY_WIDTH would pass;
             // we're only interested in whether the instruction is present.
-            switch (instruction.opcode()) {
+            switch (instOpcode(instruction)) {
                 case ALT, ALT_MATCH -> {
                     stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instruction.out();
-                    stack[stackPointer++] = instruction.out1();
+                    stack[stackPointer++] = instOut(instruction);
+                    stack[stackPointer++] = instOut1(instruction);
                 }
                 case NOP, CAPTURE -> {
                     stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instruction.out();
+                    stack[stackPointer++] = instOut(instruction);
                 }
                 case BYTE_RANGE, MATCH, FAIL, EMPTY_WIDTH -> {
                     // no-op
                 }
             }
 
-            if (!instruction.last()) {
+            if (!instLast(instruction)) {
                 stack = ensureCapacity(stack, stackPointer + 1);
                 stack[stackPointer++] = instructionId + 1;
             }
@@ -4113,37 +4069,37 @@ final class Prog
             }
             visited[instructionId] = true;
 
-            Inst instruction = inst(instructionId);
+            long instruction = words[instructionId];
 
-            switch (instruction.opcode()) {
+            switch (instOpcode(instruction)) {
                 case ALT, ALT_MATCH -> {
                     stack = ensureCapacity(stack, stackPointer + 2);
-                    stack[stackPointer++] = instruction.out();
-                    stack[stackPointer++] = instruction.out1();
-                    if (!instruction.last()) {
+                    stack[stackPointer++] = instOut(instruction);
+                    stack[stackPointer++] = instOut1(instruction);
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case NOP, CAPTURE -> {
                     stack = ensureCapacity(stack, stackPointer + 1);
-                    stack[stackPointer++] = instruction.out();
-                    if (!instruction.last()) {
+                    stack[stackPointer++] = instOut(instruction);
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
                 }
                 case EMPTY_WIDTH -> {
                     // Only "consume" EMPTY_WIDTH if it is satisfied by the initial flags.
-                    if ((instruction.empty() & ~initialFlags) == 0) {
+                    if ((instEmpty(instruction) & ~initialFlags) == 0) {
                         stack = ensureCapacity(stack, stackPointer + 1);
-                        stack[stackPointer++] = instruction.out();
+                        stack[stackPointer++] = instOut(instruction);
                     }
                     else {
                         normalizedInstructionIds = ensureCapacity(normalizedInstructionIds, normalizedInstructionCount + 1);
                         normalizedInstructionIds[normalizedInstructionCount++] = instructionId;
                     }
-                    if (!instruction.last()) {
+                    if (!instLast(instruction)) {
                         stack = ensureCapacity(stack, stackPointer + 1);
                         stack[stackPointer++] = instructionId + 1;
                     }
@@ -4191,8 +4147,8 @@ final class Prog
         int caret = (reversed ? EmptyOp.EMPTY_END_LINE : EmptyOp.EMPTY_BEGIN_LINE) | javaLine;
         boolean hasCaret = false;
         for (int id = 0; id < size(); id++) {
-            Inst instruction = inst(id);
-            if (instruction.opcode() == InstOp.EMPTY_WIDTH && instruction.empty() == caret) {
+            long instruction = words[id];
+            if (instOpcode(instruction) == InstOp.EMPTY_WIDTH && instEmpty(instruction) == caret) {
                 hasCaret = true;
                 break;
             }
@@ -4207,10 +4163,10 @@ final class Prog
         SparseSet reachable = new SparseSet(size() + 1);
         addToQueue(reachable, start);
         for (int index = 0; index < reachable.size(); index++) {
-            Inst instruction = inst(reachable.denseAt(index));
-            addToQueue(reachable, instruction.out());
-            if (instruction.opcode() == InstOp.ALT || instruction.opcode() == InstOp.ALT_MATCH) {
-                addToQueue(reachable, instruction.out1());
+            long instruction = words[reachable.denseAt(index)];
+            addToQueue(reachable, instOut(instruction));
+            if (instOpcode(instruction) == InstOp.ALT || instOpcode(instruction) == InstOp.ALT_MATCH) {
+                addToQueue(reachable, instOut1(instruction));
             }
         }
 
@@ -4220,13 +4176,13 @@ final class Prog
         if (reversed) {
             addToQueue(emptyReach, start);
             for (int index = 0; index < emptyReach.size(); index++) {
-                Inst instruction = inst(emptyReach.denseAt(index));
-                switch (instruction.opcode()) {
+                long instruction = words[emptyReach.denseAt(index)];
+                switch (instOpcode(instruction)) {
                     case ALT, ALT_MATCH -> {
-                        addToQueue(emptyReach, instruction.out());
-                        addToQueue(emptyReach, instruction.out1());
+                        addToQueue(emptyReach, instOut(instruction));
+                        addToQueue(emptyReach, instOut1(instruction));
                     }
-                    case CAPTURE, EMPTY_WIDTH, NOP -> addToQueue(emptyReach, instruction.out());
+                    case CAPTURE, EMPTY_WIDTH, NOP -> addToQueue(emptyReach, instOut(instruction));
                     case BYTE_RANGE, MATCH, FAIL -> {}
                 }
             }
@@ -4236,13 +4192,13 @@ final class Prog
             PredecessorLists predecessors = new PredecessorLists(size(), 2 * reachable.size());
             for (int index = 0; index < reachable.size(); index++) {
                 int id = reachable.denseAt(index);
-                Inst instruction = inst(id);
-                switch (instruction.opcode()) {
+                long instruction = words[id];
+                switch (instOpcode(instruction)) {
                     case ALT, ALT_MATCH -> {
-                        predecessors.add(instruction.out(), id);
-                        predecessors.add(instruction.out1(), id);
+                        predecessors.add(instOut(instruction), id);
+                        predecessors.add(instOut1(instruction), id);
                     }
-                    case CAPTURE, EMPTY_WIDTH, NOP -> predecessors.add(instruction.out(), id);
+                    case CAPTURE, EMPTY_WIDTH, NOP -> predecessors.add(instOut(instruction), id);
                     case MATCH -> emptyReach.insert(id);
                     case BYTE_RANGE, FAIL -> {}
                 }
@@ -4256,9 +4212,9 @@ final class Prog
 
         for (int index = 0; index < reachable.size(); index++) {
             int id = reachable.denseAt(index);
-            Inst instruction = inst(id);
-            if (instruction.opcode() == InstOp.EMPTY_WIDTH && instruction.empty() == caret && !emptyReach.contains(id)) {
-                instruction.setEmpty(caret & ~javaLine);
+            long instruction = words[id];
+            if (instOpcode(instruction) == InstOp.EMPTY_WIDTH && instEmpty(instruction) == caret && !emptyReach.contains(id)) {
+                words[id] = withInstPayload(instruction, caret & ~javaLine);
             }
         }
     }
@@ -4276,19 +4232,21 @@ final class Prog
         for (int queueIndex = 0; queueIndex < queue.size(); queueIndex++) {
             int id = queue.denseAt(queueIndex);
 
-            Inst instruction = inst(id);
-            if (nopTargets == null && isNopChain(instruction.out())) {
+            long instruction = words[id];
+            if (nopTargets == null && isNopChain(instOut(instruction))) {
                 nopTargets = new SparseIntArray(size());
             }
-            instruction.setOut(skipNops(instruction.out(), nopTargets));
-            addToQueue(queue, instruction.out());
+            instruction = withInstOut(instruction, skipNops(instOut(instruction), nopTargets));
+            words[id] = instruction;
+            addToQueue(queue, instOut(instruction));
 
-            if (instruction.opcode() == InstOp.ALT) {
-                if (nopTargets == null && isNopChain(instruction.out1())) {
+            if (instOpcode(instruction) == InstOp.ALT) {
+                if (nopTargets == null && isNopChain(instOut1(instruction))) {
                     nopTargets = new SparseIntArray(size());
                 }
-                instruction.setOut1(skipNops(instruction.out1(), nopTargets));
-                addToQueue(queue, instruction.out1());
+                instruction = withInstOut1(instruction, skipNops(instOut1(instruction), nopTargets));
+                words[id] = instruction;
+                addToQueue(queue, instOut1(instruction));
             }
         }
 
@@ -4298,35 +4256,35 @@ final class Prog
         addToQueue(queue, start);
         for (int queueIndex = 0; queueIndex < queue.size(); queueIndex++) {
             int id = queue.denseAt(queueIndex);
-            Inst instruction = inst(id);
-            addToQueue(queue, instruction.out());
-            if (instruction.opcode() == InstOp.ALT) {
-                addToQueue(queue, instruction.out1());
+            long instruction = words[id];
+            addToQueue(queue, instOut(instruction));
+            if (instOpcode(instruction) == InstOp.ALT) {
+                addToQueue(queue, instOut1(instruction));
             }
 
-            if (instruction.opcode() == InstOp.ALT) {
+            if (instOpcode(instruction) == InstOp.ALT) {
                 // Many loops can share one long chain of captures, so answers are remembered,
                 // and the loop test comes first so loop-free programs never walk.
-                Inst firstBranch = inst(instruction.out());
-                Inst secondBranch = inst(instruction.out1());
+                long firstBranch = words[instOut(instruction)];
+                long secondBranch = words[instOut1(instruction)];
                 int matchBranchId;
-                if (firstBranch.opcode() == InstOp.BYTE_RANGE && firstBranch.out() == id &&
-                        firstBranch.lo() == 0x00 && firstBranch.hi() == 0xFF) {
-                    matchBranchId = instruction.out1();
+                if (instOpcode(firstBranch) == InstOp.BYTE_RANGE && instOut(firstBranch) == id &&
+                        instLo(firstBranch) == 0x00 && instHi(firstBranch) == 0xFF) {
+                    matchBranchId = instOut1(instruction);
                 }
-                else if (secondBranch.opcode() == InstOp.BYTE_RANGE && secondBranch.out() == id &&
-                        secondBranch.lo() == 0x00 && secondBranch.hi() == 0xFF) {
-                    matchBranchId = instruction.out();
+                else if (instOpcode(secondBranch) == InstOp.BYTE_RANGE && instOut(secondBranch) == id &&
+                        instLo(secondBranch) == 0x00 && instHi(secondBranch) == 0xFF) {
+                    matchBranchId = instOut(instruction);
                 }
                 else {
                     continue;
                 }
-                InstOp matchBranchOpcode = inst(matchBranchId).opcode();
+                InstOp matchBranchOpcode = instOpcode(words[matchBranchId]);
                 if (matchAnswers == null && (matchBranchOpcode == InstOp.CAPTURE || matchBranchOpcode == InstOp.NOP)) {
                     matchAnswers = new SparseIntArray(size());
                 }
                 if (isMatch(matchBranchId, matchAnswers)) {
-                    instruction.setOpcode(InstOp.ALT_MATCH);
+                    words[id] = withInstOpcode(instruction, InstOp.ALT_MATCH);
                 }
             }
         }
@@ -4412,7 +4370,8 @@ final class Prog
                 // The unflattened program is still intact, and only a rejected compile counts it.
                 throw new RegexpCompileMemoryLimitException(maxMemory, () -> flattenedSizeExceeded(rootIdsByInstruction, reachable, stack, maxInstructionCount, maxMemory));
             }
-            flattenedInstructions.getLast().setLast();
+            int lastIndex = flattenedInstructions.size() - 1;
+            flattenedInstructions.set(lastIndex, flattenedInstructions.get(lastIndex) | INSTRUCTION_LAST_BIT);
             computeHints(
                     flattenedInstructions,
                     flattenedIndexesByRoot[rootId],
@@ -4441,19 +4400,20 @@ final class Prog
         // Fourth pass: record output list ids, remap outputs to flattened indexes, count
         // instructions by opcode, and record the capture slot count.
         for (int id = 0; id < flattenedInstructions.size(); id++) {
-            Inst instruction = flattenedInstructions.get(id);
+            long instruction = flattenedInstructions.get(id);
+            InstOp opcode = instOpcode(instruction);
             if (outputLists != null) {
-                outputLists[id] = switch (instruction.opcode()) {
-                    case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, NOP -> (short) instruction.out();
+                outputLists[id] = switch (opcode) {
+                    case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, NOP -> (short) instOut(instruction);
                     case ALT, ALT_MATCH, MATCH, FAIL -> -1;
                 };
             }
-            if (instruction.opcode() != InstOp.ALT_MATCH) {
-                instruction.setOut(flattenedIndexesByRoot[instruction.out()]);
+            if (opcode != InstOp.ALT_MATCH) {
+                flattenedInstructions.set(id, withInstOut(instruction, flattenedIndexesByRoot[instOut(instruction)]));
             }
-            instCount[instruction.opcode().ordinal()]++;
-            if (instruction.opcode() == InstOp.CAPTURE) {
-                captureSlotCount = Math.max(captureSlotCount, (instruction.cap() | 1) + 1);
+            instCount[opcode.ordinal()]++;
+            if (opcode == InstOp.CAPTURE) {
+                captureSlotCount = Math.max(captureSlotCount, (instCap(instruction) | 1) + 1);
             }
         }
 
@@ -4475,7 +4435,7 @@ final class Prog
         }
 
         // Replace old instructions with flattened ones.
-        insts = flattenedInstructions.retainedInstructions();
+        words = flattenedInstructions.retainedInstructions();
         instructionCount = flattenedInstructions.size();
 
         this.outputLists = null;
@@ -4575,11 +4535,11 @@ final class Prog
         int emptyWidthCount = 0;
         int noOpCount = 0;
         for (int id = 0; id < size(); id++) {
-            switch (inst(id).opcode()) {
+            switch (instOpcode(words[id])) {
                 case BYTE_RANGE -> byteRangeCount++;
                 case CAPTURE -> {
                     captureCount++;
-                    maximumCaptureSlot = Math.max(maximumCaptureSlot, inst(id).cap());
+                    maximumCaptureSlot = Math.max(maximumCaptureSlot, instCap(words[id]));
                 }
                 case EMPTY_WIDTH -> emptyWidthCount++;
                 case NOP -> noOpCount++;
@@ -4617,9 +4577,9 @@ final class Prog
         nodeById[startUnanchored()] = 1;
         int nodeBound = 1;
         for (int id = 0; id < size(); id++) {
-            Inst instruction = inst(id);
-            if (instruction.opcode() == InstOp.BYTE_RANGE && nodeById[instruction.out()] == 0) {
-                nodeById[instruction.out()] = 1;
+            long instruction = words[id];
+            if (instOpcode(instruction) == InstOp.BYTE_RANGE && nodeById[instOut(instruction)] == 0) {
+                nodeById[instOut(instruction)] = 1;
                 nodeBound++;
             }
         }
@@ -4683,11 +4643,11 @@ final class Prog
                 int assertions = hasExtendedAssertions ? stackAssertions[stackSize] : 0;
 
                 while (id != 0) {
-                    Inst instruction = inst(id);
-                    switch (instruction.opcode()) {
+                    long instruction = words[id];
+                    switch (instOpcode(instruction)) {
                         case ALT_MATCH -> {
                             // Upstream ignores ALT_MATCH's subtle semantics in IsOnePass; we do the same.
-                            if (instruction.last()) {
+                            if (instLast(instruction)) {
                                 return false;
                             }
                             if (!addOnePassQueue(workQueue, id + 1)) {
@@ -4697,7 +4657,7 @@ final class Prog
                         }
 
                         case BYTE_RANGE -> {
-                            int nextInstructionId = instruction.out();
+                            int nextInstructionId = instOut(instruction);
                             int nextIndex = nodeById[nextInstructionId];
                             if (nextIndex == -1) {
                                 if (allocatedNodeCount >= nodeBound) {
@@ -4722,8 +4682,8 @@ final class Prog
                             }
 
                             // Fill each action for the byte classes touched by this instruction.
-                            int lo = instruction.lo();
-                            int hi = instruction.hi();
+                            int lo = instLo(instruction);
+                            int hi = instHi(instruction);
                             for (int c = lo; c <= hi; c++) {
                                 int byteClass = bytemap(c);
                                 while (c < 255 && bytemap(c + 1) == byteClass) {
@@ -4750,7 +4710,7 @@ final class Prog
                                 }
                             }
 
-                            if (instruction.foldCase()) {
+                            if (instFoldCase(instruction)) {
                                 int uppercaseLow = Math.max(lo, 'a') + ('A' - 'a');
                                 int uppercaseHigh = Math.min(hi, 'z') + ('A' - 'a');
                                 for (int c = uppercaseLow; c <= uppercaseHigh; c++) {
@@ -4780,7 +4740,7 @@ final class Prog
                                 }
                             }
 
-                            if (instruction.last()) {
+                            if (instLast(instruction)) {
                                 id = 0;
                                 break;
                             }
@@ -4791,7 +4751,7 @@ final class Prog
                         }
 
                         case CAPTURE, EMPTY_WIDTH, NOP -> {
-                            if (!instruction.last()) {
+                            if (!instLast(instruction)) {
                                 if (!addOnePassQueue(workQueue, id + 1)) {
                                     return false;
                                 }
@@ -4806,14 +4766,14 @@ final class Prog
                                 stackSize++;
                             }
 
-                            if (instruction.opcode() == InstOp.CAPTURE && instruction.cap() < ONEPASS_MAX_CAP) {
-                                condition |= 1 << (ONEPASS_CAP_SHIFT + instruction.cap());
+                            if (instOpcode(instruction) == InstOp.CAPTURE && instCap(instruction) < ONEPASS_MAX_CAP) {
+                                condition |= 1 << (ONEPASS_CAP_SHIFT + instCap(instruction));
                             }
-                            if (hasExtendedCaptures && instruction.opcode() == InstOp.CAPTURE) {
-                                captureMask |= 1L << instruction.cap();
+                            if (hasExtendedCaptures && instOpcode(instruction) == InstOp.CAPTURE) {
+                                captureMask |= 1L << instCap(instruction);
                             }
-                            if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
-                                int empty = instruction.empty();
+                            if (instOpcode(instruction) == InstOp.EMPTY_WIDTH) {
+                                int empty = instEmpty(instruction);
                                 if ((empty & ONEPASS_TEXT_DEPENDENT_ASSERTIONS) == 0) {
                                     condition |= empty;
                                 }
@@ -4823,10 +4783,10 @@ final class Prog
                                 assertions |= empty;
                             }
 
-                            if (!addOnePassQueue(workQueue, instruction.out())) {
+                            if (!addOnePassQueue(workQueue, instOut(instruction))) {
                                 return false;
                             }
-                            id = instruction.out();
+                            id = instOut(instruction);
                         }
 
                         case MATCH -> {
@@ -4843,7 +4803,7 @@ final class Prog
                                 nodeMatchAssertions[nodeIndex] = assertions;
                             }
 
-                            if (instruction.last()) {
+                            if (instLast(instruction)) {
                                 id = 0;
                                 break;
                             }
@@ -4932,8 +4892,8 @@ final class Prog
 
     private boolean isNopChain(int instructionId)
     {
-        return instructionId != 0 && inst(instructionId).opcode() == InstOp.NOP &&
-                inst(instructionId).out() != 0 && inst(inst(instructionId).out()).opcode() == InstOp.NOP;
+        return instructionId != 0 && instOpcode(words[instructionId]) == InstOp.NOP &&
+                instOut(words[instructionId]) != 0 && instOpcode(words[instOut(words[instructionId])]) == InstOp.NOP;
     }
 
     private int skipNops(int instructionId, SparseIntArray nopTargets)
@@ -4941,7 +4901,7 @@ final class Prog
         int endId = instructionId;
         int targetId;
         while (true) {
-            if (endId == 0 || inst(endId).opcode() != InstOp.NOP) {
+            if (endId == 0 || instOpcode(words[endId]) != InstOp.NOP) {
                 targetId = endId;
                 break;
             }
@@ -4949,10 +4909,10 @@ final class Prog
                 targetId = nopTargets.getExisting(endId);
                 break;
             }
-            endId = inst(endId).out();
+            endId = instOut(words[endId]);
         }
         if (nopTargets != null) {
-            for (int id = instructionId; id != endId; id = inst(id).out()) {
+            for (int id = instructionId; id != endId; id = instOut(words[id])) {
                 nopTargets.setNew(id, targetId);
             }
         }
@@ -4964,18 +4924,18 @@ final class Prog
         int endId = instructionId;
         boolean match;
         while (true) {
-            Inst instruction = inst(endId);
-            if (instruction.opcode() != InstOp.CAPTURE && instruction.opcode() != InstOp.NOP) {
-                match = instruction.opcode() == InstOp.MATCH;
+            long instruction = words[endId];
+            if (instOpcode(instruction) != InstOp.CAPTURE && instOpcode(instruction) != InstOp.NOP) {
+                match = instOpcode(instruction) == InstOp.MATCH;
                 break;
             }
             if (matchAnswers.hasIndex(endId)) {
                 match = matchAnswers.getExisting(endId) != 0;
                 break;
             }
-            endId = instruction.out();
+            endId = instOut(instruction);
         }
-        for (int id = instructionId; id != endId; id = inst(id).out()) {
+        for (int id = instructionId; id != endId; id = instOut(words[id])) {
             matchAnswers.setNew(id, match ? 1 : 0);
         }
         return match;
@@ -5009,21 +4969,21 @@ final class Prog
                 }
                 reachable.insertNew(id);
 
-                Inst instruction = inst(id);
-                switch (instruction.opcode()) {
+                long instruction = words[id];
+                switch (instOpcode(instruction)) {
                     case ALT_MATCH, ALT -> {
                         edgeCount += 2;
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case BYTE_RANGE, CAPTURE, EMPTY_WIDTH -> {
                         // Mark the out of this instruction as a "root".
-                        if (!rootIdsByInstruction.hasIndex(instruction.out())) {
-                            rootIdsByInstruction.setNew(instruction.out(), rootIdsByInstruction.size());
+                        if (!rootIdsByInstruction.hasIndex(instOut(instruction))) {
+                            rootIdsByInstruction.setNew(instOut(instruction), rootIdsByInstruction.size());
                         }
-                        id = instruction.out();
+                        id = instOut(instruction);
                     }
-                    case NOP -> id = instruction.out();
+                    case NOP -> id = instOut(instruction);
                     case MATCH, FAIL -> {
                         id = 0;
                     }
@@ -5039,11 +4999,11 @@ final class Prog
         PredecessorLists predecessorLists = new PredecessorLists(size(), edgeCount);
         for (int index = 0; index < reachable.size(); index++) {
             int id = reachable.denseAt(index);
-            Inst instruction = inst(id);
-            if (instruction.opcode() == InstOp.ALT || instruction.opcode() == InstOp.ALT_MATCH) {
+            long instruction = words[id];
+            if (instOpcode(instruction) == InstOp.ALT || instOpcode(instruction) == InstOp.ALT_MATCH) {
                 // Mark this instruction as a predecessor of each out.
-                predecessorLists.add(instruction.out(), id);
-                predecessorLists.add(instruction.out1(), id);
+                predecessorLists.add(instOut(instruction), id);
+                predecessorLists.add(instOut1(instruction), id);
             }
         }
         return predecessorLists;
@@ -5139,21 +5099,21 @@ final class Prog
     /// position, or -1 past the last.
     private int epsilonOutput(int id, int output)
     {
-        Inst instruction = inst(id);
-        return switch (instruction.opcode()) {
+        long instruction = words[id];
+        return switch (instOpcode(instruction)) {
             case ALT, ALT_MATCH -> switch (output) {
-                case 0 -> instruction.out();
-                case 1 -> instruction.out1();
+                case 0 -> instOut(instruction);
+                case 1 -> instOut1(instruction);
                 default -> -1;
             };
-            case CAPTURE, EMPTY_WIDTH, NOP -> output == 0 ? instruction.out() : -1;
+            case CAPTURE, EMPTY_WIDTH, NOP -> output == 0 ? instOut(instruction) : -1;
             case BYTE_RANGE, MATCH, FAIL -> -1;
         };
     }
 
     private void markLoopRoot(int id, SparseIntArray rootIdsByInstruction)
     {
-        InstOp opcode = inst(id).opcode();
+        InstOp opcode = instOpcode(words[id]);
         if ((opcode == InstOp.ALT || opcode == InstOp.ALT_MATCH) && !rootIdsByInstruction.hasIndex(id)) {
             rootIdsByInstruction.setNew(id, rootIdsByInstruction.size());
         }
@@ -5183,16 +5143,16 @@ final class Prog
                     break;
                 }
 
-                Inst instruction = inst(id);
-                switch (instruction.opcode()) {
+                long instruction = words[id];
+                switch (instOpcode(instruction)) {
                     case ALT_MATCH, ALT -> {
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, MATCH, FAIL -> {
                         id = 0;
                     }
-                    case NOP -> id = instruction.out();
+                    case NOP -> id = instOut(instruction);
                 }
                 if (id == 0) {
                     break;
@@ -5241,43 +5201,40 @@ final class Prog
                 if (id != rootInstructionId && rootIdsByInstruction.hasIndex(id)) {
                     // We reached another "tree" via epsilon transition. Emit a NOP
                     // instruction so that the Prog does not become quadratically larger.
-                    Inst noOp = new Inst(InstOp.NOP);
-                    noOp.setOut(rootIdsByInstruction.getExisting(id));
-                    if (!flattenedInstructions.add(noOp)) {
+                    if (!flattenedInstructions.add(instWord(InstOp.NOP, rootIdsByInstruction.getExisting(id), 0))) {
                         return false;
                     }
                     break;
                 }
 
-                Inst instruction = inst(id);
-                switch (instruction.opcode()) {
+                long instruction = words[id];
+                switch (instOpcode(instruction)) {
                     case ALT_MATCH -> {
-                        Inst altMatch = new Inst(InstOp.ALT_MATCH);
-                        if (!flattenedInstructions.add(altMatch)) {
+                        // The flattened alt-match leads to the two instructions after it. A list
+                        // without room for all three rejects before the word is built, whose
+                        // outputs past the last instruction a list may hold need not fit a word.
+                        if (!flattenedInstructions.hasRoomFor(3)) {
                             return false;
                         }
-                        int next = flattenedInstructions.size();
-                        altMatch.setOut(next);
-                        altMatch.setOut1(next + 1);
+                        int next = flattenedInstructions.size() + 1;
+                        flattenedInstructions.add(instWord(InstOp.ALT_MATCH, next, next + 1));
                         // fall through to ALT handling
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case ALT -> {
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case BYTE_RANGE, CAPTURE, EMPTY_WIDTH -> {
-                        Inst copy = instruction.copy();
-                        copy.setOut(rootIdsByInstruction.getExisting(instruction.out()));
-                        if (!flattenedInstructions.add(copy)) {
+                        if (!flattenedInstructions.add(withInstOut(instruction, rootIdsByInstruction.getExisting(instOut(instruction))))) {
                             return false;
                         }
                         id = 0;
                     }
-                    case NOP -> id = instruction.out();
+                    case NOP -> id = instOut(instruction);
                     case MATCH, FAIL -> {
-                        if (!flattenedInstructions.add(instruction.copy())) {
+                        if (!flattenedInstructions.add(instruction)) {
                             return false;
                         }
                         id = 0;
@@ -5328,22 +5285,22 @@ final class Prog
                     count++;
                     break;
                 }
-                Inst instruction = inst(id);
-                switch (instruction.opcode()) {
+                long instruction = words[id];
+                switch (instOpcode(instruction)) {
                     case ALT_MATCH -> {
                         count++;
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case ALT -> {
-                        stack.push(instruction.out1());
-                        id = instruction.out();
+                        stack.push(instOut1(instruction));
+                        id = instOut(instruction);
                     }
                     case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, MATCH, FAIL -> {
                         count++;
                         id = 0;
                     }
-                    case NOP -> id = instruction.out();
+                    case NOP -> id = instOut(instruction);
                 }
                 if (id == 0) {
                     break;
@@ -5368,18 +5325,18 @@ final class Prog
         // ranges use the split bitmap below.
         int id = end - 1;
         while (id >= begin) {
-            if (flattenedInstructions.get(id).opcode() != InstOp.BYTE_RANGE) {
+            if (instOpcode(flattenedInstructions.get(id)) != InstOp.BYTE_RANGE) {
                 id--;
                 continue;
             }
             int runEnd = id + 1;
             int runBegin = id;
-            while (runBegin > begin && flattenedInstructions.get(runBegin - 1).opcode() == InstOp.BYTE_RANGE) {
+            while (runBegin > begin && instOpcode(flattenedInstructions.get(runBegin - 1)) == InstOp.BYTE_RANGE) {
                 runBegin--;
             }
             if (runBegin == id) {
                 if (runEnd != end) {
-                    setHint(flattenedInstructions.get(id), 1);
+                    setHint(flattenedInstructions, id, 1);
                 }
             }
             else {
@@ -5406,11 +5363,11 @@ final class Prog
         for (int id = runEnd - 1; id >= runBegin; id--) {
             int first = end;
 
-            Inst instruction = flattenedInstructions.get(id);
-            int lo = instruction.lo();
-            int hi = instruction.hi();
+            long instruction = flattenedInstructions.get(id);
+            int lo = instLo(instruction);
+            int hi = instHi(instruction);
             first = recolorHints(splits, colors, id, lo, hi, first);
-            if (instruction.foldCase() && lo <= 'z' && hi >= 'a') {
+            if (instFoldCase(instruction) && lo <= 'z' && hi >= 'a') {
                 int foldlo = lo;
                 int foldhi = hi;
                 if (foldlo < 'a') {
@@ -5427,15 +5384,14 @@ final class Prog
             }
 
             if (first != end) {
-                setHint(instruction, first - id);
+                setHint(flattenedInstructions, id, first - id);
             }
         }
     }
 
-    // Hints are stored above the fold-case bit and saturate at the largest encodable distance.
-    private static void setHint(Inst instruction, int distance)
+    private static void setHint(InstList flattenedInstructions, int id, int distance)
     {
-        instruction.hintFoldCase |= Math.min(distance, 32767) << 1;
+        flattenedInstructions.set(id, withInstHint(flattenedInstructions.get(id), distance));
     }
 
     private static int recolorHints(Bitmap256 splits, int[] colors, int id, int lo, int hi, int first)
@@ -5720,7 +5676,7 @@ final class Prog
     {
         private final int maxSize;
         private final int blockShift;
-        private Inst[][] blocks = new Inst[16][];
+        private long[][] blocks = new long[16][];
         private int size;
 
         InstList(int unflattenedSize, int maxSize)
@@ -5730,8 +5686,14 @@ final class Prog
             blockShift = Math.max(4, 27 - Integer.numberOfLeadingZeros(unflattenedSize));
         }
 
+        // Whether the list can take `count` more instructions.
+        boolean hasRoomFor(int count)
+        {
+            return size <= maxSize - count;
+        }
+
         // Returns false, adding nothing, when the list holds `maxSize` instructions.
-        boolean add(Inst instruction)
+        boolean add(long instruction)
         {
             if (size == maxSize) {
                 return false;
@@ -5741,22 +5703,23 @@ final class Prog
                 if (block == blocks.length) {
                     blocks = Arrays.copyOf(blocks, block * 2);
                 }
-                blocks[block] = new Inst[1 << blockShift];
+                blocks[block] = new long[1 << blockShift];
             }
             blocks[block][size - (block << blockShift)] = instruction;
             size++;
             return true;
         }
 
-        Inst get(int index)
+        long get(int index)
         {
             int block = index >>> blockShift;
             return blocks[block][index - (block << blockShift)];
         }
 
-        Inst getLast()
+        void set(int index, long instruction)
         {
-            return get(size - 1);
+            int block = index >>> blockShift;
+            blocks[block][index - (block << blockShift)] = instruction;
         }
 
         int size()
@@ -5765,9 +5728,9 @@ final class Prog
         }
 
         /// The instructions for the program to keep, in an array of exactly their count.
-        Inst[] retainedInstructions()
+        long[] retainedInstructions()
         {
-            Inst[] instructions = new Inst[size];
+            long[] instructions = new long[size];
             int blockSize = 1 << blockShift;
             for (int begin = 0; begin < size; begin += blockSize) {
                 System.arraycopy(blocks[begin >>> blockShift], 0, instructions, begin, Math.min(blockSize, size - begin));
@@ -5896,12 +5859,12 @@ final class Prog
         StringBuilder builder = new StringBuilder();
         for (int queueIndex = 0; queueIndex < queue.size(); queueIndex++) {
             int id = queue.denseAt(queueIndex);
-            Inst instruction = inst(id);
-            builder.append(id).append(". ").append(instruction.dump()).append('\n');
+            long instruction = words[id];
+            builder.append(id).append(". ").append(dumpInst(instruction)).append('\n');
 
-            addToQueue(queue, instruction.out());
-            if (instruction.opcode() == InstOp.ALT || instruction.opcode() == InstOp.ALT_MATCH) {
-                addToQueue(queue, instruction.out1());
+            addToQueue(queue, instOut(instruction));
+            if (instOpcode(instruction) == InstOp.ALT || instOpcode(instruction) == InstOp.ALT_MATCH) {
+                addToQueue(queue, instOut1(instruction));
             }
         }
         return builder.toString();
@@ -5911,12 +5874,12 @@ final class Prog
     {
         StringBuilder builder = new StringBuilder();
         for (int id = start; id < size(); id++) {
-            Inst instruction = inst(id);
-            if (instruction.last()) {
-                builder.append(id).append(". ").append(instruction.dump()).append('\n');
+            long instruction = words[id];
+            if (instLast(instruction)) {
+                builder.append(id).append(". ").append(dumpInst(instruction)).append('\n');
             }
             else {
-                builder.append(id).append("+ ").append(instruction.dump()).append('\n');
+                builder.append(id).append("+ ").append(dumpInst(instruction)).append('\n');
             }
         }
         return builder.toString();

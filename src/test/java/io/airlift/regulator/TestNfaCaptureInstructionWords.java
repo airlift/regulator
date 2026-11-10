@@ -53,17 +53,56 @@ public class TestNfaCaptureInstructionWords
         }
     }
 
+    @Test
+    public void testPackedInstructionsEncodeFixtureFields()
+    {
+        Prog program = allInstructionKinds();
+        long[] instructionWords = program.getOrCreateCaptureInstructionWords();
+        assertThat(instructionWords).hasSize(8);
+
+        assertHeader(instructionWords[0], InstOp.FAIL, false, 0);
+        assertThat(payload(instructionWords[0])).isZero();
+
+        long byteRange = instructionWords[1];
+        assertHeader(byteRange, InstOp.BYTE_RANGE, true, 4);
+        assertThat(payload(byteRange) & 0xFF).isEqualTo('a');
+        assertThat((payload(byteRange) >>> 8) & 0xFF).isEqualTo('z');
+        assertThat(payload(byteRange) < 0).isTrue();
+
+        assertHeader(instructionWords[2], InstOp.CAPTURE, false, 1);
+        assertThat(payload(instructionWords[2])).isEqualTo(3);
+
+        assertHeader(instructionWords[3], InstOp.EMPTY_WIDTH, false, 1);
+        assertThat(payload(instructionWords[3])).isEqualTo(EmptyOp.EMPTY_BEGIN_TEXT);
+
+        assertHeader(instructionWords[4], InstOp.MATCH, false, 0);
+        assertThat(payload(instructionWords[4])).isEqualTo(7);
+
+        assertHeader(instructionWords[5], InstOp.NOP, false, 1);
+        assertThat(payload(instructionWords[5])).isZero();
+
+        assertHeader(instructionWords[6], InstOp.ALT, false, 1);
+        assertThat(payload(instructionWords[6]) & OUT_MASK).isEqualTo(2);
+
+        // The first output reads a byte, so the program marks this ALT_MATCH greedy.
+        long altMatch = instructionWords[7];
+        assertThat(program.greedyAltMatch(altMatch)).isTrue();
+        assertHeader(altMatch, InstOp.ALT_MATCH, false, 1);
+        assertThat(payload(altMatch) & OUT_MASK).isEqualTo(2);
+        assertThat((payload(altMatch) >>> ALT_MATCH_GREEDY_SHIFT) & 1).isEqualTo(1);
+    }
+
     private static Prog allInstructionKinds()
     {
         Prog program = new Prog();
-        program.add(Prog.Inst.createByteRange('a', 'z', true, 4));
-        program.add(Prog.Inst.createCapture(3, 1));
-        program.add(Prog.Inst.createEmptyWidth(EmptyOp.EMPTY_BEGIN_TEXT, 1));
-        program.add(Prog.Inst.createMatch(7));
-        program.add(Prog.Inst.createNop(1));
-        program.add(Prog.Inst.createAlt(1, 2));
-        program.add(Prog.Inst.createAltMatch(1, 2));
-        program.inst(1).setLast();
+        program.add(Prog.byteRangeWord('a', 'z', true, 4));
+        program.add(Prog.captureWord(3, 1));
+        program.add(Prog.emptyWidthWord(EmptyOp.EMPTY_BEGIN_TEXT, 1));
+        program.add(Prog.matchWord(7));
+        program.add(Prog.nopWord(1));
+        program.add(Prog.altWord(1, 2));
+        program.add(Prog.altMatchWord(1, 2));
+        program.setWord(1, Prog.withInstLast(program.word(1)));
         program.setDidFlatten(true);
         return program;
     }
@@ -81,11 +120,7 @@ public class TestNfaCaptureInstructionWords
     @Test
     public void testPackedInstructionsRejectOutputOverflow()
     {
-        Prog program = new Prog();
-        program.add(Prog.Inst.createNop(1 << 28));
-        program.setDidFlatten(true);
-
-        assertThatThrownBy(program::getOrCreateCaptureInstructionWords)
+        assertThatThrownBy(() -> Prog.nopWord(1 << 28))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("output exceeds packed instruction limit");
     }
@@ -99,29 +134,41 @@ public class TestNfaCaptureInstructionWords
         assertThat(instructionWords.getType()).isEqualTo(long[].class);
     }
 
+    private static void assertHeader(long word, InstOp opcode, boolean last, int out)
+    {
+        assertThat((int) (word & OPCODE_MASK)).isEqualTo(opcode.ordinal());
+        assertThat(((word >>> LAST_SHIFT) & 1) != 0).isEqualTo(last);
+        assertThat((int) ((word >>> OUT_SHIFT) & OUT_MASK)).isEqualTo(out);
+    }
+
+    private static int payload(long word)
+    {
+        return (int) (word >>> PAYLOAD_SHIFT);
+    }
+
     private static void assertInstruction(Prog program, int instructionId, long word)
     {
-        Prog.Inst instruction = program.inst(instructionId);
-        assertThat((int) (word & OPCODE_MASK)).isEqualTo(instruction.opcode().ordinal());
-        assertThat(((word >>> LAST_SHIFT) & 1) != 0).isEqualTo(instruction.last());
-        assertThat((int) ((word >>> OUT_SHIFT) & OUT_MASK)).isEqualTo(instruction.out());
+        long instruction = program.word(instructionId);
+        assertThat((int) (word & OPCODE_MASK)).isEqualTo(Prog.instOpcode(instruction).ordinal());
+        assertThat(((word >>> LAST_SHIFT) & 1) != 0).isEqualTo(Prog.instLast(instruction));
+        assertThat((int) ((word >>> OUT_SHIFT) & OUT_MASK)).isEqualTo(Prog.instOut(instruction));
 
         int payload = (int) (word >>> PAYLOAD_SHIFT);
-        switch (instruction.opcode()) {
-            case ALT -> assertThat((int) (payload & OUT_MASK)).isEqualTo(instruction.out1());
+        switch (Prog.instOpcode(instruction)) {
+            case ALT -> assertThat((int) (payload & OUT_MASK)).isEqualTo(Prog.instOut1(instruction));
             case ALT_MATCH -> {
-                assertThat((int) (payload & OUT_MASK)).isEqualTo(instruction.out1());
-                assertThat(((payload >>> ALT_MATCH_GREEDY_SHIFT) & 1) != 0).isEqualTo(instruction.greedy(program));
+                assertThat((int) (payload & OUT_MASK)).isEqualTo(Prog.instOut1(instruction));
+                assertThat(((payload >>> ALT_MATCH_GREEDY_SHIFT) & 1) != 0).isEqualTo(program.greedyAltMatch(instruction));
             }
             case BYTE_RANGE -> {
-                assertThat(payload & 0xFF).isEqualTo(instruction.lo());
-                assertThat((payload >>> 8) & 0xFF).isEqualTo(instruction.hi());
-                assertThat((payload >>> 16) & 0x7FFF).isEqualTo(instruction.hint());
-                assertThat(payload < 0).isEqualTo(instruction.foldCase());
+                assertThat(payload & 0xFF).isEqualTo(Prog.instLo(instruction));
+                assertThat((payload >>> 8) & 0xFF).isEqualTo(Prog.instHi(instruction));
+                assertThat((payload >>> 16) & 0x7FFF).isEqualTo(Prog.instHint(instruction));
+                assertThat(payload < 0).isEqualTo(Prog.instFoldCase(instruction));
             }
-            case CAPTURE -> assertThat(payload).isEqualTo(instruction.cap());
-            case EMPTY_WIDTH -> assertThat(payload).isEqualTo(instruction.empty());
-            case MATCH -> assertThat(payload).isEqualTo(instruction.matchId());
+            case CAPTURE -> assertThat(payload).isEqualTo(Prog.instCap(instruction));
+            case EMPTY_WIDTH -> assertThat(payload).isEqualTo(Prog.instEmpty(instruction));
+            case MATCH -> assertThat(payload).isEqualTo(Prog.instMatchId(instruction));
             case NOP, FAIL -> assertThat(payload).isZero();
         }
     }

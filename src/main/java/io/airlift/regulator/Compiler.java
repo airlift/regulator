@@ -1192,8 +1192,9 @@ final class Compiler
                 // the square of the program the instruction budget bounds. Charge each flattened
                 // instruction as it is emitted, so an oversized program fails before it is built.
                 program.flatten(skipDominatorPass, maxFlattenedInstructions(maxMemory), maxMemory, measuresRejection);
-                // The flatten charge counts the capture instruction words the program keeps, so
-                // build them now rather than on the first capture search, whose share leaves them out.
+                // The capture engines read the program's own words once each greedy alt-match
+                // carries its greedy bit. Mark them now, so no search writes to the words that
+                // other searches of the published program read.
                 program.getOrCreateCaptureInstructionWords();
                 if (maxMemory > 0) {
                     // A BitState search gets the program's whole share as its own allowance, as a
@@ -1218,12 +1219,12 @@ final class Compiler
             return program;
         }
 
-        private int add(Prog.Inst instruction)
+        private int add(long word)
         {
             if (program.size() + 1 > maxInstructions) {
                 throw limitExceeded();
             }
-            return program.add(instruction);
+            return program.add(word);
         }
 
         // An unbudgeted compile has a fixed instruction limit, and needs no budget to report.
@@ -1249,10 +1250,10 @@ final class Compiler
             }
 
             // Elide no-op.
-            Prog.Inst begin = program.inst(left.begin);
-            if (begin.opcode() == InstOp.NOP &&
+            long begin = program.word(left.begin);
+            if (Prog.instOpcode(begin) == InstOp.NOP &&
                     PatchList.head(left.end) == (left.begin << 1) &&
-                    begin.out() == 0) {
+                    Prog.instOut(begin) == 0) {
                 PatchList.patch(program, left.end, right.begin);
                 return right;
             }
@@ -1275,7 +1276,7 @@ final class Compiler
                 return left;
             }
 
-            int id = add(Prog.Inst.createAlt(left.begin, right.begin));
+            int id = add(Prog.altWord(left.begin, right.begin));
             if (id < 0) {
                 return noMatch();
             }
@@ -1430,27 +1431,27 @@ final class Compiler
             // this loop. An instruction reused in place is read and relinked in the same step.
             for (int cloneIndex = 0; cloneIndex < clones.size(); cloneIndex++) {
                 int originalId = clones.denseIndexAt(cloneIndex);
-                Prog.Inst original = program.inst(originalId);
-                Prog.Inst clone = program.inst(clones.denseValueAt(cloneIndex));
-                switch (original.opcode()) {
+                int cloneId = clones.denseValueAt(cloneIndex);
+                long original = program.word(originalId);
+                switch (Prog.instOpcode(original)) {
                     case ALT -> {
-                        clone.setOut(clonePreConsumptionInstruction(
-                                original.out(),
+                        program.setInstOut(cloneId, clonePreConsumptionInstruction(
+                                Prog.instOut(original),
                                 consumedExit.begin,
                                 emptyExit,
                                 clones,
                                 bodyStates,
                                 originalInstructionLimit));
-                        clone.setOut1(clonePreConsumptionInstruction(
-                                original.out1(),
+                        program.setInstOut1(cloneId, clonePreConsumptionInstruction(
+                                Prog.instOut1(original),
                                 consumedExit.begin,
                                 emptyExit,
                                 clones,
                                 bodyStates,
                                 originalInstructionLimit));
                     }
-                    case CAPTURE, EMPTY_WIDTH, NOP -> clone.setOut(clonePreConsumptionInstruction(
-                            original.out(),
+                    case CAPTURE, EMPTY_WIDTH, NOP -> program.setInstOut(cloneId, clonePreConsumptionInstruction(
+                            Prog.instOut(original),
                             consumedExit.begin,
                             emptyExit,
                             clones,
@@ -1459,7 +1460,7 @@ final class Compiler
                     case BYTE_RANGE -> {
                         // A byte clone keeps its original successor.
                     }
-                    case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
+                    case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + Prog.instOpcode(original));
                 }
             }
             // The check reuses the walk set, so it runs only once the copy is linked.
@@ -1512,14 +1513,14 @@ final class Compiler
                 return;
             }
             int consumed = state & 1;
-            Prog.Inst instruction = program.inst(id);
-            switch (instruction.opcode()) {
+            long instruction = program.word(id);
+            switch (Prog.instOpcode(instruction)) {
                 case ALT -> {
-                    states.insert(instruction.out() << 1 | consumed);
-                    states.insert(instruction.out1() << 1 | consumed);
+                    states.insert(Prog.instOut(instruction) << 1 | consumed);
+                    states.insert(Prog.instOut1(instruction) << 1 | consumed);
                 }
-                case CAPTURE, EMPTY_WIDTH, NOP -> states.insert(instruction.out() << 1 | consumed);
-                case BYTE_RANGE -> states.insert(instruction.out() << 1 | 1);
+                case CAPTURE, EMPTY_WIDTH, NOP -> states.insert(Prog.instOut(instruction) << 1 | consumed);
+                case BYTE_RANGE -> states.insert(Prog.instOut(instruction) << 1 | 1);
                 default -> {
                     // FAIL ends this path, and a body holds no match instruction.
                 }
@@ -1538,13 +1539,13 @@ final class Compiler
                 if (id == target) {
                     return true;
                 }
-                Prog.Inst instruction = program.inst(id);
-                switch (instruction.opcode()) {
+                long instruction = program.word(id);
+                switch (Prog.instOpcode(instruction)) {
                     case ALT -> {
-                        visited.insert(instruction.out());
-                        visited.insert(instruction.out1());
+                        visited.insert(Prog.instOut(instruction));
+                        visited.insert(Prog.instOut1(instruction));
                     }
-                    case CAPTURE, NOP -> visited.insert(instruction.out());
+                    case CAPTURE, NOP -> visited.insert(Prog.instOut(instruction));
                     default -> {
                         // An assertion or FAIL ends the search of this path, and a byte consumes.
                     }
@@ -1594,20 +1595,15 @@ final class Compiler
                 clones.setNew(originalId, originalId);
                 return originalId;
             }
-            Prog.Inst original = program.inst(originalId);
-            Prog.Inst clone = original.copy();
-            switch (original.opcode()) {
+            long original = program.word(originalId);
+            long clone = original;
+            switch (Prog.instOpcode(original)) {
                 case BYTE_RANGE -> {
                     // The cloned first byte enters the original graph after making progress.
                 }
-                case ALT -> {
-                    clone.setOut(0);
-                    clone.setOut1(0);
-                }
-                case CAPTURE, EMPTY_WIDTH, NOP -> {
-                    clone.setOut(0);
-                }
-                case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
+                case ALT -> clone = Prog.withInstOut1(Prog.withInstOut(clone, 0), 0);
+                case CAPTURE, EMPTY_WIDTH, NOP -> clone = Prog.withInstOut(clone, 0);
+                case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + Prog.instOpcode(original));
             }
             int cloneId = add(clone);
             clones.setNew(originalId, cloneId);
@@ -1616,20 +1612,20 @@ final class Compiler
 
         private Fragment plus(Fragment fragment, boolean nonGreedy)
         {
-            int id = add(Prog.Inst.createAlt(0, 0));
+            int id = add(Prog.altWord(0, 0));
             if (id < 0) {
                 return noMatch();
             }
 
             long patchList;
             if (nonGreedy) {
-                program.inst(id).setOut(0);
-                program.inst(id).setOut1(fragment.begin);
+                program.setInstOut(id, 0);
+                program.setInstOut1(id, fragment.begin);
                 patchList = PatchList.create(id << 1);
             }
             else {
-                program.inst(id).setOut(fragment.begin);
-                program.inst(id).setOut1(0);
+                program.setInstOut(id, fragment.begin);
+                program.setInstOut1(id, 0);
                 patchList = PatchList.create((id << 1) | 1);
             }
             PatchList.patch(program, fragment.end, id);
@@ -1642,20 +1638,20 @@ final class Compiler
                 return quest(plus(fragment, nonGreedy), nonGreedy);
             }
 
-            int id = add(Prog.Inst.createAlt(0, 0));
+            int id = add(Prog.altWord(0, 0));
             if (id < 0) {
                 return noMatch();
             }
 
             long patchList;
             if (nonGreedy) {
-                program.inst(id).setOut(0);
-                program.inst(id).setOut1(fragment.begin);
+                program.setInstOut(id, 0);
+                program.setInstOut1(id, fragment.begin);
                 patchList = PatchList.create(id << 1);
             }
             else {
-                program.inst(id).setOut(fragment.begin);
-                program.inst(id).setOut1(0);
+                program.setInstOut(id, fragment.begin);
+                program.setInstOut1(id, 0);
                 patchList = PatchList.create((id << 1) | 1);
             }
             PatchList.patch(program, fragment.end, id);
@@ -1668,20 +1664,20 @@ final class Compiler
                 return noOperation();
             }
 
-            int id = add(Prog.Inst.createAlt(0, 0));
+            int id = add(Prog.altWord(0, 0));
             if (id < 0) {
                 return noMatch();
             }
 
             long patchList;
             if (nonGreedy) {
-                program.inst(id).setOut(0);
-                program.inst(id).setOut1(fragment.begin);
+                program.setInstOut(id, 0);
+                program.setInstOut1(id, fragment.begin);
                 patchList = PatchList.create(id << 1);
             }
             else {
-                program.inst(id).setOut(fragment.begin);
-                program.inst(id).setOut1(0);
+                program.setInstOut(id, fragment.begin);
+                program.setInstOut1(id, 0);
                 patchList = PatchList.create((id << 1) | 1);
             }
             return new Fragment(id, PatchList.append(program, patchList, fragment.end), true);
@@ -1697,8 +1693,8 @@ final class Compiler
                 throw limitExceeded();
             }
 
-            int startId = program.add(Prog.Inst.createCapture(2 * captureIndex, fragment.begin));
-            int endId = program.add(Prog.Inst.createCapture(2 * captureIndex + 1, 0));
+            int startId = program.add(Prog.captureWord(2 * captureIndex, fragment.begin));
+            int endId = program.add(Prog.captureWord(2 * captureIndex + 1, 0));
 
             PatchList.patch(program, fragment.end, endId);
             return new Fragment(startId, PatchList.create(endId << 1), fragment.nullable);
@@ -1706,7 +1702,7 @@ final class Compiler
 
         private Fragment match(int matchId)
         {
-            int id = add(Prog.Inst.createMatch(matchId));
+            int id = add(Prog.matchWord(matchId));
             if (id < 0) {
                 return noMatch();
             }
@@ -1715,7 +1711,7 @@ final class Compiler
 
         private Fragment noOperation()
         {
-            int id = add(Prog.Inst.createNop(0));
+            int id = add(Prog.nopWord(0));
             if (id < 0) {
                 return noMatch();
             }
@@ -1724,7 +1720,7 @@ final class Compiler
 
         private Fragment emptyWidth(int empty)
         {
-            int id = add(Prog.Inst.createEmptyWidth(empty, 0));
+            int id = add(Prog.emptyWidthWord(empty, 0));
             if (id < 0) {
                 return noMatch();
             }
@@ -1733,7 +1729,7 @@ final class Compiler
 
         private Fragment byteRange(int low, int high, boolean foldCase)
         {
-            int id = add(Prog.Inst.createByteRange(low, high, foldCase, 0));
+            int id = add(Prog.byteRangeWord(low, high, foldCase, 0));
             if (id < 0) {
                 return noMatch();
             }
@@ -1802,7 +1798,7 @@ final class Compiler
 
                 int begin = branchStarts.getFirst();
                 for (int branchIndex = 1; branchIndex < branchStarts.size(); branchIndex++) {
-                    begin = add(Prog.Inst.createAlt(begin, branchStarts.get(branchIndex)));
+                    begin = add(Prog.altWord(begin, branchStarts.get(branchIndex)));
                 }
                 suffixes[index] = new Fragment(begin, terminal.end, false);
             }
@@ -2027,8 +2023,8 @@ final class Compiler
 
         private boolean isCachedRuneByteSuffix(int id)
         {
-            Prog.Inst instruction = program.inst(id);
-            long key = makeRuneCacheKey(instruction.lo(), instruction.hi(), instruction.foldCase(), instruction.out());
+            long instruction = program.word(id);
+            long key = makeRuneCacheKey(Prog.instLo(instruction), Prog.instHi(instruction), Prog.instFoldCase(instruction), Prog.instOut(instruction));
             return runeCache.containsKey(key);
         }
 
@@ -2048,29 +2044,29 @@ final class Compiler
                 return;
             }
 
-            int alternateId = add(Prog.Inst.createAlt(runeRange.begin, id));
+            int alternateId = add(Prog.altWord(runeRange.begin, id));
             runeRange.begin = alternateId;
         }
 
         private boolean byteRangeEqual(int leftId, int rightId)
         {
-            Prog.Inst left = program.inst(leftId);
-            Prog.Inst right = program.inst(rightId);
-            return left.lo() == right.lo() && left.hi() == right.hi() && left.foldCase() == right.foldCase();
+            long left = program.word(leftId);
+            long right = program.word(rightId);
+            return Prog.instLo(left) == Prog.instLo(right) && Prog.instHi(left) == Prog.instHi(right) && Prog.instFoldCase(left) == Prog.instFoldCase(right);
         }
 
         private Fragment findByteRange(int root, int id)
         {
-            Prog.Inst rootInstruction = program.inst(root);
-            if (rootInstruction.opcode() == InstOp.BYTE_RANGE) {
+            long rootInstruction = program.word(root);
+            if (Prog.instOpcode(rootInstruction) == InstOp.BYTE_RANGE) {
                 if (byteRangeEqual(root, id)) {
                     return new Fragment(root, PatchList.EMPTY, false);
                 }
                 return noMatch();
             }
 
-            while (rootInstruction.opcode() == InstOp.ALT) {
-                int alternateInstructionId = rootInstruction.out1();
+            while (Prog.instOpcode(rootInstruction) == InstOp.ALT) {
+                int alternateInstructionId = Prog.instOut1(rootInstruction);
                 if (byteRangeEqual(alternateInstructionId, id)) {
                     return new Fragment(root, PatchList.create((root << 1) | 1), false);
                 }
@@ -2082,9 +2078,9 @@ final class Compiler
                     return noMatch();
                 }
 
-                int nextInstructionId = rootInstruction.out();
-                Prog.Inst nextInstruction = program.inst(nextInstructionId);
-                if (nextInstruction.opcode() == InstOp.ALT) {
+                int nextInstructionId = Prog.instOut(rootInstruction);
+                long nextInstruction = program.word(nextInstructionId);
+                if (Prog.instOpcode(nextInstruction) == InstOp.ALT) {
                     root = nextInstructionId;
                     rootInstruction = nextInstruction;
                     continue;
@@ -2198,15 +2194,15 @@ final class Compiler
 
         private int addSuffixRecursive(int root, int id)
         {
-            Prog.Inst rootInstruction = program.inst(root);
-            if (rootInstruction.opcode() != InstOp.ALT &&
-                    rootInstruction.opcode() != InstOp.BYTE_RANGE) {
+            InstOp rootOpcode = Prog.instOpcode(program.word(root));
+            if (rootOpcode != InstOp.ALT &&
+                    rootOpcode != InstOp.BYTE_RANGE) {
                 throw new RegexpCompileException("invalid rune suffix trie root");
             }
 
             Fragment matchingRange = findByteRange(root, id);
             if (isNoMatch(matchingRange)) {
-                return add(Prog.Inst.createAlt(root, id));
+                return add(Prog.altWord(root, id));
             }
 
             int byteRangeId;
@@ -2215,37 +2211,37 @@ final class Compiler
                 byteRangeId = root;
             }
             else if ((matchingPatchPointer & 1) != 0) {
-                byteRangeId = program.inst(matchingRange.begin).out1();
+                byteRangeId = Prog.instOut1(program.word(matchingRange.begin));
             }
             else {
-                byteRangeId = program.inst(matchingRange.begin).out();
+                byteRangeId = Prog.instOut(program.word(matchingRange.begin));
             }
 
             if (isCachedRuneByteSuffix(byteRangeId)) {
                 // We can't fiddle with cached suffixes, so make a clone of the head.
-                Prog.Inst head = program.inst(byteRangeId);
-                int clone = add(Prog.Inst.createByteRange(head.lo(), head.hi(), head.foldCase(), head.out()));
+                long head = program.word(byteRangeId);
+                int clone = add(Prog.byteRangeWord(Prog.instLo(head), Prog.instHi(head), Prog.instFoldCase(head), Prog.instOut(head)));
 
                 byteRangeId = clone;
                 if (matchingPatchPointer == 0) {
                     root = byteRangeId;
                 }
                 else if ((matchingPatchPointer & 1) != 0) {
-                    program.inst(matchingRange.begin).setOut1(byteRangeId);
+                    program.setInstOut1(matchingRange.begin, byteRangeId);
                 }
                 else {
-                    program.inst(matchingRange.begin).setOut(byteRangeId);
+                    program.setInstOut(matchingRange.begin, byteRangeId);
                 }
             }
 
-            int suffixInstructionId = program.inst(id).out();
+            int suffixInstructionId = Prog.instOut(program.word(id));
             if (!isCachedRuneByteSuffix(id)) {
                 // Free the head instead of leaving it unreachable.
                 program.removeLastInst(id);
             }
 
-            suffixInstructionId = addSuffixRecursive(program.inst(byteRangeId).out(), suffixInstructionId);
-            program.inst(byteRangeId).setOut(suffixInstructionId);
+            suffixInstructionId = addSuffixRecursive(Prog.instOut(program.word(byteRangeId)), suffixInstructionId);
+            program.setInstOut(byteRangeId, suffixInstructionId);
             return root;
         }
     }
@@ -2271,14 +2267,15 @@ final class Compiler
         {
             int patchPointer = head(patchList);
             while (patchPointer != 0) {
-                Prog.Inst instruction = program.inst(patchPointer >>> 1);
+                int instructionId = patchPointer >>> 1;
+                long instruction = program.word(instructionId);
                 if ((patchPointer & 1) != 0) {
-                    patchPointer = instruction.out1();
-                    instruction.setOut1(target);
+                    patchPointer = Prog.instOut1(instruction);
+                    program.setInstOut1(instructionId, target);
                 }
                 else {
-                    patchPointer = instruction.out();
-                    instruction.setOut(target);
+                    patchPointer = Prog.instOut(instruction);
+                    program.setInstOut(instructionId, target);
                 }
             }
         }
@@ -2295,12 +2292,11 @@ final class Compiler
             }
 
             int leftTail = tail(left);
-            Prog.Inst instruction = program.inst(leftTail >>> 1);
             if ((leftTail & 1) != 0) {
-                instruction.setOut1(rightHead);
+                program.setInstOut1(leftTail >>> 1, rightHead);
             }
             else {
-                instruction.setOut(rightHead);
+                program.setInstOut(leftTail >>> 1, rightHead);
             }
             return pack(leftHead, tail(right));
         }

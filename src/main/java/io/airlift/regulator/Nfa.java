@@ -478,7 +478,7 @@ final class Nfa
                 return -1;
             }
             nfa.writeGroupZero(groupZero);
-            return prog.inst(nfa.matchInstruction).matchId();
+            return Prog.instMatchId(prog.word(nfa.matchInstruction));
         }
         catch (RuntimeException | Error failure) {
             if (workspace != null) {
@@ -1096,8 +1096,8 @@ final class Nfa
             }
         }
 
-        // Capture-heavy no-submatch path: preserve Inst semantics, but source opcode/state data
-        // from flattened arrays to avoid repeated Inst object dereferences/getter calls.
+        // Capture-heavy no-submatch path: preserves instruction semantics, but reads decoded
+        // tables instead of packed words.
         @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "The switch exhaustively handles encoded instruction opcodes")
         private void addToThreadqWithIndexedCaptureTables(NfaThreadQueue q, int id0, int c, int position, int startPos)
         {

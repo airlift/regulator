@@ -15,8 +15,6 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -24,29 +22,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestProgInstructions
 {
     @Test
-    public void testInstructionAccessIsBoundedByCount()
+    public void testRemovingTheLastInstructionShrinksTheCount()
     {
         Prog program = Compiler.compile(RegexpParser.parse(utf8Slice("abc"), Regexp.LIKE_PERL).regexp(), false, 0);
         int size = program.size();
         assertThat(size).isGreaterThan(2);
-        assertThatThrownBy(() -> program.inst(-1))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("instructionId out of range: -1");
-        assertThatThrownBy(() -> program.inst(size))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("instructionId out of range: " + size);
 
-        List<Prog.Inst> snapshot = program.insts();
-        assertThat(snapshot).hasSize(size).doesNotContainNull();
-        for (int id = 0; id < size; id++) {
-            assertThat(snapshot.get(id)).isSameAs(program.inst(id));
-        }
-
-        // Removing the last instruction shrinks the count; the backing array may keep spare capacity.
+        // Only the last instruction can be removed; the backing array may keep spare capacity.
         assertThatThrownBy(() -> program.removeLastInst(size - 2)).isInstanceOf(IllegalArgumentException.class);
         program.removeLastInst(size - 1);
         assertThat(program.size()).isEqualTo(size - 1);
-        assertThat(program.insts()).hasSize(size - 1).doesNotContainNull();
-        assertThatThrownBy(() -> program.inst(size - 1)).isInstanceOf(IllegalArgumentException.class);
     }
 }

@@ -22,12 +22,12 @@ public class TestProgInstMatches
     @Test
     public void testByteRangeDoesNotMatchNonByteSentinels()
     {
-        Prog.Inst br = Prog.Inst.createByteRange(0x00, 0x09, false, 0);
+        long br = Prog.byteRangeWord(0x00, 0x09, false, 0);
 
-        assertThat(br.matches(-1)).isFalse();
-        assertThat(br.matches(256)).isFalse();
-        assertThat(br.matches(0)).isTrue();
-        assertThat(br.matches(9)).isTrue();
-        assertThat(br.matches(10)).isFalse();
+        assertThat(Prog.instMatches(br, -1)).isFalse();
+        assertThat(Prog.instMatches(br, 256)).isFalse();
+        assertThat(Prog.instMatches(br, 0)).isTrue();
+        assertThat(Prog.instMatches(br, 9)).isTrue();
+        assertThat(Prog.instMatches(br, 10)).isFalse();
     }
 }

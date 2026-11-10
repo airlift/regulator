@@ -143,7 +143,7 @@ dictionary of words, needs a budget sized by its literals rather than by its
 program. Trino keeps only the set for such a pattern, and compiles
 `english-10`, rebar's 43,029-word dictionary, from 2.63 MiB. RE2,
 Java, and Rust keep the program wherever it fits the budget, since its DFAs
-search faster, so `english-10` retains about 25 MB under a 96 MiB budget.
+search faster, so `english-10` retains about 14.7 MB under a 96 MiB budget.
 Under a budget the program does not fit, such as any below about 40 MiB for
 `english-10`, the default included, they keep only the set instead of
 failing, and answer every operation from it. Such a pattern compiles where a

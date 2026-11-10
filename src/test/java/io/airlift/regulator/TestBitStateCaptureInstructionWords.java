@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 
-import static io.airlift.regulator.InstOp.CAPTURE;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -44,33 +43,10 @@ public class TestBitStateCaptureInstructionWords
         assertThat(captures).containsExactly(0, 3, 0, 2, 2, 3);
     }
 
-    @Test
-    public void testPackedInstructionsOwnCaptureUndoExecution()
-            throws ReflectiveOperationException
-    {
-        Prog program = compileProg("(a+)(a)");
-        long[] instructionWords = program.getOrCreateCaptureInstructionWords();
-
-        Field instructionsField = Prog.class.getDeclaredField("insts");
-        instructionsField.setAccessible(true);
-        Prog.Inst[] instructions = (Prog.Inst[]) instructionsField.get(program);
-        for (int instructionId = 0; instructionId < program.size(); instructionId++) {
-            Prog.Inst instruction = instructions[instructionId];
-            if (instruction.opcode() == CAPTURE) {
-                instructions[instructionId] = null;
-            }
-        }
-
-        assertThat(program.getOrCreateCaptureInstructionWords()).isSameAs(instructionWords);
-        int[] captures = new int[6];
-        assertThat(BitState.search(program, Slices.utf8Slice("aaa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
-        assertThat(captures).containsExactly(0, 3, 0, 2, 2, 3);
-    }
-
     private static Field instructionWordsField()
             throws ReflectiveOperationException
     {
-        Field field = Prog.class.getDeclaredField("captureInstructionWords");
+        Field field = Prog.class.getDeclaredField("words");
         field.setAccessible(true);
         assertThat(field.getType()).isEqualTo(long[].class);
         return field;

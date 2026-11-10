@@ -614,8 +614,8 @@ final class PositionNfa
                 boolean firstScan = !scannedLists[head];
                 scannedLists[head] = true;
                 for (int id = head; ; id++) {
-                    Prog.Inst instruction = program.inst(id);
-                    switch (instruction.opcode()) {
+                    long instruction = program.word(id);
+                    switch (Prog.instOpcode(instruction)) {
                         case BYTE_RANGE -> {
                             int position = position(head, id, instruction, firstScan);
                             if (position < 0) {
@@ -624,8 +624,8 @@ final class PositionNfa
                             positions.set(position);
                         }
                         case NOP, CAPTURE -> {
-                            if (instruction.out() != 0) {
-                                stack[stackPointer++] = instruction.out();
+                            if (Prog.instOut(instruction) != 0) {
+                                stack[stackPointer++] = Prog.instOut(instruction);
                             }
                         }
                         case MATCH -> closureReachesMatch = true;
@@ -633,7 +633,7 @@ final class PositionNfa
                             return null;
                         }
                     }
-                    if (instruction.last()) {
+                    if (Prog.instLast(instruction)) {
                         break;
                     }
                 }
@@ -644,9 +644,9 @@ final class PositionNfa
         /// Returns the number of the position of `instruction`, the range at `id` in the list at
         /// `listHead`, registering it when it is new, or -1 when a new position would be over
         /// [#MAXIMUM_POSITIONS].
-        private int position(int listHead, int id, Prog.Inst instruction, boolean firstScan)
+        private int position(int listHead, int id, long instruction, boolean firstScan)
         {
-            long key = ((long) listHead << 32) | instruction.out();
+            long key = ((long) listHead << 32) | Prog.instOut(instruction);
             Integer position = positionIds.get(key);
             if (position == null) {
                 if (positionOutputs.size() == MAXIMUM_POSITIONS) {
@@ -655,13 +655,13 @@ final class PositionNfa
                 position = positionOutputs.size();
                 positionIds.put(key, position);
                 positionBytes.add(new long[4]);
-                positionOutputs.add(instruction.out());
+                positionOutputs.add(Prog.instOut(instruction));
                 positionFirstInstructions.add(id);
             }
             if (firstScan) {
                 long[] bytes = positionBytes.get(position);
                 for (int value = 0; value < 256; value++) {
-                    if (instruction.matches(value)) {
+                    if (Prog.instMatches(instruction, value)) {
                         setBit(bytes, 0, value);
                     }
                 }

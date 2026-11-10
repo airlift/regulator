@@ -748,21 +748,20 @@ text, so the pair scan rejects little that a first-byte scan would not.
   program is compiled, is kept only when it fits the reverse third by itself,
   and is released once the program is built; when it does not fit, the pattern
   has no reverse program. A compiled pattern does not keep its parse tree.
-- A program is charged in two steps after a fixed 512 bytes, with references
-  counted at eight bytes. Before flattening, each instruction is charged 120
-  bytes: a 56-byte instruction object, 16 bytes of instruction array that
-  grows by doubling, and 48 bytes of the flattening pass's scratch. The
-  instruction limit is the budget past the fixed bytes divided by 120, up to
-  2^24 instructions. Flattening then charges each instruction it emits 113
-  bytes, up to 2^28 - 1 instructions, since a packed capture instruction word
-  keeps a 28-bit output. The 113 bytes are the object, its array slot and the
-  block slot flattening emits it into, a 2-byte output list id, the 31 bytes of
+- A program keeps each instruction as one packed 8-byte word, which
+  flattening, the DFA, OnePass analysis and the capture engines read directly,
+  and keeps no instruction objects. It is charged in two steps after a fixed
+  512 bytes. Before flattening, each instruction is charged 120 bytes, the
+  size of a 56-byte instruction object, 16 bytes of instruction array that
+  grows by doubling, and 48 bytes of the flattening pass's scratch, so the
+  charge exceeds what the program holds. The instruction limit is the budget
+  past the fixed bytes divided by 120, up to 2^24 instructions. Flattening
+  then charges each instruction it emits 113 bytes, up to 2^28 - 1
+  instructions, since a packed instruction word keeps a 28-bit output. The
+  113 bytes are sized for the object, its array slot and the block slot
+  flattening emits it into, a 2-byte output list id, the 31 bytes of
   no-submatch NFA tables that the first no-submatch NFA search builds, and the
-  8-byte capture word that compilation builds. The program keeps all of them
-  but the block slot, freed after flattening. The 56-byte instruction assumes
-  compressed class pointers, which a heap of 32 GB or more keeps; only with
-  them explicitly turned off, deprecated in JDK 25 and obsolete in JDK 27, is
-  an instruction 64 bytes and the charges 1 to 3 percent short.
+  8-byte word.
 - Simplification expands counted repetition into copies before the compiler
   counts anything. It counts the expansion as it builds it and fails with the
   memory-limit exception once the count passes the compiler's limits for the
@@ -5187,7 +5186,7 @@ every language, but a Trino pattern never reaches it with an automaton that
 fits: the program's DFA budget is smaller than the forward budget Trino checked.
 
 RE2, Java, and Rust keep the program wherever it fits the budget, so
-`english-10` still retains about 25 MB under a 96 MiB budget: the program and
+`english-10` still retains about 14.7 MB under a 96 MiB budget: the program and
 its reverse expression beside the 2.7 MB automaton. Only where the program does
 not fit does such a pattern compile without one. The compile that the budget
 rejected is discarded, and two checks against the forward share follow: the
