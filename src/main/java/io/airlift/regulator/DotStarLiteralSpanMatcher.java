@@ -129,25 +129,32 @@ final class DotStarLiteralSpanMatcher
 
     /// Returns the span of the first match lying entirely in `[start, end)` of `input`, or
     /// [Dfa#SEARCH_NO_MATCH]; the caller checks that `0 <= start <= end <= input.length()`. The
-    /// literal must end by `end`, and the trailing dots stop there, as at a line feed. The search
-    /// reads nothing at or past `end`.
+    /// literal must end by `end`, and the trailing dots stop there, as at a line feed. The match
+    /// starts at `start`, or after the last byte between `start` and the literal where the dots
+    /// match nothing, a line feed or a byte where the walk finds no character, so the walk from
+    /// `start` to the literal moves the start past each such byte, and once it meets the first line
+    /// feed jumps to after the last one, which a backward scan finds. That start is exact: no
+    /// character the dots read holds a line feed, so the walk would land on every line feed, and
+    /// each one starts the match after it whatever lies before. The search reads nothing before
+    /// `start` or at or past `end`.
     long findSpan(Slice input, int start, int end)
     {
         return findSpan(input, start, end, null);
     }
 
-    /// Returns [#findSpan(Slice,int,int)], adding the vector scans its dots take to
-    /// `diagnostics`.
+    /// Returns [#findSpan(Slice,int,int)], adding its forward vector scans over ASCII runs and
+    /// its backward scans for the last line feed to `diagnostics`.
     long findSpanForDiagnostics(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
         return findSpan(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
-    /// Returns [#findSpan(Slice,int,int)], adding the vector scans its dots take to `diagnostics`
-    /// unless it is `null`, as every production search passes it. The literal-kernel searches
-    /// call this overload directly, which saves them the frame of the other, and it calls the
-    /// contains search itself rather than through `findLiteral`, to keep the search's word reads
-    /// within C2's inline depth below the public entries; see
+    /// Returns [#findSpan(Slice,int,int)], adding its scans to `diagnostics` as
+    /// [#findSpanForDiagnostics(Slice,int,int,ScanDiagnostics)] counts them, unless it is `null`,
+    /// as every production search passes it.
+    /// The literal-kernel searches call this overload directly, which saves them the frame of the
+    /// other, and it calls the contains search itself rather than through `findLiteral`, to keep
+    /// the search's word reads within C2's inline depth below the public entries; see
     /// [CompiledPattern#oneShotDotStarLiteral].
     long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
@@ -166,7 +173,8 @@ final class DotStarLiteralSpanMatcher
         while (position < literalPosition) {
             int width = characterWidth(characterWidths, bytes, position, regionEnd);
             if (width == 0) {
-                matchStart = ++position;
+                position = bytes[position] == '\n' ? afterLastLineFeed(bytes, position, literalPosition, diagnostics) : position + 1;
+                matchStart = position;
             }
             else {
                 position += width;
@@ -237,6 +245,28 @@ final class DotStarLiteralSpanMatcher
         // Slice.indexOf searches to the end of its Slice, so a region that ends before the input
         // searches a view that ends with it.
         return (end == input.length() ? input : input.slice(0, end)).indexOf(literal, start);
+    }
+
+    /// Returns the position after the last line feed in `[begin, end)`, or `begin` when the range
+    /// holds none, reading nothing outside it. A range of at least
+    /// [CompiledPattern#MINIMUM_LONG_SEARCH_BYTES] bytes takes the backward vector scan the reverse
+    /// DFA uses to leave a self-loop; a shorter one, or any without the Vector API, steps back
+    /// byte by byte. Either way, it adds one backward scan to `diagnostics` unless it is `null`.
+    private static int afterLastLineFeed(byte[] bytes, int begin, int end, ScanDiagnostics diagnostics)
+    {
+        if (diagnostics != null) {
+            diagnostics.backwardScanCount++;
+        }
+        if (end - begin >= CompiledPattern.MINIMUM_LONG_SEARCH_BYTES && VectorSupport.isAvailable()) {
+            int lineFeed = VectorByteSetScanner.findLast(bytes, begin, end - begin, (byte) '\n', (byte) 0, (byte) 0, 1);
+            return lineFeed < 0 ? begin : lineFeed + 1;
+        }
+        for (int position = end; position > begin; position--) {
+            if (bytes[position - 1] == '\n') {
+                return position;
+            }
+        }
+        return begin;
     }
 
     /// Returns the first position at or after `position`, before `end`, holding a line feed or a
@@ -319,15 +349,23 @@ final class DotStarLiteralSpanMatcher
         return widths;
     }
 
-    /// Counts the vector scans a diagnostics search or count of a dot-star literal takes.
+    /// Counts the scans that a diagnostics search or count of a dot-star literal takes: the
+    /// forward vector scans over ASCII runs and the backward scans for the last line feed.
     static final class ScanDiagnostics
     {
         private long vectorScanCount;
+        private long backwardScanCount;
 
         /// The vector scans that skipped a run of ASCII bytes the dots match.
         long vectorScanCount()
         {
             return vectorScanCount;
+        }
+
+        /// The backward scans, vector or byte by byte, for the last line feed before the literal.
+        long backwardScanCount()
+        {
+            return backwardScanCount;
         }
     }
 }
