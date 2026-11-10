@@ -201,11 +201,11 @@ public class TestTaggedAlternationProgram
     @Test
     public void testExhaustedForwardMemoryLeavesNoAuxiliaryProgram()
     {
-        // Each budget's forward share is exactly 512 bytes plus 113 per flattened semantic
+        // Each budget's forward share is exactly 2,688 bytes plus 49 per flattened semantic
         // instruction, so the semantic program leaves no DFA memory. The auxiliary program must
         // not read that zero as an unlimited budget.
-        assertNoAuxiliaryProgram("((?:(?:a?)*?){150})|(z)", 154_843);
-        assertNoAuxiliaryProgram("((?:(?:(?:(?:a?)*?){16})*?)+)|(z)", 97_213);
+        assertNoAuxiliaryProgram("((?:(?:a?)*?){150})|(z)", 70_843);
+        assertNoAuxiliaryProgram("((?:(?:(?:a?)*?){64})*?)|(z)", 33_137);
     }
 
     @Test

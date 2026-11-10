@@ -101,7 +101,7 @@ public class TestFixedWidthByteSpanMatcher
     public void testCompactTrinoRouteMemoryAccounting()
     {
         Slice expression = utf8Slice("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-        long maxMemory = 4 * 1024;
+        long maxMemory = 6 * 1024;
         TrinoCompiledPattern pattern = TrinoRegexp.compile(expression, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
         FixedWidthByteSpanMatcher matcher = pattern.fixedWidthByteSpanMatcherForDiagnostics();
         assertThat(matcher).isNotNull();
@@ -1077,17 +1077,17 @@ public class TestFixedWidthByteSpanMatcher
     public void testTrinoMaxMemoryOfFixedWidthPatterns()
     {
         // Each pattern compiles from the least maxMemory at which the route without a program
-        // fits; below it neither the matcher nor a program fits. Up to 4 KiB the inner literal
+        // fits; below it neither the matcher nor a program fits. Up to 8 KiB the inner literal
         // search of a shing pattern does not fit, so the matcher is the route. The last pattern
-        // compiles a program only from a maxMemory beyond the 4 KiB checked here, so from 1753 it
+        // compiles a program only from a maxMemory beyond the 8 KiB checked here, so from 4921 it
         // compiles only on the route without one.
         Map<String, Long> minimumMaxMemory = Map.of(
-                "[a-z]shing", 1487L,
-                "\\d{4}-\\d{2}-\\d{2}", 1487L,
-                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 1753L);
+                "[a-z]shing", 4465L,
+                "\\d{4}-\\d{2}-\\d{2}", 4561L,
+                "[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}", 4921L);
         for (Map.Entry<String, Long> entry : minimumMaxMemory.entrySet()) {
             Slice expression = utf8Slice(entry.getKey());
-            for (long maxMemory = 256; maxMemory <= 4096; maxMemory++) {
+            for (long maxMemory = 256; maxMemory <= 8192; maxMemory++) {
                 TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setMaxMemory(maxMemory);
                 String label = "%s at %s".formatted(entry.getKey(), maxMemory);
                 if (maxMemory < entry.getValue()) {
@@ -1098,19 +1098,19 @@ public class TestFixedWidthByteSpanMatcher
                 }
             }
         }
-        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(1753));
+        TrinoRegexp fallback = TrinoRegexp.compile(utf8Slice("[0-9a-fA-F]{8}shing[0-9a-fA-F]{12}"), TrinoRegexp.Options.defaults().setMaxMemory(4921));
         assertThat(fallback.re2().forwardProgramForDiagnostics().start()).isZero();
 
         // The repetitions of a repeated group share its positions' ranges, so the matcher charges
         // them once, not once for each repetition.
-        TrinoRegexp repeatedGroup = TrinoRegexp.compile(utf8Slice("(?:[é中][a-z]){127}[0-9]{2}"), TrinoRegexp.Options.defaults().setMaxMemory(10_000));
+        TrinoRegexp repeatedGroup = TrinoRegexp.compile(utf8Slice("(?:[é中][a-z]){127}[0-9]{2}"), TrinoRegexp.Options.defaults().setMaxMemory(13_000));
         assertThat(repeatedGroup.re2().hasRetainedFixedWidthByteSpanMatcher()).isTrue();
 
         // Where the program fits but neither the inner literal search nor the matcher fits beside
         // it, the pattern takes the route without a program, which reserves the matcher.
         Map<String, List<Long>> matcherOnlyMaxMemory = Map.of(
-                "[a-z]shing", List.of(2567L, 2821L),
-                "[a-z]{2}ing", List.of(2387L, 2628L));
+                "[a-z]shing", List.of(5111L, 5125L),
+                "[a-z]{2}ing", List.of(5003L, 5028L));
         for (Map.Entry<String, List<Long>> entry : matcherOnlyMaxMemory.entrySet()) {
             for (long maxMemory = entry.getValue().get(0); maxMemory <= entry.getValue().get(1); maxMemory++) {
                 String label = "%s at %s".formatted(entry.getKey(), maxMemory);

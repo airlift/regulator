@@ -712,11 +712,6 @@ text, so the pair scan rejects little that a first-byte scan would not.
   [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
   - `curated/10-bounded-repeat/context` fills about 30 MB of DFA states. It
     slows at 72 MiB and below, 15 to 21 times at 32 MiB.
-  - RE2, Java, and Rust `dictionary/search/english-10`: its program needs
-    39.88 MiB, so below that the pattern compiles as the program-less literal
-    set (see Large Literal Alternations) instead of failing. Search on the set
-    is 4% to 6% slower on r9g and per-line find 4% slower on r8i, while count
-    takes 0.40x to 0.60x the time.
 
   `unicode/overlapping-words` english and russian run at each engine's
   default, comparators included: the class-run counter decides their captures,
@@ -725,6 +720,9 @@ text, so the pair scan rejects little that a first-byte scan would not.
   describes, so the pattern compiles no program and retains about 34 KB.
   Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
   `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
+  RE2, Java, and Rust `dictionary/search/english-10` keep their program from
+  about 24 MiB, so at 32 MiB they take the same route and retain the same
+  bytes as at 96 MiB.
 - BitState's anchored text limit falls with the forward share: from 105–210 KB
   to 52–105 KB for small capture programs such as `(a+)(b+)` and `(?:(a)|a)*`,
   and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB. A capture
@@ -751,17 +749,26 @@ text, so the pair scan rejects little that a first-byte scan would not.
 - A program keeps each instruction as one packed 8-byte word, which
   flattening, the DFA, OnePass analysis and the capture engines read directly,
   and keeps no instruction objects. It is charged in two steps after a fixed
-  512 bytes. Before flattening, each instruction is charged 120 bytes, the
-  size of a 56-byte instruction object, 16 bytes of instruction array that
-  grows by doubling, and 48 bytes of the flattening pass's scratch, so the
-  charge exceeds what the program holds. The instruction limit is the budget
-  past the fixed bytes divided by 120, up to 2^24 instructions. Flattening
-  then charges each instruction it emits 113 bytes, up to 2^28 - 1
-  instructions, since a packed instruction word keeps a 28-bit output. The
-  113 bytes are sized for the object, its array slot and the block slot
-  flattening emits it into, a 2-byte output list id, the 31 bytes of
-  no-submatch NFA tables that the first no-submatch NFA search builds, and the
-  8-byte word.
+  2,688 bytes, the heap any program holds whatever its size, measured with JOL
+  without compressed references, which hold the most: the program object, its
+  256-entry bytemap, the word array's least capacity, and, while flattening,
+  the hint colors, the first block of emitted words and the scratch objects.
+  Before flattening, each instruction is charged 72 bytes: 24 for its word, as
+  the word array grows by doubling and holds the old array and the new one
+  while it copies, and 48 for the flattening pass's scratch, which also covers
+  the Java and Trino nullable-loop workspace held beside a growth. The
+  instruction limit is the budget past the fixed bytes divided by 72, up to
+  2^24 instructions. Flattening then charges each instruction it emits 49
+  bytes, up to 2^28 - 1 instructions, since a packed instruction word keeps a
+  28-bit output: 16 for its word in the program and in the block flattening
+  emits it into, a 2-byte output list id, and the 31 bytes of no-submatch NFA
+  tables that the first no-submatch NFA search builds. The program keeps all
+  of them but the block slot, freed after flattening. Flattening drops the
+  unflattened words and the scratch before it builds what the program keeps,
+  so the charges bound the compile peak of a program that flattens to at most
+  as many instructions as it compiles to, or to at least 64/41 (about 1.56)
+  times as many. Between the two, about 6,000 constructed grow-on-flatten
+  shapes peaked at up to 0.959 of the program's share, and none passed it.
 - Simplification expands counted repetition into copies before the compiler
   counts anything. It counts the expansion as it builds it and fails with the
   memory-limit exception once the count passes the compiler's limits for the
@@ -795,7 +802,7 @@ text, so the pair scan rejects little that a first-byte scan would not.
   multiply them. Their nests grow before flattening instead, as
   [Java Regular-Subset Frontend](#java-regular-subset-frontend) describes.
 - The DFA caches receive what the flatten charge leaves: the program's share
-  less the fixed bytes, 113 bytes per flattened instruction, and what one-pass
+  less the fixed bytes, 49 bytes per flattened instruction, and what one-pass
   and prefix tables retain. Internal compilation with a non-positive budget
   uses upstream's 1 MiB default DFA allowance.
 - A forward program divides its DFA allowance between first-match and
@@ -823,8 +830,8 @@ text, so the pair scan rejects little that a first-byte scan would not.
   hold no ALT, but counting both keeps the bound independent of the program's
   form. The reverse longest-match DFA of the program the rebar
   `unicode/overlapping-words` rows compiled, before the class-run counter
-  took their captures, then initialized from a pattern budget (`maxMemory`) of
-  about 65 MiB instead of 92 MiB.
+  took their captures, then initialized under a 72 MiB pattern budget
+  (`maxMemory`), where the count it replaced needed 92 MiB.
 - A many-match state that matched also holds a separator and the ID of each
   MATCH instruction in the queue it left, so its true bound is the lists, plus
   one, plus the program's MATCH instructions. Its gate deliberately counts
@@ -880,13 +887,13 @@ text, so the pair scan rejects little that a first-byte scan would not.
   words that renumbers the window's slots and moves every other group's slots
   past the pass's count. Only slots 0 and 1 and the queue order decide the
   winning thread, so every pass finds the same match and the windows together
-  report exactly what one pass would. At a maxMemory of 2,651 bytes or more, a
-  window of one group fits every program the flatten charge admits, and a pass
-  of group zero alone is smaller, so planning rejects nothing compilation
-  admits. Below that, a program of at most 11 instructions can in principle fail
-  to compile with a memory-limit exception; none has in over 100,000 swept
-  patterns, and the tightest, which tracks only group zero, fit with 8 bytes to
-  spare.
+  report exactly what one pass would. A window of one group fits every
+  flattened program of at most 41 instructions the flatten charge admits, and
+  a pass of group zero alone is smaller, so planning rejects none of them. A
+  larger program can have no plan that fits its share, and planning then
+  rejects it with a memory-limit exception, so its capture tables stay within
+  the share; that rejection sets the least budget of larger capturing
+  patterns, such as 40 copies of `(a)`.
   Upstream RE2 and the Rust crate bound neither the capture NFA's threads nor
   their slots.
 - A BitState capture search also stays within the forward share: compilation
@@ -4710,7 +4717,7 @@ family. The general counter is built lazily by a single writer and retained by
 the compiled pattern; a class repeat, or a single class that count takes as a
 single member, instead reuses its matcher counter, described below, when one
 was retained. The lazily built counter's size is independent of `maxMemory`, the
-planning budget that charges the program 120 and then 113 bytes per instruction
+planning budget that charges the program 72 and then 49 bytes per instruction
 and leaves the DFA caches the rest, and it does not scale with the expression or
 configured budget.
 Unsupported shapes continue through the ordinary DFA or matcher path. A
@@ -5194,9 +5201,9 @@ temporary trie of every literal that spells the full-match list below must fit
 it, and then the automaton must fit it together with that list. Where both pass,
 the pattern keeps only the automaton and the list, and every operation runs the
 automaton, as in Trino, with no reverse expression; otherwise the compile fails
-as it would without this route. `english-10`, whose program needs about 40 MiB,
-compiles this way under the default budget, from 3.11 MiB, a budget the
-temporary trie sets, and retains about 2.8 MB; Trino compiles it from 2.63 MiB.
+as it would without this route. `english-10`, whose program needs about 24 MiB,
+compiles this way below that, from 3.11 MiB, a budget the temporary trie sets,
+and retains about 2.8 MB; Trino compiles it from 2.63 MiB.
 Dropping the program wherever the longest-match DFA cannot initialize, as for
 `english-10` under a 96 MiB budget, was measured and rejected: with every
 operation on the automaton, full-Slice count took 1.86x to 2.34x the time on r9g
@@ -5205,10 +5212,9 @@ and 2.46x to 3.33x on r8i, find on short rows 7% to 12% more on r9g and 3.5% to
 that would otherwise reject the pattern. Measured again after the dense rows
 below, `english-10` full-Slice count on the automaton alone took 0.40x to 0.60x
 the program's time on both platforms, so the count half of that measurement no
-longer holds. The find half still does: at the 32 MiB default, which leaves
-`english-10` only the automaton, search took 4% to 6% more than at a 96 MiB
-budget on r9g and per-line find 4% more on r8i, as
-[Memory Budgets And DFA Caching](#memory-budgets-and-dfa-caching) records.
+longer holds. The find half still does: at a 32 MiB budget, which before the
+packed-instruction charge left `english-10` only the automaton, search took 4%
+to 6% more than at a 96 MiB budget on r9g and per-line find 4% more on r8i.
 
 Without a program, a search anchored at its start walks the automaton's goto
 transitions from the root and keeps the deepest state that holds its own

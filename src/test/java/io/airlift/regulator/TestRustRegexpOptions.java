@@ -95,13 +95,13 @@ public class TestRustRegexpOptions
                 utf8Slice("abc"),
                 RustRegexp.Options.defaults().setMaxMemory(1)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class)
-                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 2 KiB");
+                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 5 KiB");
         // This pattern is the crate-accepted example RUST_REGEXP.md cites. It needs between 32 and
         // 33 MiB, the message names 33 MiB, and 33 MiB compiles it.
-        assertThatThrownBy(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){100}")))
+        assertThatThrownBy(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){163}")))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class)
                 .hasMessage("regular expression compilation exceeded the 33554432 byte memory limit; the pattern needs a larger memory budget, at least 33 MiB");
-        assertThatCode(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){100}"), RustRegexp.Options.defaults().setMaxMemory(33L << 20)))
+        assertThatCode(() -> RustRegexp.compile(utf8Slice("(?:\\w+\\s){163}"), RustRegexp.Options.defaults().setMaxMemory(33L << 20)))
                 .doesNotThrowAnyException();
     }
 

@@ -230,9 +230,9 @@ public class TestLiteralAlternationSpanMatcher
         // more than it retains still leaves the extraction too little. Longest-match search keeps
         // the program, so its forward budget is the one the set was analyzed under.
         String latin1Dictionary = IntStream.range(1000, 5096).mapToObj(index -> "w" + index).collect(Collectors.joining("|")) + "|caf[\\xE9\\xE8]|na\\xEFve";
-        long latin1Budget = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(300_000).setLongestMatch(true)).forwardProgramForDiagnostics().dfaMemory();
+        long latin1Budget = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(200_000).setLongestMatch(true)).forwardProgramForDiagnostics().dfaMemory();
         assertThat(LiteralAlternationSpanMatcher.extractLiteralSet(RegexpParser.parse(utf8Slice(latin1Dictionary), Re2.Options.latin1().parseFlags()).regexp(), latin1Budget)).isSameAs(ExtractedLiterals.OVER_BUDGET);
-        Re2 latin1Pattern = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(300_000));
+        Re2 latin1Pattern = Re2.compile(utf8Slice(latin1Dictionary), Re2.Options.latin1().setMaxMemory(200_000));
         RegexpMatcher latin1Matcher = latin1Pattern.matcher(wrappedBuffer("caf\u00E8 na\u00EFve w1007".getBytes(ISO_8859_1)));
         assertThat(latin1Matcher.spanSearchForDiagnostics()).isNotNull().isSameAs(latin1Pattern.literalSetSpanMatcherForDiagnostics());
         assertThat(findSpans(latin1Matcher)).containsExactly("0-4", "5-10", "11-16");

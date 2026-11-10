@@ -144,11 +144,11 @@ program. Trino keeps only the set for such a pattern, and compiles
 `english-10`, rebar's 43,029-word dictionary, from 2.63 MiB. RE2,
 Java, and Rust keep the program wherever it fits the budget, since its DFAs
 search faster, so `english-10` retains about 14.7 MB under a 96 MiB budget.
-Under a budget the program does not fit, such as any below about 40 MiB for
-`english-10`, the default included, they keep only the set instead of
-failing, and answer every operation from it. Such a pattern compiles where a
-temporary trie of all its literals fits the forward share, and then where the
-set and the list of literals that extend another fit it together. `english-10`
+Under a budget the program does not fit, such as any below about 24 MiB for
+`english-10`, they keep only the set instead of failing, and answer every
+operation from it. Such a pattern compiles where a temporary trie of all its
+literals fits the forward share, and then where the set and the list of
+literals that extend another fit it together. `english-10`
 compiles from 3.11 MiB, a budget its temporary trie sets, and then retains
 about 2.8 MB. RE2's longest-match mode and most case-insensitive literals
 always need the program.

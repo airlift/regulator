@@ -421,8 +421,8 @@ public class TestSimplifier
     private static void assertExpansionFitsWhereCompileFits(String pattern, Compiler.Dialect dialect, ParseResult parsed)
     {
         Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding(), dialect, 0);
-        // No program fits in the compiler's fixed 512-byte overhead.
-        long rejected = 512;
+        // No program fits in the compiler's fixed overhead.
+        long rejected = Compiler.PROGRAM_OVERHEAD_BYTES;
         long compiled = 1 << 24;
         assertThat(compiles(simplified, compiled, dialect, parsed.caseFolding())).as(pattern).isTrue();
         while (compiled - rejected > 1) {

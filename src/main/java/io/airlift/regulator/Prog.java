@@ -4326,59 +4326,14 @@ final class Prog
         }
         didFlatten = true;
 
-        // Scratch structures reused by helper routines to avoid heap churn.
-        SparseSet reachable = new SparseSet(size());
-        IntStack stack = new IntStack(size());
-        Bitmap256 hintSplits = new Bitmap256();
-        int[] hintColors = new int[256];
-        // First pass: mark successor roots and predecessors.
-        SparseIntArray rootIdsByInstruction = new SparseIntArray(size());
-        PredecessorLists predecessorLists = markSuccessors(rootIdsByInstruction, reachable, stack);
-        int successorRootCount = rootIdsByInstruction.size();
-        // Loop roots, for a program that keeps nullable loop priority.
-        if (keepsNullableLoopPriority) {
-            markLoopRoots(rootIdsByInstruction, successorRootCount, reachable, stack);
-        }
-        // Second pass: mark dominator roots.
-        long dominatorEdgesScanned = 0;
-        if (!skipDominatorPass) {
-            // Visit the roots marked so far from the highest instruction id down to the FAIL
-            // instruction's root, which is never visited. A root this pass marks has a root id past
-            // the ones marked so far and is not visited either.
-            int markedRootCount = rootIdsByInstruction.size();
-            for (int id = size() - 1; id > 0; id--) {
-                if (rootIdsByInstruction.hasIndex(id) && rootIdsByInstruction.getExisting(id) < markedRootCount && id != startUnanchored() && id != start()) {
-                    dominatorEdgesScanned += markDominator(
-                            id, rootIdsByInstruction, predecessorLists, reachable, stack);
-                }
-            }
-        }
-        int finalRootCount = rootIdsByInstruction.size();
-        // Third pass: emit lists and map each root to its flattened instruction index. The map
-        // borrows the predecessor lists' first edges, which hold an int per instruction and so
-        // one per root, because the dominator pass is done with them.
-        int[] flattenedIndexesByRoot = predecessorLists.borrowFirstEdges();
-        InstList flattenedInstructions = new InstList(size(), maxInstructionCount);
-        for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
-            int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
-            int rootId = rootIdsByInstruction.denseValueAt(rootIndex);
-            flattenedIndexesByRoot[rootId] = flattenedInstructions.size();
-            if (!emitList(rootInstructionId, rootIdsByInstruction, flattenedInstructions, reachable, stack)) {
-                if (maxMemory <= 0 || !measuresRejection) {
-                    throw new RegexpCompileMemoryLimitException(maxMemory);
-                }
-                // The unflattened program is still intact, and only a rejected compile counts it.
-                throw new RegexpCompileMemoryLimitException(maxMemory, () -> flattenedSizeExceeded(rootIdsByInstruction, reachable, stack, maxInstructionCount, maxMemory));
-            }
-            int lastIndex = flattenedInstructions.size() - 1;
-            flattenedInstructions.set(lastIndex, flattenedInstructions.get(lastIndex) | INSTRUCTION_LAST_BIT);
-            computeHints(
-                    flattenedInstructions,
-                    flattenedIndexesByRoot[rootId],
-                    flattenedInstructions.size(),
-                    hintSplits,
-                    hintColors);
-        }
+        // The first three passes hold the unflattened words and the scratch beside the lists they
+        // emit. The fourth pass and the arrays the program keeps need only the lists and the root
+        // map, so the scratch goes with the frame of emitLists, and the unflattened words are
+        // dropped before those arrays are built; see Compiler.UNFLATTENED_INSTRUCTION_BYTES.
+        EmittedLists emitted = emitLists(skipDominatorPass, maxInstructionCount, maxMemory, measuresRejection, recordStructure);
+        words = null;
+        InstList flattenedInstructions = emitted.instructions();
+        int[] flattenedIndexesByRoot = emitted.flattenedIndexesByRoot();
         // Reset instruction counts and the capture slot count before fourth pass.
         Arrays.fill(instCount, 0);
         captureSlotCount = 2;
@@ -4391,7 +4346,7 @@ final class Prog
         // limitBitStateMemory. BitState indexes its visited set by the list each step enters,
         // which is the list of the instruction's output. Before the fourth pass remaps it, an
         // output is the root id of that list, and a list's id is its root id.
-        listCount = rootIdsByInstruction.size();
+        listCount = emitted.listCount();
         short[] outputLists = null;
         if (listCount <= Short.MAX_VALUE) {
             outputLists = new short[flattenedInstructions.size()];
@@ -4454,13 +4409,71 @@ final class Prog
             bitStateJobsPerPosition = BitState.jobsPerPosition(this);
         }
 
-        if (!recordStructure) {
-            return null;
+        return emitted.structure();
+    }
+
+    /// The lists the first three passes of flattening emit, the map from each list's root id to
+    /// its first flattened instruction, the list count, and, when requested, the counts tests read.
+    private record EmittedLists(InstList instructions, int[] flattenedIndexesByRoot, int listCount, FlattenStructure structure) {}
+
+    // The first three passes of flattening. Throws RegexpCompileMemoryLimitException as flatten
+    // does, leaving the unflattened program intact.
+    private EmittedLists emitLists(boolean skipDominatorPass, int maxInstructionCount, long maxMemory, boolean measuresRejection, boolean recordStructure)
+    {
+        // Scratch structures reused by helper routines to avoid heap churn.
+        SparseSet reachable = new SparseSet(size());
+        IntStack stack = new IntStack(size());
+        Bitmap256 hintSplits = new Bitmap256();
+        int[] hintColors = new int[256];
+        // First pass: mark successor roots and predecessors.
+        SparseIntArray rootIdsByInstruction = new SparseIntArray(size());
+        PredecessorLists predecessorLists = markSuccessors(rootIdsByInstruction, reachable, stack);
+        int successorRootCount = rootIdsByInstruction.size();
+        // Loop roots, for a program that keeps nullable loop priority.
+        if (keepsNullableLoopPriority) {
+            markLoopRoots(rootIdsByInstruction, successorRootCount, reachable, stack);
         }
-        return new FlattenStructure(
-                successorRootCount,
-                finalRootCount,
-                dominatorEdgesScanned);
+        // Second pass: mark dominator roots.
+        long dominatorEdgesScanned = 0;
+        if (!skipDominatorPass) {
+            // Visit the roots marked so far from the highest instruction id down to the FAIL
+            // instruction's root, which is never visited. A root this pass marks has a root id past
+            // the ones marked so far and is not visited either.
+            int markedRootCount = rootIdsByInstruction.size();
+            for (int id = size() - 1; id > 0; id--) {
+                if (rootIdsByInstruction.hasIndex(id) && rootIdsByInstruction.getExisting(id) < markedRootCount && id != startUnanchored() && id != start()) {
+                    dominatorEdgesScanned += markDominator(
+                            id, rootIdsByInstruction, predecessorLists, reachable, stack);
+                }
+            }
+        }
+        int finalRootCount = rootIdsByInstruction.size();
+        // Third pass: emit lists and map each root to its flattened instruction index. The map
+        // borrows the predecessor lists' first edges, which hold an int per instruction and so
+        // one per root, because the dominator pass is done with them.
+        int[] flattenedIndexesByRoot = predecessorLists.borrowFirstEdges();
+        InstList flattenedInstructions = new InstList(size(), maxInstructionCount);
+        for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
+            int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
+            int rootId = rootIdsByInstruction.denseValueAt(rootIndex);
+            flattenedIndexesByRoot[rootId] = flattenedInstructions.size();
+            if (!emitList(rootInstructionId, rootIdsByInstruction, flattenedInstructions, reachable, stack)) {
+                if (maxMemory <= 0 || !measuresRejection) {
+                    throw new RegexpCompileMemoryLimitException(maxMemory);
+                }
+                // The unflattened program is still intact, and only a rejected compile counts it.
+                throw new RegexpCompileMemoryLimitException(maxMemory, () -> flattenedSizeExceeded(rootIdsByInstruction, reachable, stack, maxInstructionCount, maxMemory));
+            }
+            int lastIndex = flattenedInstructions.size() - 1;
+            flattenedInstructions.set(lastIndex, flattenedInstructions.get(lastIndex) | INSTRUCTION_LAST_BIT);
+            computeHints(
+                    flattenedInstructions,
+                    flattenedIndexesByRoot[rootId],
+                    flattenedInstructions.size(),
+                    hintSplits,
+                    hintColors);
+        }
+        return new EmittedLists(flattenedInstructions, flattenedIndexesByRoot, rootIdsByInstruction.size(), recordStructure ? new FlattenStructure(successorRootCount, finalRootCount, dominatorEdgesScanned) : null);
     }
 
     record FlattenStructure(

@@ -728,7 +728,7 @@ public class TestDfaCandidateStartCursor
         assertThat(requiredBytesSize).isPositive();
         List<Boolean> outcomes = new ArrayList<>();
         List<Boolean> requiredBytesOutcomes = new ArrayList<>();
-        for (long maxMemory = 4 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
+        for (long maxMemory = 6 * 1024; maxMemory <= 32 * 1024; maxMemory += 64) {
             Re2 longestPattern = Re2.compile(expression, Re2.Options.defaults().setLongestMatch(true).setMaxMemory(maxMemory));
             Prog longest = longestPattern.forwardProgramForDiagnostics();
             Re2 firstMatchPattern = Re2.compile(expression, Re2.Options.defaults().setMaxMemory(maxMemory));

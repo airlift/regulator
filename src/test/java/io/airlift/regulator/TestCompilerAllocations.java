@@ -210,18 +210,18 @@ public class TestCompilerAllocations
         // flattened program index past that.
         assertThat(Compiler.maxFlattenedInstructions(Long.MAX_VALUE)).isEqualTo((1 << 28) - 1);
         assertThat(Compiler.maxFlattenedInstructions(0)).isEqualTo((1 << 28) - 1);
-        assertThat(Compiler.maxFlattenedInstructions(96L << 20)).isEqualTo(((96L << 20) - 512) / Compiler.FLATTENED_INSTRUCTION_BYTES);
+        assertThat(Compiler.maxFlattenedInstructions(96L << 20)).isEqualTo(((96L << 20) - Compiler.PROGRAM_OVERHEAD_BYTES) / Compiler.FLATTENED_INSTRUCTION_BYTES);
     }
 
     @Test
     public void testInstructionChargesCoverWhatAProgramHolds()
             throws ReflectiveOperationException
     {
-        // Before flattening, an instruction is charged for its object, its array slot and the
-        // flattening pass's scratch. Once flattened, it is charged for its object, its array slot,
-        // its output list id and the tables the program keeps for searches. The instance size
-        // checks the object, and the allocations of flattening and of building those tables below
-        // check the rest.
+        // Before flattening, an instruction is charged for its word in the old array and its
+        // doubled replacement, three words per instruction, and for the flattening pass's scratch.
+        // Once flattened, it is charged for its word in the program and in the block flattening
+        // emits it into, its output list id and the tables the program keeps for searches. The
+        // allocations of flattening and of building those tables below check them.
 
         ThreadMXBean threadBean = allocatedMemoryBean();
         long threadId = Thread.currentThread().threadId();
@@ -273,11 +273,12 @@ public class TestCompilerAllocations
 
                 allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
                 program.getOrCreateCaptureInstructionWords();
-                wordsBytes = Math.min(wordsBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore - (8L * size));
+                wordsBytes = Math.min(wordsBytes, threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore);
             }
             assertThat(scratchBytes).as("scratch bytes per instruction for %s", scratchCase.name()).isLessThanOrEqualTo(48);
             // What remains past the per-instruction bytes is array headers.
             assertThat(tablesBytes).isLessThan(1024);
+            // The capture engines read the program's own words, which flattening built.
             assertThat(wordsBytes).isLessThan(64);
         }
 
@@ -383,7 +384,7 @@ public class TestCompilerAllocations
         Re2 prefixed = Re2.compile(utf8Slice("^abc(?:" + discardedRuns + ")"), Re2.Options.defaults().setMaxMemory(maxMemory));
         assertThat(prefixed.find(utf8Slice("abcz"))).isTrue();
         // A small budget holds the alternative beside a branch that discards a{0,700000}.
-        Re2 small = Re2.compile(utf8Slice("(?:" + coalescedRuns + "(?:[^\\x00-\\x{10FFFF}]){1}|abc)"), Re2.Options.defaults().setMaxMemory(4_096));
+        Re2 small = Re2.compile(utf8Slice("(?:" + coalescedRuns + "(?:[^\\x00-\\x{10FFFF}]){1}|abc)"), Re2.Options.defaults().setMaxMemory(5_120));
         assertThat(small.matches(utf8Slice("abc"))).isTrue();
         assertThat(small.matches(utf8Slice("a"))).isFalse();
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
@@ -444,8 +445,8 @@ public class TestCompilerAllocations
 
         // A body that matches only the empty string ends the repetition on its first iteration,
         // so its count compiles one copy. A thousand copies of \b+, which is not a lone assertion,
-        // needed a 0.9 MB budget; one fits in 4 KB.
-        JavaRegexp zeroWidthBody = JavaRegexp.compile(utf8Slice("a(?:\\b+){1000}"), JavaRegexp.Options.defaults().setMaxMemory(4_000));
+        // needed a 0.9 MB budget; one fits in 5 KB.
+        JavaRegexp zeroWidthBody = JavaRegexp.compile(utf8Slice("a(?:\\b+){1000}"), JavaRegexp.Options.defaults().setMaxMemory(5_120));
         assertThat(zeroWidthBody.matcher(utf8Slice("a")).matches()).isTrue();
     }
 
