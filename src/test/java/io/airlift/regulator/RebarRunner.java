@@ -70,8 +70,8 @@ public final class RebarRunner
     /// Rebar's `engines/regulator` runner is a separate runner that shares the budget list: it
     /// bundles a copy, which its runner version names. `TestRebarRunner` fails when the list's
     /// SHA-256 differs from this pin, so a budget change also updates Rebar's copy and version.
-    static final String REBAR_RUNNER_VERSION = "budgets-1";
-    static final String MEMORY_BUDGETS_SHA256 = "63abab2efd99338c3b20dd42c5531af20d776bbdd7d4c2319143bb372066c821";
+    static final String REBAR_RUNNER_VERSION = "budgets-2";
+    static final String MEMORY_BUDGETS_SHA256 = "e7f0438eead56865707aa134b87150edaefb748a190fc623608dcbec5c2c8af5";
 
     private RebarRunner() {}
 
