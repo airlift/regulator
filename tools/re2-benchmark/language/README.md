@@ -524,7 +524,7 @@ because its Java adapter rejects the `max-memory` key.
 
 A budget change is one line in the list plus Rebar's copy, and it reaches only
 manifests prepared after it. Rebar's `engines/regulator` runner bundles the
-list, so copy the file there and bump that runner's version, now `budgets-2`.
+list, so copy the file there and bump that runner's version, now `budgets-3`.
 Then update the list's SHA-256 and the runner version pinned in `RebarRunner`;
 `TestRebarRunner` fails until the pin matches the list.
 

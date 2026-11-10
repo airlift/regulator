@@ -260,13 +260,10 @@ class TestRebarRunner
         long budget = RebarRunner.memoryBudget("curated/10-bounded-repeat/context", "re2");
         assertThat(budget).isPositive();
         assertThat(rebar.apply("curated/10-bounded-repeat/context").maxMemory()).isEqualTo(budget);
-        assertThat(rebar.apply("unicode/overlapping-words/english").maxMemory()).isZero();
-        // A budget applies only in its languages: Trino compiles english-10 as a literal set. The
-        // compile sibling takes its row's budget.
-        assertThat(RebarRunner.memoryBudget("dictionary/search/english-10", "re2")).isPositive();
-        assertThat(RebarRunner.memoryBudget("dictionary/search/english-10", "trino")).isZero();
-        assertThat(RebarRunner.memoryBudget("dictionary/compile/english-10", "rust"))
-                .isEqualTo(RebarRunner.memoryBudget("dictionary/search/english-10", "rust"));
+        assertThat(rebar.apply("dictionary/search/english-10").maxMemory()).isZero();
+        // The compile sibling takes its row's budget.
+        assertThat(RebarRunner.memoryBudget("curated/10-bounded-repeat/compile-context", "rust"))
+                .isEqualTo(RebarRunner.memoryBudget("curated/10-bounded-repeat/context", "rust"));
     }
 
     @Test
