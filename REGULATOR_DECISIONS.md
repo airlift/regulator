@@ -355,16 +355,16 @@ Upstream's own never-capture test uses only unnamed groups.
   engines unchanged. Each entry is a copy of the body's start, which holds the
   entries of the loops nested in it, so in both languages a nest of such loops
   grows with the square of its depth: the default memory budget rejects a nest
-  several hundred loops deep, which the JDK and Joni run. In Java, the
-  simplifier drops a repeated empty group and cuts any other body that
-  matches only the empty string, such as an assertion or `\b+$`, to one copy,
-  since the JDK never runs its second iteration. A counted repetition of two
-  or more copies of any other nullable body stays counted, and the compiler
-  gives each copy an exit from the repetition that it takes when it consumes
-  nothing. When that body matches empty only through an assertion and the
-  minimum count is two or more, what the pattern matches can depend on the
-  reading direction, as in `(?:^a?){2}`, so the pattern compiles no reverse
-  program.
+  of about 250 loops such as `(?:a?b?(?:a?b?...)*)*`, which the JDK and Joni
+  run. In Java, the simplifier drops a repeated empty group and cuts any other
+  body that matches only the empty string, such as an assertion or `\b+$`, to
+  one copy, since the JDK never runs its second iteration. A counted
+  repetition of two or more copies of any other nullable body stays counted,
+  and the compiler gives each copy an exit from the repetition that it takes
+  when it consumes nothing. When that body matches empty only through an
+  assertion and the minimum count is two or more, what the pattern matches can
+  depend on the reading direction, as in `(?:^a?){2}`, so the pattern compiles
+  no reverse program.
 - `\G`, `\R`, nullable repeated captures, canonical equivalence, lookaround,
   backreferences, atomic groups, and possessive quantifiers remain deterministic
   compile-time rejections because their observable semantics do not map to the
@@ -515,8 +515,8 @@ original pattern, including when quoting rewrites it before parsing.
   [Rust language reference](docs/reference/languages/RUST_REGEXP.md#compilation-options)
   describes the patterns this accepts. The two limits disagree in both
   directions: Regulator accepts some patterns the crate rejects as too large,
-  and, under a memory budget smaller than the default, rejects some the crate
-  accepts.
+  and, at the default budget, rejects some the crate accepts, such as
+  `\w{99}x`.
 
 ## Trino Compatibility Adapter
 
@@ -694,9 +694,50 @@ text, so the pair scan rejects little that a first-byte scan would not.
 
 ## Memory Budgets And DFA Caching
 
-- Public compilation defaults to a 96 MiB planning budget. Unlike upstream's
-  8 MiB default, this retains representative large Java DFA graphs without
-  reset thrashing under both compressed and uncompressed ordinary references.
+- Public compilation defaults to a 32 MiB planning budget, four times
+  upstream's 8 MiB. The budget caps the memory the planning model charges a
+  compiled pattern, its program, DFA caches and planned matchers, however many
+  threads share it, and caps each capture search's working memory at the
+  forward share. It does not charge the pattern's own copy of its pattern
+  bytes, and it is not an exact ceiling on retained memory: superseded DFA
+  tables and native segments can coexist with their replacements until they
+  are collected. It is a cap, not a reservation: published benchmark rows
+  settle at a median of about 10 KB and a 90th percentile of 113 to 320 KB, so
+  the default does not shape ordinary patterns. It sets the worst case an
+  operator plans around, and the earlier 96 MiB default let a hostile or
+  accidental pattern hold three times as much.
+- At 32 MiB every published benchmark row still compiles, and only these rows
+  need more to keep their speed. Benchmarks run them at a budget of their own,
+  for every engine with a memory limit, as
+  [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
+  - `unicode/overlapping-words` english and russian need about 92 MiB for
+    their reverse longest-match DFA. Below 66.73 MiB their captures run on the
+    NFA, 130 to 1,700 times slower, and below 26.92 MiB they do not compile.
+  - `curated/10-bounded-repeat/context` fills about 30 MB of DFA states. It
+    slows at 72 MiB and below, 15 to 21 times at 32 MiB.
+  - RE2, Java, and Rust `dictionary/search/english-10`: its program needs
+    39.88 MiB, so below that the pattern compiles as the program-less literal
+    set (see Large Literal Alternations) instead of failing. Search on the set
+    is 4% to 6% slower on r9g and per-line find 4% slower on r8i, while count
+    takes 0.40x to 0.60x the time.
+
+  Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
+  `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
+- BitState's anchored text limit falls with the forward share: from 105–210 KB
+  to 52–105 KB for small capture programs such as `(a+)(b+)` and `(?:(a)|a)*`,
+  and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB. A capture
+  over a match between the two limits that used BitState now runs on the
+  capture NFA; the 32 KiB unanchored bitmap cap is unchanged.
+- A lower default was rejected: at 24 MiB `overlapping-words` no longer
+  compiles and Trino `url/search` slows 5% in safe mode, and at 16 MiB
+  `url/search` slows 1.3 to 7 times in every language and `english-15` 1.2 to
+  1.5 times.
+- Lowering the default in a 2.x release breaks compatibility for a pattern
+  that needed 32 to 96 MiB: it now throws `RegexpCompileMemoryLimitException`
+  at the default, and where a bound is proven the message says the pattern
+  needs a larger memory budget and reports the proven lower bound, rounded up;
+  compilation may still need more. Regulator has no users yet who rely on the
+  larger default.
 - Two thirds of the configured budget is assigned to the forward program and one
   third to reverse search: a lazily compiled reverse program, less what an
   eagerly compiled inner literal search retains from that third.
@@ -4498,7 +4539,7 @@ before the dense rows below, measured 1.94x to 2.47x slower on r9g and 3.16x
 to 3.72x on r8i. Where the DFA
 cannot initialize, the automaton answers in its place. A boolean `find` runs the
 longest-match DFA and a count the first-match DFA, which needs less memory, so
-`english-10` under the default budget finds on the automaton and counts on the
+`english-10` under a 96 MiB budget finds on the automaton and counts on the
 DFA. A DFA count that gives up returns no count, and the matcher counts on the
 automaton. Trino checks the automaton against the forward-DFA budget before
 compiling a program, while the other languages charge it to that budget beside
@@ -4507,7 +4548,7 @@ every language, but a Trino pattern never reaches it with an automaton that
 fits: the program's DFA budget is smaller than the forward budget Trino checked.
 
 RE2, Java, and Rust keep the program wherever it fits the budget, so
-`english-10` still retains about 25 MB under the default budget: the program and
+`english-10` still retains about 25 MB under a 96 MiB budget: the program and
 its reverse expression beside the 2.7 MB automaton. Only where the program does
 not fit does such a pattern compile without one. The compile that the budget
 rejected is discarded, and two checks against the forward share follow: the
@@ -4516,14 +4557,20 @@ it, and then the automaton must fit it together with that list. Where both pass,
 the pattern keeps only the automaton and the list, and every operation runs the
 automaton, as in Trino, with no reverse expression; otherwise the compile fails
 as it would without this route. `english-10`, whose program needs about 40 MiB,
-then compiles from 3.11 MiB, a budget the temporary trie sets, and retains about
-2.8 MB; Trino compiles it from 2.63 MiB. Dropping the program wherever the
-longest-match DFA cannot initialize, as for `english-10` under the default
-budget, was measured and rejected: with every operation on the automaton,
-full-Slice count took 1.86x to 2.34x the time on r9g and 2.46x to 3.33x on r8i,
-find on short rows 7% to 12% more on r9g and 3.5% to 5% more on r8i, and compile
-8% to 15% more. Memory is saved only at a budget that would otherwise reject the
-pattern.
+compiles this way under the default budget, from 3.11 MiB, a budget the
+temporary trie sets, and retains about 2.8 MB; Trino compiles it from 2.63 MiB.
+Dropping the program wherever the longest-match DFA cannot initialize, as for
+`english-10` under a 96 MiB budget, was measured and rejected: with every
+operation on the automaton, full-Slice count took 1.86x to 2.34x the time on r9g
+and 2.46x to 3.33x on r8i, find on short rows 7% to 12% more on r9g and 3.5% to
+5% more on r8i, and compile 8% to 15% more. Memory is saved only at a budget
+that would otherwise reject the pattern. Measured again after the dense rows
+below, `english-10` full-Slice count on the automaton alone took 0.40x to 0.60x
+the program's time on both platforms, so the count half of that measurement no
+longer holds. The find half still does: at the 32 MiB default, which leaves
+`english-10` only the automaton, search took 4% to 6% more than at a 96 MiB
+budget on r9g and per-line find 4% more on r8i, as
+[Memory Budgets And DFA Caching](#memory-budgets-and-dfa-caching) records.
 
 Without a program, a search anchored at its start walks the automaton's goto
 transitions from the root and keeps the deepest state that holds its own
@@ -4578,7 +4625,7 @@ at the deepest depth whose rows fit the memory the automaton may retain. Where
 the pattern keeps its program, the rows and any skip table yield only where
 removing them lets a forward DFA initialize: unlike the root skip, a set that a
 DFA cannot initialize beside either way keeps them, as `english-10` does under
-the default budget, where the longest-match DFA initializes beside neither.
+a 96 MiB budget, where the longest-match DFA initializes beside neither.
 Every large set also carries the rows' fields, 24 bytes with compressed
 pointers, whether or not it builds rows, which can move a budget edge by that
 much. Java's gd `set-dense-english` reusedContains row is accepted at 1.101x on

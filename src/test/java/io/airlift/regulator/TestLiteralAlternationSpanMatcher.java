@@ -321,7 +321,7 @@ public class TestLiteralAlternationSpanMatcher
         // initialize beside it. Find's earliest-match search runs the longest-match DFA, which
         // needs more memory than count's first-match DFA, so between the two least budgets find
         // runs on the set and count on the DFA, as for a dictionary of tens of thousands of words
-        // under the default budget. A budget least for the root's skip shows that the skip, a
+        // under a 96 MiB budget. A budget least for the root's skip shows that the skip, a
         // contiguous range or nibble tables, compiles with the same answers whether it fits or not;
         // without the Vector API no budget builds it. The count is answered without a matcher at
         // every budget, below the first-match DFA's least budget by the set. The program fits at

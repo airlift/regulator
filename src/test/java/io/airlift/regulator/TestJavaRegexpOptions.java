@@ -121,7 +121,7 @@ public class TestJavaRegexpOptions
     @Test
     public void testMemoryBudget()
     {
-        assertThat(JavaRegexp.Options.defaults().maxMemory()).isEqualTo(96L << 20);
+        assertThat(JavaRegexp.Options.defaults().maxMemory()).isEqualTo(32L << 20);
         assertThatThrownBy(() -> JavaRegexp.Options.defaults().setMaxMemory(0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("greater than zero");

@@ -69,21 +69,21 @@ public class TestTraditionalBenchmarkInputs
     }
 
     @Test
-    public void testSplitBig2CapturesDfaSpanWithBitState()
+    public void testSplitBig2CapturesDfaSpanWithNfa()
     {
         BenchmarkRe2Parse.ParseState state = new BenchmarkRe2Parse.ParseState();
         state.setup();
 
-        // The input is past the unanchored BitState limit, so the find runs the forward and
-        // reverse DFA, and BitState then captures the span they found.
+        // The input is past both BitState limits at the default budget, so the find runs the
+        // forward and reverse DFA, and the NFA then captures the span they found.
         Prog program = state.re2SplitHard.forwardProgramForDiagnostics();
         assertThat(program.unanchoredBitStateTextMaxSize()).isLessThan(state.splitBig2Text.length());
-        assertThat(program.anchoredBitStateTextMaxSize()).isGreaterThanOrEqualTo(state.splitBig2Text.length());
+        assertThat(program.anchoredBitStateTextMaxSize()).isLessThan(state.splitBig2Text.length());
         RegexpMatcher matcher = state.re2SplitHard.matcher(state.splitBig2Text);
         assertThat(matcher.find()).isTrue();
         assertThat(state.re2SplitHard.isReverseProgramComputed()).isTrue();
-        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isTrue();
-        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(100_008);
         assertThat(matcher.start(1)).isEqualTo(4);

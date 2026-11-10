@@ -28,7 +28,7 @@ public class TestRe2Options
     @Test
     public void testDefaultMemoryBudget()
     {
-        assertThat(Re2.Options.defaults().maxMemory()).isEqualTo(96L << 20);
+        assertThat(Re2.Options.defaults().maxMemory()).isEqualTo(32L << 20);
     }
 
     @Test

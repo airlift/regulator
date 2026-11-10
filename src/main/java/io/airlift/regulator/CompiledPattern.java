@@ -1098,7 +1098,7 @@ abstract sealed class CompiledPattern
         // would leave the first-match or longest-match DFA too little to initialize, where the set
         // without them would leave it enough, drops them. Where a DFA cannot initialize beside the
         // set either way, the set keeps them, as for a dictionary of tens of thousands of words
-        // under the default budget, whose matchers search the set.
+        // under a 96 MiB budget, whose matchers search the set.
         if (literalSet != null) {
             LiteralSetSpanMatcher withoutTables = literalSet.withoutSearchTables();
             if (costsDfaInitialization(semanticProgram, literalSet.estimatedRetainedSize(), withoutTables.estimatedRetainedSize())) {

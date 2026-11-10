@@ -796,9 +796,12 @@ public class TestRe2Allocations
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
         // (a?) repeated 2,000 times on 2,000 a's holds about 6,000 capture threads, each with all
-        // 4,002 slots: about 96 MB of slots a search, past the default budget's 64 MiB forward
-        // share. At 4,000 repetitions the forward DFA's cache churns, allocating 74 MB a search on
-        // its own.
+        // 4,002 slots: about 96 MB of slots a search, past a 96 MiB budget's 64 MiB forward share.
+        // At 4,000 repetitions under that budget, or 1,500 under the default, the forward DFA's
+        // cache also churns, so a search allocates its rebuilt tables as well. The test sets 96 MiB
+        // so that its slots alone pass the forward share, with a forward DFA cache that does not
+        // churn.
+        long maxMemory = 96L << 20;
         int groups = 2_000;
         Slice pattern = Slices.utf8Slice("(a?)".repeat(groups));
         Slice text = Slices.utf8Slice("a".repeat(groups));
@@ -809,11 +812,11 @@ public class TestRe2Allocations
             offsets[2 * group + 1] = group;
         }
 
-        Re2 re2 = Re2.compile(pattern);
-        JavaRegexp java = JavaRegexp.compile(pattern);
-        RustRegexp rust = RustRegexp.compile(pattern);
-        RustRegexp rustBytes = RustRegexp.compile(pattern, RustRegexp.Options.bytes());
-        TrinoRegexp trino = TrinoRegexp.compile(pattern);
+        Re2 re2 = Re2.compile(pattern, Re2.Options.defaults().setMaxMemory(maxMemory));
+        JavaRegexp java = JavaRegexp.compile(pattern, JavaRegexp.Options.defaults().setMaxMemory(maxMemory));
+        RustRegexp rust = RustRegexp.compile(pattern, RustRegexp.Options.defaults().setMaxMemory(maxMemory));
+        RustRegexp rustBytes = RustRegexp.compile(pattern, RustRegexp.Options.bytes().setMaxMemory(maxMemory));
+        TrinoRegexp trino = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
         List<CaptureSearch> searches = List.of(
                 new CaptureSearch("RE2 matcher find", re2.forwardProgramForDiagnostics(), () -> matcherOffsets(re2.matcher(text), groups), offsets),
                 new CaptureSearch("Java matcher find", java.forwardProgramForDiagnostics(), () -> matcherOffsets(java.matcher(text), groups), offsets),
@@ -821,7 +824,7 @@ public class TestRe2Allocations
                 new CaptureSearch("Rust bytes findResult", rustBytes.forwardProgramForDiagnostics(), () -> resultOffsets(rustBytes.findResult(text), groups), offsets),
                 new CaptureSearch("Trino regexp_extract", trino.re2().forwardProgramForDiagnostics(), () -> trino.extract(text, groups), Slices.utf8Slice("a")));
 
-        long forwardMemory = Re2.Options.DEFAULT_MAX_MEMORY - (Re2.Options.DEFAULT_MAX_MEMORY / 3);
+        long forwardMemory = CompiledPattern.forwardMemory(maxMemory);
         long threadId = Thread.currentThread().threadId();
         for (CaptureSearch search : searches) {
             assertThat(search.search().get()).as(search.name()).isEqualTo(search.expected());
@@ -843,15 +846,16 @@ public class TestRe2Allocations
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
         // On a's, each position pushes five BitState jobs that stay on the stack until the match
-        // ends. At the 419,429 bytes the bitmap alone allowed, a fresh matcher's direct BitState
-        // capture took 67 MB, past the default budget's 64 MiB forward share.
+        // ends. At the 419,429 bytes the bitmap alone allowed under a 96 MiB budget, a fresh
+        // matcher's direct BitState capture took 67 MB, past that budget's 64 MiB forward share.
         Slice pattern = Slices.utf8Slice("(?:(a)|a)*");
-        long forwardMemory = Re2.Options.DEFAULT_MAX_MEMORY - (Re2.Options.DEFAULT_MAX_MEMORY / 3);
+        Re2.Options options = Re2.Options.defaults().setMaxMemory(96L << 20);
+        long forwardMemory = CompiledPattern.forwardMemory(options.maxMemory());
         long threadId = Thread.currentThread().threadId();
 
         // An anchored search still takes the longest text BitState accepts, and allocates within
         // the share. An unanchored search takes a shorter text.
-        Re2 edge = Re2.compile(pattern);
+        Re2 edge = Re2.compile(pattern, options);
         int edgeLength = edge.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize();
         RegexpMatcher edgeMatcher = edge.matcher(Slices.utf8Slice("a".repeat(edgeLength)));
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
@@ -884,7 +888,7 @@ public class TestRe2Allocations
         assertThat(allocatedBytes).isLessThanOrEqualTo(exactForwardMemory);
 
         // A longer text takes the capture NFA, which reports the same groups.
-        Re2 longer = Re2.compile(pattern);
+        Re2 longer = Re2.compile(pattern, options);
         Slice text = Slices.utf8Slice("a".repeat(419_429));
         assertThat(longer.canUseDirectBitStateCapture(longer.forwardProgramForDiagnostics(), text.length(), 2)).isFalse();
         RegexpMatcher matcher = longer.matcher(text);
@@ -932,11 +936,12 @@ public class TestRe2Allocations
     public void testBitStateJobStackStaysWithinMemoryModel()
     {
         // The text limits follow the memory model, whose job stack starts at the program's size,
-        // from 16 to 64 jobs, and doubles. keyValue's limit stays where that model sets it, 161,318
-        // bytes with compressed class pointers. Turning them off, which JDK 25 and 26 deprecate,
-        // together with compressed references makes its objects larger and its limit 83,739.
+        // from 16 to 64 jobs, and doubles. Under a 96 MiB budget, keyValue's limit stays where that
+        // model sets it, 161,318 bytes with compressed class pointers. Turning them off, which JDK
+        // 25 and 26 deprecate, together with compressed references makes its objects larger and
+        // its limit 83,739.
         if (TestCompilerAllocations.compressedClassPointers()) {
-            Re2 keyValue = Re2.compile(TestingEverydayTrinoRegexpBenchmarkInputs.create("keyValue").pattern());
+            Re2 keyValue = Re2.compile(TestingEverydayTrinoRegexpBenchmarkInputs.create("keyValue").pattern(), Re2.Options.defaults().setMaxMemory(96L << 20));
             assertThat(keyValue.forwardProgramForDiagnostics().anchoredBitStateTextMaxSize()).isEqualTo(161_318);
         }
 

@@ -147,7 +147,7 @@ in byte mode. Names follow `JavaRegexp.Options` where the concept is the same:
 | `setOctal` | `octal` | off |
 | `setBytes` | `regex::bytes::RegexBuilder` in place of `regex::RegexBuilder` | off |
 | `setNestLimit` | `nest_limit` | 250 |
-| `setMaxMemory` | none; replaces `size_limit` and `dfa_size_limit` with Regulator's compilation, DFA-cache and capture-search budget | 96 MiB |
+| `setMaxMemory` | none; replaces `size_limit` and `dfa_size_limit` with Regulator's compilation, DFA-cache and capture-search budget | 32 MiB |
 | `setByteFrequencies` | none | `ByteFrequencies.uniform()` |
 | `setGenerateBytecode` | none | off |
 
@@ -155,9 +155,11 @@ The crate rejects a pattern whose compiled program exceeds its 10 MiB
 `size_limit`, such as `\w{1000}`. Regulator does not reproduce that estimate.
 It accepts such a pattern unless compiling it exceeds `maxMemory`, which throws
 `RegexpCompileMemoryLimitException` rather than a parse error. A pattern the
-crate refuses as too large has no crate result to differ from. Under a
-`maxMemory` smaller than the default, Regulator can also reject a pattern the
-crate accepts.
+crate refuses as too large has no crate result to differ from. Regulator can
+also reject a pattern the crate accepts: at the default `maxMemory`, it
+rejects `\w{n}x` for n from 99, which needs just over 32 MiB, to 209, the
+longest the crate accepts, which needs about 68 MiB, and `(?:\w+\s){100}`,
+which needs about 33 MiB.
 
 Repetition counts above 1,000 are accepted, as in the crate, and so are nested
 counts whose product exceeds 1,000. As in every language, the budget counts a
