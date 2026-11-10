@@ -844,6 +844,18 @@ text, so the pair scan rejects little that a first-byte scan would not.
   falls back to the NFA, or, for a group-zero search of a program with bounded,
   assertion-free matches, to the position automaton (see
   [Bit-Parallel Position Automaton After DFA Failure](#bit-parallel-position-automaton-after-dfa-failure)).
+- A DFA's state and transition tables start with room for one state per
+  instruction, at least 16 and at most what its budget's transitions hold, but
+  never more than 256 states. A DFA whose one-row-per-instruction capacity is
+  above 256 starts its tables at 256, and they double as states arrive,
+  stopping once at the one-row-per-instruction capacity before doubling on, so
+  at any state count they are no larger than tables that started there. Each
+  growth is charged to the state budget before it is allocated, and a growth
+  that does not fit resets the cache as a full cache does. Most large
+  programs' DFAs never fill a row per instruction: 120 of the 146
+  larger-program DFAs among the published benchmark rows never pass 256
+  states. The initial tables are charged after the initialization gate passes,
+  so smaller ones leave more of the budget the gate reserved for states.
 - A capture NFA search has its own allowance, the forward share, beside the DFA
   caches'. A search tracks K slots, the caller's, up to the slots through the
   highest surviving CAPTURE, and reports the slots past that unset: a trailing
@@ -1495,9 +1507,16 @@ between paired rows and the table. Waiting only once keeps a DFA that never
 computes a transition from retrying every search exclusively. A finite-budget
 DFA initially allocates a small row-rounded table and geometrically enlarges
 it as the graph grows. Each allocation is limited so that the remaining budget
-can still hold the minimum Java state behind every additional pointer row. The
-integer and object transition tables remain authoritative, and every zero
-entry delegates to the unchanged object continuation.
+can still hold the minimum Java state behind every additional pointer row and
+the state tables' remaining growth to one row per instruction: state tables
+that start smaller than one row per instruction have not yet paid for growing
+to it, so the sizing reserves that growth, and a pointer table is no larger
+than tables that started there would leave room for. Without the reservation,
+a pointer table sized while the state tables are small would take the budget
+their growth needs, and a budget that holds the whole graph could reset on
+every pass or withhold the pointer table. The integer and object transition
+tables remain authoritative, and every zero entry delegates to the unchanged
+object continuation.
 
 One process-wide choice, fixed when the DFA class initializes, selects the
 form: native memory when the containing module has native access enabled, the

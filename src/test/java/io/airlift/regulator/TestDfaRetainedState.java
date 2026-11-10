@@ -17,11 +17,16 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.stream.Stream;
 
+import static io.airlift.regulator.Dfa.DfaInstance.Kind.FIRST_MATCH;
 import static io.airlift.regulator.Dfa.DfaInstance.Kind.LONGEST_MATCH;
+import static io.airlift.slice.SizeOf.sizeOfIntArray;
+import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -100,7 +105,7 @@ public class TestDfaRetainedState
         // Up to 2^7 states, more than the initial capacity, so the rebuilt cache grows.
         Prog program = compileProgram("1[01]{6}$", 1 << 20);
         Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
-        Slice input = bitText();
+        Slice input = bitText(4_096);
         Dfa.search(program, input, false, Prog.MatchKind.LONGEST_MATCH, true);
 
         // A search that began before the reset reads these tables until it ends.
@@ -140,7 +145,7 @@ public class TestDfaRetainedState
         Dfa.CacheTables stale = dfa.cacheTablesForTesting();
 
         // Growth publishes larger arrays; the stale tables share their start caches and rows.
-        Dfa.search(program, bitText(), false, Prog.MatchKind.LONGEST_MATCH, true);
+        Dfa.search(program, bitText(4_096), false, Prog.MatchKind.LONGEST_MATCH, true);
         Slice anchoredText = Slices.utf8Slice("1010101");
         Dfa.search(program, anchoredText, true, Prog.MatchKind.LONGEST_MATCH, true);
         assertThat(dfa.cacheTablesForTesting().transitions.length).isGreaterThan(stale.transitions.length);
@@ -163,11 +168,147 @@ public class TestDfaRetainedState
                 .isInstanceOf(Dfa.RetrySearchException.class);
     }
 
-    // 4,096 pseudo-random bits, enough to reach every state of `1[01]{6}$`.
-    private static Slice bitText()
+    @Test
+    public void testLargeProgramStateTablesStartSmallAndGrow()
+    {
+        // 2,000 instructions the bit text never reaches make a program of 2,017 instructions, and
+        // a 16 MiB budget holds a row for each. The bit pattern's states take its DFA's tables past
+        // 256 rows, past one row per instruction, and on.
+        Prog program = compileProgram("1[01]{11}$|" + "z".repeat(2_000), 16 << 20);
+        Dfa.DfaInstance dfa = program.getCachedDfa(LONGEST_MATCH);
+        int initialCapacity = Dfa.DfaInstance.MAXIMUM_INITIAL_STATE_CAPACITY;
+        assertThat(program.size()).isGreaterThan(4 * initialCapacity);
+        assertThat(dfa.cacheSnapshot().stateCapacity()).isEqualTo(initialCapacity);
+        // The tables a program of this size prepaid alone exceed all the DFA retains.
+        assertThat(dfa.retainedStateMemory()).isLessThan(stateTableMemory(program.size(), dfa.nextSize));
+
+        // Growth doubles, stops once at one row per instruction, then doubles on.
+        List<Integer> capacities = new ArrayList<>(List.of(initialCapacity));
+        Slice bits = bitText(200_000);
+        for (int offset = 0; offset < bits.length(); offset += 64) {
+            Dfa.search(program, bits.slice(offset, 64), false, Prog.MatchKind.LONGEST_MATCH, true);
+            int capacity = dfa.cacheSnapshot().stateCapacity();
+            if (capacity != capacities.getLast()) {
+                capacities.add(capacity);
+            }
+        }
+        assertThat(dfa.cacheSnapshot().stateCount()).isGreaterThan(2 * program.size());
+        assertThat(dfa.cacheSnapshot().resetCount()).isZero();
+        assertThat(capacities).containsExactly(initialCapacity, 2 * initialCapacity, 4 * initialCapacity, program.size(), 2 * program.size(), 4 * program.size());
+
+        dfa.resetCacheExternal();
+        assertThat(dfa.cacheSnapshot().stateCapacity()).isEqualTo(initialCapacity);
+    }
+
+    @Test
+    public void testPointerTableLeavesRoomForStateTableGrowth()
+    {
+        // A program of more than 256 instructions, so the state tables start below one row per
+        // instruction and grow as the DFA's states arrive.
+        String pattern = "[ab]*a[ab]{6}\\pL";
+        List<Slice> texts = abTexts();
+        Prog referenceProgram = compileProgram(pattern, 64 << 20);
+        referenceProgram.setDfaMemory(2 * (16 << 20));
+        searchAll(referenceProgram, texts);
+        searchAll(referenceProgram, texts);
+        Dfa.DfaInstance warm = referenceProgram.getCachedDfa(FIRST_MATCH);
+        assertThat(referenceProgram.size()).isGreaterThan(Dfa.DfaInstance.MAXIMUM_INITIAL_STATE_CAPACITY);
+        assertThat(warm.cacheSnapshot().stateCount()).isGreaterThan(Dfa.DfaInstance.MAXIMUM_INITIAL_STATE_CAPACITY);
+        assertThat(warm.absolutePointerTransitionsAvailable()).isTrue();
+        long javaStateMemory = warm.stateBudget() - warm.availableStateMemory() - warm.absolutePointerTransitionMemory() +
+                stateTableMemory(referenceProgram.size(), warm.nextSize) -
+                stateTableMemory(warm.cacheSnapshot().stateCapacity(), warm.nextSize);
+        long pointerRowMemory = (warm.cacheSnapshot().stateCount() + 1L) * warm.nextSize * Long.BYTES;
+        long fixedOverhead = (16 << 20) - warm.stateBudget();
+
+        // A budget that holds the warm DFA's Java state but none of its pointer rows. The pointer
+        // table is first sized while the tables are small, and it must leave the budget their
+        // growth to one row per instruction, beside the reference row of a state behind each
+        // pointer row it adds.
+        Prog tight = compileProgram(pattern, 64 << 20);
+        tight.setDfaMemory(2 * (javaStateMemory + fixedOverhead));
+        Dfa.DfaInstance tightDfa = null;
+        for (Slice text : texts) {
+            Dfa.search(tight, text, false, Prog.MatchKind.FIRST_MATCH, true);
+            tightDfa = tight.getCachedDfa(FIRST_MATCH);
+            if (tightDfa.absolutePointerTransitionMemory() > 0) {
+                break;
+            }
+        }
+        assertThat(tightDfa.absolutePointerTransitionMemory()).isPositive();
+        Dfa.CacheSnapshot firstPointerTable = tightDfa.cacheSnapshot();
+        assertThat(firstPointerTable.stateCapacity()).isLessThan(tightDfa.programStateCapacity());
+        long addedPointerRows = tightDfa.absolutePointerTransitionMemory() / ((long) tightDfa.nextSize * Long.BYTES) - (firstPointerTable.stateCount() + 1L);
+        assertThat(tightDfa.availableStateMemory()).isGreaterThanOrEqualTo(
+                stateTableMemory(tightDfa.programStateCapacity(), tightDfa.nextSize) -
+                        stateTableMemory(firstPointerTable.stateCapacity(), tightDfa.nextSize) +
+                        addedPointerRows * sizeOfObjectArray(tightDfa.nextSize + 1));
+
+        // A budget a little above what the warm DFA would hold with tables that started at one row
+        // per instruction, its Java state and one pointer row per state, holds them all: the
+        // pointer table must not take the budget the tables' growth needs, which would make the DFA
+        // reset on every pass, or give up its pointer table.
+        for (int marginPercent = 2; marginPercent <= 6; marginPercent += 2) {
+            long stateBudget = (javaStateMemory + pointerRowMemory) * (100 + marginPercent) / 100;
+            Prog program = compileProgram(pattern, 64 << 20);
+            program.setDfaMemory(2 * (stateBudget + fixedOverhead));
+            searchAll(program, texts);
+            searchAll(program, texts);
+            Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+            assertThat(dfa.stateBudget()).isEqualTo(stateBudget);
+            int warmResets = dfa.cacheSnapshot().resetCount();
+            searchAll(program, texts);
+            searchAll(program, texts);
+            assertThat(dfa.cacheSnapshot().resetCount())
+                    .as("resets after warming, %s%% above the warm DFA's memory", marginPercent)
+                    .isEqualTo(warmResets);
+            assertThat(dfa.absolutePointerTransitionsAvailable())
+                    .as("pointer table %s%% above the warm DFA's memory", marginPercent)
+                    .isTrue();
+        }
+    }
+
+    // The state tables' charge at `stateCapacity` rows: transitions, state data, state
+    // references, and self-loop exit byte sets.
+    private static long stateTableMemory(int stateCapacity, int nextSize)
+    {
+        return sizeOfIntArray(stateCapacity * nextSize) + 2 * sizeOfObjectArray(stateCapacity) + sizeOfLongArray(stateCapacity);
+    }
+
+    private static void searchAll(Prog program, List<Slice> texts)
+    {
+        for (Slice text : texts) {
+            assertThat(Dfa.search(program, text, false, Prog.MatchKind.FIRST_MATCH, true)).isNotEqualTo(Dfa.SEARCH_FAILED);
+        }
+    }
+
+    // Pseudo-random texts, mostly a and b, short ones and a few long enough to request a pointer
+    // table.
+    private static List<Slice> abTexts()
+    {
+        Random random = new Random(99);
+        List<Slice> texts = new ArrayList<>();
+        int[] lengths = new int[60];
+        for (int i = 0; i < lengths.length; i++) {
+            lengths[i] = i < 40 ? 20 + random.nextInt(200) : (i < 56 ? 3000 + random.nextInt(3000) : 150_000);
+        }
+        for (int length : lengths) {
+            byte[] bytes = new byte[length];
+            for (int j = 0; j < length; j++) {
+                int value = random.nextInt(100);
+                bytes[j] = (byte) (value < 48 ? 'a' : value < 96 ? 'b' : value < 98 ? 'c' : 'x');
+            }
+            texts.add(Slices.wrappedBuffer(bytes));
+        }
+        return texts;
+    }
+
+    // `length` pseudo-random bits. 4,096 reach every state of `1[01]{6}$`, and 200,000, searched
+    // 64 at a time, every state of `1[01]{11}$`.
+    private static Slice bitText(int length)
     {
         StringBuilder bits = new StringBuilder();
-        for (int i = 0; i < 4_096; i++) {
+        for (int i = 0; i < length; i++) {
             bits.append(Integer.bitCount(i * 0x9E37) & 1);
         }
         return Slices.utf8Slice(bits.toString());
