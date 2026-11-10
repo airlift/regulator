@@ -13,24 +13,44 @@
  */
 package io.airlift.regulator;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
+import com.sun.management.VMOption;
+
 import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
 import java.util.List;
+
+import static com.sun.management.VMOption.Origin.DEFAULT;
+import static com.sun.management.VMOption.Origin.ERGONOMIC;
 
 final class TestingJvmArguments
 {
-    private static final List<String> VECTOR_WIDTH_OPTION_PREFIXES = List.of("-XX:MaxVectorSize=", "-XX:UseSVE=", "-XX:UseAVX=");
+    private static final List<String> VECTOR_WIDTH_OPTIONS = List.of("MaxVectorSize", "UseSVE", "UseAVX");
 
     private TestingJvmArguments() {}
 
     /// Returns this JVM's options that set its vector width, such as the `-XX:MaxVectorSize=8` of
-    /// CI's 8-byte build. They come from the JVM's input arguments, which include
-    /// `JAVA_TOOL_OPTIONS` and `JDK_JAVA_OPTIONS` as well as the command line. A test that forks a
-    /// JVM passes these to it so the child runs at this JVM's width; a width option the test adds
-    /// after them wins.
+    /// CI's 8-byte build. The JVM reports each option's value and where it came from, so an option
+    /// set on the command line, in `JAVA_TOOL_OPTIONS` or in `JDK_JAVA_OPTIONS` is returned, while a
+    /// default or a value the JVM chose for this CPU is not. An option this CPU lacks, such as
+    /// `UseSVE` on x86, is skipped. A test that forks a JVM passes these to it so the child runs at
+    /// this JVM's width; a width option the test adds after them wins.
     static List<String> vectorWidthOptions()
     {
-        return ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
-                .filter(argument -> VECTOR_WIDTH_OPTION_PREFIXES.stream().anyMatch(argument::startsWith))
-                .toList();
+        HotSpotDiagnosticMXBean diagnostics = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+        List<String> options = new ArrayList<>();
+        for (String name : VECTOR_WIDTH_OPTIONS) {
+            VMOption option;
+            try {
+                option = diagnostics.getVMOption(name);
+            }
+            catch (IllegalArgumentException _) {
+                continue;
+            }
+            if (option.getOrigin() != DEFAULT && option.getOrigin() != ERGONOMIC) {
+                options.add("-XX:" + name + "=" + option.getValue());
+            }
+        }
+        return List.copyOf(options);
     }
 }
