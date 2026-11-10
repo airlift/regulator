@@ -129,7 +129,7 @@ public class TestJavaRegexpOptions
                 utf8Slice("abc"),
                 JavaRegexp.Options.defaults().setMaxMemory(1)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class)
-                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 1 KiB");
+                .hasMessage("regular expression compilation exceeded the 1 byte memory limit; the pattern needs a larger memory budget, at least 2 KiB");
     }
 
     @Test

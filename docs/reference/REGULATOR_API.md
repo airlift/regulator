@@ -223,15 +223,16 @@ Within the budget, compilation and matching keep these limits:
 A pattern that does not compile within its budget reports a lower bound on the
 budget it needs when one is proven. The `RegexpCompileMemoryLimitException`
 message then ends "the pattern needs a larger memory budget, at least N MiB",
-rounded down to MiB, to KiB below 1 MiB, or to bytes below 1 KiB, and
-`requiredMaxMemoryBytes()` returns the unrounded bound in bytes, or an empty
-optional when there is none. No smaller budget compiles the pattern by any route
-it can take, including the literal sets and fixed-width matchers some patterns
-compile to in place of a program. Where the check that failed measures what it
-needs, as for the flattened program, a long prefix's shift table, a compact
-class counter, a capture plan, or an `Re2Set`'s DFA, the figure is often the
-least budget that compiles. Where the instruction limit stopped compilation, it
-is counted from the instructions the pattern surely compiles to. A larger budget
+rounded up to MiB, to KiB below 1 MiB, or to bytes below 1 KiB, so the figure is
+never below the bound, and `requiredMaxMemoryBytes()` returns the unrounded
+bound in bytes, or an empty optional when there is none. No budget below that
+unrounded bound compiles the pattern by any route it can take, including the
+literal sets and fixed-width matchers some patterns compile to in place of a
+program. Where the check that failed measures what it needs, as for the
+flattened program, a long prefix's shift table, a compact class counter, a
+capture plan, or an `Re2Set`'s DFA, the unrounded bound is often the least
+budget that compiles. Where the instruction limit stopped compilation, it is
+counted from the instructions the pattern surely compiles to. A larger budget
 may still be needed, since a later step can need more than the step that failed,
 and the DFAs may need more to search at full speed without resetting their
 caches. When no bound beyond the rejected budget is proven, the message gives no
