@@ -688,6 +688,29 @@ public class TestRequiredBytes
                 assertNoForwardDfa(pattern, language + " class run");
             }
         }
+
+        // A start literal filter that only groups wider than one bit give is no other route, as
+        // for the fixed-width matcher's yield, since the check was measured against filters of
+        // one-bit groups. The a to g of [a-g]{3}://\S+|[a-g]{3}@[^ @]+ give its forward DFA such a
+        // filter: the pattern checks long windows for its / or @ before the DFA scans for the
+        // filter, and the DFA keeps the filter for a window that holds one.
+        Slice wideFilterMatch = utf8Slice(LONG_FILLER + "see abc@def ");
+        for (Map.Entry<String, CompiledPattern> entry : compile("[a-g]{3}://\\S+|[a-g]{3}@[^ @]+").entrySet()) {
+            String language = entry.getKey();
+            CompiledPattern pattern = entry.getValue();
+            Prog program = pattern.forwardProgramForDiagnostics();
+            assertThat(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1)).as(language).isNull();
+            assertThat(pattern.longWindowRequiredLiteral()).as(language).hasToString("one of /@");
+            RegexpMatcher matcher = pattern.matcher(utf8Slice(LONG_FILLER));
+            assertThat(matcher.find()).as(language).isFalse();
+            assertThat(matcher.requiredLiteralScanCountForDiagnostics()).as(language).isEqualTo(1);
+            Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            assertThat(dfa.startLiteralFilter() != null).as(language).isEqualTo(VectorSupport.isAvailable());
+            assertThat(dfa.startLiteralFilterScanCount()).as(language).isZero();
+            matcher.reset(wideFilterMatch);
+            assertThat(spans(matcher)).as(language).containsExactly(new Span(LONG_FILLER.length() + 4, LONG_FILLER.length() + 11));
+            assertThat(dfa.startLiteralFilterScanCount() > 0).as(language).isEqualTo(VectorSupport.isAvailable());
+        }
     }
 
     @Test

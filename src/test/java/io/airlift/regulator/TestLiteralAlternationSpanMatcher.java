@@ -1338,6 +1338,19 @@ public class TestLiteralAlternationSpanMatcher
     }
 
     @Test
+    public void testStartLiteralFilterTakesOneBitGroups()
+    {
+        // The matcher's filter was measured with groups of one bit, two cases of a letter. Wider
+        // groups would check @, A, B, and D at the first byte under the mask 0x07; groups of one
+        // bit check the second, third, and fourth bytes.
+        StartLiteralFilter filter = scanner("@eee|Aeee|@ttt|Bttt|@   |D   ").startLiteralFilterForDiagnostics();
+        assertThat(filter != null).isEqualTo(VectorSupport.isAvailable());
+        if (filter != null) {
+            assertThat(List.of(filter.firstOffset(), filter.secondOffset(), filter.thirdOffset())).containsExactly(1, 2, 3);
+        }
+    }
+
+    @Test
     public void testMatcherResetForgetsTheRoute()
     {
         // A Trino matcher reset onto a short input forgets the long input's root-table route.

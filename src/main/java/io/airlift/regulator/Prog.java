@@ -479,8 +479,8 @@ final class Prog
     // prefixRunAddsPrefixScan.
     private boolean prefixRunAddsPrefixScan;
     // Whether the start bytes of the program without such a run would carry a start literal
-    // filter; see prefixRunHidesStartLiteralFilter.
-    private boolean prefixRunHidesStartLiteralFilter;
+    // filter that groups of one bit give; see prefixRunHidesOneBitStartLiteralFilter.
+    private boolean prefixRunHidesOneBitStartLiteralFilter;
     // KMP shifts of a non-folded prefix of two or more bytes, for the KMP search a prefix scan
     // finishes with once its failed candidates pass LiteralSearchKernel's comparison budget.
     private int[] prefixShifts;
@@ -1960,13 +1960,14 @@ final class Prog
     }
 
     /// Returns whether the start bytes of the program without its folded run would carry a start
-    /// literal filter, as [Dfa.DfaInstance#searchesStartLiteralFilter] decides for the first-match
-    /// DFA, or false unless [#prefixRunAddsPrefixScan]. A run behind a lead takes the place of the
-    /// start-byte tables, so the long-window required-literal check reads this rather than the
-    /// tables, which the DFA no longer builds.
-    boolean prefixRunHidesStartLiteralFilter()
+    /// literal filter that groups of one bit give, as
+    /// [Dfa.DfaInstance#givesOneBitStartLiteralFilter] decides for the first-match DFA, or false
+    /// unless [#prefixRunAddsPrefixScan]. A run behind a lead takes the place of the start-byte
+    /// tables, so the long-window required-literal check, which counts only such a filter, reads
+    /// this rather than the tables, which the DFA no longer builds.
+    boolean prefixRunHidesOneBitStartLiteralFilter()
     {
-        return prefixRunHidesStartLiteralFilter;
+        return prefixRunHidesOneBitStartLiteralFilter;
     }
 
     /// Whether the prefix scan takes the place of the start-byte tables, so the DFA builds none.
@@ -2043,7 +2044,7 @@ final class Prog
             throw new IllegalArgumentException("folded run lead must satisfy 0 <= minimum <= maximum: [" + minimumLead + "," + maximumLead + "]");
         }
         // Decided before the run is configured, while the program still builds its start bytes.
-        boolean hidesStartLiteralFilter = addsPrefixScan && Dfa.DfaInstance.searchesStartLiteralFilter(this, Dfa.DfaInstance.Kind.FIRST_MATCH);
+        boolean hidesOneBitStartLiteralFilter = addsPrefixScan && Dfa.DfaInstance.givesOneBitStartLiteralFilter(this, Dfa.DfaInstance.Kind.FIRST_MATCH);
         configurePrefixAccelBytes(run, true, byteFrequencies);
         this.prefixMinimumLead = minimumLead;
         this.prefixMaximumLead = maximumLead;
@@ -2051,7 +2052,7 @@ final class Prog
         // Compiler.foldedRunForAccel.
         this.prefixRunStartsEveryMatch = maximumLead == 0;
         this.prefixRunAddsPrefixScan = addsPrefixScan;
-        this.prefixRunHidesStartLiteralFilter = hidesStartLiteralFilter;
+        this.prefixRunHidesOneBitStartLiteralFilter = hidesOneBitStartLiteralFilter;
     }
 
     private void configurePrefixAccelBytes(byte[] bytes, boolean foldCase, ByteFrequencies byteFrequencies)
@@ -2077,7 +2078,7 @@ final class Prog
         this.prefixMaximumLead = 0;
         this.prefixRunStartsEveryMatch = false;
         this.prefixRunAddsPrefixScan = false;
-        this.prefixRunHidesStartLiteralFilter = false;
+        this.prefixRunHidesOneBitStartLiteralFilter = false;
         this.prefixShifts = null;
         this.prefixLiteralSet = null;
         this.prefixLiteralSetBackOffset = 0;

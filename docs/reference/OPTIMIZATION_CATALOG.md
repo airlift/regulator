@@ -672,15 +672,16 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   filter skips that sample, though long searches still sample its
   productivity. The start class filter replaces the start set's own scan on
   unanchored forward DFA searches of at least 1 KiB with the Vector API and no
-  start literal filter, where a productive fixed-distance scan goes first; a
-  find, count, or group-zero cursor search with under 64 KiB left does not
-  sample that scan and takes either start filter when English text holds the
-  fixed-distance bytes more often than the filter passes a position. The
-  start class filter's start set needs a vector scan of its own and English
-  text holding it at least once in 500 bytes, and its first two or three byte
-  ranges, taken as independent, an English estimate of at most a sixteenth as
-  often as the start bytes and under once in 500 bytes. The third offset is
-  checked only when it narrows the pair's estimate at least four times
+  start literal filter of one-bit groups, where a productive fixed-distance
+  scan goes first; a find, count, or group-zero cursor search with under
+  64 KiB left does not sample that scan and takes either start filter when
+  English text holds the fixed-distance bytes more often than the filter
+  passes a position. The start class filter's start set needs a vector scan of
+  its own and English text holding it at least once in 500 bytes, and its
+  first two or three byte ranges, taken as independent, an English estimate of
+  at most a sixteenth as often as the start bytes and under once in 500 bytes.
+  The third offset is checked only when it narrows the pair's estimate at
+  least four times
 - **What it does:** The DFA scans to the next byte that can leave its
   unanchored start state, runs from there, and resumes the scan when it
   returns to the start state. The byte set is built on first use, and the scan
@@ -746,22 +747,27 @@ These filters skip to the next byte, or byte sequence, that can begin a match.
   filter only when its estimated stop density is at most a quarter of the
   start-byte scan's and the start set has at most 16 bytes; a start set with
   estimated English frequency below 5% also needs more than three start bytes
-  that are not one range, or at most two groups and 64-byte vectors. The nibble
-  kernel needs 16 to 64 lanes; its one-load form needs Linux x86 with 64-byte
-  vectors whose first `/proc/cpuinfo` flags line lists `avx512vbmi`
+  that are not one range, or at most two groups and 64-byte vectors. Where a
+  start class filter is admitted, the filter takes groups of one bit, and
+  yields to the class filter when they give none. The nibble kernel needs 16
+  to 64 lanes; its one-load form needs Linux x86 with 64-byte vectors whose
+  first `/proc/cpuinfo` flags line lists `avx512vbmi`
   (`VectorByteSetScanner.ONE_LOAD_NIBBLES`)
 - **What it does:** For at most eight groups of leading literals of three or
   more bytes, the filter tests three positions per group at once and stops
   only where all three fit some group, a superset of the literals' starts; the
   caller checks each stop. Literals that differ in one bit at a position, such
-  as ASCII or Cyrillic case pairs, share a group through an OR mask. The
-  filter takes the three positions with the lowest estimated stop density,
-  from English frequencies and fixed UTF-8 weights. With one or two groups,
-  each position is loaded once and compared with both groups, the three
-  comparisons of a group are ANDed, and a lane is a candidate when either
-  group matches. Literals with zero masks at the three positions skip the OR,
-  and on 128-bit SVE and on x86 with 64-byte vectors their two groups are
-  checked with one compare, as in the
+  as ASCII or Cyrillic case pairs, share a group through an OR mask. In the
+  DFA, a group's position may hold bytes that vary in up to three bit
+  positions, which takes `[a-g]{3}[0-9]+` counts to 0.28 to 0.42 of the start
+  scan's time on Graviton and Intel ([#232]). The filter takes the three
+  positions with the lowest estimated stop density, from English frequencies
+  and fixed UTF-8 weights.
+  With one or two groups, each position is loaded once and compared
+  with both groups, the three comparisons of a group are ANDed, and a lane is
+  a candidate when either group matches. Literals with zero masks at the three
+  positions skip the OR, and on 128-bit SVE and on x86 with 64-byte vectors
+  their two groups are checked with one compare, as in the
   [one-compare candidate masks](#one-compare-candidate-masks).
   With 3 to 8 groups, two nibble lookups per position give
   every group's bit at once; each step loads one vector at each of the three
@@ -2309,6 +2315,7 @@ change is described.
 [#224]: https://github.com/airlift/regulator/pull/224
 [#226]: https://github.com/airlift/regulator/pull/226
 [#231]: https://github.com/airlift/regulator/pull/231
+[#232]: https://github.com/airlift/regulator/pull/232
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor

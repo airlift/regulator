@@ -375,6 +375,18 @@ public class TestInnerLiteralSearch
     }
 
     @Test
+    public void testLiteralSetFilterTakesOneBitGroups()
+    {
+        // The set's filter was measured with groups of one bit. Wider groups would check @, A, B,
+        // and D at the first byte under the mask 0x07; groups of one bit check the second, third,
+        // and fourth bytes.
+        InnerLiteralSearch search = innerLiteralSearch("[0-9]+(?:@eee|Aeee|@ttt|Bttt|@   |D   )");
+        assertThat(literal(search)).isEqualTo("@eee|Aeee|@ttt|Bttt|@   |D   ");
+        StartLiteralFilter filter = search.literalSetFilterForDiagnostics();
+        assertThat(List.of(filter.firstOffset(), filter.secondOffset(), filter.thirdOffset())).containsExactly(1, 2, 3);
+    }
+
+    @Test
     public void testPredictsLiteralOfFixedWidthPatterns()
     {
         // A fixed-width pattern has no assertion, so its expression predicts, before any program

@@ -4436,8 +4436,8 @@ final class Dfa
     // sets keep their cheaper small-set and range scanners, except for a filter of two literals
     // where VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals says its scan is faster;
     // a start class filter may still replace those scanners. `startByteProbability` is the
-    // English probability of the start bytes.
-    private static StartLiteralFilterChoice buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates, int startByteScanSet, double startByteProbability)
+    // English probability of the start bytes, and `groupBits` the filter's group width.
+    private static StartLiteralFilterChoice buildStartLiteralFilter(Prog prog, int[] stack, byte[] startByteCandidates, int startByteScanSet, double startByteProbability, int groupBits)
     {
         if (startByteCandidates == null) {
             return null;
@@ -4464,7 +4464,12 @@ final class Dfa
                 return null;
             }
         }
-        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText());
+        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText(), groupBits);
+        // Wider groups can choose positions that split the literals into more than two groups
+        // where groups of one bit keep two, so rare start bytes take the one-bit filter then.
+        if (needsTwoLiterals && groupBits > 1 && filter != null && filter.values().length / 3 != 2) {
+            filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText(), 1);
+        }
         if (filter == null || filter.density() * START_LITERAL_FILTER_NARROWING_FACTOR > startByteProbability) {
             return null;
         }
@@ -4500,9 +4505,12 @@ final class Dfa
     // two or three offsets together stop far less often. StartClassFilter.build decides from the
     // byte sets at those offsets whether a filter replaces start bytes of `startByteProbability`.
     // Start bytes rarer than StartClassFilter.MINIMUM_START_PROBABILITY skip the program walk.
-    private static StartClassFilter buildStartClassFilter(Prog prog, int[] stack, double startByteProbability)
+    // The class filter replaces only a start set's own vector scan, the range or small-set scan of
+    // `startByteScanSet` or the nibble tables of a mixed set, `nibbleTables`, so a set with
+    // neither takes none.
+    private static StartClassFilter buildStartClassFilter(Prog prog, int[] stack, int startByteScanSet, byte[] nibbleTables, double startByteProbability)
     {
-        if (startByteProbability < StartClassFilter.MINIMUM_START_PROBABILITY) {
+        if ((startByteScanSet == 0 && nibbleTables == null) || startByteProbability < StartClassFilter.MINIMUM_START_PROBABILITY) {
             return null;
         }
         byte[][] byteSets = prog.buildStartOffsetByteSets(stack, StartClassFilter.MAXIMUM_SPAN);
@@ -6584,13 +6592,33 @@ final class Dfa
 
         /// Returns whether a DFA of `kind` over `prog` searches for its start literal filter in
         /// place of its start bytes, which this selects as the start-byte tables do, building none
-        /// of the tables that follow the selection. A program whose folded run starts every match
+        /// of the tables that follow the selection except to try the start class filter when groups
+        /// wider than one bit give a literal filter. A program whose folded run starts every match
         /// keeps the tables only in its first-match DFA, so for such a program this answers for
         /// that kind alone: a DFA of another kind keeps no filter.
         static boolean searchesStartLiteralFilter(Prog prog, Kind kind)
         {
+            return selectStartLiteralFilter(prog, kind, StartLiteralFilter.GROUP_BITS) != null;
+        }
+
+        /// Returns whether groups of one bit, the two cases of a letter, give a DFA of `kind` over
+        /// `prog` a start literal filter. Where they do, the DFA searches one, since wider groups
+        /// only add positions. The routes measured against filters of one-bit groups, the
+        /// fixed-width matcher's yield and the long-window required-literal check, ask this
+        /// rather than [#searchesStartLiteralFilter], so a filter that only wider groups give,
+        /// such as that of `[éê]x`, leaves them as they were.
+        static boolean givesOneBitStartLiteralFilter(Prog prog, Kind kind)
+        {
+            return selectStartLiteralFilter(prog, kind, 1) != null;
+        }
+
+        /// Returns the start literal filter a DFA of `kind` over `prog` would search for if each
+        /// group's positions could differ in at most `groupBits` bits, or null.
+        static StartLiteralFilter selectStartLiteralFilter(Prog prog, Kind kind, int groupBits)
+        {
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
-            return StartLiteralFilterSelection.select(prog, kind, new int[stackLength(prog, nmark)]).literalFilterChoice() != null;
+            StartLiteralFilterChoice choice = StartLiteralFilterSelection.select(prog, kind, new int[stackLength(prog, nmark)], groupBits).literalFilterChoice();
+            return choice == null ? null : choice.filter();
         }
 
         // The work queues, the stack, and fixed fields, without the start-byte tables.
@@ -6615,9 +6643,9 @@ final class Dfa
         // bytes that can begin a match and, with the Vector API, the start literal filter, the
         // start class filter, or the nibble tables a search scans for them with. The scan set
         // selects that search, and a filter taken for rare start bytes serves only vector
-        // searches. The literal filter comes first, and the class filter replaces only a start
-        // set's own vector scan: a contiguous range, two or three bytes, or the nibble tables of a
-        // mixed set.
+        // searches. A literal filter of one-bit groups comes first; one that only wider groups give
+        // yields to an admitted class filter. The class filter replaces only a start set's own
+        // vector scan: a contiguous range, two or three bytes, or the nibble tables of a mixed set.
         //
         // A folded run that every match starts with takes the place of the start bytes in every
         // search but the candidate cursor's, which reads only a first-match DFA whose start bytes
@@ -6640,7 +6668,7 @@ final class Dfa
                 if (prefixRunStartsEveryMatch && kind != Kind.FIRST_MATCH) {
                     return NONE;
                 }
-                StartLiteralFilterSelection selection = StartLiteralFilterSelection.select(prog, kind, stack);
+                StartLiteralFilterSelection selection = StartLiteralFilterSelection.select(prog, kind, stack, StartLiteralFilter.GROUP_BITS);
                 StartLiteralFilterChoice literalFilterChoice = selection.literalFilterChoice();
                 if (prefixRunStartsEveryMatch && literalFilterChoice == null) {
                     return NONE;
@@ -6651,8 +6679,8 @@ final class Dfa
                 StartLiteralFilter literalFilter = literalFilterChoice == null ? null : literalFilterChoice.filter();
                 boolean literalFilterVectorOnly = literalFilterChoice != null && literalFilterChoice.vectorOnly();
                 byte[] nibbleTables = literalFilter == null && byteScanSet == 0 && vectorScans ? VectorByteSetScanner.buildNibbleTables(candidates) : null;
-                StartClassFilter classFilter = literalFilter == null && (byteScanSet != 0 || nibbleTables != null) && vectorScans
-                        ? buildStartClassFilter(prog, stack, selection.startByteProbability())
+                StartClassFilter classFilter = literalFilter == null && vectorScans
+                        ? buildStartClassFilter(prog, stack, byteScanSet, nibbleTables, selection.startByteProbability())
                         : null;
                 int scanSet;
                 if (literalFilter != null) {
@@ -6690,6 +6718,16 @@ final class Dfa
         // The first step of the start-byte tables, which searchesStartLiteralFilter stops after:
         // the bytes that can begin a match, their scan set and English probability, whether a
         // search may take a vector scan or a filter for them, and the start literal filter.
+        //
+        // When groups wider than one bit give the literal filter, the selection also tries the
+        // start class filter. Where one is admitted, the literal filter takes groups of one bit,
+        // and leaves the start bytes to the class filter when they give none. For small classes
+        // such as the a and b of [ab]*a[ab]{12}c, the wider groups give a filter that stops about
+        // as often as the class filter but costs more per position: that pattern took 1.20-1.40x
+        // the class filter's time on the literal filter. A filter of one-bit groups keeps its
+        // precedence over the class filter, and wider groups, not measured against it, do not
+        // replace that filter. Where no class filter is admitted, as for [a-g]{3}[0-9]+, whose
+        // three ranges together are too common, the wider groups' filter replaces the start bytes.
         private record StartLiteralFilterSelection(
                 byte[] candidates,
                 boolean nullableCandidates,
@@ -6698,14 +6736,20 @@ final class Dfa
                 boolean vectorScans,
                 StartLiteralFilterChoice literalFilterChoice)
         {
-            static StartLiteralFilterSelection select(Prog prog, Kind kind, int[] stack)
+            static StartLiteralFilterSelection select(Prog prog, Kind kind, int[] stack, int groupBits)
             {
                 byte[] candidates = prog.buildStartByteCandidates(stack, kind == Kind.FIRST_MATCH);
                 boolean nullableCandidates = candidates != null && prog.canMatchEmpty();
                 int byteScanSet = buildStartByteScanSet(candidates);
                 double startByteProbability = englishProbability(candidates);
                 boolean vectorScans = !nullableCandidates && VectorSupport.isAvailable();
-                StartLiteralFilterChoice literalFilterChoice = vectorScans ? buildStartLiteralFilter(prog, stack, candidates, byteScanSet, startByteProbability) : null;
+                StartLiteralFilterChoice literalFilterChoice = vectorScans ? buildStartLiteralFilter(prog, stack, candidates, byteScanSet, startByteProbability, groupBits) : null;
+                if (literalFilterChoice != null && groupBits > 1) {
+                    byte[] nibbleTables = byteScanSet == 0 ? VectorByteSetScanner.buildNibbleTables(candidates) : null;
+                    if (buildStartClassFilter(prog, stack, byteScanSet, nibbleTables, startByteProbability) != null) {
+                        literalFilterChoice = buildStartLiteralFilter(prog, stack, candidates, byteScanSet, startByteProbability, 1);
+                    }
+                }
                 return new StartLiteralFilterSelection(candidates, nullableCandidates, byteScanSet, startByteProbability, vectorScans, literalFilterChoice);
             }
         }

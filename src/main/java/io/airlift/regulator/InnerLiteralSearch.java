@@ -572,6 +572,12 @@ final class InnerLiteralSearch
         return foldedMasks == null ? null : foldedMasks.clone();
     }
 
+    /// The filter a literal set's search scans for its members with, or null for any other search.
+    StartLiteralFilter literalSetFilterForDiagnostics()
+    {
+        return literalSetFilter;
+    }
+
     /// Whether only the class-run proof gives the pattern an inner literal search: without that
     /// proof, [#analyze] returns none. Such a pattern checks long windows for its required literal
     /// or one-of bytes just as it would without the search; see
@@ -1371,7 +1377,8 @@ final class InnerLiteralSearch
             }
             Arrays.fill(path, positions * 4, path.length, -1L);
         }
-        return StartLiteralFilter.build(paths, ByteFrequencies.englishText());
+        // Groups of one bit, as this search's filter was measured with.
+        return StartLiteralFilter.build(paths, ByteFrequencies.englishText(), 1);
     }
 
     // The literal of the run of elements starting at `index` that are ASCII literals, folded or

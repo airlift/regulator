@@ -333,7 +333,8 @@ abstract sealed class LiteralAlternationSpanMatcher
             }
             paths[index] = path;
         }
-        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText());
+        // Groups of one bit, two cases of a letter, as this matcher's filter was measured with.
+        StartLiteralFilter filter = StartLiteralFilter.build(paths, ByteFrequencies.englishText(), 1);
         return filter != null && filter.density() <= MAXIMUM_START_LITERAL_FILTER_DENSITY ? filter : null;
     }
 

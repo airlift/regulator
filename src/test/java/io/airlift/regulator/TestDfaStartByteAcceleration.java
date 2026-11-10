@@ -34,6 +34,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -1155,6 +1157,185 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testWideStartLiteralFilterGroupsYieldToClassFilter()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        // A group's position may hold bytes that vary in up to StartLiteralFilter.GROUP_BITS bit
+        // positions: a and b differ in two, and a to g in three. Under groups of one bit, neither
+        // pattern has a filter. a and b admit a start class filter, which the wider groups'
+        // filter leaves the start bytes to.
+        Random random = new Random(99);
+        String classPattern = "[ab]*a[ab]{12}c";
+        Prog classProgram = compile(classPattern);
+        Dfa.DfaInstance classDfa = classProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(classDfa.startLiteralFilter()).isNull();
+        assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(classProgram, Dfa.DfaInstance.Kind.FIRST_MATCH)).isFalse();
+        assertThat(classDfa.startClassFilter()).isNotNull();
+        assertThat(Dfa.DfaInstance.selectStartLiteralFilter(classProgram, Dfa.DfaInstance.Kind.FIRST_MATCH, 1)).isNull();
+        assertMatchesInLettersAndDigits(classProgram, classPattern, random);
+        assertThat(classDfa.startClassFilterScanCount()).isPositive();
+
+        // The ranges of a to g at three offsets are too common for a class filter, so the wider
+        // groups' filter replaces the start bytes.
+        String literalPattern = "[a-g]{3}[0-9]+";
+        Prog literalProgram = compile(literalPattern);
+        Dfa.DfaInstance literalDfa = literalProgram.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(literalDfa.startLiteralFilter()).isNotNull();
+        assertThat(Dfa.DfaInstance.searchesStartLiteralFilter(literalProgram, Dfa.DfaInstance.Kind.FIRST_MATCH)).isTrue();
+        assertThat(literalDfa.startClassFilter()).isNull();
+        assertThat(Dfa.DfaInstance.selectStartLiteralFilter(literalProgram, Dfa.DfaInstance.Kind.FIRST_MATCH, 1)).isNull();
+        assertMatchesInLettersAndDigits(literalProgram, literalPattern, random);
+        assertThat(literalDfa.startLiteralFilterScanCount()).isPositive();
+
+        // Where a class filter is admitted, a one-bit filter keeps its precedence, and the wider
+        // groups' filter does not replace it.
+        Prog program = compile("(?i)[ac][:=]e{3}");
+        StartLiteralFilter filter = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter();
+        StartLiteralFilter oneBitFilter = Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1);
+        assertThat(new int[] {filter.firstOffset(), filter.secondOffset(), filter.thirdOffset()})
+                .containsExactly(oneBitFilter.firstOffset(), oneBitFilter.secondOffset(), oneBitFilter.thirdOffset());
+        assertThat(new byte[] {filter.firstMask(), filter.secondMask(), filter.thirdMask()})
+                .containsExactly(oneBitFilter.firstMask(), oneBitFilter.secondMask(), oneBitFilter.thirdMask());
+    }
+
+    @Test
+    public void testFixedWidthMatcherYieldsOnlyToOneBitStartLiteralFilter()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        // A fixed-width pattern keeps its matcher over a filter that only wider groups admit, in
+        // every language: é and ê differ in two bits of their second byte, and the DFA searches
+        // the wider groups' filter. One whose filter groups of one bit give, such as the folded
+        // Cyrillic letters around [ ,], still yields to it.
+        assertThat(firstMatchDfa("[éê]x").startLiteralFilter()).isNotNull();
+        for (String expression : List.of("[éê]x", "(?i)шр[ ,]ст")) {
+            Prog program = compile(expression);
+            boolean oneBitFilter = expression.equals("(?i)шр[ ,]ст");
+            assertThat(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1) != null).as(expression).isEqualTo(oneBitFilter);
+            for (CompiledPattern pattern : List.of(
+                    Re2.compile(Slices.utf8Slice(expression)),
+                    JavaRegexp.compile(Slices.utf8Slice(expression)),
+                    RustRegexp.compile(Slices.utf8Slice(expression)),
+                    TrinoRegexp.compile(Slices.utf8Slice(expression)).re2())) {
+                assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).as(expression).isEqualTo(!oneBitFilter);
+            }
+        }
+    }
+
+    @Test
+    public void testWideStartLiteralFilterGroupsKeepOneBitFilters()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        // Paths merge into groups under the one-bit rule at every group width, so paths that share
+        // a wider set, such as the space and tab of [ \t], still merge, and the wider groups only
+        // add positions to choose from: each filter is at most as dense as the one-bit filter.
+        for (String pattern : List.of(
+                "(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[ ,]+\\d",
+                "[ \\t](?:Mon|mon|Tue|tue|Wed|wed|Thu|thu|Fri) ",
+                "(?:user|host|port)[:=] *\\w+",
+                "(?i)да[ \\t]+дом")) {
+            Prog program = compile(pattern);
+            StartLiteralFilter filter = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter();
+            assertThat(filter).as(pattern).isNotNull();
+            assertThat(filter.density()).as(pattern).isLessThanOrEqualTo(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1).density());
+        }
+
+        // The literal alternations of the benchmarks keep the filters that groups of one bit give
+        // them.
+        for (String pattern : List.of(
+                "Sherlock Holmes|John Watson|Irene Adler|Inspector Lestrade|Professor Moriarty",
+                "(?i)Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+                "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
+                "Sherlock|Holmes|Watson|Irene|Adler|John|Baker",
+                "(?i)Sherlock|Holmes|Watson|Irene|Adler|John|Baker",
+                "(?i)Sherlock|Holmes|Watson",
+                "Tom|Sawyer|Huckleberry|Finn",
+                "(?i)Tom|Sawyer|Huckleberry|Finn",
+                "∞|✓")) {
+            Prog program = compile(pattern);
+            StartLiteralFilter filter = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH).startLiteralFilter();
+            StartLiteralFilter oneBitFilter = Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1);
+            assertThat(filter == null).as(pattern).isEqualTo(oneBitFilter == null);
+            if (filter != null) {
+                assertThat(new int[] {filter.firstOffset(), filter.secondOffset(), filter.thirdOffset()})
+                        .as(pattern)
+                        .containsExactly(oneBitFilter.firstOffset(), oneBitFilter.secondOffset(), oneBitFilter.thirdOffset());
+                assertThat(new byte[] {filter.firstMask(), filter.secondMask(), filter.thirdMask()})
+                        .as(pattern)
+                        .containsExactly(oneBitFilter.firstMask(), oneBitFilter.secondMask(), oneBitFilter.thirdMask());
+                assertThat(filter.values()).as(pattern).isEqualTo(oneBitFilter.values());
+            }
+        }
+    }
+
+    @Test
+    public void testRareStartsKeepTwoLiteralFilterOverWideGroups()
+    {
+        assumeTrue(VectorSupport.isAvailable(), "requires the vector scanners");
+        assumeTrue(VectorByteSetScanner.shouldFilterRareStartsWithTwoLiterals(), "requires 64-byte vectors");
+        // Rare start bytes take a filter only when it holds two literal groups. Three-bit
+        // positions split these alternations into four groups where one-bit positions keep two,
+        // so the DFA takes the one-bit filter. The first five came from random alternations of q
+        // and z starts. In the last, qa[ab]: 1 and qa:: d share every byte but the third, an
+        // [ab] in one and a separator in the other, and the sixth.
+        List<String> patterns = List.of(
+                "z[ab]c:1|q:a |z c:dd",
+                "z[ab] [ab]b[ab]|qea,b|qdahba",
+                "qa:f|z=[ab]aa|qa0f[ab]-",
+                "q-  :|q[ab]  |z[ab]-be",
+                "q[ab]ab e|zf0ed|q1a  ",
+                "qa[ab]: 1|zd, c|qa:: d");
+        Random random = new Random(103);
+        List<Prog> programs = new ArrayList<>();
+        for (String pattern : patterns) {
+            Re2 re2 = Re2.compileWithoutScanPlanForTesting(Slices.utf8Slice(pattern), Re2.Options.defaults());
+            Prog program = re2.forwardProgramForDiagnostics();
+            programs.add(program);
+
+            // Each literal, each literal with one byte changed in one of its three low bits, the
+            // start bytes alone, and filler of the literals' bytes.
+            String[] literals = pattern.split("\\|");
+            StringBuilder text = new StringBuilder();
+            for (String literal : literals) {
+                String bytes = literal.replace("[ab]", random.nextBoolean() ? "a" : "b");
+                text.append(bytes).append(' ').append(bytes.charAt(0)).append(' ');
+                for (int position = 0; position < bytes.length(); position++) {
+                    char changed = (char) (bytes.charAt(position) ^ (1 << random.nextInt(3)));
+                    text.append(bytes, 0, position).append(changed).append(bytes, position + 1, bytes.length()).append(' ');
+                }
+            }
+            while (text.length() < 4_096) {
+                String bytes = literals[random.nextInt(literals.length)].replace("[ab]", random.nextBoolean() ? "a" : "b");
+                switch (random.nextInt(4)) {
+                    case 0 -> text.append(bytes);
+                    case 1 -> text.append(bytes, 0, 1 + random.nextInt(bytes.length()));
+                    default -> text.append("qzabcdefgh01 ,:=-".charAt(random.nextInt(17)));
+                }
+            }
+            Slice slice = Slices.utf8Slice(text.toString());
+
+            List<Boundary> expected = new ArrayList<>();
+            Matcher jdkMatcher = Pattern.compile(pattern).matcher(text);
+            while (jdkMatcher.find()) {
+                expected.add(new Boundary(jdkMatcher.start(), jdkMatcher.end()));
+            }
+            assertThat(expected).as(pattern).hasSizeGreaterThan(literals.length);
+            assertThat(matcherBoundaries(re2.groupZeroMatcher(slice, null))).as("matches for pattern %s", pattern).isEqualTo(expected);
+            assertThat(Dfa.countMatches(program, slice, Prog.MatchKind.FIRST_MATCH)).as("count for pattern %s", pattern).isEqualTo(expected.size());
+        }
+
+        for (int index = 0; index < patterns.size(); index++) {
+            String pattern = patterns.get(index);
+            Prog program = programs.get(index);
+            Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+            StartLiteralFilter filter = dfa.startLiteralFilter();
+            assertThat(filter).as("filter for pattern %s", pattern).isNotNull();
+            assertThat(filter.values().length / 3).as("filter groups for pattern %s", pattern).isEqualTo(2);
+            assertThat(filter.values()).as(pattern).isEqualTo(Dfa.DfaInstance.selectStartLiteralFilter(program, Dfa.DfaInstance.Kind.FIRST_MATCH, 1).values());
+            assertThat(dfa.startLiteralFilterScanCount()).as(pattern).isPositive();
+        }
+    }
+
+    @Test
     public void testStartClassFilterRequiresNarrowOffsetsBeforeEveryMatchEnd()
     {
         // A match of one digit leaves no second offset.
@@ -1653,6 +1834,22 @@ public class TestDfaStartByteAcceleration
         // Pinned re2_golden reports groups 3:9,3:6,7:9 for this exact window.
         assertThat(Dfa.search(program, context, 1, 10, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(8);
         assertThat(Dfa.search(program, context, 1, 3, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(SEARCH_NO_MATCH);
+    }
+
+    // Twenty random texts of letters, digits, and spaces, on which the DFA finds and counts the
+    // matches the NFA finds.
+    private static void assertMatchesInLettersAndDigits(Prog program, String pattern, Random random)
+    {
+        for (int trial = 0; trial < 20; trial++) {
+            StringBuilder text = new StringBuilder();
+            while (text.length() < 2_048) {
+                text.append("abcdefgh 0123456789".charAt(random.nextInt(19)));
+            }
+            Slice slice = Slices.utf8Slice(text.toString());
+            assertDfaMatchesNfa(program, slice, 0, slice.length(), Prog.MatchKind.FIRST_MATCH, pattern);
+            assertDfaMatchesNfa(program, slice, 0, slice.length(), Prog.MatchKind.LONGEST_MATCH, pattern);
+            assertThat(Dfa.countMatches(program, slice, Prog.MatchKind.FIRST_MATCH)).as(pattern).isEqualTo(nfaBoundaries(program, slice).size());
+        }
     }
 
     private static Prog compile(String pattern)
