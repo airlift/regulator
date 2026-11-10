@@ -1061,47 +1061,157 @@ public class TestInnerLiteralSearch
                 NOQA_ASSIGNMENT, List.of("x=noqa", "=", "1=noqa", "x=nope", "a=NOQA", "b=NoQa"),
                 "[a-z]+=(?i:skip)", List.of("x=skip", "=", "x=SKIP", "x=\u017Fkip", "x=s\u212Aip"),
                 "[a-z]+=(?i:kilo)", List.of("x=kilo", "=", "x=\u212Ailo", "x=KILO"));
-        Slice[] malformed = {Slices.EMPTY_SLICE, Slices.wrappedBuffer((byte) 0x80), Slices.wrappedBuffer((byte) 0xE2, (byte) 0x80), Slices.wrappedBuffer((byte) 0xFF)};
         for (Map.Entry<String, List<String>> entry : pieces.entrySet()) {
             String regex = entry.getKey();
-            // An alternative that never matches leaves the top-level concatenation, and with it
-            // the inner literal and the required bytes, out of the expected engine.
-            String ordinary = "(?:" + regex + ")|\\b\\B";
-            Slice match = utf8Slice(entry.getValue().getFirst());
-            List<byte[]> lines = new ArrayList<>();
-            for (int length : new int[] {0, 1, 63, 64, 95, 96, 127, 128, 255, 256, 300}) {
-                lines.add("x".repeat(length).getBytes(UTF_8));
-                for (String piece : entry.getValue()) {
-                    for (Slice bytes : malformed) {
-                        Slice before = Slices.wrappedBuffer(ByteArrays.concat(bytes, utf8Slice(piece)));
-                        Slice after = Slices.wrappedBuffer(ByteArrays.concat(utf8Slice(piece), bytes));
-                        for (Slice content : List.of(before, after)) {
-                            if (content.length() <= length) {
-                                Slice filler = utf8Slice("x".repeat(length - content.length()));
-                                lines.add(ByteArrays.concat(content, filler));
-                                lines.add(ByteArrays.concat(filler, content));
-                            }
+            List<byte[]> lines = lines(entry.getValue(), 0, 1, 63, 64, 95, 96, 127, 128, 255, 256, 300);
+            for (Language language : Language.values()) {
+                String description = "%s %s".formatted(language, regex);
+                assertThat(language.compiledPattern(regex).findsInnerLiteralFirstForDiagnostics()).as(description).isEqualTo(searchesFirst.get(regex).contains(language));
+                assertAgreesWithOrdinaryEngine(language, regex, entry.getValue().getFirst(), lines);
+            }
+        }
+    }
+
+    @Test
+    public void testRequiredLiteralHandoffFindAgreesWithOrdinaryEngine()
+    {
+        // The full-Slice find of a long window that hands the required literal's first occurrence
+        // to the inner literal search agrees with the ordinary engine in every language, as do its
+        // matcher and count routes, with the same lines as for a search that runs first, at
+        // lengths around the window limit and the 1 KiB vector scan minimum, lines of `x` alone
+        // among them: for the literal `,z`, whose search is for `,` with `z` its gate after, and
+        // for the search's own literal. A `,z` near the start, past a `,` before a letter outside
+        // ASCII, makes the search fall back, and where the forward DFA quits on that letter beside
+        // the word boundary, as Java's does, the submatch engines answer.
+        Map<String, List<String>> pieces = Map.of(
+                "\\w+,\\bz", List.of("ab,z", ",z", " ,z", "a,b", "\u00E9,z", "a,\u00E9a,z"),
+                "(\\w+),(z)", List.of("ab,z", ",z", " ,z", "a,b", "\u00E9,z"),
+                "(\\w+)foobar(\\d)", List.of("abfoobar1", "foobar", "afoobarx", " foobar1", "\u00E9foobar1"),
+                "[a-zA-Z]+ing", List.of("sing", "ing", " ing", "1ing", "\u00E9ing"));
+        for (Map.Entry<String, List<String>> entry : pieces.entrySet()) {
+            String regex = entry.getKey();
+            List<byte[]> lines = lines(entry.getValue(), 255, 256, 300, 1023, 1024, 1100);
+            for (Language language : Language.values()) {
+                assertThat(language.compiledPattern(regex).requiredBytesForDiagnostics().handsOffToInnerLiteralSearch()).as("%s %s", language, regex).isTrue();
+                assertAgreesWithOrdinaryEngine(language, regex, entry.getValue().getFirst(), lines);
+            }
+        }
+    }
+
+    @Test
+    public void testSearchFromCheckedHitAgreesWithSearch()
+    {
+        // The handoff finds the first occurrence of the required literal, and a search started
+        // there returns what the search of the whole window returns, and a window without one,
+        // such as one without a `,` at all, has no match: for `,z` behind the gated search for
+        // `,`, and for the search's own literal behind a gated or ungated search. The literal lies
+        // at 63 and 64 bytes, around the near-start fallback, after commas the gate after `,`
+        // rules out, after hits that fail a gate, and after a letter past ASCII or malformed UTF-8
+        // where a word byte could be. In windows of at least 1 KiB, whose length keeps the scan for
+        // `,z` from the first `,` on the vector pair scan, the first `,` leaves fewer bytes than
+        // `,z`, fewer than one vector, one vector, one vector of candidates, or one vector and part
+        // of another, with no `,z`, with `,z` at the very end, or with `,z` across the last
+        // boundary of the whole vectors of candidates.
+        Map<String, String> matches = Map.of("\\w+,\\bz", "a,z", "(\\w+)foobar(\\d)", "afoobar1", "[a-zA-Z]+ing", "aing");
+        Slice filler = utf8Slice(FILLER);
+        List<Slice> texts = new ArrayList<>();
+        for (String match : matches.values()) {
+            Slice rest = utf8Slice(match.substring(1));
+            texts.add(utf8Slice("-".repeat(62) + match + FILLER));
+            texts.add(utf8Slice("-".repeat(63) + match + FILLER));
+            texts.add(utf8Slice(FILLER + ("a," + "-".repeat(8)).repeat(6) + "b" + match));
+            texts.add(utf8Slice(FILLER + " ,z foobarx  ing " + FILLER + "b" + match));
+            texts.add(Slices.wrappedBuffer(ByteArrays.concat(filler, utf8Slice("\u00E9"), rest)));
+            texts.add(Slices.wrappedBuffer(ByteArrays.concat(filler, Slices.wrappedBuffer((byte) 0xFF), rest)));
+        }
+        int lanes = VectorSupport.isAvailable() ? VectorSupport.preferredByteLanes() : 16;
+        for (int windowLength : List.of(1024, 1100)) {
+            for (int restLength : List.of(1, 10, lanes, lanes + 1, lanes + lanes / 2)) {
+                int wholeVectorEnd = (restLength - 1) / lanes * lanes;
+                for (int literalIndex : IntStream.of(-1, restLength - 2, wholeVectorEnd - 1, wholeVectorEnd).distinct().toArray()) {
+                    if (literalIndex <= restLength - 2) {
+                        byte[] text = "x".repeat(windowLength).getBytes(UTF_8);
+                        int firstComma = windowLength - restLength;
+                        text[firstComma] = ',';
+                        if (literalIndex >= 0) {
+                            text[firstComma + literalIndex] = ',';
+                            text[firstComma + literalIndex + 1] = 'z';
+                        }
+                        texts.add(Slices.wrappedBuffer(text));
+                    }
+                }
+            }
+        }
+        for (String regex : matches.keySet()) {
+            for (Language language : Language.values()) {
+                String description = "%s %s".formatted(language, regex);
+                CompiledPattern pattern = language.compiledPattern(regex);
+                InnerLiteralSearch search = pattern.innerLiteralSearchForDiagnostics();
+                RequiredBytes bytes = pattern.requiredBytesForDiagnostics();
+                assertThat(bytes.handsOffToInnerLiteralSearch()).as(description).isTrue();
+                for (Slice text : texts) {
+                    String textDescription = "%s on %s".formatted(description, text.toStringUtf8());
+                    int length = text.length();
+                    long expected = search.search(text, 0, length, 0, length);
+                    int literalStart = bytes.handoffIndexIn(text, 0, length, search);
+                    assertThat(literalStart).as(textDescription).isEqualTo(text.indexOf(utf8Slice(bytes.toString())));
+                    if (literalStart < 0) {
+                        assertThat(expected).as(textDescription).isEqualTo(Dfa.SEARCH_NO_MATCH);
+                    }
+                    else {
+                        assertThat(search.searchFromCheckedHit(text, 0, length, 0, length, literalStart)).as(textDescription).isEqualTo(expected);
+                    }
+                }
+            }
+        }
+    }
+
+    // Lines of `x` of each length, alone, and with each piece beside each malformed UTF-8 sequence
+    // at their start and end.
+    private static List<byte[]> lines(List<String> pieces, int... lengths)
+    {
+        Slice[] malformed = {Slices.EMPTY_SLICE, Slices.wrappedBuffer((byte) 0x80), Slices.wrappedBuffer((byte) 0xE2, (byte) 0x80), Slices.wrappedBuffer((byte) 0xFF)};
+        List<byte[]> lines = new ArrayList<>();
+        for (int length : lengths) {
+            lines.add("x".repeat(length).getBytes(UTF_8));
+            for (String piece : pieces) {
+                for (Slice bytes : malformed) {
+                    Slice before = Slices.wrappedBuffer(ByteArrays.concat(bytes, utf8Slice(piece)));
+                    Slice after = Slices.wrappedBuffer(ByteArrays.concat(utf8Slice(piece), bytes));
+                    for (Slice content : List.of(before, after)) {
+                        if (content.length() <= length) {
+                            Slice filler = utf8Slice("x".repeat(length - content.length()));
+                            lines.add(ByteArrays.concat(content, filler));
+                            lines.add(ByteArrays.concat(filler, content));
                         }
                     }
                 }
             }
-            for (Language language : Language.values()) {
-                String description = "%s %s".formatted(language, regex);
-                assertThat(language.compiledPattern(regex).findsInnerLiteralFirstForDiagnostics()).as(description).isEqualTo(searchesFirst.get(regex).contains(language));
-                CompiledPattern ordinaryPattern = language.compiledPattern(ordinary);
-                assertThat(ordinaryPattern.innerLiteralSearchForDiagnostics()).as(description).isNull();
-                assertThat(ordinaryPattern.requiredBytesForDiagnostics()).as(description).isNull();
-                Engine actual = language.compile(regex);
-                Engine expected = language.compile(ordinary);
-                for (byte[] line : lines) {
-                    byte[] backing = ByteArrays.concat(match, line, match);
-                    for (Slice text : List.of(Slices.wrappedBuffer(line), Slices.wrappedBuffer(backing, match.length(), line.length))) {
-                        String lineDescription = "%s on %s".formatted(description, Arrays.toString(line));
-                        assertThat(actual.spans(text)).as(lineDescription).isEqualTo(expected.spans(text));
-                        assertThat(actual.count(text)).as(lineDescription).isEqualTo(expected.count(text));
-                        assertThat(actual.find(text)).as(lineDescription).isEqualTo(expected.find(text));
-                    }
-                }
+        }
+        return lines;
+    }
+
+    // Checks that `regex` finds, counts, and matches each line as the ordinary engine does, alone
+    // and in a Slice that starts and ends inside its array between copies of `match`.
+    private static void assertAgreesWithOrdinaryEngine(Language language, String regex, String match, List<byte[]> lines)
+    {
+        String description = "%s %s".formatted(language, regex);
+        // An alternative that never matches leaves the top-level concatenation, and with it the
+        // inner literal and the required bytes, out of the expected engine.
+        String ordinary = "(?:" + regex + ")|\\b\\B";
+        CompiledPattern ordinaryPattern = language.compiledPattern(ordinary);
+        assertThat(ordinaryPattern.innerLiteralSearchForDiagnostics()).as(description).isNull();
+        assertThat(ordinaryPattern.requiredBytesForDiagnostics()).as(description).isNull();
+        Engine actual = language.compile(regex);
+        Engine expected = language.compile(ordinary);
+        Slice matchBytes = utf8Slice(match);
+        for (byte[] line : lines) {
+            byte[] backing = ByteArrays.concat(matchBytes, line, matchBytes);
+            for (Slice text : List.of(Slices.wrappedBuffer(line), Slices.wrappedBuffer(backing, matchBytes.length(), line.length))) {
+                String lineDescription = "%s on %s".formatted(description, Arrays.toString(line));
+                assertThat(actual.spans(text)).as(lineDescription).isEqualTo(expected.spans(text));
+                assertThat(actual.count(text)).as(lineDescription).isEqualTo(expected.count(text));
+                assertThat(actual.find(text)).as(lineDescription).isEqualTo(expected.find(text));
             }
         }
     }

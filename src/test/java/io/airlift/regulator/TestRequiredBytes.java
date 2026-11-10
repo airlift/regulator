@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
@@ -830,6 +831,60 @@ public class TestRequiredBytes
             assertThat(matcher.find()).isFalse();
             assertThat(matcher.requiredLiteralScanCountForDiagnostics()).isEqualTo(1);
             assertThat(matcher.bitStateWorkspaceInitializedForDiagnostics()).isFalse();
+        }
+    }
+
+    @Test
+    public void testHandsLongWindowLiteralToInnerLiteralSearch()
+    {
+        // Full-Slice find of a long window hands the required literal's first occurrence to the
+        // inner literal search where that search is for the literal itself, behind a class run,
+        // or for the literal less its last byte, which the gate after the search's literal admits
+        // alone. That second handoff has its own scan: matcher, count, and ranged searches keep
+        // the long windows unchecked, and a long window without `,z` is rejected before any DFA.
+        // A search beside a long-window search for another literal, `,` or `the` beside `,z`, hands
+        // nothing off, nor does a folded search, nor a search for `,` that `\B` leaves without a
+        // gate after it. The required bytes' charge takes in that scan of its own, which shares the
+        // literal's array, and the forward DFA budget gives up that charge; a handoff on the
+        // long-window search costs nothing more.
+        Map<String, Boolean> patterns = Map.of(
+                "\\w+,\\bz", true,
+                "(\\w+),(z)", true,
+                "(\\w+)foobar(\\d)", true,
+                "[a-zA-Z]+ing", true,
+                BOUNDED_STRINGS, false,
+                "\\bthe\\b.*?,z", false,
+                "(?i)\\w+foobar\\d", false,
+                "\\w+,\\Bz", false);
+        for (Map.Entry<String, Boolean> entry : patterns.entrySet()) {
+            for (Map.Entry<String, CompiledPattern> compiled : compile(entry.getKey()).entrySet()) {
+                String description = compiled.getKey() + " " + entry.getKey();
+                CompiledPattern pattern = compiled.getValue();
+                RequiredBytes bytes = pattern.requiredBytesForDiagnostics();
+                assertThat(bytes != null && bytes.handsOffToInnerLiteralSearch()).as(description).isEqualTo(entry.getValue());
+                if (!entry.getValue()) {
+                    continue;
+                }
+                long ownSearchSize = 0;
+                if (bytes.toString().equals(",z")) {
+                    assertThat(pattern.longWindowRequiredLiteral()).as(description).isNull();
+                    assertThat(pattern.find(utf8Slice(LONG_FILLER))).as(description).isFalse();
+                    assertNoForwardDfa(pattern, description);
+                    byte[] literal = ",z".getBytes(UTF_8);
+                    ownSearchSize = LiteralSearchKernel.sharing(Slices.wrappedBuffer(literal)).estimatedRetainedSize() - SizeOf.sizeOf(literal);
+                }
+                assertThat(pattern.requiredBytesRetainedSizeForDiagnostics()).as(description).isEqualTo(bytes.withoutInnerLiteralHandoff().estimatedRetainedSize() + ownSearchSize);
+            }
+        }
+        for (String expression : List.of("\\w+,\\bz", "(\\w+)foobar(\\d)")) {
+            Slice pattern = utf8Slice(expression);
+            int flags = Re2.Options.defaults().parseFlags();
+            ParseResult parsed = RegexpParser.parse(pattern, flags);
+            long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
+            Prog control = Compiler.compile(parsed.regexp(), false, maxMemory - maxMemory / 3);
+            Re2 compiled = Re2.compileParsed(pattern, parsed, flags, maxMemory);
+            assertThat(compiled.requiredBytesForDiagnostics().handsOffToInnerLiteralSearch()).as(expression).isTrue();
+            assertThat(compiled.forwardProgramForDiagnostics().dfaMemory()).as(expression).isEqualTo(control.dfaMemory() - compiled.requiredBytesRetainedSizeForDiagnostics());
         }
     }
 

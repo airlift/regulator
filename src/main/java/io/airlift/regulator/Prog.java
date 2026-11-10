@@ -1643,11 +1643,25 @@ final class Prog
     /// candidates pass the comparison budget, and shorter ones take `literalSearch`, the
     /// literal's call-free search. The vector scan recomputes the pair, from [#adjacentPairOffset]
     /// or [#pairOffset], on each call: at most four bytes for the pair offset and, for a periodic
-    /// literal, at most one period past it, against a range of at least 1 KiB, so the literal
-    /// needs no stored offsets.
+    /// literal, at most one period past it, against a range, or with the overload below a window,
+    /// of at least 1 KiB, so the literal needs no stored offsets.
     static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch)
     {
-        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+        return findLiteral(data, offset, length, literal, literalSearch, length);
+    }
+
+    /// Returns what [#findLiteral(byte\[\],int,int,byte\[\],LiteralSearchKernel)] returns for the
+    /// range, with the scan chosen by `windowLength`, the length of the window whose end the range
+    /// shares, in place of the range's own length. `RequiredBytes.handoffIndexIn` resumes a
+    /// window's scan at the first hit of a shorter literal, and after an early hit the rest of a
+    /// long window is often shorter than the vector scan's minimum. The vector scan takes a range
+    /// of any length, testing whole vectors of candidates and then the rest one at a time. Scanning
+    /// such rests with the call-free search, which reads a word at a time, made the handoff take
+    /// 2.1 times as long on Graviton and 2.5 times as long on x86 as a vector scan from the line
+    /// start, on 1 KiB lines; see REGULATOR_DECISIONS.md, Required Literal Absence On Long Windows.
+    static int findLiteral(byte[] data, int offset, int length, byte[] literal, LiteralSearchKernel literalSearch, int windowLength)
+    {
+        if (VectorSupport.isAvailable() && windowLength >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
             int adjacentPairOffset = adjacentPairOffset(literal, literalSearch.smallestPeriod());
             int primaryOffset = adjacentPairOffset >= 0 ? adjacentPairOffset : pairOffset(literal);
             int secondaryOffset = adjacentPairOffset >= 0 ? adjacentPairOffset + 1 : literal.length - 1;

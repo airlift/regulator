@@ -41,15 +41,19 @@ import static java.util.Objects.requireNonNull;
 /// bytes do not hold the literal, the window is still checked for the literal before that end. A
 /// pattern that another literal route keeps from that check searches long windows for its rarest
 /// exact literal instead, where the route does not already search for it; see
-/// [#literalBesideRoutes].
+/// [#literalBesideRoutes]. Where the pattern's inner literal search is for the exact literal, or
+/// for the literal less a last byte that the search's gate admits alone after it, full-Slice find
+/// hands the literal's first occurrence in a long window to that search; see
+/// [#admitsInnerLiteralHandoff].
 final class RequiredBytes
 {
     /// Windows at least this long skip the short-window check. Most lines of a line-by-line search
     /// are shorter, and there the scan costs less than the find and engine setup it skips. A window
     /// that holds the bytes is scanned twice, once here and once by the engine, and on a long
     /// window that second scan is no longer small beside the setup. Only bytes with their
-    /// long-window search check longer windows; see [#indexIn]. A one-of set of two or three
-    /// distinct bytes beside an inner literal search stops sooner; see [#windowLimit()].
+    /// long-window search check longer windows, and full-Slice find's [handoff][#handoffIndexIn]
+    /// checks them too; see [#indexIn]. A one-of set of two or three distinct bytes beside an inner
+    /// literal search stops sooner; see [#windowLimit()].
     static final int SHORT_WINDOW_LIMIT = 256;
 
     // A one-byte literal is left to the one-of-bytes shape. A case-insensitive literal needs this
@@ -137,6 +141,13 @@ final class RequiredBytes
     // The number of distinct bytes of the one-of-bytes shape, one to three, for its vector
     // byte-set scan.
     private final int oneOfByteCount;
+    // The search whose first hit in a long window full-Slice find hands to the pattern's inner
+    // literal search, for a pattern whose compile chose that handoff, or null: longWindowSearch,
+    // where the literal is the inner literal, or a search of its own for `bytes`, which it
+    // shares, where the literal is the inner literal and the one byte after it. That search of
+    // its own serves the handoff alone, so every other route keeps the long windows unchecked.
+    // See [#withInnerLiteralHandoff].
+    private final LiteralSearchKernel handoffSearch;
 
     private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, byte[] suffix, LiteralSearchKernel suffixSearch)
     {
@@ -145,11 +156,17 @@ final class RequiredBytes
 
     private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, boolean searchesOneOfOnLongWindows, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit)
     {
+        this(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit, null);
+    }
+
+    private RequiredBytes(boolean oneOf, byte[] bytes, byte[] masks, LiteralSearchKernel longWindowSearch, boolean searchesOneOfOnLongWindows, byte[] suffix, LiteralSearchKernel suffixSearch, boolean longWindowsOnly, int windowLimit, LiteralSearchKernel handoffSearch)
+    {
         this.oneOf = oneOf;
         this.bytes = requireNonNull(bytes, "bytes is null");
         this.masks = masks;
         this.longWindowSearch = longWindowSearch;
         this.searchesOneOfOnLongWindows = searchesOneOfOnLongWindows;
+        this.handoffSearch = handoffSearch;
         this.suffix = suffix;
         this.suffixSearch = suffixSearch;
         this.longWindowsOnly = longWindowsOnly;
@@ -818,18 +835,72 @@ final class RequiredBytes
         return withLongWindowSearch();
     }
 
-    /// Returns these bytes without the long-window search and the search-end bound, for the
-    /// short-window check alone: this, where they have neither. A literal that serves long windows
-    /// only has no short-window check to keep.
+    /// Returns these bytes without the long-window search, the search-end bound, and the
+    /// [handoff][#withInnerLiteralHandoff], for the short-window check alone: this, where they have
+    /// none of them. A literal that serves long windows only has no short-window check to keep.
     RequiredBytes withoutLongWindowSearch()
     {
         if (longWindowsOnly) {
             throw new IllegalStateException("long windows only: " + this);
         }
-        if (!searchesLongWindows() && suffix == null) {
+        if (!searchesLongWindows() && suffix == null && handoffSearch == null) {
             return this;
         }
         return new RequiredBytes(oneOf, bytes, masks, null, false, null, null, false, windowLimit);
+    }
+
+    /// Whether full-Slice find may hand the first occurrence of this literal in a long window to
+    /// `innerLiteralSearch`, which starts there rather than at the window's start; see
+    /// `CompiledPattern.findFromRequiredLiteral`. The literal is exact, its short-window check
+    /// keeps [#SHORT_WINDOW_LIMIT], and the search is for one literal without case-insensitive
+    /// letters, which is either:
+    ///
+    /// - this literal, where these bytes have their long-window search for it, which then serves
+    ///   the handoff too, as for `(\w+)foobar(\d)`; or
+    /// - this literal without its last byte, where these bytes have no long-window search and the
+    ///   gate after the search's literal [admits that byte alone][InnerLiteralSearch#admitsOnlyAfterLiteral],
+    ///   as the `,` of `\w+,\bz` is followed by `z`. A hit of the search's literal then passes that
+    ///   gate exactly where this literal starts, so no hit before this literal's first occurrence
+    ///   passes it.
+    boolean admitsInnerLiteralHandoff(InnerLiteralSearch innerLiteralSearch)
+    {
+        if (!isExactLiteral() || windowLimit != SHORT_WINDOW_LIMIT) {
+            return false;
+        }
+        if (longWindowSearch != null) {
+            return longWindowSearch.literalBytes() == bytes && innerLiteralSearch.searchesExactLiteral(bytes);
+        }
+        return innerLiteralSearch.searchesExactLiteral(Arrays.copyOf(bytes, bytes.length - 1)) && innerLiteralSearch.admitsOnlyAfterLiteral(bytes[bytes.length - 1]);
+    }
+
+    /// Returns these bytes with the search full-Slice find hands its first hit from, for bytes
+    /// that [admit the handoff][#admitsInnerLiteralHandoff]: their long-window search, which
+    /// costs nothing more, or a search of its own for the literal, which serves the handoff alone
+    /// and leaves [#searchesLongWindows] false. Every new copy the other methods make drops the
+    /// handoff.
+    RequiredBytes withInnerLiteralHandoff()
+    {
+        LiteralSearchKernel search = longWindowSearch != null ? longWindowSearch : LiteralSearchKernel.sharing(Slices.wrappedBuffer(bytes));
+        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit, search);
+    }
+
+    /// Returns these bytes without the handoff [#withInnerLiteralHandoff] adds.
+    RequiredBytes withoutInnerLiteralHandoff()
+    {
+        return new RequiredBytes(oneOf, bytes, masks, longWindowSearch, searchesOneOfOnLongWindows, suffix, suffixSearch, longWindowsOnly, windowLimit);
+    }
+
+    /// Whether the compile chose the handoff for this literal; see [#withInnerLiteralHandoff].
+    boolean handsOffToInnerLiteralSearch()
+    {
+        return handoffSearch != null;
+    }
+
+    /// Whether the [handoff][#withInnerLiteralHandoff] has a search of its own, which serves it
+    /// alone and adds to the charge, rather than the long-window search, which costs nothing more.
+    boolean hasOwnHandoffSearch()
+    {
+        return handoffSearch != null && handoffSearch != longWindowSearch;
     }
 
     /// Whether the literal serves the long-window check alone: every match of its pattern spans
@@ -907,6 +978,34 @@ final class RequiredBytes
         else {
             found = indexOfOneOf(data, offset, length);
         }
+        return found < 0 ? -1 : found - base;
+    }
+
+    /// Returns the Slice offset of the literal's first occurrence wholly inside `[start, end)` of
+    /// `text`, or -1, for bytes with the [handoff][#withInnerLiteralHandoff] to
+    /// `innerLiteralSearch`. Where the literal is the search's own, the scan is that of [#indexIn].
+    /// Where it is the search's literal and one byte more, as `,z` is for the search for `,` of
+    /// `\w+,\bz`, the search's own [scan][InnerLiteralSearch#literalIndexIn] first finds its
+    /// literal's first hit, and the scan of [#indexIn] for the whole literal starts there. Every
+    /// occurrence of the whole literal starts with an occurrence of the search's literal, so the
+    /// first occurrence at or after that hit is the first in the window, and a window without a hit
+    /// holds no occurrence, as the gated search, which then has no hit to pass its gate, would
+    /// answer no match. On text without the search's literal, the scan for the whole literal costs
+    /// more for each vector than the one-byte scan of the search. The window's length, not that of
+    /// the rest from the hit, chooses the scan for the whole literal, as it does for [#indexIn], so
+    /// a long window keeps the vector pair scan after an early hit; see
+    /// [Prog#findLiteral(byte\[\],int,int,byte\[\],LiteralSearchKernel,int)].
+    int handoffIndexIn(Slice text, int start, int end, InnerLiteralSearch innerLiteralSearch)
+    {
+        int scanStart = start;
+        if (hasOwnHandoffSearch()) {
+            scanStart = innerLiteralSearch.literalIndexIn(text, start, end);
+            if (scanStart < 0) {
+                return -1;
+            }
+        }
+        int base = text.byteArrayOffset();
+        int found = Prog.findLiteral(text.byteArray(), base + scanStart, end - scanStart, handoffSearch.literalBytes(), handoffSearch, end - start);
         return found < 0 ? -1 : found - base;
     }
 
@@ -1152,11 +1251,13 @@ final class RequiredBytes
     {
         // A long-window search for `bytes` shares that array, and the suffix search shares
         // `suffix`. Their own estimates count those arrays too, so each is counted once here.
-        // Where the suffix is the literal, the two searches are one.
+        // Where the suffix is the literal, the two searches are one. A handoff search of its own
+        // shares `bytes` too, and one that is the long-window search costs nothing more.
         long suffixSize = suffix == null || suffix == bytes ? 0 : SizeOf.sizeOf(suffix);
         long suffixSearchSize = suffixSearch == null || suffixSearch == longWindowSearch ? 0 : suffixSearch.estimatedRetainedSize() - suffixSize;
         long searchSize = longWindowSearch == null ? 0 : longWindowSearch.estimatedRetainedSize() - (longWindowSearch.literalBytes() == bytes ? SizeOf.sizeOf(bytes) : 0);
-        return INSTANCE_SIZE + SizeOf.sizeOf(bytes) + SizeOf.sizeOf(masks) + suffixSize + suffixSearchSize + searchSize;
+        long handoffSize = hasOwnHandoffSearch() ? handoffSearch.estimatedRetainedSize() - SizeOf.sizeOf(bytes) : 0;
+        return INSTANCE_SIZE + SizeOf.sizeOf(bytes) + SizeOf.sizeOf(masks) + suffixSize + suffixSearchSize + searchSize + handoffSize;
     }
 
     /// The literal, its case-insensitive letters lowered, or `one of` and the distinct bytes.
