@@ -1779,15 +1779,20 @@ ordinary engine would.
   the hit to its line ([kwsearch.c][grep-kwsearch] `Fexecute`); Inspired by a
   gap against Joni on dot-star rows for the call-free literal search in the
   span ([#33]). Regulator: answering `.*lit.*` from the widened span with no
-  regex pass ([#1]), and its counts in every language ([#126],
-  [design][d-trino-literal], [design][d-boolean]).
+  regex pass ([#1]), its counts in every language ([#126]), and its unanchored
+  one-shot searches ([#245], [design][d-trino-literal], [design][d-boolean]).
 - **Where:** `DotStarLiteralSpanMatcher.analyze`,
-  `DotStarLiteralSpanMatcher.findSpan`, `DotStarLiteralSpanMatcher.count`
+  `DotStarLiteralSpanMatcher.findSpan`, `DotStarLiteralSpanMatcher.count`,
+  `CompiledPattern.oneShotDotStarLiteral`,
+  `CompiledPattern.matchInternalOnLiteralKernel`
 - **Applies when:** Unanchored, capture-free patterns of one case-sensitive
   literal between greedy `.*` gaps whose dots match any character but a line
-  feed: Trino span operations, and counts and group-zero matcher finds in RE2,
-  Java with `(?d)`, and Rust; the matcher yields to the forward DFAs, as
-  [Limits and defaults](REGULATOR_API.md#limits-and-defaults) describes
+  feed, in Trino span operations and in these calls of RE2, Java with `(?d)`,
+  and Rust: counts, group-zero matcher finds, and the unanchored `find` of a
+  range, `findInto`, `findResult`, and RE2's `replaceFirst`, `replaceAll`, and
+  `extract`; anchored calls keep the engine, and the matcher yields to the
+  forward DFAs, as [Limits and defaults](REGULATOR_API.md#limits-and-defaults)
+  describes
 - **What it does:** `.*lit.*` finds the literal's first occurrence with the
   pattern's contains search, then widens over the characters the dots match on
   each side. A count scans only the trailing dots and resumes at their end.
@@ -2546,6 +2551,7 @@ change is described.
 [#241]: https://github.com/airlift/regulator/pull/241
 [#242]: https://github.com/airlift/regulator/pull/242
 [#244]: https://github.com/airlift/regulator/pull/244
+[#245]: https://github.com/airlift/regulator/pull/245
 [d-boolean]: ../../REGULATOR_DECISIONS.md#boolean-partial-match-specializations
 [d-byte-gates]: ../../REGULATOR_DECISIONS.md#inner-literal-byte-gates
 [d-candidate-cursor]: ../../REGULATOR_DECISIONS.md#bounded-candidate-start-cursor

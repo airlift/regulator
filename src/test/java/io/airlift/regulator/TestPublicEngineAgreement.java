@@ -110,7 +110,7 @@ public class TestPublicEngineAgreement
                     RustRegexp.compile(utf8Slice(expression)),
                     RustRegexp.compile(utf8Slice("(?-u)" + expression), RustRegexp.Options.bytes()));
             for (CompiledPattern pattern : patterns) {
-                assertSpanSearchRegions(pattern, entry.getValue(), input);
+                assertSpanSearchRegions(pattern, entry.getValue(), input, pattern);
             }
         }
     }
@@ -119,21 +119,75 @@ public class TestPublicEngineAgreement
     public void testDotStarLiteralSpanRegions()
     {
         // A group-zero matcher of `.*literal.*` finds on the dot-star literal matcher in RE2, Java
-        // with UNIX_LINES, whose dot is `[^\n]`, and Rust, in UTF-8 and bytes mode, and its spans
-        // are the generic matcher's in every region: a region end inside the trailing dots ends the
-        // match there, one inside the literal leaves no match, and the dots stop at a line feed
-        // and, in UTF-8, at the malformed byte at the #.
-        byte[] bytes = utf8Slice("!!xERRORy\nzERRORβ ERR ERROR\u2028tail ERRO#ERRORz é?").getBytes();
-        bytes[bytes.length - 11] = (byte) 0xFF;
-        Slice input = wrappedBuffer(bytes, 2, bytes.length - 3);
-        List<CompiledPattern> patterns = List.of(
-                Re2.compile(utf8Slice(".*ERROR.*")),
-                Re2.compile(utf8Slice(".*ERROR.*"), Re2.Options.latin1()),
-                JavaRegexp.compile(utf8Slice("(?d).*ERROR.*")),
-                RustRegexp.compile(utf8Slice(".*ERROR.*")),
-                RustRegexp.compile(utf8Slice("(?-u).*ERROR.*"), RustRegexp.Options.bytes()));
-        for (CompiledPattern pattern : patterns) {
-            assertSpanSearchRegions(pattern, DotStarLiteralSpanMatcher.class, input);
+        // with UNIX_LINES, whose dot is `[^\n]`, and Rust, in UTF-8 and bytes mode, and so do the
+        // unanchored one-shot searches of a range: find, findInto with group zero alone or with a
+        // second pair, and findResult. The second pair stays unset: it is group 1 for `(x){0}`, or
+        // unused storage for a pattern with only group 0. Their spans are those of the generic
+        // matcher of the pattern with the dots inside a capture, which keeps the program, in every
+        // region: a region end inside the trailing dots ends the match there, one inside the
+        // literal leaves no match, and the dots stop at a line feed and, in UTF-8, at the malformed
+        // byte at the #. None of the one-shot searches runs the program. A pattern whose empty
+        // capture the simplifier removes keeps that capturing group, which no match sets, so its
+        // matcher takes no span search: in RE2 and Java, its finds reach the dot-star literal
+        // matcher through the program hook, with offsets relative to the region's start, and its
+        // one-shot searches reach it as every row's do. Rust drops the group.
+        List<Slice> inputs = Stream.of("!!xERRORy\nzERRORβ ERR ERROR\u2028tail ERRO#ERRORz é?")
+                .map(text -> {
+                    byte[] bytes = utf8Slice(text).getBytes();
+                    bytes[utf8Slice(text.substring(0, text.indexOf('#'))).length()] = (byte) 0xFF;
+                    return wrappedBuffer(bytes, 2, bytes.length - 3);
+                })
+                .toList();
+        // A long input, too long for every region, checks a few long windows of at least 256 bytes
+        // that start past its first byte: the whole rest, one that ends inside the literal, and one
+        // that starts inside the dots and ends inside the trailing dots.
+        byte[] longBytes = utf8Slice("!!" + "\n".repeat(5) + "x".repeat(250) + "ERROR" + "y".repeat(40) + "?").getBytes();
+        Slice longInput = wrappedBuffer(longBytes, 2, longBytes.length - 3);
+        List<int[]> longRegions = List.of(new int[] {1, longInput.length()}, new int[] {1, 257}, new int[] {7, 280});
+
+        record Row(CompiledPattern pattern, CompiledPattern captured) {}
+
+        for (Slice input : inputs) {
+            // Each input compiles its own patterns: the pattern's own generic matcher in
+            // assertSpanSearchRegions builds the program search.
+            List<Row> rows = List.of(
+                    new Row(Re2.compile(utf8Slice(".*ERROR.*")), Re2.compile(utf8Slice("(.*ERROR.*)"))),
+                    new Row(Re2.compile(utf8Slice(".*ERROR.*"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*ERROR.*)"), Re2.Options.latin1())),
+                    new Row(JavaRegexp.compile(utf8Slice("(?d).*ERROR.*")), JavaRegexp.compile(utf8Slice("(?d)(.*ERROR.*)"))),
+                    new Row(RustRegexp.compile(utf8Slice(".*ERROR.*")), RustRegexp.compile(utf8Slice("(.*ERROR.*)"))),
+                    new Row(RustRegexp.compile(utf8Slice("(?-u).*ERROR.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?-u)(.*ERROR.*)"), RustRegexp.Options.bytes())),
+                    new Row(Re2.compile(utf8Slice(".*ERROR.*(x){0}")), Re2.compile(utf8Slice("(.*ERROR.*)"))),
+                    new Row(Re2.compile(utf8Slice(".*ERROR.*(x){0}"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*ERROR.*)"), Re2.Options.latin1())),
+                    new Row(JavaRegexp.compile(utf8Slice("(?d).*ERROR.*(x){0}")), JavaRegexp.compile(utf8Slice("(?d)(.*ERROR.*)"))),
+                    // A one-byte literal has no contains search, so these find it with Slice.indexOf,
+                    // which must not find an R past the region's end.
+                    new Row(Re2.compile(utf8Slice(".*R.*")), Re2.compile(utf8Slice("(.*R.*)"))),
+                    new Row(JavaRegexp.compile(utf8Slice("(?d).*R.*")), JavaRegexp.compile(utf8Slice("(?d)(.*R.*)"))),
+                    new Row(RustRegexp.compile(utf8Slice(".*R.*")), RustRegexp.compile(utf8Slice("(.*R.*)"))));
+            for (Row row : rows) {
+                CompiledPattern pattern = row.pattern();
+                String label = label(pattern) + " on " + HEX_FORMAT.formatHex(input.getBytes());
+                assertThat(pattern.createDotStarLiteralSpanMatcher()).as(label).isNotNull();
+                assertThat(row.captured().createDotStarLiteralSpanMatcher()).as(label).isNull();
+                RegexpMatcher generic = row.captured().genericGroupZeroMatcherForDiagnostics(input);
+                for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+                    for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                        assertOneShotRegion(pattern, generic, input, regionStart, regionEnd, label);
+                    }
+                }
+                if (input == inputs.getFirst()) {
+                    for (int[] region : longRegions) {
+                        assertOneShotRegion(pattern, generic, longInput, region[0], region[1], label(pattern) + " on long input");
+                    }
+                }
+                assertNoProgramSearch(pattern, label);
+                if (pattern.capturingGroupCount() == 0) {
+                    assertSpanSearchRegions(pattern, DotStarLiteralSpanMatcher.class, input, row.captured());
+                }
+                else {
+                    assertCapturingMatcherRegions(pattern, input, row.captured());
+                }
+            }
         }
     }
 
@@ -477,14 +531,40 @@ public class TestPublicEngineAgreement
         }
     }
 
+    // The pattern's class, text, and encoding, which tell RE2's UTF-8 and Latin-1 cases apart.
     private static String label(CompiledPattern pattern)
     {
-        return pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8();
+        return pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8() + ((pattern.flags() & Regexp.LATIN1) != 0 ? " Latin-1" : " UTF-8");
+    }
+
+    /// Requires the unanchored one-shot searches of `pattern` in `[regionStart, regionEnd)` of
+    /// `input`, a range find, findInto with group zero alone and with a second pair, and
+    /// findResult, to report the first span `generic` finds there. The second pair stays unset:
+    /// it is group 1 for `(x){0}`, or unused storage for a pattern with only group 0.
+    private static void assertOneShotRegion(CompiledPattern pattern, RegexpMatcher generic, Slice input, int regionStart, int regionEnd, String label)
+    {
+        String region = "%s region %s-%s".formatted(label, regionStart, regionEnd);
+        boolean found = generic.reset(input, regionStart, regionEnd).find();
+        int[] span = found ? new int[] {generic.start(), generic.end()} : new int[] {-1, -1};
+        assertThat(pattern.find(input, regionStart, regionEnd)).as(region).isEqualTo(found);
+        int[] groupZero = {7, 7};
+        assertThat(pattern.findInto(input, regionStart, regionEnd, groupZero)).as(region).isEqualTo(found);
+        assertThat(groupZero).as(region).containsExactly(span);
+        int[] extraPair = {7, 7, 7, 7};
+        assertThat(pattern.findInto(input, regionStart, regionEnd, extraPair)).as(region).isEqualTo(found);
+        assertThat(extraPair).as(region).containsExactly(span[0], span[1], -1, -1);
+        MatchResult result = pattern.findResult(input, regionStart, regionEnd);
+        assertThat(result != null).as(region).isEqualTo(found);
+        if (result != null) {
+            assertThat(new int[] {result.start(), result.end()}).as(region).containsExactly(span);
+        }
     }
 
     /// Requires `pattern`'s group-zero matchers to find on its span search, an instance of
-    /// `spanSearch`, and to report the generic matcher's spans in every region of `input`.
-    private static void assertSpanSearchRegions(CompiledPattern pattern, Class<?> spanSearch, Slice input)
+    /// `spanSearch`, and to report the spans of `oracle`'s generic matcher in every region of
+    /// `input`. The oracle is `pattern` itself, or a pattern of the same group-zero spans whose
+    /// generic matcher runs the program where `pattern`'s would not.
+    private static void assertSpanSearchRegions(CompiledPattern pattern, Class<?> spanSearch, Slice input, CompiledPattern oracle)
     {
         String label = label(pattern);
         assertThat(pattern.groupZeroSpanSearch()).as(label).isInstanceOf(spanSearch);
@@ -494,7 +574,7 @@ public class TestPublicEngineAgreement
         assertNoProgramSearch(pattern, label);
         assertThat(pattern.genericGroupZeroMatcherForDiagnostics(input).spanSearchForDiagnostics()).as(label).isNull();
         RegexpMatcher matcher = pattern.matcher(input, 0);
-        RegexpMatcher generic = pattern.genericGroupZeroMatcherForDiagnostics(input);
+        RegexpMatcher generic = oracle.genericGroupZeroMatcherForDiagnostics(input);
         for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
             for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
                 assertThat(findSpans(matcher.reset(input, regionStart, regionEnd)))
@@ -502,6 +582,31 @@ public class TestPublicEngineAgreement
                         .isEqualTo(findSpans(generic.reset(input, regionStart, regionEnd)));
             }
         }
+    }
+
+    /// Requires the matcher of `pattern`, whose one capturing group never participates, to take no
+    /// span search, to report the spans of `oracle`'s generic matcher with that group unset in
+    /// every region of `input`, and to run no program search.
+    private static void assertCapturingMatcherRegions(CompiledPattern pattern, Slice input, CompiledPattern oracle)
+    {
+        String label = label(pattern);
+        assertThat(pattern.capturingGroupCount()).as(label).isEqualTo(1);
+        RegexpMatcher matcher = pattern.matcher(input);
+        assertThat(matcher.spanSearchForDiagnostics()).as(label).isNull();
+        RegexpMatcher generic = oracle.genericGroupZeroMatcherForDiagnostics(input);
+        for (int regionStart = 0; regionStart <= input.length(); regionStart++) {
+            for (int regionEnd = regionStart; regionEnd <= input.length(); regionEnd++) {
+                String region = "%s region %s-%s".formatted(label, regionStart, regionEnd);
+                matcher.reset(input, regionStart, regionEnd);
+                generic.reset(input, regionStart, regionEnd);
+                while (generic.find()) {
+                    assertThat(matcher.find()).as(region).isTrue();
+                    assertThat(new int[] {matcher.start(), matcher.end(), matcher.start(1), matcher.end(1)}).as(region).containsExactly(generic.start(), generic.end(), -1, -1);
+                }
+                assertThat(matcher.find()).as(region).isFalse();
+            }
+        }
+        assertNoProgramSearch(pattern, label);
     }
 
     private static List<String> findSpans(RegexpMatcher matcher)

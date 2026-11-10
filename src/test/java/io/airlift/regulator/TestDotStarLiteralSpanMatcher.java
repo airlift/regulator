@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
+import static io.airlift.regulator.TestingPatternShapes.assertProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestDfaBudget;
 import static io.airlift.regulator.TestingPatternShapes.shape;
 import static io.airlift.slice.Slices.utf8Slice;
@@ -79,19 +80,13 @@ public class TestDotStarLiteralSpanMatcher
         // U+10FFFF as one character each, as the program's byte ranges for `[^\n]` do.
         assertSpan(matcher(".*literal.*"), bytes("61 EDA080 E08080 F4908080 6C69746572616C 7A"), 0, 0, 19);
 
-        // In every language, the spans and counts are the general engine's on each malformed
-        // sequence before, after, and on both sides of the literal, and at the input's ends. A run
-        // of 100 ASCII bytes before the literal or between it and a malformed sequence or a line
-        // feed takes the vector scan from some starts and is walked byte by byte from the rest,
-        // by the rule the scan counts below pin.
+        // In every language, the spans and counts are the general engine's, run on the pattern
+        // with its dots inside a capture, on each malformed sequence before, after, and on both
+        // sides of the literal, and at the input's ends. A run of 100 ASCII bytes before the
+        // literal or between it and a malformed sequence or a line feed takes the vector scan
+        // from some starts and is walked byte by byte from the rest, by the rule the scan counts
+        // below pin.
         String longAscii = "78".repeat(100);
-        List<CompiledPattern> patterns = List.of(
-                Re2.compile(utf8Slice(".*literal.*")),
-                Re2.compile(utf8Slice(".*literal.*"), Re2.Options.latin1()),
-                JavaRegexp.compile(utf8Slice("(?d).*literal.*")),
-                RustRegexp.compile(utf8Slice(".*literal.*")),
-                RustRegexp.compile(utf8Slice("(?-u).*literal.*"), RustRegexp.Options.bytes()),
-                TrinoRegexp.compile(utf8Slice(".*literal.*")).re2());
         List<String> malformedSequences = List.of(
                 // Bare continuation bytes.
                 "80",
@@ -99,7 +94,9 @@ public class TestDotStarLiteralSpanMatcher
                 // Overlong two-byte forms, which no lead byte C0 or C1 starts.
                 "C080",
                 "C1BF",
-                // Sequences cut short by an ASCII byte or by the end.
+                // Sequences cut short by an ASCII byte or by the end. C2 is the smallest UTF-8 lead
+                // byte, cut short here; Latin-1 reads every byte alone.
+                "C2",
                 "C3",
                 "E282",
                 "F09F92",
@@ -115,22 +112,25 @@ public class TestDotStarLiteralSpanMatcher
                 "FF",
                 // A line feed after a cut-short sequence.
                 "E2820A");
-        for (CompiledPattern pattern : patterns) {
-            DotStarLiteralSpanMatcher spanMatcher = pattern.createDotStarLiteralSpanMatcher();
-            assertThat(spanMatcher).as(label(pattern)).isNotNull();
-            for (String malformed : malformedSequences) {
-                for (String input : List.of(
-                        "61 %s 6C69746572616C 7A",
-                        "61 6C69746572616C %s 7A",
-                        "%s 6C69746572616C %s",
-                        "6C69746572616C %s",
-                        "%s 6C69746572616C",
-                        "61 %s 62 6C69746572616C 63 %s 6C69746572616C %s 64",
-                        "%s L 6C69746572616C L %s",
-                        "61 %s L 6C69746572616C L 0A L 6C69746572616C L %s")) {
-                    assertGeneralEngineAgreement(pattern, spanMatcher, bytes(input.replace("%s", malformed).replace("L", longAscii)));
-                }
+        List<Slice> inputs = new ArrayList<>();
+        for (String malformed : malformedSequences) {
+            for (String input : List.of(
+                    "61 %s 6C69746572616C 7A",
+                    "61 6C69746572616C %s 7A",
+                    "%s 6C69746572616C %s",
+                    "6C69746572616C %s",
+                    "%s 6C69746572616C",
+                    "61 %s 62 6C69746572616C 63 %s 6C69746572616C %s 64",
+                    "%s L 6C69746572616C L %s",
+                    "61 %s L 6C69746572616C L 0A L 6C69746572616C L %s")) {
+                inputs.add(bytes(input.replace("%s", malformed).replace("L", longAscii)));
             }
+        }
+        for (Row row : everyLanguage()) {
+            CompiledPattern pattern = row.pattern();
+            assertGeneralEngineAgreement(row, inputs);
+            DotStarLiteralSpanMatcher spanMatcher = pattern.createDotStarLiteralSpanMatcher();
+
             // A run of ASCII bytes takes the vector scan when the walk has read 16 of its bytes,
             // DotStarLiteralSpanMatcher.INLINE_DOT_ASCII_BYTES, in its inline loop and at least
             // CompiledPattern.MINIMUM_LONG_SEARCH_BYTES remain before the literal or the region
@@ -181,14 +181,26 @@ public class TestDotStarLiteralSpanMatcher
     public void testEveryLanguageCountsAndFindsOnSpans()
     {
         // Count and a group-zero matcher's find run the dot-star literal matcher, never a DFA, in
-        // RE2, Java with UNIX_LINES, whose dot is `[^\n]`, and Rust in UTF-8 and bytes mode.
+        // RE2, also with longest-match semantics, under which this pattern's spans are the same,
+        // Java with UNIX_LINES, whose dot is `[^\n]`, and Rust in UTF-8 and bytes mode. So do
+        // RE2's replaceFirst, replaceAll, and extract of group zero, which agree with the pattern
+        // with the dots inside a capture, which keeps the program. A start-anchored search keeps
+        // the program: from the start of `before`, the dots stop at the line feed, past which
+        // the matcher would search on for the literal.
         Slice source = utf8Slice("before\nxxcoolfunctionnameyy\nafter\ncoolfunctionname!");
-        for (CompiledPattern pattern : List.of(
-                Re2.compile(utf8Slice(".*coolfunctionname.*")),
-                JavaRegexp.compile(utf8Slice("(?d).*coolfunctionname.*")),
-                RustRegexp.compile(utf8Slice(".*coolfunctionname.*")),
-                RustRegexp.compile(utf8Slice("(?-u).*coolfunctionname.*"), RustRegexp.Options.bytes()))) {
-            String label = label(pattern);
+        Re2 captured = Re2.compile(utf8Slice("(.*coolfunctionname.*)"));
+        assertThat(captured.createDotStarLiteralSpanMatcher()).isNull();
+
+        record ModeRow(CompiledPattern pattern, boolean longestMatch) {}
+
+        for (ModeRow row : List.of(
+                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*")), false),
+                new ModeRow(Re2.compile(utf8Slice(".*coolfunctionname.*"), Re2.Options.defaults().setLongestMatch(true)), true),
+                new ModeRow(JavaRegexp.compile(utf8Slice("(?d).*coolfunctionname.*")), false),
+                new ModeRow(RustRegexp.compile(utf8Slice(".*coolfunctionname.*")), false),
+                new ModeRow(RustRegexp.compile(utf8Slice("(?-u).*coolfunctionname.*"), RustRegexp.Options.bytes()), false))) {
+            CompiledPattern pattern = row.pattern();
+            String label = label(pattern) + (row.longestMatch() ? " longest-match" : "");
             DotStarLiteralSpanMatcher spanMatcher = pattern.createDotStarLiteralSpanMatcher();
             assertThat(spanMatcher).as(label).isNotNull();
             assertThat(shape(pattern)).as(label).isEqualTo(CompiledPattern.Shape.LITERAL_KERNEL);
@@ -203,6 +215,18 @@ public class TestDotStarLiteralSpanMatcher
             }
             assertThat(spans).as(label).containsExactly("7-27", "34-51");
             assertNoProgramSearch(pattern, label);
+
+            if (pattern instanceof Re2 re2) {
+                Slice rewrite = utf8Slice("<\\0>");
+                Slice capturedRewrite = utf8Slice("<\\1>");
+                assertThat(re2.replaceFirst(source, rewrite)).as(label).isEqualTo(captured.replaceFirst(source, capturedRewrite));
+                assertThat(re2.replaceAll(source, rewrite)).as(label).isEqualTo(captured.replaceAll(source, capturedRewrite));
+                assertThat(re2.extract(source, rewrite)).as(label).isEqualTo(captured.extract(source, capturedRewrite));
+                assertNoProgramSearch(pattern, label);
+            }
+
+            assertThat(pattern.lookingAt(source, 0, source.length())).as(label).isFalse();
+            assertProgramSearch(pattern, label);
         }
 
         // Java's default dot also stops at `\r`, U+0085, U+2028, and U+2029, and Rust's Unicode
@@ -304,7 +328,7 @@ public class TestDotStarLiteralSpanMatcher
         Re2 pattern = Re2.compile(utf8Slice(".*l.*"));
         DotStarLiteralSpanMatcher matcher = pattern.createDotStarLiteralSpanMatcher();
         assertThat(matcher.searchForDiagnostics()).isNull();
-        assertGeneralEngineAgreement(pattern, matcher);
+        assertGeneralEngineAgreement(new Row(pattern, Re2.compile(utf8Slice("(.*l.*)"))));
 
         // Spans share the pattern's contains search, so this checks the call-free scan's spans.
         TrinoCompiledPattern trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).re2();
@@ -312,12 +336,12 @@ public class TestDotStarLiteralSpanMatcher
         assertThat(trinoMatcher.searchForDiagnostics())
                 .isNotNull()
                 .isSameAs(trinoPattern.literalSearchForDiagnostics());
-        assertGeneralEngineAgreement(trinoPattern, trinoMatcher);
+        assertGeneralEngineAgreement(new Row(trinoPattern, TrinoRegexp.compile(utf8Slice("(.*literal.*)")).re2()));
     }
 
-    private static void assertGeneralEngineAgreement(CompiledPattern pattern, DotStarLiteralSpanMatcher matcher)
+    private static void assertGeneralEngineAgreement(Row row)
     {
-        for (Slice input : List.of(
+        assertGeneralEngineAgreement(row, List.of(
                 utf8Slice(""),
                 utf8Slice("literal"),
                 utf8Slice("before literal after"),
@@ -331,35 +355,58 @@ public class TestDotStarLiteralSpanMatcher
                 utf8Slice(DENSE_RUNS + "literal" + DENSE_RUNS + "\nliteral" + DENSE_RUNS),
                 utf8Slice("é💰literalж終"),
                 wrappedBuffer(new byte[] {'a', (byte) 0xFF, 'l', 'i', 't', 'e', 'r', 'a', 'l', 'z'}),
-                wrappedBuffer(new byte[] {'a', 'l', 'i', 't', 'e', 'r', 'a', 'l', (byte) 0xFF, 'z'}))) {
-            assertGeneralEngineAgreement(pattern, matcher, input);
-        }
+                wrappedBuffer(new byte[] {'a', 'l', 'i', 't', 'e', 'r', 'a', 'l', (byte) 0xFF, 'z'})));
     }
 
-    /// Requires `matcher`'s span from every start in `input`, and `pattern`'s and `matcher`'s
-    /// counts, to be the general engine's.
-    private static void assertGeneralEngineAgreement(CompiledPattern pattern, DotStarLiteralSpanMatcher matcher, Slice input)
+    /// Requires the row pattern to have a dot-star literal matcher and its captured pattern none,
+    /// and, in each of `inputs`, the matcher's span from every start, and the pattern's and the
+    /// matcher's counts, to be the general engine's: those of the generic matcher of the captured
+    /// pattern, which, without the matcher, runs the program.
+    private static void assertGeneralEngineAgreement(Row row, List<Slice> inputs)
     {
-        String label = label(pattern) + " on " + HexFormat.of().formatHex(input.getBytes());
-        for (int start = 0; start <= input.length(); start++) {
-            RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
-            long span = matcher.findSpan(input, start);
-            if (generalMatcher.find(start)) {
-                assertThat(span).as("%s start %s", label, start).isEqualTo(((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL));
+        CompiledPattern pattern = row.pattern();
+        DotStarLiteralSpanMatcher matcher = pattern.createDotStarLiteralSpanMatcher();
+        assertThat(matcher).as(label(pattern)).isNotNull();
+        assertThat(row.captured().createDotStarLiteralSpanMatcher()).as(label(row.captured())).isNull();
+        for (Slice input : inputs) {
+            String label = label(pattern) + " on " + HexFormat.of().formatHex(input.getBytes());
+            for (int start = 0; start <= input.length(); start++) {
+                RegexpMatcher generalMatcher = row.captured().genericGroupZeroMatcherForDiagnostics(input);
+                long span = matcher.findSpan(input, start);
+                if (generalMatcher.find(start)) {
+                    assertThat(span).as("%s start %s", label, start).isEqualTo(((long) generalMatcher.start() << 32) | (generalMatcher.end() & 0xFFFF_FFFFL));
+                }
+                else {
+                    assertThat(span).as("%s start %s", label, start).isEqualTo(Dfa.SEARCH_NO_MATCH);
+                }
             }
-            else {
-                assertThat(span).as("%s start %s", label, start).isEqualTo(Dfa.SEARCH_NO_MATCH);
-            }
-        }
 
-        RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
-        long count = 0;
-        while (generalMatcher.find()) {
-            count++;
+            RegexpMatcher generalMatcher = row.captured().genericGroupZeroMatcherForDiagnostics(input);
+            long count = 0;
+            while (generalMatcher.find()) {
+                count++;
+            }
+            assertThat(pattern.count(input)).as(label).isEqualTo(count);
+            assertThat(matcher.count(input)).as(label).isEqualTo(count);
         }
-        assertThat(pattern.count(input)).as(label).isEqualTo(count);
-        assertThat(matcher.count(input)).as(label).isEqualTo(count);
     }
+
+    /// Returns `.*literal.*` in every language and encoding that takes the matcher, each with the
+    /// same pattern with its dots inside a capture.
+    private static List<Row> everyLanguage()
+    {
+        return List.of(
+                new Row(Re2.compile(utf8Slice(".*literal.*")), Re2.compile(utf8Slice("(.*literal.*)"))),
+                new Row(Re2.compile(utf8Slice(".*literal.*"), Re2.Options.latin1()), Re2.compile(utf8Slice("(.*literal.*)"), Re2.Options.latin1())),
+                new Row(JavaRegexp.compile(utf8Slice("(?d).*literal.*")), JavaRegexp.compile(utf8Slice("(?d)(.*literal.*)"))),
+                new Row(RustRegexp.compile(utf8Slice(".*literal.*")), RustRegexp.compile(utf8Slice("(.*literal.*)"))),
+                new Row(RustRegexp.compile(utf8Slice("(?-u).*literal.*"), RustRegexp.Options.bytes()), RustRegexp.compile(utf8Slice("(?-u)(.*literal.*)"), RustRegexp.Options.bytes())),
+                new Row(TrinoRegexp.compile(utf8Slice(".*literal.*")).re2(), TrinoRegexp.compile(utf8Slice("(.*literal.*)")).re2()));
+    }
+
+    /// A pattern that takes the dot-star literal matcher, and the same pattern with its dots inside
+    /// a capture, which takes none and keeps the program.
+    private record Row(CompiledPattern pattern, CompiledPattern captured) {}
 
     private static DotStarLiteralSpanMatcher matcher(String pattern)
     {
@@ -383,7 +430,7 @@ public class TestDotStarLiteralSpanMatcher
         assertThat((int) span).isEqualTo(expectedEnd);
     }
 
-    // The pattern's class, text, and encoding, which tells RE2's UTF-8 and Latin-1 cases apart.
+    // The pattern's class, text, and encoding, which tell RE2's UTF-8 and Latin-1 cases apart.
     private static String label(CompiledPattern pattern)
     {
         return pattern.getClass().getSimpleName() + " " + pattern.pattern().toStringUtf8() + ((pattern.flags() & Regexp.LATIN1) != 0 ? " Latin-1" : " UTF-8");

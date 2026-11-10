@@ -583,6 +583,23 @@ public sealed class RustRegexp
         {
             return lookingAtOnLiteralKernel(input);
         }
+
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            return matchInternalOnLiteralKernel(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+        }
+
+        @Override
+        boolean matchInto(Slice text, int start, int end, Anchor anchor, int[] groups, OnePass.Workspace onePassWorkspace, BitState.Workspace bitStateWorkspace, Nfa.Workspace nfaWorkspace)
+        {
+            // The span search runs here, not in a shared helper; see oneShotDotStarLiteral.
+            DotStarLiteralSpanMatcher dotStarLiteral = oneShotDotStarLiteral(text, start, end, anchor, groups);
+            if (dotStarLiteral == null) {
+                return super.matchInto(text, start, end, anchor, groups, onePassWorkspace, bitStateWorkspace, nfaWorkspace);
+            }
+            return setDotStarLiteralGroups(dotStarLiteral.findSpan(text, start, end, null), groups);
+        }
     }
 
     /// A pattern of the [literal-alternation shape][Shape#LITERAL_ALTERNATION].

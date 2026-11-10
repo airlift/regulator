@@ -27,14 +27,19 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.infra.BenchmarkParams;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.LongStream;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
@@ -44,9 +49,9 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 
-/// Public `find`, `count`, `matches`, `lookingAt`, and matcher iteration of RE2, Java, Rust, and
-/// Trino patterns over a batch of rows on one target pattern, called the way an application calls a
-/// pattern it holds: one call site that only ever sees that pattern. It measures profile pollution,
+/// Public `find`, `count`, `matches`, `lookingAt`, matcher iteration, and the one-shot searches of
+/// RE2, Java, Rust, and Trino patterns over a batch of rows on one target pattern, called the way
+/// an application calls a pattern it holds: one call site that only ever sees that pattern. It measures profile pollution,
 /// what other patterns cost the target when they have run first through the library code every
 /// pattern shares.
 ///
@@ -115,6 +120,28 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// `UnsupportedOperationException`, and its training calls only `contains`, `count`, and its
 /// matcher.
 ///
+/// The one-shot searches run once per row: `rangedFind`, `find` of the whole row as a range;
+/// `findInto` of group zero into one reused buffer; `findResult`; `replaceAll` with an empty
+/// replacement; and `extract` of group zero, `\0`. Each consumes its whole result:
+/// `rangedFind` counts the rows it matches, `findInto` and `findResult` add up each match's start
+/// and end, and `replaceAll` and `extract` add up the length of their output. RE2, Java, and Rust
+/// have the first three, and RE2 and Trino the last two, which RE2 calls `replaceAll` and
+/// `extract` and Trino `replace` and `extract`; a language without one throws
+/// `UnsupportedOperationException`. Setup runs the measured one-shot search over the rows and
+/// requires each row's result to be the one the spans of the target's group-zero matcher give,
+/// the rows it matches to be the rows `find` matches, and the loop's sum to be the one those
+/// spans give. It runs no other one-shot search, so the other methods' setup is as it was.
+///
+/// DOT_STAR_LITERAL also runs on line texts, constructed rows of about 4 KiB each, so that its
+/// searches cross many lines. LINES_ABSENT, LINES_SPARSE, and LINES_DENSE are lines of whole
+/// words, each line taking words until it reaches a target of 40 to 120 bytes, so a line can run
+/// a word longer. They are generated deterministically, with `timeout` in no line, in one line in
+/// 50, and in every second line. LINES_SHORT_BEFORE_LITERAL is lines of one to eight bytes and
+/// then one ordinary line with `timeout`, which has no line feed: it stresses a search that
+/// crosses many line feeds before the literal to find the match start. Every row of a line text
+/// matches, except in LINES_ABSENT. Line texts run only that target, with `polluted=false`, and
+/// `sharedSite` does not run them.
+///
 /// With `polluted=false`, setup compiles only the target, so no other pattern has run or loaded a
 /// generated class: the run is the one-pattern baseline. With `polluted=true`, setup also compiles
 /// a pollution set with the target's language and `generated` setting, every other target and the
@@ -122,10 +149,11 @@ import static org.openjdk.jmh.annotations.CompilerControl.Mode.DONT_INLINE;
 /// find loop on the target and the pollution set, interleaved, through one non-inlined training
 /// method, with one site per operation, for enough rounds to encourage C2 to compile the shared
 /// methods with the profile of all of them. Training reads every target's rows at the run's `rows`
-/// length, so a LONG run's shared methods also learn long inputs. The measured methods then call
-/// only the target, so the difference from `polluted=false` is the cost of reaching the target
-/// through shared methods whose profile holds many patterns, with the other patterns' generated
-/// classes loaded. The `sharedSite` method calls `find` of the target and then of every pollution
+/// length, so a LONG run's shared methods also learn long inputs. Training calls none of the
+/// one-shot searches, which share with it only the profiles of the lower methods they reach. The
+/// measured methods then call only the target, so the difference from `polluted=false` is the
+/// cost of reaching the target through shared methods whose profile holds many patterns, with
+/// the other patterns' generated classes loaded. The `sharedSite` method calls `find` of the target and then of every pollution
 /// pattern on each row, from one call site: the loop of an application that holds many patterns.
 /// It reports the time per call. Its state always compiles the pollution set and has no `polluted`
 /// parameter, since its own loop trains the shared methods with every pattern.
@@ -186,6 +214,22 @@ public class BenchmarkPatternDispatch
             """.strip().split("\\s+"));
     // The target, the seventeen other targets of `sharedSite`, and the POLLUTION patterns.
     private static final int SHARED_SITE_PATTERNS = 24;
+    // The replacement of `replaceAll`, and RE2's rewrite of group zero for `extract`.
+    private static final Slice EMPTY_REPLACEMENT = EMPTY_SLICE;
+    private static final Slice GROUP_ZERO_REWRITE = utf8Slice("\\0");
+    // The span of no match; a match's span holds its start in the high half and its end in the
+    // low half.
+    private static final long NO_SPAN = -1;
+    // The least bytes of a line-text row.
+    private static final int LINE_TEXT_BYTES = 4096;
+    // The words of the line texts' lines, as in English prose. None holds `timeout`, but `time`
+    // and `out` start and end like it.
+    private static final List<String> LINE_WORDS = List.of(
+            """
+            the of and to a in that it was his he with as had you for at upon which her my him
+            Holmes Watson said Baker Street door window carriage letter lady inspector night time
+            out matter little case face hand room before should there would could been some into
+            """.strip().split("\\s+"));
 
     private static volatile long trainingSink;
 
@@ -218,11 +262,13 @@ public class BenchmarkPatternDispatch
         })
         public String target;
 
-        // SHORT rows are 16 to 64 bytes; LONG rows are 1024 bytes.
-        @Param({"SHORT", "LONG"})
+        // SHORT rows are 16 to 64 bytes; LONG rows are 1024 bytes. The line texts, about 4 KiB
+        // each, run only DOT_STAR_LITERAL.
+        @Param({"SHORT", "LONG", "LINES_ABSENT", "LINES_SPARSE", "LINES_DENSE", "LINES_SHORT_BEFORE_LITERAL"})
         public String rows;
 
-        // `true` is invalid for ORDERED_LITERALS_BYTES, which has no pollution set.
+        // `true` is invalid for ORDERED_LITERALS_BYTES, which has no pollution set, and for the
+        // line texts.
         @Param({"false", "true"})
         public boolean polluted;
 
@@ -234,15 +280,25 @@ public class BenchmarkPatternDispatch
         Slice[] inputs;
 
         @Setup
-        public void setup()
+        public void setup(BenchmarkParams parameters)
+        {
+            setup();
+            String benchmark = parameters.getBenchmark();
+            checkOneShotSearch(benchmark.substring(benchmark.lastIndexOf('.') + 1));
+        }
+
+        void setup()
         {
             boolean bytes = target.equals("ORDERED_LITERALS_BYTES");
             if (bytes && polluted) {
                 throw new IllegalArgumentException(target + " has no pollution set; it runs only with polluted=false");
             }
+            if (isLineText(rows) && polluted) {
+                throw new IllegalArgumentException(rows + " has no training rows; it runs only with polluted=false");
+            }
             inputs = inputs(target, rows);
             List<String> expressions = polluted ? sharedSiteExpressions(target) : List.of(expression(target));
-            patterns = compile(language, expressions, generated, bytes, inputs);
+            patterns = compile(language, expressions, generated, bytes, inputs, rows);
 
             if (polluted) {
                 Slice[] trainingInputs = trainingInputs(rows);
@@ -254,6 +310,56 @@ public class BenchmarkPatternDispatch
                     }
                 }
                 trainingSink = checksum;
+            }
+        }
+
+        /// Requires the one-shot search `operation`, when it is one, to give on each row the
+        /// result that the spans of the target's group-zero matcher give: whether a range find
+        /// matches, the first span for `findInto` and `findResult`, the row without its matches
+        /// for `replaceAll`, and the first match for `extract`. The rows it matches must be the
+        /// rows `find` matches, and its measured loop must return the sum those spans give, as
+        /// [#oneShotRowResult] adds it up. A language without the search throws
+        /// `UnsupportedOperationException`, and a name that is no benchmark method of this state
+        /// throws `IllegalArgumentException`.
+        void checkOneShotSearch(String operation)
+        {
+            long result;
+            switch (operation) {
+                case "find", "count", "matches", "lookingAt", "iterate" -> {
+                    return;
+                }
+                case "rangedFind" -> result = patterns.rangedFind(inputs);
+                case "findInto" -> result = patterns.findInto(inputs);
+                case "findResult" -> result = patterns.findResult(inputs);
+                case "replaceAll" -> result = patterns.replaceAll(inputs);
+                case "extract" -> result = patterns.extract(inputs);
+                default -> throw new IllegalArgumentException("not a benchmark of BenchmarkData: " + operation);
+            }
+            int matches = 0;
+            long expectedResult = 0;
+            for (int row = 0; row < inputs.length; row++) {
+                Slice input = inputs[row];
+                long[] spans = patterns.matcherSpans(input);
+                long first = spans.length > 0 ? spans[0] : NO_SPAN;
+                Object expected = switch (operation) {
+                    case "rangedFind" -> first != NO_SPAN;
+                    case "findInto", "findResult" -> first;
+                    case "replaceAll" -> withoutSpans(input, spans);
+                    case "extract" -> first == NO_SPAN ? null : input.slice(spanStart(first), spanEnd(first) - spanStart(first));
+                    default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+                };
+                if (!Objects.equals(patterns.oneShotResult(operation, input), expected)) {
+                    throw new IllegalStateException(operation + " of " + target + " on row " + row + " differs from the result of the matcher's spans");
+                }
+                matches += first != NO_SPAN ? 1 : 0;
+                expectedResult += oneShotRowResult(operation, input, spans);
+            }
+            int finds = patterns.find(inputs);
+            if (matches != finds) {
+                throw new IllegalStateException(operation + " of " + target + " matched " + matches + " rows, but find matched " + finds);
+            }
+            if (result != expectedResult) {
+                throw new IllegalStateException(operation + " of " + target + " returned " + result + ", not the " + expectedResult + " of the matcher's spans");
             }
         }
     }
@@ -304,7 +410,7 @@ public class BenchmarkPatternDispatch
         public void setup()
         {
             inputs = inputs(target, rows);
-            patterns = compile(language, sharedSiteExpressions(target), generated, false, inputs);
+            patterns = compile(language, sharedSiteExpressions(target), generated, false, inputs, rows);
         }
     }
 
@@ -344,6 +450,42 @@ public class BenchmarkPatternDispatch
         return data.patterns.iterate(data.inputs);
     }
 
+    /// Searches each row as a range that covers it.
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public int rangedFind(BenchmarkData data)
+    {
+        return data.patterns.rangedFind(data.inputs);
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public long findInto(BenchmarkData data)
+    {
+        return data.patterns.findInto(data.inputs);
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public long findResult(BenchmarkData data)
+    {
+        return data.patterns.findResult(data.inputs);
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public long replaceAll(BenchmarkData data)
+    {
+        return data.patterns.replaceAll(data.inputs);
+    }
+
+    @Benchmark
+    @OperationsPerInvocation(ROWS)
+    public long extract(BenchmarkData data)
+    {
+        return data.patterns.extract(data.inputs);
+    }
+
     /// Calls `find` of every pattern of [#sharedSiteExpressions(String)] on each row from one
     /// call site.
     @Benchmark
@@ -355,8 +497,9 @@ public class BenchmarkPatternDispatch
 
     /// Compiles `expressions` of `language`, the target first, in byte mode when `bytes` is set,
     /// and requires the target to have a generated class when `generated` is set and to find some
-    /// of `inputs` but not all. Only RE2 and Rust have a byte mode.
-    private static LanguagePatterns compile(String language, List<String> expressions, boolean generated, boolean bytes, Slice[] inputs)
+    /// of `inputs` but not all, or, on a line text, every row, except in LINES_ABSENT, which it
+    /// finds in none. Only RE2 and Rust have a byte mode.
+    private static LanguagePatterns compile(String language, List<String> expressions, boolean generated, boolean bytes, Slice[] inputs, String rows)
     {
         if (bytes && !language.equals("RE2") && !language.equals("RUST")) {
             throw new IllegalArgumentException(language + " has no byte mode for " + expressions.getFirst());
@@ -372,19 +515,101 @@ public class BenchmarkPatternDispatch
             throw new IllegalStateException("Pattern has no generated class: " + expressions.getFirst());
         }
         int hits = patterns.find(inputs);
-        if (hits == 0 || hits == inputs.length) {
+        if (isLineText(rows)) {
+            int expected = rows.equals("LINES_ABSENT") ? 0 : inputs.length;
+            if (hits != expected) {
+                throw new IllegalStateException(rows + " of " + expressions.getFirst() + " found " + hits + " of " + inputs.length + " rows, not " + expected);
+            }
+        }
+        else if (hits == 0 || hits == inputs.length) {
             throw new IllegalStateException("Rows of " + expressions.getFirst() + " do not mix find hits and misses: " + hits + " of " + inputs.length);
         }
         return patterns;
     }
 
-    private static Slice[] inputs(String target, String rows)
+    static Slice[] inputs(String target, String rows)
     {
+        if (isLineText(rows) && !target.equals("DOT_STAR_LITERAL")) {
+            throw new IllegalArgumentException(rows + " runs only DOT_STAR_LITERAL, not " + target);
+        }
         Slice[] inputs = new Slice[ROWS];
         for (int row = 0; row < ROWS; row++) {
-            inputs[row] = offsetInput(row(target, row, rows.equals("LONG")));
+            inputs[row] = offsetInput(isLineText(rows) ? lineText(rows, row) : row(target, row, rows.equals("LONG")));
         }
         return inputs;
+    }
+
+    private static boolean isLineText(String rows)
+    {
+        return rows.startsWith("LINES_");
+    }
+
+    // A match's span: its start in the high half and its end in the low half.
+    private static long span(int start, int end)
+    {
+        return ((long) start << 32) | (end & 0xFFFF_FFFFL);
+    }
+
+    private static long span(MatchResult result)
+    {
+        return result == null ? NO_SPAN : span(result.start(), result.end());
+    }
+
+    private static int spanStart(long span)
+    {
+        return (int) (span >>> 32);
+    }
+
+    private static int spanEnd(long span)
+    {
+        return (int) span;
+    }
+
+    private static long[] spans(RegexpMatcher matcher)
+    {
+        LongStream.Builder spans = LongStream.builder();
+        while (matcher.find()) {
+            spans.add(span(matcher.start(), matcher.end()));
+        }
+        return spans.build().toArray();
+    }
+
+    /// Returns what the loop of one-shot search `operation` adds to its result for `input`, whose
+    /// group-zero matches are `spans`: 1 for a match of `rangedFind`, the first match's start
+    /// plus its end for `findInto` and `findResult`, the length of the row without its matches for
+    /// `replaceAll`, and the first match's length for `extract`.
+    static long oneShotRowResult(String operation, Slice input, long[] spans)
+    {
+        if (operation.equals("replaceAll")) {
+            long removed = 0;
+            for (long span : spans) {
+                removed += spanEnd(span) - spanStart(span);
+            }
+            return input.length() - removed;
+        }
+        if (spans.length == 0) {
+            return 0;
+        }
+        long first = spans[0];
+        return switch (operation) {
+            case "rangedFind" -> 1;
+            case "findInto", "findResult" -> spanStart(first) + spanEnd(first);
+            case "extract" -> spanEnd(first) - spanStart(first);
+            default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+        };
+    }
+
+    // The row with each span removed, as `replaceAll` with the empty replacement leaves it.
+    private static Slice withoutSpans(Slice input, long[] spans)
+    {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        int position = 0;
+        for (long span : spans) {
+            output.writeBytes(input.getBytes(position, spanStart(span) - position));
+            position = spanEnd(span);
+        }
+        output.writeBytes(input.getBytes(position, input.length() - position));
+        return wrappedBuffer(output.toByteArray());
     }
 
     static List<String> targets()
@@ -474,7 +699,28 @@ public class BenchmarkPatternDispatch
 
         abstract long iterate(Slice[] inputs);
 
+        abstract int rangedFind(Slice[] inputs);
+
+        abstract long findInto(Slice[] inputs);
+
+        abstract long findResult(Slice[] inputs);
+
+        abstract long replaceAll(Slice[] inputs);
+
+        abstract long extract(Slice[] inputs);
+
         abstract int sharedSite(Slice[] inputs);
+
+        /// Returns the spans that the target's group-zero matcher finds in `input`, each with its
+        /// start in the high half and its end in the low half: the reference that setup checks
+        /// the one-shot searches against.
+        abstract long[] matcherSpans(Slice input);
+
+        /// Returns the result of the target's one-shot search `operation` on `input`: whether
+        /// `rangedFind` matches, the span that `findInto` or `findResult` reports, with its start
+        /// in the high half and its end in the low half, or the output of `replaceAll` or
+        /// `extract`.
+        abstract Object oneShotResult(String operation, Slice input);
 
         /// Runs `find`, `count`, `matches`, `lookingAt`, and a find loop of the pattern's matcher
         /// for shared-site pattern `patternIndex` on `input`, or only `find`, `count`, and the find
@@ -492,6 +738,8 @@ public class BenchmarkPatternDispatch
         final RegexpMatcher targetMatcher;
         // One group-zero matcher per pattern, reset to each row.
         final RegexpMatcher[] matchers;
+        // The group-zero buffer of `findInto`, reused for every row.
+        final int[] groupZero = new int[2];
 
         // In byte mode, patterns and inputs are Latin-1, so `(?s:.)` matches any byte.
         private Re2Patterns(List<String> expressions, boolean generated, boolean bytes)
@@ -574,6 +822,92 @@ public class BenchmarkPatternDispatch
         }
 
         @Override
+        int rangedFind(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.find(input, 0, input.length())) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long findInto(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            int[] groups = groupZero;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                if (pattern.findInto(input, groups)) {
+                    checksum += groups[0] + groups[1];
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long findResult(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                MatchResult result = pattern.findResult(input);
+                if (result != null) {
+                    checksum += result.start() + result.end();
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long replaceAll(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                checksum += pattern.replaceAll(input, EMPTY_REPLACEMENT).result().length();
+            }
+            return checksum;
+        }
+
+        @Override
+        long extract(Slice[] inputs)
+        {
+            Re2 pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                Slice extracted = pattern.extract(input, GROUP_ZERO_REWRITE);
+                if (extracted != null) {
+                    checksum += extracted.length();
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long[] matcherSpans(Slice input)
+        {
+            return spans(targetMatcher.reset(input));
+        }
+
+        @Override
+        Object oneShotResult(String operation, Slice input)
+        {
+            Re2 pattern = target;
+            return switch (operation) {
+                case "rangedFind" -> pattern.find(input, 0, input.length());
+                case "findInto" -> pattern.findInto(input, groupZero) ? span(groupZero[0], groupZero[1]) : NO_SPAN;
+                case "findResult" -> span(pattern.findResult(input));
+                case "replaceAll" -> pattern.replaceAll(input, EMPTY_REPLACEMENT).result();
+                case "extract" -> pattern.extract(input, GROUP_ZERO_REWRITE);
+                default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+            };
+        }
+
+        @Override
         int sharedSite(Slice[] inputs)
         {
             Re2[] patterns = this.patterns;
@@ -610,6 +944,8 @@ public class BenchmarkPatternDispatch
         final RegexpMatcher targetMatcher;
         // One group-zero matcher per pattern, reset to each row.
         final RegexpMatcher[] matchers;
+        // The group-zero buffer of `findInto`, reused for every row.
+        final int[] groupZero = new int[2];
 
         private JavaPatterns(List<String> expressions, boolean generated)
         {
@@ -691,6 +1027,77 @@ public class BenchmarkPatternDispatch
         }
 
         @Override
+        int rangedFind(Slice[] inputs)
+        {
+            JavaRegexp pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.find(input, 0, input.length())) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long findInto(Slice[] inputs)
+        {
+            JavaRegexp pattern = target;
+            int[] groups = groupZero;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                if (pattern.findInto(input, groups)) {
+                    checksum += groups[0] + groups[1];
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long findResult(Slice[] inputs)
+        {
+            JavaRegexp pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                MatchResult result = pattern.findResult(input);
+                if (result != null) {
+                    checksum += result.start() + result.end();
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long replaceAll(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Java has no replace operation");
+        }
+
+        @Override
+        long extract(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Java has no extract operation");
+        }
+
+        @Override
+        long[] matcherSpans(Slice input)
+        {
+            return spans(targetMatcher.reset(input));
+        }
+
+        @Override
+        Object oneShotResult(String operation, Slice input)
+        {
+            JavaRegexp pattern = target;
+            return switch (operation) {
+                case "rangedFind" -> pattern.find(input, 0, input.length());
+                case "findInto" -> pattern.findInto(input, groupZero) ? span(groupZero[0], groupZero[1]) : NO_SPAN;
+                case "findResult" -> span(pattern.findResult(input));
+                default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+            };
+        }
+
+        @Override
         int sharedSite(Slice[] inputs)
         {
             JavaRegexp[] patterns = this.patterns;
@@ -727,6 +1134,8 @@ public class BenchmarkPatternDispatch
         final RegexpMatcher targetMatcher;
         // One group-zero matcher per pattern, reset to each row.
         final RegexpMatcher[] matchers;
+        // The group-zero buffer of `findInto`, reused for every row.
+        final int[] groupZero = new int[2];
 
         // In byte mode, each expression compiles with the bytes API after `(?-u)`, with which
         // `(?s:.)` matches any byte rather than one UTF-8 character.
@@ -811,6 +1220,77 @@ public class BenchmarkPatternDispatch
         }
 
         @Override
+        int rangedFind(Slice[] inputs)
+        {
+            RustRegexp pattern = target;
+            int matches = 0;
+            for (Slice input : inputs) {
+                if (pattern.find(input, 0, input.length())) {
+                    matches++;
+                }
+            }
+            return matches;
+        }
+
+        @Override
+        long findInto(Slice[] inputs)
+        {
+            RustRegexp pattern = target;
+            int[] groups = groupZero;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                if (pattern.findInto(input, groups)) {
+                    checksum += groups[0] + groups[1];
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long findResult(Slice[] inputs)
+        {
+            RustRegexp pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                MatchResult result = pattern.findResult(input);
+                if (result != null) {
+                    checksum += result.start() + result.end();
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long replaceAll(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Rust has no replace operation");
+        }
+
+        @Override
+        long extract(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Rust has no extract operation");
+        }
+
+        @Override
+        long[] matcherSpans(Slice input)
+        {
+            return spans(targetMatcher.reset(input));
+        }
+
+        @Override
+        Object oneShotResult(String operation, Slice input)
+        {
+            RustRegexp pattern = target;
+            return switch (operation) {
+                case "rangedFind" -> pattern.find(input, 0, input.length());
+                case "findInto" -> pattern.findInto(input, groupZero) ? span(groupZero[0], groupZero[1]) : NO_SPAN;
+                case "findResult" -> span(pattern.findResult(input));
+                default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+            };
+        }
+
+        @Override
         int sharedSite(Slice[] inputs)
         {
             RustRegexp[] patterns = this.patterns;
@@ -840,7 +1320,9 @@ public class BenchmarkPatternDispatch
     }
 
     /// Trino patterns, whose `find` is `contains`. Trino has no whole-input or anchored-prefix
-    /// match, so `matches` and `lookingAt` throw.
+    /// match, so `matches` and `lookingAt` throw, and of the one-shot searches it has only
+    /// `replaceAll`, as `replace`, and `extract`, so `rangedFind`, `findInto`, and `findResult`
+    /// throw.
     static final class TrinoPatterns
             extends LanguagePatterns
     {
@@ -913,6 +1395,71 @@ public class BenchmarkPatternDispatch
                 }
             }
             return matches;
+        }
+
+        @Override
+        int rangedFind(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Trino has no range search");
+        }
+
+        @Override
+        long findInto(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Trino has no search into caller storage");
+        }
+
+        @Override
+        long findResult(Slice[] inputs)
+        {
+            throw new UnsupportedOperationException("Trino has no match result search");
+        }
+
+        @Override
+        long replaceAll(Slice[] inputs)
+        {
+            TrinoRegexp pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                checksum += pattern.replace(input, EMPTY_REPLACEMENT).length();
+            }
+            return checksum;
+        }
+
+        @Override
+        long extract(Slice[] inputs)
+        {
+            TrinoRegexp pattern = target;
+            long checksum = 0;
+            for (Slice input : inputs) {
+                Slice extracted = pattern.extract(input);
+                if (extracted != null) {
+                    checksum += extracted.length();
+                }
+            }
+            return checksum;
+        }
+
+        @Override
+        long[] matcherSpans(Slice input)
+        {
+            TrinoRegexpMatcher matcher = targetMatcher.reset(input);
+            LongStream.Builder spans = LongStream.builder();
+            while (matcher.find()) {
+                spans.add(span(matcher.start(), matcher.end()));
+            }
+            return spans.build().toArray();
+        }
+
+        @Override
+        Object oneShotResult(String operation, Slice input)
+        {
+            TrinoRegexp pattern = target;
+            return switch (operation) {
+                case "replaceAll" -> pattern.replace(input, EMPTY_REPLACEMENT);
+                case "extract" -> pattern.extract(input);
+                default -> throw new IllegalArgumentException("not a one-shot search: " + operation);
+            };
         }
 
         @Override
@@ -1150,6 +1697,48 @@ public class BenchmarkPatternDispatch
         String filler = filler(target);
         String padding = filler.repeat(length / filler.length() + 1).substring(0, length);
         return template.replace(PAD, longRow ? padding : "").getBytes(charset);
+    }
+
+    /// Returns row `row` of a line text, encoded as UTF-8, of at least [#LINE_TEXT_BYTES] bytes.
+    /// The lines of LINES_ABSENT, LINES_SPARSE, and LINES_DENSE each end in a line feed and take
+    /// words of [#LINE_WORDS] until they reach a target length of 40 to 120 bytes, so a line can
+    /// run a word longer. In LINES_ABSENT no line holds `timeout`; in LINES_SPARSE every 50th line
+    /// does, from line `row % 30`, which every row reaches; and in LINES_DENSE every odd line does.
+    /// LINES_SHORT_BEFORE_LITERAL is lines of one to eight bytes, each a word or its start and
+    /// each ending in a line feed, then one line with `timeout` and no line feed. A seed of the
+    /// row picks the words and lengths, so every run builds the same rows.
+    private static byte[] lineText(String rows, int row)
+    {
+        Random random = new Random(row);
+        StringBuilder text = new StringBuilder();
+        if (rows.equals("LINES_SHORT_BEFORE_LITERAL")) {
+            String last = "WARN connect timeout after " + row + "ms on the Baker Street host";
+            while (text.length() + last.length() < LINE_TEXT_BYTES) {
+                String word = LINE_WORDS.get(random.nextInt(LINE_WORDS.size()));
+                text.append(word, 0, Math.min(word.length(), 1 + random.nextInt(8))).append('\n');
+            }
+            return text.append(last).toString().getBytes(UTF_8);
+        }
+        for (int line = 0; text.length() < LINE_TEXT_BYTES; line++) {
+            boolean literal = switch (rows) {
+                case "LINES_ABSENT" -> false;
+                case "LINES_SPARSE" -> line % 50 == row % 30;
+                case "LINES_DENSE" -> line % 2 == 1;
+                default -> throw new IllegalArgumentException("unknown line text: " + rows);
+            };
+            int lineStart = text.length();
+            int lineEnd = lineStart + 40 + random.nextInt(81);
+            // The first four words of a line fit in fewer than 40 bytes, so every line has them.
+            int literalWord = literal ? random.nextInt(4) : -1;
+            for (int word = 0; text.length() < lineEnd; word++) {
+                if (word > 0) {
+                    text.append(' ');
+                }
+                text.append(word == literalWord ? "timeout" : LINE_WORDS.get(random.nextInt(LINE_WORDS.size())));
+            }
+            text.append('\n');
+        }
+        return text.toString().getBytes(UTF_8);
     }
 
     /// Returns the text that a LONG row of `target` repeats as its padding, one byte per

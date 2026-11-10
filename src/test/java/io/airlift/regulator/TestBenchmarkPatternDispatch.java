@@ -24,6 +24,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
 import static io.airlift.regulator.BenchmarkPatternDispatch.expression;
 import static io.airlift.regulator.BenchmarkPatternDispatch.sharedSiteTargets;
@@ -42,6 +44,7 @@ import static io.airlift.regulator.CompiledPattern.Shape.LITERAL_KERNEL;
 import static io.airlift.regulator.CompiledPattern.Shape.SCAN_PLAN;
 import static io.airlift.regulator.TestingPatternShapes.assertNoProgramSearch;
 import static io.airlift.regulator.TestingPatternShapes.shape;
+import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,6 +56,8 @@ public class TestBenchmarkPatternDispatch
     private static final Set<String> GENERATED_TARGETS = Set.of("ANCHORED_WWW_HOST", "UNANCHORED_URL", "UNANCHORED_SET");
     // The languages with the byte mode that ORDERED_LITERALS_BYTES compiles in.
     private static final Set<String> BYTE_LANGUAGES = Set.of("RE2", "RUST");
+    // The rows of DOT_STAR_LITERAL alone, in the benchmark's order.
+    private static final List<String> LINE_TEXTS = List.of("LINES_ABSENT", "LINES_SPARSE", "LINES_DENSE", "LINES_SHORT_BEFORE_LITERAL");
     // The pollution patterns, in the benchmark's order. Each has a generated class in every language.
     private static final List<String> POLLUTION = List.of(
             "^https?://[^/]+/",
@@ -126,6 +131,23 @@ public class TestBenchmarkPatternDispatch
                                 }
                                 assertNoProgramSearch(fresh, description);
                             }
+                            if (target.equals("DOT_STAR_LITERAL") && (reference instanceof Re2 || reference instanceof RustRegexp)) {
+                                // A fresh pattern shows that the one-shot searches over these rows
+                                // run the dot-star literal matcher and never the program.
+                                CompiledPattern fresh = (CompiledPattern) interpreted(language, expression(target));
+                                for (Slice input : data.inputs) {
+                                    boolean found = find(reference, input);
+                                    assertThat(fresh.find(input, 0, input.length())).as(description).isEqualTo(found);
+                                    assertThat(fresh.findInto(input, new int[2])).as(description).isEqualTo(found);
+                                    assertThat(fresh.findResult(input) != null).as(description).isEqualTo(found);
+                                    if (fresh instanceof Re2 re2) {
+                                        Re2 referenceRe2 = (Re2) reference;
+                                        assertThat(re2.replaceAll(input, EMPTY_SLICE).result()).as(description).isEqualTo(referenceRe2.replaceAll(input, EMPTY_SLICE).result());
+                                        assertThat(re2.extract(input, utf8Slice("\\0"))).as(description).isEqualTo(referenceRe2.extract(input, utf8Slice("\\0")));
+                                    }
+                                }
+                                assertNoProgramSearch(fresh, description);
+                            }
                             for (Slice input : data.inputs) {
                                 assertThat(input.byteArrayOffset()).as(description).isPositive();
                                 if (rows.equals("LONG")) {
@@ -135,33 +157,7 @@ public class TestBenchmarkPatternDispatch
                                     assertThat(input.length()).as(description).isBetween(16, 64);
                                 }
                             }
-
-                            int finds = 0;
-                            long count = 0;
-                            long iterated = 0;
-                            for (Slice input : data.inputs) {
-                                finds += find(reference, input) ? 1 : 0;
-                                count += count(reference, input);
-                                iterated += iterate(reference, input);
-                            }
-                            assertThat(benchmark.find(data)).as(description).isEqualTo(finds);
-                            assertThat(benchmark.count(data)).as(description).isEqualTo(count);
-                            assertThat(benchmark.iterate(data)).as(description).isEqualTo(iterated);
-                            if (reference instanceof CompiledPattern compiled) {
-                                int matches = 0;
-                                int lookingAt = 0;
-                                for (Slice input : data.inputs) {
-                                    matches += compiled.matches(input) ? 1 : 0;
-                                    lookingAt += compiled.lookingAt(input) ? 1 : 0;
-                                }
-                                assertThat(benchmark.matches(data)).as(description).isEqualTo(matches);
-                                assertThat(benchmark.lookingAt(data)).as(description).isEqualTo(lookingAt);
-                            }
-                            else {
-                                // Trino has no whole-input or anchored-prefix match.
-                                assertThatThrownBy(() -> benchmark.matches(data)).as(description).isInstanceOf(UnsupportedOperationException.class);
-                                assertThatThrownBy(() -> benchmark.lookingAt(data)).as(description).isInstanceOf(UnsupportedOperationException.class);
-                            }
+                            assertBenchmarkResults(benchmark, data, reference, description);
                         }
                         if (bytes) {
                             continue;
@@ -184,17 +180,137 @@ public class TestBenchmarkPatternDispatch
     }
 
     @Test
+    public void testLineTexts()
+    {
+        // The line texts of DOT_STAR_LITERAL are rows of about 4 KiB of lines that hold `timeout`
+        // in no line, in every 50th line from line `row % 30`, in every odd line, or only in a
+        // last line without a line feed, after lines of one to eight bytes. Every method's results
+        // are those of the interpreted pattern, and the line texts run only DOT_STAR_LITERAL, with
+        // `polluted=false`.
+        BenchmarkPatternDispatch benchmark = new BenchmarkPatternDispatch();
+        for (String rows : LINE_TEXTS) {
+            assertThatThrownBy(() -> data("RE2", "CONTAINS", rows, false, false))
+                    .as(rows)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("runs only DOT_STAR_LITERAL");
+            assertThatThrownBy(() -> data("RE2", "DOT_STAR_LITERAL", rows, true, false))
+                    .as(rows)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("no training rows");
+            Slice[] inputs = BenchmarkPatternDispatch.inputs("DOT_STAR_LITERAL", rows);
+            for (int row = 0; row < inputs.length; row++) {
+                String description = "%s row %s".formatted(rows, row);
+                String[] lines = inputs[row].toStringUtf8().split("\n");
+                assertThat(inputs[row].length()).as(description).isBetween(4096, 4096 + 160);
+                for (int line = 0; line < lines.length; line++) {
+                    boolean literal = switch (rows) {
+                        case "LINES_ABSENT" -> false;
+                        case "LINES_SPARSE" -> line % 50 == row % 30;
+                        case "LINES_DENSE" -> line % 2 == 1;
+                        default -> line == lines.length - 1;
+                    };
+                    assertThat(lines[line].contains("timeout")).as("%s line %s", description, line).isEqualTo(literal);
+                }
+                if (rows.equals("LINES_SHORT_BEFORE_LITERAL")) {
+                    assertThat(Arrays.stream(lines, 0, lines.length - 1)).as(description).allMatch(line -> !line.isEmpty() && line.length() <= 8);
+                }
+                else {
+                    assertThat(lines).as(description).allMatch(line -> line.length() >= 40 && line.length() <= 130);
+                }
+            }
+            for (String language : List.of("RE2", "JAVA", "RUST", "TRINO")) {
+                String description = "%s DOT_STAR_LITERAL %s".formatted(language, rows);
+                BenchmarkPatternDispatch.BenchmarkData data = data(language, "DOT_STAR_LITERAL", rows, false, false);
+                assertThat(benchmark.find(data)).as(description).isEqualTo(rows.equals("LINES_ABSENT") ? 0 : data.inputs.length);
+                assertBenchmarkResults(benchmark, data, interpreted(language, expression("DOT_STAR_LITERAL")), description);
+            }
+        }
+    }
+
+    /// Requires every method of the benchmark on `data` to return the results of `reference` on
+    /// its rows: `find`, `count`, `iterate`, the one-shot searches, and `matches` and
+    /// `lookingAt`, which throw in Trino.
+    private static void assertBenchmarkResults(BenchmarkPatternDispatch benchmark, BenchmarkPatternDispatch.BenchmarkData data, Object reference, String description)
+    {
+        int finds = 0;
+        long count = 0;
+        long iterated = 0;
+        for (Slice input : data.inputs) {
+            finds += find(reference, input) ? 1 : 0;
+            count += count(reference, input);
+            iterated += iterate(reference, input);
+        }
+        assertThat(benchmark.find(data)).as(description).isEqualTo(finds);
+        assertThat(benchmark.count(data)).as(description).isEqualTo(count);
+        assertThat(benchmark.iterate(data)).as(description).isEqualTo(iterated);
+        assertOneShotSearches(benchmark, data, reference, finds, description);
+        if (reference instanceof CompiledPattern compiled) {
+            int matches = 0;
+            int lookingAt = 0;
+            for (Slice input : data.inputs) {
+                matches += compiled.matches(input) ? 1 : 0;
+                lookingAt += compiled.lookingAt(input) ? 1 : 0;
+            }
+            assertThat(benchmark.matches(data)).as(description).isEqualTo(matches);
+            assertThat(benchmark.lookingAt(data)).as(description).isEqualTo(lookingAt);
+        }
+        else {
+            // Trino has no whole-input or anchored-prefix match.
+            assertThatThrownBy(() -> benchmark.matches(data)).as(description).isInstanceOf(UnsupportedOperationException.class);
+            assertThatThrownBy(() -> benchmark.lookingAt(data)).as(description).isInstanceOf(UnsupportedOperationException.class);
+        }
+    }
+
+    /// Requires each one-shot search of the benchmark, in the languages that have it, to return
+    /// the sum that the spans of `reference`'s find loop give, the `finds` rows that `find` of
+    /// `reference` matches for `rangedFind`, and to pass its setup check of each row's result,
+    /// and to throw in the others, whose setup check of it then throws too. Setup's check throws
+    /// for a name that is no benchmark method.
+    private static void assertOneShotSearches(BenchmarkPatternDispatch benchmark, BenchmarkPatternDispatch.BenchmarkData data, Object reference, int finds, String description)
+    {
+        assertThatThrownBy(() -> data.checkOneShotSearch("renamedFindInto")).as(description).isInstanceOf(IllegalArgumentException.class);
+        if (reference instanceof CompiledPattern) {
+            assertThat(benchmark.rangedFind(data)).as(description).isEqualTo(finds);
+            assertThat(benchmark.findInto(data)).as(description).isEqualTo(oneShotResult("findInto", data, reference));
+            assertThat(benchmark.findResult(data)).as(description).isEqualTo(oneShotResult("findResult", data, reference));
+            for (String operation : List.of("rangedFind", "findInto", "findResult")) {
+                data.checkOneShotSearch(operation);
+            }
+        }
+        else {
+            for (String operation : List.of("rangedFind", "findInto", "findResult")) {
+                assertThatThrownBy(() -> data.checkOneShotSearch(operation)).as("%s %s", description, operation).isInstanceOf(UnsupportedOperationException.class);
+            }
+        }
+        if (reference instanceof Re2 || reference instanceof TrinoRegexp) {
+            assertThat(benchmark.replaceAll(data)).as(description).isEqualTo(oneShotResult("replaceAll", data, reference));
+            assertThat(benchmark.extract(data)).as(description).isEqualTo(oneShotResult("extract", data, reference));
+            for (String operation : List.of("replaceAll", "extract")) {
+                data.checkOneShotSearch(operation);
+            }
+        }
+        else {
+            for (String operation : List.of("replaceAll", "extract")) {
+                assertThatThrownBy(() -> data.checkOneShotSearch(operation)).as("%s %s", description, operation).isInstanceOf(UnsupportedOperationException.class);
+            }
+        }
+    }
+
+    @Test
     public void testSharedSiteRunsEveryTarget()
             throws NoSuchFieldException
     {
         // JMH reads the parameters of each state from its own annotations, so the shared-site state
-        // repeats those of the benchmark data, all but `polluted` and the byte target, which is no
-        // pollution pattern.
-        for (String parameter : List.of("language", "rows", "generated")) {
+        // repeats those of the benchmark data, all but `polluted`, the byte target, which is no
+        // pollution pattern, and the line texts, which have no training rows.
+        for (String parameter : List.of("language", "generated")) {
             assertThat(parameterValues(BenchmarkPatternDispatch.SharedSiteData.class, parameter))
                     .as(parameter)
                     .containsExactly(parameterValues(BenchmarkPatternDispatch.BenchmarkData.class, parameter));
         }
+        assertThat(parameterValues(BenchmarkPatternDispatch.SharedSiteData.class, "rows")).containsExactly("SHORT", "LONG");
+        assertThat(parameterValues(BenchmarkPatternDispatch.BenchmarkData.class, "rows"))
+                .containsExactly(Stream.concat(Stream.of("SHORT", "LONG"), LINE_TEXTS.stream()).toArray(String[]::new));
         assertThat(sharedSiteTargets())
                 .containsExactlyElementsOf(targets().stream().filter(target -> !target.equals("ORDERED_LITERALS_BYTES")).toList());
     }
@@ -376,8 +492,45 @@ public class TestBenchmarkPatternDispatch
         };
     }
 
+    // The sum that the loop of one-shot search `operation` returns over `data`'s rows, from the
+    // spans of `reference`'s find loop.
+    private static long oneShotResult(String operation, BenchmarkPatternDispatch.BenchmarkData data, Object reference)
+    {
+        long result = 0;
+        for (Slice input : data.inputs) {
+            result += BenchmarkPatternDispatch.oneShotRowResult(operation, input, spans(reference, input));
+        }
+        return result;
+    }
+
+    // The spans of a find loop over the whole input, each with its start in the high half and its
+    // end in the low half: the generic group-zero matcher's, or a Trino pattern's matcher's.
+    private static long[] spans(Object pattern, Slice input)
+    {
+        LongStream.Builder spans = LongStream.builder();
+        switch (pattern) {
+            case CompiledPattern compiled -> {
+                RegexpMatcher matcher = compiled.genericGroupZeroMatcherForDiagnostics(input);
+                while (matcher.find()) {
+                    spans.add(((long) matcher.start() << 32) | matcher.end());
+                }
+            }
+            case TrinoRegexp trino -> {
+                TrinoRegexpMatcher matcher = trino.matcher(input, 0);
+                while (matcher.find()) {
+                    spans.add(((long) matcher.start() << 32) | matcher.end());
+                }
+            }
+            default -> throw new IllegalArgumentException("unhandled compiled pattern");
+        }
+        return spans.build().toArray();
+    }
+
     // The non-overlapping matches of a find loop over the whole input: the generic group-zero
-    // matcher's, or a Trino pattern's count.
+    // matcher's, whose finds of DOT_STAR_LITERAL in RE2 and Rust still take the dot-star literal
+    // matcher, as the benchmark's do, or a Trino pattern's count. A test that needs the engine's
+    // spans runs the pattern with its dots inside a capture instead, as TestPublicEngineAgreement
+    // does.
     private static long iterate(Object pattern, Slice input)
     {
         return switch (pattern) {

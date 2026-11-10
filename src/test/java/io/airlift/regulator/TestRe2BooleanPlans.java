@@ -234,9 +234,11 @@ public class TestRe2BooleanPlans
         Set<String> overrides = switch (expected) {
             case ENGINE -> throw new IllegalArgumentException("the engine shape has no shape class");
             case EXACT_LITERAL -> Set.of("find", "countMatches", "matches", "lookingAt");
-            // A literal kernel counts a dot-star literal's spans; Trino counts them on its own
-            // dot-star subtype, so its literal-kernel class counts on the engine.
-            case LITERAL_KERNEL -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "matches", "lookingAt") : Set.of("find", "countMatches", "matches", "lookingAt");
+            // A literal kernel counts a dot-star literal's spans and runs its unanchored one-shot
+            // searches and program calls on the dot-star literal matcher; Trino counts them on its
+            // own dot-star subtype, so its literal-kernel class counts and runs its searches and
+            // program calls on the engine.
+            case LITERAL_KERNEL -> pattern instanceof TrinoCompiledPattern ? Set.of("find", "matches", "lookingAt") : Set.of("find", "countMatches", "matches", "lookingAt", "matchInto", "matchInternal");
             case LITERAL_ALTERNATION, BYTE_TABLE -> Set.of("find", "countMatches");
             // Trino's fixed-width class overrides the program hook for every pattern, which runs
             // the matcher where the pattern compiled no program.
@@ -247,6 +249,7 @@ public class TestRe2BooleanPlans
         Set<String> routes = Set.of("find", "countMatches", "matches", "lookingAt");
         Set<String> declared = Arrays.stream(pattern.getClass().getDeclaredMethods())
                 .filter(method -> (routes.contains(method.getName()) && Arrays.equals(method.getParameterTypes(), new Class<?>[] {Slice.class})) ||
+                        (method.getName().equals("matchInto") && method.getParameterCount() == 8) ||
                         (method.getName().equals("matchInternal") && method.getParameterCount() == 9))
                 .map(Method::getName)
                 .collect(toSet());
