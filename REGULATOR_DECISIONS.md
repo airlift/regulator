@@ -4876,6 +4876,14 @@ Trino. Regulator does not follow these results of pinned Joni's tokenization:
 - the rewrite of an exact repeat such as `(?i)ß{2}`, which then matches `sßs`
 - the split of strings of mixed UTF-8 width: `(?i)aaİ` does not match its own
   text
+- the Greek letters with iota subscript, whose full fold is two or three
+  characters: the 54 with a case partner, U+1F80–1FAF, U+1FB3, U+1FBC, U+1FC3,
+  U+1FCC, U+1FF3, and U+1FFC, and the nine without one, U+1FB2, U+1FB4, U+1FB7,
+  U+1FC2, U+1FC4, U+1FC7, U+1FF2, U+1FF4, and U+1FF7; for U+1F80–1FAF, U+1FB2,
+  U+1FC2, and U+1FF2, pinned Joni's case-insensitive pattern matches only the
+  letter's full fold, so pinned `(?i)ᾀ` matches `ἀι` but neither `ᾀ` nor `ᾈ`,
+  and pinned Joni and modern Joni 2.2.9 both miss each of the 63 when a class
+  follows it, so in either Joni `(?i)ᾳ[0-9]` does not match `ᾳ5`
 
 These differences are separate from the Unicode-table difference above.
 

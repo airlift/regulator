@@ -37,6 +37,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.LongFunction;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static io.airlift.regulator.TestingPatternShapes.compileAtSmallestBudget;
@@ -982,6 +983,43 @@ public class TestTrinoRegexpLanguage
                 new String[] {"(?i)s(s)", "ß"},
                 new String[] {"(?i)s(?s)s|x", "ß"})) {
             assertNoMatchMatchesJoni(example[0], example[1]);
+        }
+    }
+
+    @Test
+    public void testIotaSubscriptLettersMatchCaseInsensitively()
+    {
+        // The Greek letters with iota subscript fold to two or three characters, ᾀ to ἀι. Pinned
+        // Joni's case-insensitive pattern for U+1F80-1FAF, U+1FB2, U+1FC2, and U+1FF2 matches only
+        // the full fold, and pinned and modern Joni both miss each letter followed by a class
+        // (TRINO_REGEXP.md, Other matching differences from Joni). Regulator matches each letter
+        // and its case partner as a literal, as an escape, before a class, and before another
+        // literal.
+        List<Integer> partnered = Stream.concat(
+                        IntStream.rangeClosed(0x1F80, 0x1FAF).boxed(),
+                        Stream.of(0x1FB3, 0x1FBC, 0x1FC3, 0x1FCC, 0x1FF3, 0x1FFC))
+                .toList();
+        List<Integer> unpartnered = List.of(0x1FB2, 0x1FB4, 0x1FB7, 0x1FC2, 0x1FC4, 0x1FC7, 0x1FF2, 0x1FF4, 0x1FF7);
+        for (int letter : Stream.concat(partnered.stream(), unpartnered.stream()).toList()) {
+            Set<Integer> partners = new TreeSet<>();
+            addCodePoints(partners, CaseFolding.TRINO.simpleFoldClass(letter));
+            partners.remove(letter);
+            assertThat(partners).as("case partners of U+%04X", letter).hasSize(partnered.contains(letter) ? 1 : 0);
+
+            String text = Character.toString(letter);
+            Map<String, String> suffixByPattern = Map.of(
+                    "(?i)" + text, "",
+                    String.format(Locale.ROOT, "(?i)\\x{%X}", letter), "",
+                    "(?i)" + text + "[0-9]", "5",
+                    "(?i)" + text + "x", "x");
+            for (int input : Stream.concat(Stream.of(letter), partners.stream()).toList()) {
+                for (Map.Entry<String, String> form : suffixByPattern.entrySet()) {
+                    String whole = Character.toString(input) + form.getValue();
+                    assertThat(TrinoRegexp.compile(utf8Slice(form.getKey())).extract(utf8Slice(whole)))
+                            .as("%s against %s", form.getKey(), whole.codePoints().mapToObj(codePoint -> String.format(Locale.ROOT, "U+%04X", codePoint)).toList())
+                            .isEqualTo(utf8Slice(whole));
+                }
+            }
         }
     }
 
