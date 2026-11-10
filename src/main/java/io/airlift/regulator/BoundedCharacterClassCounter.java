@@ -897,6 +897,30 @@ final class BoundedCharacterClassCounter
         return Dfa.SEARCH_NO_MATCH;
     }
 
+    /// The most members a match holds, the repeat's maximum, or `-1` where it has none.
+    int maximum()
+    {
+        return maximum;
+    }
+
+    /// Returns the number of members in `[start, end)`, a match this counter found in `input`,
+    /// with offsets from the start of `input`.
+    int countMembers(Slice input, int start, int end)
+    {
+        if (readsBytes) {
+            return end - start;
+        }
+        byte[] bytes = input.byteArray();
+        int position = input.byteArrayOffset() + start;
+        int limit = input.byteArrayOffset() + end;
+        int members = 0;
+        while (position < limit) {
+            position += Utf8.decodedWidth(decodeUtf8(bytes, position, limit));
+            members++;
+        }
+        return members;
+    }
+
     // Returns whether the region lies within `input` and `start` lies within the region.
     private static boolean isSearchRegion(Slice input, int contextStart, int contextEnd, int start)
     {

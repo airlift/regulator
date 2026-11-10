@@ -4713,16 +4713,18 @@ r9g and 0.47 to 0.49 on r8i.
 
 Two counters are instead built at compile time and charged against the pattern's
 memory budget. The compact counter serves a large Unicode class repeated many
-times, or repeated without a fixed count; it is charged against the forward
-budget, and a budget too small for it compiles the pattern's program instead, as
-for any other pattern. Compact count and boolean find can use it. The matcher
-counter serves a pattern that is one large Unicode class, such as `\pL` or
-`\p{Greek}`, or a greedy repeat of any class
-with a minimum of at least one, such as `\w+` or `[0-9]{2,3}`, except a repeat
-that RE2 or Trino case-folds; Java and Rust fold a class while parsing it, so
-theirs stay eligible. A pattern with a capture keeps the DFA, as on the compact
-route. The matcher counter is charged against the DFA budget before any DFA can
-snapshot it, and a budget too small for it keeps the DFA. Both counters find
+times, or repeated without a fixed count, and an
+[alternation of groups around runs of such a class](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures),
+whose captures its count decides; it is charged against the forward budget, and
+a budget too small for it compiles the pattern's program instead, as for any
+other pattern. Compact count and boolean find can use it. The matcher counter
+serves a pattern that is one large Unicode class, such as `\pL` or `\p{Greek}`,
+or a greedy repeat of any class with a minimum of at least one, such as `\w+` or
+`[0-9]{2,3}`, except a repeat that RE2 or Trino case-folds; Java and Rust fold a
+class while parsing it, so theirs stay eligible. A pattern with a capture keeps
+the DFA, as on the compact route, where only the class-run alternation decides
+captures. The matcher counter is charged against the DFA budget before any DFA
+can snapshot it, and a budget too small for it keeps the DFA. Both counters find
 group-zero matches for a matcher, which would otherwise restart the DFA at every
 match; the matcher counter cuts each run at the repeat's maximum, which gives
 the leftmost-first matches, and a repeat compiled for longest match keeps the

@@ -148,7 +148,8 @@ public final class RegexpMatcher
         // The table passed in is the pattern's own, and groupZeroSpanSearch() returns no span
         // search beside it or a class counter.
         this.spanSearch = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.groupZeroSpanSearch() : null;
-        this.characterClassCounter = capturingGroupCount == 0 && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
+        // The counter also finds the matches of a pattern whose captures it decides.
+        this.characterClassCounter = (capturingGroupCount == 0 || pattern.capturesOnClassRun()) && enableSpecializedGroupZeroRoutes ? pattern.classMatchCounter() : null;
         this.candidateStartCursor = capturingGroupCount == 0 && this.singleByteMatcher == null && spanSearch == null && characterClassCounter == null ? pattern.createCandidateStartCursor() : null;
         this.enableGroupZeroForwardCursor = enableSpecializedGroupZeroRoutes &&
                 characterClassCounter == null &&
@@ -438,6 +439,7 @@ public final class RegexpMatcher
             }
             groups[0] = (int) (span >>> 32);
             groups[1] = (int) span;
+            pattern.writeClassRunCaptures(input, regionStart, groups);
             setMatchAndAdvance(groups[0], groups[1]);
             return true;
         }
