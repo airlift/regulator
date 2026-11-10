@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestRebarRunner
 {
@@ -32,6 +33,13 @@ class TestRebarRunner
             throws Exception
     {
         assertCounts(run("compile", bytes("a+"), true, bytes("baaa ca")), 2, 2);
+        // A measurement that max-time cuts short still takes the minimum samples, and max-iters 0
+        // takes none.
+        assertCounts(run(input("compile", bytes("a+"), true, bytes("baaa ca"), 10, 0)), 2, 2, 2);
+        assertCounts(run(input("compile", bytes("a+"), true, bytes("baaa ca"), 0, 0)));
+        // With no warm-up and no samples, the settle run still compiles, so an invalid pattern fails.
+        assertThatThrownBy(() -> run(input("compile", bytes("("), true, bytes("a"), 0, Long.MAX_VALUE, 0, Long.MAX_VALUE)))
+                .isInstanceOf(RegexpParseException.class);
     }
 
     @Test
@@ -39,6 +47,22 @@ class TestRebarRunner
             throws Exception
     {
         assertCounts(run("count", bytes("a+"), true, bytes("baaa ca")), 2, 2);
+        // max-time 0 has passed after every sample, and Long.MAX_VALUE never passes, so these
+        // depend only on max-iters and the minimum of three samples.
+        assertCounts(run(input("count", bytes("a+"), true, bytes("baaa ca"), 10, 0)), 2, 2, 2);
+        assertCounts(run(input("count", bytes("a+"), true, bytes("baaa ca"), 2, 0)), 2, 2);
+        assertCounts(run(input("count", bytes("a+"), true, bytes("baaa ca"), 0, 0)));
+        assertCounts(run(input("count", bytes("a+"), true, bytes("baaa ca"), 5, Long.MAX_VALUE)), 2, 2, 2, 2, 2);
+    }
+
+    @Test
+    void testSettleRunFollowsWarmup()
+    {
+        // Each call returns its call number, so the first sample's count shows how many untimed
+        // calls came before it: the warm-up's, then exactly one settle call, whatever the limits.
+        assertThat(measuredCalls(2, Long.MAX_VALUE)).containsExactly(4L, 5L, 6L);
+        assertThat(measuredCalls(5, 0)).containsExactly(3L, 4L, 5L);
+        assertThat(measuredCalls(0, Long.MAX_VALUE)).containsExactly(2L, 3L, 4L);
     }
 
     @Test
@@ -221,25 +245,64 @@ class TestRebarRunner
         assertThat(Integer.parseInt(fields.get(19))).isNotNegative();
     }
 
+    /// Returns the counts of three samples of an operation that returns its call number.
+    private static List<Long> measuredCalls(long maximumWarmupIterations, long maximumWarmupTimeNanos)
+    {
+        RebarRunner.Benchmark benchmark = RebarRunner.Benchmark.read(
+                input("count", bytes("a"), true, bytes("a"), 3, 1_000_000_000, maximumWarmupIterations, maximumWarmupTimeNanos));
+        long[] calls = new long[1];
+        RebarRunner.Samples samples = RebarRunner.benchmarkOperation(benchmark, () -> ++calls[0]);
+
+        List<Long> counts = new ArrayList<>();
+        for (int index = 0; index < samples.size(); index++) {
+            counts.add(samples.count(index));
+        }
+        return counts;
+    }
+
     private static List<String> run(String model, byte[] pattern, boolean unicode, byte[] haystack)
             throws Exception
     {
+        return run(input(model, pattern, unicode, haystack));
+    }
+
+    private static List<String> run(byte[] input)
+            throws Exception
+    {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        RebarRunner.run(new ByteArrayInputStream(input(model, pattern, unicode, haystack)), output);
+        RebarRunner.run(new ByteArrayInputStream(input), output);
         return output.toString(StandardCharsets.US_ASCII).lines().toList();
     }
 
     private static byte[] input(String model, byte[] pattern, boolean unicode, byte[] haystack)
+    {
+        return input(model, pattern, unicode, haystack, 2, 1_000_000_000);
+    }
+
+    private static byte[] input(String model, byte[] pattern, boolean unicode, byte[] haystack, long maximumIterations, long maximumTimeNanos)
+    {
+        return input(model, pattern, unicode, haystack, maximumIterations, maximumTimeNanos, 1, 1_000_000_000);
+    }
+
+    private static byte[] input(
+            String model,
+            byte[] pattern,
+            boolean unicode,
+            byte[] haystack,
+            long maximumIterations,
+            long maximumTimeNanos,
+            long maximumWarmupIterations,
+            long maximumWarmupTimeNanos)
     {
         ByteArrayOutputStream input = new ByteArrayOutputStream();
         write(input, "name", bytes("test"));
         write(input, "model", bytes(model));
         write(input, "case-insensitive", bytes("false"));
         write(input, "unicode", bytes(Boolean.toString(unicode)));
-        write(input, "max-iters", bytes("2"));
-        write(input, "max-warmup-iters", bytes("1"));
-        write(input, "max-time", bytes("1000000000"));
-        write(input, "max-warmup-time", bytes("1000000000"));
+        write(input, "max-iters", bytes(Long.toString(maximumIterations)));
+        write(input, "max-warmup-iters", bytes(Long.toString(maximumWarmupIterations)));
+        write(input, "max-time", bytes(Long.toString(maximumTimeNanos)));
+        write(input, "max-warmup-time", bytes(Long.toString(maximumWarmupTimeNanos)));
         write(input, "pattern", pattern);
         write(input, "haystack", haystack);
         return input.toByteArray();
