@@ -115,6 +115,20 @@ code { font-family: var(--font-geist-mono, monospace); }
   letter-spacing: .08em;
   text-transform: uppercase;
 }
+.budget-pill {
+  display: inline-flex;
+  margin-left: 3px;
+  padding: 1px 6px;
+  border: 1px solid #4f7159;
+  border-radius: 9px;
+  background: #e4f0e4;
+  color: #28563a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
 .scan-header h1 {
   margin: 16px 0 7px;
   font-size: clamp(38px, 5vw, 62px);

@@ -54,7 +54,10 @@ template <typename Api>
 struct RustEngine {
     using Regex = typename Api::Regex;
 
-    static Regex compile(const Inputs& inputs) { return Regex(inputs.pattern, inputs.unicode, inputs.insensitive); }
+    // A row's memory budget sets the crate's compiled-size and lazy DFA cache limits.
+    static Regex compile(const Inputs& inputs) {
+        return Regex(inputs.pattern, inputs.unicode, inputs.insensitive, static_cast<size_t>(inputs.max_memory));
+    }
 
     // Both APIs parse the pattern as text, so check it before any timing.
     static void check(const Inputs& inputs) {

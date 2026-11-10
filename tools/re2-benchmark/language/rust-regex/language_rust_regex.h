@@ -27,7 +27,7 @@ typedef void (*LanguageRustMatchCallback)(void* context, const size_t* spans, si
 
 bool language_rust_regex_valid_utf8(const char* data, size_t length);
 LanguageRustRegex* language_rust_regex_compile(const char* pattern, size_t length, bool unicode, bool case_insensitive,
-                                               char** error);
+                                               size_t memory_limit, char** error);
 void language_rust_regex_free(LanguageRustRegex* regex);
 void language_rust_regex_free_error(char* error);
 LanguageRustCaptureLocations* language_rust_regex_capture_locations(const LanguageRustRegex* regex);
@@ -51,7 +51,7 @@ struct LanguageRustBytesRegex;
 struct LanguageRustBytesCaptureLocations;
 
 LanguageRustBytesRegex* language_rust_bytes_regex_compile(const char* pattern, size_t length, bool unicode,
-                                                          bool case_insensitive, char** error);
+                                                          bool case_insensitive, size_t memory_limit, char** error);
 void language_rust_bytes_regex_free(LanguageRustBytesRegex* regex);
 LanguageRustBytesCaptureLocations* language_rust_bytes_regex_capture_locations(const LanguageRustBytesRegex* regex);
 void language_rust_bytes_regex_free_capture_locations(LanguageRustBytesCaptureLocations* locations);
@@ -66,11 +66,13 @@ bool language_rust_bytes_regex_trace(const LanguageRustBytesRegex* regex, const 
 }
 
 namespace {
-template <typename Handle, Handle* (*Compile)(const char*, size_t, bool, bool, char**), void (*Free)(Handle*)>
+// A nonzero memory_limit is a benchmark row's budget in bytes for the crate's compiled-size and
+// lazy DFA cache limits; zero keeps the crate's defaults.
+template <typename Handle, Handle* (*Compile)(const char*, size_t, bool, bool, size_t, char**), void (*Free)(Handle*)>
 class BasicRustRegex {
 public:
-    BasicRustRegex(std::string_view pattern, bool unicode, bool case_insensitive)
-            : regex_(Compile(pattern.data(), pattern.size(), unicode, case_insensitive, &error_)) {}
+    BasicRustRegex(std::string_view pattern, bool unicode, bool case_insensitive, size_t memory_limit = 0)
+            : regex_(Compile(pattern.data(), pattern.size(), unicode, case_insensitive, memory_limit, &error_)) {}
     ~BasicRustRegex() {
         if (regex_ != nullptr) Free(regex_);
         if (error_ != nullptr) language_rust_regex_free_error(error_);

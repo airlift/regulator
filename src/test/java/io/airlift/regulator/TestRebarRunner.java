@@ -19,9 +19,14 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,7 +43,7 @@ class TestRebarRunner
         assertCounts(run(input("compile", bytes("a+"), true, bytes("baaa ca"), 10, 0)), 2, 2, 2);
         assertCounts(run(input("compile", bytes("a+"), true, bytes("baaa ca"), 0, 0)));
         // With no warm-up and no samples, the settle run still compiles, so an invalid pattern fails.
-        assertThatThrownBy(() -> run(input("compile", bytes("("), true, bytes("a"), 0, Long.MAX_VALUE, 0, Long.MAX_VALUE)))
+        assertThatThrownBy(() -> run(input("test", "compile", bytes("("), true, bytes("a"), 0, Long.MAX_VALUE, 0, Long.MAX_VALUE)))
                 .isInstanceOf(RegexpParseException.class);
     }
 
@@ -245,11 +250,77 @@ class TestRebarRunner
         assertThat(Integer.parseInt(fields.get(19))).isNotNegative();
     }
 
+    @Test
+    void testRebarBenchmarkRunsAtItsListedBudget()
+    {
+        // Rebar's input names no budget, so a benchmark the budget list names compiles at its RE2
+        // budget, and any other keeps no budget of its own, which is Regulator's default.
+        Function<String, RebarRunner.Benchmark> rebar = name -> RebarRunner.Benchmark.readRebar(
+                input(name, "count", bytes("a"), true, bytes("a"), 2, 1_000_000_000, 1, 1_000_000_000));
+        long budget = RebarRunner.memoryBudget("unicode/overlapping-words/english", "re2");
+        assertThat(budget).isPositive();
+        assertThat(rebar.apply("unicode/overlapping-words/english").maxMemory()).isEqualTo(budget);
+        assertThat(rebar.apply("unicode/overlapping-words/ascii").maxMemory()).isZero();
+        // A budget applies only in its languages: Trino compiles english-10 as a literal set. The
+        // compile sibling takes its row's budget.
+        assertThat(RebarRunner.memoryBudget("dictionary/search/english-10", "re2")).isPositive();
+        assertThat(RebarRunner.memoryBudget("dictionary/search/english-10", "trino")).isZero();
+        assertThat(RebarRunner.memoryBudget("dictionary/compile/english-10", "rust"))
+                .isEqualTo(RebarRunner.memoryBudget("dictionary/search/english-10", "rust"));
+    }
+
+    @Test
+    void testMemoryBudgetListParsesStrictly()
+    {
+        String header = "# A comment\nrow_id\tlanguages\tbudget_mib\n";
+        assertThat(RebarRunner.parseMemoryBudgets(header + "a\tre2,rust\t72\n# Another\nb\tjava\t8796093022207\n"))
+                .isEqualTo(Map.of("a", Map.of("re2", 72L << 20, "rust", 72L << 20), "b", Map.of("java", 8796093022207L << 20)));
+        // The same cases as mappings.py's loader test.
+        for (String rows : List.of(
+                "a\tre2\t96\n\nb\tre2\t96\n",
+                "a\tre2\t96\na\tjava\t96\n",
+                "a\tgo\t96\n",
+                "a\tre2,re2\t96\n",
+                "a\t\t96\n",
+                "a\tre2\n",
+                "a\tre2\t9_6\n",
+                "a\tre2\t 96\n",
+                "a\tre2\t96 \n",
+                "a\tre2\t0\n",
+                "a\tre2\t096\n",
+                "a\tre2\t17592186044416\n",
+                "a\tre2\t8796093022208\n",
+                "a\tre2\t96\r\n")) {
+            assertThatThrownBy(() -> RebarRunner.parseMemoryBudgets(header + rows)).as(rows)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageStartingWith("memory budget list line ");
+        }
+        assertThatThrownBy(() -> RebarRunner.parseMemoryBudgets("# A comment\na\tre2\t96\n"))
+                .hasMessageContaining("expected the header row");
+        assertThatThrownBy(() -> RebarRunner.parseMemoryBudgets("# A comment\n"))
+                .hasMessage("memory budget list has no header row");
+    }
+
+    @Test
+    void testRebarRunnerVersionPinsTheBudgetList()
+            throws Exception
+    {
+        byte[] list;
+        try (InputStream input = TestRebarRunner.class.getResourceAsStream("/io/airlift/regulator/benchmark-memory-budgets.tsv")) {
+            assertThat(input).isNotNull();
+            list = input.readAllBytes();
+        }
+        assertThat(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(list)))
+                .as("the memory budget list changed: copy it to Rebar's engines/regulator, bump its runner version (now %s), "
+                        + "then update this digest and version in RebarRunner", RebarRunner.REBAR_RUNNER_VERSION)
+                .isEqualTo(RebarRunner.MEMORY_BUDGETS_SHA256);
+    }
+
     /// Returns the counts of three samples of an operation that returns its call number.
     private static List<Long> measuredCalls(long maximumWarmupIterations, long maximumWarmupTimeNanos)
     {
         RebarRunner.Benchmark benchmark = RebarRunner.Benchmark.read(
-                input("count", bytes("a"), true, bytes("a"), 3, 1_000_000_000, maximumWarmupIterations, maximumWarmupTimeNanos));
+                input("test", "count", bytes("a"), true, bytes("a"), 3, 1_000_000_000, maximumWarmupIterations, maximumWarmupTimeNanos));
         long[] calls = new long[1];
         RebarRunner.Samples samples = RebarRunner.benchmarkOperation(benchmark, () -> ++calls[0]);
 
@@ -281,10 +352,11 @@ class TestRebarRunner
 
     private static byte[] input(String model, byte[] pattern, boolean unicode, byte[] haystack, long maximumIterations, long maximumTimeNanos)
     {
-        return input(model, pattern, unicode, haystack, maximumIterations, maximumTimeNanos, 1, 1_000_000_000);
+        return input("test", model, pattern, unicode, haystack, maximumIterations, maximumTimeNanos, 1, 1_000_000_000);
     }
 
     private static byte[] input(
+            String name,
             String model,
             byte[] pattern,
             boolean unicode,
@@ -295,7 +367,7 @@ class TestRebarRunner
             long maximumWarmupTimeNanos)
     {
         ByteArrayOutputStream input = new ByteArrayOutputStream();
-        write(input, "name", bytes("test"));
+        write(input, "name", bytes(name));
         write(input, "model", bytes(model));
         write(input, "case-insensitive", bytes("false"));
         write(input, "unicode", bytes(Boolean.toString(unicode)));

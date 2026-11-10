@@ -37,6 +37,8 @@ struct Inputs {
     std::string model;
     bool unicode;
     bool insensitive;
+    // The row's memory budget in bytes for comparators with a memory limit; 0 keeps their defaults.
+    int64_t max_memory;
 
     bool captures() const { return model == "count-captures" || model == "grep-captures"; }
 
@@ -80,11 +82,22 @@ Inputs read_inputs(const std::string& path) {
     for (const char* flag : {"unicode", "case-insensitive"}) {
         if (fields.at(flag) != "true" && fields.at(flag) != "false") throw std::runtime_error("invalid KLV flag");
     }
+    int64_t max_memory = 0;
+    if (auto budget = fields.find("max-memory"); budget != fields.end()) {
+        // Digits up to INT64_MAX, so std::stoll cannot overflow; equal-length digit strings compare numerically.
+        const std::string& text = budget->second;
+        if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos || text.size() > 19 ||
+                (text.size() == 19 && text > "9223372036854775807")) {
+            throw std::runtime_error("invalid KLV max-memory");
+        }
+        max_memory = std::stoll(text);
+        if (max_memory <= 0) throw std::runtime_error("invalid KLV max-memory");
+    }
     std::string model = fields.at("model");
     if (model != "compile" && model != "count" && model != "count-spans" && model != "count-captures" &&
             model != "grep" && model != "grep-captures") throw std::runtime_error("unknown model");
     return {fields.at("pattern"), fields.at("haystack"), model,
-            fields.at("unicode") == "true", fields.at("case-insensitive") == "true"};
+            fields.at("unicode") == "true", fields.at("case-insensitive") == "true", max_memory};
 }
 
 void write_group(std::string_view source, std::string_view value) {

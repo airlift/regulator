@@ -144,19 +144,30 @@ public class BenchmarkLanguageBulk
             if (input.unicode()) {
                 flags |= Pattern.UNICODE_CASE | Pattern.UNICODE_CHARACTER_CLASS;
             }
+            // A workload's budget applies to every Regulator language; the JDK and Joni have none.
+            long maxMemory = input.maxMemory();
             return switch (engine) {
                 case "re2" -> input.compile();
-                case "java" -> JavaRegexp.compile(patternBytes, JavaRegexp.Options.defaults()
-                        .setCaseInsensitive(input.caseInsensitive())
-                        .setUnicodeCase(input.unicode())
-                        .setUnicodeCharacterClasses(input.unicode())
-                        .setByteFrequencies(input.byteFrequencies()));
-                case "trino" -> TrinoRegexp.compile(patternBytes, TrinoRegexp.Options.defaults().setByteFrequencies(input.byteFrequencies()));
-                case "rust" -> RustRegexp.compile(patternBytes, RustRegexp.Options.defaults()
-                        .setCaseInsensitive(input.caseInsensitive())
-                        .setUnicode(input.unicode())
-                        .setBytes(rustBytes)
-                        .setByteFrequencies(input.byteFrequencies()));
+                case "java" -> {
+                    JavaRegexp.Options options = JavaRegexp.Options.defaults()
+                            .setCaseInsensitive(input.caseInsensitive())
+                            .setUnicodeCase(input.unicode())
+                            .setUnicodeCharacterClasses(input.unicode())
+                            .setByteFrequencies(input.byteFrequencies());
+                    yield JavaRegexp.compile(patternBytes, maxMemory == 0 ? options : options.setMaxMemory(maxMemory));
+                }
+                case "trino" -> {
+                    TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setByteFrequencies(input.byteFrequencies());
+                    yield TrinoRegexp.compile(patternBytes, maxMemory == 0 ? options : options.setMaxMemory(maxMemory));
+                }
+                case "rust" -> {
+                    RustRegexp.Options options = RustRegexp.Options.defaults()
+                            .setCaseInsensitive(input.caseInsensitive())
+                            .setUnicode(input.unicode())
+                            .setBytes(rustBytes)
+                            .setByteFrequencies(input.byteFrequencies());
+                    yield RustRegexp.compile(patternBytes, maxMemory == 0 ? options : options.setMaxMemory(maxMemory));
+                }
                 case "jdk" -> Pattern.compile(patternText, flags);
                 case "joni" -> new Regex(
                         patternBytes.byteArray(),

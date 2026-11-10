@@ -29,6 +29,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestLanguageBulkBenchmark
@@ -185,6 +186,33 @@ public class TestLanguageBulkBenchmark
         assertThatThrownBy(() -> read(input("count", "ex", "exex", "byte-frequencies", "latin")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unknown byte-frequency preset");
+    }
+
+    @Test
+    public void testMaxMemoryFieldSetsRegulatorBudget()
+            throws Exception
+    {
+        assertThat(read(input("count", "ex", "exex")).maxMemory()).isZero();
+        assertThat(read(input("count", "ex", "exex", "max-memory", Long.toString(72L << 20))).options().maxMemory()).isEqualTo(72L << 20);
+
+        // Two Unicode classes repeated 200 times compile within the default budget but not within 1 MiB.
+        Path workload = input("count", "(?:\\p{L}\\p{N}){200}", "a1", "max-memory", Long.toString(1L << 20));
+        for (String engine : ENGINES) {
+            var data = new BenchmarkLanguageBulk.BenchmarkData();
+            data.engine = engine;
+            data.workloadFile = workload.toString();
+            if (engine.equals("jdk") || engine.equals("joni")) {
+                assertThatCode(data::initialize).as(engine).doesNotThrowAnyException();
+            }
+            else {
+                assertThatThrownBy(data::initialize).as(engine)
+                        .isInstanceOf(RegexpCompileMemoryLimitException.class);
+            }
+        }
+
+        assertThatThrownBy(() -> read(input("count", "ex", "exex", "max-memory", "0")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("max-memory must be positive");
     }
 
     @Test

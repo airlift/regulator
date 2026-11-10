@@ -185,10 +185,10 @@ def selected_engines(manifest):
     return {language: engines for language, engines in ENGINES.items() if language in selected}
 
 
-def validate_manifest(manifest, directory, archived=False):
+def validate_manifest(manifest, directory, archived=False, recorded_budgets=False):
     if manifest.get("suite") == "language-bulk":
         import bulk
-        return bulk.validate_manifest(manifest, directory, archived)
+        return bulk.validate_manifest(manifest, directory, archived, recorded_budgets)
     if manifest["schema_version"] != 2 or not protocol_for(manifest):
         raise ValueError("unrecognized schema or unfrozen protocol")
     if (encode(manifest["languages"]) != encode(expected_languages(archived)) or
@@ -758,7 +758,8 @@ def export(directory, results, *, write=True, inputs=None):
             mode: measured_jvm_arguments(mode) for mode in MODES}:
         raise ValueError("release measurement lacks the frozen JVM memory protocol")
     manifest = load(directory / "manifest.json")
-    validate_manifest(manifest, inputs, has_release_1_0_languages(manifest))
+    # Saved evidence ran at the budgets its manifest recorded, which the budget list may since have changed.
+    validate_manifest(manifest, inputs, has_release_1_0_languages(manifest), recorded_budgets=True)
     evidence = load(results / "verification.json")
     validate_receipts(manifest, evidence["receipts"])
     if manifest.get("suite") == "language-bulk":

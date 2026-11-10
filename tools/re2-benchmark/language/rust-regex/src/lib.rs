@@ -43,7 +43,9 @@ pub unsafe extern "C" fn language_rust_regex_valid_utf8(data: *const u8, length:
     std::str::from_utf8(bytes(data, length)).is_ok()
 }
 
-/// Compiles with the builder settings of tools/rust-regex-golden. On failure returns null
+/// Compiles with the builder settings of tools/rust-regex-golden. A nonzero `memory_limit`
+/// sets both the compiled-size limit and the lazy DFA cache limit to that many bytes, as a
+/// benchmark row's memory budget; zero keeps the crate's defaults. On failure returns null
 /// and stores a message for `language_rust_regex_free_error`.
 #[no_mangle]
 pub unsafe extern "C" fn language_rust_regex_compile(
@@ -51,9 +53,15 @@ pub unsafe extern "C" fn language_rust_regex_compile(
     length: usize,
     unicode: bool,
     case_insensitive: bool,
+    memory_limit: usize,
     error: *mut *mut c_char,
 ) -> *mut Regex {
-    match RegexBuilder::new(text(pattern, length)).unicode(unicode).case_insensitive(case_insensitive).build() {
+    let mut builder = RegexBuilder::new(text(pattern, length));
+    builder.unicode(unicode).case_insensitive(case_insensitive);
+    if memory_limit != 0 {
+        builder.size_limit(memory_limit).dfa_size_limit(memory_limit);
+    }
+    match builder.build() {
         Ok(regex) => Box::into_raw(Box::new(regex)),
         Err(failure) => {
             *error = CString::new(failure.to_string().replace('\0', "\\0")).unwrap().into_raw();
@@ -234,18 +242,24 @@ pub unsafe extern "C" fn language_rust_regex_trace(
     true
 }
 
-/// Compiles for the bytes API with the same builder settings as `language_rust_regex_compile`.
-/// The pattern is still UTF-8 text. On failure returns null and stores a message for
-/// `language_rust_regex_free_error`.
+/// Compiles for the bytes API with the same builder settings and memory limit as
+/// `language_rust_regex_compile`. The pattern is still UTF-8 text. On failure returns null and
+/// stores a message for `language_rust_regex_free_error`.
 #[no_mangle]
 pub unsafe extern "C" fn language_rust_bytes_regex_compile(
     pattern: *const u8,
     length: usize,
     unicode: bool,
     case_insensitive: bool,
+    memory_limit: usize,
     error: *mut *mut c_char,
 ) -> *mut regex::bytes::Regex {
-    match regex::bytes::RegexBuilder::new(text(pattern, length)).unicode(unicode).case_insensitive(case_insensitive).build() {
+    let mut builder = regex::bytes::RegexBuilder::new(text(pattern, length));
+    builder.unicode(unicode).case_insensitive(case_insensitive);
+    if memory_limit != 0 {
+        builder.size_limit(memory_limit).dfa_size_limit(memory_limit);
+    }
+    match builder.build() {
         Ok(regex) => Box::into_raw(Box::new(regex)),
         Err(failure) => {
             *error = CString::new(failure.to_string().replace('\0', "\\0")).unwrap().into_raw();

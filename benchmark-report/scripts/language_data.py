@@ -194,6 +194,9 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
         })
         if descriptions[key].get('work_contract') is not None:
             rows[-1]['workContract'] = descriptions[key]['work_contract']
+        # A row that runs at its own budget runs every engine with a memory limit at it.
+        if mapping.get('max_memory_bytes') is not None:
+            rows[-1]['memoryBudgetBytes'] = mapping['max_memory_bytes']
     complete = {(manifest['suite'], case['id'], language)
                 for manifest in manifests for case in manifest['cases'] for language in case['mappings']}
     selected = complete if selection is None else set(map(tuple, selection))
@@ -309,6 +312,9 @@ def validate_language_report(data):
         for key in ('id', 'caseId', 'name', 'operation', 'model', 'population', 'family', 'source'):
             if not isinstance(row[key], str) or not row[key]:
                 raise ValueError(f'missing row {key}')
+        budget = row.get('memoryBudgetBytes')
+        if budget is not None and (type(budget) is not int or budget <= 0 or row['source'] != 'language'):
+            raise ValueError('invalid row memory budget')
         if 'workContract' in row:
             contracts = set()
             if row['source'].startswith('baseline') and language == 'trino' and row['operation'] in {'extractAll', 'split', 'replaceLambda'}:

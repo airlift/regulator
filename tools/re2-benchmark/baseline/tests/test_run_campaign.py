@@ -458,6 +458,7 @@ class TestRunCampaign(unittest.TestCase):
             # The candidate's generator writes its tables from a module beside it.
             candidate = self.commit(repository, {
                 "src/main/Engine.java": "final class Engine {}\n",
+                RUN_CAMPAIGN.MEMORY_BUDGET_LIST: "row_id\tlanguages\tbudget_mib\n",
                 f"{baseline}/neighbour.py": "TABLE = 'frozen'\n",
                 f"{baseline}/generate-units.py":
                     "import argparse, pathlib, neighbour\n"
@@ -518,11 +519,17 @@ class TestRunCampaign(unittest.TestCase):
                 RUN_CAMPAIGN.validate_source(repository, SimpleNamespace(**{**vars(arguments),
                                                                             "candidates": [("first", head)]}))
             # Hosts run the candidate's tooling while this checkout's checks their results, so the two must match.
-            (repository / baseline / "neighbour.py").write_text("TABLE = 'edited'\n")
-            with self.assertRaisesRegex(SystemExit, "requires committed benchmark tooling"):
-                RUN_CAMPAIGN.validate_source(repository, arguments)
-            self.commit(repository, {}, "Tooling")
-            with self.assertRaisesRegex(SystemExit, "other benchmark tooling"):
+            # The memory budget list decides how the language rows run, so it is tooling too.
+            for path, tooling in ((RUN_CAMPAIGN.MEMORY_BUDGET_LIST, RUN_CAMPAIGN.MEMORY_BUDGET_LIST),
+                                  (f"{baseline}/neighbour.py", RUN_CAMPAIGN.BENCHMARK_TOOLING)):
+                frozen_tooling = (repository / path).read_text()
+                (repository / path).write_text("edited\n")
+                with self.assertRaisesRegex(SystemExit, "requires committed benchmark tooling"):
+                    RUN_CAMPAIGN.validate_source(repository, arguments)
+                self.commit(repository, {}, "Tooling")
+                with self.assertRaisesRegex(SystemExit, f"other benchmark tooling.*whose {tooling} matches"):
+                    RUN_CAMPAIGN.validate_source(repository, arguments)
+                self.commit(repository, {path: frozen_tooling}, "Restore")
                 RUN_CAMPAIGN.validate_source(repository, arguments)
 
     def test_campaign_runs_every_candidates_phases_in_one_controller_as_their_steps_complete(self):

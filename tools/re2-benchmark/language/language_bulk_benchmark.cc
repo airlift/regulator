@@ -20,6 +20,8 @@ struct Re2Engine {
         RE2::Options options;
         options.set_encoding(inputs.unicode ? RE2::Options::EncodingUTF8 : RE2::Options::EncodingLatin1);
         options.set_case_sensitive(!inputs.insensitive);
+        // A row's memory budget replaces RE2's default max_mem.
+        if (inputs.max_memory != 0) options.set_max_mem(inputs.max_memory);
         return options;
     }
 

@@ -236,6 +236,10 @@ CAMPAIGN_ID_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}"
 CAMPAIGN_OPTIONS = "campaign-options.json"
 BENCHMARK_TOOLING = "tools/re2-benchmark"
 BASELINE_TOOLING = "tools/re2-benchmark/baseline"
+# The memory budget list lives with the Java runners' resources but decides how the language rows run, so the
+# campaign treats it as benchmark tooling.
+MEMORY_BUDGET_LIST = "src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv"
+TOOLING_PATHS = (BENCHMARK_TOOLING, MEMORY_BUDGET_LIST)
 # Every worker's instance profile, which exists in the account before any campaign, with the policy in
 # aws/worker-policy.json, and its user data, which the controller sends with the worker's settings.
 WORKER_PROFILE = "regulator-benchmark-worker"
@@ -903,13 +907,16 @@ def resolve_commit(root, commitish):
 
 def check_candidate_tooling(root, commit):
     """Hosts run the candidate archive's benchmark tooling while this checkout's copy checks their results, so the
-    two must be the same committed tree. The rest of this checkout may differ from the candidate."""
-    if check_output(["git", "status", "--porcelain", "--", BENCHMARK_TOOLING], cwd=root):
-        raise SystemExit(f"campaign execution requires committed benchmark tooling: {BENCHMARK_TOOLING} has changes")
-    if (check_output(["git", "rev-parse", f"{commit}:{BENCHMARK_TOOLING}"], cwd=root) !=
-            check_output(["git", "rev-parse", f"HEAD:{BENCHMARK_TOOLING}"], cwd=root)):
-        raise SystemExit(f"candidate {commit} has other benchmark tooling than this checkout's HEAD; run the campaign "
-                         "from a checkout whose tools/re2-benchmark matches the candidate's")
+    two must be the same committed tooling and memory budget list. The rest of this checkout may differ from the
+    candidate."""
+    if check_output(["git", "status", "--porcelain", "--", *TOOLING_PATHS], cwd=root):
+        raise SystemExit(f"campaign execution requires committed benchmark tooling: {' or '.join(TOOLING_PATHS)} "
+                         "has changes")
+    for path in TOOLING_PATHS:
+        if (check_output(["git", "rev-parse", f"{commit}:{path}"], cwd=root) !=
+                check_output(["git", "rev-parse", f"HEAD:{path}"], cwd=root)):
+            raise SystemExit(f"candidate {commit} has other benchmark tooling than this checkout's HEAD; run the "
+                             f"campaign from a checkout whose {path} matches the candidate's")
 
 
 def generate_candidate_tables(root, commit, output):
@@ -1123,7 +1130,7 @@ def validate_source(root, arguments):
 
 def tracked_tooling(root):
     """The benchmark tooling files Git tracks, which the frozen inputs and the tooling digest hash."""
-    return [root / path for path in check_output(["git", "ls-files", "tools/re2-benchmark"], cwd=root).splitlines()]
+    return [root / path for path in check_output(["git", "ls-files", "--", *TOOLING_PATHS], cwd=root).splitlines()]
 
 
 def tooling_digest(root):

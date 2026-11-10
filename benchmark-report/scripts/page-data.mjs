@@ -1,6 +1,7 @@
 // The publication JSON is evidence. These projections contain only what the UI reads.
 const rowFields = ["id", "caseId", "name", "operation", "model", "population", "family",
-  "language", "platform", "memoryMode", "inputBytes", "source", "comparator", "workContract", "variantGainWarnings"];
+  "language", "platform", "memoryMode", "inputBytes", "source", "comparator", "workContract", "variantGainWarnings",
+  "memoryBudgetBytes"];
 const resultFields = ["state", "reason", "candidateNs", "comparatorNs", "ratio", "minimumRatio",
   "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings", "estimator"];
 const pick = (value, fields) => Object.fromEntries(fields.filter(key => value[key] !== undefined).map(key => [key, value[key]]));

@@ -585,12 +585,14 @@ def duration_coverage(plan, units):
         f"{language} {covered} of {total} rows" for language, (covered, total) in sorted(counts.items()))
 
 
-def validate(directory):
+def validate(directory, recorded_budgets=False):
+    """Validate a plan and return it. Its source manifest's memory budgets are checked against the budget list, or,
+    with recorded_budgets, as a measured plan's export does, against the budgets the manifest recorded."""
     directory = directory.resolve()
     plan = collection.load(directory / "plan.json")
     source = directory / "source"
     manifest = collection.load(source / "manifest.json")
-    collection.validate_manifest(manifest, directory)
+    collection.validate_manifest(manifest, directory, recorded_budgets=recorded_budgets)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
@@ -721,7 +723,7 @@ def aggregate(directory, result_root, output):
     retained evidence, without rewriting it. The phase must have rejected no attempt for its semantics, a case's
     traces must agree across its partitions, and every attempt must have measured one candidate."""
     directory, result_root, output = directory.resolve(), result_root.resolve(), output.resolve()
-    plan = validate(directory)
+    plan = validate(directory, recorded_budgets=True)
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
     receipts = shard_receipts(plan, result_root)
@@ -747,7 +749,7 @@ def aggregate_partial(directory, result_root, output):
         raise ValueError(f"a partial fleet export's name must end in {PARTIAL_SUFFIX}")
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
-    plan = validate(directory)
+    plan = validate(directory, recorded_budgets=True)
     receipts = shard_receipts(plan, result_root)
     unit_session.check_semantic_rejections(result_root)
     campaign = campaign_units({directory: plan}, "primary")
