@@ -306,8 +306,10 @@ public class TestJavaRegexpDifferential
         // supplementary character, which the JDK reads as a lone low surrogate; a supplementary
         // mark after the boundary is read whole. Unicode character classes make every mark a word
         // character. None of these patterns matches inside a surrogate pair, which a bare \B does in
-        // the JDK and Regulator cannot.
+        // the JDK and Regulator cannot. With an ASCII character or a text edge on each side, \b is
+        // the ASCII word boundary, even with (?U); next to é or a mark it need not be.
         List<String> inputs = List.of(
+                " _1Az é e\u0301 ",
                 "a\u0301\u0301 b",
                 "1\u0301\u0301\u0301",
                 " \u0301\u0301a",

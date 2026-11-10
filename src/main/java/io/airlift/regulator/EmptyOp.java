@@ -171,7 +171,14 @@ final class EmptyOp
         // No program mixes Rust and Java assertions, so the Rust arm excludes both Java arms.
         if ((textDependentAssertions & (CODE_POINT_ASSERTIONS | RUST_ASSERTIONS)) != 0) {
             if ((textDependentAssertions & JAVA_WORD_BOUNDARIES) != 0) {
-                if (isCodePointBoundary(bytes, begin, end, position)) {
+                if (hasAsciiNeighbors(bytes, begin, end, position)) {
+                    boolean asciiBoundary = (flags & EMPTY_WORD_BOUNDARY) != 0;
+                    flags |= asciiBoundary ? EMPTY_JAVA_WORD_BOUNDARY : EMPTY_JAVA_NO_WORD_BOUNDARY;
+                    if ((textDependentAssertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
+                        flags |= asciiBoundary ? EMPTY_JAVA_UNICODE_WORD_BOUNDARY : EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
+                    }
+                }
+                else if (isCodePointBoundary(bytes, begin, end, position)) {
                     boolean javaBoundary = isJavaWordBoundary(bytes, begin, end, position, false, null);
                     flags |= javaBoundary ? EMPTY_JAVA_WORD_BOUNDARY : EMPTY_JAVA_NO_WORD_BOUNDARY;
                     if ((textDependentAssertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
@@ -182,12 +189,24 @@ final class EmptyOp
             else if ((textDependentAssertions & RUST_ASSERTIONS) != 0) {
                 flags |= rustContextFlags(bytes, begin, end, position, textDependentAssertions);
             }
+            else if (hasAsciiNeighbors(bytes, begin, end, position)) {
+                flags |= (flags & EMPTY_WORD_BOUNDARY) != 0 ? EMPTY_JAVA_UNICODE_WORD_BOUNDARY : EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
+            }
             else if (isCodePointBoundary(bytes, begin, end, position)) {
                 flags |= javaUnicodeWordBoundaryFlags(bytes, begin, end, position);
             }
         }
 
         return flags;
+    }
+
+    // An ASCII byte is a whole character and never a nonspacing mark, and Java's word characters,
+    // with or without (?U), are exactly [A-Za-z0-9_] in ASCII. So with an ASCII byte or a text edge
+    // on each side, Java's \b and \B take the word boundary bit the overload without assertions
+    // sets, as they do on the DFA.
+    private static boolean hasAsciiNeighbors(byte[] bytes, int begin, int end, int position)
+    {
+        return (position == begin || bytes[position - 1] >= 0) && (position == end || bytes[position] >= 0);
     }
 
     private static int javaUnicodeWordBoundaryFlags(byte[] bytes, int begin, int end, int position)
