@@ -17,6 +17,7 @@ import io.airlift.regulator.LiteralAlternationSpanMatcher.ExactMatcher;
 import io.airlift.regulator.LiteralAlternationSpanMatcher.FoldedMatcher;
 import io.airlift.regulator.ScanKernelGenerator.PatternRoutes;
 import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
+import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.lang.classfile.Attributes;
@@ -26,9 +27,11 @@ import java.lang.classfile.CodeModel;
 import java.lang.classfile.MethodModel;
 import java.lang.classfile.attribute.CodeAttribute;
 import java.lang.classfile.instruction.InvokeInstruction;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
 import java.util.List;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 import static io.airlift.regulator.TestScanKernel.classfile;
 import static io.airlift.regulator.TestScanKernel.patternClassfile;
@@ -245,6 +248,36 @@ public class TestHotMethodSize
                 .as("BoundedCharacterClassCounter.findSpan bytecode bytes")
                 .isPositive()
                 .isLessThanOrEqualTo(FREQ_INLINE_SIZE);
+    }
+
+    /// Keeps the dot-star literal matcher's span searches small enough for C2 to inline into the
+    /// literal-kernel searches and the group-zero matcher finds that call them, so the contains
+    /// search inlines beneath them.
+    @Test
+    public void testDotStarLiteralSpanSearchFitsInlineSize()
+    {
+        assertThat(codeLengths(DotStarLiteralSpanMatcher.class, "findSpan"))
+                .as("DotStarLiteralSpanMatcher.findSpan bytecode bytes")
+                .isNotEmpty()
+                .allSatisfy(length -> assertThat(length).isPositive().isLessThanOrEqualTo(FREQ_INLINE_SIZE));
+    }
+
+    /// Keeps each call from a one-shot matchInto to the contains search direct: each literal-kernel
+    /// override calls the overload of findSpan that takes the diagnostics, not the one that
+    /// forwards to it, and that overload calls the contains search itself. Each frame between a
+    /// public one-shot entry and the search's word reads costs C2 inline depth.
+    @Test
+    public void testOneShotDotStarLiteralCallsContainsSearchDirectly()
+    {
+        String findSpan = "findSpan" + MethodType.methodType(long.class, Slice.class, int.class, int.class, DotStarLiteralSpanMatcher.ScanDiagnostics.class).toMethodDescriptorString();
+        assertThat(calledOverloads(DotStarLiteralSpanMatcher.class, method -> overload(method).equals(findSpan), LiteralSearchKernel.class))
+                .as("LiteralSearchKernel methods DotStarLiteralSpanMatcher.%s calls", findSpan)
+                .anyMatch(call -> call.startsWith("findContains("));
+        for (Class<?> type : List.of(Re2.LiteralKernelRe2.class, JavaRegexp.LiteralKernelJavaRegexp.class, RustRegexp.LiteralKernelRustRegexp.class)) {
+            assertThat(calledOverloads(type, method -> method.methodName().equalsString("matchInto"), DotStarLiteralSpanMatcher.class))
+                    .as("DotStarLiteralSpanMatcher methods %s.matchInto calls", type.getSimpleName())
+                    .containsExactly(findSpan);
+        }
     }
 
     /// Keeps the prefix scan and the folded routes it takes small enough for C2 to inline into the
@@ -474,16 +507,36 @@ public class TestHotMethodSize
     // The names of the methods of `owner` that `methodName` of `type` calls.
     private static List<String> calledMethods(Class<?> type, String methodName, Class<?> owner)
     {
+        return invocations(type, model -> model.methodName().equalsString(methodName), owner)
+                .map(invoke -> invoke.name().stringValue())
+                .toList();
+    }
+
+    // The methods of `owner`, each as its name and descriptor, that the methods of `type` that
+    // `callers` accepts call.
+    private static List<String> calledOverloads(Class<?> type, Predicate<MethodModel> callers, Class<?> owner)
+    {
+        return invocations(type, callers, owner)
+                .map(invoke -> invoke.name().stringValue() + invoke.type().stringValue())
+                .toList();
+    }
+
+    private static Stream<InvokeInstruction> invocations(Class<?> type, Predicate<MethodModel> callers, Class<?> owner)
+    {
         String ownerName = owner.getName().replace('.', '/');
         return ClassFile.of().parse(classfile(type)).methods().stream()
-                .filter(model -> model.methodName().equalsString(methodName))
+                .filter(callers)
                 .flatMap(model -> model.code().stream())
                 .flatMap(CodeModel::elementStream)
                 .filter(InvokeInstruction.class::isInstance)
                 .map(InvokeInstruction.class::cast)
-                .filter(invoke -> invoke.owner().asInternalName().equals(ownerName))
-                .map(invoke -> invoke.name().stringValue())
-                .toList();
+                .filter(invoke -> invoke.owner().asInternalName().equals(ownerName));
+    }
+
+    // A method's name and descriptor.
+    private static String overload(MethodModel method)
+    {
+        return method.methodName().stringValue() + method.methodType().stringValue();
     }
 
     private static int codeLength(Class<?> type, String methodName)

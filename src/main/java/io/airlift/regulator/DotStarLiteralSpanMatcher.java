@@ -143,10 +143,15 @@ final class DotStarLiteralSpanMatcher
         return findSpan(input, start, end, requireNonNull(diagnostics, "diagnostics is null"));
     }
 
-    // A null `diagnostics`, as every production search passes, counts nothing.
-    private long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
+    /// Returns [#findSpan(Slice,int,int)], adding the vector scans its dots take to `diagnostics`
+    /// unless it is `null`, as every production search passes it. The literal-kernel searches
+    /// call this overload directly, which saves them the frame of the other, and it calls the
+    /// contains search itself rather than through `findLiteral`, to keep the search's word reads
+    /// within C2's inline depth below the public entries; see
+    /// [CompiledPattern#oneShotDotStarLiteral].
+    long findSpan(Slice input, int start, int end, ScanDiagnostics diagnostics)
     {
-        int literalStart = findLiteral(input, start, end);
+        int literalStart = search != null ? search.findContains(input, start, end - start) : findLiteral(input, start, end);
         if (literalStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }

@@ -1994,16 +1994,18 @@ existence semantics. APIs that accept a range, return boundaries or captures, or
 produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
 cascade when no scan plan applies, except on a Trino fixed-width pattern that
 compiled no program, whose every operation runs the [fixed-width
-matcher](#fixed-width-rare-class-candidates), and on a [large literal
+matcher](#fixed-width-rare-class-candidates), on a [large literal
 set](#large-literal-alternations) that compiled no program, whose every
-operation runs the automaton. A group-zero matcher of a one-byte
-pattern finds on the single-byte table in every language, Trino's included,
-while fewer than 64 bytes are left; a longer search runs the group-zero forward
-cursor, whose vector byte scan the table replaced, because the table, which
-reads every byte, lost on 1024-byte rows. A pattern with a scan plan takes no
-table, so its matchers keep the plan. Unsupported shapes, position-dependent
-assertions, and other unproven forms retain the ordinary path. Compilation
-builds the single-byte table; direct boolean calls allocate no matching storage.
+operation runs the automaton, and on a `.*literal.*` pattern in RE2, Java, and
+Rust, whose unanchored searches run the dot-star literal matcher below. A
+group-zero matcher of a one-byte pattern finds on the single-byte table in every
+language, Trino's included, while fewer than 64 bytes are left; a longer search
+runs the group-zero forward cursor, whose vector byte scan the table replaced,
+because the table, which reads every byte, lost on 1024-byte rows. A pattern
+with a scan plan takes no table, so its matchers keep the plan. Unsupported
+shapes, position-dependent assertions, and other unproven forms retain the
+ordinary path. Compilation builds the single-byte table; direct boolean calls
+allocate no matching storage.
 
 When the general engine would otherwise answer, full-Slice boolean `find` and
 count in RE2, Java, and Rust use the literal-alternation and fixed-width span
@@ -2027,31 +2029,51 @@ Compilation resolves the matcher; a pattern with a single-byte table or a class
 counter finds on that instead.
 
 The count of a `.*literal.*` pattern whose dots match any character but a line
-feed, and a group-zero `RegexpMatcher.find()` of it within the matcher's
-region, run the dot-star literal matcher in RE2, Java, and Rust, as Trino's
-dot-star subtype does for its span operations: the literal's first occurrence,
-found with the pattern's contains search, widened over the characters the dots
-match on each side. A count needs only each match's end, so it walks only the
-dots after each literal, and resumes there. Both walks step over ASCII other
-than a line feed without the width table, and a run with at least 64 bytes
-left with the vector scan the DFA count uses to leave a `[^\n]` loop. The dots
-read characters as the compiled byte ranges of `[^\n]` do, which depend only on
-the pattern's encoding, so compilation picks a table of character widths and the
-walk has no language branch. In UTF-8 the class holds all of U+0080 through
-U+10FFFF, whose byte ranges accept overlong three- and four-byte forms, encoded
-surrogates, and values above U+10FFFF, and reject bare continuation bytes, C0,
-C1, F5–FF, and cut-short sequences; RE2's Latin-1 option and Rust's bytes API
-with `(?-u)` read each byte as a character. Java's default dot also stops at
-`\r`, U+0085, U+2028, and U+2029, and Rust's Unicode dot in bytes mode at the
-surrogates, so the analysis takes neither for such a pattern; Java's `(?d)` dot
-is `[^\n]` and takes the matcher. The matcher reserves its own size from the
-forward-DFA budget after the contains search and, in every language, [yields to
-the forward DFAs](#memory-budgets-and-dfa-caching). Release 2.0's Trino dot-star
-subtype reserved nothing and was always built. So at the budgets where it would
-cost a DFA, Trino now runs `.*literal.*` on that DFA rather than the matcher.
-Trino's dot-star spans previously ended at any byte sequence that is not
-well-formed UTF-8; they now read malformed input as Trino's ordinary engine
-does, which its garbage-in, garbage-out contract leaves unspecified either way.
+feed, a group-zero `RegexpMatcher.find()` of it within the matcher's region,
+and its unanchored one-shot searches run the dot-star literal matcher in RE2,
+Java, and Rust, as Trino's dot-star subtype does for its span operations: the
+literal's first occurrence, found with the pattern's contains search, widened
+over the characters the dots match on each side. The one-shot searches are
+`find` of a range, `findInto`, `findResult`, and RE2's `replaceFirst` and
+`extract`, which the literal-kernel classes answer from their one-shot
+`matchInto`, above the engine hook, and RE2's `replaceAll`, whose loop reaches
+the matcher through the engine hook. An anchored call keeps the ordinary
+engine: a match from the call's start cannot cross the first line feed, past
+which the matcher would search on for the literal. An unanchored call makes no
+long-window check, which for such a pattern would never shorten the search: its
+find plan is the contains plan, only a pattern that finds on the general engine
+or a lowered program checks long windows for a required literal, and the
+matcher scans for the literal itself and stops at the region's end. The matcher
+calls the contains search itself, and `matchInto` calls the matcher. C2 limits
+inline depth below the method it compiles, and forwarding frames spend that
+depth. A caller that inlines the public entry spends part of it above the
+entry, and past the limit the search's word reads ran out of line, at 3.6 times
+the instructions per word.
+
+A count needs only each match's end, so it walks only the dots after each
+literal, and resumes there. Both walks step over ASCII other than a line feed
+without the width table, and a run with at least 64 bytes left with the vector
+scan the DFA count uses to leave a `[^\n]` loop.
+
+The dots read characters as the compiled byte ranges of `[^\n]` do, which
+depend only on the pattern's encoding, so compilation picks a table of
+character widths and the walk has no language branch. In UTF-8 the class holds
+all of U+0080 through U+10FFFF, whose byte ranges accept overlong three- and
+four-byte forms, encoded surrogates, and values above U+10FFFF, and reject bare
+continuation bytes, C0, C1, F5–FF, and cut-short sequences; RE2's Latin-1
+option and Rust's bytes API with `(?-u)` read each byte as a character. Java's
+default dot also stops at `\r`, U+0085, U+2028, and U+2029, and Rust's Unicode
+dot in bytes mode at the surrogates, so the analysis takes neither for such a
+pattern; Java's `(?d)` dot is `[^\n]` and takes the matcher.
+
+The matcher reserves its own size from the forward-DFA budget after the
+contains search and, in every language, [yields to the forward
+DFAs](#memory-budgets-and-dfa-caching). Release 2.0's Trino dot-star subtype
+reserved nothing and was always built. So at the budgets where it would cost a
+DFA, Trino now runs `.*literal.*` on that DFA rather than the matcher. Trino's
+dot-star spans previously ended at any byte sequence that is not well-formed
+UTF-8; they now read malformed input as Trino's ordinary engine does, which its
+garbage-in, garbage-out contract leaves unspecified either way.
 
 Full-Slice boolean `find` of literals in order with any bytes between them, such
 as RE2's `a\C*b\C*c`, `a(?s:.*)b(?s:.*)c` under RE2's Latin-1 option, or
