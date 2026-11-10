@@ -268,15 +268,6 @@ final class Compiler
         return requiredBudget(rejection, maxMemory, LongUnaryOperator.identity(), counted.orElseThrow().count() + (unanchored ? 3 : 1));
     }
 
-    /// Returns a lower bound on the least budget that passes the check `rejection` failed, from
-    /// what that check measured alone, or [#NO_BUDGET] where no budget passes it. The check was
-    /// given `programMemory` of a rejected budget, and `budgetForProgramMemory` turns program
-    /// memory into a budget as for [#requiredProgramBudget].
-    static long requiredMeasuredBudget(RegexpCompileMemoryLimitException rejection, long programMemory, LongUnaryOperator budgetForProgramMemory)
-    {
-        return requiredBudget(rejection, programMemory, budgetForProgramMemory, 0);
-    }
-
     /// Returns the exception a compile with `maxMemory` throws for `rejection`, reporting
     /// `requiredBudget`, a lower bound on the least budget the pattern compiles with by any
     /// route, or that no budget compiles it where it is [#NO_BUDGET]. A bound the rejected budget

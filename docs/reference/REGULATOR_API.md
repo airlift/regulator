@@ -233,9 +233,10 @@ bound in bytes, or an empty optional when there is none. No budget below that
 unrounded bound compiles the pattern by any route it can take, including the
 literal sets and fixed-width matchers some patterns compile to in place of a
 program. Where the check that failed measures what it needs, as for the
-flattened program, a long prefix's shift table, a compact class counter, a
-capture plan, or an `Re2Set`'s DFA, the unrounded bound is often the least
-budget that compiles. Where the instruction limit stopped compilation, it is
+flattened program, a long prefix's shift table, a capture plan, or an
+`Re2Set`'s DFA, the unrounded bound is often the least budget that compiles,
+and it covers a compact class counter where the counter would take the
+program's place. Where the instruction limit stopped compilation, it is
 counted from the instructions the pattern surely compiles to. A larger budget
 may still be needed, since a later step can need more than the step that failed,
 and the DFAs may need more to search at full speed without resetting their

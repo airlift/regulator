@@ -227,10 +227,32 @@ public class TestBoundedCharacterClassCounter
     @Test
     public void testClassCountersHonorMemoryLimit()
     {
-        // The bitset ends at the last letter: about 32 KB.
+        // The bitset ends at the last letter: about 32 KB. A budget too small for the compact
+        // counter compiles the program, and 256 letters do not fit that budget either.
         assertThatThrownBy(() -> Re2.compile(utf8Slice("\\p{L}{256}"), Re2.Options.defaults().setMaxMemory(32 * 1024)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
         assertThat(Re2.compile(utf8Slice("\\p{L}{256}"), Re2.Options.defaults().setMaxMemory(64 * 1024)).usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+
+        // A sparse class whose bitset reaches U+100000 costs more as a counter than as a program,
+        // so at 32 KiB the pattern compiles its program, which matches what the counter does.
+        Slice sparseHighRepeat = utf8Slice("[13579ACEGIKMOQSUWYacegikmoqsuwy\\x{100000}]{1,2}");
+        Slice text = utf8Slice("AAA 1x" + "\uDBC0\uDC00".repeat(3));
+        long smallBudget = 32 * 1024;
+        List<Routes> routes = List.of(
+                new Routes(Re2.compile(sparseHighRepeat, Re2.Options.defaults().setMaxMemory(smallBudget)), Re2.compile(sparseHighRepeat)),
+                new Routes(JavaRegexp.compile(sparseHighRepeat, JavaRegexp.Options.defaults().setMaxMemory(smallBudget)), JavaRegexp.compile(sparseHighRepeat)),
+                new Routes(RustRegexp.compile(sparseHighRepeat, RustRegexp.Options.defaults().setMaxMemory(smallBudget)), RustRegexp.compile(sparseHighRepeat)),
+                new Routes(TrinoRegexp.compile(sparseHighRepeat, TrinoRegexp.Options.defaults().setMaxMemory(smallBudget)).re2(), TrinoRegexp.compile(sparseHighRepeat).re2()));
+        for (Routes languageRoutes : routes) {
+            CompiledPattern program = languageRoutes.program();
+            CompiledPattern counter = languageRoutes.counter();
+            assertThat(program.usesCompactBoundedCharacterClassForDiagnostics()).isFalse();
+            assertThat(counter.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+            assertThat(spans(program.matcher(text, 0))).containsExactly(packSpan(0, 2), packSpan(2, 3), packSpan(4, 5), packSpan(6, 14), packSpan(14, 18));
+            assertThat(spans(counter.matcher(text, 0))).isEqualTo(spans(program.matcher(text, 0)));
+            assertThat(program.countMatches(text)).isEqualTo(5);
+            assertThat(counter.countMatches(text)).isEqualTo(5);
+        }
 
         // A single class's or a class repeat's counter takes its bytes from the DFA budget; a
         // budget too small for it keeps the engine.
@@ -1047,4 +1069,7 @@ public class TestBoundedCharacterClassCounter
         }
         return count;
     }
+
+    // One language's pattern compiled on its program and on its compact counter.
+    private record Routes(CompiledPattern program, CompiledPattern counter) {}
 }
