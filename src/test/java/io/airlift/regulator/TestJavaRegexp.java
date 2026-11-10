@@ -242,6 +242,18 @@ public class TestJavaRegexp
     }
 
     @Test
+    public void testWordBoundaryWalksEachMarkRunOnce()
+    {
+        // A nonspacing mark's base is the letter or digit before its run of marks, which every
+        // position inside the run shares, so \b reads back over the run only at its last mark.
+        int marks = 2048;
+        for (String prefix : List.of("", "a", " ")) {
+            Slice text = utf8Slice(prefix + "\u0301".repeat(marks) + " ".repeat(100));
+            assertThat(EmptyOp.javaBoundaryBaseStepsForDiagnostics(text)).as("prefix [%s]", prefix).isLessThan(4 * marks);
+        }
+    }
+
+    @Test
     public void testFinalTerminatorAnchorsRunOnOnePass()
     {
         // Java's $ and \Z read the line terminator after the position, which OnePass evaluates as
