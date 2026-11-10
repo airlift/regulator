@@ -701,20 +701,41 @@ abstract sealed class CompiledPattern
         return Compiler.withRequiredBudget(rejection, maxMemory, requiredBudget);
     }
 
+    /// Returns the expression the compact route reads for the pattern `entireRegexp`, or `null`
+    /// where the pattern keeps its program: a pattern with a capture, or one that compiles for
+    /// longest match.
+    private static Regexp compactRouteRegexp(Regexp entireRegexp, int capturingGroupCount, boolean longestMatch)
+    {
+        return capturingGroupCount == 0 && !longestMatch ? entireRegexp : null;
+    }
+
     /// Returns a lower bound on the least budget with which [#buildWithProgram] compiles the
     /// pattern `rejection` rejected with `maxMemory`, or [Compiler#NO_BUDGET] where no budget
-    /// does. The program it compiles is the suffix after a required literal prefix; a compact
-    /// pattern's counter, which it takes in place of a program, measured exactly what it needs.
+    /// does. The program it compiles is the suffix after a required literal prefix. A compact
+    /// pattern compiles its program only where its counter, which it takes in place of a
+    /// program, does not fit, so its bound is the lesser of the program's and exactly what the
+    /// counter needs.
     private static long requiredProgramBudget(RegexpCompileMemoryLimitException rejection, ParseResult parsed, long maxMemory, boolean longestMatch, Compiler.Dialect compilerDialect)
     {
         long forwardMemory = forwardMemory(maxMemory);
         Regexp entireRegexp = parsed.regexp();
-        if (parsed.capturingGroupCount() == 0 && !longestMatch && BoundedCharacterClassCounter.analyzeCompactRoute(entireRegexp) != null) {
-            return Compiler.requiredMeasuredBudget(rejection, forwardMemory, CompiledPattern::budgetForForwardMemory);
-        }
         Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix(parsed.caseFolding());
         Regexp programRegexp = prefixResult == null ? entireRegexp : prefixResult.suffix();
-        return Compiler.requiredProgramBudget(rejection, forwardMemory, CompiledPattern::budgetForForwardMemory, programRegexp, parsed.caseFolding(), compilerDialect);
+        long programBudget = Compiler.requiredProgramBudget(rejection, forwardMemory, CompiledPattern::budgetForForwardMemory, programRegexp, parsed.caseFolding(), compilerDialect);
+        Regexp compactRegexp = compactRouteRegexp(entireRegexp, parsed.capturingGroupCount(), longestMatch);
+        BoundedCharacterClassCounter compactBoundedCharacterClass = compactRegexp == null ? null : BoundedCharacterClassCounter.analyzeCompactRoute(compactRegexp);
+        if (compactBoundedCharacterClass == null) {
+            return programBudget;
+        }
+        return leastRequiredBudget(programBudget, budgetForForwardMemory(compactRouteMemory(compactBoundedCharacterClass)));
+    }
+
+    /// Returns the forward memory the compact route of `counter` needs: the counter shares the
+    /// forward budget with the placeholder program, a no-match that holds only the program's own
+    /// instructions.
+    private static long compactRouteMemory(BoundedCharacterClassCounter counter)
+    {
+        return counter.estimatedRetainedSize() + Compiler.unflattenedProgramMemory(Compiler.PROGRAM_INSTRUCTIONS);
     }
 
     /// Returns a lower bound on the least budget with which [#analyzeLiteralSetWithoutProgram]
@@ -859,18 +880,11 @@ abstract sealed class CompiledPattern
         Regexp entireRegexp = parsed.regexp();
         int capturingGroupCount = parsed.capturingGroupCount();
         CaseFolding caseFolding = parsed.caseFolding();
-        BoundedCharacterClassCounter compactBoundedCharacterClass = capturingGroupCount == 0 && !longestMatch
-                ? BoundedCharacterClassCounter.analyzeCompactRoute(entireRegexp)
-                : null;
-        if (compactBoundedCharacterClass != null) {
+        Regexp compactRegexp = compactRouteRegexp(entireRegexp, capturingGroupCount, longestMatch);
+        BoundedCharacterClassCounter compactBoundedCharacterClass = compactRegexp == null ? null : BoundedCharacterClassCounter.analyzeCompactRoute(compactRegexp);
+        // A budget too small for the counter compiles the program instead, as for any pattern.
+        if (compactBoundedCharacterClass != null && compactRouteMemory(compactBoundedCharacterClass) <= forwardMemory) {
             long counterMemory = compactBoundedCharacterClass.estimatedRetainedSize();
-            // The counter shares the forward budget with the placeholder program, a no-match that
-            // holds only the program's own instructions.
-            long placeholderMemory = Compiler.unflattenedProgramMemory(Compiler.PROGRAM_INSTRUCTIONS);
-            if (counterMemory > forwardMemory - placeholderMemory) {
-                throw new RegexpCompileMemoryLimitException(forwardMemory, counterMemory + placeholderMemory);
-            }
-
             ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp, caseFolding);
             long availableMemory = forwardMemory - counterMemory;
             Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory, compilerDialect, caseFolding);

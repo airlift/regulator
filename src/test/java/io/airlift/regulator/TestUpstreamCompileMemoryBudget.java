@@ -356,6 +356,7 @@ public class TestUpstreamCompileMemoryBudget
         String fruits = "apple|banana|cherry|durian|elderberry";
         String words = randomWords(65, 7);
         String dictionary = randomWords(3000, 11);
+        String sparseHighClass = "[13579ACEGIKMOQSUWYacegikmoqsuwy\\x{100000}]{1,2}";
         // Each pattern reports the same figure at every rejected budget listed, a figure whose
         // predecessor fails, and compiles first at the least budget. The literal sets and
         // matchers, the compact counter, and the sets' DFAs are charged for the objects they
@@ -386,8 +387,14 @@ public class TestUpstreamCompileMemoryBudget
                 new RejectedPattern(Language.RE2, nestedOptional, 1_422_533, 1_422_533, 800_000),
                 // The flattened program fits but leaves too little for a long prefix's shift table.
                 new RejectedPattern("long prefix", Language.RE2, "a".repeat(320) + "(?:(?:(?:(?:b?)*?){32})*?)+", 421_049, 421_049, 100_000, 419_093),
-                // A compact counter in place of a program measures exactly what it needs.
+                // A compact counter in place of a program measures exactly what it needs. A
+                // budget too small for the counter compiles the program, so a sparse class whose
+                // counter's bitset reaches U+100000 reports what its smaller program needs.
                 new RejectedPattern(Language.RE2, "\\p{L}{100,200}", 50_999, 50_999, 1, 8_000),
+                new RejectedPattern("sparse high class", Language.RE2, sparseHighClass, 16_067, 16_067, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.JAVA, sparseHighClass, 16_067, 16_067, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.RUST, sparseHighClass, 16_067, 16_067, 1, 2_000),
+                new RejectedPattern("sparse high class", Language.TRINO, sparseHighClass, 16_067, 16_067, 1, 2_000),
                 // The figure covers every route: the literal set that compiles without a program,
                 // and Trino's literal alternation, literal set and fixed-width matcher.
                 new RejectedPattern(Language.RE2, fruits, 8_147, 8_147, 1, 2_000),

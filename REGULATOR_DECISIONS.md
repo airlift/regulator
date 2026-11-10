@@ -4714,9 +4714,10 @@ r9g and 0.47 to 0.49 on r8i.
 Two counters are instead built at compile time and charged against the pattern's
 memory budget. The compact counter serves a large Unicode class repeated many
 times, or repeated without a fixed count; it is charged against the forward
-budget, and a budget too small for it fails compilation. Compact count and
-boolean find can use it. The matcher counter serves a pattern that is one large
-Unicode class, such as `\pL` or `\p{Greek}`, or a greedy repeat of any class
+budget, and a budget too small for it compiles the pattern's program instead, as
+for any other pattern. Compact count and boolean find can use it. The matcher
+counter serves a pattern that is one large Unicode class, such as `\pL` or
+`\p{Greek}`, or a greedy repeat of any class
 with a minimum of at least one, such as `\w+` or `[0-9]{2,3}`, except a repeat
 that RE2 or Trino case-folds; Java and Rust fold a class while parsing it, so
 theirs stay eligible. A pattern with a capture keeps the DFA, as on the compact
