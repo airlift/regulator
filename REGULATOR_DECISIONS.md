@@ -706,23 +706,24 @@ text, so the pair scan rejects little that a first-byte scan would not.
   the default does not shape ordinary patterns. It sets the worst case an
   operator plans around, and the earlier 96 MiB default let a hostile or
   accidental pattern hold three times as much.
-- At 32 MiB every published benchmark row still compiles, and only these rows
-  need more to keep their speed. Benchmarks run them at a budget of their own,
+- At 32 MiB every published benchmark row still compiles, and only
+  `curated/10-bounded-repeat/context` needs more to keep its speed: it fills
+  about 30 MB of DFA states, and slows at 72 MiB and below, 15 to 21 times at
+  32 MiB. Benchmarks run it and its compile sibling at a budget of their own,
   for every engine with a memory limit, as
   [Memory budgets](docs/benchmarks/METHODOLOGY.md#memory-budgets) describes.
-  - `curated/10-bounded-repeat/context` fills about 30 MB of DFA states. It
-    slows at 72 MiB and below, 15 to 21 times at 32 MiB.
 
   `unicode/overlapping-words` english and russian run at each engine's
   default, comparators included: the class-run counter decides their captures,
   as [Class-run alternation
   captures](docs/reference/OPTIMIZATION_CATALOG.md#class-run-alternation-captures)
   describes, so the pattern compiles no program and retains about 34 KB.
-  Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
-  `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
-  RE2, Java, and Rust `dictionary/search/english-10` keep their program from
+  RE2, Java, and Rust `dictionary/search/english-10` and its compile sibling
+  run at the default too, comparators included: they keep their program from
   about 24 MiB, so at 32 MiB they take the same route and retain the same
   bytes as at 96 MiB.
+  Every other published row runs at 32 MiB as at 96 MiB on r9g and r8i,
+  `url/search` included (0.997x on r9g and 0.999x on r8i in Trino safe mode).
 - BitState's anchored text limit falls with the forward share: from 105–210 KB
   to 52–105 KB for small capture programs such as `(a+)(b+)` and `(?:(a)|a)*`,
   and by more for larger ones, `[0-9]+.(.*)` from 161 KB to 44 KB. A capture

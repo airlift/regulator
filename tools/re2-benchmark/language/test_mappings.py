@@ -82,15 +82,18 @@ class TestMappings(unittest.TestCase):
         for identity, (_, languages) in mappings.MEMORY_BUDGETS_MIB.items():
             self.assertIn(identity, rows)
             self.assertLessEqual(set(languages), set(collection.ENGINES))
-        self.assertEqual(mappings.memory_budget("dictionary/search/english-10", "rust"),
-                         mappings.MEMORY_BUDGETS_MIB["dictionary/search/english-10"][0] << 20)
-        self.assertIsNone(mappings.memory_budget("dictionary/search/english-10", "trino"))
+        self.assertEqual(mappings.memory_budget("curated/10-bounded-repeat/context", "rust"),
+                         mappings.MEMORY_BUDGETS_MIB["curated/10-bounded-repeat/context"][0] << 20)
+        self.assertIsNone(mappings.memory_budget("dictionary/search/english-10", "rust"))
         self.assertIsNone(mappings.memory_budget("unicode/overlapping-words/ascii", "re2"))
+        # A budget applies only in its languages.
+        with mock.patch.dict(mappings.MEMORY_BUDGETS_MIB, {"example": (96, ("re2",))}):
+            self.assertEqual(mappings.memory_budget("example", "re2"), 96 << 20)
+            self.assertIsNone(mappings.memory_budget("example", "trino"))
 
     def test_memory_budget_list_parses_strictly(self):
         # The shipped list loads under these rules, and each budgeted row's compile sibling is listed with it.
         budgets = mappings.load_memory_budgets()
-        self.assertEqual(budgets["dictionary/compile/english-10"], budgets["dictionary/search/english-10"])
         self.assertEqual(budgets["curated/10-bounded-repeat/compile-context"], budgets["curated/10-bounded-repeat/context"])
         header = "# A comment\nrow_id\tlanguages\tbudget_mib\n"
         self.assertEqual(mappings.parse_memory_budgets(header + "a\tre2,rust\t72\n# Another\nb\tjava\t8796093022207\n"),

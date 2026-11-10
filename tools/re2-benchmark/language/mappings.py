@@ -45,8 +45,8 @@ RUST_LIFECYCLE_CASES = {
     "everyday/whitespace": rb"\s+",
 }
 # The memory budget list: rows that run at a budget of their own, each with its languages. A listed row's input
-# carries the budget for its comparators too. Trino takes the same literal-set route for english-10 at 32 and
-# 96 MiB, so it needs no budget there. The Regulator Rebar runner reads the same list by Rebar benchmark name.
+# carries the budget for its comparators too. The Regulator Rebar runner reads the same list by Rebar benchmark
+# name.
 MEMORY_BUDGETS_FILE = collection.ROOT / "src/test/resources/io/airlift/regulator/benchmark-memory-budgets.tsv"
 MEMORY_BUDGETS_HEADER = "row_id\tlanguages\tbudget_mib"
 

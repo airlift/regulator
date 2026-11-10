@@ -170,28 +170,30 @@ class TestBulkEvidence(unittest.TestCase):
             bulk.validate_manifest(self.manifest, self.directory)
 
     def test_budgeted_row_carries_its_budget_to_every_listed_language(self):
-        # The search row and its compile sibling run at one budget.
-        for identity, model in (("dictionary/compile/english-10", "compile"), ("dictionary/search/english-10", "count")):
-            directory = self.root / model
-            manifest = prepare_manifest(identity, b"a", directory, models=(model,))
-            bulk.validate_manifest(manifest, directory)
-            bulk.validate_manifest(manifest, directory, recorded_budgets=True)
-            budgets = {}
-            for language, mapping in manifest["cases"][0]["mappings"].items():
-                fields = bulk.rebar_inventory.decode_klv((directory / mapping["input_file"]).read_bytes())
-                budgets[language] = (mapping["status"], mapping.get("max_memory_bytes"), fields.get("max-memory"))
-            budget = bulk.mappings.MEMORY_BUDGETS_MIB[identity][0] << 20
-            self.assertEqual(budgets, {"re2": ("identical", budget, [str(budget).encode()]),
-                                       "java": ("identical", budget, [str(budget).encode()]),
-                                       "trino": ("identical", None, None),
-                                       "rust": ("identical", budget, [str(budget).encode()])})
-        mapping = manifest["cases"][0]["mappings"]["java"]
-        mapping["max_memory_bytes"] = 72 << 20
-        with self.assertRaisesRegex(ValueError, "memory budget"):
-            bulk.validate_manifest(manifest, directory)
-        # Saved evidence keeps the budget its mapping recorded, which its input must carry.
-        with self.assertRaisesRegex(ValueError, "declared translation"):
-            bulk.validate_manifest(manifest, directory, recorded_budgets=True)
+        # The search row and its compile sibling run at one budget, in the languages the list names.
+        listed = dict.fromkeys(("example/compile", "example/search"), (96, ("re2", "java", "rust")))
+        with patch.dict(mappings.MEMORY_BUDGETS_MIB, listed):
+            for identity, model in (("example/compile", "compile"), ("example/search", "count")):
+                directory = self.root / model
+                manifest = prepare_manifest(identity, b"a", directory, models=(model,))
+                bulk.validate_manifest(manifest, directory)
+                bulk.validate_manifest(manifest, directory, recorded_budgets=True)
+                budgets = {}
+                for language, mapping in manifest["cases"][0]["mappings"].items():
+                    fields = bulk.rebar_inventory.decode_klv((directory / mapping["input_file"]).read_bytes())
+                    budgets[language] = (mapping["status"], mapping.get("max_memory_bytes"), fields.get("max-memory"))
+                budget = mappings.MEMORY_BUDGETS_MIB[identity][0] << 20
+                self.assertEqual(budgets, {"re2": ("identical", budget, [str(budget).encode()]),
+                                           "java": ("identical", budget, [str(budget).encode()]),
+                                           "trino": ("identical", None, None),
+                                           "rust": ("identical", budget, [str(budget).encode()])})
+            mapping = manifest["cases"][0]["mappings"]["java"]
+            mapping["max_memory_bytes"] = 72 << 20
+            with self.assertRaisesRegex(ValueError, "memory budget"):
+                bulk.validate_manifest(manifest, directory)
+            # Saved evidence keeps the budget its mapping recorded, which its input must carry.
+            with self.assertRaisesRegex(ValueError, "declared translation"):
+                bulk.validate_manifest(manifest, directory, recorded_budgets=True)
         # A row without a budget runs from its source bytes.
         self.assertNotIn("max_memory_bytes", self.manifest["cases"][0]["mappings"]["java"])
         # Only the budget list sets a budget, so a source input that names one is rejected.
@@ -314,7 +316,7 @@ class TestBulkEvidence(unittest.TestCase):
         self.directory = self.root / "before-budgets"
         budgets = patch.dict(mappings.MEMORY_BUDGETS_MIB, clear=True)
         with budgets:
-            self.manifest = prepare_manifest("dictionary/search/english-10", b"a", self.directory)
+            self.manifest = prepare_manifest("curated/10-bounded-repeat/context", b"a", self.directory)
 
         def verified(command, prefix, engine, mode, *, hash_trace=False):
             output = b"2:61,61\n" if hash_trace else b"2\n"
