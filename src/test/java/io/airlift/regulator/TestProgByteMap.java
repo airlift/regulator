@@ -32,12 +32,12 @@ public class TestProgByteMap
     {
         Prog prog = new Prog();
 
-        Prog.Inst r0 = Prog.Inst.createByteRange(0x00, 0x09, false, 3);
-        Prog.Inst r1 = Prog.Inst.createByteRange(0x0B, 0xFF, false, 3);
-        r1.setLast();
+        long r0 = Prog.byteRangeWord(0x00, 0x09, false, 3);
+        long r1 = Prog.byteRangeWord(0x0B, 0xFF, false, 3);
+        r1 = Prog.withInstLast(r1);
         prog.add(r0); // 1
         prog.add(r1); // 2
-        prog.add(Prog.Inst.createMatch(0)); // 3
+        prog.add(Prog.matchWord(0)); // 3
 
         prog.computeByteMap();
 
@@ -52,14 +52,14 @@ public class TestProgByteMap
     {
         Prog prog = new Prog();
 
-        Prog.Inst digits = Prog.Inst.createByteRange(0x30, 0x39, false, 4);
-        Prog.Inst upper = Prog.Inst.createByteRange(0x41, 0x46, false, 4);
-        Prog.Inst lower = Prog.Inst.createByteRange(0x61, 0x66, false, 4);
-        lower.setLast();
+        long digits = Prog.byteRangeWord(0x30, 0x39, false, 4);
+        long upper = Prog.byteRangeWord(0x41, 0x46, false, 4);
+        long lower = Prog.byteRangeWord(0x61, 0x66, false, 4);
+        lower = Prog.withInstLast(lower);
         prog.add(digits); // 1
         prog.add(upper);  // 2
         prog.add(lower);  // 3
-        prog.add(Prog.Inst.createMatch(0)); // 4
+        prog.add(Prog.matchWord(0)); // 4
 
         prog.computeByteMap();
 
@@ -77,7 +77,7 @@ public class TestProgByteMap
     public void testWordBoundaryByteClasses()
     {
         Prog prog = new Prog();
-        prog.add(Prog.Inst.createEmptyWidth(EmptyOp.EMPTY_WORD_BOUNDARY, 0));
+        prog.add(Prog.emptyWidthWord(EmptyOp.EMPTY_WORD_BOUNDARY, 0));
 
         prog.computeByteMap();
 
@@ -98,12 +98,12 @@ public class TestProgByteMap
     {
         Prog prog = new Prog();
 
-        Prog.Inst r0 = Prog.Inst.createByteRange(0x00, 0x5E, false, 3);
-        Prog.Inst r1 = Prog.Inst.createByteRange(0x60, 0xFF, false, 3);
-        r1.setLast();
+        long r0 = Prog.byteRangeWord(0x00, 0x5E, false, 3);
+        long r1 = Prog.byteRangeWord(0x60, 0xFF, false, 3);
+        r1 = Prog.withInstLast(r1);
         prog.add(r0);
         prog.add(r1);
-        prog.add(Prog.Inst.createMatch(0));
+        prog.add(Prog.matchWord(0));
 
         prog.computeByteMap();
 
@@ -119,27 +119,27 @@ public class TestProgByteMap
         Prog prog = new Prog();
 
         // Batch 1: ASCII except newline.
-        Prog.Inst ascii0 = Prog.Inst.createByteRange(0x00, 0x09, false, 99);
-        Prog.Inst ascii1 = Prog.Inst.createByteRange(0x0B, 0x7F, false, 99);
-        ascii1.setLast();
+        long ascii0 = Prog.byteRangeWord(0x00, 0x09, false, 99);
+        long ascii1 = Prog.byteRangeWord(0x0B, 0x7F, false, 99);
+        ascii1 = Prog.withInstLast(ascii1);
         prog.add(ascii0);
         prog.add(ascii1);
 
         // Batch 2+: The key UTF-8 lead/continuation byte ranges.
-        Prog.Inst cont = Prog.Inst.createByteRange(0x80, 0xBF, false, 98);
-        cont.setLast();
+        long cont = Prog.byteRangeWord(0x80, 0xBF, false, 98);
+        cont = Prog.withInstLast(cont);
         prog.add(cont);
 
-        Prog.Inst lead2 = Prog.Inst.createByteRange(0xC2, 0xDF, false, 97);
-        lead2.setLast();
+        long lead2 = Prog.byteRangeWord(0xC2, 0xDF, false, 97);
+        lead2 = Prog.withInstLast(lead2);
         prog.add(lead2);
 
-        Prog.Inst lead3 = Prog.Inst.createByteRange(0xE0, 0xEF, false, 96);
-        lead3.setLast();
+        long lead3 = Prog.byteRangeWord(0xE0, 0xEF, false, 96);
+        lead3 = Prog.withInstLast(lead3);
         prog.add(lead3);
 
-        Prog.Inst lead4 = Prog.Inst.createByteRange(0xF0, 0xF4, false, 95);
-        lead4.setLast();
+        long lead4 = Prog.byteRangeWord(0xF0, 0xF4, false, 95);
+        lead4 = Prog.withInstLast(lead4);
         prog.add(lead4);
 
         prog.computeByteMap();

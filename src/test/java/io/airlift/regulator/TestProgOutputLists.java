@@ -57,7 +57,7 @@ public class TestProgOutputLists
         Arrays.fill(lists, -1);
         int listCount = 0;
         for (int id = 0; id < prog.size(); id++) {
-            if (id == 0 || prog.inst(id - 1).last()) {
+            if (id == 0 || Prog.instLast(prog.word(id - 1))) {
                 lists[id] = listCount++;
             }
         }
@@ -70,10 +70,10 @@ public class TestProgOutputLists
         assertThat(outputLists).hasSize(prog.size());
         assertThat(prog.startList()).isEqualTo(lists[prog.start()]).isNotNegative();
         for (int id = 0; id < prog.size(); id++) {
-            Prog.Inst instruction = prog.inst(id);
-            int expected = switch (instruction.opcode()) {
+            long instruction = prog.word(id);
+            int expected = switch (Prog.instOpcode(instruction)) {
                 case BYTE_RANGE, CAPTURE, EMPTY_WIDTH, NOP -> {
-                    int list = lists[instruction.out()];
+                    int list = lists[Prog.instOut(instruction)];
                     assertThat(list).as("instruction %s", id).isNotNegative();
                     yield list;
                 }

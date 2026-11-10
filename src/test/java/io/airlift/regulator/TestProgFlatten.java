@@ -27,10 +27,10 @@ public class TestProgFlatten
     {
         Prog prog = new Prog();
 
-        prog.add(Prog.Inst.createAlt(2, 3));                    // 1
-        prog.add(Prog.Inst.createByteRange(0x61, 0x61, false, 4)); // 2
-        prog.add(Prog.Inst.createByteRange(0x63, 0x63, false, 4)); // 3
-        prog.add(Prog.Inst.createMatch(0));                     // 4
+        prog.add(Prog.altWord(2, 3));                    // 1
+        prog.add(Prog.byteRangeWord(0x61, 0x61, false, 4)); // 2
+        prog.add(Prog.byteRangeWord(0x63, 0x63, false, 4)); // 3
+        prog.add(Prog.matchWord(0));                     // 4
 
         prog.setStartUnanchored(1);
         prog.setStart(1);
@@ -51,12 +51,12 @@ public class TestProgFlatten
         // Build a program manually to test instruction counting.
         Prog prog = new Prog();
 
-        prog.add(Prog.Inst.createAlt(2, 3));                        // 1 - ALT
-        prog.add(Prog.Inst.createByteRange(0x61, 0x61, false, 4));  // 2 - BYTE_RANGE
-        prog.add(Prog.Inst.createByteRange(0x62, 0x62, false, 5));  // 3 - BYTE_RANGE
-        prog.add(Prog.Inst.createCapture(0, 6));                    // 4 - CAPTURE
-        prog.add(Prog.Inst.createEmptyWidth(EmptyOp.EMPTY_BEGIN_TEXT, 6)); // 5 - EMPTY_WIDTH
-        prog.add(Prog.Inst.createMatch(0));                         // 6 - MATCH
+        prog.add(Prog.altWord(2, 3));                        // 1 - ALT
+        prog.add(Prog.byteRangeWord(0x61, 0x61, false, 4));  // 2 - BYTE_RANGE
+        prog.add(Prog.byteRangeWord(0x62, 0x62, false, 5));  // 3 - BYTE_RANGE
+        prog.add(Prog.captureWord(0, 6));                    // 4 - CAPTURE
+        prog.add(Prog.emptyWidthWord(EmptyOp.EMPTY_BEGIN_TEXT, 6)); // 5 - EMPTY_WIDTH
+        prog.add(Prog.matchWord(0));                         // 6 - MATCH
 
         prog.setStartUnanchored(1);
         prog.setStart(1);
@@ -106,14 +106,14 @@ public class TestProgFlatten
         for (String pattern : patterns) {
             Prog program = Re2.compile(utf8Slice(pattern)).forwardProgramForDiagnostics();
             for (int id = 0; id < program.size(); id++) {
-                Prog.Inst instruction = program.inst(id);
-                if (instruction.opcode() != InstOp.BYTE_RANGE) {
+                long instruction = program.word(id);
+                if (Prog.instOpcode(instruction) != InstOp.BYTE_RANGE) {
                     continue;
                 }
-                assertThat(instruction.hint()).as("%s instruction %s", pattern, id).isEqualTo(referenceHint(program, id));
-                if (instruction.hint() != 0) {
+                assertThat(Prog.instHint(instruction)).as("%s instruction %s", pattern, id).isEqualTo(referenceHint(program, id));
+                if (Prog.instHint(instruction) != 0) {
                     hints++;
-                    if (instruction.foldCase()) {
+                    if (Prog.instFoldCase(instruction)) {
                         foldCaseHints++;
                     }
                 }
@@ -131,21 +131,21 @@ public class TestProgFlatten
     private static int referenceHint(Prog program, int id)
     {
         int end = id;
-        while (!program.inst(end).last()) {
+        while (!Prog.instLast(program.word(end))) {
             end++;
         }
         end++;
         int runEnd = id + 1;
-        while (runEnd < end && program.inst(runEnd).opcode() == InstOp.BYTE_RANGE) {
+        while (runEnd < end && Prog.instOpcode(program.word(runEnd)) == InstOp.BYTE_RANGE) {
             runEnd++;
         }
         int first = end;
         for (int value = 0; value < 256; value++) {
-            if (!matchesByte(program.inst(id), value)) {
+            if (!matchesByte(program.word(id), value)) {
                 continue;
             }
             int next = id + 1;
-            while (next < runEnd && !matchesByte(program.inst(next), value)) {
+            while (next < runEnd && !matchesByte(program.word(next), value)) {
                 next++;
             }
             first = Math.min(first, next);
@@ -153,14 +153,14 @@ public class TestProgFlatten
         return first == end ? 0 : Math.min(first - id, 32767);
     }
 
-    private static boolean matchesByte(Prog.Inst instruction, int value)
+    private static boolean matchesByte(long instruction, int value)
     {
-        if (instruction.lo() <= value && value <= instruction.hi()) {
+        if (Prog.instLo(instruction) <= value && value <= Prog.instHi(instruction)) {
             return true;
         }
-        if (instruction.foldCase() && value >= 'A' && value <= 'Z') {
+        if (Prog.instFoldCase(instruction) && value >= 'A' && value <= 'Z') {
             int lower = value + ('a' - 'A');
-            return instruction.lo() <= lower && lower <= instruction.hi();
+            return Prog.instLo(instruction) <= lower && lower <= Prog.instHi(instruction);
         }
         return false;
     }

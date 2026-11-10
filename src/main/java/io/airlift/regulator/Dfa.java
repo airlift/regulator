@@ -9337,22 +9337,22 @@ final class Dfa
                     continue;
                 }
 
-                Prog.Inst instruction = prog.inst(id);
-                InstOp op = instruction.opcode();
+                long instruction = prog.word(id);
+                InstOp op = Prog.instOpcode(instruction);
 
                 if (op == InstOp.ALT_MATCH &&
                         kind != Kind.MANY_MATCH &&
-                        (kind != Kind.FIRST_MATCH || (isFirstEntry && instruction.greedy(prog))) &&
+                        (kind != Kind.FIRST_MATCH || (isFirstEntry && prog.greedyAltMatch(instruction))) &&
                         (kind != Kind.LONGEST_MATCH || !sawMark) &&
                         (flag & FLAG_MATCH) != 0) {
                     return FULL_MATCH_DATA;
                 }
 
                 if (op == InstOp.EMPTY_WIDTH) {
-                    needflags |= dfaEmptyFlags(instruction.empty());
+                    needflags |= dfaEmptyFlags(Prog.instEmpty(instruction));
                 }
 
-                if (id > 0 && prog.inst(id - 1).last()) {
+                if (id > 0 && Prog.instLast(prog.word(id - 1))) {
                     inst[n++] = id;
                 }
 
@@ -9396,9 +9396,9 @@ final class Dfa
                 for (int it = 0; it < mq.size(); it++) {
                     int id = mq.denseAt(it);
                     if (!mq.isMark(id)) {
-                        Prog.Inst instruction = prog.inst(id);
-                        if (instruction.opcode() == InstOp.MATCH) {
-                            inst[n++] = instruction.matchId();
+                        long instruction = prog.word(id);
+                        if (Prog.instOpcode(instruction) == InstOp.MATCH) {
+                            inst[n++] = Prog.instMatchId(instruction);
                         }
                     }
                 }
@@ -9800,42 +9800,42 @@ final class Dfa
                     }
                     q.insertNew(id);
 
-                    Prog.Inst instruction = prog.inst(id);
-                    InstOp op = instruction.opcode();
+                    long instruction = prog.word(id);
+                    InstOp op = Prog.instOpcode(instruction);
                     switch (op) {
                         case BYTE_RANGE, MATCH -> {
-                            if (!instruction.last()) {
+                            if (!Prog.instLast(instruction)) {
                                 id = id + 1;
                                 continue;
                             }
                         }
                         case CAPTURE, NOP -> {
-                            if (!instruction.last()) {
+                            if (!Prog.instLast(instruction)) {
                                 stack[stackPointer++] = id + 1;
                             }
                             if (op == InstOp.NOP && q.maxmark() > 0 &&
                                     id == prog.startUnanchored() && id != prog.start()) {
                                 stack[stackPointer++] = Mark;
                             }
-                            id = instruction.out();
+                            id = Prog.instOut(instruction);
                             continue;
                         }
                         case EMPTY_WIDTH -> {
-                            if (!instruction.last()) {
+                            if (!Prog.instLast(instruction)) {
                                 stack[stackPointer++] = id + 1;
                             }
-                            if ((dfaEmptyFlags(instruction.empty()) & ~flag) != 0) {
+                            if ((dfaEmptyFlags(Prog.instEmpty(instruction)) & ~flag) != 0) {
                                 break;
                             }
-                            id = instruction.out();
+                            id = Prog.instOut(instruction);
                             continue;
                         }
                         case ALT -> {
-                            if (!instruction.last()) {
+                            if (!Prog.instLast(instruction)) {
                                 stack[stackPointer++] = id + 1;
                             }
-                            stack[stackPointer++] = instruction.out1();
-                            id = instruction.out();
+                            stack[stackPointer++] = Prog.instOut1(instruction);
+                            id = Prog.instOut(instruction);
                             continue;
                         }
                         case ALT_MATCH -> {
@@ -9843,7 +9843,7 @@ final class Dfa
                             continue;
                         }
                         case FAIL -> {
-                            if (!instruction.last()) {
+                            if (!Prog.instLast(instruction)) {
                                 stack[stackPointer++] = id + 1;
                             }
                         }
@@ -9881,22 +9881,22 @@ final class Dfa
                     continue;
                 }
 
-                Prog.Inst instruction = prog.inst(id);
-                switch (instruction.opcode()) {
+                long instruction = prog.word(id);
+                switch (Prog.instOpcode(instruction)) {
                     case BYTE_RANGE -> {
-                        if (!instruction.matches(c)) {
+                        if (!Prog.instMatches(instruction, c)) {
                             break;
                         }
-                        addToQueue(newq, instruction.out(), flag);
-                        if (instruction.hint() != 0) {
-                            it += instruction.hint() - 1;
+                        addToQueue(newq, Prog.instOut(instruction), flag);
+                        if (Prog.instHint(instruction) != 0) {
+                            it += Prog.instHint(instruction) - 1;
                         }
                         else {
-                            Prog.Inst j = instruction;
+                            long j = instruction;
                             int jid = id;
-                            while (!j.last()) {
+                            while (!Prog.instLast(j)) {
                                 jid++;
-                                j = prog.inst(jid);
+                                j = prog.word(jid);
                             }
                             it += jid - id;
                         }

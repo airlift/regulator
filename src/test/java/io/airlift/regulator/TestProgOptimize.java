@@ -29,19 +29,19 @@ public class TestProgOptimize
     {
         Prog prog = new Prog();
 
-        prog.add(Prog.Inst.createAlt(2, 3));     // 1
-        prog.add(Prog.Inst.createNop(4));        // 2
-        prog.add(Prog.Inst.createNop(5));        // 3
-        prog.add(Prog.Inst.createMatch(0));      // 4
-        prog.add(Prog.Inst.createMatch(1));      // 5
+        prog.add(Prog.altWord(2, 3));     // 1
+        prog.add(Prog.nopWord(4));        // 2
+        prog.add(Prog.nopWord(5));        // 3
+        prog.add(Prog.matchWord(0));      // 4
+        prog.add(Prog.matchWord(1));      // 5
         prog.setStart(1);
 
         prog.optimize();
 
-        Prog.Inst alt = prog.inst(1);
-        assertThat(alt.opcode()).isEqualTo(InstOp.ALT);
-        assertThat(alt.out()).isEqualTo(4);
-        assertThat(alt.out1()).isEqualTo(5);
+        long alt = prog.word(1);
+        assertThat(Prog.instOpcode(alt)).isEqualTo(InstOp.ALT);
+        assertThat(Prog.instOut(alt)).isEqualTo(4);
+        assertThat(Prog.instOut1(alt)).isEqualTo(5);
     }
 
     @Test
@@ -49,15 +49,15 @@ public class TestProgOptimize
     {
         Prog prog = new Prog();
 
-        prog.add(Prog.Inst.createAlt(2, 4));                 // 1
-        prog.add(Prog.Inst.createByteRange(0x00, 0xFF, false, 1)); // 2
-        prog.add(Prog.Inst.createFail());                    // 3 (unused)
-        prog.add(Prog.Inst.createMatch(0));                  // 4
+        prog.add(Prog.altWord(2, 4));                 // 1
+        prog.add(Prog.byteRangeWord(0x00, 0xFF, false, 1)); // 2
+        prog.add(Prog.failWord());                    // 3 (unused)
+        prog.add(Prog.matchWord(0));                  // 4
         prog.setStart(1);
 
         prog.optimize();
 
-        assertThat(prog.inst(1).opcode()).isEqualTo(InstOp.ALT_MATCH);
+        assertThat(Prog.instOpcode(prog.word(1))).isEqualTo(InstOp.ALT_MATCH);
     }
 
     @Test
@@ -65,15 +65,15 @@ public class TestProgOptimize
     {
         Prog prog = new Prog();
 
-        prog.add(Prog.Inst.createAlt(4, 2));                 // 1
-        prog.add(Prog.Inst.createByteRange(0x00, 0xFF, false, 1)); // 2
-        prog.add(Prog.Inst.createFail());                    // 3 (unused)
-        prog.add(Prog.Inst.createMatch(0));                  // 4
+        prog.add(Prog.altWord(4, 2));                 // 1
+        prog.add(Prog.byteRangeWord(0x00, 0xFF, false, 1)); // 2
+        prog.add(Prog.failWord());                    // 3 (unused)
+        prog.add(Prog.matchWord(0));                  // 4
         prog.setStart(1);
 
         prog.optimize();
 
-        assertThat(prog.inst(1).opcode()).isEqualTo(InstOp.ALT_MATCH);
+        assertThat(Prog.instOpcode(prog.word(1))).isEqualTo(InstOp.ALT_MATCH);
     }
 
     @Test
@@ -95,12 +95,12 @@ public class TestProgOptimize
         int chainLength = 400_000;
         Prog sharedNops = new Prog();
         for (int alt = 1; alt <= chainLength; alt++) {
-            sharedNops.add(Prog.Inst.createAlt(chainLength + 1, alt < chainLength ? alt + 1 : 2 * chainLength + 1));
+            sharedNops.add(Prog.altWord(chainLength + 1, alt < chainLength ? alt + 1 : 2 * chainLength + 1));
         }
         for (int nop = chainLength + 1; nop <= 2 * chainLength; nop++) {
-            sharedNops.add(Prog.Inst.createNop(nop + 1));
+            sharedNops.add(Prog.nopWord(nop + 1));
         }
-        sharedNops.add(Prog.Inst.createMatch(0));
+        sharedNops.add(Prog.matchWord(0));
         sharedNops.setStart(1);
         assertThatCode(sharedNops::optimize).doesNotThrowAnyException();
     }

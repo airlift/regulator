@@ -13,7 +13,6 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.Prog.Inst;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
@@ -185,14 +184,14 @@ public final class Backtrack
             }
             visited[word] |= bit;
 
-            Inst instruction = prog.inst(id);
+            long instruction = prog.word(id);
             if (tryInst(id, position)) {
-                if (longest && !instruction.last()) {
+                if (longest && !Prog.instLast(instruction)) {
                     visit(id + 1, position);
                 }
                 return true;
             }
-            if (!instruction.last()) {
+            if (!Prog.instLast(instruction)) {
                 return visit(id + 1, position);
             }
             return false;
@@ -202,24 +201,24 @@ public final class Backtrack
         {
             int c = (position < textEnd) ? (bytes[position] & 0xFF) : -1;
 
-            Inst instruction = prog.inst(id);
-            return switch (instruction.opcode()) {
+            long instruction = prog.word(id);
+            return switch (Prog.instOpcode(instruction)) {
                 case ALT_MATCH -> false;
                 case FAIL -> false;
-                case BYTE_RANGE -> instruction.matches(c) && visit(instruction.out(), position + 1);
+                case BYTE_RANGE -> Prog.instMatches(instruction, c) && visit(Prog.instOut(instruction), position + 1);
                 case CAPTURE -> {
-                    int capIndex = instruction.cap();
+                    int capIndex = Prog.instCap(instruction);
                     if (0 <= capIndex && capIndex < cap.length) {
                         int saved = cap[capIndex];
                         cap[capIndex] = position;
-                        boolean ret = visit(instruction.out(), position);
+                        boolean ret = visit(Prog.instOut(instruction), position);
                         cap[capIndex] = saved;
                         yield ret;
                     }
-                    yield visit(instruction.out(), position);
+                    yield visit(Prog.instOut(instruction), position);
                 }
-                case EMPTY_WIDTH -> ((instruction.empty() & ~Prog.emptyFlags(context, position)) == 0) && visit(instruction.out(), position);
-                case NOP -> visit(instruction.out(), position);
+                case EMPTY_WIDTH -> ((Prog.instEmpty(instruction) & ~Prog.emptyFlags(context, position)) == 0) && visit(Prog.instOut(instruction), position);
+                case NOP -> visit(Prog.instOut(instruction), position);
                 case MATCH -> {
                     if (endMatch && position != contextEnd) {
                         yield false;

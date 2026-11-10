@@ -77,7 +77,7 @@ public class BenchmarkNfaCaptureScaling
         int emptyWidthCount = 0;
         int noOpCount = 0;
         for (int instructionId = 0; instructionId < data.program.size(); instructionId++) {
-            switch (data.program.inst(instructionId).opcode()) {
+            switch (Prog.instOpcode(data.program.word(instructionId))) {
                 case CAPTURE -> captureCount++;
                 case EMPTY_WIDTH -> emptyWidthCount++;
                 case NOP -> noOpCount++;

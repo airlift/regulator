@@ -32,8 +32,6 @@ import java.util.stream.IntStream;
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
 import static io.airlift.regulator.TestingAllocations.MAXIMUM_WINDOW_RUNS;
 import static io.airlift.regulator.TestingAllocations.assertAllocatesAtMostOnceCompiled;
-import static io.airlift.slice.SizeOf.instanceSize;
-import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
@@ -224,10 +222,6 @@ public class TestCompilerAllocations
         // its output list id and the tables the program keeps for searches. The instance size
         // checks the object, and the allocations of flattening and of building those tables below
         // check the rest.
-        // The 56-byte charge assumes compressed class pointers. Turning them off, which JDK 25 and
-        // 26 deprecate, together with compressed references makes an instruction 64 bytes.
-        assertThat(instanceSize(Prog.Inst.class)).isLessThanOrEqualTo(compressedClassPointers() ? 56 : 64);
-        long referenceBytes = (sizeOfObjectArray(1024) - sizeOfObjectArray(0)) / 1024;
 
         ThreadMXBean threadBean = allocatedMemoryBean();
         long threadId = Thread.currentThread().threadId();
@@ -268,8 +262,9 @@ public class TestCompilerAllocations
                 long flattenBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
                 int size = program.size();
                 assertThat(program.outputLists()).hasSize(size);
-                // Flattening allocates the copies, their array and block slots, their output list ids and its scratch.
-                long copiesBytes = size * (instanceSize(Prog.Inst.class) + (2 * referenceBytes) + Short.BYTES);
+                // Flattening allocates the copies' words in their blocks and in the program's array, their output
+                // list ids and its scratch.
+                long copiesBytes = size * (2L * Long.BYTES + Short.BYTES);
                 scratchBytes = Math.min(scratchBytes, (flattenBytes - copiesBytes) / unflattenedSize);
 
                 allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
@@ -290,9 +285,9 @@ public class TestCompilerAllocations
         // check, so nested empty loops compile to 67 instructions that flatten to 42. The program
         // keeps an instruction array of exactly its flattened size.
         Prog shrunk = TrinoRegexp.compile(utf8Slice("(".repeat(13) + ")" + ")*".repeat(12))).re2().forwardProgramForDiagnostics();
-        Field instructions = Prog.class.getDeclaredField("insts");
+        Field instructions = Prog.class.getDeclaredField("words");
         instructions.setAccessible(true);
-        assertThat(((Prog.Inst[]) instructions.get(shrunk)).length).isEqualTo(shrunk.size());
+        assertThat(((long[]) instructions.get(shrunk)).length).isEqualTo(shrunk.size());
     }
 
     @Test

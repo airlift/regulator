@@ -25,9 +25,9 @@ public class TestProgDump
         Prog prog = new Prog();
 
         // 0 is the sentinel "null" inst (fail), mirroring upstream.
-        prog.add(Prog.Inst.createAlt(2, 3));              // 1
-        prog.add(Prog.Inst.createMatch(0));               // 2
-        prog.add(Prog.Inst.createMatch(1));               // 3
+        prog.add(Prog.altWord(2, 3));              // 1
+        prog.add(Prog.matchWord(0));               // 2
+        prog.add(Prog.matchWord(1));               // 3
         prog.setStart(1);
 
         assertThat(prog.dump()).isEqualTo(
@@ -42,9 +42,9 @@ public class TestProgDump
     public void testDumpFlattened()
     {
         Prog prog = new Prog();
-        prog.add(Prog.Inst.createNop(2));     // 1
-        Prog.Inst match = Prog.Inst.createMatch(0);
-        match.setLast();
+        prog.add(Prog.nopWord(2));     // 1
+        long match = Prog.matchWord(0);
+        match = Prog.withInstLast(match);
         prog.add(match);                      // 2
 
         prog.setStart(1);
